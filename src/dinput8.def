@@ -1,0 +1,4 @@
+; dinput8.def - Export definitions for DirectInput8 proxy
+LIBRARY dinput8
+EXPORTS
+    DirectInput8Create

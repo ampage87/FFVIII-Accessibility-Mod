@@ -1,0 +1,25 @@
+// resources.rc - Embedded data files for FF8 Accessibility Mod
+//
+// VTT audio description files and mapping data are compiled into the DLL
+// as RCDATA resources. This means end users only need to install dinput8.dll
+// — no separate Audio Descriptions folder or screen reader DLLs required.
+//
+// To add a new FMV audio description:
+// 1. Create the .vtt file in Audio Descriptions/
+// 2. Add a new IDR_ constant in resources.h
+// 3. Add an RCDATA entry below pointing to the file
+// 4. Add the mapping in the IDR_AD_MAPPING text or in the defaults in fmv_audio_desc.cpp
+
+#include "resources.h"
+
+// Audio description VTT files (WebVTT format)
+// Paths are relative to the .rc file location (src/)
+IDR_VTT_INTRO           RCDATA "..\\Audio Descriptions\\ff8_intro_ad.vtt"
+IDR_VTT_OPENING_CREDITS RCDATA "..\\Audio Descriptions\\ff8_opening_credits_ad.vtt"
+
+// AVI-to-VTT mapping file
+IDR_AD_MAPPING          RCDATA "..\\Audio Descriptions\\mapping.txt"
+
+// NVDA controller client DLL (embedded for single-file distribution)
+// Extracted to temp directory at runtime, loaded via LoadLibrary.
+IDR_NVDA_CLIENT_DLL     RCDATA "..\\TOLK\\nvdaControllerClient.dll"

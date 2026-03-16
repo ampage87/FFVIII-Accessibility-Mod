@@ -1,0 +1,19 @@
+# FMV Audio Description Mapping
+# Maps AVI filenames to VTT audio description files.
+# Format: avi_filename = vtt_filename
+# Lines starting with # are comments.
+# Filenames are case-insensitive.
+#
+# NOTE: These AVI filenames are used by both the Remastered and Original PC
+# versions of FF8. FFNx extracts movies from .pak archives and opens them
+# as individual AVI files, so the filenames match.
+#
+# If an AVI isn't detected, check ff8_accessibility.log for [FmvSkip] lines
+# showing the actual AVI filename opened by the game/FFNx.
+
+# Intro FMV (ocean, Rinoa, Squall vs Seifer cinematic - plays after selecting New Game)
+disc00_30h.avi = ff8_intro_ad.vtt
+
+# Opening credits FMV (black-and-white character intros with credits text)
+# TODO: verify the actual AVI filename during testing
+# disc00_23h.avi = ff8_opening_credits_ad.vtt
