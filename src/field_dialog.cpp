@@ -1748,4 +1748,27 @@ bool IsDialogOpen()
     return false;
 }
 
+// v07.09: Expose text rendering call counters for save screen diagnostic.
+LONG GetMenuDrawTextCallCount()
+{
+    return InterlockedCompareExchange(&s_menuDrawTextCallCount, 0, 0);
+}
+
+LONG GetGetCharWidthCallCount()
+{
+    return InterlockedCompareExchange(&s_gcwCallCount, 0, 0);
+}
+
+// v07.10: Snapshot and reset the GCW accumulation buffer.
+int SnapshotGcwBuffer(uint8_t* outBuf, int maxLen)
+{
+    LONG bufLen = InterlockedExchange(&s_gcwBufLen, 0);
+    int len = (bufLen < maxLen) ? (int)bufLen : maxLen;
+    if (len > GCW_BUF_SIZE) len = GCW_BUF_SIZE;
+    if (len > 0) {
+        memcpy(outBuf, s_gcwBuf, len);
+    }
+    return len;
+}
+
 }  // namespace FieldDialog

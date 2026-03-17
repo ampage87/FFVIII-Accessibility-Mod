@@ -3,7 +3,7 @@
 // See field_navigation.h for full architecture and phasing notes.
 //
 // ============================================================================
-// CURRENT STATE: v06.13 — CoordSample wiring + progress-toward-target stuck detection
+// CURRENT STATE: v0.07.16 — Save screen: arrow key tracking for slot cursor
 // ============================================================================
 //
 // What's new in v05.12:
@@ -183,7 +183,7 @@ static int      s_driveStuckTicks   = 0;
 static int      s_driveWiggleTicks  = 0;
 static uint8_t  s_driveWiggleDir    = 0;   // current wiggle direction
 static int      s_driveWigglePhase  = 0;   // v05.68: rotates through 8 recovery directions
-static const int DRIVE_STUCK_THRESH  = 40;  // v05.90: ticks before wiggle (~0.65s, was 90)
+static const int DRIVE_STUCK_THRESH  = 80;  // v06.14: ticks before wiggle (~1.3s, was 40). Analog steering needs more settling time.
 static const int DRIVE_WIGGLE_TICKS  = 18;  // v05.90: quick nudge (~0.3s, was 45)
 static const int NUDGE_TICKS         = 8;   // v06.07: micro-nudge duration (~0.13s)
 static const int MAX_RECOVERY_PHASES = 12;  // v06.08: auto-cancel after this many recovery phases without progress
@@ -222,6 +222,18 @@ static const WORD SC_RIGHT = 0x4D;
 
 static const float DRIVE_ARRIVE_DIST_DEFAULT = 300.0f; // fallback for non-entity targets
 static float       s_driveArriveDist = 300.0f;  // v05.80: per-drive arrive distance (from entity talk radius)
+
+// v06.21: Talk radius expansion for hard-to-reach NPCs.
+// When recovery fires near a target NPC, we expand the game's actual talk
+// radius so the player can interact from further away. This "meet in the
+// middle" strategy combines auto-drive getting close with a forgiving
+// interaction zone. Original radius is restored when the drive ends.
+static int         s_driveTargetEntityIdx = -1;   // entity index of NPC target (for radius restore)
+static uint16_t    s_driveOrigTalkRadius  = 0;    // original talk radius before expansion
+static bool        s_driveTalkRadExpanded = false; // true if we've written an expanded radius
+static const float TALK_RAD_EXPAND_FACTOR = 2.5f; // multiply original radius by this
+static const float TALK_RAD_EXPAND_MAX    = 350.0f; // cap expanded radius
+static const float TALK_RAD_EXPAND_DIST   = 500.0f; // only expand when player is within this distance
 static const float DRIVE_AXIS_THRESH  = 150.0f; // ignore axis below this magnitude
 static const int   DRIVE_MAX_TICKS    = 2400;   // v05.68: max drive time ~40s (increased for tighter arrive dist)
 static int         s_driveTotalTicks  = 0;
@@ -622,6 +634,21 @@ static uint16_t GetEntityTalkRadius(int entityIdx)
         if (base) return *(uint16_t*)(base + ENTITY_STRIDE * entityIdx + 0x1F8);
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
     return 0;
+}
+
+// v06.21: Write a new talk radius to the entity struct.
+static bool SetEntityTalkRadius(int entityIdx, uint16_t newRadius)
+{
+    if (entityIdx < 0 || entityIdx >= MAX_ENTITIES) return false;
+    if (!FF8Addresses::pFieldStateOthers) return false;
+    __try {
+        uint8_t* base = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+        if (base) {
+            *(uint16_t*)(base + ENTITY_STRIDE * entityIdx + 0x1F8) = newRadius;
+            return true;
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return false;
 }
 
 static uint16_t GetEntityPushRadius(int entityIdx)
@@ -2124,12 +2151,38 @@ static void SetHeldDirections(uint8_t desired)
     s_driveHeld = desired;
 }
 
-// v05.84: Set analog override from a world-space direction vector.
-// Converts (dx, dy) into DIJOYSTATE2 lX/lY values (-1000 to +1000).
-// The vector is normalized to full-deflection magnitude regardless of distance.
-// DirectInput axis convention: lX +1000 = right, lY +1000 = down.
-// FF8 world convention: +X = right, +Y = up (pressing UP moves +Y).
-// So lX maps directly from dx, lY is INVERTED from dy.
+// v06.14: Per-field heading calibration.
+// The game interprets analog stick input relative to the camera orientation.
+// On each field, lX=+1000 moves the player along the camera's right vector
+// in entity/world space, and lY=+1000 moves along the camera's down vector.
+// We calibrate by injecting a known analog direction at drive start and
+// measuring the resulting world-space movement direction.
+//
+// Until calibrated, we use the .ca camera axes (loaded at field load) as
+// a best guess. The calibration refines this empirically.
+static float s_camRightX = 1.0f;   // camera right vector X component (normalized)
+static float s_camRightY = 0.0f;   // camera right vector Y component
+static float s_camDownX  = 0.0f;   // camera down vector X component  
+static float s_camDownY  = 1.0f;   // camera down vector Y component (default: +Y = down)
+static bool  s_camCalibrated = false;
+
+// v06.14: Heading calibration state machine.
+// At drive start, we inject lX=+1000,lY=0 for a few ticks, measure the
+// resulting movement direction, and use that as the camera right axis.
+// Then inject lX=0,lY=+1000 for a few ticks to get the camera down axis.
+// After both are measured, s_camCalibrated=true and we use the measured axes.
+static int   s_calibPhase = 0;       // 0=not calibrating, 1=measuring right, 2=measuring down, 3=done
+static int   s_calibTicks = 0;       // ticks in current calibration phase
+static float s_calibStartX = 0;      // player position at calibration phase start
+static float s_calibStartY = 0;
+static const int CALIB_SETTLE_TICKS = 8;   // ticks to let the game start moving
+static const int CALIB_MEASURE_TICKS = 16; // ticks to measure movement direction
+static bool  s_calibPending = false;  // true if calibration should run at drive start
+
+// v05.84/v06.14: Set analog override from a world-space direction vector.
+// Converts (dx, dy) in entity/world space into DIJOYSTATE2 lX/lY values
+// using the per-field camera axes to produce correct screen-relative input.
+// DirectInput axis convention: lX +1000 = screen right, lY +1000 = screen down.
 static void SetAnalogFromVector(float dx, float dy)
 {
     float len = sqrtf(dx*dx + dy*dy);
@@ -2140,10 +2193,14 @@ static void SetAnalogFromVector(float dx, float dy)
     }
     float nx = dx / len;
     float ny = dy / len;
-    // lX: +X world = right = +1000
-    int lx = (int)(nx * 1000.0f);
-    // lY: +Y world = UP = -1000 (DirectInput: negative = up)
-    int ly = (int)(-ny * 1000.0f);  // inverted!
+    // v06.14: Project world-space direction onto camera axes.
+    // lX = dot(worldDir, camRight) = how much of the desired direction
+    //   aligns with the camera's rightward axis.
+    // lY = dot(worldDir, camDown) = how much aligns with camera's downward axis.
+    float lxF = (nx * s_camRightX + ny * s_camRightY) * 1000.0f;
+    float lyF = (nx * s_camDownX  + ny * s_camDownY)  * 1000.0f;
+    int lx = (int)lxF;
+    int ly = (int)lyF;
     if (lx < -1000) lx = -1000; if (lx > 1000) lx = 1000;
     if (ly < -1000) ly = -1000; if (ly > 1000) ly = 1000;
     s_analogDesiredLX = lx;
@@ -2167,6 +2224,19 @@ static void StopAutoDrive(const char* reason)
         s_fakeGamepadInstalled = false;
         Log::Write("FieldNavigation: [drive] fake gamepad removed, original ptrs restored");
     }
+    // v06.21: Do NOT restore talk radius here — the player needs the expanded
+    // radius to persist so they can press X to interact after "Arrived".
+    // The game's TALKRADIUS opcode resets it naturally on the next field load.
+    if (s_driveTalkRadExpanded) {
+        Log::Write("FieldNavigation: [drive] talkRadius stays expanded (%u -> %u) for ent%d — resets on field load",
+                   (unsigned)s_driveOrigTalkRadius,
+                   (unsigned)GetEntityTalkRadius(s_driveTargetEntityIdx),
+                   s_driveTargetEntityIdx);
+    }
+    s_driveTalkRadExpanded = false;
+    s_driveTargetEntityIdx = -1;
+    s_driveOrigTalkRadius = 0;
+
     // v06.08: NavLog drive end
     NavLog::DriveEnd(reason ? reason : "unknown", s_driveTotalTicks, 0.0f,
                      s_driveWigglePhase, s_driveStartDist);
@@ -2189,6 +2259,91 @@ static void UpdateAutoDrive()
     if (!FF8Addresses::IsOnField()) { StopAutoDrive("Left field."); return; }
 
     if (s_playerEntityIdx < 0) { StopAutoDrive("Player position lost."); return; }
+
+    // v06.14: Heading calibration — runs at the start of the first drive on each field.
+    // Injects known analog directions and measures the resulting world-space movement
+    // to determine the camera-to-world rotation for this field.
+    if (s_calibPhase > 0 && s_calibPhase < 3) {
+        float cpx = 0, cpy = 0;
+        GetEntityPos(s_playerEntityIdx, cpx, cpy);
+        s_calibTicks++;
+
+        if (s_calibPhase == 1) {
+            // Phase 1: inject lX=+1000, lY=0 (screen-right) and measure movement.
+            s_analogOverrideActive = true;
+            s_analogDesiredLX = 1000;
+            s_analogDesiredLY = 0;
+            SetHeldDirections(DIR_RIGHT);  // keyboard trigger for movement
+
+            if (s_calibTicks == CALIB_SETTLE_TICKS) {
+                // Record position after settling.
+                s_calibStartX = cpx;
+                s_calibStartY = cpy;
+            } else if (s_calibTicks >= CALIB_SETTLE_TICKS + CALIB_MEASURE_TICKS) {
+                // Measure displacement.
+                float cdx = cpx - s_calibStartX;
+                float cdy = cpy - s_calibStartY;
+                float cdist = sqrtf(cdx*cdx + cdy*cdy);
+                if (cdist > 5.0f) {
+                    // Normalize: this is the world-space direction of lX=+1000.
+                    s_camRightX = cdx / cdist;
+                    s_camRightY = cdy / cdist;
+                    Log::Write("FieldNavigation: [CALIB] phase 1 done: lX=+1000 moved (%.1f,%.1f) dist=%.1f -> camRight=(%.3f,%.3f)",
+                               cdx, cdy, cdist, s_camRightX, s_camRightY);
+                } else {
+                    Log::Write("FieldNavigation: [CALIB] phase 1 FAILED: no movement (dist=%.1f), keeping default camRight", cdist);
+                }
+                // Transition to phase 2.
+                s_calibPhase = 2;
+                s_calibTicks = 0;
+            }
+            s_driveTotalTicks++;
+            return;  // don't run normal navigation during calibration
+        }
+
+        if (s_calibPhase == 2) {
+            // Phase 2: inject lX=0, lY=+1000 (screen-down) and measure movement.
+            s_analogOverrideActive = true;
+            s_analogDesiredLX = 0;
+            s_analogDesiredLY = 1000;
+            SetHeldDirections(DIR_DOWN);  // keyboard trigger for movement
+
+            if (s_calibTicks == CALIB_SETTLE_TICKS) {
+                s_calibStartX = cpx;
+                s_calibStartY = cpy;
+            } else if (s_calibTicks >= CALIB_SETTLE_TICKS + CALIB_MEASURE_TICKS) {
+                float cdx = cpx - s_calibStartX;
+                float cdy = cpy - s_calibStartY;
+                float cdist = sqrtf(cdx*cdx + cdy*cdy);
+                if (cdist > 5.0f) {
+                    s_camDownX = cdx / cdist;
+                    s_camDownY = cdy / cdist;
+                    Log::Write("FieldNavigation: [CALIB] phase 2 done: lY=+1000 moved (%.1f,%.1f) dist=%.1f -> camDown=(%.3f,%.3f)",
+                               cdx, cdy, cdist, s_camDownX, s_camDownY);
+                } else {
+                    // v06.17: Derive camDown from camRight by 90° clockwise rotation.
+                    // In screen space, rotating right vector 90° CW gives the down vector.
+                    // rotation: (x,y) -> (y, -x)
+                    s_camDownX = s_camRightY;
+                    s_camDownY = -s_camRightX;
+                    Log::Write("FieldNavigation: [CALIB] phase 2 FAILED: no movement (dist=%.1f), derived camDown=(%.3f,%.3f) from camRight perpendicular",
+                               cdist, s_camDownX, s_camDownY);
+                }
+                // Calibration complete.
+                s_calibPhase = 3;
+                s_camCalibrated = true;
+                s_calibPending = false;
+                // Log the final calibration result.
+                Log::Write("FieldNavigation: [CALIB] complete: camRight=(%.3f,%.3f) camDown=(%.3f,%.3f)",
+                           s_camRightX, s_camRightY, s_camDownX, s_camDownY);
+                // Reset stuck detection to account for calibration movement.
+                s_driveStuckTicks = 0;
+                GetEntityPos(s_playerEntityIdx, s_driveStuckPosX, s_driveStuckPosY);
+            }
+            s_driveTotalTicks++;
+            return;  // don't run normal navigation during calibration
+        }
+    }
 
     const EntityInfo& catTarget = (s_selectedCatalogIdx < s_catalogCount)
                                    ? s_catalog[s_selectedCatalogIdx]
@@ -2335,13 +2490,172 @@ static void UpdateAutoDrive()
         steerX = s_waypoints[s_waypointIdx][0];
         steerY = s_waypoints[s_waypointIdx][1];
     }
-    // Recompute dx/dz toward the steer target (waypoint or final).
+    // v06.17: Corridor-level steering — steer toward the shared-edge midpoint
+    // of the next corridor triangle instead of distant funnel waypoints.
+    // This gives very local targets that are always close, preventing overshoot.
+    // The corridor from A* tells us which triangle sequence leads to the goal.
+    // Each tick, we find the player's current triangle in the corridor and target
+    // the midpoint of the shared edge to the next corridor triangle.
+    if (s_walkmesh.valid && s_corridorCount >= 2 && s_driveTotalTicks >= 30) {
+        uint16_t nowTri = 0xFFFF;
+        {
+            uint8_t* base2 = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+            if (base2)
+                nowTri = *(uint16_t*)(base2 + ENTITY_STRIDE * s_playerEntityIdx + 0x1FA);
+        }
+        if (nowTri != 0xFFFF && nowTri < (uint16_t)s_walkmesh.numTriangles) {
+            // Find player's position in the corridor.
+            int corridorPos = -1;
+            for (int ci = 0; ci < s_corridorCount; ci++) {
+                if (s_corridor[ci] == nowTri) { corridorPos = ci; break; }
+            }
+            if (corridorPos >= 0 && corridorPos + 1 < s_corridorCount) {
+                // Target = midpoint of shared edge to next corridor triangle.
+                uint16_t nextTri = s_corridor[corridorPos + 1];
+                const auto& tCur = s_walkmesh.triangles[nowTri];
+                int sharedEdge = -1;
+                for (int e = 0; e < 3; e++) {
+                    if (tCur.neighbor[e] == nextTri) { sharedEdge = e; break; }
+                }
+                if (sharedEdge >= 0) {
+                    int vi1 = tCur.vertexIdx[(sharedEdge + 1) % 3];
+                    int vi2 = tCur.vertexIdx[(sharedEdge + 2) % 3];
+                    if (vi1 < s_walkmesh.numVertices && vi2 < s_walkmesh.numVertices) {
+                        float emx = ((float)s_walkmesh.vertices[vi1].x + (float)s_walkmesh.vertices[vi2].x) / 2.0f;
+                        float emy = ((float)s_walkmesh.vertices[vi1].y + (float)s_walkmesh.vertices[vi2].y) / 2.0f;
+                        // Shrink toward next triangle center by agent radius.
+                        float toCX = s_walkmesh.triangles[nextTri].centerX - emx;
+                        float toCY = s_walkmesh.triangles[nextTri].centerY - emy;
+                        float toCLen = sqrtf(toCX*toCX + toCY*toCY);
+                        if (toCLen > 0.001f) {
+                            emx += (toCX / toCLen) * 30.0f;
+                            emy += (toCY / toCLen) * 30.0f;
+                        }
+                        // v06.22: Don't use corridor steering if the edge midpoint
+                        // is across a non-target trigger line from the player.
+                        // This prevents the corridor from routing through trigger zones.
+                        bool edgeCrossesTrig = false;
+                        if (s_capturedLineCount > 0) {
+                            edgeCrossesTrig = IsSeparatedByTriggerLine(px, pz, emx, emy, s_driveSkipTrigIdx);
+                        }
+                        if (!edgeCrossesTrig) {
+                            steerX = emx;
+                            steerY = emy;
+                        }
+                        // else: keep the funnel waypoint as steer target
+                    }
+                }
+            } else if (corridorPos < 0) {
+                // Player left the corridor — re-path needed (recovery will handle).
+            }
+        }
+    }
+
+    // Recompute dx/dz toward the steer target.
     dx = steerX - px;
     dz = steerY - pz;
 
-    // v06.01: Corridor-center steering bias REMOVED. Portal shrinking in
-    // FunnelPath() now keeps waypoints agent-radius away from walls, so the
-    // steering direction naturally avoids wall-parallel approaches.
+    // v06.17: Wall-avoidance steering bias.
+    // DISABLED in v06.20: Causes more harm than good. In narrow corridors
+    // (bg2f_1), the bias pushes the player OUT of the corridor. In classrooms,
+    // it interferes with short drives. The corridor-level steering + recovery
+    // system handles wall-stuck better without active avoidance.
+    // The code remains for potential re-enabling with better narrow-space logic.
+    if (false && s_walkmesh.valid) {
+        uint16_t nowTri2 = 0xFFFF;
+        {
+            uint8_t* base2 = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+            if (base2)
+                nowTri2 = *(uint16_t*)(base2 + ENTITY_STRIDE * s_playerEntityIdx + 0x1FA);
+        }
+        if (nowTri2 != 0xFFFF && nowTri2 < (uint16_t)s_walkmesh.numTriangles) {
+            const auto& tri = s_walkmesh.triangles[nowTri2];
+            static const float WALL_BIAS_DIST = 40.0f;   // activate when within this distance
+            static const float WALL_BIAS_STRENGTH = 0.25f; // blend factor (0=no bias, 1=full perpendicular)
+            // v06.19: Check if corridor is narrow (walls on multiple edges).
+            // If so, reduce bias to avoid ping-ponging between walls.
+            int wallEdgeCount = 0;
+            for (int ec = 0; ec < 3; ec++)
+                if (tri.neighbor[ec] == 0xFFFF) wallEdgeCount++;
+            float effectiveStrength = WALL_BIAS_STRENGTH;
+            if (wallEdgeCount >= 2) effectiveStrength *= 0.3f; // very narrow, minimal bias
+            for (int e = 0; e < 3; e++) {
+                if (tri.neighbor[e] != 0xFFFF) continue; // not a wall edge
+                // Wall edge: vertices (e+1)%3 and (e+2)%3
+                int wvi1 = tri.vertexIdx[(e + 1) % 3];
+                int wvi2 = tri.vertexIdx[(e + 2) % 3];
+                if (wvi1 >= s_walkmesh.numVertices || wvi2 >= s_walkmesh.numVertices) continue;
+                float wx1 = (float)s_walkmesh.vertices[wvi1].x;
+                float wy1 = (float)s_walkmesh.vertices[wvi1].y;
+                float wx2 = (float)s_walkmesh.vertices[wvi2].x;
+                float wy2 = (float)s_walkmesh.vertices[wvi2].y;
+                // Distance from player to this edge (point-to-line-segment).
+                float edx = wx2 - wx1, edy = wy2 - wy1;
+                float edLenSq = edx*edx + edy*edy;
+                if (edLenSq < 1.0f) continue;
+                float t = ((px - wx1)*edx + (pz - wy1)*edy) / edLenSq;
+                if (t < 0) t = 0; if (t > 1) t = 1;
+                float closestX = wx1 + t * edx;
+                float closestY = wy1 + t * edy;
+                float wallDx = px - closestX;
+                float wallDy = pz - closestY;
+                float wallDist = sqrtf(wallDx*wallDx + wallDy*wallDy);
+                if (wallDist < WALL_BIAS_DIST && wallDist > 0.1f) {
+                    // Blend steering away from wall. Stronger when closer.
+                    float factor = effectiveStrength * (1.0f - wallDist / WALL_BIAS_DIST);
+                    float awayX = wallDx / wallDist; // unit vector away from wall
+                    float awayY = wallDy / wallDist;
+                    float steerMag = sqrtf(dx*dx + dz*dz);
+                    dx = dx * (1.0f - factor) + awayX * factor * steerMag;
+                    dz = dz * (1.0f - factor) + awayY * factor * steerMag;
+                }
+            }
+        }
+    }
+
+    // v06.17: Trigger-line proximity check.
+    // Per-tick: if the current steering direction would carry the player across
+    // a non-target trigger line within the next ~200 units, redirect steering
+    // to be parallel to the trigger line instead of crossing it.
+    // Skip this check for trigger lines that the A* path legitimately crosses
+    // (the target trigger line, exempted via s_driveSkipTrigIdx).
+    // Also skip for NPC targets where the NPC is on the other side of a trigger
+    // line — A* already routed through it, so crossing is intentional.
+    if (s_capturedLineCount > 0) {
+        float steerLen = sqrtf(dx*dx + dz*dz);
+        if (steerLen > 1.0f) {
+            float projDist = 200.0f;
+            float projX = px + (dx / steerLen) * projDist;
+            float projY = pz + (dz / steerLen) * projDist;
+            for (int t = 0; t < s_capturedLineCount; t++) {
+                if (!s_capturedLines[t].active) continue;
+                if (t == s_driveSkipTrigIdx) continue;
+                float lx1 = (float)s_capturedLines[t].x1;
+                float ly1 = (float)s_capturedLines[t].y1;
+                float lx2 = (float)s_capturedLines[t].x2;
+                float ly2 = (float)s_capturedLines[t].y2;
+                float ldx = lx2 - lx1, ldy = ly2 - ly1;
+                // v06.18: Skip trigger lines where the target is on the other side.
+                // If the target is across this trigger line from the player, A*
+                // already planned to cross it, so we must allow the crossing.
+                float crossPlayer = ldx * (pz - ly1) - ldy * (px - lx1);
+                float crossTarget = ldx * (tz - ly1) - ldy * (tx - lx1);
+                if (crossPlayer * crossTarget < -1.0f) continue; // target is across, allow crossing
+                float crossProj = ldx * (projY - ly1) - ldy * (projX - lx1);
+                if (crossPlayer * crossProj < -1.0f) {
+                    // Projected endpoint crosses trigger line — redirect parallel.
+                    float trigLen = sqrtf(ldx*ldx + ldy*ldy);
+                    if (trigLen > 0.001f) {
+                        float trigNx = ldx / trigLen, trigNy = ldy / trigLen;
+                        float dot = dx * trigNx + dz * trigNy;
+                        dx = trigNx * dot;
+                        dz = trigNy * dot;
+                    }
+                    break;
+                }
+            }
+        }
+    }
 
     // v05.62: Max drive time safety cutoff.
     s_driveTotalTicks++;
@@ -2556,15 +2870,15 @@ static void UpdateAutoDrive()
             }
         }
     } else if (s_driveStuckTicks >= DRIVE_STUCK_THRESH) {
-        // v06.07: Edge-midpoint + micro-nudge recovery.
-        // Phase 1 (odd phases): re-run A* and switch to edge-midpoint waypoints.
-        // Phase 2 (even phases >= 2): edge-midpoint didn't help (wall-stuck),
-        //   inject a brief perpendicular nudge to break wall contact.
+        // v06.16: Simplified recovery system.
+        // No more odd/even phase alternation. Simple cycle:
+        //   Odd phases:  re-run A* from current position → funnel path
+        //   Even phases: single perpendicular nudge to break wall contact
+        // After nudge completes, the wiggle-completion code above re-paths via funnel.
         s_driveStuckTicks = 0;
         s_driveWigglePhase++;
 
-        // v06.08: Auto-cancel after too many recovery phases without progress.
-        // This prevents the drive from looping forever when wall-stuck with moveDist=0.
+        // Auto-cancel after too many recovery phases without progress.
         if (s_driveWigglePhase > MAX_RECOVERY_PHASES) {
             char msg[128];
             snprintf(msg, sizeof(msg), "Stuck. Distance remaining: %.0f.", dist);
@@ -2572,13 +2886,33 @@ static void UpdateAutoDrive()
             return;
         }
 
-        // v06.08: NavLog recovery event
+        // NavLog recovery event
         {
             uint16_t recTri = 0xFFFF;
             uint8_t* base4 = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
             if (base4)
                 recTri = *(uint16_t*)(base4 + ENTITY_STRIDE * s_playerEntityIdx + 0x1FA);
             NavLog::DriveRecovery(s_driveWigglePhase, (int)recTri, px, pz, dist);
+        }
+
+        // v06.21: Expand talk radius when stuck near NPC target.
+        // If recovery is firing and we're close to the target, expand the
+        // game's talk radius so the player can interact from further away.
+        // This is the "meet in the middle" strategy.
+        if (!s_driveTalkRadExpanded && s_driveTargetEntityIdx >= 0 &&
+            s_driveOrigTalkRadius > 0 && dist < TALK_RAD_EXPAND_DIST) {
+            float expanded = (float)s_driveOrigTalkRadius * TALK_RAD_EXPAND_FACTOR;
+            if (expanded > TALK_RAD_EXPAND_MAX) expanded = TALK_RAD_EXPAND_MAX;
+            uint16_t newRad = (uint16_t)expanded;
+            if (newRad > s_driveOrigTalkRadius) {
+                SetEntityTalkRadius(s_driveTargetEntityIdx, newRad);
+                s_driveTalkRadExpanded = true;
+                // Also expand our arriveDist to match.
+                s_driveArriveDist = expanded;
+                Log::Write("FieldNavigation: [drive] expanded talkRadius %u -> %u for ent%d (dist=%.0f)",
+                           (unsigned)s_driveOrigTalkRadius, (unsigned)newRad,
+                           s_driveTargetEntityIdx, dist);
+            }
         }
 
         if (s_walkmesh.valid) {
@@ -2589,24 +2923,19 @@ static void UpdateAutoDrive()
                     nowTri = *(uint16_t*)(base2 + ENTITY_STRIDE * s_playerEntityIdx + 0x1FA);
             }
             if (nowTri != 0xFFFF && nowTri < (uint16_t)s_walkmesh.numTriangles) {
-                // Get target position for re-path.
-                float rpTx = tx, rpTz = tz;  // use the current target
+                float rpTx = tx, rpTz = tz;
                 int rpGoal = FindNearestTriangle(rpTx, rpTz);
 
-                if (s_driveWigglePhase >= 2 && (s_driveWigglePhase % 2) == 0) {
-                    // v06.07: Micro-nudge — edge-midpoint was tried but player
-                    // is wall-stuck (moveDist=0). Compute perpendicular to the
-                    // shared edge between current triangle and the next corridor
-                    // triangle, then inject a brief analog nudge in that direction.
-                    // This breaks wall contact so edge-midpoint can work next cycle.
+                if ((s_driveWigglePhase % 2) == 0) {
+                    // Even phase: perpendicular nudge to break wall contact.
+                    // Compute nudge perpendicular to the shared edge between
+                    // current triangle and the next corridor triangle.
                     bool nudged = false;
                     if (s_corridorCount >= 2) {
-                        // Find current triangle in corridor.
                         int corridorPos = -1;
                         for (int ci = 0; ci < s_corridorCount; ci++) {
                             if (s_corridor[ci] == nowTri) { corridorPos = ci; break; }
                         }
-                        // Use next corridor tri, or if at end, previous.
                         int neighborCorridorIdx = -1;
                         if (corridorPos >= 0 && corridorPos + 1 < s_corridorCount)
                             neighborCorridorIdx = corridorPos + 1;
@@ -2616,7 +2945,6 @@ static void UpdateAutoDrive()
                         if (neighborCorridorIdx >= 0) {
                             uint16_t nextTri = s_corridor[neighborCorridorIdx];
                             const auto& tCur = s_walkmesh.triangles[nowTri];
-                            // Find shared edge.
                             int sharedEdge = -1;
                             for (int e = 0; e < 3; e++) {
                                 if (tCur.neighbor[e] == nextTri) { sharedEdge = e; break; }
@@ -2629,25 +2957,17 @@ static void UpdateAutoDrive()
                                     float ey1 = (float)s_walkmesh.vertices[vi1].y;
                                     float ex2 = (float)s_walkmesh.vertices[vi2].x;
                                     float ey2 = (float)s_walkmesh.vertices[vi2].y;
-                                    // Edge direction.
                                     float edx = ex2 - ex1;
                                     float edy = ey2 - ey1;
                                     float edLen = sqrtf(edx*edx + edy*edy);
                                     if (edLen > 0.001f) {
-                                        // Two perpendiculars: (-edy, edx) and (edy, -edx).
-                                        float perp1x = -edy / edLen;
-                                        float perp1y =  edx / edLen;
-                                        float perp2x =  edy / edLen;
-                                        float perp2y = -edx / edLen;
-                                        // Pick the one that doesn't cross a trigger line.
-                                        // Also prefer the one pointing toward the next corridor center.
+                                        float perp1x = -edy / edLen, perp1y =  edx / edLen;
+                                        float perp2x =  edy / edLen, perp2y = -edx / edLen;
                                         float nextCX = s_walkmesh.triangles[nextTri].centerX;
                                         float nextCY = s_walkmesh.triangles[nextTri].centerY;
-                                        float toNextX = nextCX - px;
-                                        float toNextY = nextCY - pz;
+                                        float toNextX = nextCX - px, toNextY = nextCY - pz;
                                         float dot1 = perp1x * toNextX + perp1y * toNextY;
                                         float dot2 = perp2x * toNextX + perp2y * toNextY;
-                                        // Try preferred direction first (toward next corridor).
                                         float ndx = (dot1 >= dot2) ? perp1x : perp2x;
                                         float ndy = (dot1 >= dot2) ? perp1y : perp2y;
                                         float altdx = (dot1 >= dot2) ? perp2x : perp1x;
@@ -2655,32 +2975,26 @@ static void UpdateAutoDrive()
                                         bool crossesTrig = (s_capturedLineCount > 0 &&
                                             WouldCrossTriggerLine(px, pz, ndx * 100.0f, ndy * 100.0f, s_driveSkipTrigIdx));
                                         if (crossesTrig) {
-                                            // Try the other perpendicular.
                                             ndx = altdx; ndy = altdy;
                                             crossesTrig = (s_capturedLineCount > 0 &&
                                                 WouldCrossTriggerLine(px, pz, ndx * 100.0f, ndy * 100.0f, s_driveSkipTrigIdx));
                                         }
                                         if (!crossesTrig) {
-                                            // Inject the nudge via analog + keyboard wiggle.
                                             s_driveWiggleTicks = NUDGE_TICKS;
-                                            // Convert perpendicular to 8-dir bitmask for keyboard.
                                             uint8_t nudgeDir = 0;
                                             if (ndy >  0.3f) nudgeDir |= DIR_UP;
                                             if (ndy < -0.3f) nudgeDir |= DIR_DOWN;
                                             if (ndx >  0.3f) nudgeDir |= DIR_RIGHT;
                                             if (ndx < -0.3f) nudgeDir |= DIR_LEFT;
-                                            if (nudgeDir == 0) nudgeDir = DIR_UP;  // fallback
+                                            if (nudgeDir == 0) nudgeDir = DIR_UP;
                                             s_driveWiggleDir = nudgeDir;
                                             SetAnalogFromVector(ndx * 1000.0f, ndy * 1000.0f);
                                             SetHeldDirections(nudgeDir);
                                             nudged = true;
-                                            Log::Write("FieldNavigation: [drive] stuck phase %d — micro-nudge perpendicular to edge "
+                                            Log::Write("FieldNavigation: [drive] recovery %d — nudge perpendicular "
                                                        "tri %d->%d dir=(%.2f,%.2f) %d ticks",
                                                        s_driveWigglePhase, (int)nowTri, (int)nextTri,
                                                        ndx, ndy, NUDGE_TICKS);
-                                        } else {
-                                            Log::Write("FieldNavigation: [drive] stuck phase %d — both nudge directions cross trigger line, skipping",
-                                                       s_driveWigglePhase);
                                         }
                                     }
                                 }
@@ -2688,7 +3002,9 @@ static void UpdateAutoDrive()
                         }
                     }
                     if (!nudged) {
-                        // Couldn't compute nudge — fall back to edge-midpoint re-path.
+                        // Couldn't compute nudge — fall back to re-path.
+                        Log::Write("FieldNavigation: [drive] recovery %d — nudge failed, falling back to re-path",
+                                   s_driveWigglePhase);
                         if (rpGoal >= 0 && (int)nowTri != rpGoal) {
                             float savedWp[MAX_WAYPOINTS][2];
                             int savedWpCount = s_waypointCount;
@@ -2696,8 +3012,9 @@ static void UpdateAutoDrive()
                             bool savedFunnel = s_usingFunnel;
                             memcpy(savedWp, s_waypoints, sizeof(float) * 2 * savedWpCount);
                             if (ComputeAStarPath((int)nowTri, rpGoal, ei, s_driveSkipTrigIdx)) {
-                                EdgeMidpointPath(px, pz, rpTx, rpTz);
-                                Log::Write("FieldNavigation: [drive] stuck phase %d — nudge failed, edge-midpoint fallback: %d wp",
+                                FunnelPath(px, pz, rpTx, rpTz);
+                                s_wpMinDist = 1e30f;
+                                Log::Write("FieldNavigation: [drive] recovery %d — re-pathed (nudge fallback): %d wp",
                                            s_driveWigglePhase, s_waypointCount);
                             } else {
                                 memcpy(s_waypoints, savedWp, sizeof(float) * 2 * savedWpCount);
@@ -2708,10 +3025,8 @@ static void UpdateAutoDrive()
                         }
                     }
                 } else {
-                    // Odd phase: try edge-midpoint re-path.
+                    // Odd phase: re-run A* and generate fresh funnel path.
                     if (rpGoal >= 0 && (int)nowTri != rpGoal) {
-                        int oldWp = s_waypointIdx;
-                        int oldTotal = s_waypointCount;
                         float savedWp[MAX_WAYPOINTS][2];
                         int savedWpCount = s_waypointCount;
                         int savedWpIdx = s_waypointIdx;
@@ -2719,28 +3034,29 @@ static void UpdateAutoDrive()
                         memcpy(savedWp, s_waypoints, sizeof(float) * 2 * savedWpCount);
 
                         if (ComputeAStarPath((int)nowTri, rpGoal, ei, s_driveSkipTrigIdx)) {
-                            EdgeMidpointPath(px, pz, rpTx, rpTz);
-                            Log::Write("FieldNavigation: [drive] stuck phase %d — switched to edge-midpoint: %d wp from tri %d (was wp %d/%d)",
-                                       s_driveWigglePhase, s_waypointCount, (int)nowTri, oldWp, oldTotal);
+                            FunnelPath(px, pz, rpTx, rpTz);
+                            s_wpMinDist = 1e30f;
+                            Log::Write("FieldNavigation: [drive] recovery %d — re-pathed: %d wp from tri %d",
+                                       s_driveWigglePhase, s_waypointCount, (int)nowTri);
                         } else {
                             memcpy(s_waypoints, savedWp, sizeof(float) * 2 * savedWpCount);
                             s_waypointCount = savedWpCount;
                             s_waypointIdx = savedWpIdx;
                             s_usingFunnel = savedFunnel;
-                            Log::Write("FieldNavigation: [drive] stuck phase %d — A* failed from tri %d, keeping old %d wp",
+                            Log::Write("FieldNavigation: [drive] recovery %d — A* failed from tri %d, keeping old %d wp",
                                        s_driveWigglePhase, (int)nowTri, savedWpCount);
                         }
                     } else {
-                        Log::Write("FieldNavigation: [drive] stuck phase %d — already on goal tri or no goal",
+                        Log::Write("FieldNavigation: [drive] recovery %d — already on goal tri or no goal",
                                    s_driveWigglePhase);
                     }
                 }
             }
         }
-        // Reset stuck position so we get a fresh window.
+        // Reset stuck position for fresh window.
         s_driveStuckPosX = px;
         s_driveStuckPosY = pz;
-        if (s_driveWiggleTicks == 0)  // don't override heading during nudge
+        if (s_driveWiggleTicks == 0)
             SetHeldDirections(heading);
     } else {
         // Normal heading toward waypoint/target.
@@ -2826,14 +3142,12 @@ static void HandleKeys()
         // v06.08: During recovery (stuck phases), any arrow key cancels immediately.
         // This ensures the player can always regain control when the drive is stuck.
         // During normal steering, mask out keys we're injecting ourselves.
-        if (s_driveWigglePhase >= 4) {
-            // v06.08: After several recovery attempts, any arrow key cancels.
-            // We use phase>=4 (not 0) to avoid cancelling on residual key
-            // state from catalog cycling or JAWS key interception.
-            if (arrowUp || arrowDown || arrowLeft || arrowRight) {
-                StopAutoDrive("Cancelled.");
-            }
-        } else {
+        // v06.14: Arrow-key cancel REMOVED during recovery.
+        // JAWS intercepts arrow keys in fullscreen DirectX, causing false
+        // cancels at phase >= 4. The user can cancel via backslash toggle.
+        // During normal steering (phase 0), still cancel on non-injected arrows
+        // to allow manual override before recovery starts.
+        if (s_driveWigglePhase == 0) {
             bool playerUp    = arrowUp    && !(s_driveHeld & DIR_UP);
             bool playerDown  = arrowDown  && !(s_driveHeld & DIR_DOWN);
             bool playerLeft  = arrowLeft  && !(s_driveHeld & DIR_LEFT);
@@ -2898,6 +3212,16 @@ static void HandleKeys()
                 s_driveProgressDist    = 1e30f;  // v06.10: reset progress tracking
                 s_driveNoProgressCount = 0;
 
+                // v06.14: Start heading calibration if not yet calibrated for this field.
+                if (s_calibPending && !s_camCalibrated) {
+                    s_calibPhase = 1;
+                    s_calibTicks = 0;
+                    Log::Write("FieldNavigation: [CALIB] starting heading calibration for field '%s'",
+                               FF8Addresses::pCurrentFieldName ? FF8Addresses::pCurrentFieldName : "?");
+                } else {
+                    s_calibPhase = 3;  // skip calibration, use existing axes
+                }
+
                 // v05.84: Install fake gamepad so the game processes our analog values.
                 if (FF8Addresses::HasDinputGamepadPtrs() && !s_fakeGamepadInstalled) {
                     s_savedDevicePtr = *FF8Addresses::pDinputGamepadDevicePtr;
@@ -2926,11 +3250,17 @@ static void HandleKeys()
                 // margin for collision bodies and narrow approaches.
                 // For non-entity targets (gateways, triggers), use the default.
                 s_driveArriveDist = DRIVE_ARRIVE_DIST_DEFAULT;
+                s_driveTargetEntityIdx = -1;
+                s_driveOrigTalkRadius = 0;
+                s_driveTalkRadExpanded = false;
                 if (drTgt.entityIdx >= 0 && drTgt.entityIdx < MAX_ENTITIES) {
                     uint16_t talkRad = GetEntityTalkRadius(drTgt.entityIdx);
                     if (talkRad > 0) {
                         s_driveArriveDist = (float)talkRad;
                         if (s_driveArriveDist < 60.0f) s_driveArriveDist = 60.0f;
+                        // v06.21: Save original talk radius for potential expansion.
+                        s_driveTargetEntityIdx = drTgt.entityIdx;
+                        s_driveOrigTalkRadius = talkRad;
                         Log::Write("FieldNavigation: [drive] talkRadius=%u -> arriveDist=%.0f",
                                    (unsigned)talkRad, s_driveArriveDist);
                     }
@@ -3322,6 +3652,12 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
     s_bgDiagDumped       = true;
     s_coordDiagDumped    = false;  // v05.59: reset so COORDDIAG fires once per field
     s_coordPrevPlayerTri = 0;       // v06.13: reset for shared-edge CoordSample
+    // v06.14: Reset heading calibration for new field.
+    s_camRightX = 1.0f; s_camRightY = 0.0f;
+    s_camDownX = 0.0f; s_camDownY = -1.0f;  // default: +lY = -Y world (screen down)
+    s_camCalibrated = false;
+    s_calibPhase = 0;
+    s_calibPending = true;  // calibrate on first drive
     s_projDiagCount      = 0;       // v06.13: reset projection diagnostic
     s_projDiagPrevFpX    = 0;
     s_projDiagPrevFpY    = 0;
@@ -3594,7 +3930,7 @@ void Initialize()
 
     s_initialized = true;
     s_lastLogTime = GetTickCount();
-    Log::Write("FieldNavigation: Initialized v06.13 — CoordSample wiring + progress-toward-target stuck detection.");
+    Log::Write("FieldNavigation: Initialized v0.06.22 — Corridor steering respects trigger lines + talk radius expansion.");
     Log::Write("FieldNavigation:   F9  = nearest character and compass direction (repeat to cycle)");
     Log::Write("FieldNavigation:   F10 = player field name and position");
 }

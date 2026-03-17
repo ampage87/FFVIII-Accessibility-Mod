@@ -391,4 +391,82 @@ std::string HexDump(const uint8_t* data, size_t count)
     return result;
 }
 
+// ============================================================================
+// Menu font (sysfnt) glyph-to-character table (v07.11)
+// Source: myst6re/deling — src/qt/fonts/sysfnt.txt
+// 14 rows x 16 columns = 224 entries. Index = row*16 + col.
+// ============================================================================
+
+static const char* s_menuGlyphTable[224] = {
+    // Row 0 (0x00-0x0F): space, digits, punctuation
+    " ","0","1","2","3","4","5","6","7","8","9","%","/",":","!","?",
+    // Row 1 (0x10-0x1F): symbols
+    "...","+","-","=","*","&","","","(",")"," ",".",",","~","","",
+    // Row 2 (0x20-0x2F): punctuation + uppercase A-K
+    "'","#","$","'","_","A","B","C","D","E","F","G","H","I","J","K",
+    // Row 3 (0x30-0x3F): uppercase L-Z + lowercase a
+    "L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z","a",
+    // Row 4 (0x40-0x4F): lowercase b-q
+    "b","c","d","e","f","g","h","i","j","k","l","m","n","o","p","q",
+    // Row 5 (0x50-0x5F): lowercase r-z + accented uppercase
+    "r","s","t","u","v","w","x","y","z","A","A","A","A","C","E","E",
+    // Row 6 (0x60-0x6F): accented uppercase continued (simplified to ASCII)
+    "E","E","I","I","I","I","N","O","O","O","O","U","U","U","U","OE",
+    // Row 7 (0x70-0x7F): accented lowercase (simplified to ASCII)
+    "ss","a","a","a","a","c","e","e","e","e","i","i","i","i","n","o",
+    // Row 8 (0x80-0x8F): accented lowercase continued + symbols
+    "o","o","o","u","u","u","u","oe","","[","]","","","","","",
+    // Row 9 (0x90-0x9F): symbols
+    "","","","","",";","","","x","","",""," degrees","","","-",
+    // Row 10 (0xA0-0xAF): symbols
+    "","","+/-","","","","","","","TM","<",">","","","","",
+    // Row 11 (0xB0-0xBF): mostly empty
+    "","","","","","","","","","","","","","","","",
+    // Row 12 (0xC0-0xCF): empty + compression sequences
+    "","","","","","","","","in","e ","ne","to","re","HP","l ","ll",
+    // Row 13 (0xD0-0xDF): compression sequences
+    "GF","nt","il","o ","ef","on"," w"," r","wi","fi","","s ","ar",""," S","ag"
+};
+
+std::string DecodeMenuText(const uint8_t* data, size_t len)
+{
+    if (!data || len == 0) return "";
+
+    std::string result;
+    result.reserve(len);
+    bool lastWasSpace = false;
+
+    for (size_t i = 0; i < len; i++) {
+        uint8_t b = data[i];
+
+        // Glyph indices 0x00-0xDF map into the 224-entry table
+        const char* ch = nullptr;
+        if (b < 224) {
+            ch = s_menuGlyphTable[b];
+        }
+
+        if (ch && ch[0] != '\0') {
+            // Collapse repeated spaces
+            if (ch[0] == ' ' && ch[1] == '\0') {
+                if (!lastWasSpace) {
+                    result += ' ';
+                    lastWasSpace = true;
+                }
+            } else {
+                result += ch;
+                // Check if this multi-char entry ends with a space
+                size_t slen = strlen(ch);
+                lastWasSpace = (ch[slen - 1] == ' ');
+            }
+        }
+        // else: unknown glyph — skip silently
+    }
+
+    // Trim trailing space
+    while (!result.empty() && result.back() == ' ')
+        result.pop_back();
+
+    return result;
+}
+
 }  // namespace FF8TextDecode

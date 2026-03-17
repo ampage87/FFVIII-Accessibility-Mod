@@ -1,119 +1,78 @@
-# Next Session Priority: Wall-stuck recovery + trigger-line crossing
+# Next Session Priority: Save Screen Cursor + Source Push
 
-## Current State (v06.09)
+## Current State (v0.07.24)
 
-Build is stable and deployed. NavLog is fully wired and collecting structured data.
-Logs are in `Logs/` subfolder (ff8_accessibility.log, ff8_nav_data.log, build_latest.log).
+Build is stable and deployed. BGM volume control fully working.
+Menu TTS working (top-level). Save screen cursor BLOCKED.
+GitHub issue #1 (BGM volume persistence) CLOSED.
+Logs are in `Logs/` subfolder.
 
-### What's working well
-- Quistis (bgroom_1) reached reliably
-- 2/3 Trepie Groupies (bgroom_1) reached
-- Screen transitions: multiple successful Arrived drives (bggate_1, bggate_5)
-- Overshoot detection fires correctly (v06.08)
-- Stuck detection grace period prevents false early cancels (v06.09)
-- Arrow key cancel during recovery (phase ≥4) lets player regain control (v06.09)
-- MAX_RECOVERY_PHASES=12 auto-cancels with "Stuck. Distance remaining: N." message
-- NavLog collecting rich structured data across all fields
+### Session 2026-03-17 Major Achievement
 
-### Known issues (prioritized)
+**GitHub Issue #1 — BGM Volume Persistence: FIXED (v0.07.24)**
 
-**1. Wire NavLog::CoordSample into HookedSetCurrentTriangle (HIGH PRIORITY — small change, big unlock)**
-The 3D→2D coordinate transform for angled fields (bg2f_1 etc.) is unknown and blocks
-pathfinding on those fields. CoordSample logs both the raw 3D walkmesh vertex data
-(from the hook's int16_t[3] arguments) AND the entity's 2D position (from offset
-0x190/0x194) every time the player moves to a new triangle. A few minutes of walking
-around bg2f_1 will produce dozens of paired 3D↔2D data points — enough to solve
-the projection matrix numerically. Implementation: ~20 lines in HookedSetCurrentTriangle,
-only log when the changed entity is the player (changedIdx == s_playerEntityIdx).
-Log format: `COORD\tfield\ttriId\t3dX\t3dY\t3dZ\t2dX\t2dY`
-The 3D coords are the triangle center from the vertex args; the 2D coords are from
-the entity struct at 0x190/0x194 (divided by 4096). Once we have the data, we can
-solve for the per-field affine transform in Python offline.
+Root cause: We were hooking `dmusicperf_set_volume_sub_46C6F0` (0x0046C6F0),
+a function only called during game credits. Field/battle/worldmap music uses
+`set_midi_volume` (`common_externals.set_midi_volume`), which FFNx replaces
+with `set_music_volume_for_channel(int32_t channel, uint32_t volume)`.
 
-**2. Micro-oscillation fools stuck detector (bggate_2 NPC — HIGH PRIORITY)**
-Player bounces between tri 126↔127 at Y≈728↔759, moving ~31 units each cycle.
-This is enough to reset stuck detection (DRIVE_STUCK_MIN_DIST=20), so recovery
-phase never exceeds 1 and MAX_RECOVERY_PHASES never fires. Player oscillates
-for the full 2400-tick timeout then "Gave up." at dist=5044. Fix needed: track
-whether the player is making progress toward the TARGET, not just moving at all.
-Potential approach: compare dist-to-target at each stuck window. If dist hasn't
-decreased meaningfully over N windows, declare stuck even if position changed.
+Fix: Resolved `set_midi_volume` via FFNx's address chain
+(`main_loop → sm_battle_sound → set_midi_volume`). Hooked FFNx's replacement
+with correct 2-parameter signature. All game volume calls now flow through
+our hook. No periodic re-apply needed.
 
-**3. Trigger-line crossing during drives (bghall_1, bggate_6 — MEDIUM PRIORITY)**
-Some drives accidentally cross trigger lines and cause field transitions.
-NavLog shows "unknown" end reason (field changed mid-drive). The A* avoids
-trigger lines but the funnel path can cut close to them, and analog steering
-momentum carries the player through. Fix needed: check player position against
-trigger lines each tick during drive, and either stop or redirect if about to cross.
+Investigation timeline: v0.07.17–v0.07.24 (8 builds).
 
-**4. bg2f_1 corridor NPC consistently unreachable (BLOCKED — needs CoordSample data from issue #1)**
-Entity at (323,-3651) but walkmesh coordinates are in 3D space (Z=484-10413).
-The 3D→2D transform is hardcoded in FF8_EN.exe and unknown. Walkmesh path leads
-to a wall because coordinates don't align on this angled field. NavLog CoordSample
-(not yet wired) will collect empirical data to solve this. Can't fix pathfinding
-until we know the coordinate transform.
+### What's Working
+- **BGM volume control**: F3/F4 adjust, default 20%, persists across scenes
+- Top-level menu cursor TTS (mode 6, all 11 items)
+- DecodeMenuText() — correctly decodes menu/save screen glyph codes
+- Save screen detection via GCW text content
+- Field dialog TTS (all opcodes)
+- Title screen TTS
+- FMV audio descriptions + skip
+- Field navigation with auto-drive
 
-**5. Wall-stuck on multiple fields (bggate_1 tri 315, bghall_1)**
-Player gets stuck against invisible collision geometry. Micro-nudge direction
-doesn't help (moveDist=0). The current recovery alternates edge-midpoint re-path
-and micro-nudge, but neither breaks free. May need more aggressive random-walk
-recovery after repeated failures.
+### What's NOT Working / Blocked
+- **Save screen cursor detection**: Cursor address unknown. Not in pMenuStateA
+  region. Not in GCW text. Awaiting deep research results.
+- **Save block list navigation**: Depends on cursor detection.
 
-## v06.09 Session Test Data Summary
+## Next Session Priorities
 
-Fields tested: bgroom_1, bg2f_1, bghall_1, bghall_4, bggate_1, bggate_2, bggate_4, bggate_5, bggate_6
+### 1. Push Source to GitHub (IMMEDIATE)
+Source changed significantly (ff8_addresses.h/.cpp, dinput8.cpp,
+ff8_accessibility.h). Needs full push to main branch.
 
-| Result | Count | Examples |
-|--------|-------|---------|
-| Arrived | 3+ | bggate_5 cdfield8, bggate_1 screen transitions |
-| Gave up (2400 ticks) | 3 | bg2f_1 NPC (×2), bggate_2 NPC |
-| Cancelled (phase≥4) | 5+ | bggate_1 NPC, bghall_1 exits, bggate_5 ddtower3 |
-| Field transition (unknown) | 3 | bghall_1→bghall_4, bggate_6→bghall_1 |
+### 2. Process Deep Research Results (HIGH — if available)
+Check if ChatGPT deep research found save screen cursor address.
+Research prompt at `Plan Documents/Save Screen Cursor - ChatGPT Research Request.md`.
 
-## Implementation Suggestions
+### 3. Bug Fixes (as reported by Aaron)
 
-### For issue #1 (CoordSample wiring):
-In `HookedSetCurrentTriangle`, after the `changeCount == 1` block that stores
-the triangle center, add a check: if `changedIdx == s_playerEntityIdx`, read
-the entity's 2D position from offset 0x190/0x194 (divided by 4096) and call
-`NavLog::CoordSample(fieldName, triId, cx3d, cy3d, cz3d, entity2dX, entity2dY)`.
-The 3D center is computed from the raw vertex args (x0+x1+x2)/3 for all three
-axes. This gives us paired 3D↔2D data every time the player changes triangles.
-After collecting data from bg2f_1, write a Python script to solve for the
-affine transform: `[2dX, 2dY] = M * [3dX, 3dY, 3dZ] + offset`.
+### 4. Menu Submenu TTS (MEDIUM — after save screen)
 
-### For issue #2 (micro-oscillation):
-Add a "progress toward target" check alongside the existing "moved at all" check.
-Track `s_driveProgressDist` = distance to target at the start of each stuck window.
-If the current dist is not significantly less than `s_driveProgressDist` after N
-consecutive stuck windows, trigger recovery even though the player "moved."
-
-### For issue #3 (trigger-line crossing):
-Add a per-tick check in UpdateAutoDrive: if player position has crossed any
-non-target trigger line since last tick, stop the drive immediately with
-"Screen changed." or redirect.
-
-### For issue #5 (wall-stuck):
-After MAX_RECOVERY_PHASES, instead of just stopping, try one last "toward target"
-burst — steer directly at the target for 30 ticks, ignoring waypoints. If that
-doesn't close distance, then stop.
+## Volume Control Architecture (v0.07.24)
+- **F3** = music volume down 10%, **F4** = music volume up 10%
+- Default: 20% (`s_gameVolume = 0.2f`)
+- Hook target: `pSetMidiVolume` (resolved at runtime from main_loop → sm_battle_sound)
+- FFNx replaces this with `set_music_volume_for_channel(channel, volume)` (0-127, per channel)
+- Our hook scales volume by user setting before passing through
+- No periodic re-apply — game calls this function for ALL music volume changes
 
 ## Key Code Locations
-
-- `UpdateAutoDrive()` — main drive loop, waypoint advancement, stuck detection
-- `StopAutoDrive()` — drive cleanup
-- Drive start logic — in `HandleKeys()` under the `drive && !s_driveWasDown` block
-- Stuck detection — search for `DRIVE_STUCK_THRESH` and `s_driveStuckTicks`
-- Recovery phases — search for `s_driveWigglePhase`
-- NavLog calls — search for `NavLog::` in field_navigation.cpp
-- The file is ~3500+ lines; use targeted reads with head/tail
+- `src/dinput8.cpp` — volume hook: `TryInstallVolumeHookOnFFNx()`, `HookedSetMusicVolumeForChannel()`
+- `src/ff8_addresses.h/.cpp` — `pSetMidiVolume` (resolved from sm_battle_sound+0x173)
+- `src/ff8_accessibility.h` — version constant
+- `src/menu_tts.cpp` — menu TTS + save screen detection
+- `src/ff8_text_decode.h/.cpp` — text decoders
+- `deploy.bat` — ONLY build script
 
 ## Recovery Instructions
-1. Read DEVNOTES.md for full history
+1. Read DEVNOTES.md for full architecture
 2. Read this file for immediate context
 3. Use filesystem MCP tools for Windows files (not bash)
-4. `deploy.bat` is the ONLY build script; `deploy.vbs`/`deploy.ps1` is the UI wrapper
-5. Bump `FF8OPC_VERSION` in `ff8_accessibility.h` + two locations in `field_navigation.cpp` for every build
-6. When Aaron says "BAT" → read tail of `Logs/ff8_accessibility.log` immediately
-7. Nav data log: `Logs/ff8_nav_data.log` (append-mode, persistent across sessions)
-8. Build log: `Logs/build_latest.log` (written by deploy.ps1)
+4. `deploy.bat` is the ONLY build script
+5. Bump FF8OPC_VERSION in ff8_accessibility.h on every build
+6. When Aaron says "BAT" → read tail of `Logs/ff8_accessibility.log`
+7. Versioning: 0.MM.BB format (pre-production). First public release = 1.0.0.

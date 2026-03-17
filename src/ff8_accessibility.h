@@ -9,8 +9,8 @@
 // FF8 Original PC Accessibility Mod version
 // Increment on every build change
 // ================================================================
-#define FF8OPC_VERSION "06.13"  // Shared-edge CoordSample + projection function diagnostic
-#define FF8OPC_VERSION_DATE "2026-03-15"
+#define FF8OPC_VERSION "0.07.24"  // Fix: hook set_midi_volume (field/battle BGM) instead of credits-only function
+#define FF8OPC_VERSION_DATE "2026-03-16"
 
 // ============================================================================
 // FF8 Runtime Address Resolution

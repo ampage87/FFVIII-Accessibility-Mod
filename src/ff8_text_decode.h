@@ -66,4 +66,23 @@ std::string DecodeWithHex(const uint8_t* data, size_t maxBytes, std::string& hex
 // Dump raw bytes as hex string (for logging).
 std::string HexDump(const uint8_t* data, size_t count);
 
+// ============================================================================
+// Menu font decoder (v07.11)
+// ============================================================================
+// The menu/save screen text rendering uses a DIFFERENT encoding from field
+// dialog. Glyph indices come from the sysfnt.tex texture grid layout, where
+// each cell is a character. The mapping was extracted from the authoritative
+// Deling editor (myst6re/deling: src/qt/fonts/sysfnt.txt).
+//
+// Key differences from field dialog encoding:
+//   Field: A=0x45, a=0x5F, space=0x20, digits=0x21-0x2A
+//   Menu:  A=0x25, a=0x3F, space=0x00, digits=0x01-0x0A
+//
+// Used by: get_character_width hook (GCW buffer) in menu_tts.cpp
+
+// Decode menu font glyph indices into a UTF-8 string.
+// Input is an array of raw glyph index bytes as captured by the GCW hook.
+// Repeated spaces are collapsed. Unknown glyphs are skipped.
+std::string DecodeMenuText(const uint8_t* data, size_t len);
+
 }  // namespace FF8TextDecode

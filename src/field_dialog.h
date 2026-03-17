@@ -35,4 +35,12 @@ void RepeatLastDialog();
 // Used by FieldNavigation to suspend auto-drive key injection during cutscenes.
 bool IsDialogOpen();
 
+// v07.09: Expose text rendering call counters for save screen diagnostic.
+LONG GetMenuDrawTextCallCount();
+LONG GetGetCharWidthCallCount();
+
+// v07.10: Snapshot and reset the GCW accumulation buffer.
+// Returns the number of bytes copied. Caller provides buffer and max size.
+int SnapshotGcwBuffer(uint8_t* outBuf, int maxLen);
+
 }  // namespace FieldDialog

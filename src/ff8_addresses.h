@@ -448,6 +448,11 @@ uint16_t GetEntityTriangleId(int entityIndex);
 extern uint8_t*  pFieldStateBackgroundCount;
 extern uint8_t** pFieldStateBackgrounds;
 
+// --- v0.07.24: Music volume function address (for hooking) ---
+// This is the game's set_midi_volume function, which FFNx replaces with
+// set_music_volume_for_channel. Resolved from main_loop -> sm_battle_sound.
+extern uint32_t pSetMidiVolume;  // game address of set_midi_volume
+
 // Convenience: are the entity state arrays resolved?
 inline bool HasFieldStateArrays() {
     return pFieldStateOtherCount != nullptr && pFieldStateOthers != nullptr;
