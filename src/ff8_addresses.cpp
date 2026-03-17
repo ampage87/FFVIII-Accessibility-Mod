@@ -119,6 +119,9 @@ uint8_t** pFieldInfData = nullptr;
 // v05.10: set_current_triangle hook target
 uint32_t  set_current_triangle_addr = 0;
 
+// v0.07.24: Music volume function (set_midi_volume / set_music_volume_for_channel)
+uint32_t  pSetMidiVolume = 0;
+
 // --- Internal state ---
 static uint32_t s_start = 0;
 static bool s_resolved = false;
@@ -869,6 +872,22 @@ bool Resolve()
             uint32_t bgAddr = get_absolute_value(field_scripts_init, 0x50D);
             pFieldStateBackgrounds = (uint8_t**)bgAddr;
             Log::Write("FF8Addresses:   pFieldStateBackgrounds (uint8_t**) = 0x%08X", bgAddr);
+        }
+
+        // ---- v0.07.24: Resolve set_midi_volume (music volume function for hooking) ----
+        // Chain: main_loop+0x487 -> sm_battle_sound -> +0x173 -> set_midi_volume
+        // FFNx replaces this with set_music_volume_for_channel(channel, volume).
+        // This is the function that actually controls field/battle BGM volume.
+        // (The credits-only function at dmusicperf_set_volume_sub_46C6F0 does NOT.)
+        Log::Write("FF8Addresses: --- Resolving set_midi_volume (v0.07.24) ---");
+        {
+            uint32_t sm_battle_sound_offset = jp ? 0x487 + 5 : 0x487;
+            uint32_t sm_battle_sound = get_relative_call(main_loop, sm_battle_sound_offset);
+            pSetMidiVolume = get_relative_call(sm_battle_sound, 0x173);
+            Log::Write("FF8Addresses:   sm_battle_sound = 0x%08X (from main_loop+0x%X)",
+                       sm_battle_sound, sm_battle_sound_offset);
+            Log::Write("FF8Addresses:   set_midi_volume = 0x%08X (from sm_battle_sound+0x173)",
+                       pSetMidiVolume);
         }
 
         // ---- v01.13: game_loop_obj.main_loop is resolved via deferred scan ----
