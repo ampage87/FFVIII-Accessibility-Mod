@@ -122,6 +122,9 @@ uint32_t  set_current_triangle_addr = 0;
 // v0.07.24: Music volume function (set_midi_volume / set_music_volume_for_channel)
 uint32_t  pSetMidiVolume = 0;
 
+// v0.07.25: Save file read function
+uint32_t  sm_pc_read_addr = 0;
+
 // --- Internal state ---
 static uint32_t s_start = 0;
 static bool s_resolved = false;
@@ -888,6 +891,18 @@ bool Resolve()
                        sm_battle_sound, sm_battle_sound_offset);
             Log::Write("FF8Addresses:   set_midi_volume = 0x%08X (from sm_battle_sound+0x173)",
                        pSetMidiVolume);
+        }
+
+        // ---- v0.07.25: Resolve sm_pc_read (save file read function for hooking) ----
+        // Chain: main_loop+0x9C -> sm_pc_read
+        // Signature: uint32_t sm_pc_read(char* filename, void* buffer)
+        // Called by the game when reading save files from disk.
+        Log::Write("FF8Addresses: --- Resolving sm_pc_read (v0.07.25) ---");
+        {
+            uint32_t sm_pc_read_offset = jp ? 0x9C + 3 : 0x9C;
+            sm_pc_read_addr = get_relative_call(main_loop, sm_pc_read_offset);
+            Log::Write("FF8Addresses:   sm_pc_read = 0x%08X (from main_loop+0x%X)",
+                       sm_pc_read_addr, sm_pc_read_offset);
         }
 
         // ---- v01.13: game_loop_obj.main_loop is resolved via deferred scan ----

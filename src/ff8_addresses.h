@@ -453,6 +453,12 @@ extern uint8_t** pFieldStateBackgrounds;
 // set_music_volume_for_channel. Resolved from main_loop -> sm_battle_sound.
 extern uint32_t pSetMidiVolume;  // game address of set_midi_volume
 
+// --- v0.07.25: Save file read function address (for hooking) ---
+// Signature: uint32_t sm_pc_read(char* filename, void* buffer)
+// Resolved from main_loop + 0x9C. Called by the game when loading save files
+// from disk (e.g. when opening the save/load screen).
+extern uint32_t sm_pc_read_addr;
+
 // Convenience: are the entity state arrays resolved?
 inline bool HasFieldStateArrays() {
     return pFieldStateOtherCount != nullptr && pFieldStateOthers != nullptr;

@@ -65,6 +65,11 @@ bool Initialize();
 // Returns true if the SYM file was found and parsed.
 bool LoadSYMNames(const char* fieldName, char names[][32], int maxNames, int& outCount);
 
+// Look up a field ID by its internal name (e.g. "bghall_1" → 165).
+// Searches the FL file index loaded at init time.
+// Returns -1 if not found.
+int GetFieldIdByInternalName(const char* internalName);
+
 // Load gateway exits from the INF file for the given field.
 // gateways: array to receive gateway data.
 // maxGateways: size of the gateways array (INF supports up to 12).
@@ -92,6 +97,51 @@ const char* GetFieldNameById(uint16_t fieldId);
 // (doors + lines + backgrounds) tells you which SYM index corresponds
 // to entity state array index 0.
 bool LoadJSMCounts(const char* fieldName, JSMCounts& counts);
+
+// ============================================================================
+// JSM script scanning — entity classification by opcode signatures
+// ============================================================================
+
+// Entity type classified from JSM script content.
+enum JSMEntityType {
+    JSM_ENT_UNKNOWN = 0,
+    JSM_ENT_DRAW_POINT,      // SETDRAWPOINT / DRAWPOINT
+    JSM_ENT_SAVE_POINT,      // MENUSAVE / SAVEENABLE
+    JSM_ENT_SHOP,            // MENUSHOP
+    JSM_ENT_CARD_GAME,       // CARDGAME
+    JSM_ENT_LADDER,          // LADDERUP / LADDERDOWN
+    JSM_ENT_MAP_EXIT,        // MAPJUMP / MAPJUMP3
+    JSM_ENT_NPC,             // SETMODEL + TALKON or other interaction
+    JSM_ENT_DOOR,            // JSM Door category entity
+    JSM_ENT_LINE_TRIGGER,    // JSM Line category (generic/unclassified trigger)
+    JSM_ENT_LINE_CAMERA_PAN, // v0.07.82: Line with BGDRAW/BGOFF/scroll — transparent for screen filtering
+    JSM_ENT_LINE_SCREEN_BOUND, // v0.07.82: Line with MAPJUMP — filters entities on other side
+    JSM_ENT_LINE_EVENT,      // v0.07.82: Line with SHOW/HIDE/MES/BATTLE — transparent
+    JSM_ENT_BACKGROUND       // JSM Background category (unclassified)
+};
+
+// Classification result for a single JSM entity.
+struct JSMEntityInfo {
+    int            jsmIndex;      // index in JSM entity table (Door→Line→Bg→Other order)
+    int            jsmCategory;   // 0=Door, 1=Line, 2=Background, 3=Other
+    JSMEntityType  type;          // classified type from script scanning
+    bool           hasPosition;   // true if SET3/SET position was found in init script
+    int16_t        posX, posY, posZ;
+    uint16_t       posTriangle;   // walkmesh triangle from SET3/SET inline param
+    int            param;         // type-specific: drawPointId, shopId, destFieldId, etc.
+    char           symName[32];   // from SYM (empty for doors)
+};
+
+const char* JSMEntityTypeName(JSMEntityType t);
+
+// Scan all JSM scripts for a field to classify entities by their opcodes.
+// Detects draw points, save points, shops, card games, ladders, and map exits.
+// Extracts positions from SET3/SET in init scripts.
+// outEntities: array to receive classified entities.
+// maxEntities: size of outEntities array.
+// outCount: number of entities found.
+// Returns true if the JSM was parsed successfully.
+bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEntities, int& outCount);
 
 // ============================================================================
 // Walkmesh (ID file) data for A* pathfinding

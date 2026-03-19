@@ -3,7 +3,7 @@
 // See field_navigation.h for full architecture and phasing notes.
 //
 // ============================================================================
-// CURRENT STATE: v0.07.16 — Save screen: arrow key tracking for slot cursor
+// CURRENT STATE: v0.07.94 — INF gateway catalog integration: deduplicated exits with compass directions
 // ============================================================================
 //
 // What's new in v05.12:
@@ -43,6 +43,7 @@
 #include "field_archive.h"
 #include "field_navigation.h"
 #include "minhook/include/MinHook.h"
+#include "field_display_names.h"
 
 namespace FieldNavigation {
 
@@ -92,22 +93,46 @@ static const int    MAX_GATEWAYS  = 12;
 static FieldArchive::GatewayInfo s_gateways[MAX_GATEWAYS] = {};
 static int          s_gatewayCount = 0;
 
+// v0.07.94: Deduplicated INF gateway groups for catalog.
+// Multiple INF gateways with the same destFieldId are merged into one
+// catalog exit with averaged center position. This prevents 3 gateway
+// lines covering one wide exit from appearing as 3 separate exits.
+struct DedupGateway {
+    float   centerX, centerY;
+    uint16_t destFieldId;
+    char    displayName[48];
+    int     count;  // number of raw gateways merged
+};
+static const int MAX_DEDUP_GATEWAYS = 12;
+static DedupGateway s_dedupGateways[MAX_DEDUP_GATEWAYS] = {};
+static int s_dedupGatewayCount = 0;
+
 // --- INF trigger zones (loaded per field from archive, v05.54) ---
 static const int    MAX_TRIGGERS  = 16;
 static FieldArchive::TriggerInfo s_triggers[MAX_TRIGGERS] = {};
 static int          s_triggerCount = 0;
 
+// --- JSM entity classification results (loaded per field from ScanJSMScripts) ---
+static const int MAX_JSM_ENTITIES = 128;
+static FieldArchive::JSMEntityInfo s_jsmEntities[MAX_JSM_ENTITIES] = {};
+static int s_jsmEntityCount = 0;
+
 // --- NPC catalog (rebuilt at each field load) ---
-enum EntityType { ENT_UNKNOWN = 0, ENT_NPC, ENT_OBJECT, ENT_EXIT, ENT_BG_NPC, ENT_BG_OBJECT };
+enum EntityType { ENT_UNKNOWN = 0, ENT_NPC, ENT_OBJECT, ENT_EXIT, ENT_BG_NPC, ENT_BG_OBJECT,
+                  ENT_SAVE_POINT, ENT_DRAW_POINT, ENT_SHOP, ENT_CARD_GAME };
 
 static const char* EntityTypeName(EntityType t) {
     switch (t) {
-        case ENT_NPC:       return "NPC";
-        case ENT_OBJECT:    return "Object";
-        case ENT_EXIT:      return "Exit";
-        case ENT_BG_NPC:    return "NPC";
-        case ENT_BG_OBJECT: return "Object";
-        default:            return "Entity";
+        case ENT_NPC:        return "NPC";
+        case ENT_OBJECT:     return "Object";
+        case ENT_EXIT:       return "Exit";
+        case ENT_BG_NPC:     return "NPC";
+        case ENT_BG_OBJECT:  return "Object";
+        case ENT_SAVE_POINT: return "Save Point";
+        case ENT_DRAW_POINT: return "Draw Point";
+        case ENT_SHOP:       return "Shop";
+        case ENT_CARD_GAME:  return "Card Game";
+        default:             return "Entity";
     }
 }
 
@@ -357,6 +382,15 @@ static bool s_f11WasDown = false;
 
 // v05.39: Track which entities have logged the struct-position fallback.
 static uint16_t  s_structFallbackLogged = 0;
+
+// v06.14/v0.07.76: Per-field camera heading axes for analog steering + compass directions.
+// Calibrated empirically on first auto-drive; default = identity (world axes).
+// Declared here (before FormatNavComponents) so compass directions can use them.
+static float s_camRightX = 1.0f;   // camera right vector X component (normalized)
+static float s_camRightY = 0.0f;   // camera right vector Y component
+static float s_camDownX  = 0.0f;   // camera down vector X component
+static float s_camDownY  = -1.0f;  // camera down vector Y component (default: -Y world = screen-down, matches common calibration)
+static bool  s_camCalibrated = false;
 
 // ============================================================================
 // v05.82: engine_eval_keyboard_gamepad_input post-call diagnostic hook
@@ -711,18 +745,23 @@ static bool ReadVertexCoords(uintptr_t ptr, int16_t& x, int16_t& y, int16_t& z)
 }
 
 // Format navigation as component-based directions: "Right 5, Up 3"
-// +X = right (screen-right), -Y = up (screen-up). Corrected v05.61.
+// v0.07.76: Uses camera-calibrated axes to convert world-space deltas to
+// screen-space directions. Before calibration, falls back to raw world coords
+// (+X = right, -Y = up). After calibration, projects world delta onto the
+// measured camera right/down vectors so directions match the player's screen.
 // Each axis is converted to steps independently at 250 world units/step.
 // If both axes are tiny, says "right here".
-// v05.61: Parameter renamed from dz to dy — now represents the Y axis.
 static void FormatNavComponents(float dx, float dy, char* buf, int bufsz)
 {
-    int hSteps = (int)(fabsf(dx) / 250.0f + 0.5f);
-    int vSteps = (int)(fabsf(dy) / 250.0f + 0.5f);
-    const char* hDir = (dx >= 0.0f) ? "right" : "left";
-    // v05.61: Y axis — negative Y = screen-up (confirmed: entities above
-    // player have more negative Y in bgroom_1 COORDDIAG).
-    const char* vDir = (dy >= 0.0f) ? "down" : "up";
+    // v0.07.76: Project world-space delta onto camera axes for screen-relative directions.
+    // screenRight = dot(worldDelta, camRight), screenDown = dot(worldDelta, camDown).
+    float screenRight = dx * s_camRightX + dy * s_camRightY;
+    float screenDown  = dx * s_camDownX  + dy * s_camDownY;
+
+    int hSteps = (int)(fabsf(screenRight) / 250.0f + 0.5f);
+    int vSteps = (int)(fabsf(screenDown) / 250.0f + 0.5f);
+    const char* hDir = (screenRight >= 0.0f) ? "right" : "left";
+    const char* vDir = (screenDown >= 0.0f) ? "down" : "up";
 
     if (hSteps == 0 && vSteps == 0) {
         snprintf(buf, bufsz, "right here");
@@ -738,6 +777,34 @@ static void FormatNavComponents(float dx, float dy, char* buf, int bufsz)
 // Sanity threshold: if the computed distance exceeds this, the center data
 // is likely stale/wrong and we report the entity as "not yet located".
 static const float MAX_SANE_DIST = 30000.0f;
+
+// v0.07.73: Look up JSM entity classification by SYM name.
+// Returns pointer to the matching JSMEntityInfo, or nullptr if not found.
+static const FieldArchive::JSMEntityInfo* FindJSMBySym(const char* symName)
+{
+    if (!symName || symName[0] == '\0') return nullptr;
+    for (int j = 0; j < s_jsmEntityCount; j++) {
+        if (s_jsmEntities[j].symName[0] != '\0' &&
+            _stricmp(s_jsmEntities[j].symName, symName) == 0) {
+            return &s_jsmEntities[j];
+        }
+    }
+    return nullptr;
+}
+
+// v0.07.73: Map JSM entity type to catalog EntityType.
+static EntityType JSMTypeToCatalogType(FieldArchive::JSMEntityType jt)
+{
+    switch (jt) {
+        case FieldArchive::JSM_ENT_SAVE_POINT: return ENT_SAVE_POINT;
+        case FieldArchive::JSM_ENT_DRAW_POINT: return ENT_DRAW_POINT;
+        case FieldArchive::JSM_ENT_SHOP:       return ENT_SHOP;
+        case FieldArchive::JSM_ENT_CARD_GAME:  return ENT_CARD_GAME;
+        case FieldArchive::JSM_ENT_MAP_EXIT:   return ENT_EXIT;
+        case FieldArchive::JSM_ENT_NPC:        return ENT_NPC;
+        default: return ENT_UNKNOWN;
+    }
+}
 
 // ============================================================================
 // A* Walkmesh Pathfinding (v05.62)
@@ -836,6 +903,13 @@ struct CapturedTriggerLine {
     int16_t  x2, y2, z2;
     bool     active;
     char     name[48];
+    // v0.07.82: JSM-classified line type for screen filtering.
+    // Only JSM_ENT_LINE_SCREEN_BOUND lines act as screen boundaries.
+    // Camera pans and event triggers are transparent.
+    FieldArchive::JSMEntityType lineType;
+    // v0.07.83: Destination field ID for LINE_SCREEN_BOUND (from MAPJUMP param).
+    // -1 = unknown, -2 = world map, >= 0 = field ID.
+    int destFieldId;
 };
 static const int MAX_CAPTURED_LINES = 32;
 static CapturedTriggerLine s_capturedLines[MAX_CAPTURED_LINES] = {};
@@ -1646,6 +1720,34 @@ static const char* ResolveNameByModelId(int16_t modelId)
 }
 
 // ============================================================================
+// v0.07.64: Field ID → human-readable display name lookup
+// ============================================================================
+// Uses the static FIELD_DISPLAY_NAMES[] table from field_display_names.h
+// (982 entries, field IDs 0–981, disambiguated with sequential numbering).
+// Returns the display name for a given field ID, or the internal field name
+// as fallback if the ID is out of range.
+
+static const char* GetFieldDisplayName(uint16_t fieldId)
+{
+    if (fieldId < FIELD_DISPLAY_NAMES_COUNT)
+        return FIELD_DISPLAY_NAMES[fieldId];
+    return nullptr;
+}
+
+// v0.07.66: Look up display name by internal field name (e.g. "bghall1a" -> "B-Garden - Hall 2").
+// Searches FIELD_INTERNAL_NAMES[] for the match, returns corresponding FIELD_DISPLAY_NAMES[] entry.
+// The FL-based index in FieldArchive is NOT the game's field ID, so we must search here.
+static const char* GetFieldDisplayNameByInternalName(const char* internalName)
+{
+    if (!internalName) return nullptr;
+    for (int i = 0; i < FIELD_DISPLAY_NAMES_COUNT; i++) {
+        if (_stricmp(internalName, FIELD_INTERNAL_NAMES[i]) == 0)
+            return FIELD_DISPLAY_NAMES[i];
+    }
+    return nullptr;
+}
+
+// ============================================================================
 // v05.51: Background entity classification by SYM name
 // ============================================================================
 //
@@ -1922,6 +2024,7 @@ static int __cdecl HookedPushradius(int entityPtr)
 
 // Forward declarations.
 static bool AnnounceCurrentTarget();
+static bool AnnounceDirections();  // v0.07.76: directions on Backspace
 static void CycleEntity(int delta);
 static void RefreshCatalog();
 
@@ -1956,8 +2059,13 @@ static bool AnnounceCurrentTarget()
 
     // v05.59: Simplified type+number labels.
     // v05.72: Trigger lines use their name field ("Screen transition" or "Event").
+    // v0.07.74: Use EntityTypeName for all types, including new JSM-classified ones.
     const char* typeLabel = "Entity";
-    if (catEnt.entityIdx <= -200 && catEnt.type == ENT_EXIT)
+    if (catEnt.type == ENT_SAVE_POINT)      typeLabel = "Save Point";
+    else if (catEnt.type == ENT_DRAW_POINT)  typeLabel = "Draw Point";
+    else if (catEnt.type == ENT_SHOP)        typeLabel = "Shop";
+    else if (catEnt.type == ENT_CARD_GAME)   typeLabel = "Card Game";
+    else if (catEnt.entityIdx <= -200 && catEnt.type == ENT_EXIT)
         typeLabel = "Exit";   // screen transition
     else if (catEnt.entityIdx <= -200)
         typeLabel = "Event";  // event trigger
@@ -1979,7 +2087,17 @@ static bool AnnounceCurrentTarget()
         // NPCs: regular entities (entityIdx >= 0).
         if (strcmp(typeLabel, "Exit") == 0 && ce.type == ENT_EXIT)
             sameType = true;
-        else if (strcmp(typeLabel, "Event") == 0 && ce.entityIdx <= -200 && ce.type != ENT_EXIT)
+        else if (strcmp(typeLabel, "Event") == 0 && ce.entityIdx <= -200 && ce.type != ENT_EXIT
+                 && ce.type != ENT_SAVE_POINT && ce.type != ENT_DRAW_POINT
+                 && ce.type != ENT_SHOP && ce.type != ENT_CARD_GAME)
+            sameType = true;
+        else if (strcmp(typeLabel, "Save Point") == 0 && ce.type == ENT_SAVE_POINT)
+            sameType = true;
+        else if (strcmp(typeLabel, "Draw Point") == 0 && ce.type == ENT_DRAW_POINT)
+            sameType = true;
+        else if (strcmp(typeLabel, "Shop") == 0 && ce.type == ENT_SHOP)
+            sameType = true;
+        else if (strcmp(typeLabel, "Card Game") == 0 && ce.type == ENT_CARD_GAME)
             sameType = true;
         else if (strcmp(typeLabel, "NPC") == 0 && ce.entityIdx >= 0 && ce.entityIdx != s_playerEntityIdx)
             sameType = true;
@@ -1998,7 +2116,17 @@ static bool AnnounceCurrentTarget()
         bool sameType = false;
         if (strcmp(typeLabel, "Exit") == 0 && ce.type == ENT_EXIT)
             sameType = true;
-        else if (strcmp(typeLabel, "Event") == 0 && ce.entityIdx <= -200 && ce.type != ENT_EXIT)
+        else if (strcmp(typeLabel, "Event") == 0 && ce.entityIdx <= -200 && ce.type != ENT_EXIT
+                 && ce.type != ENT_SAVE_POINT && ce.type != ENT_DRAW_POINT
+                 && ce.type != ENT_SHOP && ce.type != ENT_CARD_GAME)
+            sameType = true;
+        else if (strcmp(typeLabel, "Save Point") == 0 && ce.type == ENT_SAVE_POINT)
+            sameType = true;
+        else if (strcmp(typeLabel, "Draw Point") == 0 && ce.type == ENT_DRAW_POINT)
+            sameType = true;
+        else if (strcmp(typeLabel, "Shop") == 0 && ce.type == ENT_SHOP)
+            sameType = true;
+        else if (strcmp(typeLabel, "Card Game") == 0 && ce.type == ENT_CARD_GAME)
             sameType = true;
         else if (strcmp(typeLabel, "NPC") == 0 && ce.entityIdx >= 0 && ce.entityIdx != s_playerEntityIdx)
             sameType = true;
@@ -2007,26 +2135,56 @@ static bool AnnounceCurrentTarget()
         if (sameType) typeTotal++;
     }
 
-    char label[96];
+    // v0.07.76: Catalog cycling speaks only the type label, no directions.
+    // Directions are spoken separately via Backspace (AnnounceDirections).
+    char label[160];
     snprintf(label, sizeof(label), "%s %d of %d", typeLabel, typeNum, typeTotal);
+    ScreenReader::Speak(label);
+
+    Log::Write("FieldNavigation: [nav] cat%d ent%d rank=%d/%d '%s'",
+               s_selectedCatalogIdx, ei, rank, s_nonPlayerCount, label);
+    return true;
+}
+
+// v0.07.76: Speak compass directions for the currently selected entity.
+// Called when Backspace is pressed. Reads live positions and applies
+// camera-calibrated direction formatting.
+static bool AnnounceDirections()
+{
+    if (s_nonPlayerCount == 0) {
+        ScreenReader::Speak("No entities in this area.");
+        return false;
+    }
+    if (s_selectedCatalogIdx >= s_catalogCount) return false;
+    const EntityInfo& catEnt = s_catalog[s_selectedCatalogIdx];
+    if (catEnt.entityIdx == s_playerEntityIdx) return false;
+    int ei = catEnt.entityIdx;
 
     float px = 0, pz = 0;
     if (s_playerEntityIdx < 0 || !GetEntityPos(s_playerEntityIdx, px, pz)) {
-        char buf[256];
-        snprintf(buf, sizeof(buf), "%s. Player position not yet known.", label);
-        ScreenReader::Speak(buf);
+        ScreenReader::Speak("Player position not yet known.");
         return true;
     }
 
-    // Get target position: gateway exits use INF center; triggers use INF center; entities use struct.
+    // Get target position.
     float tx = 0, tz = 0;
     bool targetLocated = false;
-    if (catEnt.type == ENT_EXIT && catEnt.gatewayIdx >= 0 && catEnt.gatewayIdx < s_gatewayCount) {
-        tx = s_gateways[catEnt.gatewayIdx].centerX;
-        tz = s_gateways[catEnt.gatewayIdx].centerZ;
-        targetLocated = true;
+    if (ei <= -400) {
+        // v0.07.94: INF gateway exit — position from deduplicated gateway center.
+        int gwIdx = -(ei + 400);
+        if (gwIdx >= 0 && gwIdx < s_dedupGatewayCount) {
+            tx = s_dedupGateways[gwIdx].centerX;
+            tz = s_dedupGateways[gwIdx].centerY;
+            targetLocated = true;
+        }
+    } else if (ei <= -300) {
+        int jsmIdx = -(ei + 300);
+        if (jsmIdx >= 0 && jsmIdx < s_jsmEntityCount && s_jsmEntities[jsmIdx].hasPosition) {
+            tx = (float)s_jsmEntities[jsmIdx].posX;
+            tz = (float)s_jsmEntities[jsmIdx].posY;
+            targetLocated = true;
+        }
     } else if (ei <= -200) {
-        // v05.57: Trigger zone — position from SETLINE opcode capture.
         int trigIdx = -(ei + 200);
         if (trigIdx >= 0 && trigIdx < s_capturedLineCount) {
             tx = (float)(s_capturedLines[trigIdx].x1 + s_capturedLines[trigIdx].x2) / 2.0f;
@@ -2038,11 +2196,7 @@ static bool AnnounceCurrentTarget()
     }
 
     if (!targetLocated) {
-        char buf[256];
-        snprintf(buf, sizeof(buf), "%s. Not yet located.", label);
-        ScreenReader::Speak(buf);
-        Log::Write("FieldNavigation: [nav] cat%d ent%d rank=%d/%d NOT_YET_LOCATED",
-                   s_selectedCatalogIdx, ei, rank, s_nonPlayerCount);
+        ScreenReader::Speak("Not yet located.");
         return true;
     }
 
@@ -2050,14 +2204,8 @@ static bool AnnounceCurrentTarget()
     float dz   = tz - pz;
     float dist = sqrtf(dx*dx + dz*dz);
 
-    // Sanity check: positions over MAX_SANE_DIST are likely stale/wrong center data.
     if (dist > MAX_SANE_DIST) {
-        char buf[256];
-        snprintf(buf, sizeof(buf), "%s. Position not yet reliable — walk closer.", label);
-        ScreenReader::Speak(buf);
-        Log::Write("FieldNavigation: [nav] cat%d ent%d rank=%d/%d SANE_FAIL dist=%.0f "
-                   "player=(%.0f,%.0f) target=(%.0f,%.0f)",
-                   s_selectedCatalogIdx, ei, rank, s_nonPlayerCount, dist, px, pz, tx, tz);
+        ScreenReader::Speak("Position not yet reliable.");
         return true;
     }
 
@@ -2066,16 +2214,15 @@ static bool AnnounceCurrentTarget()
 
     char buf[256];
     if (dist < 250.0f) {
-        snprintf(buf, sizeof(buf), "%s. Right here.", label);
+        snprintf(buf, sizeof(buf), "Right here.");
     } else {
-        snprintf(buf, sizeof(buf), "%s. %s.", label, dirBuf);
+        snprintf(buf, sizeof(buf), "%s.", dirBuf);
     }
     ScreenReader::Speak(buf);
 
-    Log::Write("FieldNavigation: [nav] cat%d ent%d rank=%d/%d '%s' %s dist=%.0f "
+    Log::Write("FieldNavigation: [dir] cat%d ent%d '%s' %s dist=%.0f "
                "player=(%.0f,%.0f) target=(%.0f,%.0f)",
-               s_selectedCatalogIdx, ei, rank, s_nonPlayerCount,
-               catEnt.name, dirBuf, dist, px, pz, tx, tz);
+               s_selectedCatalogIdx, ei, catEnt.name, dirBuf, dist, px, pz, tx, tz);
     return true;
 }
 
@@ -2094,8 +2241,8 @@ static void CycleEntity(int delta)
             ((s_selectedCatalogIdx + delta) % s_catalogCount + s_catalogCount) % s_catalogCount;
         const EntityInfo& entry = s_catalog[s_selectedCatalogIdx];
         if (entry.entityIdx == s_playerEntityIdx) continue;
-        // v05.54: Allow "others" entities (>=0), gateways (-1), and triggers (<=-200).
-        if (entry.entityIdx < -1 && entry.entityIdx > -200 && entry.gatewayIdx < 0) continue;
+        // v0.07.83: Allow runtime entities (>=0), trigger exits/events (<=-200), JSM-injected (<=-300), INF gateways (<=-400).
+        if (entry.entityIdx < 0 && entry.entityIdx > -200) continue;
         if (entry.entityIdx >= MAX_ENTITIES) continue;
         break;
     }
@@ -2160,11 +2307,8 @@ static void SetHeldDirections(uint8_t desired)
 //
 // Until calibrated, we use the .ca camera axes (loaded at field load) as
 // a best guess. The calibration refines this empirically.
-static float s_camRightX = 1.0f;   // camera right vector X component (normalized)
-static float s_camRightY = 0.0f;   // camera right vector Y component
-static float s_camDownX  = 0.0f;   // camera down vector X component  
-static float s_camDownY  = 1.0f;   // camera down vector Y component (default: +Y = down)
-static bool  s_camCalibrated = false;
+// NOTE: s_camRightX/Y, s_camDownX/Y, s_camCalibrated are declared earlier
+// (before FormatNavComponents) so compass directions can access them.
 
 // v06.14: Heading calibration state machine.
 // At drive start, we inject lX=+1000,lY=0 for a few ticks, measure the
@@ -2350,8 +2494,8 @@ static void UpdateAutoDrive()
                                    : s_catalog[0]; // safety fallback
     int ei = catTarget.entityIdx;
     if (ei == s_playerEntityIdx) { StopAutoDrive("No target."); return; }
-    // Gateway exits (entityIdx == -1) and triggers (<=-200) are valid drive targets.
-    if (ei < 0 && ei > -200 && catTarget.gatewayIdx < 0) { StopAutoDrive("Target lost."); return; }
+    // v0.07.94: Valid targets: >=0 (runtime entity), <=-200 (trigger line), <=-300 (JSM-injected), <=-400 (INF gateway).
+    if (ei < 0 && ei > -200) { StopAutoDrive("Target lost."); return; }
     if (ei >= MAX_ENTITIES)                              { StopAutoDrive("Target lost."); return; }
 
     // v05.37: Suspend key injection during dialog (scripted cutscenes lock movement).
@@ -2369,13 +2513,24 @@ static void UpdateAutoDrive()
         StopAutoDrive("Player position lost.");
         return;
     }
-    // v05.47: Gateway exits use INF center position.
-    // v05.54: Trigger zones also use INF center position.
+    // v0.07.74: JSM-injected entities use SET3 extraction positions.
+    // v0.07.83: Trigger line exits use SETLINE center positions.
+    // v0.07.94: INF gateway exits use deduplicated gateway center positions.
     bool gotTarget = false;
-    if (catTarget.type == ENT_EXIT && catTarget.gatewayIdx >= 0 && catTarget.gatewayIdx < s_gatewayCount) {
-        tx = s_gateways[catTarget.gatewayIdx].centerX;
-        tz = s_gateways[catTarget.gatewayIdx].centerZ;
-        gotTarget = true;
+    if (ei <= -400) {
+        int gwIdx = -(ei + 400);
+        if (gwIdx >= 0 && gwIdx < s_dedupGatewayCount) {
+            tx = s_dedupGateways[gwIdx].centerX;
+            tz = s_dedupGateways[gwIdx].centerY;
+            gotTarget = true;
+        }
+    } else if (ei <= -300) {
+        int jsmIdx = -(ei + 300);
+        if (jsmIdx >= 0 && jsmIdx < s_jsmEntityCount && s_jsmEntities[jsmIdx].hasPosition) {
+            tx = (float)s_jsmEntities[jsmIdx].posX;
+            tz = (float)s_jsmEntities[jsmIdx].posY;
+            gotTarget = true;
+        }
     } else if (ei <= -200) {
         int trigIdx = -(ei + 200);
         if (trigIdx >= 0 && trigIdx < s_capturedLineCount) {
@@ -2817,10 +2972,20 @@ static void UpdateAutoDrive()
                 // Find goal triangle from target position
                 float rpTx = 0, rpTz = 0;
                 bool rpGot = false;
-                if (catTarget.type == ENT_EXIT && catTarget.gatewayIdx >= 0 && catTarget.gatewayIdx < s_gatewayCount) {
-                    rpTx = s_gateways[catTarget.gatewayIdx].centerX;
-                    rpTz = s_gateways[catTarget.gatewayIdx].centerZ;
-                    rpGot = true;
+                if (ei <= -400) {
+                    int gwIdx = -(ei + 400);
+                    if (gwIdx >= 0 && gwIdx < s_dedupGatewayCount) {
+                        rpTx = s_dedupGateways[gwIdx].centerX;
+                        rpTz = s_dedupGateways[gwIdx].centerY;
+                        rpGot = true;
+                    }
+                } else if (ei <= -300) {
+                    int jsmIdx = -(ei + 300);
+                    if (jsmIdx >= 0 && jsmIdx < s_jsmEntityCount && s_jsmEntities[jsmIdx].hasPosition) {
+                        rpTx = (float)s_jsmEntities[jsmIdx].posX;
+                        rpTz = (float)s_jsmEntities[jsmIdx].posY;
+                        rpGot = true;
+                    }
                 } else if (ei <= -200) {
                     int trigIdx2 = -(ei + 200);
                     if (trigIdx2 >= 0 && trigIdx2 < s_capturedLineCount) {
@@ -2838,8 +3003,9 @@ static void UpdateAutoDrive()
                         int oldTotal = s_waypointCount;
                         // v06.02: Exempt target trigger line from A* avoidance during re-path.
                         // v06.04: Also exempt for event triggers (not just exits).
+                        // v0.07.94: Only for trigger-line entities (-200 to -299).
                         int rpSkipTrig = -1;
-                        if (catTarget.entityIdx <= -200) {
+                        if (catTarget.entityIdx <= -200 && catTarget.entityIdx > -300) {
                             rpSkipTrig = -(catTarget.entityIdx + 200);
                         }
                         // v06.04: Save old waypoints before A* overwrites them.
@@ -3160,7 +3326,7 @@ static void HandleKeys()
 
     if (minus && !s_minusWasDown) { RefreshCatalog(); if (s_driveActive) StopAutoDrive("Cancelled."); CycleEntity(-1); }
     if (plus  && !s_plusWasDown)  { RefreshCatalog(); if (s_driveActive) StopAutoDrive("Cancelled."); CycleEntity(+1); }
-    if (bksp  && !s_bkspWasDown)  AnnounceCurrentTarget(); // live refresh
+    if (bksp  && !s_bkspWasDown)  AnnounceDirections(); // v0.07.76: directions on Backspace
     if (drive && !s_driveWasDown) {
         if (s_driveActive) {
             StopAutoDrive("Cancelled.");
@@ -3175,10 +3341,22 @@ static void HandleKeys()
             bool drValid = false;
             if (drTgt.entityIdx != s_playerEntityIdx &&
                 GetEntityPos(s_playerEntityIdx, _px, _pz)) {
-                if (drTgt.type == ENT_EXIT && drTgt.gatewayIdx >= 0 && drTgt.gatewayIdx < s_gatewayCount) {
-                    _tx = s_gateways[drTgt.gatewayIdx].centerX;
-                    _tz = s_gateways[drTgt.gatewayIdx].centerZ;
-                    drValid = true;
+                if (drTgt.entityIdx <= -400) {
+                    // v0.07.94: INF gateway exit.
+                    int gwIdx = -(drTgt.entityIdx + 400);
+                    if (gwIdx >= 0 && gwIdx < s_dedupGatewayCount) {
+                        _tx = s_dedupGateways[gwIdx].centerX;
+                        _tz = s_dedupGateways[gwIdx].centerY;
+                        drValid = true;
+                    }
+                } else if (drTgt.entityIdx <= -300) {
+                    // v0.07.74: JSM-injected entity.
+                    int jsmIdx = -(drTgt.entityIdx + 300);
+                    if (jsmIdx >= 0 && jsmIdx < s_jsmEntityCount && s_jsmEntities[jsmIdx].hasPosition) {
+                        _tx = (float)s_jsmEntities[jsmIdx].posX;
+                        _tz = (float)s_jsmEntities[jsmIdx].posY;
+                        drValid = true;
+                    }
                 } else if (drTgt.entityIdx <= -200) {
                     int trigIdx = -(drTgt.entityIdx + 200);
                     if (trigIdx >= 0 && trigIdx < s_capturedLineCount) {
@@ -3253,7 +3431,13 @@ static void HandleKeys()
                 s_driveTargetEntityIdx = -1;
                 s_driveOrigTalkRadius = 0;
                 s_driveTalkRadExpanded = false;
-                if (drTgt.entityIdx >= 0 && drTgt.entityIdx < MAX_ENTITIES) {
+                // v0.07.76: Save/draw points require walking INTO the spot, not stopping nearby.
+                // These are walk-on triggers with no talk radius — arrive distance must be tiny.
+                if (drTgt.type == ENT_SAVE_POINT || drTgt.type == ENT_DRAW_POINT) {
+                    s_driveArriveDist = 30.0f;
+                    Log::Write("FieldNavigation: [drive] %s target -> arriveDist=30 (walk-into)",
+                               EntityTypeName(drTgt.type));
+                } else if (drTgt.entityIdx >= 0 && drTgt.entityIdx < MAX_ENTITIES) {
                     uint16_t talkRad = GetEntityTalkRadius(drTgt.entityIdx);
                     if (talkRad > 0) {
                         s_driveArriveDist = (float)talkRad;
@@ -3632,6 +3816,7 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
     s_jsmBackgrounds     = 0;
     s_jsmOthers          = 0;
     s_gatewayCount       = 0;
+    s_dedupGatewayCount  = 0;
     s_triggerCount       = 0;
     s_capturedLineCount  = 0;
     s_waypointCount      = 0;
@@ -3644,6 +3829,7 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
     memset(s_triggers,   0, sizeof(s_triggers));
     memset(s_capturedLines, 0, sizeof(s_capturedLines));
     s_catalogCount       = 0;
+    s_jsmEntityCount     = 0;
     s_playerTri          = 0xFFFF;
     s_setTriCallCount    = 0;
     s_structFallbackLogged = 0;
@@ -3654,7 +3840,7 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
     s_coordPrevPlayerTri = 0;       // v06.13: reset for shared-edge CoordSample
     // v06.14: Reset heading calibration for new field.
     s_camRightX = 1.0f; s_camRightY = 0.0f;
-    s_camDownX = 0.0f; s_camDownY = -1.0f;  // default: +lY = -Y world (screen down)
+    s_camDownX = 0.0f; s_camDownY = -1.0f;  // default: -Y world = screen-down (matches common calibration result)
     s_camCalibrated = false;
     s_calibPhase = 0;
     s_calibPending = true;  // calibrate on first drive
@@ -3705,34 +3891,10 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
         // v05.48: Load SYM entity names, JSM counts, and INF gateways from archive.
         if (FieldArchive::IsReady() && fieldName && fieldName[0] != '(') {
             FieldArchive::LoadSYMNames(fieldName, s_symNames, MAX_SYM_NAMES, s_symNameCount);
+            // v0.07.94: INF gateway loading RE-ENABLED with corrected Deling format.
+            // INF gateways are the engine's native exit mechanism for many fields
+            // (e.g. bghall_1 hallway exits) that don't use script-level MAPJUMP.
             FieldArchive::LoadINFGateways(fieldName, s_gateways, MAX_GATEWAYS, s_gatewayCount);
-
-            // v05.48: Filter bogus gateways.
-            // Remove gateways with destFieldId=0 (first FL entry, usually bogus),
-            // out-of-range IDs, or sentinel vertex values.
-            int filtered = 0;
-            for (int g = 0; g < s_gatewayCount; ) {
-                bool bogus = false;
-                if (s_gateways[g].destFieldId == 0) bogus = true;
-                if (s_gateways[g].destFieldId >= 800) bogus = true;  // FF8 has ~800 fields max
-                if (s_gateways[g].centerX > 30000.0f || s_gateways[g].centerX < -30000.0f) bogus = true;
-                if (s_gateways[g].centerZ > 30000.0f || s_gateways[g].centerZ < -30000.0f) bogus = true;
-                if (bogus) {
-                    Log::Write("FieldNavigation: [fieldload] filtered bogus gateway: dest=%u '%s' center=(%.0f,%.0f)",
-                               (unsigned)s_gateways[g].destFieldId, s_gateways[g].destFieldName,
-                               s_gateways[g].centerX, s_gateways[g].centerZ);
-                    // Shift remaining gateways down.
-                    for (int j = g; j < s_gatewayCount - 1; j++)
-                        s_gateways[j] = s_gateways[j+1];
-                    s_gatewayCount--;
-                    filtered++;
-                } else {
-                    g++;
-                }
-            }
-            if (filtered > 0)
-                Log::Write("FieldNavigation: [fieldload] %d bogus gateways filtered, %d remain",
-                           filtered, s_gatewayCount);
 
             // v05.49: SYM offset = 0.
             // CONFIRMED by ENTDIAG: the entity state array maps 1:1 to the
@@ -3755,8 +3917,76 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
             // v05.62: Load walkmesh for A* pathfinding.
             FieldArchive::LoadWalkmesh(fieldName, s_walkmesh);
 
-            Log::Write("FieldNavigation: [fieldload] SYM: %d names, %d entities, offset=0, %d gateways, %d triggers, walkmesh=%s",
-                       s_symNameCount, (int)entCount, s_gatewayCount, s_triggerCount,
+            // v0.07.68: JSM script scan — classify all entities by opcode signatures.
+            // Detects draw points, save points, shops, card games, ladders, and map exits.
+            // v0.07.73: Results wired into catalog for TTS announcements.
+            s_jsmEntityCount = 0;
+            memset(s_jsmEntities, 0, sizeof(s_jsmEntities));
+            FieldArchive::ScanJSMScripts(fieldName, s_jsmEntities, MAX_JSM_ENTITIES, s_jsmEntityCount);
+
+            // v0.07.82: Assign lineType to captured trigger lines from JSM classification.
+            // SETLINE fires during field_scripts_init for each Line entity (and possibly
+            // Door entities). Captured lines are ordered by lineOrder (SETLINE call order).
+            // JSM Line entities are at indices [countDoors .. countDoors+countLines-1].
+            // We match by assuming captured lines arrive in JSM entity order.
+            // If captured count <= jsmLines, direct map. If more, excess are from doors.
+            {
+                // Sort captured lines by lineOrder to establish a stable mapping.
+                // (They should already be in order, but be safe.)
+                for (int a = 0; a < s_capturedLineCount - 1; a++) {
+                    for (int b = a + 1; b < s_capturedLineCount; b++) {
+                        if (s_capturedLines[b].lineOrder < s_capturedLines[a].lineOrder) {
+                            CapturedTriggerLine tmp = s_capturedLines[a];
+                            s_capturedLines[a] = s_capturedLines[b];
+                            s_capturedLines[b] = tmp;
+                        }
+                    }
+                }
+                int linesMapped = 0;
+                for (int t = 0; t < s_capturedLineCount; t++) {
+                    s_capturedLines[t].lineType = FieldArchive::JSM_ENT_UNKNOWN;
+                    s_capturedLines[t].destFieldId = -1;  // v0.07.83
+                    // Map captured line t to JSM Line entity at jsmDoors + t.
+                    // Line entities in JSM: indices [jsmDoors .. jsmDoors+jsmLines-1].
+                    int jsmIdx = s_jsmDoors + t;
+                    if (jsmIdx < s_jsmEntityCount &&
+                        s_jsmEntities[jsmIdx].jsmCategory == 1) {  // category 1 = Line
+                        s_capturedLines[t].lineType = s_jsmEntities[jsmIdx].type;
+                        // v0.07.83: Capture MAPJUMP destination for screen boundary lines.
+                        if (s_jsmEntities[jsmIdx].type == FieldArchive::JSM_ENT_LINE_SCREEN_BOUND) {
+                            s_capturedLines[t].destFieldId = s_jsmEntities[jsmIdx].param;
+                        }
+                        linesMapped++;
+                    }
+                }
+                // Log the mapping results.
+                int cameraPans = 0, screenBounds = 0, lineEvents = 0, lineUnknown = 0;
+                for (int t = 0; t < s_capturedLineCount; t++) {
+                    switch (s_capturedLines[t].lineType) {
+                        case FieldArchive::JSM_ENT_LINE_CAMERA_PAN:   cameraPans++; break;
+                        case FieldArchive::JSM_ENT_LINE_SCREEN_BOUND: screenBounds++; break;
+                        case FieldArchive::JSM_ENT_LINE_EVENT:        lineEvents++; break;
+                        default: lineUnknown++; break;
+                    }
+                }
+                Log::Write("FieldNavigation: [fieldload] lineType assigned: %d captured, %d mapped "
+                           "(camPan=%d screenBd=%d event=%d unknown=%d)",
+                           s_capturedLineCount, linesMapped,
+                           cameraPans, screenBounds, lineEvents, lineUnknown);
+                // Detailed per-line log for first few fields.
+                for (int t = 0; t < s_capturedLineCount; t++) {
+                    int jsmIdx = s_jsmDoors + t;
+                    const char* typeName = (jsmIdx < s_jsmEntityCount)
+                        ? FieldArchive::JSMEntityTypeName(s_jsmEntities[jsmIdx].type) : "(no JSM)";
+                    Log::Write("FieldNavigation: [fieldload]   line%d order=%d type=%s center=(%.0f,%.0f)",
+                               t, s_capturedLines[t].lineOrder, typeName,
+                               (float)(s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2.0f,
+                               (float)(s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2.0f);
+                }
+            }
+
+            Log::Write("FieldNavigation: [fieldload] SYM: %d names, %d entities, offset=0, %d triggers, walkmesh=%s",
+                       s_symNameCount, (int)entCount, s_triggerCount,
                        s_walkmesh.valid ? "OK" : "NONE");
             Log::Write("FieldNavigation: [fieldload] JSM: doors=%d lines=%d bg=%d others=%d",
                        s_jsmDoors, s_jsmLines, s_jsmBackgrounds, s_jsmOthers);
@@ -3764,7 +3994,7 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
             // v06.08: NavLog field load
             NavLog::FieldLoad(fieldName, (int)fieldId,
                               s_walkmesh.valid ? s_walkmesh.numTriangles : 0,
-                              (int)entCount, s_gatewayCount, 0);
+                              (int)entCount, 0, 0);  // v0.07.83: gateway count always 0 (INF removed)
         }
 
         s_cachedFieldId = fieldId;
@@ -3930,7 +4160,7 @@ void Initialize()
 
     s_initialized = true;
     s_lastLogTime = GetTickCount();
-    Log::Write("FieldNavigation: Initialized v0.06.22 — Corridor steering respects trigger lines + talk radius expansion.");
+    Log::Write("FieldNavigation: Initialized v0.07.94 — INF gateway catalog integration with deduplicated exits.");
     Log::Write("FieldNavigation:   F9  = nearest character and compass direction (repeat to cycle)");
     Log::Write("FieldNavigation:   F10 = player field name and position");
 }
@@ -3946,6 +4176,11 @@ static bool IsSeparatedByTriggerLine(float px, float py, float ex, float ey, int
         if (!s_capturedLines[t].active) continue;
         // v06.02: Skip the exempted trigger line (used when driving TO a screen transition).
         if (t == skipTriggerIdx) continue;
+        // v0.07.82: Only screen-boundary lines act as separators.
+        // Camera pans, event triggers, and unclassified lines are transparent.
+        if (s_capturedLines[t].lineType != FieldArchive::JSM_ENT_LINE_SCREEN_BOUND &&
+            s_capturedLines[t].lineType != FieldArchive::JSM_ENT_UNKNOWN)
+            continue;
         float lx1 = (float)s_capturedLines[t].x1;
         float ly1 = (float)s_capturedLines[t].y1;
         float lx2 = (float)s_capturedLines[t].x2;
@@ -4132,13 +4367,7 @@ static void RefreshCatalog()
                            (float)(s_capturedLines[t].z1 + s_capturedLines[t].z2) / 2.0f,
                            (int)s_capturedLines[t].active);
             }
-            // Gateway positions
-            for (int g = 0; g < s_gatewayCount; g++) {
-                Log::Write("FieldNavigation: [COORDDIAG] gateway%d dest='%s' "
-                           "INF_center=(%.0f,%.0f)",
-                           g, s_gateways[g].destFieldName,
-                           s_gateways[g].centerX, s_gateways[g].centerZ);
-            }
+            // v0.07.83: INF gateway logging removed (gateways replaced by JSM exits).
             Log::Write("FieldNavigation: [COORDDIAG] === End diagnostic ===");
         }
 
@@ -4167,8 +4396,30 @@ static void RefreshCatalog()
             // v05.52: Only include entities the player can meaningfully navigate to.
             // Must have a visible model on the walkmesh. Invisible controllers
             // (model=-1, e.g. 'Director') are skipped even if they have execution_flags.
+            // v0.07.74: Exception: JSM-classified special entities (save/draw points,
+            // shops, card games) are included even with model=-1 if they have a
+            // valid position. These are invisible script entities with particle effects.
             bool isPlaced = (triId > 0 || (hasModel && triId == 0));
-            if (isPlaced && hasModel) {
+            bool isSpecialJSM = false;
+            if (!hasModel) {
+                int symIdx2 = s_symOthersOffset + i;
+                if (symIdx2 >= 0 && symIdx2 < s_symNameCount) {
+                    const FieldArchive::JSMEntityInfo* jsm2 = FindJSMBySym(s_symNames[symIdx2]);
+                    if (jsm2 && (jsm2->type == FieldArchive::JSM_ENT_SAVE_POINT ||
+                                 jsm2->type == FieldArchive::JSM_ENT_DRAW_POINT ||
+                                 jsm2->type == FieldArchive::JSM_ENT_SHOP ||
+                                 jsm2->type == FieldArchive::JSM_ENT_CARD_GAME)) {
+                        // Check if the entity has a valid runtime position
+                        int32_t fpX2 = *(int32_t*)(block + 0x190);
+                        int32_t fpY2 = *(int32_t*)(block + 0x194);
+                        if (fpX2 != 0 || fpY2 != 0 || triId > 0) {
+                            isSpecialJSM = true;
+                            isPlaced = true;
+                        }
+                    }
+                }
+            }
+            if (isPlaced && (hasModel || isSpecialJSM)) {
                 qualifies[i] = true;
                 EntityInfo ei_info = {};
                 ei_info.entityIdx  = i;
@@ -4177,9 +4428,30 @@ static void RefreshCatalog()
                 ei_info.type       = etype;
                 ei_info.gatewayIdx = -1;
                 ei_info.name[0]    = '\0';
-                // v05.59: Simplified naming — all entities are just "NPC".
-                // The announcement code adds the number ("NPC 1", "NPC 2", etc.)
-                strncpy(ei_info.name, "NPC", sizeof(ei_info.name) - 1);
+                // v0.07.73: Look up JSM classification by SYM name.
+                // Overrides generic "NPC" with specific type (Save Point, Draw Point, etc.)
+                const char* entName = "NPC";
+                int symIdx = s_symOthersOffset + i;
+                if (symIdx >= 0 && symIdx < s_symNameCount) {
+                    const FieldArchive::JSMEntityInfo* jsm = FindJSMBySym(s_symNames[symIdx]);
+                    if (jsm) {
+                        EntityType jsmType = JSMTypeToCatalogType(jsm->type);
+                        if (jsmType != ENT_UNKNOWN) {
+                            ei_info.type = jsmType;
+                            entName = EntityTypeName(jsmType);
+                        }
+                    }
+                }
+                // v0.07.79: Model-based save point detection.
+                // Model 24 is the save point crystal across all FF8 fields.
+                // The visible save point entity often has a different SYM index
+                // than the save point script entity (e.g. bghall_1 ent6 vs JSM ent27),
+                // so SYM-based lookup misses it. Model ID is authoritative.
+                if (modelId == 24 && ei_info.type != ENT_SAVE_POINT) {
+                    ei_info.type = ENT_SAVE_POINT;
+                    entName = "Save Point";
+                }
+                strncpy(ei_info.name, entName, sizeof(ei_info.name) - 1);
                 ei_info.name[sizeof(ei_info.name) - 1] = '\0';
                 fresh[i] = ei_info;
             }
@@ -4247,75 +4519,35 @@ static void RefreshCatalog()
             }
         }
 
-        // v05.71: Show reachable SETLINE trigger lines as "Screen transition" exits,
-        // but ONLY if the line is a true screen transition. A trigger line qualifies
-        // as a screen transition if it separates the player from at least one entity
-        // that was screen-filtered above. Event-only triggers (Trepie movement,
-        // Selphie spawn) don't separate any entities from the player.
+        // v0.07.83: JSM-based exit detection for screen boundary trigger lines.
+        // Each JSM_ENT_LINE_SCREEN_BOUND captured line becomes an ENT_EXIT entry
+        // with the destination resolved from the MAPJUMP destination field ID.
+        // Replaces INF gateway exits entirely (INF data is vestigial PS1 data).
         if (s_capturedLineCount > 0 && s_playerEntityIdx >= 0) {
             float scrPlayerX = 0, scrPlayerY = 0;
             if (GetEntityPos(s_playerEntityIdx, scrPlayerX, scrPlayerY)) {
                 for (int t = 0; t < s_capturedLineCount && newCount < MAX_CATALOG; t++) {
                     if (!s_capturedLines[t].active) continue;
+                    if (s_capturedLines[t].lineType != FieldArchive::JSM_ENT_LINE_SCREEN_BOUND) continue;
                     float tcx = (float)(s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2.0f;
                     float tcy = (float)(s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2.0f;
 
-                    // Reachability: trigger center must be on same side of all
-                    // OTHER active trigger lines as the player.
-                    bool reachable = true;
-                    for (int o = 0; o < s_capturedLineCount; o++) {
-                        if (o == t) continue;
-                        if (!s_capturedLines[o].active) continue;
-                        float olx1 = (float)s_capturedLines[o].x1;
-                        float oly1 = (float)s_capturedLines[o].y1;
-                        float olx2 = (float)s_capturedLines[o].x2;
-                        float oly2 = (float)s_capturedLines[o].y2;
-                        float odx = olx2 - olx1;
-                        float ody = oly2 - oly1;
-                        float crossP = odx * (scrPlayerY - oly1) - ody * (scrPlayerX - olx1);
-                        float crossT = odx * (tcy - oly1) - ody * (tcx - olx1);
-                        if (crossP * crossT < -1.0f) { reachable = false; break; }
-                    }
-                    if (!reachable) continue;
+                    // Reachability: trigger center must not be separated from player
+                    // by any other active screen-boundary trigger line.
+                    if (IsSeparatedByTriggerLine(scrPlayerX, scrPlayerY, tcx, tcy))
+                        continue;
 
-                    // Screen transition test: this trigger line must separate the
-                    // player from at least one screen-filtered entity. This ensures
-                    // we only show lines that actually divide the field into distinct
-                    // camera zones, not event triggers near entities.
-                    float tlx1 = (float)s_capturedLines[t].x1;
-                    float tly1 = (float)s_capturedLines[t].y1;
-                    float tlx2 = (float)s_capturedLines[t].x2;
-                    float tly2 = (float)s_capturedLines[t].y2;
-                    float tdx = tlx2 - tlx1;
-                    float tdy = tly2 - tly1;
-                    float crossPlayerSelf = tdx * (scrPlayerY - tly1) - tdy * (scrPlayerX - tlx1);
-                    bool separatesFiltered = false;
-                    for (int i = 0; i < (int)lim; i++) {
-                        if (!screenFiltered[i]) continue;  // only check screen-filtered entities
-                        float ex, ey;
-                        if (!GetEntityPos(i, ex, ey)) continue;
-                        float crossEnt = tdx * (ey - tly1) - tdy * (ex - tlx1);
-                        if (crossPlayerSelf * crossEnt < -1.0f) {
-                            separatesFiltered = true;
-                            break;
-                        }
+                    // Resolve destination name from MAPJUMP field ID.
+                    char exitName[48];
+                    int destId = s_capturedLines[t].destFieldId;
+                    if (destId >= 0 && destId < FIELD_DISPLAY_NAMES_COUNT) {
+                        snprintf(exitName, sizeof(exitName), "Exit to %s", FIELD_DISPLAY_NAMES[destId]);
+                    } else if (destId == -2) {
+                        strncpy(exitName, "Exit to World Map", sizeof(exitName) - 1);
+                    } else {
+                        strncpy(exitName, "Exit", sizeof(exitName) - 1);
                     }
-                    // Also check screen-filtered gateways.
-                    if (!separatesFiltered) {
-                        for (int g = 0; g < s_gatewayCount; g++) {
-                            float gx = s_gateways[g].centerX;
-                            float gz = s_gateways[g].centerZ;
-                            // Gateway is "screen-filtered" if it's separated from player.
-                            if (!IsSeparatedByTriggerLine(scrPlayerX, scrPlayerY, gx, gz))
-                                continue;  // gateway is on player's screen, not filtered
-                            float crossGw = tdx * (gz - tly1) - tdy * (gx - tlx1);
-                            if (crossPlayerSelf * crossGw < -1.0f) {
-                                separatesFiltered = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (!separatesFiltered) continue;  // event trigger, not screen boundary
+                    exitName[sizeof(exitName) - 1] = '\0';
 
                     EntityInfo trigExit = {};
                     trigExit.entityIdx  = -200 - t;
@@ -4323,7 +4555,7 @@ static void RefreshCatalog()
                     trigExit.triangleId = 0;
                     trigExit.type       = ENT_EXIT;
                     trigExit.gatewayIdx = -1;
-                    strncpy(trigExit.name, "Screen transition", sizeof(trigExit.name) - 1);
+                    strncpy(trigExit.name, exitName, sizeof(trigExit.name) - 1);
                     trigExit.name[sizeof(trigExit.name) - 1] = '\0';
                     newCatalog[newCount++] = trigExit;
                 }
@@ -4344,6 +4576,12 @@ static void RefreshCatalog()
                         if (newCatalog[c].entityIdx == (-200 - t)) { alreadyAdded = true; break; }
                     }
                     if (alreadyAdded) continue;
+                    // v0.07.84: Skip lines already classified by JSM as camera pans or events.
+                    // Only unclassified (UNKNOWN) lines should appear as "Event" entries.
+                    // Camera pan lines are transparent navigation markers, not interactable.
+                    if (s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_CAMERA_PAN ||
+                        s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_EVENT)
+                        continue;
                     // Reachability check (same as screen transitions).
                     float tcx = (float)(s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2.0f;
                     float tcy = (float)(s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2.0f;
@@ -4362,6 +4600,37 @@ static void RefreshCatalog()
                         if (crossP * crossT < -1.0f) { reachable = false; break; }
                     }
                     if (!reachable) continue;
+                    // v0.07.78: Skip event triggers near save/draw points already in catalog.
+                    // Check both JSM positions AND runtime entity positions (JSM SET3 can be
+                    // inaccurate, but runtime entities always have correct coordinates).
+                    bool overlapsSaveDrawPt = false;
+                    // Check JSM scan positions.
+                    for (int j = 0; j < s_jsmEntityCount && !overlapsSaveDrawPt; j++) {
+                        const FieldArchive::JSMEntityInfo& je = s_jsmEntities[j];
+                        if (!je.hasPosition) continue;
+                        if (je.type != FieldArchive::JSM_ENT_SAVE_POINT &&
+                            je.type != FieldArchive::JSM_ENT_DRAW_POINT) continue;
+                        float jdx = tcx - (float)je.posX;
+                        float jdy = tcy - (float)je.posY;
+                        if (sqrtf(jdx*jdx + jdy*jdy) < 1000.0f)
+                            overlapsSaveDrawPt = true;
+                    }
+                    // Check runtime catalog entries already classified as save/draw.
+                    for (int c2 = 0; c2 < newCount && !overlapsSaveDrawPt; c2++) {
+                        if (newCatalog[c2].type != ENT_SAVE_POINT &&
+                            newCatalog[c2].type != ENT_DRAW_POINT) continue;
+                        int cei = newCatalog[c2].entityIdx;
+                        if (cei < 0 || cei >= MAX_ENTITIES) continue;
+                        float ex2 = 0, ey2 = 0;
+                        if (GetEntityPos(cei, ex2, ey2)) {
+                            float edx = tcx - ex2;
+                            float edy = tcy - ey2;
+                            if (sqrtf(edx*edx + edy*edy) < 1000.0f)
+                                overlapsSaveDrawPt = true;
+                        }
+                    }
+                    if (overlapsSaveDrawPt) continue;
+
                     EntityInfo evEntry = {};
                     evEntry.entityIdx  = -200 - t;
                     evEntry.modelId    = -1;
@@ -4382,30 +4651,226 @@ static void RefreshCatalog()
         // by walk-on zones — the player discovers them by exploring, not by
         // navigating to an entity position.
 
-        // v05.47: Append INF gateway exits.
-        // v05.71: Apply screen filtering to gateways — hide exits on other
-        // side of trigger lines (e.g. feart2f1 exit when player is in back).
-        {
-            float gwPlayerX = 0, gwPlayerY = 0;
-            bool gwHavePlayer = (s_capturedLineCount > 0 && s_playerEntityIdx >= 0
-                                 && GetEntityPos(s_playerEntityIdx, gwPlayerX, gwPlayerY));
-            for (int g = 0; g < s_gatewayCount && newCount < MAX_CATALOG; g++) {
-                if (gwHavePlayer) {
-                    float gwX = s_gateways[g].centerX;
-                    float gwZ = s_gateways[g].centerZ;
-                    if (IsSeparatedByTriggerLine(gwPlayerX, gwPlayerY, gwX, gwZ))
-                        continue;  // skip — gateway is on a different screen
+        // v0.07.74: Inject JSM-classified special entities not already in the catalog.
+        // These are entities beyond the runtime state array (SYM index >= entCount)
+        // or entities in the array that weren't caught by approach A above.
+        // Uses SET3 positions extracted by the JSM scanner when available.
+        for (int j = 0; j < s_jsmEntityCount && newCount < MAX_CATALOG; j++) {
+            const FieldArchive::JSMEntityInfo& je = s_jsmEntities[j];
+            if (je.type != FieldArchive::JSM_ENT_SAVE_POINT &&
+                je.type != FieldArchive::JSM_ENT_DRAW_POINT &&
+                je.type != FieldArchive::JSM_ENT_SHOP &&
+                je.type != FieldArchive::JSM_ENT_CARD_GAME) continue;
+            // v0.07.80: Check if this type exists as a runtime entity ANYWHERE on
+            // the field, even if screen-filtered. JSM SET3 positions are unreliable
+            // (bghall_1 saves at 135,588 instead of -700,-8593). Runtime entities
+            // always have correct positions. If a runtime entity of matching type
+            // exists, prefer it — don't inject JSM with wrong coordinates.
+            EntityType jt = JSMTypeToCatalogType(je.type);
+            bool runtimeEntityExists = false;
+            for (int i2 = 0; i2 < (int)lim; i2++) {
+                if (fresh[i2].entityIdx >= 0 && fresh[i2].type == jt) {
+                    runtimeEntityExists = true; break;
                 }
-                EntityInfo gwEntry = {};
-                gwEntry.entityIdx  = -1;  // sentinel: not a real entity
-                gwEntry.modelId    = -1;
-                gwEntry.triangleId = 0;
-                gwEntry.type       = ENT_EXIT;
-                gwEntry.gatewayIdx = g;
-                // Name = destination field name from INF.
-                strncpy(gwEntry.name, s_gateways[g].destFieldName, 47);
-                gwEntry.name[47] = '\0';
-                newCatalog[newCount++] = gwEntry;
+            }
+            if (runtimeEntityExists) continue;
+            // Also check what's already in the catalog (from other sources).
+            bool alreadyInCatalog = false;
+            for (int c = 0; c < newCount; c++) {
+                if (newCatalog[c].type == jt) { alreadyInCatalog = true; break; }
+            }
+            if (alreadyInCatalog) continue;
+            // Not in catalog yet. Try to inject using JSM SET3 position.
+            if (!je.hasPosition) continue;
+            // Validate position is in plausible range.
+            if (je.posX == 0 && je.posY == 0 && je.posZ == 0) continue;
+            EntityInfo jsmEntry = {};
+            jsmEntry.entityIdx  = -300 - j;  // unique sentinel for JSM-injected entities
+            jsmEntry.modelId    = -1;
+            jsmEntry.triangleId = je.posTriangle;
+            jsmEntry.type       = jt;
+            jsmEntry.gatewayIdx = -1;
+            const char* jtName = EntityTypeName(jt);
+            strncpy(jsmEntry.name, jtName, sizeof(jsmEntry.name) - 1);
+            jsmEntry.name[sizeof(jsmEntry.name) - 1] = '\0';
+            newCatalog[newCount++] = jsmEntry;
+            Log::Write("FieldNavigation: [refresh] JSM-injected %s at (%d,%d) sym='%s'",
+                       jtName, (int)je.posX, (int)je.posY, je.symName);
+        }
+
+        // v0.07.83: Entity-based exits from JSM_ENT_MAP_EXIT "Other" entities.
+        // These are interactive objects (elevators, doors, trigger zones) whose
+        // scripts contain MAPJUMP. They have destination field IDs in param.
+        // Position from SET3 extraction or runtime entity, or captured SETLINE.
+        for (int j = 0; j < s_jsmEntityCount && newCount < MAX_CATALOG; j++) {
+            const FieldArchive::JSMEntityInfo& je = s_jsmEntities[j];
+            if (je.type != FieldArchive::JSM_ENT_MAP_EXIT) continue;
+            // Skip if already in catalog as a runtime entity or trigger line exit.
+            bool alreadyInCatalog = false;
+            for (int c = 0; c < newCount; c++) {
+                if (newCatalog[c].type == ENT_EXIT) { 
+                    // Check if this JSM entity's destination matches an existing exit.
+                    // Also check if the SYM name matches a runtime entity already added.
+                    if (newCatalog[c].entityIdx <= -200) {
+                        // Trigger line exit — check destination.
+                        int ti = -(newCatalog[c].entityIdx + 200);
+                        if (ti >= 0 && ti < s_capturedLineCount &&
+                            s_capturedLines[ti].destFieldId == je.param) {
+                            alreadyInCatalog = true; break;
+                        }
+                    }
+                }
+            }
+            if (alreadyInCatalog) continue;
+            // Resolve destination name.
+            char exitName[48];
+            int destId = je.param;
+            if (destId >= 0 && destId < FIELD_DISPLAY_NAMES_COUNT) {
+                snprintf(exitName, sizeof(exitName), "Exit to %s", FIELD_DISPLAY_NAMES[destId]);
+            } else if (destId == -2) {
+                strncpy(exitName, "Exit to World Map", sizeof(exitName) - 1);
+            } else {
+                strncpy(exitName, "Exit", sizeof(exitName) - 1);
+            }
+            exitName[sizeof(exitName) - 1] = '\0';
+            // Find position: try matching captured SETLINE by entity address range,
+            // or use SET3 position from JSM scan.
+            float exitX = 0, exitY = 0;
+            bool hasPos = false;
+            if (je.hasPosition) {
+                exitX = (float)je.posX;
+                exitY = (float)je.posY;
+                hasPos = true;
+            }
+            // v0.07.84: If no SET3 position, try matching SYM name to a captured
+            // SETLINE entity. "Other" entities that call SETLINE (e.g. saveline0
+            // elevator trigger) have their SETLINE coordinates captured at runtime
+            // with accurate positions, even when SET3 extraction fails.
+            if (!hasPos && je.symName[0] != '\0' && base) {
+                uint32_t baseAddr = (uint32_t)(uintptr_t)base;
+                for (int t = 0; t < s_capturedLineCount; t++) {
+                    uint32_t lineEntAddr = s_capturedLines[t].entityAddr;
+                    // Check if this captured line belongs to an Others entity.
+                    if (lineEntAddr >= baseAddr &&
+                        lineEntAddr < baseAddr + ENTITY_STRIDE * lim) {
+                        int entIdx = (int)((lineEntAddr - baseAddr) / ENTITY_STRIDE);
+                        int symIdx = s_symOthersOffset + entIdx;
+                        if (symIdx >= 0 && symIdx < s_symNameCount &&
+                            _stricmp(s_symNames[symIdx], je.symName) == 0) {
+                            exitX = (float)(s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2.0f;
+                            exitY = (float)(s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2.0f;
+                            hasPos = true;
+                            // v0.07.87: Write position back to JSM entity so
+                            // AnnounceDirections can read it for compass.
+                            s_jsmEntities[j].posX = (int16_t)exitX;
+                            s_jsmEntities[j].posY = (int16_t)exitY;
+                            s_jsmEntities[j].hasPosition = true;
+                            Log::Write("FieldNavigation: [refresh] MAP_EXIT '%s' position from SETLINE center (%.0f,%.0f)",
+                                       je.symName, exitX, exitY);
+                            break;
+                        }
+                    }
+                }
+            }
+            // Screen filter: skip exits on the other side of trigger lines.
+            if (hasPos && s_capturedLineCount > 0 && s_playerEntityIdx >= 0) {
+                float plX = 0, plY = 0;
+                if (GetEntityPos(s_playerEntityIdx, plX, plY)) {
+                    if (IsSeparatedByTriggerLine(plX, plY, exitX, exitY))
+                        continue;
+                }
+            }
+            EntityInfo mapExit = {};
+            mapExit.entityIdx  = -300 - j;  // JSM-injected sentinel
+            mapExit.modelId    = -1;
+            mapExit.triangleId = je.posTriangle;
+            mapExit.type       = ENT_EXIT;
+            mapExit.gatewayIdx = -1;
+            strncpy(mapExit.name, exitName, sizeof(mapExit.name) - 1);
+            mapExit.name[sizeof(mapExit.name) - 1] = '\0';
+            newCatalog[newCount++] = mapExit;
+        }
+
+        // v0.07.94: Add deduplicated INF gateway exits to catalog.
+        // Group gateways by destFieldId, average their centers, create one
+        // catalog entry per unique destination. Skip gateways whose center is
+        // on the other side of a screen-boundary trigger line from the player.
+        // Also skip gateways whose destination already has a JSM-detected exit.
+        s_dedupGatewayCount = 0;
+        memset(s_dedupGateways, 0, sizeof(s_dedupGateways));
+        for (int g = 0; g < s_gatewayCount && s_dedupGatewayCount < MAX_DEDUP_GATEWAYS; g++) {
+            uint16_t destId = s_gateways[g].destFieldId;
+            // Find existing dedup group for this destination.
+            int groupIdx = -1;
+            for (int d = 0; d < s_dedupGatewayCount; d++) {
+                if (s_dedupGateways[d].destFieldId == destId) { groupIdx = d; break; }
+            }
+            if (groupIdx < 0) {
+                // New group.
+                groupIdx = s_dedupGatewayCount++;
+                s_dedupGateways[groupIdx].destFieldId = destId;
+                s_dedupGateways[groupIdx].centerX = 0;
+                s_dedupGateways[groupIdx].centerY = 0;
+                s_dedupGateways[groupIdx].count = 0;
+                // Resolve display name. Static INF destinations may be placeholders
+                // (overwritten at runtime by MAPJUMPO), so show generic "Exit" if
+                // the destination doesn't look like it belongs to this field's area.
+                const char* dispName = GetFieldDisplayName(destId);
+                if (dispName) {
+                    snprintf(s_dedupGateways[groupIdx].displayName, 48, "Exit to %s", dispName);
+                } else {
+                    strncpy(s_dedupGateways[groupIdx].displayName, "Exit", 47);
+                }
+                s_dedupGateways[groupIdx].displayName[47] = '\0';
+            }
+            // Accumulate center (will average after all gateways processed).
+            s_dedupGateways[groupIdx].centerX += s_gateways[g].centerX;
+            s_dedupGateways[groupIdx].centerY += s_gateways[g].centerZ;  // centerZ = Y in our coords
+            s_dedupGateways[groupIdx].count++;
+        }
+        // Average the centers.
+        for (int d = 0; d < s_dedupGatewayCount; d++) {
+            if (s_dedupGateways[d].count > 0) {
+                s_dedupGateways[d].centerX /= (float)s_dedupGateways[d].count;
+                s_dedupGateways[d].centerY /= (float)s_dedupGateways[d].count;
+            }
+        }
+        // Add to catalog.
+        if (s_dedupGatewayCount > 0 && s_playerEntityIdx >= 0) {
+            float gwPlayerX = 0, gwPlayerY = 0;
+            bool gotPlayer = GetEntityPos(s_playerEntityIdx, gwPlayerX, gwPlayerY);
+            for (int d = 0; d < s_dedupGatewayCount && newCount < MAX_CATALOG; d++) {
+                // Screen filter: skip if center is separated from player by trigger lines.
+                if (gotPlayer && s_capturedLineCount > 0) {
+                    if (IsSeparatedByTriggerLine(gwPlayerX, gwPlayerY,
+                                                 s_dedupGateways[d].centerX,
+                                                 s_dedupGateways[d].centerY))
+                        continue;
+                }
+                // Dedup against JSM exits already in catalog with same destination.
+                bool dupExit = false;
+                for (int c = 0; c < newCount; c++) {
+                    if (newCatalog[c].type != ENT_EXIT) continue;
+                    // Check if any existing exit names match this gateway's display name.
+                    if (strstr(newCatalog[c].name, s_gateways[0].destFieldName) != nullptr ||
+                        strcmp(newCatalog[c].name, s_dedupGateways[d].displayName) == 0) {
+                        dupExit = true; break;
+                    }
+                }
+                if (dupExit) continue;
+                EntityInfo gwExit = {};
+                gwExit.entityIdx  = -400 - d;  // sentinel for INF gateway exits
+                gwExit.modelId    = -1;
+                gwExit.triangleId = 0;
+                gwExit.type       = ENT_EXIT;
+                gwExit.gatewayIdx = d;  // index into s_dedupGateways
+                strncpy(gwExit.name, s_dedupGateways[d].displayName, sizeof(gwExit.name) - 1);
+                gwExit.name[sizeof(gwExit.name) - 1] = '\0';
+                newCatalog[newCount++] = gwExit;
+                Log::Write("FieldNavigation: [refresh] INF-GW group %d: '%s' center=(%.0f,%.0f) %d gateways merged",
+                           d, s_dedupGateways[d].displayName,
+                           s_dedupGateways[d].centerX, s_dedupGateways[d].centerY,
+                           s_dedupGateways[d].count);
             }
         }
 
@@ -4441,13 +4906,17 @@ static void RefreshCatalog()
         }
 
         if (changed) {
-            Log::Write("FieldNavigation: [refresh] catalog: %d entries (%d navigable, %d new entities, %d gateways), player=ent%d",
-                       s_catalogCount, s_nonPlayerCount, added, s_gatewayCount, s_playerEntityIdx);
+            Log::Write("FieldNavigation: [refresh] catalog: %d entries (%d navigable, %d new entities), player=ent%d",
+                       s_catalogCount, s_nonPlayerCount, added, s_playerEntityIdx);
             for (int c = 0; c < s_catalogCount; c++) {
                 if (s_catalog[c].entityIdx == s_playerEntityIdx) continue;
-                if (s_catalog[c].gatewayIdx >= 0)
-                    Log::Write("FieldNavigation: [refresh]   cat%d EXIT gw%d -> '%s'",
-                               c, s_catalog[c].gatewayIdx, s_catalog[c].name);
+                if (s_catalog[c].entityIdx <= -300) {
+                    int ji = -(s_catalog[c].entityIdx + 300);
+                    if (ji >= 0 && ji < s_jsmEntityCount)
+                        Log::Write("FieldNavigation: [refresh]   cat%d JSM ent%d type=%s name='%s' pos=(%d,%d)",
+                                   c, ji, EntityTypeName(s_catalog[c].type), s_catalog[c].name,
+                                   (int)s_jsmEntities[ji].posX, (int)s_jsmEntities[ji].posY);
+                }
                 else if (s_catalog[c].entityIdx <= -200) {
                     int ti = -(s_catalog[c].entityIdx + 200);
                     float tcx = (ti < s_capturedLineCount) ? (float)(s_capturedLines[ti].x1 + s_capturedLines[ti].x2) / 2.0f : 0;

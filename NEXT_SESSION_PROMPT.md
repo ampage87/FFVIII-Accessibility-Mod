@@ -1,78 +1,64 @@
-# Next Session Priority: Save Screen Cursor + Source Push
+# Next Session Priorities
 
-## Current State (v0.07.24)
+## Current State (v0.07.94 — source + deployed)
 
-Build is stable and deployed. BGM volume control fully working.
-Menu TTS working (top-level). Save screen cursor BLOCKED.
-GitHub issue #1 (BGM volume persistence) CLOSED.
-Logs are in `Logs/` subfolder.
+INF gateway catalog integration complete and working. Parser corrected using Deling source (offset 0x64, stride 32, fieldId at +18). Deduplicated gateway exits integrated into entity catalog with compass directions and auto-drive support.
 
-### Session 2026-03-17 Major Achievement
+### Tested fields this session:
+- **bggate_2**: 4 catalog entries (NPC, Draw Point, 2 INF gateway exits). Compass directions worked. User manually navigated to Draw Point successfully.
+- **bggate_1**: 5 catalog entries (NPC/Seifer, 3 INF gateway exits). All 3 exits gave compass directions. Destinations resolved: "B-Garden - Front Gate 2", "B-Garden - Parking Lot", "wm00".
+- Auto-drive to INF gateways failed (A* pathfinding issues with gateway positions far from walkmesh). Low priority — entity identification is the focus.
 
-**GitHub Issue #1 — BGM Volume Persistence: FIXED (v0.07.24)**
+### INF Gateway Key Facts
+- INF format: 676 bytes (not 672). Confirmed from Deling source (`myst6re/deling` → `src/files/InfFile.h`).
+- Gateway offset: 0x64, stride 32 bytes, 12 entries. fieldId at +18 within each 32-byte gateway.
+- Static destinations are placeholders on some fields (overwritten at runtime by MAPJUMPO). Show as generic "Exit to [fieldname]".
+- Deduplication: multiple gateways with same destFieldId → one catalog exit with averaged center.
+- Entity index sentinel: -400 range for INF gateway exits.
 
-Root cause: We were hooking `dmusicperf_set_volume_sub_46C6F0` (0x0046C6F0),
-a function only called during game credits. Field/battle/worldmap music uses
-`set_midi_volume` (`common_externals.set_midi_volume`), which FFNx replaces
-with `set_music_volume_for_channel(int32_t channel, uint32_t volume)`.
+---
 
-Fix: Resolved `set_midi_volume` via FFNx's address chain
-(`main_loop → sm_battle_sound → set_midi_volume`). Hooked FFNx's replacement
-with correct 2-parameter signature. All game volume calls now flow through
-our hook. No periodic re-apply needed.
+## Priorities for Next Session
 
-Investigation timeline: v0.07.17–v0.07.24 (8 builds).
+### 1. Top-level menu navigation TTS (HIGH)
+Cursor at `pMenuStateA + 0x1E6`. Values 0–10 map to Junction through Save. Need to hook the cursor changes and speak menu item names.
 
-### What's Working
-- **BGM volume control**: F3/F4 adjust, default 20%, persists across scenes
-- Top-level menu cursor TTS (mode 6, all 11 items)
-- DecodeMenuText() — correctly decodes menu/save screen glyph codes
-- Save screen detection via GCW text content
-- Field dialog TTS (all opcodes)
-- Title screen TTS
-- FMV audio descriptions + skip
-- Field navigation with auto-drive
+### 2. Save Game flow TTS (HIGH)
+The save screen cursor system works (v0.07.63). Need to connect it to the in-game Save command flow.
 
-### What's NOT Working / Blocked
-- **Save screen cursor detection**: Cursor address unknown. Not in pMenuStateA
-  region. Not in GCW text. Awaiting deep research results.
-- **Save block list navigation**: Depends on cursor detection.
+### 3. Save Point entity catalog integration (MEDIUM)
+Save Points are detected via model ID 24. Need to verify they appear correctly as catalog exits that the player can drive to and interact with.
 
-## Next Session Priorities
+### 4. Title Screen Continue TTS (MEDIUM)
+Enables saving after the opening sequence, reducing future test setup time.
 
-### 1. Push Source to GitHub (IMMEDIATE)
-Source changed significantly (ff8_addresses.h/.cpp, dinput8.cpp,
-ff8_accessibility.h). Needs full push to main branch.
+### 5. Fix auto-drive to INF gateway exits (LOW)
+Auto-drive fails because gateway positions are at walkmesh edges (far from player's current island). Need to either route to nearest trigger line or treat INF gateways as walk-toward targets without A* pathing.
 
-### 2. Process Deep Research Results (HIGH — if available)
-Check if ChatGPT deep research found save screen cursor address.
-Research prompt at `Plan Documents/Save Screen Cursor - ChatGPT Research Request.md`.
+### 6. Fix saveline0 position (LOW — unchanged)
+saveline0 (JSM ent36) beyond 10-slot runtime entity array. SETLINE writeback can't reach it.
 
-### 3. Bug Fixes (as reported by Aaron)
+---
 
-### 4. Menu Submenu TTS (MEDIUM — after save screen)
+## What's Working
 
-## Volume Control Architecture (v0.07.24)
-- **F3** = music volume down 10%, **F4** = music volume up 10%
-- Default: 20% (`s_gameVolume = 0.2f`)
-- Hook target: `pSetMidiVolume` (resolved at runtime from main_loop → sm_battle_sound)
-- FFNx replaces this with `set_music_volume_for_channel(channel, volume)` (0-127, per channel)
-- Our hook scales volume by user setting before passing through
-- No periodic re-apply — game calls this function for ALL music volume changes
+- **INF gateway exits**: Correct parser, deduplicated catalog entries, compass directions, display name resolution
+- **JSM-based exits**: saveline0 (elevator), water (main gate) detected with positions
+- **Camera pan filter**: l1-l6 correctly classified, don't leak as events
+- **Draw/Save points**: Detected and navigable
+- **All prior features**: dialog TTS, field navigation, FMV, menu TTS, BGM volume, save screen, trigger line classification
 
-## Key Code Locations
-- `src/dinput8.cpp` — volume hook: `TryInstallVolumeHookOnFFNx()`, `HookedSetMusicVolumeForChannel()`
-- `src/ff8_addresses.h/.cpp` — `pSetMidiVolume` (resolved from sm_battle_sound+0x173)
-- `src/ff8_accessibility.h` — version constant
-- `src/menu_tts.cpp` — menu TTS + save screen detection
-- `src/ff8_text_decode.h/.cpp` — text decoders
-- `deploy.bat` — ONLY build script
+---
 
 ## Recovery Instructions
-1. Read DEVNOTES.md for full architecture
+
+1. Read DEVNOTES.md for architecture and key learnings
 2. Read this file for immediate context
-3. Use filesystem MCP tools for Windows files (not bash)
-4. `deploy.bat` is the ONLY build script
-5. Bump FF8OPC_VERSION in ff8_accessibility.h on every build
-6. When Aaron says "BAT" → read tail of `Logs/ff8_accessibility.log`
-7. Versioning: 0.MM.BB format (pre-production). First public release = 1.0.0.
+3. Reference `DEEP_RESEARCH_INF_GATEWAYS_Findings.md` for gateway system details
+4. **Use filesystem MCP tools** — mod files on Windows, bash is separate Linux container
+5. `deploy.bat` is the ONLY build script
+6. Bump `FF8OPC_VERSION` in `ff8_accessibility.h` on every build
+7. When Aaron says **"BAT"** → read tail of `Logs/ff8_accessibility.log`
+8. Versioning: `0.MM.BB` format. Current: v0.07.94.
+9. GitHub repo: ampage87/FFVIII-Accessibility-Mod (main branch)
+10. INF format reference: `myst6re/deling` on GitHub → `src/files/InfFile.h`

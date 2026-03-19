@@ -253,6 +253,52 @@ static bool PatchDispatchSite()
     s_dispatchPatched = true;
     Log::Write("FieldDialog: [DISPATCH] Patched! JMP to 0x%08X (%s stub), ret to 0x%08X",
                (uint32_t)stubTarget, indexInEdx ? "EDX" : "EAX", s_dispatchRetAddr);
+
+    // Diagnostic: dump x86 bytes before the dispatch to understand how
+    // the engine extracts the opcode index from JSM instruction data.
+    // This covers the bytecode interpreter loop in update_field_entities.
+    {
+        uint32_t dumpStart = s_dispatchAddr - 128;
+        // Restore original bytes temporarily for clean dump
+        DWORD dp;
+        VirtualProtect((LPVOID)s_dispatchAddr, 7, PAGE_EXECUTE_READWRITE, &dp);
+        memcpy((void*)s_dispatchAddr, s_dispatchOrigBytes, 7);
+
+        const uint8_t* p = (const uint8_t*)dumpStart;
+        for (int row = 0; row < 9; row++) {
+            char hexBuf[256];
+            int hp = 0;
+            uint32_t addr = dumpStart + row * 16;
+            hp += snprintf(hexBuf + hp, 256 - hp, "%08X: ", addr);
+            for (int b = 0; b < 16; b++)
+                hp += snprintf(hexBuf + hp, 256 - hp, "%02X ", p[row * 16 + b]);
+            Log::Write("FieldDialog: [X86DUMP] %s", hexBuf);
+        }
+
+        // Also dump the instruction decoder function at 0x00530760
+        // (called from the dispatch site to extract opcode from raw dword)
+        uint32_t decoderAddr = 0x00530760;
+        const uint8_t* dp2 = (const uint8_t*)decoderAddr;
+        Log::Write("FieldDialog: [X86DUMP] === Instruction decoder at 0x%08X ===", decoderAddr);
+        for (int row = 0; row < 16; row++) {
+            char hexBuf2[256];
+            int hp2 = 0;
+            uint32_t a2 = decoderAddr + row * 16;
+            hp2 += snprintf(hexBuf2 + hp2, 256 - hp2, "%08X: ", a2);
+            for (int b = 0; b < 16; b++)
+                hp2 += snprintf(hexBuf2 + hp2, 256 - hp2, "%02X ", dp2[row * 16 + b]);
+            Log::Write("FieldDialog: [X86DUMP] %s", hexBuf2);
+        }
+
+        // Re-apply patch
+        code = (uint8_t*)s_dispatchAddr;
+        code[0] = 0xE9;
+        *(int32_t*)(code + 1) = rel;
+        code[5] = 0x90;
+        code[6] = 0x90;
+        VirtualProtect((LPVOID)s_dispatchAddr, 7, dp, &dp);
+    }
+
     return true;
 }
 

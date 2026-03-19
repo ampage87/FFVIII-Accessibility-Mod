@@ -31,6 +31,9 @@
 #include <mutex>
 #include <set>
 
+// Forward declaration for save cache (defined in menu_tts.cpp)
+void MenuTTS_CacheSaveHeader(const char* filename, const uint8_t* data, int dataLen);
+
 namespace FmvSkip
 {
     // ================================================================
@@ -195,6 +198,28 @@ namespace FmvSkip
             std::string filename(lpFileName);
             if (EndsWithAvi(filename))
                 RegisterAviHandle(result, filename, "CreateFileA");
+            
+            // v0.07.57: Intercept .ff8 save file opens — read entire file for LZSS decompression
+            std::string lower = ToLower(filename);
+            if (lower.find(".ff8") != std::string::npos) {
+                Log::Write("[SaveFileIO] CreateFileA: \"%s\"", lpFileName);
+                // Open our own handle, read entire file, close it
+                HANDLE hRead = g_originalCreateFileA(
+                    lpFileName, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (hRead != INVALID_HANDLE_VALUE) {
+                    // .ff8 files are ~2106 bytes; 4096 is more than enough
+                    uint8_t buf[4096] = {};
+                    DWORD bytesRead = 0;
+                    if (g_originalReadFile(hRead, buf, sizeof(buf), &bytesRead, nullptr) && bytesRead >= 8) {
+                        // Notify MenuTTS to decompress + cache this save header
+                        ::MenuTTS_CacheSaveHeader(lpFileName, buf, (int)bytesRead);
+                    } else {
+                        Log::Write("[SaveFileIO]   read failed or too short (%u bytes)", bytesRead);
+                    }
+                    g_originalCloseHandle(hRead);
+                }
+            }
         }
 
         return result;
@@ -217,6 +242,8 @@ namespace FmvSkip
             std::string filename = WideToNarrow(lpFileName);
             if (EndsWithAvi(filename))
                 RegisterAviHandle(result, filename, "CreateFileW");
+            
+
         }
 
         return result;
