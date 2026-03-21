@@ -117,7 +117,8 @@ enum JSMEntityType {
     JSM_ENT_LINE_CAMERA_PAN, // v0.07.82: Line with BGDRAW/BGOFF/scroll — transparent for screen filtering
     JSM_ENT_LINE_SCREEN_BOUND, // v0.07.82: Line with MAPJUMP — filters entities on other side
     JSM_ENT_LINE_EVENT,      // v0.07.82: Line with SHOW/HIDE/MES/BATTLE — transparent
-    JSM_ENT_BACKGROUND       // JSM Background category (unclassified)
+    JSM_ENT_BACKGROUND,      // JSM Background category (unclassified)
+    JSM_ENT_INTERACTIVE_OBJECT // v0.07.98: Background entity with dialog opcodes + position (Directory, desks, etc.)
 };
 
 // Classification result for a single JSM entity.
@@ -130,6 +131,13 @@ struct JSMEntityInfo {
     uint16_t       posTriangle;   // walkmesh triangle from SET3/SET inline param
     int            param;         // type-specific: drawPointId, shopId, destFieldId, etc.
     char           symName[32];   // from SYM (empty for doors)
+    // v0.07.99: PSHM_W coordinate tracking for interactive objects.
+    // When SET3 fires with PSHM_W markers instead of literal coordinates,
+    // the memory addresses are stored here for runtime resolution.
+    bool           hasPshmCoords; // true if SET3 found but coords are PSHM_W markers
+    int16_t        pshmAddrX;     // PSHM_W memory address for X coordinate
+    int16_t        pshmAddrY;     // PSHM_W memory address for Y coordinate
+    int16_t        pshmAddrZ;     // PSHM_W memory address for Z coordinate
 };
 
 const char* JSMEntityTypeName(JSMEntityType t);

@@ -73,6 +73,12 @@ uint32_t  opcode_lineoff = 0;
 uint32_t  opcode_talkradius = 0;
 uint32_t  opcode_pushradius = 0;
 
+// v0.08.03: SET3 opcode for runtime position capture
+uint32_t  opcode_set3 = 0;
+
+// v0.08.07: PSHM_W opcode for shared memory read diagnostics
+uint32_t  opcode_pshm_w = 0;
+
 // v04.28+: engine input button state variables
 uint32_t* pEngineInputConfirmedButtons = nullptr;
 uint32_t* pEngineInputValidButtons     = nullptr;
@@ -678,6 +684,226 @@ bool Resolve()
             opcode_pushradius = pExecuteOpcodeTable[0x63];
             Log::Write("FF8Addresses:   opcode_talkradius [0x062] = 0x%08X", opcode_talkradius);
             Log::Write("FF8Addresses:   opcode_pushradius [0x063] = 0x%08X", opcode_pushradius);
+
+            // v0.08.03: SET3 for runtime position capture of PSHM_W entities
+            opcode_set3 = pExecuteOpcodeTable[0x1E];
+            Log::Write("FF8Addresses:   opcode_set3       [0x01E] = 0x%08X", opcode_set3);
+
+            // v0.08.07: PSHM_W for hooking (shared memory word read)
+            opcode_pshm_w = pExecuteOpcodeTable[0x06];
+            Log::Write("FF8Addresses:   opcode_pshm_w     [0x006] = 0x%08X", opcode_pshm_w);
+
+            // v0.08.06: PSHM_W handler diagnostic — dump machine code to find
+            // the shared memory base address for direct variable reads.
+            // PSHM_W = opcode 0x06, POPM_W = opcode 0x0A.
+            {
+                uint32_t pshm_w_handler = opcode_pshm_w;
+                uint32_t popm_w_handler = pExecuteOpcodeTable[0x0A];
+                Log::Write("FF8Addresses:   opcode_popm_w [0x00A] = 0x%08X", popm_w_handler);
+                // Dump first 64 bytes of PSHM_W handler to find memory base pattern.
+                // Looking for: MOV reg, [absolute_addr] — loads shared memory pointer
+                // Pattern: 8B xx [4-byte addr] or A1 [4-byte addr]
+                if (pshm_w_handler > 0x10000 && pshm_w_handler < 0x7FFFFFFF) {
+                    __try {
+                        uint8_t* hc = (uint8_t*)pshm_w_handler;
+                        Log::Write("FF8Addresses: [PSHM_W-DIAG] handler bytes (512B):");
+                        for (int row = 0; row < 32; row++) {
+                            int off = row * 16;
+                            Log::Write("FF8Addresses: [PSHM_W-DIAG] +%02X: "
+                                       "%02X %02X %02X %02X %02X %02X %02X %02X  "
+                                       "%02X %02X %02X %02X %02X %02X %02X %02X",
+                                       off,
+                                       hc[off+0],  hc[off+1],  hc[off+2],  hc[off+3],
+                                       hc[off+4],  hc[off+5],  hc[off+6],  hc[off+7],
+                                       hc[off+8],  hc[off+9],  hc[off+10], hc[off+11],
+                                       hc[off+12], hc[off+13], hc[off+14], hc[off+15]);
+                        }
+                        // Try to auto-detect shared memory base:
+                        // Common x86 patterns for loading a global pointer:
+                        //   A1 [addr]        = MOV EAX, [addr]
+                        //   8B 0D [addr]      = MOV ECX, [addr]
+                        //   8B 15 [addr]      = MOV EDX, [addr]
+                        //   8B 35 [addr]      = MOV ESI, [addr]
+                        //   8B 3D [addr]      = MOV EDI, [addr]
+                        for (int i = 0; i < 500; i++) {
+                            uint32_t candidate = 0;
+                            bool found = false;
+                            if (hc[i] == 0xA1) {
+                                candidate = *(uint32_t*)(hc + i + 1);
+                                found = true;
+                                Log::Write("FF8Addresses: [PSHM_W-DIAG] +%02X: MOV EAX,[0x%08X]", i, candidate);
+                            } else if (hc[i] == 0x8B && (hc[i+1] & 0xC7) == 0x05) {
+                                // 8B mod-reg-r/m: mod=00 r/m=101 (disp32)
+                                candidate = *(uint32_t*)(hc + i + 2);
+                                found = true;
+                                Log::Write("FF8Addresses: [PSHM_W-DIAG] +%02X: MOV %s,[0x%08X]",
+                                           i, (hc[i+1] == 0x0D) ? "ECX" :
+                                              (hc[i+1] == 0x15) ? "EDX" :
+                                              (hc[i+1] == 0x35) ? "ESI" :
+                                              (hc[i+1] == 0x3D) ? "EDI" : "reg", candidate);
+                            } else if (hc[i] == 0xE8) {
+                                // CALL rel32
+                                int32_t rel = *(int32_t*)(hc + i + 1);
+                                uint32_t target = pshm_w_handler + i + 5 + rel;
+                                Log::Write("FF8Addresses: [PSHM_W-DIAG] +%02X: CALL 0x%08X", i, target);
+                            } else if (hc[i] == 0x0F && hc[i+1] == 0xBF && (hc[i+2] & 0xC7) == 0x05) {
+                                // MOVSX reg, WORD [abs32]: 0F BF modrm
+                                candidate = *(uint32_t*)(hc + i + 3);
+                                Log::Write("FF8Addresses: [PSHM_W-DIAG] +%02X: MOVSX r16,[0x%08X]", i, candidate);
+                            } else if (hc[i] == 0x0F && hc[i+1] == 0xBF && (hc[i+2] & 0xC0) == 0x00 && (hc[i+2] & 0x07) == 0x05) {
+                                // Already caught above, skip
+                            } else if (hc[i] == 0x66 && hc[i+1] == 0x8B && (hc[i+2] & 0xC7) == 0x05) {
+                                // MOV r16, WORD [abs32]: 66 8B modrm
+                                candidate = *(uint32_t*)(hc + i + 3);
+                                Log::Write("FF8Addresses: [PSHM_W-DIAG] +%02X: MOV r16,[0x%08X]", i, candidate);
+                            }
+                        }
+                    } __except(EXCEPTION_EXECUTE_HANDLER) {
+                        Log::Write("FF8Addresses: [PSHM_W-DIAG] Exception reading handler bytes");
+                    }
+                }
+                // v0.08.06b: Dump the actual PSHM read sub at 0x0051C9C0
+                // (called by all 4 POPM_W variants) and the sub at 0x00532890
+                // (called from PSHM_W at +14F for entity-local variable reads).
+                {
+                    // The POPM_W handler calls 0x0051C9C0 with different type params.
+                    // This is the core variable accessor function.
+                    uint32_t pshm_read_sub = 0x0051C9C0;
+                    // The PSHM_W handler at +14F calls 0x00532890 for the
+                    // entity-scope path (addresses below the threshold).
+                    uint32_t pshm_entity_sub = 0;
+                    {
+                        uint8_t* hc2 = (uint8_t*)pshm_w_handler;
+                        // At +14F there's a CALL rel32
+                        if (hc2[0x14F] == 0xE8) {
+                            int32_t rel2 = *(int32_t*)(hc2 + 0x150);
+                            pshm_entity_sub = pshm_w_handler + 0x14F + 5 + rel2;
+                        }
+                    }
+                    Log::Write("FF8Addresses: [PSHM-SUB] core read sub = 0x%08X", pshm_read_sub);
+                    Log::Write("FF8Addresses: [PSHM-SUB] entity scope sub = 0x%08X", pshm_entity_sub);
+                    // Dump core read sub (0x0051C9C0) - 512 bytes
+                    __try {
+                        uint8_t* rc = (uint8_t*)pshm_read_sub;
+                        Log::Write("FF8Addresses: [PSHM-SUB] core read sub bytes (512B):");
+                        for (int row = 0; row < 32; row++) {
+                            int off = row * 16;
+                            Log::Write("FF8Addresses: [PSHM-SUB] +%02X: "
+                                       "%02X %02X %02X %02X %02X %02X %02X %02X  "
+                                       "%02X %02X %02X %02X %02X %02X %02X %02X",
+                                       off,
+                                       rc[off+0],  rc[off+1],  rc[off+2],  rc[off+3],
+                                       rc[off+4],  rc[off+5],  rc[off+6],  rc[off+7],
+                                       rc[off+8],  rc[off+9],  rc[off+10], rc[off+11],
+                                       rc[off+12], rc[off+13], rc[off+14], rc[off+15]);
+                        }
+                        // Scan for absolute addresses and calls
+                        for (int i = 0; i < 500; i++) {
+                            if (rc[i] == 0xA1) {
+                                uint32_t c = *(uint32_t*)(rc + i + 1);
+                                if (c > 0x00400000 && c < 0x20000000)
+                                    Log::Write("FF8Addresses: [PSHM-SUB] +%02X: MOV EAX,[0x%08X]", i, c);
+                            } else if (rc[i] == 0x8B && (rc[i+1] & 0xC7) == 0x05) {
+                                uint32_t c = *(uint32_t*)(rc + i + 2);
+                                if (c > 0x00400000 && c < 0x20000000)
+                                    Log::Write("FF8Addresses: [PSHM-SUB] +%02X: MOV reg,[0x%08X]", i, c);
+                            } else if (rc[i] == 0x0F && rc[i+1] == 0xBF && (rc[i+2] & 0xC7) == 0x05) {
+                                uint32_t c = *(uint32_t*)(rc + i + 3);
+                                if (c > 0x00400000 && c < 0x20000000)
+                                    Log::Write("FF8Addresses: [PSHM-SUB] +%02X: MOVSX r16,[0x%08X]", i, c);
+                            } else if (rc[i] == 0xE8) {
+                                int32_t rel = *(int32_t*)(rc + i + 1);
+                                uint32_t target = pshm_read_sub + i + 5 + rel;
+                                if (target > 0x00400000 && target < 0x00600000)
+                                    Log::Write("FF8Addresses: [PSHM-SUB] +%02X: CALL 0x%08X", i, target);
+                            }
+                        }
+                    } __except(EXCEPTION_EXECUTE_HANDLER) {
+                        Log::Write("FF8Addresses: [PSHM-SUB] Exception reading core sub");
+                    }
+                    // Dump entity scope sub (from PSHM_W +14F CALL) - 256 bytes
+                    if (pshm_entity_sub > 0x10000) {
+                        __try {
+                            uint8_t* ec = (uint8_t*)pshm_entity_sub;
+                            Log::Write("FF8Addresses: [PSHM-ENTSUB] entity scope sub bytes (256B):");
+                            for (int row = 0; row < 16; row++) {
+                                int off = row * 16;
+                                Log::Write("FF8Addresses: [PSHM-ENTSUB] +%02X: "
+                                           "%02X %02X %02X %02X %02X %02X %02X %02X  "
+                                           "%02X %02X %02X %02X %02X %02X %02X %02X",
+                                           off,
+                                           ec[off+0],  ec[off+1],  ec[off+2],  ec[off+3],
+                                           ec[off+4],  ec[off+5],  ec[off+6],  ec[off+7],
+                                           ec[off+8],  ec[off+9],  ec[off+10], ec[off+11],
+                                           ec[off+12], ec[off+13], ec[off+14], ec[off+15]);
+                            }
+                            // Scan for absolute addresses
+                            for (int i = 0; i < 240; i++) {
+                                if (ec[i] == 0xA1) {
+                                    uint32_t c = *(uint32_t*)(ec + i + 1);
+                                    if (c > 0x00400000 && c < 0x20000000)
+                                        Log::Write("FF8Addresses: [PSHM-ENTSUB] +%02X: MOV EAX,[0x%08X]", i, c);
+                                } else if (ec[i] == 0x8B && (ec[i+1] & 0xC7) == 0x05) {
+                                    uint32_t c = *(uint32_t*)(ec + i + 2);
+                                    if (c > 0x00400000 && c < 0x20000000)
+                                        Log::Write("FF8Addresses: [PSHM-ENTSUB] +%02X: MOV reg,[0x%08X]", i, c);
+                                } else if (ec[i] == 0x0F && ec[i+1] == 0xBF && (ec[i+2] & 0xC7) == 0x05) {
+                                    uint32_t c = *(uint32_t*)(ec + i + 3);
+                                    if (c > 0x00400000 && c < 0x20000000)
+                                        Log::Write("FF8Addresses: [PSHM-ENTSUB] +%02X: MOVSX r16,[0x%08X]", i, c);
+                                } else if (ec[i] == 0xE8) {
+                                    int32_t rel = *(int32_t*)(ec + i + 1);
+                                    uint32_t target = pshm_entity_sub + i + 5 + rel;
+                                    if (target > 0x00400000 && target < 0x00600000)
+                                        Log::Write("FF8Addresses: [PSHM-ENTSUB] +%02X: CALL 0x%08X", i, target);
+                                }
+                            }
+                        } __except(EXCEPTION_EXECUTE_HANDLER) {
+                            Log::Write("FF8Addresses: [PSHM-ENTSUB] Exception");
+                        }
+                    }
+                }
+                // Also dump POPM_W (write path — often simpler, shows table base more clearly)
+                if (popm_w_handler > 0x10000 && popm_w_handler < 0x7FFFFFFF) {
+                    __try {
+                        uint8_t* pc = (uint8_t*)popm_w_handler;
+                        Log::Write("FF8Addresses: [POPM_W-DIAG] handler bytes (256B):");
+                        for (int row = 0; row < 16; row++) {
+                            int off = row * 16;
+                            Log::Write("FF8Addresses: [POPM_W-DIAG] +%02X: "
+                                       "%02X %02X %02X %02X %02X %02X %02X %02X  "
+                                       "%02X %02X %02X %02X %02X %02X %02X %02X",
+                                       off,
+                                       pc[off+0],  pc[off+1],  pc[off+2],  pc[off+3],
+                                       pc[off+4],  pc[off+5],  pc[off+6],  pc[off+7],
+                                       pc[off+8],  pc[off+9],  pc[off+10], pc[off+11],
+                                       pc[off+12], pc[off+13], pc[off+14], pc[off+15]);
+                        }
+                        // Scan for absolute addresses in POPM_W handler
+                        for (int i = 0; i < 240; i++) {
+                            if (pc[i] == 0xA1) {
+                                uint32_t c = *(uint32_t*)(pc + i + 1);
+                                Log::Write("FF8Addresses: [POPM_W-DIAG] +%02X: MOV EAX,[0x%08X]", i, c);
+                            } else if (pc[i] == 0x8B && (pc[i+1] & 0xC7) == 0x05) {
+                                uint32_t c = *(uint32_t*)(pc + i + 2);
+                                Log::Write("FF8Addresses: [POPM_W-DIAG] +%02X: MOV reg,[0x%08X]", i, c);
+                            } else if (pc[i] == 0x0F && pc[i+1] == 0xBF && (pc[i+2] & 0xC7) == 0x05) {
+                                uint32_t c = *(uint32_t*)(pc + i + 3);
+                                Log::Write("FF8Addresses: [POPM_W-DIAG] +%02X: MOVSX r16,[0x%08X]", i, c);
+                            } else if (pc[i] == 0x89 && (pc[i+1] & 0xC7) == 0x05) {
+                                uint32_t c = *(uint32_t*)(pc + i + 2);
+                                Log::Write("FF8Addresses: [POPM_W-DIAG] +%02X: MOV [0x%08X],reg (WRITE)", i, c);
+                            } else if (pc[i] == 0xE8) {
+                                int32_t rel = *(int32_t*)(pc + i + 1);
+                                uint32_t target = popm_w_handler + i + 5 + rel;
+                                Log::Write("FF8Addresses: [POPM_W-DIAG] +%02X: CALL 0x%08X", i, target);
+                            }
+                        }
+                    } __except(EXCEPTION_EXECUTE_HANDLER) {
+                        Log::Write("FF8Addresses: [POPM_W-DIAG] Exception");
+                    }
+                }
+            }
 
             // v04.28+/v04.30: engine input variables and eval hook target
             // Chain: pubintro_main_loop+0x4 -> +0x16 -> +0x4A6 -> abs@+0x3C / +0x62

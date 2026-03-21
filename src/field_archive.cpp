@@ -1021,6 +1021,7 @@ const char* JSMEntityTypeName(JSMEntityType t)
         case JSM_ENT_LINE_SCREEN_BOUND: return "Screen Boundary";
         case JSM_ENT_LINE_EVENT:        return "Event Trigger";
         case JSM_ENT_BACKGROUND:        return "Background";
+        case JSM_ENT_INTERACTIVE_OBJECT: return "Interactive Object";
         default:                        return "Unknown";
     }
 }
@@ -1287,6 +1288,8 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         bool foundBgdraw       = false;  // BGDRAW or BGOFF
         bool foundScroll       = false;  // any DSCROLL/LSCROLL/CSCROLL/SETCAMERA
         bool foundEventOp      = false;  // SHOW/HIDE/USE/UNUSE/MES/ASK/BATTLE/MOVE/REQ
+        bool foundDialogOp     = false;  // v0.07.98: MES/ASK/AMES/AASK specifically (for interactive object detection)
+        bool foundExtDispatch  = false;  // v0.07.98: 0x1C fired with PSHM_W value (runtime-dispatched extended opcode)
         bool foundBattle       = false;  // BATTLE specifically
 
         // Each entity occupies methodCount + 1 method slots in the entry point table.
@@ -1362,11 +1365,21 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                     // (Was limited to 100 per field for diagnostic purposes.)
                     if (extOp >= 0 && extOp < 0x200) {
                         opcode = (uint16_t)extOp;
+                    } else if (((uint32_t)extOp & 0xFFFF0000u) == 0x80000000u) {
+                        // v0.07.98/v0.08.00/v0.08.13: Value came from PSHM_W (runtime memory push).
+                        // Tightened: only 0x8000xxxx pattern, not negative passthrough literals.
+                        // We can't resolve the actual opcode statically, but this
+                        // entity uses runtime-dispatched extended opcodes — which
+                        // often include MES/ASK for interactive objects.
+                        foundExtDispatch = true;
                     }
                 } else if (opcode == 0x1C && pushCount == 0) {
                     // Stack empty when 0x1C fires — our simulation lost track.
-                    // Try using the LAST pushed value (peek at push history).
-                    // For now, log this as a diagnostic.
+                    // The dispatch index was pushed but consumed by an unmodeled opcode.
+                    // v0.07.98: Still counts as extended dispatch usage for interactive
+                    // object detection — entities using 0x1C with lost stack likely call
+                    // MES/ASK via runtime variable dispatch.
+                    foundExtDispatch = true;
                     static int s_emptyCount = 0;
                     if (s_emptyCount < 5) {
                         Log::Write("FieldArchive: [JSMScan] 0x1C EMPTY STACK: ent=%d method=%d", e, m);
@@ -1392,10 +1405,27 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                         case 0x0C: // PSHSM_W - push from special memory
                         case 0x0D: // PSHSM_B - push byte from special memory
                         {
-                            // Push a marker: negative offset flags it as "from memory".
-                            // 0x1C handler can still pop this; value may or may not
-                            // be a valid opcode index (it's a runtime value).
-                            int32_t marker = 0x00FF0000 | (opcParam & 0xFFFF);  // marker + mem addr
+                            // Push a marker: bit 31 flags it as "from memory".
+                            // v0.08.00: Changed from 0x00FF0000 to bit 31. The old
+                            // 0x00FF pattern collided with negative literal values
+                            // (e.g. push of -1484 = 0x00FFFA34 matched the marker).
+                            // Literal pushes max at 0x00FFFFFF, never setting bit 31.
+                            //
+                            // v0.08.13: PSHM_W negative-param passthrough.
+                            // Deep research confirmed: negative PSHM_W params cannot be
+                            // valid varblock offsets (unsigned). The engine returns them
+                            // as literal coordinate values. Each axis is resolved
+                            // independently, so one SET3 can mix varblock + passthrough.
+                            // Treat negative params as literals (like PSHN_L push).
+                            int32_t marker;
+                            if (highByte == 0x07 && opcParam < 0) {
+                                // Passthrough: negative param IS the coordinate value.
+                                // Push as literal (no bit31 marker) so SET3 extraction
+                                // treats it as a resolved coordinate.
+                                marker = opcParam;
+                            } else {
+                                marker = (int32_t)(0x80000000u | (uint32_t)(opcParam & 0xFFFF));  // bit31 + mem addr
+                            }
                             if (pushCount < PUSH_STACK_MAX)
                                 pushStack[pushCount++] = marker;
                             // v0.07.87: Record PSHM_W reads for variable-dispatch detection.
@@ -1450,20 +1480,90 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                 // The fallback handles entities that use PSHM_W for coordinates
                 // (e.g. bggate_2 dp01: X/Y/Z from PSHM_W markers, tri=194 in opcParam).
                 // v0.07.75: Added 3-param fallback for draw point position extraction.
-                if (opcode == JSM_OP_SET3 && m == 0 && !info.hasPosition) {
+                // v0.07.99: PSHM_W marker detection — when coordinates come from runtime
+                // memory, store the memory addresses instead of garbage position values.
+                if (opcode == JSM_OP_SET3 && m == 0 && !info.hasPosition && !info.hasPshmCoords) {
+                    // Check which stack values (if any) are PSHM_W markers.
+                    // v0.08.00: Markers use bit 31 (0x8000xxxx). Literal pushes max at 0x00FFFFFF.
+                    int coordBase = -1;  // index of X in pushStack
+                    int paramCount = 0;  // 3 or 4 params found
                     if (pushCount >= 4) {
-                        info.posX = (int16_t)pushStack[pushCount - 4];
-                        info.posY = (int16_t)pushStack[pushCount - 3];
-                        info.posZ = (int16_t)pushStack[pushCount - 2];
-                        info.posTriangle = (uint16_t)pushStack[pushCount - 1];
-                        info.hasPosition = true;
+                        coordBase = pushCount - 4;
+                        paramCount = 4;
                     } else if (pushCount >= 3 && opcParam >= 0 && opcParam < 4096) {
-                        // Triangle index from instruction inline param.
-                        info.posX = (int16_t)pushStack[pushCount - 3];
-                        info.posY = (int16_t)pushStack[pushCount - 2];
-                        info.posZ = (int16_t)pushStack[pushCount - 1];
-                        info.posTriangle = (uint16_t)opcParam;
-                        info.hasPosition = true;
+                        coordBase = pushCount - 3;
+                        paramCount = 3;
+                    }
+                    if (coordBase >= 0) {
+                        // Check if X, Y, or Z values are PSHM_W markers.
+                        // v0.08.13: Tightened marker detection. PSHM markers are
+                        // exactly 0x8000xxxx (bit31 set, bits 16-30 all zero).
+                        // Negative passthrough literals (e.g. -82 = 0xFFFFFFAE)
+                        // also have bit31 set but have bits 16-30 set too.
+                        // The mask 0xFFFF0000 == 0x80000000 catches only markers.
+                        bool xIsPshm = ((uint32_t)pushStack[coordBase + 0] & 0xFFFF0000u) == 0x80000000u;
+                        bool yIsPshm = ((uint32_t)pushStack[coordBase + 1] & 0xFFFF0000u) == 0x80000000u;
+                        bool zIsPshm = ((uint32_t)pushStack[coordBase + 2] & 0xFFFF0000u) == 0x80000000u;
+                        bool anyPshm = xIsPshm || yIsPshm || zIsPshm;
+                        if (anyPshm) {
+                            // v0.07.99: Coordinates come from runtime memory.
+                            // Store the memory addresses for runtime resolution.
+                            info.hasPshmCoords = true;
+                            info.pshmAddrX = xIsPshm ? (int16_t)(pushStack[coordBase + 0] & 0xFFFF) : 0;
+                            info.pshmAddrY = yIsPshm ? (int16_t)(pushStack[coordBase + 1] & 0xFFFF) : 0;
+                            info.pshmAddrZ = zIsPshm ? (int16_t)(pushStack[coordBase + 2] & 0xFFFF) : 0;
+                            // Log the full stack dump for diagnostic.
+                            char stkBuf[256] = {};
+                            int bp = 0;
+                            for (int si = 0; si < pushCount && bp < 240; si++)
+                                bp += snprintf(stkBuf + bp, 256 - bp, "0x%08X ", (unsigned)pushStack[si]);
+                            uint16_t tri = (paramCount == 4) ? (uint16_t)pushStack[coordBase + 3] : (uint16_t)opcParam;
+                            Log::Write("FieldArchive: [SET3-DIAG] ent%d '%s' PSHM_W coords: "
+                                       "X=%s(addr=%d) Y=%s(addr=%d) Z=%s(addr=%d) tri=%u "
+                                       "stack[%d]=[%s]",
+                                       e, info.symName,
+                                       xIsPshm ? "PSHM" : "lit", (int)info.pshmAddrX,
+                                       yIsPshm ? "PSHM" : "lit", (int)info.pshmAddrY,
+                                       zIsPshm ? "PSHM" : "lit", (int)info.pshmAddrZ,
+                                       (unsigned)tri, pushCount, stkBuf);
+                            // Also store the triangle even though position is runtime.
+                            info.posTriangle = tri;
+                            // Store literal values for any non-PSHM coordinates.
+                            if (!xIsPshm) info.posX = (int16_t)pushStack[coordBase + 0];
+                            if (!yIsPshm) info.posY = (int16_t)pushStack[coordBase + 1];
+                            if (!zIsPshm) info.posZ = (int16_t)pushStack[coordBase + 2];
+
+                            // v0.08.13: Shift-pattern position promotion.
+                            // When the first PSHM_W param (X) is unresolved but the
+                            // second (Y) and third (Z) are resolved passthrough literals,
+                            // the entity uses the shift pattern: the first param is a
+                            // mode selector or entity-scope index consumed by the engine,
+                            // and the actual navigable position is (litY, litZ).
+                            // Confirmed by runtime data: l1 (1032,-2865,-5421)->pos(-2865,-5421),
+                            // stairlight (1,-700,-8593)->pos(-700,-8593).
+                            // Safety: only apply when litY AND litZ are both non-zero
+                            // (avoids false positives like elelight where only litY is set).
+                            if (xIsPshm && !yIsPshm && !zIsPshm &&
+                                info.posY != 0 && info.posZ != 0) {
+                                info.posX = info.posY;   // litY -> navigable X
+                                info.posY = info.posZ;   // litZ -> navigable Y
+                                info.posZ = 0;           // no Z for 2D nav
+                                info.hasPosition = true;
+                                Log::Write("FieldArchive: [SET3-SHIFT] ent%d '%s' shift-pattern: "
+                                           "pos=(%d,%d) from litY/litZ passthrough",
+                                           e, info.symName,
+                                           (int)info.posX, (int)info.posY);
+                            }
+                        } else {
+                            // All literal values — extract normally.
+                            info.posX = (int16_t)pushStack[coordBase + 0];
+                            info.posY = (int16_t)pushStack[coordBase + 1];
+                            info.posZ = (int16_t)pushStack[coordBase + 2];
+                            info.posTriangle = (paramCount == 4)
+                                ? (uint16_t)pushStack[coordBase + 3]
+                                : (uint16_t)opcParam;
+                            info.hasPosition = true;
+                        }
                     }
                 }
 
@@ -1569,6 +1669,13 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                     opcode == JSM_OP_REQ || opcode == JSM_OP_REQSW || opcode == JSM_OP_REQEW)
                     foundEventOp = true;
                 if (opcode == JSM_OP_BATTLE) foundBattle = true;
+
+                // v0.07.98: Track dialog opcodes specifically (MES/ASK/AMES/AASK).
+                // foundEventOp is too broad (includes SHOW/HIDE/MOVE/REQ) and would
+                // false-positive on lighting/animation controllers.
+                if (opcode == JSM_OP_MES || opcode == JSM_OP_ASK ||
+                    opcode == JSM_OP_AMES || opcode == JSM_OP_AASK)
+                    foundDialogOp = true;
 
                 // v0.07.84: Extract REQ/REQSW/REQEW call targets for indirect MAPJUMP detection.
                 // REQ pops 3 values: entity_id, method_id, priority.
@@ -1735,6 +1842,69 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
             }
         }
 
+        // v0.07.98: Interactive object detection for unclassified entities with dialog.
+        // Entities (background OR invisible others) with dialog opcodes (MES/ASK/AMES/AASK)
+        // and a position from SET3/SET are interactive objects the player can examine
+        // (B-Garden Directory, classroom terminals, beds, desks, bulletin boards).
+        // Promoted to JSM_ENT_INTERACTIVE_OBJECT for catalog injection.
+        // Uses foundDialogOp (not foundEventOp) to avoid false positives on
+        // lighting/animation controllers that use SHOW/HIDE but no dialog.
+        // Covers both Background (cat=2) and Other (cat=3) entities that remain
+        // unclassified after all prior classification passes.
+        // foundDialogOp catches literal MES/ASK pushes; foundExtDispatch catches
+        // runtime-dispatched extended opcodes (0x1C with PSHM_W or empty stack)
+        // which commonly include MES/ASK for interactive objects like the Directory.
+        // v0.07.99: Also accept hasPshmCoords — entity has SET3 but coordinates
+        // are from runtime memory. Classification is correct; catalog injection
+        // still requires hasPosition for navigable coordinates.
+        if ((info.type == JSM_ENT_BACKGROUND || info.type == JSM_ENT_UNKNOWN) &&
+            (foundDialogOp || foundExtDispatch) &&
+            (info.hasPosition || info.hasPshmCoords) && !foundSetmodel) {
+            info.type = JSM_ENT_INTERACTIVE_OBJECT;
+        }
+
+        // v0.08.01: Paired entity position inheritance.
+        // FF8 uses a pattern where a positioning entity (SET3 with PSHM_W coords)
+        // is placed immediately before a dialog entity (0x1C extended dispatch with
+        // MES/ASK) in the JSM entity table. Example: bghall_1 ent24 'dic' (position)
+        // + ent25 'igyous1' (dialog). Neither passes interactive object detection
+        // alone. When a dialog entity has no position at all, check if the
+        // immediately preceding "Other" entity has PSHM_W coordinates and inherit them.
+        // v0.08.04: Paired inheritance with targeted light-entity filter.
+        // foundExtDispatch is needed because igyous1 (Directory dialog) uses 0x1C
+        // dispatch, not literal MES/ASK. But lighting controllers (displight,
+        // cornerlight, sidelight) also use 0x1C via stairlight inheritance.
+        // Fix: allow foundExtDispatch but skip entities whose SYM name contains "light".
+        if ((info.type == JSM_ENT_BACKGROUND || info.type == JSM_ENT_UNKNOWN) &&
+            (foundDialogOp || foundExtDispatch) && !foundSetmodel &&
+            !info.hasPosition && !info.hasPshmCoords &&
+            outCount > 0 &&
+            !strstr(info.symName, "light")) {
+            JSMEntityInfo& prev = outEntities[outCount - 1];
+            if (prev.hasPshmCoords && prev.jsmIndex == e - 1 &&
+                (prev.jsmCategory == 3 || prev.jsmCategory == 2) &&
+                prev.type != JSM_ENT_NPC && prev.type != JSM_ENT_MAP_EXIT) {
+                // Inherit PSHM coordinates from the positioning entity.
+                info.hasPshmCoords = true;
+                info.pshmAddrX = prev.pshmAddrX;
+                info.pshmAddrY = prev.pshmAddrY;
+                info.pshmAddrZ = prev.pshmAddrZ;
+                info.posTriangle = prev.posTriangle;
+                info.posX = prev.posX;
+                info.posY = prev.posY;
+                info.posZ = prev.posZ;
+                // v0.08.13: Also inherit hasPosition if the positioning entity
+                // resolved its coordinates via the shift-pattern passthrough.
+                if (prev.hasPosition) info.hasPosition = true;
+                info.type = JSM_ENT_INTERACTIVE_OBJECT;
+                Log::Write("FieldArchive: [JSMScan] paired-entity: ent%d '%s' inherits PSHM coords "
+                           "from ent%d '%s' (addrX=%d addrY=%d addrZ=%d tri=%u)",
+                           e, info.symName, prev.jsmIndex, prev.symName,
+                           (int)info.pshmAddrX, (int)info.pshmAddrY, (int)info.pshmAddrZ,
+                           (unsigned)info.posTriangle);
+            }
+        }
+
         outCount++;
     }
 
@@ -1751,6 +1921,21 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
             pos += snprintf(addrBuf + pos, 256 - pos, "%d ", (int)s_entityPopms[ei.jsmIndex].addrs[p]);
         Log::Write("FieldArchive: [JSMScan] POPM_W diag: ent%d '%s' type=%s writes=[%s]",
                    ei.jsmIndex, ei.symName, JSMEntityTypeName(ei.type), addrBuf);
+    }
+
+    // v0.07.99: Diagnostic — log entities with PSHM_W coordinate markers.
+    // These are entities whose SET3 coordinates come from runtime memory variables.
+    // The logged addresses tell us which game memory holds X/Y/Z for each entity.
+    for (int e2 = 0; e2 < outCount; e2++) {
+        const JSMEntityInfo& ei = outEntities[e2];
+        if (!ei.hasPshmCoords) continue;
+        Log::Write("FieldArchive: [SET3-DIAG] SUMMARY ent%d '%s' cat=%d type=%s "
+                   "pshmAddr X=%d Y=%d Z=%d tri=%u litX=%d litY=%d litZ=%d",
+                   ei.jsmIndex, ei.symName, ei.jsmCategory,
+                   JSMEntityTypeName(ei.type),
+                   (int)ei.pshmAddrX, (int)ei.pshmAddrY, (int)ei.pshmAddrZ,
+                   (unsigned)ei.posTriangle,
+                   (int)ei.posX, (int)ei.posY, (int)ei.posZ);
     }
 
     // v0.07.89: Diagnostic — dump ALL s_methodMapjumps entries for the field.
@@ -1829,7 +2014,8 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
 
     // --- Log results ---
     int drawPoints = 0, savePoints = 0, shops = 0, cards = 0, ladders = 0, exits = 0;
-    int lineCameraPans = 0, lineScreenBounds = 0, lineEvents = 0;
+    int lineCameraPans = 0, lineScreenBounds = 0, lineEvents = 0, interactiveObjects = 0;
+    int pshmCoords = 0;  // v0.07.99: entities with PSHM_W coordinate markers
     for (int i = 0; i < outCount; i++) {
         const JSMEntityInfo& e = outEntities[i];
         switch (e.type) {
@@ -1842,14 +2028,16 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
             case JSM_ENT_LINE_CAMERA_PAN:   lineCameraPans++; break;
             case JSM_ENT_LINE_SCREEN_BOUND: lineScreenBounds++; break;
             case JSM_ENT_LINE_EVENT:        lineEvents++; break;
+            case JSM_ENT_INTERACTIVE_OBJECT: interactiveObjects++; break;
             default: break;
         }
+        if (outEntities[i].hasPshmCoords) pshmCoords++;
     }
     Log::Write("FieldArchive: [JSMScan] '%s' results: %d entities scanned — "
                "DrawPts=%d SavePts=%d Shops=%d Cards=%d Ladders=%d Exits=%d "
-               "LineCamPan=%d LineScreenBd=%d LineEvent=%d",
+               "LineCamPan=%d LineScreenBd=%d LineEvent=%d IntObj=%d PshmCoord=%d",
                fieldName, outCount, drawPoints, savePoints, shops, cards, ladders, exits,
-               lineCameraPans, lineScreenBounds, lineEvents);
+               lineCameraPans, lineScreenBounds, lineEvents, interactiveObjects, pshmCoords);
 
     // Detailed log for each classified entity.
     for (int i = 0; i < outCount; i++) {
@@ -1866,14 +2054,15 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         }
 
         Log::Write("FieldArchive: [JSMScan]   ent%d cat=%d type=%s sym='%s' "
-                   "pos=%s(%d,%d,%d tri=%d) param=%d%s%s",
+                   "pos=%s(%d,%d,%d tri=%d) param=%d%s%s%s",
                    e.jsmIndex, e.jsmCategory, JSMEntityTypeName(e.type),
                    e.symName,
-                   e.hasPosition ? "YES" : "no",
+                   e.hasPosition ? "YES" : (e.hasPshmCoords ? "PSHM" : "no"),
                    (int)e.posX, (int)e.posY, (int)e.posZ, (int)e.posTriangle,
                    e.param,
                    (e.type == JSM_ENT_MAP_EXIT && e.param >= 0) ? " dest=" : "",
-                   destName);
+                   destName,
+                   e.hasPshmCoords ? " [PSHM_W]" : "");
     }
 
     return true;

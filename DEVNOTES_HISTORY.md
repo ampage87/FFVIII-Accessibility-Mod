@@ -137,6 +137,16 @@ SETLINE trigger lines as screen boundaries. Cross product sign test. Layers: IsS
 
 ---
 
+## v0.07.93–v0.07.99: Interactive Objects, Exit Naming, INF Gateways
+
+- **v0.07.99**: SET3 push stack diagnostic. `hasPshmCoords`/`pshmAddrX/Y/Z` added.
+- **v0.07.98**: Interactive object classification infrastructure.
+- **v0.07.97**: Model≥10 NPC fix (push-before-talk timing).
+- **v0.07.95–96**: Exit naming, world map labels, redundant JSM exit suppression.
+- **v0.07.93–94**: INF gateway parser (Deling format), dedup, catalog integration.
+
+---
+
 ## Pre-v05: Dialog, FMV, Title Screen
 
 ### v04.36: Field Dialog TTS

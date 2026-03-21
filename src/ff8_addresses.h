@@ -287,6 +287,12 @@ extern uint32_t opcode_lineoff;   // 0x03B — disable trigger line
 extern uint32_t opcode_talkradius; // 0x062 — set talk interaction radius
 extern uint32_t opcode_pushradius; // 0x063 — set push/collision radius
 
+// v0.08.03: SET3 opcode for runtime position capture of PSHM_W entities
+extern uint32_t opcode_set3;       // 0x01E — set entity position (X, Y, Z, triangle)
+
+// v0.08.07: PSHM_W opcode for shared memory read diagnostics
+extern uint32_t opcode_pshm_w;     // 0x00C — push shared memory word (unsigned)
+
 // v04.28+: engine input button state variables.
 // Both are written by engine_eval_is_button_pressed each frame.
 // confirmed_buttons = buttons just pressed this frame (edge-triggered).

@@ -3,7 +3,7 @@
 // See field_navigation.h for full architecture and phasing notes.
 //
 // ============================================================================
-// CURRENT STATE: v0.07.94 — INF gateway catalog integration: deduplicated exits with compass directions
+// CURRENT STATE: v0.08.61 — Item submenu TTS (action menu + item list)
 // ============================================================================
 //
 // What's new in v05.12:
@@ -313,6 +313,73 @@ static OpcodeHandler_t      s_originalLineon             = nullptr;
 static OpcodeHandler_t      s_originalLineoff            = nullptr;
 static OpcodeHandler_t      s_originalTalkradius         = nullptr;
 static OpcodeHandler_t      s_originalPushradius         = nullptr;
+static OpcodeHandler_t      s_originalSet3               = nullptr;  // v0.08.03
+static OpcodeHandler_t      s_originalPshmW              = nullptr;  // v0.08.07
+
+// v0.08.03: SET3 opcode hook — capture entity positions at runtime.
+// v0.08.26: PERSISTENT — always captures, no time window. This catches entities
+// like dic (bghall_1 Directory) whose SET3 fires outside field_scripts_init.
+// Entities with PSHM_W coordinates have their positions resolved by the engine
+// at runtime. We capture the real positions from the entity state struct after
+// SET3 executes.
+struct CapturedSET3 {
+    uint32_t entityAddr;
+    int16_t  posX, posY, posZ;
+    uint16_t triId;
+    bool     firstLogged;  // v0.08.26: true once this slot has been logged
+};
+static const int MAX_SET3_CAPTURES = 64;
+static CapturedSET3 s_set3Captures[MAX_SET3_CAPTURES] = {};
+static int  s_set3CaptureCount = 0;
+static bool s_capturingSET3 = false;  // v0.08.26: set true on first field load, stays true forever
+static DWORD s_set3CaptureStartTime = 0;  // v0.08.16: GetTickCount() when capture started (kept for init summary)
+static const DWORD SET3_CAPTURE_DURATION_MS = 3000;  // v0.08.16: 3s window for init summary logging
+static bool s_set3SummaryLogged = false;  // v0.08.16: true once post-init summary is logged
+static int  s_set3TotalCalls = 0;  // v0.08.26: total SET3 calls (for periodic summary)
+
+// v0.08.07: PSHM_W opcode hook — capture all shared memory reads during field_scripts_init.
+// Logs the entity address, PSHM_W address parameter, execution flags, and the
+// value pushed to the VM stack after the read completes. This reveals which
+// active entities read from the same addresses as dic (135, -82, -8019) and
+// what the handler resolves those addresses to.
+struct CapturedPSHM {
+    uint32_t entityAddr;
+    int16_t  param;        // PSHM_W address parameter (signed)
+    uint32_t execFlags;    // entity execution flags at offset 0x160
+    int32_t  resultValue;  // value pushed to VM stack after read
+};
+static const int MAX_PSHM_CAPTURES = 256;
+static CapturedPSHM s_pshmCaptures[MAX_PSHM_CAPTURES] = {};
+static int  s_pshmCaptureCount = 0;
+static bool s_capturingPSHM = false;  // true for ~5s after field load
+static DWORD s_pshmCaptureStartTime = 0;  // GetTickCount() when capture started
+static const DWORD PSHM_CAPTURE_DURATION_MS = 5000;  // capture window after field load
+static bool s_pshmSummaryLogged = false;  // true once end-of-window summary is logged
+
+// v0.08.23: Descriptor table polling probe — check if PSHM_W entity-scope descriptors
+// populate after field load. Table at 0x01DCB340 holds one 4-byte pointer per flat
+// entity index. If non-NULL, points to a ~0x90-byte descriptor struct:
+//   +0x00: int32 validity marker (-1 = invalid)
+//   +0x0C: int16 computed X coordinate
+//   +0x0E: int16 computed Y coordinate
+//   +0x68: uint32 curve data pointer
+//   +0x7E: int16 cache key (last PSHM address processed)
+// We poll every ~1s for 10s after field load to see if any descriptors appear.
+static bool  s_descriptorPollActive = false;
+static DWORD s_descriptorPollStart = 0;
+static int   s_descriptorPollCount = 0;
+static DWORD s_descriptorPollLastCheck = 0;
+static bool  s_descriptorPollSummaryLogged = false;
+static uint16_t s_descriptorPollFieldId = 0xFFFF;  // last field ID we started polling for
+static const DWORD DESCRIPTOR_POLL_DURATION_MS = 10000;  // poll for 10s after field load
+static const DWORD DESCRIPTOR_POLL_INTERVAL_MS = 1000;   // check every 1s
+static const uint32_t DESCRIPTOR_TABLE_ADDR = 0x01DCB340;  // runtime VA, per-entity ptr table
+static const int MAX_DESCRIPTOR_SCAN = 64;  // max flat entity indices to check
+
+// v0.08.24: One-shot hex dump of PSHM_W entity-scope functions.
+// Reads raw x86 instruction bytes from the two key subroutines so we can
+// disassemble the parametric curve formula without Ghidra/IDA.
+static bool s_pshmFuncDumpDone = false;  // true once the dump has fired
 
 // v05.82: engine_eval_keyboard_gamepad_input hook for analog input diagnostic + steering
 typedef void (__cdecl *EngineEvalInput_t)();
@@ -796,12 +863,13 @@ static const FieldArchive::JSMEntityInfo* FindJSMBySym(const char* symName)
 static EntityType JSMTypeToCatalogType(FieldArchive::JSMEntityType jt)
 {
     switch (jt) {
-        case FieldArchive::JSM_ENT_SAVE_POINT: return ENT_SAVE_POINT;
-        case FieldArchive::JSM_ENT_DRAW_POINT: return ENT_DRAW_POINT;
-        case FieldArchive::JSM_ENT_SHOP:       return ENT_SHOP;
-        case FieldArchive::JSM_ENT_CARD_GAME:  return ENT_CARD_GAME;
-        case FieldArchive::JSM_ENT_MAP_EXIT:   return ENT_EXIT;
-        case FieldArchive::JSM_ENT_NPC:        return ENT_NPC;
+        case FieldArchive::JSM_ENT_SAVE_POINT:        return ENT_SAVE_POINT;
+        case FieldArchive::JSM_ENT_DRAW_POINT:        return ENT_DRAW_POINT;
+        case FieldArchive::JSM_ENT_SHOP:              return ENT_SHOP;
+        case FieldArchive::JSM_ENT_CARD_GAME:         return ENT_CARD_GAME;
+        case FieldArchive::JSM_ENT_MAP_EXIT:          return ENT_EXIT;
+        case FieldArchive::JSM_ENT_NPC:               return ENT_NPC;
+        case FieldArchive::JSM_ENT_INTERACTIVE_OBJECT: return ENT_OBJECT;  // v0.07.98
         default: return ENT_UNKNOWN;
     }
 }
@@ -2019,6 +2087,117 @@ static int __cdecl HookedPushradius(int entityPtr)
 }
 
 // ============================================================================
+// v0.08.03: SET3 opcode hook — capture entity positions at runtime
+// ============================================================================
+// Fires during field_scripts_init when any entity executes SET3 (opcode 0x1E).
+// After calling the original handler, we read the entity’s resolved position
+// from the entity state struct. This captures PSHM_W-sourced coordinates that
+// the static JSM scanner can’t resolve (e.g. bghall_1 Directory panel).
+
+static int __cdecl HookedSet3(int entityPtr)
+{
+    int result = s_originalSet3(entityPtr);
+
+    // v0.08.26: PERSISTENT capture — always on after first field load, no time window.
+    // The old 3s window missed dic's SET3 which fires outside init.
+    if (!s_capturingSET3) return result;
+
+    s_set3TotalCalls++;
+
+    if (s_set3CaptureCount < MAX_SET3_CAPTURES) {
+        __try {
+            uint8_t* ent = (uint8_t*)(uint32_t)entityPtr;
+            int32_t fpX = *(int32_t*)(ent + 0x190);
+            int32_t fpY = *(int32_t*)(ent + 0x194);
+            uint16_t tri = *(uint16_t*)(ent + 0x1FA);
+            int16_t posX = (int16_t)(fpX / 4096);
+            int16_t posY = (int16_t)(fpY / 4096);
+            // Also try simple int16 coords as fallback
+            if (fpX == 0 && fpY == 0) {
+                posX = *(int16_t*)(ent + 0x20);
+                posY = *(int16_t*)(ent + 0x24);
+            }
+            // Deduplicate — if this entity already has a capture, update it.
+            // Per-frame scripts can fire SET3 multiple times; we want the latest position.
+            int slot = -1;
+            for (int c = 0; c < s_set3CaptureCount; c++) {
+                if (s_set3Captures[c].entityAddr == (uint32_t)entityPtr) {
+                    slot = c;
+                    break;
+                }
+            }
+            bool isNew = (slot < 0);
+            if (isNew) {
+                slot = s_set3CaptureCount++;
+            }
+            s_set3Captures[slot].entityAddr = (uint32_t)entityPtr;
+            s_set3Captures[slot].posX = posX;
+            s_set3Captures[slot].posY = posY;
+            s_set3Captures[slot].posZ = 0;
+            s_set3Captures[slot].triId = tri;
+
+            // v0.08.26: Log only on FIRST capture of each entity (new slot).
+            // This keeps the log clean while still catching dic when it finally fires.
+            if (isNew) {
+                Log::Write("FieldNavigation: [SET3-HOOK] NEW ent=0x%08X pos=(%d,%d) tri=%u slot=%d/%d totalCalls=%d",
+                           (uint32_t)entityPtr, (int)posX, (int)posY,
+                           (unsigned)tri, slot, s_set3CaptureCount, s_set3TotalCalls);
+                s_set3Captures[slot].firstLogged = true;
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {
+            Log::Write("FieldNavigation: [SET3-HOOK] ent=0x%08X (SEH)", (uint32_t)entityPtr);
+        }
+    }
+
+    // v0.08.26: Periodic summary every 10000 calls (roughly every ~3 min at 60fps).
+    if ((s_set3TotalCalls % 10000) == 0) {
+        Log::Write("FieldNavigation: [SET3-HOOK] summary: %d unique entities, %d total calls",
+                   s_set3CaptureCount, s_set3TotalCalls);
+    }
+
+    return result;
+}
+
+// ============================================================================
+// v0.08.07: PSHM_W opcode hook — capture shared memory reads at runtime
+// ============================================================================
+// Fires for every PSHM_W call during field_scripts_init. After the original
+// handler runs, we read the value it pushed to the VM stack. This tells us
+// what the engine resolves each PSHM_W address to, including for entities
+// that use the alternate code path (entity-scope / parametric curves).
+
+static int __cdecl HookedPshmW(int entityPtr)
+{
+    // Call original handler first — game behaviour unchanged.
+    int result = s_originalPshmW(entityPtr);
+
+    // Minimal capture: just count + log entity address. No struct reads.
+    // Previous builds crashed when reading entity+0x184/0x140 during per-frame calls.
+    if (s_capturingPSHM) {
+        s_pshmCaptureCount++;
+
+        // Auto-expire after 5 seconds.
+        if ((s_pshmCaptureCount & 0xFF) == 0) {  // check time every 256 calls
+            DWORD elapsed = GetTickCount() - s_pshmCaptureStartTime;
+            if (elapsed > PSHM_CAPTURE_DURATION_MS) {
+                s_capturingPSHM = false;
+                Log::Write("FieldNavigation: [PSHM_W-HOOK] Capture window closed: %d calls in %ums",
+                           s_pshmCaptureCount, elapsed);
+                return result;
+            }
+        }
+
+        // Log first 20 calls with just entity address (no struct reads).
+        if (s_pshmCaptureCount <= 20) {
+            Log::Write("FieldNavigation: [PSHM_W-HOOK] #%d ent=0x%08X result=%d",
+                       s_pshmCaptureCount, (uint32_t)entityPtr, result);
+        }
+    }
+
+    return result;
+}
+
+// ============================================================================
 // Key handlers
 // ============================================================================
 
@@ -2137,8 +2316,14 @@ static bool AnnounceCurrentTarget()
 
     // v0.07.76: Catalog cycling speaks only the type label, no directions.
     // Directions are spoken separately via Backspace (AnnounceDirections).
+    // v0.07.95: Include destination name for exits so players can build mental maps.
+    // Exit names are already in catEnt.name (e.g. "Exit to B-Garden - Front Gate 2").
     char label[160];
-    snprintf(label, sizeof(label), "%s %d of %d", typeLabel, typeNum, typeTotal);
+    if (catEnt.type == ENT_EXIT && catEnt.name[0] != '\0') {
+        snprintf(label, sizeof(label), "%s, %d of %d", catEnt.name, typeNum, typeTotal);
+    } else {
+        snprintf(label, sizeof(label), "%s %d of %d", typeLabel, typeNum, typeTotal);
+    }
     ScreenReader::Speak(label);
 
     Log::Write("FieldNavigation: [nav] cat%d ent%d rank=%d/%d '%s'",
@@ -3295,6 +3480,32 @@ static void HandleKeys()
     }
     s_f11WasDown = f11;
 
+    // v0.08.14: F12 = announce + log player position (for coordinate calibration).
+    static bool s_f12WasDown = false;
+    bool f12 = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
+    if (f12 && !s_f12WasDown) {
+        float f12px = 0, f12py = 0;
+        if (s_playerEntityIdx >= 0 && GetEntityPos(s_playerEntityIdx, f12px, f12py)) {
+            uint16_t f12tri = 0xFFFF;
+            __try {
+                uint8_t* base = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+                if (base)
+                    f12tri = *(uint16_t*)(base + ENTITY_STRIDE * s_playerEntityIdx + 0x1FA);
+            } __except(EXCEPTION_EXECUTE_HANDLER) {}
+            const char* fn = FF8Addresses::pCurrentFieldName ? FF8Addresses::pCurrentFieldName : "?";
+            const char* dn = GetFieldDisplayNameByInternalName(fn);
+            char posBuf[256];
+            snprintf(posBuf, sizeof(posBuf), "%s. Position %.0f, %.0f. Triangle %u.",
+                     dn ? dn : fn, f12px, f12py, (unsigned)f12tri);
+            ScreenReader::Speak(posBuf);
+            Log::Write("FieldNavigation: [F12-POS] field=%s pos=(%.0f,%.0f) tri=%u",
+                       fn, f12px, f12py, (unsigned)f12tri);
+        } else {
+            ScreenReader::Speak("Player position not available.");
+        }
+    }
+    s_f12WasDown = f12;
+
     // v05.86: Arrow keys cancel auto-drive immediately.
     // The player pressing any direction key means they want manual control.
     // We must only cancel if the arrow key is NOT one we're currently injecting
@@ -3855,7 +4066,30 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
     s_driveActive        = false;
     s_driveHeld          = 0;
 
+    // v0.08.03: Enable SET3 capture so HookedSet3 records positions during init.
+    // v0.08.26: PERSISTENT — stays true forever, no time window. Resets capture array
+    // on field change so entity addresses from the old field don't linger.
+    s_set3CaptureCount = 0;
+    s_set3TotalCalls = 0;
+    s_capturingSET3 = true;
+    s_set3CaptureStartTime = GetTickCount();
+    s_set3SummaryLogged = false;
+    memset(s_set3Captures, 0, sizeof(s_set3Captures));
+    s_pshmCaptureCount = 0;
+    s_capturingPSHM = true;
+    s_pshmCaptureStartTime = GetTickCount();
+    s_pshmSummaryLogged = false;
+
     int ret = s_originalFieldScriptsInit(unk1, unk2, unk3, unk4);
+
+    // v0.08.26: SET3 capture stays active PERMANENTLY (persistent hook).
+    // Per-frame scripts (like dic on bghall_1) fire SET3 after init returns.
+    // Note: s_capturingPSHM stays true — time-based window (5s) handles auto-off.
+    // PSHM_W-using entities fire in per-frame scripts (method 1+), not during init.
+
+    Log::Write("FieldNavigation: [PSHM_W-HOOK] Init done, %d PSHM_W during init. Capture window open for %ums.",
+               s_pshmCaptureCount, PSHM_CAPTURE_DURATION_MS);
+
     // s_entityCenters now contains centers for every entity that fired
     // set_current_triangle during load — including stationary NPCs.
 
@@ -3923,6 +4157,254 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
             s_jsmEntityCount = 0;
             memset(s_jsmEntities, 0, sizeof(s_jsmEntities));
             FieldArchive::ScanJSMScripts(fieldName, s_jsmEntities, MAX_JSM_ENTITIES, s_jsmEntityCount);
+
+            // v0.08.03: Match SET3 hook captures to JSM entities with hasPshmCoords.
+            // During field_scripts_init, HookedSet3 captured entity addresses and
+            // their resolved positions. Match these to JSM entities by computing
+            // the expected entity address from the Others array base + index * stride.
+            if (s_set3CaptureCount > 0 && FF8Addresses::pFieldStateOthers) {
+                __try {
+                    uint8_t* othersBase = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+                    if (othersBase) {
+                        int othersStart = s_jsmDoors + s_jsmLines + s_jsmBackgrounds;
+                        int bgStart = s_jsmDoors + s_jsmLines;
+                        // v0.08.15: Also get background entity base for category 2 matching.
+                        uint8_t* bgBase2 = nullptr;
+                        if (FF8Addresses::HasFieldStateBackgrounds()) {
+                            bgBase2 = reinterpret_cast<uint8_t*>(
+                                *reinterpret_cast<uint32_t*>(FF8Addresses::pFieldStateBackgrounds));
+                        }
+                        int resolved = 0;
+                        for (int j = 0; j < s_jsmEntityCount; j++) {
+                            FieldArchive::JSMEntityInfo& je = s_jsmEntities[j];
+                            if (!je.hasPshmCoords) continue;
+                            // Compute expected entity address for this JSM entity.
+                            // Works for ALL categories since field_scripts_init
+                            // executes init scripts for doors, lines, bg, and others.
+                            // Others (cat 3): othersBase + (jsmIndex - othersStart) * ENTITY_STRIDE
+                            // Background (cat 2): bgBase + (jsmIndex - bgStart) * BG_STRIDE
+                            uint32_t expectedAddr = 0;
+                            int matchIdx = 0;  // v0.08.15: unified index for log (othersIdx or bgIdx)
+                            if (je.jsmCategory == 3) {
+                                matchIdx = je.jsmIndex - othersStart;
+                                if (matchIdx < 0) continue;
+                                expectedAddr = (uint32_t)(uintptr_t)(othersBase + ENTITY_STRIDE * matchIdx);
+                            } else if (je.jsmCategory == 2 && bgBase2) {
+                                matchIdx = je.jsmIndex - bgStart;
+                                if (matchIdx < 0) continue;
+                                expectedAddr = (uint32_t)(uintptr_t)(bgBase2 + BG_STRIDE * matchIdx);
+                            } else {
+                                continue;
+                            }
+                            // Search SET3 captures for this entity address.
+                            for (int c = 0; c < s_set3CaptureCount; c++) {
+                                if (s_set3Captures[c].entityAddr == expectedAddr) {
+                                    je.posX = s_set3Captures[c].posX;
+                                    je.posY = s_set3Captures[c].posY;
+                                    je.posZ = s_set3Captures[c].posZ;
+                                    je.posTriangle = s_set3Captures[c].triId;
+                                    je.hasPosition = true;
+                                    resolved++;
+                                    Log::Write("FieldNavigation: [SET3-MATCH] ent%d '%s' type=%s "
+                                               "cat=%d idx=%d pos=(%d,%d) tri=%u addr=0x%08X",
+                                               je.jsmIndex, je.symName,
+                                               FieldArchive::JSMEntityTypeName(je.type),
+                                               je.jsmCategory, matchIdx, (int)je.posX, (int)je.posY,
+                                               (unsigned)je.posTriangle, expectedAddr);
+                                    break;
+                                }
+                            }
+                        }
+                        // v0.08.05: Fallback — direct struct read for unmatched PSHM entities.
+                        // Some entities (e.g. dic) have SET3 in non-init methods, so the
+                        // SET3 hook doesn't capture them. Try reading positions directly
+                        // from their entity struct. At this point (right after field_scripts_init)
+                        // positions may still be (0,0) — that's OK, RefreshCatalog will retry.
+                        int directResolved = 0;
+                        for (int j2 = 0; j2 < s_jsmEntityCount; j2++) {
+                            FieldArchive::JSMEntityInfo& je2 = s_jsmEntities[j2];
+                            if (!je2.hasPshmCoords || je2.hasPosition) continue;
+                            // v0.08.15: Handle both Others (cat 3) and Background (cat 2) entities.
+                            uint8_t* blk = nullptr;
+                            int entIdx = 0;
+                            if (je2.jsmCategory == 3) {
+                                entIdx = je2.jsmIndex - othersStart;
+                                if (entIdx < 0) continue;
+                                blk = othersBase + ENTITY_STRIDE * entIdx;
+                            } else if (je2.jsmCategory == 2 && bgBase2) {
+                                entIdx = je2.jsmIndex - bgStart;
+                                if (entIdx < 0) continue;
+                                blk = bgBase2 + BG_STRIDE * entIdx;
+                            } else {
+                                continue;
+                            }
+                            int32_t fpX2 = *(int32_t*)(blk + 0x190);
+                            int32_t fpY2 = *(int32_t*)(blk + 0x194);
+                            // v0.08.15: triId at 0x1FA is only valid for Others (0x264 stride).
+                            // Background structs (0x1B4 stride) don't extend to 0x1FA.
+                            uint16_t tri2 = 0;
+                            if (je2.jsmCategory == 3) {
+                                tri2 = *(uint16_t*)(blk + 0x1FA);
+                            }
+                            if (fpX2 != 0 || fpY2 != 0) {
+                                je2.posX = (int16_t)(fpX2 / 4096);
+                                je2.posY = (int16_t)(fpY2 / 4096);
+                                je2.posTriangle = tri2;
+                                je2.hasPosition = true;
+                                directResolved++;
+                                Log::Write("FieldNavigation: [SET3-DIRECT] ent%d '%s' type=%s "
+                                           "cat=%d idx=%d pos=(%d,%d) tri=%u fp=(%d,%d)",
+                                           je2.jsmIndex, je2.symName,
+                                           FieldArchive::JSMEntityTypeName(je2.type),
+                                           je2.jsmCategory, entIdx,
+                                           (int)je2.posX, (int)je2.posY,
+                                           (unsigned)tri2, fpX2, fpY2);
+                            }
+                        }
+                        Log::Write("FieldNavigation: [SET3-MATCH] %d captures, %d hook-matched, %d direct-read",
+                                   s_set3CaptureCount, resolved, directResolved);
+
+                        // v0.08.11: Varblock diagnostic — read the flat variable array at
+                        // 0x1CFE9B8 for every PSHM_W address used by JSM entities.
+                        // Compare with SET3-captured positions to determine if the
+                        // standard varblock formula works for below-threshold addresses.
+                        // FFNx confirms: varblock base = get_absolute_value(opcode_pshm_w, 0x1E)
+                        {
+                            // Use known varblock base. Dynamic resolution via opcode_pshm_w+0x1E
+                            // fails because FFNx has replaced the dispatch table entry with its
+                            // own hook function, so +0x1E reads FFNx code, not the game's embedded
+                            // varblock reference. The correct base is 0x1CFE9B8 (Steam 2013 en-US),
+                            // confirmed by FFNx source: field_vars_stack_1CFE9B8.
+                            uint32_t varblockBase = 0x1CFE9B8;
+                            Log::Write("FieldNavigation: [VARBLOCK-DIAG] base=0x%08X (hardcoded Steam 2013 en-US)",
+                                       varblockBase);
+                            // Read varblock at every PSHM address from JSM entities.
+                            for (int vj = 0; vj < s_jsmEntityCount; vj++) {
+                                const FieldArchive::JSMEntityInfo& vje = s_jsmEntities[vj];
+                                if (!vje.hasPshmCoords) continue;
+                                int16_t addrX = vje.pshmAddrX;
+                                int16_t addrY = vje.pshmAddrY;
+                                int16_t addrZ = vje.pshmAddrZ;
+                                int16_t vbX = 0, vbY = 0, vbZ = 0;
+                                bool readOk = true;
+                                __try {
+                                    vbX = *(int16_t*)(varblockBase + (uint16_t)addrX);
+                                    vbY = *(int16_t*)(varblockBase + (uint16_t)addrY);
+                                    vbZ = *(int16_t*)(varblockBase + (uint16_t)addrZ);
+                                } __except(EXCEPTION_EXECUTE_HANDLER) {
+                                    readOk = false;
+                                }
+                                // Find SET3-captured position for comparison.
+                                const char* matchStr = "";
+                                int16_t set3X = 0, set3Y = 0;
+                                if (vje.hasPosition) {
+                                    set3X = vje.posX;
+                                    set3Y = vje.posY;
+                                    if (vbX == set3X && vbY == set3Y)
+                                        matchStr = " <<MATCH>>";
+                                    else
+                                        matchStr = " <<MISMATCH>>";
+                                }
+                                Log::Write("FieldNavigation: [VARBLOCK-DIAG] ent%d '%s' "
+                                           "pshmAddr=(%d,%d,%d) varblock=(%d,%d,%d) "
+                                           "set3pos=(%d,%d) %s%s",
+                                           vje.jsmIndex, vje.symName,
+                                           (int)addrX, (int)addrY, (int)addrZ,
+                                           (int)vbX, (int)vbY, (int)vbZ,
+                                           (int)set3X, (int)set3Y,
+                                           readOk ? "" : "READ_FAIL",
+                                           matchStr);
+                            }
+                        }
+
+                        // v0.08.06: PSHM descriptor table probe.
+                        // 0x01DCB340 is a pointer table — table[entityIndex] → descriptor struct.
+                        // The entity scope sub at 0x00532890 uses:
+                        //   descriptor+0x68: data array pointer (parametric curve data)
+                        //   descriptor+0x6C: secondary pointer
+                        //   descriptor+0x7E: last PSHM address (WORD)
+                        //   descriptor+0x0C: computed result X (WORD)
+                        //   descriptor+0x0E: computed result Y (WORD)
+                        // Scan all Others entities to find dic's descriptor.
+                        {
+                            static const uint32_t PSHM_TABLE_BASE = 0x01DCB340;
+                            static const uint32_t PSHM_GLOBAL_FIELD_VAR = 0x01CE476A;
+                            __try {
+                                int16_t fieldVar = *(int16_t*)PSHM_GLOBAL_FIELD_VAR;
+                                Log::Write("FieldNavigation: [PSHM-PROBE] global@0x%08X = %d",
+                                           PSHM_GLOBAL_FIELD_VAR, (int)fieldVar);
+                                // Scan descriptor table for all Others indices.
+                                // Others start at jsmDoors+jsmLines+jsmBackgrounds in the JSM order.
+                                // The table is indexed by a flat entity index that includes
+                                // doors+lines+bg+others. Scan a range around where Others live.
+                                int scanStart = 0;
+                                int scanEnd = s_jsmDoors + s_jsmLines + s_jsmBackgrounds + s_jsmOthers;
+                                if (scanEnd > 64) scanEnd = 64;  // safety
+                                Log::Write("FieldNavigation: [PSHM-PROBE] scanning table 0x%08X indices %d..%d (others start at %d)",
+                                           PSHM_TABLE_BASE, scanStart, scanEnd - 1,
+                                           s_jsmDoors + s_jsmLines + s_jsmBackgrounds);
+                                for (int ti = scanStart; ti < scanEnd; ti++) {
+                                    __try {
+                                        uint32_t* tableEntry = (uint32_t*)(PSHM_TABLE_BASE + ti * 4);
+                                        uint32_t descPtr = *tableEntry;
+                                        if (descPtr == 0) continue;  // null entry, skip silently
+                                        // Check if descriptor is valid (first DWORD != -1)
+                                        int32_t firstDword = *(int32_t*)descPtr;
+                                        if (firstDword == -1) {
+                                            Log::Write("FieldNavigation: [PSHM-PROBE] [%d] desc=0x%08X INVALID (first=-1)",
+                                                       ti, descPtr);
+                                            continue;
+                                        }
+                                        // Read key descriptor fields
+                                        uint32_t dataArr = *(uint32_t*)(descPtr + 0x68);
+                                        uint32_t secPtr  = *(uint32_t*)(descPtr + 0x6C);
+                                        int16_t  lastAddr = *(int16_t*)(descPtr + 0x7E);
+                                        int16_t  resX    = *(int16_t*)(descPtr + 0x0C);
+                                        int16_t  resY    = *(int16_t*)(descPtr + 0x0E);
+                                        int16_t  field50 = *(int16_t*)(descPtr + 0x50);
+                                        int16_t  field52 = *(int16_t*)(descPtr + 0x52);
+                                        // Get SYM name for this index
+                                        const char* symName = "?";
+                                        for (int sj = 0; sj < s_jsmEntityCount; sj++) {
+                                            if (s_jsmEntities[sj].jsmIndex == ti) {
+                                                symName = s_jsmEntities[sj].symName;
+                                                break;
+                                            }
+                                        }
+                                        Log::Write("FieldNavigation: [PSHM-PROBE] [%d] '%s' desc=0x%08X "
+                                                   "data=0x%08X sec=0x%08X lastAddr=%d "
+                                                   "res=(%d,%d) f50=(%d,%d)",
+                                                   ti, symName, descPtr, dataArr, secPtr,
+                                                   (int)lastAddr, (int)resX, (int)resY,
+                                                   (int)field50, (int)field52);
+                                        // For dic (ent24 = othersIdx 12), also dump the data array
+                                        // to understand the parametric format.
+                                        if (ti == 24 && dataArr > 0x10000 && dataArr < 0x20000000) {
+                                            // Dump first 32 WORDs of data array
+                                            int16_t* dw = (int16_t*)dataArr;
+                                            Log::Write("FieldNavigation: [PSHM-PROBE] dic data[0..31]: "
+                                                       "%d %d %d %d %d %d %d %d "
+                                                       "%d %d %d %d %d %d %d %d "
+                                                       "%d %d %d %d %d %d %d %d "
+                                                       "%d %d %d %d %d %d %d %d",
+                                                       dw[0],dw[1],dw[2],dw[3],dw[4],dw[5],dw[6],dw[7],
+                                                       dw[8],dw[9],dw[10],dw[11],dw[12],dw[13],dw[14],dw[15],
+                                                       dw[16],dw[17],dw[18],dw[19],dw[20],dw[21],dw[22],dw[23],
+                                                       dw[24],dw[25],dw[26],dw[27],dw[28],dw[29],dw[30],dw[31]);
+                                        }
+                                    } __except(EXCEPTION_EXECUTE_HANDLER) {
+                                        Log::Write("FieldNavigation: [PSHM-PROBE] [%d] ACCESS VIOLATION", ti);
+                                    }
+                                }
+                            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                                Log::Write("FieldNavigation: [PSHM-PROBE] Exception in table scan");
+                            }
+                        }
+                    }
+                } __except(EXCEPTION_EXECUTE_HANDLER) {
+                    Log::Write("FieldNavigation: [SET3-MATCH] Exception matching captures");
+                }
+            }
 
             // v0.07.82: Assign lineType to captured trigger lines from JSM classification.
             // SETLINE fires during field_scripts_init for each Line entity (and possibly
@@ -4094,6 +4576,28 @@ void Initialize()
                    FF8Addresses::opcode_pushradius, MH_StatusToString(st));
     }
 
+    // v0.08.03: Hook SET3 opcode for runtime position capture of PSHM_W entities.
+    if (FF8Addresses::opcode_set3 != 0) {
+        MH_STATUS st = MH_CreateHook(
+            (LPVOID)(uintptr_t)FF8Addresses::opcode_set3,
+            (LPVOID)HookedSet3,
+            (LPVOID*)&s_originalSet3);
+        if (st == MH_OK)
+            st = MH_EnableHook((LPVOID)(uintptr_t)FF8Addresses::opcode_set3);
+        Log::Write("FieldNavigation: opcode_set3 hook @ 0x%08X — %s",
+                   FF8Addresses::opcode_set3, MH_StatusToString(st));
+    } else {
+        Log::Write("FieldNavigation: WARNING - opcode_set3=0, SET3 position capture hook skipped.");
+    }
+
+    // v0.08.07-10: PSHM_W dispatch table hook DISABLED for v0.08.11.
+    // Replaced by direct varblock read diagnostic (see HookedFieldScriptsInit).
+    // Hook infrastructure retained for future use if needed.
+    if (FF8Addresses::opcode_pshm_w != 0) {
+        Log::Write("FieldNavigation: PSHM_W at 0x%08X (hook disabled, using varblock diagnostic)",
+                   FF8Addresses::opcode_pshm_w);
+    }
+
     // v05.84: Hook dinput_update_gamepad_status to intercept gamepad polling.
     if (FF8Addresses::dinput_update_gamepad_status_addr != 0) {
         MH_STATUS st = MH_CreateHook(
@@ -4160,7 +4664,7 @@ void Initialize()
 
     s_initialized = true;
     s_lastLogTime = GetTickCount();
-    Log::Write("FieldNavigation: Initialized v0.07.94 — INF gateway catalog integration with deduplicated exits.");
+    Log::Write("FieldNavigation: Initialized v0.08.61 — PSHM_W handler diagnostic + SET3 hook + direct read fallback.");
     Log::Write("FieldNavigation:   F9  = nearest character and compass direction (repeat to cycle)");
     Log::Write("FieldNavigation:   F10 = player field name and position");
 }
@@ -4386,11 +4890,17 @@ static void RefreshCatalog()
             // v05.52: Classify entity type by interaction flags.
             // setpc==0 means this IS the player; setpc!=0 means it isn't.
             // Interaction flags determine what the player can do with it.
+            // v0.07.97: Entities with visible generic character models (modelId >= 10)
+            // always classify as NPC. Walking NPCs get pushonoff before talkonoff
+            // (PUSHRADIUS fires in init, TALKRADIUS fires later), so push-only
+            // at catalog-build time doesn't mean "object" for visible characters.
+            // The pushonoff → Object path only applies to invisible (model<0) entities.
             EntityType etype = ENT_UNKNOWN;
-            if (talkonoff > 0)        etype = ENT_NPC;
-            else if (pushonoff > 0)   etype = ENT_OBJECT;
-            else if (throughonoff > 0) etype = ENT_EXIT;
-            else                      etype = ENT_NPC;  // visible character, default to NPC
+            if (talkonoff > 0)                    etype = ENT_NPC;
+            else if (pushonoff > 0 && modelId >= 10) etype = ENT_NPC;   // v0.07.97: walking NPC, talk not yet set
+            else if (pushonoff > 0)               etype = ENT_OBJECT;
+            else if (throughonoff > 0)             etype = ENT_EXIT;
+            else                                  etype = ENT_NPC;  // visible character, default to NPC
             bool hasModel = (modelId >= 0);
             bool hasInteraction = (talkonoff > 0 || pushonoff > 0 || throughonoff > 0);
             // v05.52: Only include entities the player can meaningfully navigate to.
@@ -4651,6 +5161,129 @@ static void RefreshCatalog()
         // by walk-on zones — the player discovers them by exploring, not by
         // navigating to an entity position.
 
+        // v0.08.05: Late PSHM resolution — retry direct struct reads for entities
+        // whose positions weren't available at field init time. By RefreshCatalog time,
+        // the field has been running and non-init scripts may have executed SET3.
+        if (FF8Addresses::pFieldStateOthers) {
+            __try {
+                uint8_t* othBase = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+                if (othBase) {
+                    int othStart = s_jsmDoors + s_jsmLines + s_jsmBackgrounds;
+                    for (int jr = 0; jr < s_jsmEntityCount; jr++) {
+                        FieldArchive::JSMEntityInfo& jer = s_jsmEntities[jr];
+                        if (!jer.hasPshmCoords || jer.hasPosition) continue;
+                        // v0.08.15: Handle both Others (cat 3) and Background (cat 2) entities.
+                        uint8_t* blk4 = nullptr;
+                        int oir = 0;
+                        if (jer.jsmCategory == 3) {
+                            oir = jer.jsmIndex - othStart;
+                            if (oir < 0) continue;
+                            blk4 = othBase + ENTITY_STRIDE * oir;
+                        } else if (jer.jsmCategory == 2) {
+                            uint8_t* bgBase4 = nullptr;
+                            if (FF8Addresses::HasFieldStateBackgrounds()) {
+                                bgBase4 = reinterpret_cast<uint8_t*>(
+                                    *reinterpret_cast<uint32_t*>(FF8Addresses::pFieldStateBackgrounds));
+                            }
+                            if (!bgBase4) continue;
+                            int bgStart4 = s_jsmDoors + s_jsmLines;
+                            oir = jer.jsmIndex - bgStart4;
+                            if (oir < 0) continue;
+                            blk4 = bgBase4 + BG_STRIDE * oir;
+                        } else {
+                            continue;
+                        }
+                        int32_t fX = *(int32_t*)(blk4 + 0x190);
+                        int32_t fY = *(int32_t*)(blk4 + 0x194);
+                        uint16_t tr = 0;
+                        if (jer.jsmCategory == 3) {
+                            tr = *(uint16_t*)(blk4 + 0x1FA);
+                        }
+                        if (fX != 0 || fY != 0) {
+                            jer.posX = (int16_t)(fX / 4096);
+                            jer.posY = (int16_t)(fY / 4096);
+                            jer.posTriangle = tr;
+                            jer.hasPosition = true;
+                            Log::Write("FieldNavigation: [LATE-RESOLVE] ent%d '%s' type=%s "
+                                       "cat=%d idx=%d pos=(%d,%d) tri=%u fp=(%d,%d)",
+                                       jer.jsmIndex, jer.symName,
+                                       FieldArchive::JSMEntityTypeName(jer.type),
+                                       jer.jsmCategory, oir,
+                                       (int)jer.posX, (int)jer.posY,
+                                       (unsigned)tr, fX, fY);
+                        }
+                    }
+                }
+            } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        }
+
+        // v0.08.16: SET3-LATE-MATCH — re-check accumulated SET3 captures against PSHM entities.
+        // The extended capture window (3s) catches per-frame SET3 calls from entities like
+        // dic (bghall_1 Directory) whose SET3 fires in method 1+, not during init.
+        // This overwrites shift-pattern approximations with engine-resolved positions.
+        if (s_set3CaptureCount > 0 && FF8Addresses::pFieldStateOthers) {
+            __try {
+                uint8_t* set3OthBase = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+                uint8_t* set3BgBase = nullptr;
+                if (FF8Addresses::HasFieldStateBackgrounds()) {
+                    set3BgBase = reinterpret_cast<uint8_t*>(
+                        *reinterpret_cast<uint32_t*>(FF8Addresses::pFieldStateBackgrounds));
+                }
+                if (set3OthBase) {
+                    int set3OthStart = s_jsmDoors + s_jsmLines + s_jsmBackgrounds;
+                    int set3BgStart = s_jsmDoors + s_jsmLines;
+                    int lateMatched = 0;
+                    for (int jl = 0; jl < s_jsmEntityCount; jl++) {
+                        FieldArchive::JSMEntityInfo& jel = s_jsmEntities[jl];
+                        if (!jel.hasPshmCoords) continue;
+                        // Compute expected entity address.
+                        uint32_t lateAddr = 0;
+                        if (jel.jsmCategory == 3) {
+                            int oi = jel.jsmIndex - set3OthStart;
+                            if (oi < 0) continue;
+                            lateAddr = (uint32_t)(uintptr_t)(set3OthBase + ENTITY_STRIDE * oi);
+                        } else if (jel.jsmCategory == 2 && set3BgBase) {
+                            int bi = jel.jsmIndex - set3BgStart;
+                            if (bi < 0) continue;
+                            lateAddr = (uint32_t)(uintptr_t)(set3BgBase + BG_STRIDE * bi);
+                        } else {
+                            continue;
+                        }
+                        // Search SET3 captures for this entity address.
+                        for (int c = 0; c < s_set3CaptureCount; c++) {
+                            if (s_set3Captures[c].entityAddr == lateAddr) {
+                                int16_t newX = s_set3Captures[c].posX;
+                                int16_t newY = s_set3Captures[c].posY;
+                                if (newX == 0 && newY == 0) break;  // no useful position
+                                // Only log + update if position actually changed.
+                                if (!jel.hasPosition || jel.posX != newX || jel.posY != newY) {
+                                    Log::Write("FieldNavigation: [SET3-LATE-MATCH] ent%d '%s' type=%s "
+                                               "cat=%d old=(%d,%d) new=(%d,%d) tri=%u addr=0x%08X",
+                                               jel.jsmIndex, jel.symName,
+                                               FieldArchive::JSMEntityTypeName(jel.type),
+                                               jel.jsmCategory,
+                                               jel.hasPosition ? (int)jel.posX : 0,
+                                               jel.hasPosition ? (int)jel.posY : 0,
+                                               (int)newX, (int)newY,
+                                               (unsigned)s_set3Captures[c].triId, lateAddr);
+                                    jel.posX = newX;
+                                    jel.posY = newY;
+                                    jel.posTriangle = s_set3Captures[c].triId;
+                                    jel.hasPosition = true;
+                                    lateMatched++;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    if (lateMatched > 0) {
+                        Log::Write("FieldNavigation: [SET3-LATE-MATCH] %d entities updated from %d captures",
+                                   lateMatched, s_set3CaptureCount);
+                    }
+                }
+            } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        }
+
         // v0.07.74: Inject JSM-classified special entities not already in the catalog.
         // These are entities beyond the runtime state array (SYM index >= entCount)
         // or entities in the array that weren't caught by approach A above.
@@ -4660,7 +5293,8 @@ static void RefreshCatalog()
             if (je.type != FieldArchive::JSM_ENT_SAVE_POINT &&
                 je.type != FieldArchive::JSM_ENT_DRAW_POINT &&
                 je.type != FieldArchive::JSM_ENT_SHOP &&
-                je.type != FieldArchive::JSM_ENT_CARD_GAME) continue;
+                je.type != FieldArchive::JSM_ENT_CARD_GAME &&
+                je.type != FieldArchive::JSM_ENT_INTERACTIVE_OBJECT) continue;  // v0.07.98: include interactive objects
             // v0.07.80: Check if this type exists as a runtime entity ANYWHERE on
             // the field, even if screen-filtered. JSM SET3 positions are unreliable
             // (bghall_1 saves at 135,588 instead of -700,-8593). Runtime entities
@@ -4781,6 +5415,15 @@ static void RefreshCatalog()
                 }
             }
             EntityInfo mapExit = {};
+            // v0.07.95: Suppress JSM exits with runtime-resolved destinations
+            // when INF gateways exist on this field. The INF gateway system
+            // handles those same physical exits with proper static destinations.
+            // v0.08.01: Bit31 marker check. PSHM_W-sourced MAPJUMP destinations
+            // have bit31 set (negative values). Also check param > 982 for
+            // the 0x00FFxx markers that survived before the bit31 change.
+            if (s_gatewayCount > 0 && (je.param < 0 || je.param > 982))
+                continue;
+
             mapExit.entityIdx  = -300 - j;  // JSM-injected sentinel
             mapExit.modelId    = -1;
             mapExit.triangleId = je.posTriangle;
@@ -4815,8 +5458,11 @@ static void RefreshCatalog()
                 // Resolve display name. Static INF destinations may be placeholders
                 // (overwritten at runtime by MAPJUMPO), so show generic "Exit" if
                 // the destination doesn't look like it belongs to this field's area.
+                // v0.07.95: World map fields (IDs 0-71) all say "World Map" instead of "wm00" etc.
                 const char* dispName = GetFieldDisplayName(destId);
-                if (dispName) {
+                if (destId <= 71) {
+                    strncpy(s_dedupGateways[groupIdx].displayName, "Exit to World Map", 47);
+                } else if (dispName) {
                     snprintf(s_dedupGateways[groupIdx].displayName, 48, "Exit to %s", dispName);
                 } else {
                     strncpy(s_dedupGateways[groupIdx].displayName, "Exit", 47);
@@ -4936,6 +5582,185 @@ static void RefreshCatalog()
     }
 }
 
+// ============================================================================
+// v0.08.24: One-shot hex dump of PSHM_W entity-scope functions
+// ============================================================================
+// Reads raw x86 instruction bytes from the game's .text segment at runtime.
+// These are the same bytes the CPU executes — we just log them so we can
+// disassemble the parametric curve formula offline.
+//
+// Target addresses (Steam 2013 en-US, no ASLR):
+//   0x00532890 — entity-scope parametric curve subroutine (~300 insns)
+//   0x0051C9C0 — type-clamping dispatch (caller of 0x00532890)
+
+static void DumpPshmFunctions()
+{
+    if (s_pshmFuncDumpDone) return;
+    s_pshmFuncDumpDone = true;
+
+    struct DumpTarget {
+        const char* name;
+        uint32_t addr;
+        int size;
+    };
+    // v0.08.25: Primary target is the PSHM_W handler from the dispatch table.
+    // This is the function that actually resolves shared memory reads.
+    // Also dump the surrounding POPM_W/PSHM area for call context.
+    DumpTarget targets[] = {
+        { "pshm_w_handler",         0x0051C5C0, 1024 },  // THE KEY TARGET
+        { "entity_scope_curve_sub", 0x00532890,  512 },
+        { "type_clamp_dispatch",    0x0051C9C0,  512 },
+    };
+
+    for (int t = 0; t < 3; t++) {
+        const char* name = targets[t].name;
+        uint32_t addr = targets[t].addr;
+        int size = targets[t].size;
+
+        Log::Write("FieldNavigation: [FUNCDUMP] === %s @ 0x%08X (%d bytes) ===", name, addr, size);
+
+        __try {
+            const uint8_t* code = (const uint8_t*)addr;
+            // Log in 32-byte lines: "ADDR: XX XX XX XX ... (32 bytes)"
+            for (int offset = 0; offset < size; offset += 32) {
+                int lineLen = size - offset;
+                if (lineLen > 32) lineLen = 32;
+                char hexBuf[200];
+                int pos = 0;
+                for (int b = 0; b < lineLen; b++) {
+                    pos += snprintf(hexBuf + pos, sizeof(hexBuf) - pos, "%02X ", code[offset + b]);
+                }
+                Log::Write("FieldNavigation: [FUNCDUMP] %08X: %s", addr + offset, hexBuf);
+            }
+        }
+        __except(EXCEPTION_EXECUTE_HANDLER) {
+            Log::Write("FieldNavigation: [FUNCDUMP] EXCEPTION reading %s @ 0x%08X", name, addr);
+        }
+    }
+
+    // Also log what the dispatch table currently holds for PSHM_W (opcode 0x0C)
+    // to confirm whether FFNx has replaced it.
+    if (FF8Addresses::pExecuteOpcodeTable) {
+        uint32_t tableEntry = FF8Addresses::pExecuteOpcodeTable[0x0C];
+        Log::Write("FieldNavigation: [FUNCDUMP] dispatch_table[0x0C] (PSHM_W) = 0x%08X %s",
+                   tableEntry,
+                   (tableEntry == 0x0051C5C0) ? "(matches hardcoded addr)" :
+                   (tableEntry > 0x00600000) ? "(likely FFNx replacement)" : "(game code range)");
+        // If FFNx replaced it, also dump the original game code at nearby addresses.
+        // The original PSHM_W handler should be near the other opcode handlers (~0x0051xxxx).
+        if (tableEntry != 0x0051C5C0 && tableEntry > 0x00600000) {
+            Log::Write("FieldNavigation: [FUNCDUMP] FFNx hook detected. Dumping FFNx handler too.");
+            __try {
+                const uint8_t* code = (const uint8_t*)tableEntry;
+                Log::Write("FieldNavigation: [FUNCDUMP] === ffnx_pshm_w_hook @ 0x%08X (256 bytes) ===", tableEntry);
+                for (int offset = 0; offset < 256; offset += 32) {
+                    char hexBuf[200];
+                    int pos = 0;
+                    for (int b = 0; b < 32; b++)
+                        pos += snprintf(hexBuf + pos, sizeof(hexBuf) - pos, "%02X ", code[offset + b]);
+                    Log::Write("FieldNavigation: [FUNCDUMP] %08X: %s", tableEntry + offset, hexBuf);
+                }
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                Log::Write("FieldNavigation: [FUNCDUMP] EXCEPTION reading FFNx hook");
+            }
+        }
+    }
+
+    Log::Write("FieldNavigation: [FUNCDUMP] === dump complete ===");
+}
+
+// ============================================================================
+// v0.08.23: Descriptor table polling probe
+// ============================================================================
+// Scans the per-entity descriptor pointer table at 0x01DCB340 for non-NULL
+// entries. Each entry is a pointer to a ~0x90-byte descriptor struct that
+// contains the entity-scope computed coordinates at +0x0C/+0x0E.
+// Runs for 10 seconds after field load, checking every ~1 second.
+
+static void PollDescriptorTable()
+{
+    if (!s_descriptorPollActive) return;
+    DWORD now = GetTickCount();
+
+    // Check if polling window has expired.
+    if (now - s_descriptorPollStart > DESCRIPTOR_POLL_DURATION_MS) {
+        if (!s_descriptorPollSummaryLogged) {
+            s_descriptorPollSummaryLogged = true;
+            Log::Write("FieldNavigation: [DESCPOLL] Polling complete after %d checks, %dms",
+                       s_descriptorPollCount, (int)(now - s_descriptorPollStart));
+        }
+        s_descriptorPollActive = false;
+        return;
+    }
+
+    // Throttle to DESCRIPTOR_POLL_INTERVAL_MS.
+    if (now - s_descriptorPollLastCheck < DESCRIPTOR_POLL_INTERVAL_MS) return;
+    s_descriptorPollLastCheck = now;
+    s_descriptorPollCount++;
+
+    int totalEnts = s_jsmDoors + s_jsmLines + s_jsmBackgrounds + s_jsmOthers;
+    if (totalEnts <= 0 || totalEnts > MAX_DESCRIPTOR_SCAN) {
+        Log::Write("FieldNavigation: [DESCPOLL] #%d totalEnts=%d (skipped, out of range 1-%d)",
+                   s_descriptorPollCount, totalEnts, MAX_DESCRIPTOR_SCAN);
+        return;
+    }
+
+    __try {
+        uint32_t* table = (uint32_t*)DESCRIPTOR_TABLE_ADDR;
+        int foundCount = 0;
+
+        for (int i = 0; i < totalEnts; i++) {
+            uint32_t descPtr = table[i];
+            if (descPtr == 0) continue;
+
+            // Non-NULL descriptor found — read key fields.
+            foundCount++;
+            __try {
+                uint8_t* desc = (uint8_t*)descPtr;
+                int32_t  validity = *(int32_t*)(desc + 0x00);
+                int16_t  coordX   = *(int16_t*)(desc + 0x0C);
+                int16_t  coordY   = *(int16_t*)(desc + 0x0E);
+                uint32_t curvePtr = *(uint32_t*)(desc + 0x68);
+                int16_t  cacheKey = *(int16_t*)(desc + 0x7E);
+
+                // Dump first 16 bytes of descriptor for analysis.
+                uint8_t hdr[16];
+                memcpy(hdr, desc, 16);
+
+                // Get SYM name for this flat entity index.
+                const char* symName = (i < s_symNameCount) ? s_symNames[i] : "?";
+
+                Log::Write("FieldNavigation: [DESCPOLL] #%d ent%d '%s' ptr=0x%08X "
+                           "valid=%d coords=(%d,%d) curve=0x%08X cacheKey=%d "
+                           "hdr=[%02X %02X %02X %02X  %02X %02X %02X %02X  %02X %02X %02X %02X  %02X %02X %02X %02X]",
+                           s_descriptorPollCount, i, symName, descPtr,
+                           validity, (int)coordX, (int)coordY, curvePtr, (int)cacheKey,
+                           hdr[0], hdr[1], hdr[2], hdr[3],
+                           hdr[4], hdr[5], hdr[6], hdr[7],
+                           hdr[8], hdr[9], hdr[10], hdr[11],
+                           hdr[12], hdr[13], hdr[14], hdr[15]);
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER) {
+                Log::Write("FieldNavigation: [DESCPOLL] #%d ent%d ptr=0x%08X EXCEPTION reading descriptor",
+                           s_descriptorPollCount, i, descPtr);
+            }
+        }
+
+        if (foundCount == 0) {
+            Log::Write("FieldNavigation: [DESCPOLL] #%d all %d descriptor ptrs NULL (elapsed %dms)",
+                       s_descriptorPollCount, totalEnts, (int)(now - s_descriptorPollStart));
+        } else {
+            Log::Write("FieldNavigation: [DESCPOLL] #%d found %d/%d non-NULL descriptors",
+                       s_descriptorPollCount, foundCount, totalEnts);
+        }
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log::Write("FieldNavigation: [DESCPOLL] #%d EXCEPTION reading descriptor table at 0x%08X",
+                   s_descriptorPollCount, DESCRIPTOR_TABLE_ADDR);
+        s_descriptorPollActive = false;
+    }
+}
+
 void Update()
 {
     if (!s_initialized) return;
@@ -4945,6 +5770,33 @@ void Update()
     // Key handling and auto-drive are unthrottled: runs every ~16ms.
     HandleKeys();
     UpdateAutoDrive();
+
+    // v0.08.23: Start descriptor polling on field change.
+    // Use separate tracking var so we don't depend on s_cachedFieldId update timing.
+    if (FF8Addresses::pCurrentFieldId) {
+        uint16_t curFieldId = *FF8Addresses::pCurrentFieldId;
+        if (curFieldId != s_descriptorPollFieldId && curFieldId != 0xFFFF) {
+            // New field loaded — start descriptor polling.
+            s_descriptorPollFieldId = curFieldId;
+            s_descriptorPollActive = true;
+            s_descriptorPollStart = GetTickCount();
+            s_descriptorPollCount = 0;
+            s_descriptorPollLastCheck = 0;
+            s_descriptorPollSummaryLogged = false;
+            Log::Write("FieldNavigation: [DESCPOLL] Starting descriptor table poll for field %d (%s), "
+                       "totalEnts=%d (D%d+L%d+B%d+O%d)",
+                       curFieldId,
+                       FF8Addresses::pCurrentFieldName ? FF8Addresses::pCurrentFieldName : "?",
+                       s_jsmDoors + s_jsmLines + s_jsmBackgrounds + s_jsmOthers,
+                       s_jsmDoors, s_jsmLines, s_jsmBackgrounds, s_jsmOthers);
+        }
+    }
+
+    // v0.08.24: One-shot hex dump of PSHM_W functions (fires once, first field load).
+    DumpPshmFunctions();
+
+    // v0.08.23: Run descriptor table polling probe.
+    PollDescriptorTable();
 
     // Entity position polling is throttled to 500ms to reduce log spam.
     DWORD now = GetTickCount();
@@ -5004,6 +5856,21 @@ void Shutdown()
         MH_DisableHook((LPVOID)(uintptr_t)FF8Addresses::get_key_state_addr);
         MH_RemoveHook( (LPVOID)(uintptr_t)FF8Addresses::get_key_state_addr);
         s_originalGetKeyState = nullptr;
+    }
+    if (FF8Addresses::opcode_set3 && s_originalSet3) {
+        MH_DisableHook((LPVOID)(uintptr_t)FF8Addresses::opcode_set3);
+        MH_RemoveHook( (LPVOID)(uintptr_t)FF8Addresses::opcode_set3);
+        s_originalSet3 = nullptr;
+    }
+    // v0.08.07: Restore PSHM_W dispatch table entry (not MinHook).
+    if (FF8Addresses::pExecuteOpcodeTable != nullptr && s_originalPshmW != nullptr) {
+        uint32_t* tableEntry = &FF8Addresses::pExecuteOpcodeTable[0x06];
+        DWORD oldProtect = 0;
+        if (VirtualProtect(tableEntry, 4, PAGE_READWRITE, &oldProtect)) {
+            *tableEntry = (uint32_t)(uintptr_t)s_originalPshmW;
+            VirtualProtect(tableEntry, 4, oldProtect, &oldProtect);
+        }
+        s_originalPshmW = nullptr;
     }
     // Ensure fake gamepad is removed even if StopAutoDrive wasn't called.
     if (s_fakeGamepadInstalled && FF8Addresses::HasDinputGamepadPtrs()) {

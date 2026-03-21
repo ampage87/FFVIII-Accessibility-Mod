@@ -1,240 +1,205 @@
 # DEVNOTES - FF8 Accessibility Mod (Original PC + FFNx)
-## Last updated: 2026-03-19
+## Last updated: 2026-03-21
 
-> **File structure**: This file contains current state + key learnings only.
-> Detailed build history (v05.47–v06.22, v07.00–v07.15) is in `DEVNOTES_HISTORY.md`.
-
----
-
-## CURRENT OBJECTIVE: Entity Identification Accuracy + Exit Detection
-
-### Current build: v0.07.94
-
-### Save/Draw Point Detection (v0.07.75–v0.07.81)
-
-**Draw points now detected** on bggate_2 via SET3 3-param fallback (X/Y/Z from PSHM_W markers + triangle from opcParam). JSM injection places them in the catalog with correct coordinates.
-
-**Save points detected** via model ID 24 (save point crystal model). More reliable than SYM-based lookup because the visible save point entity (ent6) has a different SYM index than the save point script entity (JSM ent27).
-
-**Key fixes in this series:**
-- v0.07.75: SET3 position extraction fallback for draw points
-- v0.07.76: Split catalog cycling (label only) from direction announcements (Backspace); camera-adjusted compass using heading calibration axes
-- v0.07.77: Save/draw point walk-into arrive distance (30 units); fix default camera Y axis
-- v0.07.78: Remove trigger-to-save rename heuristic; suppress event triggers near save/draw points
-- v0.07.79: Model 24 save point detection
-- v0.07.80: Skip JSM injection when runtime entity exists but is screen-filtered
-- v0.07.81: Suppress screen-transition triggers near save/draw points
-
-### Trigger Line Classification (v0.07.82 — WORKING)
-
-JSM Line entity scripts are now scanned for opcode signatures to classify each SETLINE trigger line:
-- **Camera Pan** (BGDRAW/BGOFF/scroll): transparent for screen filtering
-- **Screen Boundary** (MAPJUMP family): filters entities on other side
-- **Event Trigger** (SHOW/HIDE/MES/BATTLE): transparent
-
-bghall_1 confirmed: all 6 lines classified as Camera Pan, entities remain visible while walking the hallway.
-
-**Minor edge case**: bghall_4 has 6 captured SETLINEs but only 4 JSM Line entities. The extra 2 come from Background/Other entities calling SETLINE — they map beyond the Line range and get UNKNOWN (treated as separators). Low priority — fix by matching entity addresses instead of ordinal.
-
-### JSM-Based Exits (v0.07.83–v0.07.88 — PARTIALLY WORKING)
-
-INF gateway exit detection **stripped entirely** (vestigial PS1 data with bogus positions and destinations). Replaced with multi-layered JSM-based exit detection:
-
-1. **Line-based exits** (`JSM_ENT_LINE_SCREEN_BOUND` captured trigger lines): Walk-on trigger lines with MAPJUMP. Position = runtime SETLINE center (accurate). Uses trigger-crossing arrival detection. No fields tested yet with actual screen boundary lines.
-2. **Entity-based exits** (`JSM_ENT_MAP_EXIT` "Other" JSM entities): Direct MAPJUMP in entity scripts. Position from SET3 extraction or SETLINE fallback.
-3. **REQ-following** (v0.07.85): If entity A calls REQ to entity B method M, and method M contains MAPJUMP, entity A is classified as MAP_EXIT. Works for indirect exit patterns like bgroom_1 jump entities.
-4. **Variable-dispatch** (v0.07.87): If entity writes POPM_W to address X, and a MAPJUMP-containing method reads PSHM_W from address X, entity is classified as MAP_EXIT. Addr<8 filtered (v0.07.88) to eliminate scratch variable false positives.
-
-**Destination names**: Resolved via `FIELD_DISPLAY_NAMES[destFieldId]` → "Exit to B-Garden - Hall 2". However, many fields load destFieldId from runtime memory (PSHM_W markers like 0xFF00FF) — static scanner cannot extract these. These show as generic "Exit".
-
-**Current status on bghall_1**: 2 exits detected:
-- `saveline0` (elevator): MAP_EXIT, no position (JSM ent36, beyond 10-slot runtime entity array — SETLINE writeback can't reach it)
-- `water` (main gate): MAP_EXIT, position (142,-1484) works with compass. Player goes DOWN from save point to reach this.
-
-**Not yet detected**: l1-l6 hall exits. **Deep research (2026-03-19) revealed these are CAMERA PAN ONLY** — they do NOT trigger field transitions. The actual transitions come from INF gateways (engine-level, checked every frame by field_main_loop). The variable-dispatch investigation for l1-l6 was a dead end. See `DEEP_RESEARCH_INF_GATEWAYS_Findings.md`. POPM_W addresses [1024-1041] are camera state variables, not transition dispatch.
-
-**Bugs fixed this session**:
-- **v0.07.84 Bug 3 FIX**: Camera Pan trigger lines no longer leak as "Event" entities. Event trigger section skips lines with `lineType == JSM_ENT_LINE_CAMERA_PAN || JSM_ENT_LINE_EVENT`.
-- **v0.07.87**: SETLINE position writeback — writes derived position back to `s_jsmEntities[j]` so AnnounceDirections can provide compass for exits whose position came from SETLINE center.
-- **v0.07.88**: Addr<8 filter eliminates false positives from scratch variables in var-dispatch matching.
-
-### Catalog UX (v0.07.76+)
-
-- **Minus/Plus**: Cycle entities, speaks "Type N of M" only (no directions)
-- **Backspace**: Speaks camera-adjusted compass directions to selected entity
-- **Backslash**: Auto-drive to selected entity
-- Camera calibration runs on first auto-drive per field; default axes (1,0)/(0,-1) correct for most fields
-
-### Menu TTS (WORKING — v07.04+)
-
-Top-level cursor at `pMenuStateA + 0x1E6`. Values 0–10: Junction through Save.
-
-### Save Screen (WORKING — v0.07.63)
-
-Slot/block/phase cursors. LZSS decompression. SETPLACE location names. Save block content TTS.
-
-### BGM Volume (WORKING — v0.07.24)
-
-Hook `set_music_volume_for_channel` via FFNx. F3/F4 controls. Default 20%.
+> **File structure**: This file = current state + key learnings only (~10KB max).
+> Build history in `DEVNOTES_HISTORY.md`. Immediate context in `NEXT_SESSION_PROMPT.md`.
 
 ---
 
-## PREVIOUS MILESTONES
+## CURRENT OBJECTIVE: Menu TTS + Interactive Object Position Research
 
-- **v0.07.94**: INF gateway catalog integration — deduplicated exits with compass directions and auto-drive support. Tested on bggate_1 (3 exits) and bggate_2 (2 exits + draw point).
-- **v0.07.93**: Corrected INF parser using Deling source: offset 0x64, stride 32, fieldId at +18. INF size = 676 bytes.
-- **v0.07.90–92**: INF gateway diagnostic builds — hex dump, field-ID scan, format investigation.
-- **v0.07.88**: Variable-dispatch exit detection + SETLINE position writeback + addr<8 filter. bghall_1: 2 exits detected (main gate with compass, elevator without position).
-- **v0.07.87**: Variable-dispatch exit detection (POPM_W/PSHM_W address matching across entities and MAPJUMP methods). SETLINE position writeback for compass.
-- **v0.07.85**: REQ-following for indirect MAPJUMP. Tracks REQ call targets and checks if target methods contain MAPJUMP.
-- **v0.07.84**: Fix camera pan event leak, bogus destId filter (removed — too aggressive), SETLINE position fallback for entity-based exits.
-- **v0.07.83**: JSM-based exits replace INF gateways. Entity-based exits from MAP_EXIT entities.
-- **v0.07.82**: Trigger line classification — camera pans transparent, only screen boundaries filter entities.
-- **v0.07.81**: Suppress screen-transition triggers near save/draw points.
-- **v0.07.80**: Skip JSM injection when runtime entity is screen-filtered.
-- **v0.07.79**: Model 24 save point detection.
-- **v0.07.78**: Remove trigger-to-save rename heuristic. Event trigger overlap suppression.
-- **v0.07.77**: Save/draw arrive distance 30. Fix default camera Y axis.
-- **v0.07.76**: Split catalog/directions UX. Camera-adjusted compass.
-- **v0.07.75**: SET3 3-param fallback for draw point positions. Disable SVDUMP/0x1C logging.
-- **v0.07.74**: AnnounceCurrentTarget typeLabel fix. Invisible entity inclusion. JSM injection infrastructure.
-- **v0.07.73**: JSM wired into catalog. Trigger line renaming. LoadJSMCounts fix.
-- **v0.07.72**: JSM method boundaries fixed. SYM-name fallback.
-- **v0.07.68**: JSM bytecode scanner — instruction decode confirmed via x86 disassembly.
-- **v0.07.66**: Field display name tables (982 entries)
-- **v0.07.63**: SETPLACE location display names in save block TTS
-- **v0.07.48**: Save block cursor TTS
-- **v0.07.24**: BGM volume persistence fix
-- **v0.06.22**: Field navigation — auto-drive with A* pathfinding, SSFA funnel
-- **v0.04.36**: Field dialog TTS — all MES/ASK/AMES/AASK/AMESW/RAMESW opcodes
-- **v0.03.00**: FMV audio descriptions + skip
-- **v0.02.00**: Title screen TTS
+### Current build: v0.08.61 (source) / v0.08.01 (deployed)
+
+### PSHM_W Investigation (v0.08.03–v0.08.26 — ALL RUNTIME APPROACHES EXHAUSTED, Option F pending)
+
+**Goal**: Resolve runtime positions for PSHM_W entities (e.g. bghall_1 Directory panel dic/igyous1) whose coordinates come from shared memory variables rather than literal values in JSM scripts.
+
+**Approaches tried (ALL FAILED for dic):**
+1. SET3 opcode hook (v0.08.03, extended v0.08.16, persistent v0.08.26): dic is beyond 10-slot active window, engine never executes its scripts, never fires SET3.
+2. Direct entity state read (v0.08.02/v0.08.05): entities beyond index 9 have no allocated state struct.
+3. Varblock formula (v0.08.11–12): `*(int16_t*)(0x1CFE9B8 + addr)` returns wrong values. dic's address 135 is below entity-scope threshold (~2696), takes alternate code path.
+4. Descriptor table polling (v0.08.23): `0x01DCB340[dic_index]` always NULL. Polled 10s after load.
+5. Proximity-based active window swap (v0.08.26): walked to Directory, no new SET3 calls. Active window is fixed at field load.
+6. Parametric curve formula (deep research): requires descriptor data at +0x68 which is never allocated.
+7. Mini JSM interpreter (Option D): would hit same entity-scope dead end — varblock read for addr 135 returns 0.
+
+**Remaining approach: Option F — Force Entity Script Execution**
+Allocate temporary entity state struct, configure it for dic's JSM context, call the engine's script interpreter directly. Deep research prompt prepared: `Plan & Research Documents/Force Entity Script Execution - Deep Research Request.md`. Awaiting ChatGPT results.
+
+**What works today**: Shift-pattern passthrough gives approximate coordinates (-82, -8019) for dic/igyous1. Entity is in catalog and interactable but ~494 units off from true position (21, -7536).
+
+### Savemap Offset Correction (v0.08.27 — CRITICAL for all future research)
+
+ChatGPT deep research assumes savemap header is 96 bytes (0x60). **Confirmed header is 76 bytes (0x4C).** All post-header offsets from research are 0x14 (20 bytes) too high. When using research offsets: subtract 0x14.
+
+Verified corrected new offsets: Live game time +0x0CCC, gameplay Gil +0x0B08, item inventory +0x0B40 (198×2 bytes), current field ID +0x0D3E, SeeD test level +0x0D2F, active party +0xAF1 (unchanged). T hotkey now uses live timer.
+
+### Submenu Cursor Discovery (v0.08.28–v0.08.61)
+
+**Item submenu offsets confirmed:**
+- **+0x22E**: Active focus indicator (v0.08.59 round-trip diagnostic). **3=action menu, 5=items list**. Transitions through intermediates: 5→2→3 (items→action), 3→4→5 (action→items). This is the primary detection mechanism — scalable to all submenus.
+- **+0x27F**: Action menu cursor (0=Use, 1=Rearrange, 2=Sort, 3=Battle). Debounced 200ms.
+- **+0x272**: Item list cursor index.
+- **+0x230**: Phase flag (0=action, 1=items) — UNRELIABLE, does not always update on Cancel.
+- **+0x5DF**: Sub-phase — UNRELIABLE, sometimes fires 3→2 and sometimes doesn't.
+- **+0x234**: Submenu callback index (=5 for Item).
+
+**Architecture (v0.08.60–61):** PollItemSubmenu watches +0x22E for transitions to stable endpoints (3 or 5). On arriving at 3: announce action option. On arriving at 5: announce current item. Debounced +0x27F handles left/right action navigation. Clean, no GCW string matching or phase fallbacks.
+
+Auto-monitor infrastructure (SUBMON) still active for discovering future submenu offsets.
+
+### Catalog Status (bghall_1 v0.08.16)
+- 5 NPCs + 1 Save Point + 1 Interactive Object (Directory) + 4 INF gateway exits (named)
+- **Directory panel (igyous1)**: In catalog at (-82, -8019) via shift-pattern. Interactable but ~494 units off from true interaction zone (21, -7536).
+- **v0.08.15**: Extended SET3-MATCH to scan pFieldStateBackgrounds — no new matches for dic/igyous1 (they're actually Others cat=3, not Background cat=2). Infrastructure still valuable for future fields with genuine bg entities using PSHM_W.
+- **v0.08.16**: Extended SET3 capture window to 3s post-init. Captured walking NPCs (ent3/ent4) repositioning, proving the extended window works for per-frame SET3. However dic never fires SET3 during normal gameplay — its position is resolved on-demand by the PSHM_W entity-scope parametric formula, not via explicit SET3 calls.
+- **Next step**: Deep research needed on parametric curve formula at sub `0x00532890`. Prompt prepared: `Plan & Research Documents/PSHM_W Parametric Curve Formula - ChatGPT Deep Research Request v2.md`
+- **Bonus finding**: Extended SET3 window captures walking NPCs repositioning after field load. This will be useful for tracking moving NPC positions on other fields (e.g., students walking between classes).
 
 ---
 
-## ARCHITECTURE
+## WORKING FEATURES (stable)
 
-### Module System (dinput8.cpp)
-AccessibilityThread polls game state ~60Hz. Modules: TitleScreen, FieldDialog, FieldNavigation, FmvAudioDesc, FmvSkip, MenuTTS.
+| Feature | Version | Notes |
+|---------|---------|-------|
+| Title screen TTS | v0.02.00 | Cursor tracking |
+| FMV audio descriptions + skip | v0.03.00 | ReadFile EOF hook |
+| Field dialog TTS | v0.04.36 | All MES/ASK/AMES/AASK/AMESW/RAMESW |
+| Field navigation + auto-drive | v0.06.22 | A*, SSFA funnel, analog steering, recovery |
+| Menu TTS (top-level) | v0.07.04+ | pMenuStateA+0x1E6 cursor |
+| BGM volume control | v0.07.24 | F3/F4, hook set_music_volume |
+| Save screen TTS | v0.07.63 | Slot/block/phase cursors, LZSS, SETPLACE |
+| Field display names | v0.07.66 | 982-entry table |
+| Save/draw point detection | v0.07.75–81 | SET3 fallback, model 24 |
+| Trigger line classification | v0.07.82 | Camera pan / screen boundary / event |
+| JSM-based exit detection | v0.07.83–88 | MAPJUMP, REQ-following, var-dispatch |
+| INF gateway exits | v0.07.93–96 | Dedup, named destinations, world map |
+| Interactive object detection | v0.07.98–v0.08.01 | Paired inheritance, PSHM_W markers |
+| SET3 opcode hook | v0.08.03 | Runtime position capture (active entities only) |
 
-### Key Source Files
-| File | Purpose |
-|------|---------|
-| dinput8.cpp | DLL proxy entry + game loop + module dispatch |
-| ff8_addresses.h/cpp | Runtime address resolution |
-| menu_tts.cpp/h | In-game menu + save screen TTS |
-| field_navigation.cpp | Entity catalog, auto-drive, A* pathfinding (~4800 lines) |
-| field_dialog.cpp/h | Opcode dispatch hooks for field dialog TTS |
-| field_archive.cpp/h | fi/fl/fs archive reader + JSM scanner |
-| ff8_text_decode.cpp/h | FF8 field + menu font encoding → UTF-8 |
-| screen_reader.cpp | NVDA direct + SAPI fallback TTS |
-| field_display_names.h | FIELD_DISPLAY_NAMES[982] + FIELD_INTERNAL_NAMES[982] |
-| deploy.bat | Build + deploy (ONLY build script) |
+---
+
+## MENU TTS (v0.08.17–v0.08.22)
+
+### Savemap Memory Layout (confirmed)
+- **Savemap base**: `0x1CFDC5C` (derived from Gil=5000 at 0x1CFDC64, header.gil is at +0x08)
+- **Header**: 0x4C bytes. locId(+0x00 u16), HP(+0x02/0x04 u16), Gil(+0x08 u32), time(+0x0C u32 seconds), lvl(+0x10 u8), portraits(+0x11 u8[3]), names(+0x14 12-byte blocks, -0x20 encoded)
+- **GF section**: 16 × 68 bytes = 0x440, starting at savemap+0x4C
+- **Character section**: 8 × 152 (0x98) bytes = 0x4C0, starting at savemap+0x48C (= 0x1CFE0E8)
+- **Party indices**: savemap+0xAF1 (3 bytes: char index 0-7 or 0xFF=empty) — candidate, not fully verified
+- **Name encoding**: Live savemap uses +0x20 offset from menu font encoding. Subtract 0x20 before decoding.
+- **character_data_1CFE74C** from FFNx is battle-computed stats, NOT savemap characters.
+
+### Known Issue: Header played_time_secs is Stale
+The uint32 at savemap+0x0C is only synced at save/load time, NOT updated in real-time during gameplay. Need to find the live timer variable for the T hotkey.
+
+### Help Text in GCW Buffer
+GCW buffer captures ALL rendered menu text concatenated. Pattern:
+`"...SaveJunction MenuSquallB-Garden- Hall"` — help text is between "Save" and character name.
+Need to parse the help substring from the repeating block.
+
+### Menu Hotkeys (implemented v0.08.21, need live-timer fix)
+- G = Gil, T = Play time, L = Location, R = SeeD rank
+- F11 = full summary, Shift+F11 = memory monitor, Ctrl+F11 = diagnostic dump
+- Keys G/T/R/L confirmed safe — not bound to any FF8 function
+
+---
+
+## PREVIOUS MILESTONES (v0.08.xx)
+
+- **v0.08.22**: Memory monitor + GCW help text capture. Left-panel cursor investigation started.
+- **v0.08.21**: Menu hotkeys G/T/L/R + F11 summary. Removed auto-announce on menu open.
+- **v0.08.19**: Fixed GF struct size (68 not 76), name -0x20 decode. All 8 chars + names confirmed.
+- **v0.08.17**: First menu data diagnostic. Confirmed savemap base 0x1CFDC5C via Gil/time cross-reference.
+- **v0.08.16**: Extended SET3 capture window (3s post-init) + SET3-LATE-MATCH in RefreshCatalog. Deduplication in SET3 hook. Captures walking NPCs repositioning. dic still needs parametric formula.
+- **v0.08.15**: SET3-MATCH extended to background entities (cat 2). Three matching sites updated (init, direct-read, late-resolve).
+- **v0.08.14**: F12 position announce key. Shift-pattern promotion in catalog.
+- **v0.08.13**: PSHM_W negative-param passthrough. Tightened isPshm marker detection (`&0xFFFF0000==0x80000000`). Shift-pattern: litY→posX, litZ→posY when X=PSHM. Paired inheritance hasPosition propagation.
+- **v0.08.12**: PSHM_W investigation builds. Hardcoded varblock, dispatch table hook, time-based capture.
+- **v0.08.06**: PSHM_W handler diagnostic. Descriptor table probe (all NULL). Deep research prompt.
+- **v0.08.05**: Direct struct read fallback + late PSHM resolution. Both return 0 for dic.
+- **v0.08.04**: Light-entity paired inheritance filter. IntObj=1 confirmed.
+- **v0.08.03**: SET3 opcode hook. 5 captures on bghall_1. dic not captured (non-init method).
+- **v0.08.02**: Runtime PSHM_W read attempt. FAILED — 10-slot active window.
+- **v0.08.01**: (DEPLOYED) Paired entity inheritance (dic→igyous1). Exit dedup bit31 fix.
+- **v0.08.00**: PSHM_W marker pattern fix: `0x80000000|addr` (was `0x00FF0000`).
+For v0.07.xx and earlier build tables, see `DEVNOTES_HISTORY.md`.
 
 ---
 
 ## KEY LEARNINGS
 
 ### Entity & Coordinate System
-- Entity screen-vertical is Y (offset 0x194), NOT Z (0x198). Z is always ~0.
-- World coords (fixed-point ×4096): X=0x190, Y=0x194, Z=0x198. Player triangle: 0x1FA.
-- Talk radius: offset 0x1F8 (uint16). Push radius: 0x1F6 (uint16).
-- Model ID at offset 0x218 (int16). model=-1 = invisible script entity.
-- **Model 24 = save point crystal** (authoritative across all fields).
-
-### SETLINE Triggers
-- INF trigger section is BOGUS on PC — real data from SETLINE opcode at runtime.
-- Line coords at entity offset 0x188: 6×int16 (X1,Y1,Z1,X2,Y2,Z2) + lineIndex.
-- SETLINE fires DURING field_scripts_init BEFORE SYM names load → captured names always empty.
-- **Trigger line classification by JSM opcodes** (deep research complete):
-  - Camera pan: BGDRAW (0x099), BGOFF (0x09A), scroll family (0x071–0x081), SETCAMERA (0x10A). Most common line type. Should NOT filter entities.
-  - Screen boundary: MAPJUMP (0x029), MAPJUMP3 (0x02A), DISCJUMP (0x038), MAPJUMPO (0x05C), WORLDMAPJUMP (0x10D). Should filter entities.
-  - Event trigger: SHOW (0x060), HIDE (0x061), USE (0x0E5), UNUSE (0x01A), MES (0x047), BATTLE (0x069). Should NOT filter entities.
-  - Priority: MAPJUMP-family first (a script with BGDRAW + MAPJUMP is a screen boundary, not a camera pan).
-  - All camera/scroll/event opcodes are < 0x100 → detected as primary opcodes (high byte). No 0x1C dispatch needed.
-  - Line entities are JSM indices [countDoors .. countDoors+countLines-1], category 1 in scanner.
-
-### Exit Detection Architecture (v0.07.83–v0.07.88)
-- FF8 exits use 4 patterns:
-  (A) Direct MAPJUMP in entity script — detected by opcode scan.
-  (B) REQ to another entity's method with MAPJUMP — detected by REQ-following.
-  (C) Variable-dispatch (write POPM_W, Director reads PSHM_W + branches to MAPJUMP) — partially works but misses many fields.
-  (D) **INF gateways** (engine-level) — checked every frame by field_main_loop, zero script involvement. Toggled by MAPJUMPON (0x5D) / MAPJUMPOFF (0x5E). Destinations can be overwritten by MAPJUMPO (0x5C). **This is how bghall_1 hall exits work.**
-- Pattern A: Works for `saveline0`, `water`, lighting entities with direct MAPJUMP.
-- Pattern B: Works for bgroom_1 `*_jump*` entities that REQ to Director.
-- Pattern C: Addr<8 filter in place. bghall_1 l1-l6 were investigated under this pattern but **turned out to be camera-pan-only entities** — their POPM_W writes (addrs 1024-1041) are camera state, not transition dispatch.
-- Pattern D: **NOT YET IMPLEMENTED** in catalog. INF gateway data is loaded by LoadINFGateways() but was previously dismissed as "bogus PS1 data". Deep research (2026-03-19) shows the data appeared garbage due to format-version parsing error (4 INF formats: 672/576/480/384 bytes, each with different gateway offsets).
-- Many fields load MAPJUMP destination from runtime memory (PSHM_W markers 0xFF00xx). Static scanner sees marker value, not real field ID. These show as generic "Exit".
-- SETLINE position fallback: when entity-based exit has no SET3 position, match JSM SYM name to captured SETLINE entity address within runtime Others array. Write position back to `s_jsmEntities[]` for compass. Limited to entities within runtime entCount (saveline0 at ent36 is beyond 10-slot array).
-
-### Entity Naming & Classification
-- Model ID 0–8 overrides SYM for main character names. Model 24 = Save Point.
+- Screen-vertical = Y (offset 0x194), NOT Z. World coords ×4096: X=0x190, Y=0x194. Triangle: 0x1FA.
+- Talk radius: 0x1F8. Push radius: 0x1F6. Model ID: 0x218. Model 24 = save point.
 - SYM offset = 0 (entity state index i = SYM[i]).
-- JSM-classified types: Save Point ("savePoint"/"svpt"), Draw Point ("dp##"), Shop ("shop*"), Card Game ("cardgame*").
-- **JSM SET3 positions unreliable for some fields** (bghall_1 save point: SET3 gives 135,588 but runtime entity is at -700,-8593). Runtime entity positions via model=24 are authoritative.
-- **JSM injection must check runtime entities (even screen-filtered) before injecting** to avoid wrong-position duplicates.
+- `pFieldStateOthers` only allocates `entCount` active slots (typically 10). Entities beyond are inaccessible.
 
-### JSM Bytecode (CONFIRMED by x86 disassembly)
+### PSHM_W / Shared Memory Architecture
+- **Varblock base**: `0x1CFE9B8` (Steam 2013 en-US), `0x18FE9B8` (Original/SE). FFNx: `field_vars_stack_1CFE9B8`. Save file offset `0xD10`.
+- **Variable space**: bytes 0–1023 = persistent (saved to disk). 1024+ = temp per-field (reset on transition).
+- **Standard formula**: `*(int16_t*)(0x1CFE9B8 + param)` — only for standard code path.
+- **Two code paths**: execution flags at entity struct 0x160 control branching. Standard = varblock read. Alternate = entity-relative via *9 multiply.
+- **PSHSM = "Push Signed Memory"** (NOT shared). Same varblock, sign-extended result. No POPSM counterpart.
+- **JSM encoding**: 32-bit native LE. Bits[31:16] = opcode key. Bits[15:0] = signed int16 parameter.
+- `0x01DCB340`: per-entity descriptor pointer table (NOT variable array). Allocated on-demand.
+- Entity scope sub `0x00532890`: parametric curve computation from descriptor+0x68 data array.
+- POPM_W `0x0051CAF0` → core sub `0x0051C9C0` (type-clamping jump table).
+- Global threshold selector: `0x01CE476A` (WORD). On bghall_1 = 20 → threshold ≈ 2696.
+- **PSHM markers**: `0x8000xxxx` (bits 16-30 zero). Negative literals: `0xFFFFxxxx` (bits 16-30 ones). Must use `& 0xFFFF0000 == 0x80000000` to distinguish.
+- **Shift-pattern**: When first PSHM_W param is positive (mode selector) but Y,Z are negative passthrough, actual position is (litY, litZ). Confirmed: l1 (1032,-2865,-5421)→pos(-2865,-5421). Safety: both litY AND litZ must be non-zero.
+- **Three PSHM_W resolution modes** (per-axis independent): (1) Negative param → passthrough literal coordinate. (2) Small positive + entity flag → entity-scope sub 0x00532890. (3) Standard positive → varblock read.
+- **Descriptor struct**: 0x90 bytes (9×16), per flat entity index. +0x0C/+0x0E=computed X/Y, +0x68=curve data ptr, +0x7E=cache key.
+- Paired entity pattern: position entity (dic) + dialog entity (igyous1), consecutive JSM indices.
+- **Dispatch table hook**: MinHook conflicts with FFNx on same handler. Write directly to `pExecuteOpcodeTable[index]` instead — swap pointer, save original as trampoline. Restore on shutdown via VirtualProtect.
+- **FFNx replaces dispatch table entries**: `opcode_pshm_w` from the table points to FFNx code, NOT the original handler. Cannot read embedded constants (e.g., +0x1E for varblock base) from it.
+- **Entity struct stack**: VM stack is at entity+0x000 (320 bytes). Stack pointer at +0x184 is `uint8_t`, NOT `uint32_t`. Reading DWORD at 0x184 causes crash (3 garbage bytes).
+- **Varblock reads don't work for entity-scope addresses**: `*(int16_t*)(0x1CFE9B8 + addr)` returns wrong values for ALL PSHM_W entities on bghall_1. Every address goes through entity-scope parametric path.
 
-**Instruction encoding**: Native LE uint32, NO byte swap. High byte = primary opcode (0x01-0xFF). 0x00 = push literal. Low 24 bits = signed param.
+### Exit Detection (4 patterns)
+- (A) Direct MAPJUMP in entity script — opcode scan
+- (B) REQ-following — indirect MAPJUMP via REQ call
+- (C) Variable-dispatch — POPM_W/PSHM_W address matching (addr≥8 filter)
+- (D) INF gateways — engine-level, toggled by MAPJUMPON/OFF, destinations by MAPJUMPO
 
-**0x1C extended dispatch**: POPS dispatch index from VM stack (not from instruction param). Pattern: `PUSH 0x137` then `0x1C` → dispatches as table[0x137] (DRAWPOINT).
+### Trigger Lines & Screen Filtering
+- Classified by JSM opcodes: Camera Pan (BGDRAW), Screen Boundary (MAPJUMP), Event (SHOW/HIDE)
+- Cross-product sign test for screen filtering
+- INF trigger section is bogus on PC — real data from SETLINE opcode hook at runtime
 
-**ENCODING DISCREPANCY**: Deep research (from Deling/Qhimm wiki) claims opcodes use bits 1–14 of the instruction word. Our scanner uses high-byte encoding — confirmed by x86 disassembly and validated across many fields. `DecodeJSMInstruction()` and `SwapBE32()` in field_archive.cpp are DEAD CODE (never called). Do not change the encoding — the high-byte + 0x1C approach works.
+### INF Gateway System
+- Dual transition architecture: script-driven (MAPJUMP) + engine-driven (INF gateways)
+- INF format = 676 bytes. Gateways at offset 0x64, stride 32, fieldId at +18.
+- Deduplication by destFieldId. World map IDs 0-71 → "Exit to World Map".
 
-**Header**: b0=countDoors, b1=countLines, b2=countBg, b3=countOthers. Bytes 4-5=posFirst, 6-7=posScripts (uint16 LE).
-
-**Group table entry**: uint16, bits 0-6 = method count, bits 7-15 = starting method index (0-based), bit 15 also encodes class/category flag.
-
-**Key opcodes**: MAPJUMP=0x29, MAPJUMP3=0x2A, SETLINE=0x39, MES=0x47, DRAWPOINT=0x137 (via 0x1C), MENUSAVE=0x12E (via 0x1C), SETDRAWPOINT=0x155 (via 0x1C).
-
-**SET3 position extraction**: Primary path uses 4 stack params. Fallback uses 3 stack params + triangle from opcParam (handles PSHM_W markers). Validated on bggate_2 dp01.
-
-### Compass Directions (v0.07.76+)
-- FormatNavComponents projects world-space delta onto camera axes (s_camRightX/Y, s_camDownX/Y).
-- Default axes: camRight=(1,0), camDown=(0,-1). Matches most field camera orientations.
-- Calibration refines axes empirically on first auto-drive per field.
-- Camera variables declared early in file (before FormatNavComponents) for visibility.
+### JSM Bytecode
+- Native LE uint32. High byte = primary opcode. 0x00 = push literal. Low 24 bits = signed param.
+- 0x1C extended dispatch: pops index from VM stack. Key dispatches: DRAWPOINT=0x137, MENUSAVE=0x12E.
+- Header: b0-b3 = countDoors/Lines/Bg/Others. Group table: bits 0-6 = methods, 7-15 = start index.
 
 ### Navigation Architecture
-- 47.5% of FF8 fields have disconnected walkmesh islands — BFS island detection essential.
-- Save/draw points use arriveDist=30 (walk-into). NPCs use talkRadius. Default=300.
-- Analog steering via fake gamepad + per-field heading calibration.
-- Corridor-level steering targets shared-edge midpoints.
-- Trigger-line proximity check prevents accidental field transitions.
+- 47.5% of fields have disconnected walkmesh islands — BFS essential
+- Analog steering via fake gamepad (0xDEAD0001 sentinel) + get_key_state hook
+- SSFA funnel path smoothing. Corridor-level steering. Recovery: re-path/nudge cycle.
+- Per-field heading calibration on first auto-drive.
 
-### Auto-Drive
-- Fake gamepad device sentinel (0xDEAD0001) + fake DIJOYSTATE2 buffer.
-- Hook get_key_state to zero arrow scancodes during drive.
-- SSFA funnel for path smoothing. Wall-parallel portal skip. Agent-radius portal shrinking.
-- Recovery: re-path/nudge cycle. Max 12 recovery phases.
+---
 
-### INF Gateway System (deep research + Deling source 2026-03-19)
-- FF8 has a DUAL transition architecture: script-driven (MAPJUMP family) AND engine-driven (INF gateways).
-- INF gateways are checked every frame inside field_main_loop — 2D line-crossing test (cross product).
-- Toggled by MAPJUMPON (0x5D) / MAPJUMPOFF (0x5E). Destinations overwritable by MAPJUMPO (0x5C).
-- **0x5D = MAPJUMPON**, NOT WORLDMAPJUMP (which is 0x10D via 0x1C dispatch).
-- **INF format = 676 bytes** (not 672). Definitive from Deling source (`myst6re/deling` → `src/files/InfFile.h`):
-  - 0x00: name[9] + control(1) + unknown[6] + pvp(2) + cameraFocusHeight(2) = 20 bytes
-  - 0x14: cameraRange[8] (64 bytes)
-  - 0x54: screenRange[2] (16 bytes)
-  - 0x64: gateways[12] (12 × 32 = 384 bytes) — **offset 0x64, stride 32, fieldId at +18**
-  - 0x1E4: triggers[12] (12 × 16 = 192 bytes)
-- Gateway struct (32 bytes): exitLine[2]×6B + destPoint×6B + fieldId(uint16) + unknown(12B)
-- Gateway center = average of exit line endpoints (X,Y). Uses X/Y not X/Z (Y is screen-vertical).
-- Static destinations may be FH placeholders (overwritten by MAPJUMPO at runtime). Display as "Exit to [fieldname]".
-- **Deduplication**: Multiple gateways with same destFieldId → one catalog exit with averaged center.
-- **Entity index sentinel**: -400 range for INF gateway catalog entries.
-- Reference: `DEEP_RESEARCH_INF_GATEWAYS_Findings.md`, Deling `InfFile.h`
+## ARCHITECTURE
 
-### Menu / Save Screen
-- Menu font (sysfnt) encoding differs from field dialog. Separate decoder.
-- Save files: LZSS compression, 384-byte PC header before savemap.
-- SETPLACE location names: hardcoded 251-entry table.
+### Module System (dinput8.cpp)
+AccessibilityThread polls ~60Hz. Modules: TitleScreen, FieldDialog, FieldNavigation, FmvAudioDesc, FmvSkip, MenuTTS.
 
-### Build System
-- `deploy.bat` is the ONLY build script.
-- Version: bump `FF8OPC_VERSION` in `ff8_accessibility.h`, version comment in field_navigation.cpp, init log string.
+### Key Source Files
+| File | Purpose |
+|------|---------|
+| field_navigation.cpp | Entity catalog, auto-drive, A* pathfinding (~5000 lines) |
+| field_archive.cpp/h | fi/fl/fs archive reader + JSM scanner |
+| ff8_addresses.h/cpp | Runtime address resolution |
+| field_dialog.cpp/h | Opcode dispatch hooks for field dialog TTS |
+| menu_tts.cpp/h | In-game menu + save screen TTS |
+| screen_reader.cpp | NVDA direct + SAPI fallback TTS |
+| deploy.bat | Build + deploy (ONLY build script) |
 
 ---
 
@@ -243,8 +208,7 @@ AccessibilityThread polls game state ~60Hz. Modules: TitleScreen, FieldDialog, F
 - Project root: `C:\Users\ampag\OneDrive\Documents\FFVIII-Accessibility-Mod\FF8_OriginalPC_mod\`
 - Source: `src\`
 - FFNx reference: `FFNx-Steam-v1.23.0.182\Source Code\FFNx-canary\src\`
-- Game folder: `C:\Program Files (x86)\Steam\steamapps\common\FINAL FANTASY VIII\`
-- Logs: `Logs\` (ff8_accessibility.log, ff8_nav_data.log, build_latest.log)
+- Log: `Logs\ff8_accessibility.log`
 - Build history: `DEVNOTES_HISTORY.md`
 
 ---
@@ -256,6 +220,6 @@ AccessibilityThread polls game state ~60Hz. Modules: TitleScreen, FieldDialog, F
 3. Read `DEVNOTES_HISTORY.md` ONLY if you need past build details
 4. Use filesystem MCP tools (not bash) for Windows file access
 5. `deploy.bat` is the ONLY build script
-6. Current version: v0.07.94
+6. Current version: v0.08.61 (source), v0.08.01 (deployed)
 7. "BAT" = read tail of `Logs/ff8_accessibility.log`
 8. GitHub repo: ampage87/FFVIII-Accessibility-Mod
