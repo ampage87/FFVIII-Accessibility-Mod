@@ -9,8 +9,8 @@
 // FF8 Original PC Accessibility Mod version
 // Increment on every build change
 // ================================================================
-#define FF8OPC_VERSION "0.08.61"  // Item submenu: +0x22E transitions through intermediates (5>2>3, 3>4>5)
-#define FF8OPC_VERSION_DATE "2026-03-21"
+#define FF8OPC_VERSION "0.08.87"  // Use target: compStats HP confirmed, diagnostic removed
+#define FF8OPC_VERSION_DATE "2026-03-22"
 
 // ============================================================================
 // FF8 Runtime Address Resolution

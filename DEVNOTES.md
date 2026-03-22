@@ -1,5 +1,5 @@
 # DEVNOTES - FF8 Accessibility Mod (Original PC + FFNx)
-## Last updated: 2026-03-21
+## Last updated: 2026-03-22 (session 2)
 
 > **File structure**: This file = current state + key learnings only (~10KB max).
 > Build history in `DEVNOTES_HISTORY.md`. Immediate context in `NEXT_SESSION_PROMPT.md`.
@@ -8,7 +8,25 @@
 
 ## CURRENT OBJECTIVE: Menu TTS + Interactive Object Position Research
 
-### Current build: v0.08.61 (source) / v0.08.01 (deployed)
+### Current build: v0.08.87 (source + deployed)
+
+### Battle Arrangement TTS — FIXED (v0.08.82–v0.08.85)
+- **Display struct at `0x1D8DFF4`** is the authoritative data source
+- Format: `{item_id, quantity}` pairs, 2 bytes per slot, qty=0 = empty
+- Engine populates from battle_order on screen entry, filtering non-battle items
+- Updates live during swaps — no manual tracking needed
+- v0.08.82–83: Diagnosed that neither battle_order[32] nor raw inventory matched screen
+- v0.08.84: Switched to display struct — perfect match
+- v0.08.85: Cleaned up ~300 lines of dead working buffer code
+- Deep research confirmed no public RE covers item menu controller (0x4F81F0, 0x4AD0C0)
+
+### Party HP/Status Announcement — CONFIRMED (v0.08.86–v0.08.87)
+- **Computed stats at `0x1CFF000`** (FFNx `char_comp_stats_1CFF000`): curHP at +0x172, maxHP at +0x174
+- Struct stride `0x1D0` (464 bytes), 3 entries indexed by party formation slot (not charIdx)
+- Map charIdx to slot via savemap +0xAF0 formation array
+- `FormatPartyMemberAnnouncement()` builds "Name, HP X of Y" + status ailments
+- Status: savemap char +0x96 bitfield (KO/Poison/Petrify/Blind/Silence/Berserk/Zombie)
+- TODO: test with damaged characters, GF items, miscellaneous items
 
 ### PSHM_W Investigation (v0.08.03–v0.08.26 — ALL RUNTIME APPROACHES EXHAUSTED, Option F pending)
 
@@ -32,29 +50,46 @@ Allocate temporary entity state struct, configure it for dic's JSM context, call
 
 ChatGPT deep research assumes savemap header is 96 bytes (0x60). **Confirmed header is 76 bytes (0x4C).** All post-header offsets from research are 0x14 (20 bytes) too high. When using research offsets: subtract 0x14.
 
-Verified corrected new offsets: Live game time +0x0CCC, gameplay Gil +0x0B08, item inventory +0x0B40 (198×2 bytes), current field ID +0x0D3E, SeeD test level +0x0D2F, active party +0xAF1 (unchanged). T hotkey now uses live timer.
+Verified corrected new offsets: Live game time +0x0CCC, gameplay Gil +0x0B08, item inventory +0x0B40 (198x2 bytes), current field ID +0x0D3E, SeeD test level +0x0D2F, active party +0xAF1 (unchanged). T hotkey now uses live timer.
 
 ### Submenu Cursor Discovery (v0.08.28–v0.08.61)
 
 **Item submenu offsets confirmed:**
-- **+0x22E**: Active focus indicator (v0.08.59 round-trip diagnostic). **3=action menu, 5=items list**. Transitions through intermediates: 5→2→3 (items→action), 3→4→5 (action→items). This is the primary detection mechanism — scalable to all submenus.
+- **+0x22E**: Active focus indicator (v0.08.59 round-trip diagnostic). **3=action menu, 5=items list**. Transitions through intermediates: 5>2>3 (items>action), 3>4>5 (action>items). This is the primary detection mechanism — scalable to all submenus.
 - **+0x27F**: Action menu cursor (0=Use, 1=Rearrange, 2=Sort, 3=Battle). Debounced 200ms.
 - **+0x272**: Item list cursor index.
 - **+0x230**: Phase flag (0=action, 1=items) — UNRELIABLE, does not always update on Cancel.
-- **+0x5DF**: Sub-phase — UNRELIABLE, sometimes fires 3→2 and sometimes doesn't.
+- **+0x5DF**: Sub-phase — UNRELIABLE, sometimes fires 3>2 and sometimes doesn't.
 - **+0x234**: Submenu callback index (=5 for Item).
 
-**Architecture (v0.08.60–61):** PollItemSubmenu watches +0x22E for transitions to stable endpoints (3 or 5). On arriving at 3: announce action option. On arriving at 5: announce current item. Debounced +0x27F handles left/right action navigation. Clean, no GCW string matching or phase fallbacks.
+**Architecture (v0.08.60–64):** PollItemSubmenu watches +0x22E focus state for mode transitions. Extended focus values map to sub-flows:
+- 3=action menu, 5=items list, 14=use target, ~97=rearrange source, 99=rearrange dest
+- ~30=battle source, 36=battle dest, 79=sort flash
+- Sort: flash through 79→3, announce "Items sorted" then queue "Use" (interrupt=false)
+- Rearrange: source cursor +0x272, dest cursor +0x276 (reused from party target)
+- Battle: source cursor +0x285, dest cursor +0x286
+- Use target: +0x276 party cursor. HP/name fixed v0.08.67 (sorted party order, curHP only)
 
 Auto-monitor infrastructure (SUBMON) still active for discovering future submenu offsets.
+
+### Battle Order Table (v0.08.68–v0.08.77)
+
+**Confirmed via deep research + diagnostic builds:**
+- `battle_order[32]` at savemap +0x0B20 (runtime 0x1CFE77C)
+- Format: `uint8[32]`, each entry = inventory slot index (0-197, 0xFF=empty)
+- Mapping: `battle_order[cursor_pos]` → inv index → `items[inv_idx*2]` for id/qty
+- Engine uses **deferred write**: copies to working buffer on screen open, writes back on exit
+- **BLOCKED**: Runtime working buffer not yet located. Current workaround: local copy + swap tracking.
+- Deep research: `Plan & Research Documents/DEEP_RESEARCH_battle_item_order_table.md`
+
+### Party Identification (v0.08.67)
+- Header portraits (+0x11) are in **formation order, NOT visual menu order**
+- Party at +0xAF0 (4 bytes), sorted ascending by char index for visual order
+- maxHP in savemap = 0 (runtime computed). Announce curHP only.
 
 ### Catalog Status (bghall_1 v0.08.16)
 - 5 NPCs + 1 Save Point + 1 Interactive Object (Directory) + 4 INF gateway exits (named)
 - **Directory panel (igyous1)**: In catalog at (-82, -8019) via shift-pattern. Interactable but ~494 units off from true interaction zone (21, -7536).
-- **v0.08.15**: Extended SET3-MATCH to scan pFieldStateBackgrounds — no new matches for dic/igyous1 (they're actually Others cat=3, not Background cat=2). Infrastructure still valuable for future fields with genuine bg entities using PSHM_W.
-- **v0.08.16**: Extended SET3 capture window to 3s post-init. Captured walking NPCs (ent3/ent4) repositioning, proving the extended window works for per-frame SET3. However dic never fires SET3 during normal gameplay — its position is resolved on-demand by the PSHM_W entity-scope parametric formula, not via explicit SET3 calls.
-- **Next step**: Deep research needed on parametric curve formula at sub `0x00532890`. Prompt prepared: `Plan & Research Documents/PSHM_W Parametric Curve Formula - ChatGPT Deep Research Request v2.md`
-- **Bonus finding**: Extended SET3 window captures walking NPCs repositioning after field load. This will be useful for tracking moving NPC positions on other fields (e.g., students walking between classes).
 
 ---
 
@@ -76,112 +111,51 @@ Auto-monitor infrastructure (SUBMON) still active for discovering future submenu
 | INF gateway exits | v0.07.93–96 | Dedup, named destinations, world map |
 | Interactive object detection | v0.07.98–v0.08.01 | Paired inheritance, PSHM_W markers |
 | SET3 opcode hook | v0.08.03 | Runtime position capture (active entities only) |
+| Item submenu TTS | v0.08.61 | +0x22E focus state, debounced action cursor |
+| Item sub-flows | v0.08.64 | Sort, Rearrange (src+dest), Battle (src+dest) |
+| Use target TTS | v0.08.87 | compStats HP/maxHP, status ailments |
+| Battle item TTS | v0.08.85 | Display struct 0x1D8DFF4, page/position, swap detection |
 
 ---
 
 ## MENU TTS (v0.08.17–v0.08.22)
 
 ### Savemap Memory Layout (confirmed)
-- **Savemap base**: `0x1CFDC5C` (derived from Gil=5000 at 0x1CFDC64, header.gil is at +0x08)
+- **Savemap base**: `0x1CFDC5C`
 - **Header**: 0x4C bytes. locId(+0x00 u16), HP(+0x02/0x04 u16), Gil(+0x08 u32), time(+0x0C u32 seconds), lvl(+0x10 u8), portraits(+0x11 u8[3]), names(+0x14 12-byte blocks, -0x20 encoded)
-- **GF section**: 16 × 68 bytes = 0x440, starting at savemap+0x4C
-- **Character section**: 8 × 152 (0x98) bytes = 0x4C0, starting at savemap+0x48C (= 0x1CFE0E8)
-- **Party indices**: savemap+0xAF1 (3 bytes: char index 0-7 or 0xFF=empty) — candidate, not fully verified
+- **GF section**: 16 x 68 bytes = 0x440, starting at savemap+0x4C
+- **Character section**: 8 x 152 (0x98) bytes = 0x4C0, starting at savemap+0x48C (= 0x1CFE0E8)
+- **Party indices**: savemap+0xAF1 (3 bytes: char index 0-7 or 0xFF=empty)
 - **Name encoding**: Live savemap uses +0x20 offset from menu font encoding. Subtract 0x20 before decoding.
-- **character_data_1CFE74C** from FFNx is battle-computed stats, NOT savemap characters.
 
-### Known Issue: Header played_time_secs is Stale
-The uint32 at savemap+0x0C is only synced at save/load time, NOT updated in real-time during gameplay. Need to find the live timer variable for the T hotkey.
-
-### Help Text in GCW Buffer
-GCW buffer captures ALL rendered menu text concatenated. Pattern:
-`"...SaveJunction MenuSquallB-Garden- Hall"` — help text is between "Save" and character name.
-Need to parse the help substring from the repeating block.
-
-### Menu Hotkeys (implemented v0.08.21, need live-timer fix)
-- G = Gil, T = Play time, L = Location, R = SeeD rank
+### Menu Hotkeys
+- G = Gil, T = Play time (live timer +0x0CCC), L = Location, R = SeeD rank
 - F11 = full summary, Shift+F11 = memory monitor, Ctrl+F11 = diagnostic dump
-- Keys G/T/R/L confirmed safe — not bound to any FF8 function
-
----
-
-## PREVIOUS MILESTONES (v0.08.xx)
-
-- **v0.08.22**: Memory monitor + GCW help text capture. Left-panel cursor investigation started.
-- **v0.08.21**: Menu hotkeys G/T/L/R + F11 summary. Removed auto-announce on menu open.
-- **v0.08.19**: Fixed GF struct size (68 not 76), name -0x20 decode. All 8 chars + names confirmed.
-- **v0.08.17**: First menu data diagnostic. Confirmed savemap base 0x1CFDC5C via Gil/time cross-reference.
-- **v0.08.16**: Extended SET3 capture window (3s post-init) + SET3-LATE-MATCH in RefreshCatalog. Deduplication in SET3 hook. Captures walking NPCs repositioning. dic still needs parametric formula.
-- **v0.08.15**: SET3-MATCH extended to background entities (cat 2). Three matching sites updated (init, direct-read, late-resolve).
-- **v0.08.14**: F12 position announce key. Shift-pattern promotion in catalog.
-- **v0.08.13**: PSHM_W negative-param passthrough. Tightened isPshm marker detection (`&0xFFFF0000==0x80000000`). Shift-pattern: litY→posX, litZ→posY when X=PSHM. Paired inheritance hasPosition propagation.
-- **v0.08.12**: PSHM_W investigation builds. Hardcoded varblock, dispatch table hook, time-based capture.
-- **v0.08.06**: PSHM_W handler diagnostic. Descriptor table probe (all NULL). Deep research prompt.
-- **v0.08.05**: Direct struct read fallback + late PSHM resolution. Both return 0 for dic.
-- **v0.08.04**: Light-entity paired inheritance filter. IntObj=1 confirmed.
-- **v0.08.03**: SET3 opcode hook. 5 captures on bghall_1. dic not captured (non-init method).
-- **v0.08.02**: Runtime PSHM_W read attempt. FAILED — 10-slot active window.
-- **v0.08.01**: (DEPLOYED) Paired entity inheritance (dic→igyous1). Exit dedup bit31 fix.
-- **v0.08.00**: PSHM_W marker pattern fix: `0x80000000|addr` (was `0x00FF0000`).
-For v0.07.xx and earlier build tables, see `DEVNOTES_HISTORY.md`.
 
 ---
 
 ## KEY LEARNINGS
 
 ### Entity & Coordinate System
-- Screen-vertical = Y (offset 0x194), NOT Z. World coords ×4096: X=0x190, Y=0x194. Triangle: 0x1FA.
+- Screen-vertical = Y (offset 0x194), NOT Z. World coords x4096: X=0x190, Y=0x194. Triangle: 0x1FA.
 - Talk radius: 0x1F8. Push radius: 0x1F6. Model ID: 0x218. Model 24 = save point.
 - SYM offset = 0 (entity state index i = SYM[i]).
 - `pFieldStateOthers` only allocates `entCount` active slots (typically 10). Entities beyond are inaccessible.
 
 ### PSHM_W / Shared Memory Architecture
-- **Varblock base**: `0x1CFE9B8` (Steam 2013 en-US), `0x18FE9B8` (Original/SE). FFNx: `field_vars_stack_1CFE9B8`. Save file offset `0xD10`.
-- **Variable space**: bytes 0–1023 = persistent (saved to disk). 1024+ = temp per-field (reset on transition).
-- **Standard formula**: `*(int16_t*)(0x1CFE9B8 + param)` — only for standard code path.
-- **Two code paths**: execution flags at entity struct 0x160 control branching. Standard = varblock read. Alternate = entity-relative via *9 multiply.
-- **PSHSM = "Push Signed Memory"** (NOT shared). Same varblock, sign-extended result. No POPSM counterpart.
-- **JSM encoding**: 32-bit native LE. Bits[31:16] = opcode key. Bits[15:0] = signed int16 parameter.
-- `0x01DCB340`: per-entity descriptor pointer table (NOT variable array). Allocated on-demand.
-- Entity scope sub `0x00532890`: parametric curve computation from descriptor+0x68 data array.
-- POPM_W `0x0051CAF0` → core sub `0x0051C9C0` (type-clamping jump table).
-- Global threshold selector: `0x01CE476A` (WORD). On bghall_1 = 20 → threshold ≈ 2696.
-- **PSHM markers**: `0x8000xxxx` (bits 16-30 zero). Negative literals: `0xFFFFxxxx` (bits 16-30 ones). Must use `& 0xFFFF0000 == 0x80000000` to distinguish.
-- **Shift-pattern**: When first PSHM_W param is positive (mode selector) but Y,Z are negative passthrough, actual position is (litY, litZ). Confirmed: l1 (1032,-2865,-5421)→pos(-2865,-5421). Safety: both litY AND litZ must be non-zero.
-- **Three PSHM_W resolution modes** (per-axis independent): (1) Negative param → passthrough literal coordinate. (2) Small positive + entity flag → entity-scope sub 0x00532890. (3) Standard positive → varblock read.
-- **Descriptor struct**: 0x90 bytes (9×16), per flat entity index. +0x0C/+0x0E=computed X/Y, +0x68=curve data ptr, +0x7E=cache key.
-- Paired entity pattern: position entity (dic) + dialog entity (igyous1), consecutive JSM indices.
-- **Dispatch table hook**: MinHook conflicts with FFNx on same handler. Write directly to `pExecuteOpcodeTable[index]` instead — swap pointer, save original as trampoline. Restore on shutdown via VirtualProtect.
-- **FFNx replaces dispatch table entries**: `opcode_pshm_w` from the table points to FFNx code, NOT the original handler. Cannot read embedded constants (e.g., +0x1E for varblock base) from it.
-- **Entity struct stack**: VM stack is at entity+0x000 (320 bytes). Stack pointer at +0x184 is `uint8_t`, NOT `uint32_t`. Reading DWORD at 0x184 causes crash (3 garbage bytes).
-- **Varblock reads don't work for entity-scope addresses**: `*(int16_t*)(0x1CFE9B8 + addr)` returns wrong values for ALL PSHM_W entities on bghall_1. Every address goes through entity-scope parametric path.
+- **Varblock base**: `0x1CFE9B8` (Steam 2013 en-US). Save file offset `0xD10`.
+- **Three resolution modes** (per-axis independent): (1) Negative param = passthrough literal. (2) Small positive + entity flag = entity-scope sub 0x00532890. (3) Standard positive = varblock read.
+- **PSHM markers**: `0x8000xxxx` (bits 16-30 zero). Negative literals: `0xFFFFxxxx`. Use `& 0xFFFF0000 == 0x80000000` to distinguish.
+- **Shift-pattern**: When first PSHM_W param is positive (mode selector) but Y,Z are negative passthrough, actual position is (litY, litZ).
+- **Dispatch table hook**: Write directly to `pExecuteOpcodeTable[index]` — MinHook conflicts with FFNx.
 
 ### Exit Detection (4 patterns)
-- (A) Direct MAPJUMP in entity script — opcode scan
-- (B) REQ-following — indirect MAPJUMP via REQ call
-- (C) Variable-dispatch — POPM_W/PSHM_W address matching (addr≥8 filter)
-- (D) INF gateways — engine-level, toggled by MAPJUMPON/OFF, destinations by MAPJUMPO
-
-### Trigger Lines & Screen Filtering
-- Classified by JSM opcodes: Camera Pan (BGDRAW), Screen Boundary (MAPJUMP), Event (SHOW/HIDE)
-- Cross-product sign test for screen filtering
-- INF trigger section is bogus on PC — real data from SETLINE opcode hook at runtime
-
-### INF Gateway System
-- Dual transition architecture: script-driven (MAPJUMP) + engine-driven (INF gateways)
-- INF format = 676 bytes. Gateways at offset 0x64, stride 32, fieldId at +18.
-- Deduplication by destFieldId. World map IDs 0-71 → "Exit to World Map".
-
-### JSM Bytecode
-- Native LE uint32. High byte = primary opcode. 0x00 = push literal. Low 24 bits = signed param.
-- 0x1C extended dispatch: pops index from VM stack. Key dispatches: DRAWPOINT=0x137, MENUSAVE=0x12E.
-- Header: b0-b3 = countDoors/Lines/Bg/Others. Group table: bits 0-6 = methods, 7-15 = start index.
+- (A) Direct MAPJUMP, (B) REQ-following, (C) Variable-dispatch, (D) INF gateways
 
 ### Navigation Architecture
 - 47.5% of fields have disconnected walkmesh islands — BFS essential
-- Analog steering via fake gamepad (0xDEAD0001 sentinel) + get_key_state hook
-- SSFA funnel path smoothing. Corridor-level steering. Recovery: re-path/nudge cycle.
-- Per-field heading calibration on first auto-drive.
+- Analog steering via fake gamepad + get_key_state hook
+- SSFA funnel path smoothing. Recovery: re-path/nudge cycle.
 
 ---
 
@@ -203,16 +177,6 @@ AccessibilityThread polls ~60Hz. Modules: TitleScreen, FieldDialog, FieldNavigat
 
 ---
 
-## KEY FILE LOCATIONS
-
-- Project root: `C:\Users\ampag\OneDrive\Documents\FFVIII-Accessibility-Mod\FF8_OriginalPC_mod\`
-- Source: `src\`
-- FFNx reference: `FFNx-Steam-v1.23.0.182\Source Code\FFNx-canary\src\`
-- Log: `Logs\ff8_accessibility.log`
-- Build history: `DEVNOTES_HISTORY.md`
-
----
-
 ## RECOVERY NOTES
 
 1. Read this file FIRST for current state
@@ -220,6 +184,6 @@ AccessibilityThread polls ~60Hz. Modules: TitleScreen, FieldDialog, FieldNavigat
 3. Read `DEVNOTES_HISTORY.md` ONLY if you need past build details
 4. Use filesystem MCP tools (not bash) for Windows file access
 5. `deploy.bat` is the ONLY build script
-6. Current version: v0.08.61 (source), v0.08.01 (deployed)
+6. Current version: v0.08.87 (source), v0.08.87 (deployed)
 7. "BAT" = read tail of `Logs/ff8_accessibility.log`
 8. GitHub repo: ampage87/FFVIII-Accessibility-Mod

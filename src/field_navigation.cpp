@@ -3,7 +3,7 @@
 // See field_navigation.h for full architecture and phasing notes.
 //
 // ============================================================================
-// CURRENT STATE: v0.08.61 — Item submenu TTS (action menu + item list)
+// CURRENT STATE: v0.08.87 — Use target: compStats HP confirmed, diagnostic removed
 // ============================================================================
 //
 // What's new in v05.12:

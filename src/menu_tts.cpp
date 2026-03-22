@@ -49,6 +49,11 @@ static const int SUBMENU_ACTION_CURSOR_OFFSET = 0x27F; // action menu cursor (ra
 static const int ITEM_SUBPHASE_OFFSET          = 0x5DF; // v0.08.33: sub-phase within Item (3=item list, 2=action menu overlay)
 static const int ITEM_FOCUS_STATE_OFFSET        = 0x22E; // v0.08.60: active focus indicator (3=action menu, 5=items list)
 
+// v0.08.62: Sub-flow offsets discovered via SUBMON during test session
+static const int ITEM_TARGET_CURSOR_OFFSET       = 0x276; // party member cursor during Use target selection
+static const int BATTLE_ITEM_CURSOR_OFFSET        = 0x285; // cursor in Battle item arrangement sub-screen
+static const int PARTY_INDICES_OFFSET              = 0xAF1; // savemap offset: 3 bytes, char index 0-7 or 0xFF
+
 // Item submenu action menu options (phase 0, cursor 0-3)
 static const char* ITEM_ACTION_NAMES[] = { "Use", "Rearrange", "Sort", "Battle" };
 static const int ITEM_ACTION_COUNT = 4;
@@ -315,6 +320,23 @@ static uint8_t  s_prevActionCursor = 0xFF;         // tracks +0x27F action curso
 static uint8_t  s_prevFocusState = 0xFF;           // tracks +0x22E (3=action, 5=items)
 static uint8_t  s_pendingActionCursor = 0xFF;       // debounce: value waiting to be announced
 static DWORD    s_pendingActionTime = 0;            // GetTickCount when pending was set (0=none)
+
+// v0.08.62: Item sub-flow state tracking
+// Use target: focus==14, +0x276 party cursor. Rearrange: focus~97, +0x272. Sort: focus flash 79. Battle: focus~30, +0x285.
+static uint8_t  s_prevTargetCursor = 0xFF;          // tracks +0x276 during Use target selection
+static uint8_t  s_prevBattleItemCursor = 0xFF;      // tracks +0x285 during Battle items
+static bool     s_inUseTargetMode = false;           // true when focus==14 (Use target selection)
+static bool     s_inRearrangeMode = false;           // true when focus stabilized ~97
+static bool     s_inBattleMode = false;              // true when focus stabilized ~30
+static bool     s_inBattleDestMode = false;           // v0.08.68: true when in battle dest (focus==36)
+static uint8_t  s_battleSwapSrcPos = 0xFF;             // v0.08.77: source cursor when entering battle dest
+static uint8_t  s_rearrangePrevFocus = 0;            // for detecting swap completion (99->97)
+static bool     s_rearDestDiagValid = false;           // diagnostic: snap valid for rearrange destination
+static uint8_t  s_rearDestDiagSnap[32] = {};            // diagnostic: snapshot for rearrange destination
+static bool     s_batDestDiagValid = false;             // diagnostic: snap valid for battle destination
+static uint8_t  s_batDestDiagSnap[32] = {};              // diagnostic: snapshot for battle destination
+// v0.08.84: s_battleOrderLoaded, s_snapValid, s_battleOrderLivePtr removed.
+// Battle TTS now reads from display struct at 0x1D8DFF4 directly.
 
 // F12 diagnostic: track menu_draw_text / get_character_width call counts
 static bool     s_diagActive = false;
@@ -1353,7 +1375,7 @@ static void PollSaveScreen()
 // ============================================================================
 void MenuTTS::Initialize()
 {
-    Log::Write("[MenuTTS] Initialize() — v0.08.61 Item submenu TTS (+0x22E with intermediate transitions)");
+    Log::Write("[MenuTTS] Initialize() — v0.08.87 Use target: compStats HP confirmed, diagnostic removed");
     
     if (pMenuStateA == nullptr) {
         Log::Write("[MenuTTS] WARNING: pMenuStateA not resolved, menu TTS disabled");
@@ -2190,6 +2212,218 @@ static void ResetItemSubmenuState()
     s_prevFocusState = 0xFF;
     s_pendingActionCursor = 0xFF;
     s_pendingActionTime = 0;
+    // v0.08.62: reset sub-flow state
+    s_prevTargetCursor = 0xFF;
+    s_prevBattleItemCursor = 0xFF;
+    s_inUseTargetMode = false;
+    s_inRearrangeMode = false;
+    s_inBattleMode = false;
+    s_inBattleDestMode = false;
+    s_battleSwapSrcPos = 0xFF;
+    s_rearrangePrevFocus = 0;
+    s_rearDestDiagValid = false;
+    s_batDestDiagValid = false;
+}
+
+// v0.08.64: Live character HP readout for Use target.
+// CHAR_DATA_BASE (0x1CFE74C) and CHAR_STRUCT_SIZE (0x98) defined above.
+// Runtime character struct: +0x00=current_hp(u16), +0x02=max_hp(u16), +0x04=exp(u32), +0x08=model_id(u8)
+
+// v0.08.63: Get active party member name by cursor position (0-based)
+// Reads savemap party indices at +0xAF1 (3 bytes: char index 0-7, or 0xFF=empty)
+static const char* GetPartyMemberName(uint8_t cursorPos)
+{
+    if (cursorPos >= 3) return nullptr;
+    uint8_t* party = (uint8_t*)SAVEMAP_BASE + PARTY_INDICES_OFFSET;
+    uint8_t charIdx = party[cursorPos];
+    Log::Write("[MenuTTS] GetPartyMemberName: pos=%u partyRaw=[%u,%u,%u] charIdx=%u",
+               (unsigned)cursorPos,
+               (unsigned)party[0], (unsigned)party[1], (unsigned)party[2],
+               (unsigned)charIdx);
+    return GetCharacterNameByPortrait(charIdx);
+}
+
+// ============================================================================
+// v0.08.86: Status ailment decoding from savemap character status byte (+0x96)
+// FF8 persistent status flags (survive outside battle, shown in menu):
+//   Bit 0 (0x01): KO/Dead
+//   Bit 1 (0x02): Poison
+//   Bit 2 (0x04): Petrify
+//   Bit 3 (0x08): Darkness/Blind
+//   Bit 4 (0x10): Silence
+//   Bit 5 (0x20): Berserk
+//   Bit 6 (0x40): Zombie
+//   Bit 7 (0x80): unknown/unused
+// ============================================================================
+static const char* STATUS_NAMES[] = {
+    "KO",        // bit 0
+    "Poison",    // bit 1
+    "Petrify",   // bit 2
+    "Blind",     // bit 3
+    "Silence",   // bit 4
+    "Berserk",   // bit 5
+    "Zombie",    // bit 6
+    nullptr      // bit 7 (unused)
+};
+
+// Decode status byte into a comma-separated string. Returns empty string if no ailments.
+static int FormatStatusAilments(uint8_t status, char* buf, int bufSize)
+{
+    int pos = 0;
+    for (int bit = 0; bit < 7; bit++) {
+        if ((status & (1 << bit)) && STATUS_NAMES[bit]) {
+            if (pos > 0 && pos < bufSize - 2)
+                pos += sprintf(buf + pos, ", ");
+            if (pos < bufSize - 16)
+                pos += sprintf(buf + pos, "%s", STATUS_NAMES[bit]);
+        }
+    }
+    if (pos < bufSize) buf[pos] = '\0';
+    return pos;
+}
+
+// v0.08.86: Runtime computed stats array.
+// FFNx: char_comp_stats_1CFF000, span of 3 (one per active party slot).
+// struct ff8_char_computed_stats: curr_hp at +0x172, max_hp at +0x174.
+// Struct size = 0x1D0 (464 bytes) based on FFNx definition.
+static const uint32_t COMP_STATS_BASE = 0x1CFF000;
+static const int COMP_STATS_CURHP_OFFSET = 0x172;
+static const int COMP_STATS_MAXHP_OFFSET = 0x174;
+static const int COMP_STATS_STRUCT_SIZE  = 0x1D0;  // 464 bytes per entry (3 entries for party)
+
+// v0.08.86: Get character HP + status.
+// Primary source: computed stats at 0x1CFF000 (live, updates on item use).
+// Fallback: savemap character section for curHP, header for lead maxHP.
+static bool GetCharacterHP(uint8_t charIdx, uint16_t& curHP, uint16_t& maxHP)
+{
+    if (charIdx > 7) return false;
+    __try {
+        // Read from savemap as baseline
+        uint8_t* smChar = (uint8_t*)SAVEMAP_BASE + CHARS_OFFSET + charIdx * CHAR_STRUCT_SIZE;
+        curHP = *(uint16_t*)(smChar + CHR_CURR_HP);
+        maxHP = *(uint16_t*)(smChar + CHR_MAX_HP);
+
+        // v0.08.86: Try computed stats array for this party slot.
+        // Map charIdx to party slot (0-2) by checking formation.
+        uint8_t* formation = (uint8_t*)SAVEMAP_BASE + 0xAF0;
+        int partySlot = -1;
+        for (int i = 0; i < 4; i++) {
+            if (formation[i] == charIdx) { partySlot = i; break; }
+        }
+
+        // Use computed stats for HP if character is in active party
+        if (partySlot >= 0 && partySlot < 3) {
+            uint8_t* cs = (uint8_t*)COMP_STATS_BASE + partySlot * COMP_STATS_STRUCT_SIZE;
+            uint16_t csHP = *(uint16_t*)(cs + COMP_STATS_CURHP_OFFSET);
+            uint16_t csMax = *(uint16_t*)(cs + COMP_STATS_MAXHP_OFFSET);
+            if (csMax > 0 && csMax < 10000) {
+                curHP = csHP;
+                maxHP = csMax;
+            }
+        } else if (maxHP == 0) {
+            // Not in party — try header for lead
+            if (formation[0] == charIdx) {
+                maxHP = *(uint16_t*)((uint8_t*)SAVEMAP_BASE + HDR_CHAR1_MAX_HP);
+            }
+        }
+
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// v0.08.86: Get character status byte from savemap
+static uint8_t GetCharacterStatus(uint8_t charIdx)
+{
+    if (charIdx > 7) return 0;
+    __try {
+        uint8_t* smChar = (uint8_t*)SAVEMAP_BASE + CHARS_OFFSET + charIdx * CHAR_STRUCT_SIZE;
+        return *(smChar + CHR_STATUS);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+// v0.08.86: Build full party member announcement string.
+// Format: "Name, HP X of Y" or "Name, HP X" (if no maxHP)
+// Appends status ailments if present: ", Poison, Blind"
+// Appends "KO" for dead characters (curHP=0).
+static int FormatPartyMemberAnnouncement(uint8_t charIdx, const char* name,
+                                          bool isUseEntry, char* buf, int bufSize)
+{
+    uint16_t curHP = 0, maxHP = 0;
+    bool hasHP = GetCharacterHP(charIdx, curHP, maxHP);
+    uint8_t status = GetCharacterStatus(charIdx);
+    
+    int pos = 0;
+    if (isUseEntry)
+        pos += sprintf(buf + pos, "Use on ");
+    
+    pos += sprintf(buf + pos, "%s", name);
+    
+    if (hasHP) {
+        if (maxHP > 0)
+            pos += sprintf(buf + pos, ", HP %u of %u", (unsigned)curHP, (unsigned)maxHP);
+        else
+            pos += sprintf(buf + pos, ", HP %u", (unsigned)curHP);
+    }
+    
+    // Append status ailments
+    if (status != 0) {
+        char statusBuf[128] = {};
+        int slen = FormatStatusAilments(status, statusBuf, sizeof(statusBuf));
+        if (slen > 0)
+            pos += sprintf(buf + pos, ", %s", statusBuf);
+    } else if (hasHP && curHP == 0) {
+        // No status flags but HP is 0 — character is KO
+        pos += sprintf(buf + pos, ", KO");
+    }
+    
+    return pos;
+}
+
+// v0.08.67: Get party member character index by cursor position (0-based).
+// Reads party composition from savemap +0xAF0 (4 bytes: char indices, 0xFF=empty).
+// The menu's Use target screen shows party members sorted by character index
+// (Squall=0 always first), NOT in formation/battle order.
+// So we collect non-0xFF entries, sort by char index, and map cursor to sorted array.
+static uint8_t GetPartyCharAtVisualPos(uint8_t cursorPos)
+{
+    static const int PARTY_FORMATION_OFFSET = 0xAF0;  // 4 bytes: formation order char indices
+    uint8_t* formation = (uint8_t*)SAVEMAP_BASE + PARTY_FORMATION_OFFSET;
+    
+    // Collect non-empty party members
+    uint8_t members[4];
+    int count = 0;
+    for (int i = 0; i < 4; i++) {
+        if (formation[i] != 0xFF && formation[i] <= 10) {
+            members[count++] = formation[i];
+        }
+    }
+    
+    // Sort by character index (simple insertion sort)
+    for (int i = 1; i < count; i++) {
+        uint8_t key = members[i];
+        int j = i - 1;
+        while (j >= 0 && members[j] > key) {
+            members[j + 1] = members[j];
+            j--;
+        }
+        members[j + 1] = key;
+    }
+    
+    Log::Write("[MenuTTS] GetPartyCharAtVisualPos: pos=%u formation=[%u,%u,%u,%u] sorted=[%u,%u,%u] count=%d",
+               (unsigned)cursorPos,
+               (unsigned)formation[0], (unsigned)formation[1],
+               (unsigned)formation[2], (unsigned)formation[3],
+               count > 0 ? (unsigned)members[0] : 255u,
+               count > 1 ? (unsigned)members[1] : 255u,
+               count > 2 ? (unsigned)members[2] : 255u,
+               count);
+    
+    if (cursorPos < count) return members[cursorPos];
+    return 0xFF;
 }
 
 // SEH-protected: reads submenu offsets and announces changes.
@@ -2220,6 +2454,53 @@ static void AnnounceItemAtCursor(uint8_t cursor)
                (unsigned)cursor, (unsigned)itemId, (unsigned)itemQty, buf);
 }
 
+// v0.08.68: Battle item announcement with page/item position.
+// Format: "Name, quantity N, page P, item I" or "Empty, page P, item I"
+// Battle screen shows 4 items per page.
+static const int BATTLE_ITEMS_PER_PAGE = 4;
+
+// v0.08.85: battle_order working buffer code removed (v0.08.68–v0.08.83).
+// The battle arrangement screen has its own display struct at 0x1D8DFF4
+// containing {item_id, quantity} pairs that reflect the actual screen content,
+// including filtering and live swap updates. We read that directly now.
+
+// v0.08.84: Battle arrangement display struct at 0x1D8DFF4.
+// Format: savemap_ff8_item pairs {item_id, quantity} at 2 bytes per slot.
+// Engine builds this filtered list from battle_order on screen open.
+// qty=0 means empty slot. This is what the screen actually shows.
+static const uint32_t BATTLE_DISPLAY_STRUCT = 0x1D8DFF4;
+
+static void AnnounceBattleItemAtCursor(uint8_t cursor)
+{
+    // v0.08.84: Read from the engine's display struct at 0x1D8DFF4.
+    // This is the filtered/ordered list that the battle arrangement screen renders.
+    uint8_t itemId = 0, itemQty = 0;
+    __try {
+        uint8_t* disp = (uint8_t*)BATTLE_DISPLAY_STRUCT;
+        itemId  = disp[cursor * 2];
+        itemQty = disp[cursor * 2 + 1];
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log::Write("[MenuTTS] Battle display struct read failed at cursor %u", (unsigned)cursor);
+    }
+    
+    int page = (cursor / BATTLE_ITEMS_PER_PAGE) + 1;
+    int itemNum = (cursor % BATTLE_ITEMS_PER_PAGE) + 1;
+    char buf[256];
+
+    if (itemQty == 0) {
+        sprintf(buf, "Empty, page %d, item %d", page, itemNum);
+    } else {
+        const char* name = GetItemName(itemId);
+        if (name)
+            sprintf(buf, "%s, quantity %u, page %d, item %d", name, (unsigned)itemQty, page, itemNum);
+        else
+            sprintf(buf, "Item %u, quantity %u, page %d, item %d", (unsigned)itemId, (unsigned)itemQty, page, itemNum);
+    }
+    ScreenReader::Speak(buf, true);
+    Log::Write("[MenuTTS] Battle cursor %u: disp id=%u qty=%u page=%d item=%d -> \"%s\"",
+               (unsigned)cursor, (unsigned)itemId, (unsigned)itemQty, page, itemNum, buf);
+}
+
 static void PollItemSubmenu()
 {
     if (!pMenuStateA) return;
@@ -2231,7 +2512,7 @@ static void PollItemSubmenu()
 
     __try {
         uint8_t* base = (uint8_t*)pMenuStateA;
-        uint8_t focusState = *(base + ITEM_FOCUS_STATE_OFFSET);  // 3=action, 5=items
+        uint8_t focusState = *(base + ITEM_FOCUS_STATE_OFFSET);  // 3=action, 5=items, 14=use target, etc.
         uint8_t actionCur  = *(base + SUBMENU_ACTION_CURSOR_OFFSET);
         uint8_t listCur    = *(base + SUBMENU_LIST_CURSOR_OFFSET);
 
@@ -2243,39 +2524,151 @@ static void PollItemSubmenu()
             s_prevFocusState = focusState;
             s_pendingActionCursor = 0xFF;
             s_pendingActionTime = 0;
+            s_prevTargetCursor = 0xFF;
+            s_prevBattleItemCursor = 0xFF;
+            s_inUseTargetMode = false;
+            s_inRearrangeMode = false;
+            s_inBattleMode = false;
+            s_inBattleDestMode = false;
+            s_battleSwapSrcPos = 0xFF;
+            s_rearrangePrevFocus = 0;
             Log::Write("[MenuTTS] Item submenu entered (focus=%u actionCur=%u listCur=%u)",
                        (unsigned)focusState, (unsigned)actionCur, (unsigned)listCur);
         }
 
         // === FOCUS STATE TRANSITIONS (+0x22E) ===
-        // +0x22E transitions through intermediates: 5→2→3 (items→action), 3→4→5 (action→items).
-        // We only act on arriving at the stable endpoints (3 or 5), not intermediates.
+        // Core transitions: 5↔3 via intermediates (5>2>3, 3>4>5).
+        // Sub-flow focus values: 14=Use target, ~97=Rearrange, ~30=Battle, 79=Sort flash.
         if (focusState != s_prevFocusState) {
             Log::Write("[MenuTTS] Item focus: %u -> %u (actionCur=%u listCur=%u)",
                        (unsigned)s_prevFocusState, (unsigned)focusState,
                        (unsigned)actionCur, (unsigned)listCur);
 
+            // --- Arriving at Action menu (focus==3) ---
             if (focusState == 3 && s_prevFocusState != 3 && s_prevFocusState != 0xFF) {
-                // Arrived at Action menu (from 2, which came from 5): announce action
+                // v0.08.63: Check if returning from Sort (focus 79->3, actionCur resets to 0)
+                bool fromSort = (s_prevFocusState == 79);
+                if (fromSort) {
+                    ScreenReader::Speak("Items sorted", true);
+                    Log::Write("[MenuTTS] Sort executed (focus 79->3)");
+                }
+                // Exiting sub-flow modes
+                if (s_inUseTargetMode) {
+                    s_inUseTargetMode = false;
+                    Log::Write("[MenuTTS] Use target mode exited");
+                }
+                if (s_inRearrangeMode) {
+                    s_inRearrangeMode = false;
+                    Log::Write("[MenuTTS] Rearrange mode exited");
+                }
+                if (s_inBattleMode) {
+                    s_inBattleMode = false;
+                    Log::Write("[MenuTTS] Battle mode exited");
+                }
+                // Announce current action option
+                // v0.08.64: After Sort, queue the action name with interrupt=false
+                // so user hears "Items sorted" then "Use" in sequence.
                 if (actionCur < ITEM_ACTION_COUNT) {
-                    ScreenReader::Speak(ITEM_ACTION_NAMES[actionCur], true);
-                    Log::Write("[MenuTTS] Item action (focus->3) cursor %u: %s",
-                               (unsigned)actionCur, ITEM_ACTION_NAMES[actionCur]);
+                    ScreenReader::Speak(ITEM_ACTION_NAMES[actionCur], !fromSort);
+                    Log::Write("[MenuTTS] Item action (focus->3) cursor %u: %s%s",
+                               (unsigned)actionCur, ITEM_ACTION_NAMES[actionCur],
+                               fromSort ? " (queued after sort)" : "");
                 }
                 s_prevActionCursor = actionCur;
                 s_pendingActionTime = 0;
             }
+            // --- Arriving at Items list (focus==5) ---
             else if (focusState == 5 && s_prevFocusState != 5 && s_prevFocusState != 0xFF) {
-                // Arrived at Items list (from 4, which came from 3): announce item
+                // Exiting sub-flow modes (cancel from Use target returns via 14->4->5)
+                if (s_inUseTargetMode) {
+                    s_inUseTargetMode = false;
+                    Log::Write("[MenuTTS] Use target mode exited (back to items)");
+                }
                 AnnounceItemAtCursor(listCur);
                 s_prevItemCursor = listCur;
+            }
+            // --- v0.08.86: Arriving at Use target selection (focus==14) ---
+            else if (focusState == 14 && !s_inUseTargetMode) {
+                s_inUseTargetMode = true;
+                uint8_t targetCur = *(base + ITEM_TARGET_CURSOR_OFFSET);
+                s_prevTargetCursor = targetCur;
+                uint8_t charIdx = GetPartyCharAtVisualPos(targetCur);
+                const char* name = GetCharacterNameByPortrait(charIdx);
+                char buf[256];
+                if (name) {
+                    FormatPartyMemberAnnouncement(charIdx, name, true, buf, sizeof(buf));
+                } else {
+                    sprintf(buf, "Use on party member %u", (unsigned)targetCur + 1);
+                }
+                ScreenReader::Speak(buf, true);
+                Log::Write("[MenuTTS] Use target entered: cursor %u charIdx=%u -> \"%s\"",
+                           (unsigned)targetCur, (unsigned)charIdx, buf);
+            }
+            // --- v0.08.64: Rearrange mode detection (focus stabilizes ~97) ---
+            else if (focusState >= 94 && focusState <= 100 && !s_inRearrangeMode) {
+                s_inRearrangeMode = true;
+                s_rearrangePrevFocus = focusState;
+                s_prevItemCursor = listCur;
+                s_prevTargetCursor = 0xFF;  // reset dest cursor for when focus hits 99
+                AnnounceItemAtCursor(listCur);
+                Log::Write("[MenuTTS] Rearrange mode entered (focus=%u listCur=%u)",
+                           (unsigned)focusState, (unsigned)listCur);
+            }
+            // --- v0.08.70: Battle mode detection (focus stabilizes ~30) ---
+            else if (focusState >= 26 && focusState <= 35 && !s_inBattleMode) {
+                s_inBattleMode = true;
+                s_inBattleDestMode = false;
+                uint8_t battleCur = *(base + BATTLE_ITEM_CURSOR_OFFSET);
+                s_prevBattleItemCursor = battleCur;
+                AnnounceBattleItemAtCursor(battleCur);
+                Log::Write("[MenuTTS] Battle mode entered (focus=%u battleCur=%u)",
+                           (unsigned)focusState, (unsigned)battleCur);
+
+            }
+            // --- v0.08.77: Battle destination entered (focus==36) ---
+            else if (focusState == 36 && s_inBattleMode && s_prevFocusState != 36) {
+                s_inBattleDestMode = true;
+                s_battleSwapSrcPos = s_prevBattleItemCursor;  // remember source for swap
+                uint8_t batDestCur = *(base + 0x286);
+                s_prevBattleItemCursor = batDestCur;
+                AnnounceBattleItemAtCursor(batDestCur);
+                Log::Write("[MenuTTS] Battle dest entered (focus=36 srcPos=%u destCur=%u)",
+                           (unsigned)s_battleSwapSrcPos, (unsigned)batDestCur);
+            }
+
+            // --- v0.08.79: Battle swap detection (returning from dest to source) ---
+            if (s_inBattleMode && s_inBattleDestMode && focusState >= 26 && focusState <= 35) {
+                // Was in dest mode (focus==36), now back to source (~30) = swap completed
+                uint8_t destPos = s_prevBattleItemCursor;  // last dest cursor position
+                s_inBattleDestMode = false;
+                // v0.08.79: No manual swap tracking needed — live buffer is authoritative
+                ScreenReader::Speak("Swapped", true);
+                Log::Write("[MenuTTS] Battle swap completed: pos %u <-> %u",
+                           (unsigned)s_battleSwapSrcPos, (unsigned)destPos);
+                s_battleSwapSrcPos = 0xFF;
+                uint8_t battleCur = *(base + BATTLE_ITEM_CURSOR_OFFSET);
+                s_prevBattleItemCursor = battleCur;
+                AnnounceBattleItemAtCursor(battleCur);
+            }
+
+            // --- v0.08.64: Rearrange swap detection (focus 99->97 = swap completed) ---
+            if (s_inRearrangeMode && s_rearrangePrevFocus == 99 && focusState == 97) {
+                ScreenReader::Speak("Swapped", true);
+                Log::Write("[MenuTTS] Rearrange swap completed (99->97)");
+                // Re-announce item at cursor after swap
+                AnnounceItemAtCursor(listCur);
+                s_prevItemCursor = listCur;
+                s_prevTargetCursor = 0xFF;  // reset dest cursor for next source→dest cycle
+            }
+            if (s_inRearrangeMode) {
+                s_rearrangePrevFocus = focusState;
             }
 
             s_prevFocusState = focusState;
         }
 
-        // === ACTION CURSOR: debounced left/right (works at any focus state) ===
-        if (focusState >= 3) {
+        // === ACTION CURSOR: debounced left/right (only when at action menu focus==3) ===
+        if (focusState == 3) {
             if (actionCur != s_prevActionCursor) {
                 s_pendingActionCursor = actionCur;
                 s_pendingActionTime = GetTickCount();
@@ -2307,6 +2700,62 @@ static void PollItemSubmenu()
             if (listCur != s_prevItemCursor) {
                 AnnounceItemAtCursor(listCur);
                 s_prevItemCursor = listCur;
+            }
+        }
+
+        // === v0.08.86: USE TARGET CURSOR (+0x276 party member selection) ===
+        if (s_inUseTargetMode) {
+            uint8_t targetCur = *(base + ITEM_TARGET_CURSOR_OFFSET);
+            if (targetCur != s_prevTargetCursor) {
+                uint8_t charIdx = GetPartyCharAtVisualPos(targetCur);
+                const char* name = GetCharacterNameByPortrait(charIdx);
+                char buf[256];
+                if (name) {
+                    FormatPartyMemberAnnouncement(charIdx, name, false, buf, sizeof(buf));
+                } else {
+                    sprintf(buf, "Party member %u", (unsigned)targetCur + 1);
+                }
+                ScreenReader::Speak(buf, true);
+                Log::Write("[MenuTTS] Use target cursor %u: charIdx=%u -> \"%s\"",
+                           (unsigned)targetCur, (unsigned)charIdx, buf);
+                s_prevTargetCursor = targetCur;
+            }
+        }
+
+        // === v0.08.63: REARRANGE ITEM CURSOR (reuse +0x272 during rearrange source, focus ~97) ===
+        if (s_inRearrangeMode && focusState == 97) {
+            if (listCur != s_prevItemCursor) {
+                AnnounceItemAtCursor(listCur);
+                s_prevItemCursor = listCur;
+            }
+        }
+
+        // === v0.08.64: REARRANGE DESTINATION CURSOR (+0x276 during focus==99) ===
+        if (s_inRearrangeMode && focusState == 99) {
+            uint8_t destCur = *(base + ITEM_TARGET_CURSOR_OFFSET);  // +0x276 reused for destination
+            if (destCur != s_prevTargetCursor) {
+                AnnounceItemAtCursor(destCur);
+                Log::Write("[MenuTTS] Rearrange dest cursor %u", (unsigned)destCur);
+                s_prevTargetCursor = destCur;
+            }
+        }
+
+        // === v0.08.68: BATTLE ITEM CURSOR (+0x285 for source browsing) ===
+        if (s_inBattleMode && focusState >= 26 && focusState <= 35) {
+            uint8_t battleCur = *(base + BATTLE_ITEM_CURSOR_OFFSET);
+            if (battleCur != s_prevBattleItemCursor) {
+                AnnounceBattleItemAtCursor(battleCur);
+                s_prevBattleItemCursor = battleCur;
+            }
+        }
+
+        // === v0.08.68: BATTLE DESTINATION CURSOR (+0x286 during focus==36) ===
+        static const int BATTLE_DEST_CURSOR_OFFSET = 0x286;
+        if (s_inBattleMode && focusState == 36) {
+            uint8_t batDestCur = *(base + BATTLE_DEST_CURSOR_OFFSET);
+            if (batDestCur != s_prevBattleItemCursor) {
+                AnnounceBattleItemAtCursor(batDestCur);
+                s_prevBattleItemCursor = batDestCur;
             }
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {
