@@ -28,17 +28,38 @@ jobs:
           echo "See DEVNOTES.md 'Infirmary Glitch' section for full details."
           echo ""
 
-          # Check 1: The dispatch table SET3 hook in Initialize() must have 'false &&'
-          if grep -n 'pExecuteOpcodeTable\[0x1E\]' src/field_navigation.cpp | grep -v 'false &&' | grep -v '//' | grep -v 'Shutdown' | grep -q .; then
-            echo "FAIL: SET3 dispatch table hook appears to be ENABLED in Initialize()."
-            echo "This WILL cause the infirmary scene hang. Disable it with 'false &&'."
-            exit 1
+          FAIL=0
+
+          # Check 1: HookedSet3 must NOT be written into any dispatch table entry.
+          # The line '*tableEntry = (uint32_t)(uintptr_t)HookedSet3;' is the danger signal.
+          # Shutdown() writing s_originalSet3 back is SAFE (that's the restore path).
+          if grep -n 'HookedSet3' src/field_navigation.cpp | grep -v '//' | grep 'tableEntry\|pExecuteOpcodeTable' | grep -v 'false' | grep -q .; then
+            echo "FAIL: HookedSet3 appears to be written into the dispatch table."
+            echo "This WILL cause the infirmary scene hang."
+            FAIL=1
           fi
 
-          # Check 2: No MinHook on opcode_set3 without 'false &&'
-          if grep -n 'MH_CreateHook.*opcode_set3\|MH_EnableHook.*opcode_set3' src/field_navigation.cpp | grep -v 'false &&' | grep -v '//' | grep -q .; then
+          # Check 2: No active MinHook on opcode_set3.
+          # Lines with MH_CreateHook/MH_EnableHook referencing opcode_set3 must be
+          # behind 'false &&' or commented out.
+          if grep -n 'MH_CreateHook.*opcode_set3\|MH_EnableHook.*opcode_set3' src/field_navigation.cpp | grep -v 'false' | grep -v '^ *//' | grep -q .; then
             echo "FAIL: MinHook SET3 hook appears to be ENABLED."
             echo "This WILL cause the infirmary scene hang."
+            FAIL=1
+          fi
+
+          # Check 3: The Initialize() dispatch table block must have 'false &&'.
+          # Look for the specific pattern of installing HookedSet3 without the guard.
+          if grep -n 'HookedSet3' src/field_navigation.cpp | grep -v '//' | grep -v 'false' | grep -v 'static\|void\|CaptureSet3' | grep -q .; then
+            echo "FAIL: HookedSet3 reference found without 'false' guard."
+            echo "Review all active references to HookedSet3 in field_navigation.cpp."
+            FAIL=1
+          fi
+
+          if [ "$FAIL" -eq 1 ]; then
+            echo ""
+            echo "=== FAILED: SET3 hook safety check ==="
+            echo "The SET3 opcode hook must remain disabled. See DEVNOTES.md."
             exit 1
           fi
 
