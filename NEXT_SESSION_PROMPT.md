@@ -1,110 +1,58 @@
 # NEXT SESSION PROMPT
 ## FF8 Accessibility Mod — Immediate Context
-## Updated: 2026-03-22 (end of session 2)
+## Updated: 2026-03-23 (session 9 end)
 
 ---
 
-## What Happened This Session (v0.08.82–v0.08.87)
+## Current Build: v0.09.40 (source + deployed)
 
-### Battle Arrangement TTS — FIXED (v0.08.82–v0.08.85)
-- Neither `battle_order[32]` nor raw inventory matched what the battle arrangement screen shows
-- **Display struct at `0x1D8DFF4`** is the authoritative source: `{item_id, qty}` pairs, 2 bytes/slot, updates live during swaps
-- v0.08.85: Cleaned up ~300 lines of dead working buffer code
+## What Works
+- **All features from session 8** — GameAudio, naming bypass, GF acquisition TTS, menu TTS, field dialog, field navigation, save screen, etc.
+- **Infirmary glitch FIXED (v0.09.40)**: SET3 opcode hook permanently disabled. FieldNavigation re-enabled with all other hooks working.
+- **GitHub Actions CI** guard added: `.github/workflows/safety-checks.yml` flags if SET3 hook is accidentally re-enabled.
 
-### Party Member HP/Status Announcement — IMPLEMENTED (v0.08.86–v0.08.87)
-- **Computed stats at `0x1CFF000`**: FFNx `char_comp_stats_1CFF000`, 3 entries (one per active party slot)
-- Struct: `ff8_char_computed_stats`, stride `0x1D0` (464 bytes), curHP at +0x172, maxHP at +0x174
-- Indexed by **party formation slot** (0-2), NOT character index — map via savemap +0xAF0 formation array
-- Confirmed: maxHP reads correctly (486/486 for Squall, 501/501 for Quistis)
-- `FormatPartyMemberAnnouncement()` builds: "Name, HP X of Y" + status ailments if present
-- Status ailment decoding from savemap char +0x96 bitfield (KO, Poison, Petrify, Blind, Silence, Berserk, Zombie)
-- v0.08.87: Diagnostic removed, clean production code
+## What Changed This Session (Session 9)
+- **Binary search** isolated the infirmary hang to HookedSet3 (SET3 opcode 0x1E hook).
+- Tried MinHook → dispatch table → SEH removal → minimal wrapper. ALL cause the hang.
+- The FF8 script interpreter is incompatible with any SET3 handler replacement.
+- SET3 hook was only used for PSHM_W investigation (already exhausted). Shift-pattern passthrough is the working fallback.
+- Builds v0.09.32–v0.09.40 were the binary search + fix sequence.
 
----
+## Open Items for Next Session
 
-## Current Build State
-- **Source**: v0.08.87
-- **Deployed**: v0.08.87
-- **Battle TTS**: Display struct at 0x1D8DFF4 ✓
-- **Use target TTS**: compStats HP/maxHP ✓, status ailments ✓
+### Item 1 (READY): GitHub Push
+- All features working, infirmary glitch resolved.
+- Safe to push source + docs.
 
----
+### Item 2 (PENDING): Continue menu TTS priorities
+1. Top-level menu navigation TTS
+2. Save Game flow TTS
+3. Save Point entity catalog integration
+4. Title Screen Continue TTS
 
-## Next Priorities
+### Item 3 (PENDING): Junction Menu TTS (v0.08.88+)
+- Phase plan in DEVNOTES.md. GF assignment before sub-options.
 
-### 1. Item Use — Remaining Testing (BLOCKED until more game progress)
-- Test using Potion on damaged character → verify HP updates in real time
-- Test using items on GFs (G-Potion etc.) → need GF item target detection
-- Test miscellaneous items (Magic Lamp, compatibility items) → need different focus states
-- Test Tent/Cottage (heal all party) → may use different target flow
-- HP change announcement after item use (before/after comparison)
-
-### 2. Other Submenu TTS
-- Magic, GF, Ability submenus
-
-### 3. Save Game Flow TTS / Title Screen Continue
-
-### 4. PSHM_W Option F — awaiting deep research
+### Item 4 (FUTURE): Separate SFX volume control (GitHub Issue #8)
+- F3/F4 controls BGM+FMV. Separate keys for SFX volume.
 
 ---
 
-## Key Architecture Reference
+## Key Learnings from This Session
 
-### Computed Stats (v0.08.87)
-- **Address**: `0x1CFF000`
-- **Stride**: `0x1D0` (464 bytes per entry, 3 entries for active party)
-- **curHP**: +0x172 (uint16)
-- **maxHP**: +0x174 (uint16)
-- **Indexed by**: party formation slot (0-2), map via savemap +0xAF0
-- **Source**: FFNx `char_comp_stats_1CFF000`, `compute_char_stats_sub_495960`
-
-### Battle Display Struct (v0.08.85)
-- **Address**: `0x1D8DFF4`
-- **Format**: `{item_id, quantity}` × 32 slots (2 bytes each)
-- **Empty**: qty == 0
-- **Live updates**: Engine modifies in place during swaps
-
-### Status Ailments (savemap char +0x96)
-- Bit 0: KO, Bit 1: Poison, Bit 2: Petrify, Bit 3: Blind
-- Bit 4: Silence, Bit 5: Berserk, Bit 6: Zombie, Bit 7: unused
-
-### Item Submenu Offsets (pMenuStateA)
-| Offset | Purpose | Values |
-|--------|---------|--------|
-| +0x22E | Active focus indicator | 3=action, 5=items, 14=use target, ~97=rearrange, ~30=battle, 79=sort, 36=battle dest, 99=rearrange dest |
-| +0x27F | Action cursor | 0=Use, 1=Rearrange, 2=Sort, 3=Battle |
-| +0x272 | Item list cursor / rearrange source | 0-based |
-| +0x276 | Party target / rearrange dest cursor | Reused |
-| +0x285 | Battle source cursor | 0-based, indexes into display struct |
-| +0x286 | Battle destination cursor | 0-based |
-
-### Savemap
-- Base: `0x1CFDC5C`
-- Item inventory: +0x0B40 (198×2 bytes)
-- Party formation: +0xAF0 (4 bytes)
-- Live game time: +0x0CCC
-- Characters: +0x48C (8 × 0x98 bytes)
-- Character status: char struct +0x96 (bitfield)
-
----
-
-## Files Modified This Session
-- `src/menu_tts.cpp` — v0.08.82-87: Battle TTS fix, cleanup, party HP/status announcements
-- `src/ff8_accessibility.h` — version bumps through v0.08.87
-- `src/field_navigation.cpp` — version comment bumps
-- `DEVNOTES.md` — updated
-- `NEXT_SESSION_PROMPT.md` — updated
+### SET3 Hook is PERMANENTLY FORBIDDEN
+- **DO NOT** re-enable HookedSet3 under any circumstances.
+- ANY interception of opcode 0x1E (MinHook, dispatch table, even a pure passthrough wrapper) hangs the infirmary scene.
+- GitHub Actions CI check in `.github/workflows/safety-checks.yml` will flag violations.
+- If SET3 capture is ever needed, investigate naked/asm thunk or alternative approaches.
+- Code and comment in field_navigation.cpp Initialize() documents this.
 
 ---
 
 ## Recovery Instructions
-1. Read DEVNOTES.md for architecture and key learnings
-2. Read this file for immediate context
-3. **Use filesystem MCP tools** — mod files on Windows, bash is separate Linux container
-4. `deploy.bat` is the ONLY build script
-5. Bump `FF8OPC_VERSION` in 3 locations every build
-6. "BAT" → read tail of `Logs/ff8_accessibility.log`
-7. Build error → read `Logs/build_latest.log`
-8. Current: v0.08.87 (source+deployed)
-9. GitHub: ampage87/FFVIII-Accessibility-Mod (main branch)
-10. **SAVEMAP CORRECTION**: All deep research offsets need -0x14 (header is 0x4C not 0x60)
+1. Read DEVNOTES.md for full architecture
+2. `deploy.bat` is the ONLY build script
+3. Bump `FF8OPC_VERSION` in 3 locations every build
+4. "BAT" → read tail of `Logs/ff8_accessibility.log`
+5. Current: v0.09.40 (source+deployed)
+6. GitHub push is next priority

@@ -45,123 +45,6 @@ extern "C" __declspec(dllexport) HRESULT WINAPI DirectInput8Create(
 static volatile bool s_running = false;
 static HANDLE s_thread = nullptr;
 
-// ============================================================================
-// Game audio volume via hooked set_midi_volume (FFNx-aware)
-//
-// v0.07.24: We now hook set_midi_volume (common_externals.set_midi_volume),
-// which FFNx replaces with set_music_volume_for_channel(channel, volume).
-// This is the function the game calls for ALL music volume changes (field,
-// battle, world map). The previous target (dmusicperf_set_volume_sub_46C6F0)
-// was only used by game credits and never called during normal play.
-//
-// FFNx's set_music_volume_for_channel signature:
-//   uint32_t __cdecl set_music_volume_for_channel(int32_t channel, uint32_t volume)
-//   - channel: 0 or 1 (music channel index)
-//   - volume: 0-127
-//   - returns: 1 always
-//
-// Our hook scales the volume argument by the user's setting.
-// F3 = volume down 10%, F4 = volume up 10%.
-// ============================================================================
-
-typedef uint32_t (__cdecl *FF8SetMusicVolumeForChannel_t)(int32_t channel, uint32_t volume);
-static FF8SetMusicVolumeForChannel_t s_originalSetMusicVolumeForChannel = nullptr;
-static bool s_volumeHookInstalled = false;
-
-static float s_gameVolume = 0.2f;  // User's desired volume (0.0-1.0). Default 20%.
-
-// Hook: intercept ALL calls to set_music_volume_for_channel.
-// The game calls this with channel (0 or 1) and volume (0-127).
-// We scale volume by user's setting before passing through.
-static uint32_t __cdecl HookedSetMusicVolumeForChannel(int32_t channel, uint32_t volume)
-{
-    uint32_t scaled = (uint32_t)(volume * s_gameVolume + 0.5f);
-    if (scaled > 127) scaled = 127;
-    
-    if (s_originalSetMusicVolumeForChannel)
-        return s_originalSetMusicVolumeForChannel(channel, scaled);
-    return 1;
-}
-
-static void SetGameAudioVolume(float vol)
-{
-    if (vol < 0.0f) vol = 0.0f;
-    if (vol > 1.0f) vol = 1.0f;
-    s_gameVolume = vol;
-    
-    // Apply immediately to both channels via the hook
-    if (s_volumeHookInstalled) {
-        HookedSetMusicVolumeForChannel(0, 127);
-        HookedSetMusicVolumeForChannel(1, 127);
-    }
-    Log::Write("GameVolume: set_music_volume(%.0f%%).", vol * 100.0f);
-}
-
-// Poll pSetMidiVolume waiting for FFNx to replace it with E9 (JMP).
-// Once detected, resolve the JMP target and MinHook it.
-// Called every frame from the main loop until successful.
-static void TryInstallVolumeHookOnFFNx()
-{
-    if (s_volumeHookInstalled) return;
-    
-    uint32_t funcAddr = FF8Addresses::pSetMidiVolume;
-    if (funcAddr == 0) return;  // Address not resolved yet
-    
-    uint8_t* pFunc = (uint8_t*)funcAddr;
-    
-    __try {
-        if (pFunc[0] != 0xE9) {
-            // FFNx hasn't patched yet — keep waiting
-            return;
-        }
-        
-        // FFNx has written E9 xx xx xx xx — resolve the JMP target
-        int32_t offset = *(int32_t*)(pFunc + 1);
-        void* ffnxFunc = (void*)(pFunc + 5 + offset);
-        Log::Write("GameVolume: FFNx JMP detected at 0x%08X -> 0x%08X",
-                   funcAddr, (uint32_t)(uintptr_t)ffnxFunc);
-        
-        MH_STATUS st = MH_CreateHook(ffnxFunc, (LPVOID)HookedSetMusicVolumeForChannel,
-                                      (LPVOID*)&s_originalSetMusicVolumeForChannel);
-        Log::Write("GameVolume: MH_CreateHook(0x%08X) = %s",
-                   (uint32_t)(uintptr_t)ffnxFunc, MH_StatusToString(st));
-        
-        if (st == MH_OK) {
-            MH_STATUS en = MH_EnableHook(ffnxFunc);
-            Log::Write("GameVolume: MH_EnableHook = %s", MH_StatusToString(en));
-            if (en == MH_OK) {
-                s_volumeHookInstalled = true;
-                Log::Write("GameVolume: Hook installed on set_music_volume_for_channel. "
-                           "Default volume %.0f%%.", s_gameVolume * 100.0f);
-            }
-        }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        Log::Write("GameVolume: Exception reading 0x%08X", funcAddr);
-    }
-}
-
-static void GameVolumeDown()
-{
-    float newVol = s_gameVolume - 0.1f;
-    if (newVol < 0.0f) newVol = 0.0f;
-    SetGameAudioVolume(newVol);
-    char msg[48];
-    snprintf(msg, sizeof(msg), "Music volume %d percent", (int)(s_gameVolume * 100.0f + 0.5f));
-    ScreenReader::Speak(msg, true);
-    Log::Write("GameVolume: -> %.0f%%", s_gameVolume * 100.0f);
-}
-
-static void GameVolumeUp()
-{
-    float newVol = s_gameVolume + 0.1f;
-    if (newVol > 1.0f) newVol = 1.0f;
-    SetGameAudioVolume(newVol);
-    char msg[48];
-    snprintf(msg, sizeof(msg), "Music volume %d percent", (int)(s_gameVolume * 100.0f + 0.5f));
-    ScreenReader::Speak(msg, true);
-    Log::Write("GameVolume: -> %.0f%%", s_gameVolume * 100.0f);
-}
-
 // The main update loop runs in a background thread.
 // It reads game state from memory and drives accessibility modules.
 DWORD WINAPI AccessibilityThread(LPVOID lpParam)
@@ -203,8 +86,9 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     FmvSkip::Initialize();       // Creates kernel32 hooks (CreateFile/CloseHandle/ReadFile)
     FmvAudioDesc::Initialize(hOurModule);  // Loads VTT files from Audio Descriptions folder
     FieldDialog::Initialize();   // v04.00: Hooks opcode dispatch table for dialog text capture
-    FieldNavigation::Initialize(); // v05.00: Field navigation assistance (scaffold)
+    FieldNavigation::Initialize(); // v05.00: Field navigation assistance
     NameBypass::Initialize();    // v04.26: Auto-bypass character/GF naming screens
+    GameAudio::Initialize();      // v0.09.22: Centralized game audio control
     MenuTTS::Initialize();       // v07.00: In-game menu TTS diagnostic
     
     // Enable all MinHook hooks
@@ -216,11 +100,8 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     bool wasTitleActive = false;
 
     while (s_running) {
-        // Poll for FFNx's JMP patch at pSetMidiVolume and hook it once detected.
-        // FFNx loads after us, so we must wait for it to patch the function.
-        // Once hooked, ALL game volume calls flow through our hook automatically —
-        // no periodic re-apply needed.
-        TryInstallVolumeHookOnFFNx();
+        // Game audio: deferred hook install + periodic volume re-application
+        GameAudio::Update();
 
         // Deferred game loop resolution (needed for title screen detection)
         FF8Addresses::TryResolveDeferredGameLoop();
@@ -254,8 +135,6 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
         FmvSkip::OnFrame();
         FmvAudioDesc::OnFrame();
         
-        // Field navigation update (v05.00) — runs before dialog poll so it
-        // can check dialog-active state and suspend navigation if needed.
         FieldNavigation::Update();
 
         // Field dialog polling fallback (v04.13)
@@ -292,8 +171,8 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
 
             if (grave && !s_graveWas) FieldDialog::RepeatLastDialog();
             if (f1 && !s_f1was) ScreenReader::CycleVoice();
-            if (f3 && !s_f3was) GameVolumeDown();
-            if (f4 && !s_f4was) GameVolumeUp();
+            if (f3 && !s_f3was) GameAudio::VolumeDown();
+            if (f4 && !s_f4was) GameAudio::VolumeUp();
             if (f5 && !s_f5was) ScreenReader::DecreaseVolume();
             if (f6 && !s_f6was) ScreenReader::IncreaseVolume();
             if (f7 && !s_f7was) ScreenReader::DecreaseRate();
@@ -312,6 +191,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     }
     
     // Cleanup
+    GameAudio::Shutdown();       // v0.09.22: Remove BGM volume hook
     NameBypass::Shutdown();      // v04.26: Remove naming screen hook
     FieldNavigation::Shutdown(); // v05.00: Field navigation cleanup
     FieldDialog::Shutdown();     // v04.00: Restore opcode table entries

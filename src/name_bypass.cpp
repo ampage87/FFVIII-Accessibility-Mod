@@ -54,31 +54,39 @@ static int __cdecl Hooked_Menuname(int entityPtr)
     Log::Write("NameBypass: MENUNAME enter entity=0x%08X mode=%u field=%s session=%ld",
                (unsigned)entityPtr, (unsigned)mode, field, session);
 
-    // Always call the original handler first — preserves name-buffer init,
-    // save-buffer population, and any internal state flags.
+    // If bypass is off or SHIFT is held, call original and let player name.
+    if (!s_enabled) {
+        Log::Write("NameBypass: bypass disabled, passing through session=%ld", session);
+        return s_origMenuname ? s_origMenuname(entityPtr) : 3;
+    }
+    if (GetAsyncKeyState(VK_SHIFT) & 0x8000) {
+        Log::Write("NameBypass: SHIFT held, opt-out session=%ld", session);
+        return s_origMenuname ? s_origMenuname(entityPtr) : 3;
+    }
+
+    // Bypass strategy: Call the original handler to preserve all side effects
+    // (character init, script state, junction setup), then immediately clear
+    // the UI-open flag to prevent the naming screen from appearing.
+    // v04.35 documented: 0x01CE490B = naming UI open flag.
     int ret = 0;
     if (s_origMenuname) {
         ret = s_origMenuname(entityPtr);
     }
-
-    Log::Write("NameBypass: MENUNAME exit ret=%d session=%ld", ret, session);
-
-    // If bypass is off or SHIFT is held, leave the UI to the player.
-    if (!s_enabled) {
-        Log::Write("NameBypass: bypass disabled, passing through session=%ld", session);
-        return ret;
+    
+    // Force-close the naming UI by clearing the open flag
+    __try {
+        volatile uint8_t* uiFlag = (volatile uint8_t*)0x01CE490BU;
+        uint8_t flagBefore = *uiFlag;
+        *uiFlag = 0;
+        Log::Write("NameBypass: Cleared UI flag (was %u) session=%ld", (unsigned)flagBefore, session);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log::Write("NameBypass: SEH clearing UI flag session=%ld", session);
     }
-    if (GetAsyncKeyState(VK_SHIFT) & 0x8000) {
-        Log::Write("NameBypass: SHIFT held, opt-out session=%ld", session);
-        return ret;
-    }
+    
+    Log::Write("NameBypass: Bypassed naming screen (orig ret=%d) session=%ld", ret, session);
+    ScreenReader::Speak("Naming screen bypassed", false);
 
-    // Arm the pending confirm injection.
-    s_pending   = true;
-    s_deadline  = GetTickCount() + INJECT_WINDOW_MS;
-    s_announced = false;
-
-    return ret;
+    return 3;  // script advance
 }
 
 // ============================================================================
@@ -87,27 +95,11 @@ static int __cdecl Hooked_Menuname(int entityPtr)
 
 bool Initialize()
 {
-    if (s_initialized) return true;
-
-    uint32_t target = FF8Addresses::opcode_menuname;
-    if (target == 0) {
-        Log::Write("NameBypass: opcode_menuname not resolved — bypass inactive.");
-        return false;
-    }
-
-    MH_STATUS st = MH_CreateHook(
-        reinterpret_cast<LPVOID>(target),
-        reinterpret_cast<LPVOID>(&Hooked_Menuname),
-        reinterpret_cast<LPVOID*>(&s_origMenuname));
-
-    if (st != MH_OK) {
-        Log::Write("NameBypass: MH_CreateHook failed (%s) for opcode_menuname=0x%08X",
-                   MH_StatusToString(st), target);
-        return false;
-    }
-
-    Log::Write("NameBypass: Hooked opcode_menuname [0x129] @ 0x%08X", target);
-    s_initialized = true;
+    // v0.09.04: Naming bypass is now handled by field_dialog.cpp's Hook_opcode_menuname
+    // (restored v04.35 approach minus enableGF). This module is disabled to avoid
+    // dual MinHook conflicts on the same target.
+    Log::Write("NameBypass: Disabled — bypass handled by field_dialog.cpp (v0.09.04)");
+    s_initialized = false;
     return true;
 }
 
@@ -141,12 +133,13 @@ void Update()
         return;
     }
 
-    // Only inject while the naming UI is active (MODE_MENU = 6).
-    // If the game has already left menu mode, we're done.
+    // Only inject while NOT on the field (mode 1). The naming screen
+    // can use mode 6 (menu) or mode 10 (tutorial/naming). If the game
+    // has returned to field mode, the naming screen is done.
     uint16_t mode = FF8Addresses::GetCurrentMode();
-    if (mode != FF8Addresses::MODE_MENU) {
-        Log::Write("NameBypass: mode changed to %u, clearing pending session=%ld",
-                   (unsigned)mode, s_sessionId);
+    if (mode == FF8Addresses::MODE_FIELD) {
+        Log::Write("NameBypass: returned to field mode, clearing pending session=%ld",
+                   s_sessionId);
         s_pending = false;
         return;
     }

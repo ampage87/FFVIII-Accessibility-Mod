@@ -3,7 +3,7 @@
 // See field_navigation.h for full architecture and phasing notes.
 //
 // ============================================================================
-// CURRENT STATE: v0.08.87 — Use target: compStats HP confirmed, diagnostic removed
+// CURRENT STATE: v0.09.40 — Re-enable FieldNavigation for infirmary glitch repro
 // ============================================================================
 //
 // What's new in v05.12:
@@ -2094,67 +2094,64 @@ static int __cdecl HookedPushradius(int entityPtr)
 // from the entity state struct. This captures PSHM_W-sourced coordinates that
 // the static JSM scanner can’t resolve (e.g. bghall_1 Directory panel).
 
-static int __cdecl HookedSet3(int entityPtr)
+// v0.09.38: SET3 capture logic extracted from the hook to avoid SEH/stack overhead.
+// Called from HookedSet3 only when capturing is active.
+// This function is NOT on the game's script interpreter call path — safe to use SEH.
+static void CaptureSet3Position(uint32_t entityAddr)
 {
-    int result = s_originalSet3(entityPtr);
-
-    // v0.08.26: PERSISTENT capture — always on after first field load, no time window.
-    // The old 3s window missed dic's SET3 which fires outside init.
-    if (!s_capturingSET3) return result;
-
     s_set3TotalCalls++;
 
     if (s_set3CaptureCount < MAX_SET3_CAPTURES) {
         __try {
-            uint8_t* ent = (uint8_t*)(uint32_t)entityPtr;
+            uint8_t* ent = (uint8_t*)entityAddr;
             int32_t fpX = *(int32_t*)(ent + 0x190);
             int32_t fpY = *(int32_t*)(ent + 0x194);
             uint16_t tri = *(uint16_t*)(ent + 0x1FA);
             int16_t posX = (int16_t)(fpX / 4096);
             int16_t posY = (int16_t)(fpY / 4096);
-            // Also try simple int16 coords as fallback
             if (fpX == 0 && fpY == 0) {
                 posX = *(int16_t*)(ent + 0x20);
                 posY = *(int16_t*)(ent + 0x24);
             }
-            // Deduplicate — if this entity already has a capture, update it.
-            // Per-frame scripts can fire SET3 multiple times; we want the latest position.
             int slot = -1;
             for (int c = 0; c < s_set3CaptureCount; c++) {
-                if (s_set3Captures[c].entityAddr == (uint32_t)entityPtr) {
+                if (s_set3Captures[c].entityAddr == entityAddr) {
                     slot = c;
                     break;
                 }
             }
             bool isNew = (slot < 0);
-            if (isNew) {
-                slot = s_set3CaptureCount++;
-            }
-            s_set3Captures[slot].entityAddr = (uint32_t)entityPtr;
+            if (isNew) slot = s_set3CaptureCount++;
+            s_set3Captures[slot].entityAddr = entityAddr;
             s_set3Captures[slot].posX = posX;
             s_set3Captures[slot].posY = posY;
             s_set3Captures[slot].posZ = 0;
             s_set3Captures[slot].triId = tri;
-
-            // v0.08.26: Log only on FIRST capture of each entity (new slot).
-            // This keeps the log clean while still catching dic when it finally fires.
             if (isNew) {
                 Log::Write("FieldNavigation: [SET3-HOOK] NEW ent=0x%08X pos=(%d,%d) tri=%u slot=%d/%d totalCalls=%d",
-                           (uint32_t)entityPtr, (int)posX, (int)posY,
+                           entityAddr, (int)posX, (int)posY,
                            (unsigned)tri, slot, s_set3CaptureCount, s_set3TotalCalls);
                 s_set3Captures[slot].firstLogged = true;
             }
         } __except(EXCEPTION_EXECUTE_HANDLER) {
-            Log::Write("FieldNavigation: [SET3-HOOK] ent=0x%08X (SEH)", (uint32_t)entityPtr);
+            Log::Write("FieldNavigation: [SET3-HOOK] ent=0x%08X (SEH)", entityAddr);
         }
     }
-
-    // v0.08.26: Periodic summary every 10000 calls (roughly every ~3 min at 60fps).
     if ((s_set3TotalCalls % 10000) == 0) {
         Log::Write("FieldNavigation: [SET3-HOOK] summary: %d unique entities, %d total calls",
                    s_set3CaptureCount, s_set3TotalCalls);
     }
+}
 
+// v0.09.38: Minimal SET3 hook — NO SEH, no locals, pure passthrough.
+// The original had __try/__except which installs an SEH frame on the stack.
+// The FF8 script interpreter appears to be sensitive to stack frame changes
+// in opcode handlers, causing the infirmary scene hang.
+static int __cdecl HookedSet3(int entityPtr)
+{
+    int result = s_originalSet3(entityPtr);
+    if (s_capturingSET3)
+        CaptureSet3Position((uint32_t)entityPtr);
     return result;
 }
 
@@ -4576,8 +4573,31 @@ void Initialize()
                    FF8Addresses::opcode_pushradius, MH_StatusToString(st));
     }
 
-    // v0.08.03: Hook SET3 opcode for runtime position capture of PSHM_W entities.
-    if (FF8Addresses::opcode_set3 != 0) {
+    // v0.08.03: SET3 opcode hook — PERMANENTLY DISABLED.
+    // ANY interception of SET3 (MinHook or dispatch table) causes the infirmary scene
+    // to hang (Dr. Kadowaki walk-to-phone never completes). Even a minimal wrapper
+    // that only calls the original and returns triggers the bug. The FF8 script
+    // interpreter is sensitive to SET3 handler replacement. See DEVNOTES.md.
+    // SET3 capture was used for PSHM_W entity position investigation (exhausted).
+    // Shift-pattern passthrough provides adequate fallback positions.
+    // TODO: If SET3 capture is ever needed again, investigate naked/asm thunk.
+    if (false && FF8Addresses::pExecuteOpcodeTable != nullptr) {
+        s_originalSet3 = (OpcodeHandler_t)(uintptr_t)FF8Addresses::pExecuteOpcodeTable[0x1E];
+        uint32_t* tableEntry = &FF8Addresses::pExecuteOpcodeTable[0x1E];
+        DWORD oldProtect = 0;
+        if (VirtualProtect(tableEntry, 4, PAGE_READWRITE, &oldProtect)) {
+            *tableEntry = (uint32_t)(uintptr_t)HookedSet3;
+            VirtualProtect(tableEntry, 4, oldProtect, &oldProtect);
+            Log::Write("FieldNavigation: opcode_set3 dispatch table patch @ 0x%08X (was 0x%08X, now 0x%08X)",
+                       (uint32_t)(uintptr_t)tableEntry,
+                       (uint32_t)(uintptr_t)s_originalSet3,
+                       (uint32_t)(uintptr_t)HookedSet3);
+        } else {
+            Log::Write("FieldNavigation: WARNING - VirtualProtect failed for SET3 dispatch table patch");
+            s_originalSet3 = nullptr;
+        }
+    } else if (false && FF8Addresses::opcode_set3 != 0) {
+        // OLD MinHook path — DISABLED (caused infirmary scene hang).
         MH_STATUS st = MH_CreateHook(
             (LPVOID)(uintptr_t)FF8Addresses::opcode_set3,
             (LPVOID)HookedSet3,
@@ -4664,7 +4684,7 @@ void Initialize()
 
     s_initialized = true;
     s_lastLogTime = GetTickCount();
-    Log::Write("FieldNavigation: Initialized v0.08.61 — PSHM_W handler diagnostic + SET3 hook + direct read fallback.");
+    Log::Write("FieldNavigation: Initialized v0.09.40 — PSHM_W handler diagnostic + SET3 hook + direct read fallback.");
     Log::Write("FieldNavigation:   F9  = nearest character and compass direction (repeat to cycle)");
     Log::Write("FieldNavigation:   F10 = player field name and position");
 }
@@ -5857,9 +5877,14 @@ void Shutdown()
         MH_RemoveHook( (LPVOID)(uintptr_t)FF8Addresses::get_key_state_addr);
         s_originalGetKeyState = nullptr;
     }
-    if (FF8Addresses::opcode_set3 && s_originalSet3) {
-        MH_DisableHook((LPVOID)(uintptr_t)FF8Addresses::opcode_set3);
-        MH_RemoveHook( (LPVOID)(uintptr_t)FF8Addresses::opcode_set3);
+    // v0.09.38: SET3 uses dispatch table patch (not MinHook).
+    if (FF8Addresses::pExecuteOpcodeTable != nullptr && s_originalSet3 != nullptr) {
+        uint32_t* tableEntry = &FF8Addresses::pExecuteOpcodeTable[0x1E];
+        DWORD oldProtect = 0;
+        if (VirtualProtect(tableEntry, 4, PAGE_READWRITE, &oldProtect)) {
+            *tableEntry = (uint32_t)(uintptr_t)s_originalSet3;
+            VirtualProtect(tableEntry, 4, oldProtect, &oldProtect);
+        }
         s_originalSet3 = nullptr;
     }
     // v0.08.07: Restore PSHM_W dispatch table entry (not MinHook).

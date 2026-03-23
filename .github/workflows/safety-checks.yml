@@ -1,0 +1,45 @@
+# Safety checks for known bugs.
+# Runs on every push and PR to catch accidental re-introduction of fixed issues.
+
+name: Safety Checks
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  check-set3-hook:
+    name: Check SET3 hook is disabled
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure SET3 opcode hook is NOT active
+        run: |
+          echo "=== Checking that SET3 hook remains disabled ==="
+          echo ""
+          echo "Background: ANY interception of the SET3 opcode handler (opcode 0x1E)"
+          echo "causes the infirmary scene to hang (Dr. Kadowaki walk-to-phone freeze)."
+          echo "This was diagnosed in session 9 (v0.09.32-v0.09.40) via binary search."
+          echo "Both MinHook and dispatch table approaches trigger the bug."
+          echo "Even a minimal wrapper (call original + return) breaks the engine."
+          echo "See DEVNOTES.md 'Infirmary Glitch' section for full details."
+          echo ""
+
+          # Check 1: The dispatch table SET3 hook in Initialize() must have 'false &&'
+          if grep -n 'pExecuteOpcodeTable\[0x1E\]' src/field_navigation.cpp | grep -v 'false &&' | grep -v '//' | grep -v 'Shutdown' | grep -q .; then
+            echo "FAIL: SET3 dispatch table hook appears to be ENABLED in Initialize()."
+            echo "This WILL cause the infirmary scene hang. Disable it with 'false &&'."
+            exit 1
+          fi
+
+          # Check 2: No MinHook on opcode_set3 without 'false &&'
+          if grep -n 'MH_CreateHook.*opcode_set3\|MH_EnableHook.*opcode_set3' src/field_navigation.cpp | grep -v 'false &&' | grep -v '//' | grep -q .; then
+            echo "FAIL: MinHook SET3 hook appears to be ENABLED."
+            echo "This WILL cause the infirmary scene hang."
+            exit 1
+          fi
+
+          echo "PASS: SET3 hook is disabled. Infirmary scene is safe."

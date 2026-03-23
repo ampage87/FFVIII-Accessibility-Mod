@@ -1318,28 +1318,103 @@ void RepeatLastDialog()
 // auto-confirm with simulated Enter key presses to keep default names.
 // ============================================================================
 
+// v0.09.05: Restored FULL v04.35 bypass including enableGF calls.
+// enableGF(charIdx) at 0x47E480 does essential character junction init —
+// without it, subsequent scripts malfunction (infirmary scene breaks).
+// The enableGF calls DO mark GFs 0-5 as obtained in savemap, even before
+// the player earns them. This is handled at the TTS layer by reading the
+// game's own displayed GF list rather than filtering by savemap exists flags.
 static int __cdecl Hook_opcode_menuname(int entityPtr)
 {
-    // v04.35: Bypass naming screen entirely.
-    // ASM analysis showed 0x47E480(charIdx) = GF junction init per party member.
-    // We call it for all 6 slots and return 3 (script advance).
-    // The UI-open flag at 0x01CE490B is never set, so no screen appears.
     const char* fieldName = FF8Addresses::pCurrentFieldName ?
                             FF8Addresses::pCurrentFieldName : "?";
     Log::Write("FieldDialog: [MENUNAME] Bypassing naming screen. field=%s entity=0x%08X",
                fieldName, (uint32_t)entityPtr);
-    ScreenReader::Speak("Naming screen bypassed.", false);
+    // v0.09.14: Smart bypass with correct parameter reading.
+    // Disassembly of opcode_menuname shows: param = entityPtr[stackPtr * 4]
+    // where stackPtr = byte at entityPtr+0x184. Stack is at START of struct.
+    int param = -1;
+    __try {
+        uint8_t* ep = (uint8_t*)entityPtr;
+        uint8_t sp = ep[0x184];
+        param = *(int32_t*)(ep + sp * 4);
+        Log::Write("FieldDialog: [MENUNAME] stackPtr=%u, param=%d (at +0x%02X)",
+                   (unsigned)sp, param, sp * 4);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log::Write("FieldDialog: [MENUNAME] SEH reading param");
+    }
 
-    typedef void (__cdecl* EnableGF_t)(int);
-    EnableGF_t enableGF = (EnableGF_t)0x0047E480U;
-    for (int i = 0; i < 6; i++) {
-        __try { enableGF(i); }
-        __except(EXCEPTION_EXECUTE_HANDLER) {
-            Log::Write("FieldDialog: [MENUNAME] enableGF(%d) SEH", i);
+    // Character names (0-7) and GF names (8-23)
+    static const char* s_charNames[] = {
+        "Squall", "Zell", "Irvine", "Quistis", "Rinoa", "Selphie", "Seifer", "Edea"
+    };
+    static const char* s_gfNames[] = {
+        "Quezacotl", "Shiva", "Ifrit", "Siren", "Brothers", "Diablos",
+        "Carbuncle", "Leviathan", "Pandemona", "Cerberus", "Alexander",
+        "Doomtrain", "Bahamut", "Cactuar", "Tonberry", "Eden"
+    };
+
+    // v0.09.19: Snapshot GF exists flags BEFORE calling original handler.
+    // The original's switch table writes GF data to savemap. By diffing
+    // before/after, we detect acquisitions at exactly the right moment
+    // with zero polling cost during normal gameplay.
+    static const uint32_t SAVEMAP_BASE_ADDR = 0x1CFDC5C;
+    static const int GF_STRUCT_SIZE_LOCAL = 0x44;  // 68 bytes per GF
+    static const int GF_COUNT_LOCAL = 16;
+    uint8_t gfBefore[16] = {};
+    {
+        uint8_t* sm = (uint8_t*)SAVEMAP_BASE_ADDR;
+        for (int g = 0; g < GF_COUNT_LOCAL; g++)
+            gfBefore[g] = sm[0x4C + g * GF_STRUCT_SIZE_LOCAL + 0x11];
+    }
+
+    // Call original handler for ALL params — it does essential init work
+    // (switch table writes savemap data, GF assignments, character setup).
+    // Then suppress the naming UI by clearing the trigger flags.
+    Log::Write("FieldDialog: [MENUNAME] Calling original handler (param=%d)", param);
+    int result = s_origMenuname(entityPtr);
+    // Clear naming UI triggers before main loop sees them
+    __try {
+        *(uint8_t*)0x01CE4760 = 0;   // pMode0Phase - clear naming UI mode
+        *(uint8_t*)0x01CE490B = 0;   // naming flag - clear
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log::Write("FieldDialog: [MENUNAME] SEH clearing UI flags");
+    }
+
+    // v0.09.19: Check for new GF acquisitions (exists flag 0→non-zero)
+    bool gfAcquired = false;
+    {
+        static const char* GF_NAMES_LOCAL[] = {
+            "Quezacotl", "Shiva", "Ifrit", "Siren", "Brothers", "Diablos",
+            "Carbuncle", "Leviathan", "Pandemona", "Cerberus", "Alexander",
+            "Doomtrain", "Bahamut", "Cactuar", "Tonberry", "Eden"
+        };
+        uint8_t* sm = (uint8_t*)SAVEMAP_BASE_ADDR;
+        for (int g = 0; g < GF_COUNT_LOCAL; g++) {
+            uint8_t after = sm[0x4C + g * GF_STRUCT_SIZE_LOCAL + 0x11];
+            if (gfBefore[g] == 0 && after != 0) {
+                gfAcquired = true;
+                char buf[128];
+                sprintf(buf, "GF %s acquired", GF_NAMES_LOCAL[g]);
+                ScreenReader::Speak(buf, false);  // queue after any dialog
+                Log::Write("FieldDialog: [MENUNAME] %s (idx=%d, flag 0x%02X)",
+                           buf, g, (unsigned)after);
+            }
         }
     }
-    Log::Write("FieldDialog: [MENUNAME] GF init done. Returning 3.");
-    return 3;
+
+    // v0.09.21: Announce character name only when no GF was acquired.
+    // When the original handler writes GF data (e.g. Quistis/Rinoa at study panel),
+    // the GF announcement is sufficient — the character name is noise.
+    // Squall (param 0) always announces because no GFs are given with him.
+    if (param >= 0 && param <= 7 && !gfAcquired) {
+        ScreenReader::Speak(s_charNames[param], false);
+        Log::Write("FieldDialog: [MENUNAME] Character: %s", s_charNames[param]);
+    } else if (param >= 0 && param <= 7) {
+        Log::Write("FieldDialog: [MENUNAME] Character: %s (suppressed, GF acquired)", s_charNames[param]);
+    }
+    Log::Write("FieldDialog: [MENUNAME] UI suppressed, returning %d", result);
+    return result;
 }
 
 // ============================================================================
@@ -1495,25 +1570,11 @@ bool Initialize()
         Log::Write("FieldDialog: WARNING - get_character_width not resolved");
     }
 
-    // v04.22: Hook update_field_entities (naked counter for script interpreter activity)
-    if (FF8Addresses::update_field_entities_addr != 0) {
-        MH_STATUS st = MH_CreateHook(
-            (LPVOID)FF8Addresses::update_field_entities_addr,
-            (LPVOID)Hook_update_field_entities_naked,
-            (LPVOID*)&s_origUpdateFieldEntities_raw);
-        if (st == MH_OK) {
-            Log::Write("FieldDialog: Hooked update_field_entities: target=0x%08X trampoline=0x%08X",
-                       FF8Addresses::update_field_entities_addr,
-                       (uint32_t)(uintptr_t)s_origUpdateFieldEntities_raw);
-            anySuccess = true;
-        } else {
-            Log::Write("FieldDialog: FAILED to hook update_field_entities (status=%d)", (int)st);
-        }
-    } else {
-        Log::Write("FieldDialog: WARNING - update_field_entities not resolved");
-    }
+    // v0.09.08: DISABLED update_field_entities hook for infirmary glitch diagnosis.
+    // This naked hook intercepts the script interpreter entry point.
+    Log::Write("FieldDialog: [DIAG] update_field_entities hook DISABLED for infirmary glitch test");
 
-    // v04.25: Hook opcode_menuname (0x129) for naming screen auto-bypass
+    // v0.09.04: Restored menuname hook (v04.35 style, minus enableGF)
     if (FF8Addresses::opcode_menuname != 0) {
         if (CreateDetourHook(FF8Addresses::opcode_menuname, Hook_opcode_menuname, &s_origMenuname, "opcode_menuname"))
             anySuccess = true;
@@ -1521,12 +1582,10 @@ bool Initialize()
         Log::Write("FieldDialog: WARNING - opcode_menuname not resolved");
     }
 
-    // v04.22: Patch opcode dispatch site to log ALL opcode indices
-    if (PatchDispatchSite()) {
-        anySuccess = true;
-    } else {
-        Log::Write("FieldDialog: WARNING - dispatch site patch failed");
-    }
+    // v0.09.08: DISABLED dispatch patch + update_field_entities hook for infirmary glitch diagnosis.
+    // These intercept EVERY script opcode execution — prime suspects for NPC walk hang.
+    // if (PatchDispatchSite()) { anySuccess = true; }
+    Log::Write("FieldDialog: [DIAG] Dispatch patch DISABLED for infirmary glitch test");
 
     if (!anySuccess) {
         Log::Write("FieldDialog: ERROR - No hooks were installed.");

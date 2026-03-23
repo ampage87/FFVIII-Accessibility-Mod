@@ -9,8 +9,8 @@
 // FF8 Original PC Accessibility Mod version
 // Increment on every build change
 // ================================================================
-#define FF8OPC_VERSION "0.08.87"  // Use target: compStats HP confirmed, diagnostic removed
-#define FF8OPC_VERSION_DATE "2026-03-22"
+#define FF8OPC_VERSION "0.09.40"  // FIX: SET3 hook PERMANENTLY DISABLED (any interception hangs infirmary scene)
+#define FF8OPC_VERSION_DATE "2026-03-23"
 
 // ============================================================================
 // FF8 Runtime Address Resolution
@@ -99,6 +99,12 @@ void Shutdown();
 
 #include "field_archive.h"
 #include "field_navigation.h"
+
+// ============================================================================
+// Game Audio Module (v0.09.22)
+// ============================================================================
+
+#include "game_audio.h"
 
 // ============================================================================
 // FF8 Text Decoder (v04.00)

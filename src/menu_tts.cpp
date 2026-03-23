@@ -338,6 +338,407 @@ static uint8_t  s_batDestDiagSnap[32] = {};              // diagnostic: snapshot
 // v0.08.84: s_battleOrderLoaded, s_snapValid, s_battleOrderLivePtr removed.
 // Battle TTS now reads from display struct at 0x1D8DFF4 directly.
 
+// ============================================================================
+// v0.08.89: Junction submenu TTS — character select + action menu
+// Phase 2: Character select (focus==0, +0x1E8==17, cursor at +0x1E9)
+// Phase 3: Action menu (focus==3, cursor at +0x26C: 0=Junction,1=Off,2=Auto,3=Ability)
+// ============================================================================
+static const int JUNC_FOCUS_OFFSET        = 0x22E;  // focus state indicator
+static const int JUNC_ACTIVE_OFFSET       = 0x1E8;  // 17=Junction active, 255=inactive
+static const int JUNC_CHARSEL_CURSOR_OFF  = 0x1E9;  // character select cursor (party formation index)
+static const int JUNC_ACTION_CURSOR_OFF   = 0x26C;  // action menu cursor (0-3)
+
+static const char* JUNC_ACTION_NAMES[] = { "Junction", "Off", "Auto", "Ability" };
+static const int JUNC_ACTION_COUNT = 4;
+
+// v0.08.95: Junction sub-option and GF list offsets
+static const int JUNC_SUBOPTION_CURSOR_OFF = 0x268;  // 0=GF, 1=Magic (focus 37/38)
+static const int JUNC_GF_LIST_CURSOR_OFF   = 0x26D;  // GF list cursor (focus 41), 0-based GF index
+static const int JUNC_GF_TOGGLE_OFF        = 0x27F;  // GF junction toggle (0=unjunctioned, 1=junctioned)
+
+static const char* JUNC_SUBOPTION_NAMES[] = { "GF", "Magic" };
+
+// Default GF names (fallback if savemap read fails)
+static const char* GF_DEFAULT_NAMES[] = {
+    "Quezacotl", "Shiva", "Ifrit", "Siren", "Brothers", "Diablos",
+    "Carbuncle", "Leviathan", "Pandemona", "Cerberus", "Alexander",
+    "Doomtrain", "Bahamut", "Cactuar", "Tonberry", "Eden"
+};
+static const int GF_COUNT = 16;
+static const int GF_STRUCT_SIZE = 68;  // 0x44 bytes per GF in savemap
+
+// State tracking
+static bool     s_juncActive = false;          // true while Junction subsystem is active (+0x1E8==17)
+static uint8_t  s_juncPrevCharCursor = 0xFF;    // previous character select cursor
+static uint8_t  s_juncPrevFocus = 0xFF;         // previous +0x22E focus state
+static uint8_t  s_juncPrevActionCursor = 0xFF;  // previous action menu cursor (+0x26C)
+static bool     s_juncCharSelectAnnounced = false; // true after first char select announce
+static uint8_t  s_juncPrevSuboptCursor = 0xFF;  // previous sub-option cursor (+0x268)
+static uint8_t  s_juncPrevGfListCursor = 0xFF;  // previous GF list cursor (+0x26D)
+static uint8_t  s_juncPrevGfToggle = 0xFF;      // previous GF toggle state (+0x27F)
+
+
+static void ResetJunctionState()
+{
+    s_juncActive = false;
+    s_juncPrevCharCursor = 0xFF;
+    s_juncPrevFocus = 0xFF;
+    s_juncPrevActionCursor = 0xFF;
+    s_juncCharSelectAnnounced = false;
+    s_juncPrevSuboptCursor = 0xFF;
+    s_juncPrevGfListCursor = 0xFF;
+    s_juncPrevGfToggle = 0xFF;
+}
+
+// Compute character level from EXP. FF8: each level needs 1000 EXP flat.
+static int ComputeCharLevel(uint32_t exp)
+{
+    int lvl = (int)(exp / 1000) + 1;
+    if (lvl > 100) lvl = 100;
+    return lvl;
+}
+
+// SEH-safe: Announce a party member for Junction character select.
+// Uses inline literal addresses to avoid forward reference issues.
+// savemap=0x1CFDC5C, chars at +0x48C (8×0x98), compStats at 0x1CFF000 (3×0x1D0)
+static void AnnounceJuncCharSelect(uint8_t cursorPos)
+{
+    __try {
+        uint8_t* sm = (uint8_t*)0x1CFDC5C;  // SAVEMAP_BASE
+        // Party formation at +0xAF0: 4 bytes, char index 0-7 or 0xFF.
+        // Junction menu displays in formation order (NOT sorted by charIdx).
+        uint8_t* party = sm + 0xAF0;
+        uint8_t partySlots[4];
+        int partyCount = 0;
+        for (int i = 0; i < 4; i++) {
+            if (party[i] != 0xFF && party[i] <= 10)
+                partySlots[partyCount++] = party[i];
+        }
+        
+        if (cursorPos >= partyCount) {
+            Log::Write("[JuncTTS] CharSelect cursor %u beyond party count %d",
+                       (unsigned)cursorPos, partyCount);
+            return;
+        }
+        
+        uint8_t charIdx = partySlots[cursorPos];
+        // Inline name lookup (GetCharacterNameByPortrait defined later in file)
+        static const char* JUNC_CHAR_NAMES[] = {
+            "Squall", "Zell", "Irvine", "Quistis", "Rinoa", "Selphie", "Seifer", "Edea",
+            "Laguna", "Kiros", "Ward"
+        };
+        const char* name = (charIdx < 11) ? JUNC_CHAR_NAMES[charIdx] : "Unknown";
+        
+        // Get HP from computed stats (0x1CFF000, stride 0x1D0, curHP +0x172, maxHP +0x174)
+        // Map charIdx to party slot via party array
+        uint16_t curHP = 0, maxHP = 0;
+        for (int s = 0; s < 3; s++) {
+            if (party[s] == charIdx) {
+                uint8_t* cs = (uint8_t*)0x1CFF000 + s * 0x1D0;
+                uint16_t csMax = *(uint16_t*)(cs + 0x174);
+                if (csMax > 0 && csMax < 10000) {
+                    curHP = *(uint16_t*)(cs + 0x172);
+                    maxHP = csMax;
+                }
+                break;
+            }
+        }
+        // Fallback: read from savemap character struct
+        if (maxHP == 0 && charIdx < 8) {
+            uint8_t* smChar = sm + 0x48C + charIdx * 0x98;
+            curHP = *(uint16_t*)(smChar + 0x00);
+            maxHP = *(uint16_t*)(smChar + 0x02);
+        }
+        
+        // Get level from EXP (FF8: level = EXP/1000 + 1)
+        uint8_t* charData = sm + 0x48C + charIdx * 0x98;
+        uint32_t exp = *(uint32_t*)(charData + 0x04);
+        int level = ComputeCharLevel(exp);
+        
+        char buf[256];
+        if (maxHP > 0)
+            sprintf(buf, "%s, Level %d, HP %u of %u", name, level, (unsigned)curHP, (unsigned)maxHP);
+        else
+            sprintf(buf, "%s, Level %d, HP %u", name, level, (unsigned)curHP);
+        
+        ScreenReader::Speak(buf, true);
+        Log::Write("[JuncTTS] CharSelect: %s (cursor=%u charIdx=%u)",
+                   buf, (unsigned)cursorPos, (unsigned)charIdx);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log::Write("[JuncTTS] Exception in AnnounceJuncCharSelect");
+    }
+}
+
+// SEH-safe: Get GF name by index (0-15). Reads from savemap GF struct.
+// GFs at savemap +0x4C, 16 × 68 bytes. Name at +0x00 (12 bytes, FF8-encoded).
+// Exists flag at +0x11.
+static const char* GetGfName(uint8_t gfIdx, char* nameBuf, int bufSize)
+{
+    if (gfIdx >= GF_COUNT) return "Unknown GF";
+    
+    __try {
+        uint8_t* sm = (uint8_t*)0x1CFDC5C;  // SAVEMAP_BASE
+        uint8_t* gf = sm + 0x4C + gfIdx * GF_STRUCT_SIZE;
+        uint8_t exists = gf[0x11];
+        
+        if (!exists) return GF_DEFAULT_NAMES[gfIdx];  // shouldn't appear in list, but fallback
+        
+        // Decode GF name from FF8 encoding.
+        // GF names in live savemap use +0x20 offset (same as save files).
+        // Subtract 0x20 from each non-zero byte before decoding.
+        int pos = 0;
+        for (int i = 0; i < 12 && pos < bufSize - 1; i++) {
+            uint8_t raw = gf[i];
+            uint8_t c = (raw >= 0x20) ? (raw - 0x20) : raw;
+            if (c == 0x00) { nameBuf[pos++] = ' '; }
+            else if (c >= 0x01 && c <= 0x0A) { nameBuf[pos++] = '0' + (c - 0x01); }
+            else if (c >= 0x25 && c <= 0x3E) { nameBuf[pos++] = 'A' + (c - 0x25); }
+            else if (c >= 0x3F && c <= 0x58) { nameBuf[pos++] = 'a' + (c - 0x3F); }
+            else break;  // terminator or unknown
+        }
+        while (pos > 0 && nameBuf[pos-1] == ' ') pos--;
+        nameBuf[pos] = '\0';
+        
+        if (pos > 0) return nameBuf;
+        return GF_DEFAULT_NAMES[gfIdx];  // empty name, use default
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return GF_DEFAULT_NAMES[gfIdx];
+    }
+}
+
+// Check if a GF is currently junctioned to the selected character.
+// Reads character's GF bitmask from savemap character struct +0x58 (uint16).
+static bool IsGfJunctioned(uint8_t gfIdx, uint8_t charIdx)
+{
+    if (gfIdx >= GF_COUNT || charIdx > 7) return false;
+    __try {
+        uint8_t* sm = (uint8_t*)0x1CFDC5C;
+        uint8_t* chr = sm + 0x48C + charIdx * 0x98;
+        uint16_t gfMask = *(uint16_t*)(chr + 0x58);
+        return (gfMask & (1 << gfIdx)) != 0;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Find which character (if any) has a GF junctioned. Returns charIdx 0-7 or 0xFF if none.
+static uint8_t FindGfOwner(uint8_t gfIdx)
+{
+    if (gfIdx >= GF_COUNT) return 0xFF;
+    __try {
+        uint8_t* sm = (uint8_t*)0x1CFDC5C;
+        for (int c = 0; c < 8; c++) {
+            uint8_t* chr = sm + 0x48C + c * 0x98;
+            uint16_t gfMask = *(uint16_t*)(chr + 0x58);
+            if (gfMask & (1 << gfIdx)) return (uint8_t)c;
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return 0xFF;
+}
+
+// Get the currently selected character index from the Junction char cursor.
+static uint8_t GetJuncSelectedCharIdx()
+{
+    __try {
+        uint8_t* sm = (uint8_t*)0x1CFDC5C;
+        uint8_t* party = sm + 0xAF0;
+        uint8_t cursor = *((uint8_t*)pMenuStateA + JUNC_CHARSEL_CURSOR_OFF);
+        // Walk formation to find char at cursor position
+        int count = 0;
+        for (int i = 0; i < 4; i++) {
+            if (party[i] != 0xFF && party[i] <= 10) {
+                if (count == cursor) return party[i];
+                count++;
+            }
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return 0xFF;
+}
+
+// Main Junction submenu poller — called every frame while top-level cursor == 0
+// Gate: +0x1E8==17 means Junction subsystem is active. This is set when the
+// player confirms Junction from the top menu. Character select happens while
+// +0x1E8==17 AND focus==0. The subsystem flag is the reliable entry indicator.
+static void PollJunctionSubmenu()
+{
+    if (!pMenuStateA) return;
+    
+    __try {
+        uint8_t* base = (uint8_t*)pMenuStateA;
+        uint8_t juncActiveFlag = base[JUNC_ACTIVE_OFFSET];
+        uint8_t focus = base[JUNC_FOCUS_OFFSET];
+        
+        // Detect Junction subsystem activation (+0x1E8 transitions to 17)
+        if (juncActiveFlag == 17 && !s_juncActive) {
+            s_juncActive = true;
+            s_juncPrevCharCursor = 0xFF;  // force announce on first poll
+            s_juncPrevFocus = 0xFF;
+            s_juncPrevActionCursor = 0xFF;
+            s_juncCharSelectAnnounced = false;
+            Log::Write("[JuncTTS] Junction subsystem activated (+0x1E8=17)");
+        }
+        
+        // Detect Junction subsystem deactivation
+        // Back-out from Junction returns to the top-level menu (Junction/Item/etc),
+        // so the top-level cursor handler will announce the menu item.
+        if (juncActiveFlag != 17 && s_juncActive) {
+            Log::Write("[JuncTTS] Junction subsystem deactivated (+0x1E8=%u)",
+                       (unsigned)juncActiveFlag);
+            ResetJunctionState();
+            return;
+        }
+        
+        if (!s_juncActive) return;
+        
+        // ---- Character Select (focus == 0) ----
+        if (focus == 0) {
+            uint8_t charCursor = base[JUNC_CHARSEL_CURSOR_OFF];
+            if (charCursor <= 2 && charCursor != s_juncPrevCharCursor) {
+                AnnounceJuncCharSelect(charCursor);
+                s_juncPrevCharCursor = charCursor;
+                s_juncCharSelectAnnounced = true;
+            }
+            // Reset action menu state when back on char select
+            s_juncPrevActionCursor = 0xFF;
+        }
+        
+        // ---- Action Menu (focus == 3) ----
+        if (focus == 3) {
+            uint8_t actionCursor = base[JUNC_ACTION_CURSOR_OFF];
+            
+            // Announce on entry to action menu OR cursor change
+            if (actionCursor < JUNC_ACTION_COUNT) {
+                if (s_juncPrevFocus != 3 || actionCursor != s_juncPrevActionCursor) {
+                    const char* actionName = JUNC_ACTION_NAMES[actionCursor];
+                    ScreenReader::Speak(actionName, true);
+                    Log::Write("[JuncTTS] ActionMenu: %s (cursor=%u)",
+                               actionName, (unsigned)actionCursor);
+                    s_juncPrevActionCursor = actionCursor;
+                }
+            }
+            // Reset other cursors when in action menu
+            s_juncPrevCharCursor = 0xFF;
+            s_juncPrevSuboptCursor = 0xFF;
+            s_juncPrevGfListCursor = 0xFF;
+        }
+        
+        // ---- Junction Sub-option (focus == 37 or 38) ----
+        // Player chose "Junction" from action menu, now picks GF or Magic
+        if (focus == 37 || focus == 38) {
+            uint8_t suboptCursor = base[JUNC_SUBOPTION_CURSOR_OFF];
+            if (suboptCursor <= 1 && suboptCursor != s_juncPrevSuboptCursor) {
+                ScreenReader::Speak(JUNC_SUBOPTION_NAMES[suboptCursor], true);
+                Log::Write("[JuncTTS] SubOption: %s (cursor=%u focus=%u)",
+                           JUNC_SUBOPTION_NAMES[suboptCursor], (unsigned)suboptCursor, (unsigned)focus);
+                s_juncPrevSuboptCursor = suboptCursor;
+            }
+            // Reset GF list cursor for fresh entry
+            s_juncPrevGfListCursor = 0xFF;
+            s_juncPrevGfToggle = 0xFF;
+        }
+        
+        // ---- GF List (focus == 41) ----
+        // Player is browsing the GF list to junction/unjunction.
+        // +0x26D cursor indexes into OBTAINED GFs only (not all 16).
+        // Must build obtained-GF list and map cursor to real GF index.
+        if (focus == 41) {
+            uint8_t gfCursor = base[JUNC_GF_LIST_CURSOR_OFF];
+            uint8_t gfToggle = base[JUNC_GF_TOGGLE_OFF];
+            
+            // Build list of obtained GF indices
+            // Diagnostic: dump exists flags for all 16 GFs on first entry
+            static bool s_gfDiagDone = false;
+            uint8_t obtainedGfs[GF_COUNT];
+            int obtainedCount = 0;
+            __try {
+                uint8_t* sm = (uint8_t*)0x1CFDC5C;
+                if (!s_gfDiagDone) {
+                    s_gfDiagDone = true;
+                    char diag[512] = {};
+                    int dp = 0;
+                    dp += sprintf(diag + dp, "[JuncTTS] GF exists dump: ");
+                    for (int g = 0; g < GF_COUNT && dp < 480; g++) {
+                        uint8_t* gfs = sm + 0x4C + g * GF_STRUCT_SIZE;
+                        dp += sprintf(diag + dp, "%d:[%02X,%02X,%02X,%02X] ",
+                                      g, gfs[0x10], gfs[0x11], gfs[0x12], gfs[0x13]);
+                    }
+                    Log::Write("%s", diag);
+                }
+                for (int g = 0; g < GF_COUNT; g++) {
+                    uint8_t* gfStruct = sm + 0x4C + g * GF_STRUCT_SIZE;
+                    if (gfStruct[0x11] != 0)  // exists flag
+                        obtainedGfs[obtainedCount++] = (uint8_t)g;
+                }
+            } __except(EXCEPTION_EXECUTE_HANDLER) {}
+            
+            // Map cursor to real GF index
+            uint8_t realGfIdx = (gfCursor < obtainedCount) ? obtainedGfs[gfCursor] : 0xFF;
+            
+            if (realGfIdx < GF_COUNT && gfCursor != s_juncPrevGfListCursor) {
+                char nameBuf[32];
+                const char* gfName = GetGfName(realGfIdx, nameBuf, sizeof(nameBuf));
+                
+                // Check who owns this GF
+                static const char* JUNC_CHAR_NAMES2[] = {
+                    "Squall", "Zell", "Irvine", "Quistis", "Rinoa", "Selphie", "Seifer", "Edea",
+                    "Laguna", "Kiros", "Ward"
+                };
+                uint8_t owner = FindGfOwner(realGfIdx);
+                uint8_t selChar = GetJuncSelectedCharIdx();
+                
+                char buf[128];
+                if (owner != 0xFF && owner == selChar) {
+                    sprintf(buf, "%s, junctioned", gfName);
+                } else if (owner != 0xFF && owner < 11) {
+                    sprintf(buf, "%s, on %s", gfName, JUNC_CHAR_NAMES2[owner]);
+                } else {
+                    sprintf(buf, "%s", gfName);
+                }
+                
+                ScreenReader::Speak(buf, true);
+                Log::Write("[JuncTTS] GFList: %s (cursor=%u realIdx=%u owner=%u selChar=%u)",
+                           buf, (unsigned)gfCursor, (unsigned)realGfIdx, (unsigned)owner, (unsigned)selChar);
+                s_juncPrevGfListCursor = gfCursor;
+                s_juncPrevGfToggle = gfToggle;
+            }
+            // Detect toggle change (junction/unjunction) on same GF
+            else if (realGfIdx < GF_COUNT && gfToggle != s_juncPrevGfToggle && s_juncPrevGfToggle != 0xFF) {
+                char nameBuf[32];
+                const char* gfName = GetGfName(realGfIdx, nameBuf, sizeof(nameBuf));
+                const char* action = (gfToggle == 1) ? "junctioned" : "removed";
+                
+                char buf[128];
+                sprintf(buf, "%s %s", gfName, action);
+                ScreenReader::Speak(buf, true);
+                Log::Write("[JuncTTS] GFToggle: %s (toggle %u->%u)",
+                           buf, (unsigned)s_juncPrevGfToggle, (unsigned)gfToggle);
+                s_juncPrevGfToggle = gfToggle;
+            }
+        }
+        
+        // When returning to char select (focus==0) after being deeper,
+        // force re-announce the current character
+        if (focus == 0 && s_juncPrevFocus != 0 && s_juncPrevFocus != 0xFF) {
+            s_juncPrevCharCursor = 0xFF;
+        }
+        
+        // Reset sub-phase cursors when leaving those phases
+        if (focus != 37 && focus != 38 && s_juncPrevFocus >= 37 && s_juncPrevFocus <= 38) {
+            s_juncPrevSuboptCursor = 0xFF;
+        }
+        if (focus != 41 && s_juncPrevFocus == 41) {
+            s_juncPrevGfListCursor = 0xFF;
+            s_juncPrevGfToggle = 0xFF;
+        }
+        
+        // Track focus changes for transition detection
+        s_juncPrevFocus = focus;
+        
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log::Write("[JuncTTS] Exception in PollJunctionSubmenu");
+    }
+}
+
 // F12 diagnostic: track menu_draw_text / get_character_width call counts
 static bool     s_diagActive = false;
 static DWORD    s_diagLastLogTime = 0;
@@ -1375,7 +1776,7 @@ static void PollSaveScreen()
 // ============================================================================
 void MenuTTS::Initialize()
 {
-    Log::Write("[MenuTTS] Initialize() — v0.08.87 Use target: compStats HP confirmed, diagnostic removed");
+    Log::Write("[MenuTTS] Initialize() — v0.09.21 GF-ACQ via MENUNAME, suppress char on GF");
     
     if (pMenuStateA == nullptr) {
         Log::Write("[MenuTTS] WARNING: pMenuStateA not resolved, menu TTS disabled");
@@ -2853,6 +3254,9 @@ void MenuTTS::Update()
         s_prevGameMode = mode;
     }
     
+    // v0.09.19: GF acquisition detection moved to field_dialog.cpp Hook_opcode_menuname
+    // (snapshot before/after original handler call — zero polling cost)
+    
     // ========================================================================
     // F12 DIAGNOSTIC: Capture GCW (get_character_width) text during save screen
     // Snapshots the accumulated character codes every 500ms, decodes them,
@@ -2989,6 +3393,7 @@ void MenuTTS::Update()
         if (s_submonActive) SubmonStop();
         s_submonStableSince = 0;
         ResetItemSubmenuState();  // v0.08.29
+        if (s_juncActive) ResetJunctionState();  // v0.08.89
         
         // If exiting menu with cursor on Save, activate mode 1 save detection
         // but DON'T reset s_prevSaveSlotCursor here — let PollSaveScreen
@@ -3034,6 +3439,13 @@ void MenuTTS::Update()
 
             // v0.08.29: Item submenu TTS
             PollItemSubmenu();
+
+            // v0.08.89: Junction submenu TTS
+            if (s_prevCursor == 0 && !s_itemSubmenuActive) {
+                PollJunctionSubmenu();
+            } else if (s_prevCursor != 0) {
+                if (s_juncActive) ResetJunctionState();
+            }
         }
         
         // v0.07.40: Poll save slot cursor in mode 6 using +0x276

@@ -1,14 +1,36 @@
 # DEVNOTES - FF8 Accessibility Mod (Original PC + FFNx)
-## Last updated: 2026-03-22 (session 2)
+## Last updated: 2026-03-23 (session 9)
 
 > **File structure**: This file = current state + key learnings only (~10KB max).
 > Build history in `DEVNOTES_HISTORY.md`. Immediate context in `NEXT_SESSION_PROMPT.md`.
 
 ---
 
-## CURRENT OBJECTIVE: Menu TTS + Interactive Object Position Research
+## CURRENT OBJECTIVE: Menu TTS + GitHub Push
 
-### Current build: v0.08.87 (source + deployed)
+### Current build: v0.09.40 (source + deployed)
+
+### GameAudio Module — COMPLETE (v0.09.22-v0.09.31)
+- **BGM volume**: Direct `nxAudioEngine.setMusicVolume()` call bypasses FFNx hold_volume_for_channel flag. Addresses auto-detected by scanning FFNx's compiled `set_music_volume_for_channel` for MOV ECX + CALL pattern.
+- **FMV volume**: Direct `SoLoud::Soloud::fadeVolume()` on `_currentStream.handle`. Offsets extracted from FFNx's compiled `stopStream`: _engine at nxAE+0x08, handle at nxAE+0x0E0754.
+- **F3/F4**: ±10%, default 20%, TTS announcement, immediate ReapplyVolume.
+- **SFX/SAPI**: Unaffected by F3/F4 — separate future controls possible.
+- **Key insight**: FFNx's `setStreamMasterVolume` is store-only (never updates active SoLoud handle). Must use `fadeVolume(handle, vol, 0.0)` directly. Similarly `set_music_volume_for_channel` has internal hold flag that silently drops calls during track loads.
+
+### Junction Menu TTS — Implementation Plan (v0.08.88+)
+
+**Phase order** (GF assignment before sub-options; magic-to-stat deferred since Auto covers the need):
+1. Diagnostic (v0.08.88): Discover focus states at +0x22E for all Junction phases
+2. Character Select (v0.08.89–90): Party cursor with name/level/HP
+3. Action Menu top-level (v0.08.91–93): Junction/Off/Auto/Ability
+4. GF Assignment (v0.08.94–98): Junction→GF list, toggle assignment — MUST come first, unlocks everything
+5. Action Menu sub-options (v0.08.99–101): GF/Magic, Magic/All, Atk/Mag/Def
+6. Auto Execution (v0.08.102–103): Confirm auto-junction applied
+7. Ability Assignment (v0.08.104–108): Command + Support equip — **unblocks battle work**
+8. Off/Remove (v0.08.109–111): Off→Magic and Off→All
+9. Magic-to-Stat (deferred): Full stat preview system
+
+**Key data**: Character junction fields at savemap char +0x58 (GF bitmask), +0x5C–0x6E (stat/elem/status junctions), +0x50–0x57 (abilities). GF structs at savemap +0x4C (16×68 bytes). See NEXT_SESSION_PROMPT.md for full offset table.
 
 ### Battle Arrangement TTS — FIXED (v0.08.82–v0.08.85)
 - **Display struct at `0x1D8DFF4`** is the authoritative data source
@@ -110,11 +132,15 @@ Auto-monitor infrastructure (SUBMON) still active for discovering future submenu
 | JSM-based exit detection | v0.07.83–88 | MAPJUMP, REQ-following, var-dispatch |
 | INF gateway exits | v0.07.93–96 | Dedup, named destinations, world map |
 | Interactive object detection | v0.07.98–v0.08.01 | Paired inheritance, PSHM_W markers |
-| SET3 opcode hook | v0.08.03 | Runtime position capture (active entities only) |
+| SET3 opcode hook | v0.08.03 | DISABLED v0.09.40 (causes infirmary hang) |
 | Item submenu TTS | v0.08.61 | +0x22E focus state, debounced action cursor |
 | Item sub-flows | v0.08.64 | Sort, Rearrange (src+dest), Battle (src+dest) |
 | Use target TTS | v0.08.87 | compStats HP/maxHP, status ailments |
 | Battle item TTS | v0.08.85 | Display struct 0x1D8DFF4, page/position, swap detection |
+| Junction TTS (partial) | v0.08.97 | Char select, action menu, GF sub-option, GF list |
+| Naming bypass | v0.09.16 | Call original + suppress UI flags. Chars + GFs. No naming screen. |
+| GF acquisition TTS | v0.09.21 | MENUNAME snapshot before/after, zero polling. Suppresses char name when GF acquired. |
+| BGM+FMV volume ctrl | v0.09.31 | F3/F4, direct nxAudioEngine + SoLoud calls, bypasses FFNx hold flags. Default 20%. |
 
 ---
 
@@ -135,6 +161,28 @@ Auto-monitor infrastructure (SUBMON) still active for discovering future submenu
 ---
 
 ## KEY LEARNINGS
+
+### Naming Bypass Architecture (v0.09.16)
+- **opcode_menuname (0x129)**: Handler at 0x00521DA0. Signature: `int __cdecl(int entityPtr)`. Returns 3 to advance script.
+- **Entity script stack**: Stack at entityPtr+0x00, stack pointer byte at entityPtr+0x184. Param = `*(int32_t*)(entityPtr + sp * 4)`. Original handler does `sp--` internally.
+- **Correct bypass**: Call original handler (does full init via 21-case switch table), then zero `*(uint8_t*)0x01CE4760` (pMode0Phase) and `*(uint8_t*)0x01CE490B` (naming flag) to suppress UI.
+- **enableGF(idx) at 0x47E480**: NOT sufficient alone for GF activation. Original handler's switch table does much more.
+- **GF acquisition TTS (v0.09.21)**: Snapshot GF exists flags before calling original MENUNAME handler, diff after. Any 0→non-zero transitions announced as "GF [name] acquired". Zero polling cost — only runs when MENUNAME fires. When GF acquired, character name TTS suppressed (avoids duplicate speech). Squall (param 0, no GFs) still announces his name.
+- **GF exists flags**: savemap+0x4C + i*0x44 + 0x11 (base 0x1CFDCA8). 16 GFs total.
+
+### BGM Volume Bug — FIXED (v0.09.22-v0.09.31)
+- **Was**: F3/F4 volume had no effect during infirmary/classroom scenes. FFNx's `set_music_volume_for_channel` has `hold_volume_for_channel` flag that silently drops calls during track loads. Game never calls this function during normal field play.
+- **Fix**: Created GameAudio module. Scans FFNx compiled code to extract `nxAudioEngine` pointer + `setMusicVolume` address. Calls `setMusicVolume` directly (bypasses hold flag). FMV audio controlled via `SoLoud::fadeVolume` on `_currentStream.handle` (FFNx's `setStreamMasterVolume` is store-only, never updates active handle).
+
+### Infirmary Glitch — FIXED (v0.09.07-v0.09.40)
+- **Root cause**: HookedSet3 (SET3 opcode hook, opcode 0x1E). ANY interception of SET3 hangs the infirmary scene (Dr. Kadowaki walk-to-phone never completes).
+- **Binary search** (session 9, v0.09.32-v0.09.37): Confirmed FieldNavigation module is the culprit (v0.09.32). Narrowed to Group B script hooks (v0.09.33). Eliminated field_scripts_init (v0.09.34), setline/lineon/lineoff (v0.09.35). Isolated to SET3 (v0.09.37 = bug, v0.09.36 = no bug).
+- **Fix attempts that FAILED**: MinHook → dispatch table patch (v0.09.38, still hangs). SEH removal from wrapper (v0.09.39, still hangs). Even a minimal `call original + return` wrapper triggers the bug.
+- **Conclusion**: The FF8 script interpreter is fundamentally incompatible with SET3 handler replacement. The engine likely uses return address inspection or stack frame assumptions that any C wrapper violates.
+- **Fix**: SET3 hook permanently disabled (v0.09.40). `false &&` guard in Initialize(). GitHub Actions CI check prevents accidental re-enablement.
+- **Impact**: SET3 capture was only used for PSHM_W entity position investigation (already exhausted). Shift-pattern passthrough provides adequate fallback positions (~494 unit offset).
+- **FieldNavigation**: Re-enabled with all other hooks working. Only SET3 is disabled.
+- **Future**: If SET3 capture is ever needed, investigate naked/asm thunk that preserves the exact stack frame expected by the interpreter.
 
 ### Entity & Coordinate System
 - Screen-vertical = Y (offset 0x194), NOT Z. World coords x4096: X=0x190, Y=0x194. Triangle: 0x1FA.
@@ -172,6 +220,7 @@ AccessibilityThread polls ~60Hz. Modules: TitleScreen, FieldDialog, FieldNavigat
 | ff8_addresses.h/cpp | Runtime address resolution |
 | field_dialog.cpp/h | Opcode dispatch hooks for field dialog TTS |
 | menu_tts.cpp/h | In-game menu + save screen TTS |
+| game_audio.cpp/h | BGM + FMV volume control (FFNx/SoLoud direct calls) |
 | screen_reader.cpp | NVDA direct + SAPI fallback TTS |
 | deploy.bat | Build + deploy (ONLY build script) |
 
@@ -184,6 +233,6 @@ AccessibilityThread polls ~60Hz. Modules: TitleScreen, FieldDialog, FieldNavigat
 3. Read `DEVNOTES_HISTORY.md` ONLY if you need past build details
 4. Use filesystem MCP tools (not bash) for Windows file access
 5. `deploy.bat` is the ONLY build script
-6. Current version: v0.08.87 (source), v0.08.87 (deployed)
+6. Current version: v0.09.40 (source), v0.09.40 (deployed)
 7. "BAT" = read tail of `Logs/ff8_accessibility.log`
 8. GitHub repo: ampage87/FFVIII-Accessibility-Mod
