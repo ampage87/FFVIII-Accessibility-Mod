@@ -9,7 +9,7 @@
 // FF8 Original PC Accessibility Mod version
 // Increment on every build change
 // ================================================================
-#define FF8OPC_VERSION "0.09.40"  // FIX: SET3 hook PERMANENTLY DISABLED (any interception hangs infirmary scene)
+#define FF8OPC_VERSION "0.09.49"  // Cleanup: removed Ability screen diagnostic code (F12 snapshot, hex dumps, tracking vars)
 #define FF8OPC_VERSION_DATE "2026-03-23"
 
 // ============================================================================

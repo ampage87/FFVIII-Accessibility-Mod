@@ -358,6 +358,144 @@ static const int JUNC_GF_TOGGLE_OFF        = 0x27F;  // GF junction toggle (0=un
 
 static const char* JUNC_SUBOPTION_NAMES[] = { "GF", "Magic" };
 
+// v0.09.43: Unified Ability ID → Name table (IDs 0–115)
+// Source: kernel.bin sections 11–17, confirmed via deep research
+static const char* ABILITY_NAMES[] = {
+    "None",              //   0
+    "HP-J",              //   1
+    "Str-J",             //   2
+    "Vit-J",             //   3
+    "Mag-J",             //   4
+    "Spr-J",             //   5
+    "Spd-J",             //   6
+    "Eva-J",             //   7
+    "Hit-J",             //   8
+    "Luck-J",            //   9
+    "Elem-Atk-J",        //  10
+    "ST-Atk-J",          //  11
+    "Elem-Def-J",        //  12
+    "ST-Def-J",          //  13
+    "Elem-Def-J x2",     //  14
+    "Elem-Def-J x4",     //  15
+    "ST-Def-J x2",       //  16
+    "ST-Def-J x4",       //  17
+    "Ability x3",        //  18
+    "Ability x4",        //  19
+    "Magic",             //  20
+    "GF",                //  21
+    "Draw",              //  22
+    "Item",              //  23
+    "Empty",             //  24
+    "Card",              //  25
+    "Doom",              //  26
+    "Mad Rush",          //  27
+    "Treatment",         //  28
+    "Defend",            //  29
+    "Darkside",          //  30
+    "Recover",           //  31
+    "Absorb",            //  32
+    "Revive",            //  33
+    "LV Down",           //  34
+    "LV Up",             //  35
+    "Kamikaze",          //  36
+    "Devour",            //  37
+    "MiniMog",           //  38
+    "HP plus 20%",       //  39
+    "HP plus 40%",       //  40
+    "HP plus 80%",       //  41
+    "Str plus 20%",      //  42
+    "Str plus 40%",      //  43
+    "Str plus 60%",      //  44
+    "Vit plus 20%",      //  45
+    "Vit plus 40%",      //  46
+    "Vit plus 60%",      //  47
+    "Mag plus 20%",      //  48
+    "Mag plus 40%",      //  49
+    "Mag plus 60%",      //  50
+    "Spr plus 20%",      //  51
+    "Spr plus 40%",      //  52
+    "Spr plus 60%",      //  53
+    "Spd plus 20%",      //  54
+    "Spd plus 40%",      //  55
+    "Eva plus 30%",      //  56
+    "Luck plus 50%",     //  57
+    "Mug",               //  58
+    "Med Data",          //  59
+    "Counter",           //  60
+    "Return Damage",     //  61
+    "Cover",             //  62
+    "Initiative",        //  63
+    "Move-HP Up",        //  64
+    "HP Bonus",          //  65
+    "Str Bonus",         //  66
+    "Vit Bonus",         //  67
+    "Mag Bonus",         //  68
+    "Spr Bonus",         //  69
+    "Auto-Protect",      //  70
+    "Auto-Shell",        //  71
+    "Auto-Reflect",      //  72
+    "Auto-Haste",        //  73
+    "Auto-Potion",       //  74
+    "Expend x2-1",       //  75
+    "Expend x3-1",       //  76
+    "Ribbon",            //  77
+    "Alert",             //  78
+    "Move-Find",         //  79
+    "Enc-Half",          //  80
+    "Enc-None",          //  81
+    "Rare Item",         //  82
+    "SumMag plus 10%",   //  83
+    "SumMag plus 20%",   //  84
+    "SumMag plus 30%",   //  85
+    "SumMag plus 40%",   //  86
+    "GFHP plus 10%",     //  87
+    "GFHP plus 20%",     //  88
+    "GFHP plus 30%",     //  89
+    "GFHP plus 40%",     //  90
+    "Boost",             //  91
+    "Haggle",            //  92
+    "Sell-High",         //  93
+    "Familiar",          //  94
+    "Call Shop",         //  95
+    "Junk Shop",         //  96
+    "T Mag-RF",          //  97
+    "I Mag-RF",          //  98
+    "F Mag-RF",          //  99
+    "L Mag-RF",          // 100
+    "Time Mag-RF",       // 101
+    "ST Mag-RF",         // 102
+    "Supt Mag-RF",       // 103
+    "Forbid Mag-RF",     // 104
+    "Recov Med-RF",      // 105
+    "ST Med-RF",         // 106
+    "Ammo-RF",           // 107
+    "Tool-RF",           // 108
+    "Forbid Med-RF",     // 109
+    "GFRecov Med-RF",    // 110
+    "GFAbl Med-RF",      // 111
+    "Mid Mag-RF",        // 112
+    "High Mag-RF",       // 113
+    "Med LV Up",         // 114
+    "Card Mod",          // 115
+};
+static const int ABILITY_NAME_COUNT = 116;
+
+static const char* GetAbilityName(uint8_t id)
+{
+    if (id < ABILITY_NAME_COUNT) return ABILITY_NAMES[id];
+    return "Unknown";
+}
+
+// Helper: Decode GCW buffer to a char array (isolates std::string from __try functions)
+static void DecodeGcwToBuffer(const uint8_t* gcwBuf, int gcwLen, char* outBuf, int outBufSize)
+{
+    outBuf[0] = '\0';
+    if (gcwLen <= 0) return;
+    std::string tmp = FF8TextDecode::DecodeMenuText(gcwBuf, gcwLen);
+    strncpy(outBuf, tmp.c_str(), outBufSize - 1);
+    outBuf[outBufSize - 1] = '\0';
+}
+
 // Default GF names (fallback if savemap read fails)
 static const char* GF_DEFAULT_NAMES[] = {
     "Quezacotl", "Shiva", "Ifrit", "Siren", "Brothers", "Diablos",
@@ -377,6 +515,30 @@ static uint8_t  s_juncPrevSuboptCursor = 0xFF;  // previous sub-option cursor (+
 static uint8_t  s_juncPrevGfListCursor = 0xFF;  // previous GF list cursor (+0x26D)
 static uint8_t  s_juncPrevGfToggle = 0xFF;      // previous GF toggle state (+0x27F)
 
+// v0.09.46: Ability screen state — CORRECTED via user testing
+// Each panel has its own focus value and cursor offset:
+//   LEFT (equipped slots):   focus=24, cursor at +0x27C
+//   RIGHT (available list):  focus=28, cursor at +0x271
+// v0.09.45 had these swapped. User test proved: focus=28 cursor goes to 10+
+// (many GF abilities = RIGHT), focus=24 cursor stays 0-3 (few slots = LEFT).
+// Intermediate focus values (21, 22, 26, 27) are transitions — ignore them.
+static const int ABIL_LEFT_CURSOR_OFF  = 0x27C;  // left panel cursor (focus=24)
+static const int ABIL_RIGHT_CURSOR_OFF = 0x271;  // right panel cursor (focus=28)
+static const int ABIL_LEFT_FOCUS  = 24;
+static const int ABIL_RIGHT_FOCUS = 28;
+static uint8_t  s_juncPrevAbilLeftCursor  = 0xFF;
+static uint8_t  s_juncPrevAbilRightCursor = 0xFF;
+static uint8_t  s_juncPrevAbilFocus = 0xFF;  // tracks focus for panel transition detection
+// v0.09.48: Right panel GF bitmap reconstruction
+// Builds the available abilities list from junctioned GFs' completeAbilities bitmaps.
+// Sorted in ascending unified ability ID order. Rebuilt when entering the right panel.
+static const int ABIL_RIGHT_LIST_MAX = 128;
+static uint8_t  s_abilRightList[ABIL_RIGHT_LIST_MAX] = {};  // ability IDs in display order
+static int      s_abilRightListCount = 0;
+static uint8_t  s_abilLastLeftCursor = 0;  // tracks which left slot was last active (0-2=cmd, 3-6=ability)
+static uint16_t s_juncCachedGfMasks[8] = {}; // v0.09.49: GF bitmasks for ALL chars, cached at Junction entry (game zeroes them during editing)
+static uint8_t  s_juncSelectedCharIdx = 0xFF;  // v0.09.49: cached charIdx from char select (formation array gets rewritten during editing)
+
 
 static void ResetJunctionState()
 {
@@ -388,6 +550,13 @@ static void ResetJunctionState()
     s_juncPrevSuboptCursor = 0xFF;
     s_juncPrevGfListCursor = 0xFF;
     s_juncPrevGfToggle = 0xFF;
+    s_juncPrevAbilLeftCursor = 0xFF;
+    s_juncPrevAbilRightCursor = 0xFF;
+    s_juncPrevAbilFocus = 0xFF;
+    s_abilRightListCount = 0;
+    s_abilLastLeftCursor = 0;
+    memset(s_juncCachedGfMasks, 0, sizeof(s_juncCachedGfMasks));
+    s_juncSelectedCharIdx = 0xFF;
 }
 
 // Compute character level from EXP. FF8: each level needs 1000 EXP flat.
@@ -401,27 +570,34 @@ static int ComputeCharLevel(uint32_t exp)
 // SEH-safe: Announce a party member for Junction character select.
 // Uses inline literal addresses to avoid forward reference issues.
 // savemap=0x1CFDC5C, chars at +0x48C (8×0x98), compStats at 0x1CFF000 (3×0x1D0)
+//
+// v0.09.41: The cursor at +0x1E9 indexes directly into the formation array
+// at savemap+0xAF0. The engine places characters in the visual slot positions:
+//   1 member  → formation=[FF, charIdx, FF, FF] (middle slot)
+//   2 members → formation=[charA, charB, FF, FF] (top + middle)
+//   3 members → formation=[charA, charB, charC, FF] (all three)
+// So formation[cursorPos] gives the character at the cursor's visual slot,
+// or 0xFF for an empty slot. No compaction or centering formula needed.
 static void AnnounceJuncCharSelect(uint8_t cursorPos)
 {
     __try {
         uint8_t* sm = (uint8_t*)0x1CFDC5C;  // SAVEMAP_BASE
         // Party formation at +0xAF0: 4 bytes, char index 0-7 or 0xFF.
-        // Junction menu displays in formation order (NOT sorted by charIdx).
+        // Cursor indexes directly into this array — engine handles centering.
         uint8_t* party = sm + 0xAF0;
-        uint8_t partySlots[4];
-        int partyCount = 0;
-        for (int i = 0; i < 4; i++) {
-            if (party[i] != 0xFF && party[i] <= 10)
-                partySlots[partyCount++] = party[i];
-        }
         
-        if (cursorPos >= partyCount) {
-            Log::Write("[JuncTTS] CharSelect cursor %u beyond party count %d",
-                       (unsigned)cursorPos, partyCount);
+        if (cursorPos > 2) {
+            Log::Write("[JuncTTS] CharSelect cursor %u out of range", (unsigned)cursorPos);
             return;
         }
         
-        uint8_t charIdx = partySlots[cursorPos];
+        uint8_t charIdx = party[cursorPos];
+        if (charIdx == 0xFF || charIdx > 10) {
+            ScreenReader::Speak("Empty", true);
+            Log::Write("[JuncTTS] CharSelect cursor %u -> empty (formation[%u]=0x%02X)",
+                       (unsigned)cursorPos, (unsigned)cursorPos, (unsigned)charIdx);
+            return;
+        }
         // Inline name lookup (GetCharacterNameByPortrait defined later in file)
         static const char* JUNC_CHAR_NAMES[] = {
             "Squall", "Zell", "Irvine", "Quistis", "Rinoa", "Selphie", "Seifer", "Edea",
@@ -462,8 +638,8 @@ static void AnnounceJuncCharSelect(uint8_t cursorPos)
             sprintf(buf, "%s, Level %d, HP %u", name, level, (unsigned)curHP);
         
         ScreenReader::Speak(buf, true);
-        Log::Write("[JuncTTS] CharSelect: %s (cursor=%u charIdx=%u)",
-                   buf, (unsigned)cursorPos, (unsigned)charIdx);
+        Log::Write("[JuncTTS] CharSelect: %s (cursor=%u formation[%u]=%u)",
+                   buf, (unsigned)cursorPos, (unsigned)cursorPos, (unsigned)charIdx);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         Log::Write("[JuncTTS] Exception in AnnounceJuncCharSelect");
     }
@@ -537,22 +713,92 @@ static uint8_t FindGfOwner(uint8_t gfIdx)
 }
 
 // Get the currently selected character index from the Junction char cursor.
+// v0.09.41: Read formation[cursor] directly — cursor indexes the formation array.
 static uint8_t GetJuncSelectedCharIdx()
 {
     __try {
         uint8_t* sm = (uint8_t*)0x1CFDC5C;
         uint8_t* party = sm + 0xAF0;
         uint8_t cursor = *((uint8_t*)pMenuStateA + JUNC_CHARSEL_CURSOR_OFF);
-        // Walk formation to find char at cursor position
-        int count = 0;
-        for (int i = 0; i < 4; i++) {
-            if (party[i] != 0xFF && party[i] <= 10) {
-                if (count == cursor) return party[i];
-                count++;
-            }
+        if (cursor <= 2) {
+            uint8_t charIdx = party[cursor];
+            if (charIdx != 0xFF && charIdx <= 10) return charIdx;
         }
+        // v0.09.49: Engine rewrites formation during Junction editing.
+        // Fall back to cached charIdx from char select.
+        if (s_juncSelectedCharIdx != 0xFF) return s_juncSelectedCharIdx;
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
     return 0xFF;
+}
+
+// v0.09.48: Build the right panel available abilities list from GF bitmaps.
+// Reads all junctioned GFs' completeAbilities[16] bitmaps, unions them,
+// and filters by the relevant ability ID range based on the left panel slot type.
+// Result is stored in s_abilRightList[] in ascending ID order.
+//
+// Left cursor 0-2 = command slot selected → show command abilities (IDs 20-38, skip 24)
+// Left cursor 3-6 = ability slot selected → show character/party abilities (IDs 39-82)
+static void BuildAbilityRightPanel(uint8_t charIdx, uint8_t leftCursor)
+{
+    s_abilRightListCount = 0;
+    if (charIdx > 7) return;
+    
+    __try {
+        uint8_t* sm = (uint8_t*)0x1CFDC5C;
+        uint8_t* chr = sm + 0x48C + charIdx * 0x98;
+        uint16_t gfMask = *(uint16_t*)(chr + 0x58);  // junctioned GF bitmask (live)
+        // v0.09.49: Game zeroes gfMask during Junction editing. Use per-char cached value.
+        if (gfMask == 0 && charIdx < 8 && s_juncCachedGfMasks[charIdx] != 0) {
+            gfMask = s_juncCachedGfMasks[charIdx];
+        }
+        // Ultimate fallback — if both are 0, use ALL existing GFs.
+        if (gfMask == 0) {
+            for (int g = 0; g < 16; g++) {
+                uint8_t* gf = sm + 0x4C + g * 0x44;
+                if (gf[0x11]) gfMask |= (1 << g);
+            }
+        }
+        
+        // Union all junctioned GFs' completeAbilities bitmaps (16 bytes = 128 bits)
+        uint8_t unionBitmap[16] = {};
+        for (int g = 0; g < 16; g++) {
+            if (!(gfMask & (1 << g))) continue;  // GF not junctioned
+            uint8_t* gf = sm + 0x4C + g * 0x44;  // GF struct base
+            if (!gf[0x11]) continue;  // GF doesn't exist
+            uint8_t* completeAbil = gf + 0x14;  // completeAbilities[16]
+            for (int b = 0; b < 16; b++)
+                unionBitmap[b] |= completeAbil[b];
+        }
+        
+        // Determine ID range based on left panel slot type
+        int idMin, idMax;
+        if (leftCursor <= 2) {
+            // Command slot selected: show command abilities (IDs 20-38)
+            idMin = 20;
+            idMax = 38;
+        } else {
+            // Ability slot selected: show character/party abilities (IDs 39-82)
+            idMin = 39;
+            idMax = 82;
+        }
+        
+        // Collect all learned abilities in the relevant range, ascending ID order
+        for (int id = idMin; id <= idMax; id++) {
+            if (id == 24) continue;  // ID 24 = "Empty" placeholder, skip
+            // Check bit 'id' in the union bitmap
+            int byteIdx = id / 8;
+            int bitIdx = id % 8;
+            if (unionBitmap[byteIdx] & (1 << bitIdx)) {
+                if (s_abilRightListCount < ABIL_RIGHT_LIST_MAX)
+                    s_abilRightList[s_abilRightListCount++] = (uint8_t)id;
+            }
+        }
+        
+        Log::Write("[AbilTTS] Built right panel list: %d abilities (leftCursor=%u range=%d-%d)",
+                   s_abilRightListCount, (unsigned)leftCursor, idMin, idMax);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log::Write("[AbilTTS] Exception in BuildAbilityRightPanel");
+    }
 }
 
 // Main Junction submenu poller — called every frame while top-level cursor == 0
@@ -575,6 +821,21 @@ static void PollJunctionSubmenu()
             s_juncPrevFocus = 0xFF;
             s_juncPrevActionCursor = 0xFF;
             s_juncCharSelectAnnounced = false;
+            // v0.09.49: Cache GF bitmasks for ALL characters NOW,
+            // before the engine zeroes them during Junction editing.
+            // The user can switch characters without leaving Junction,
+            // so we need all masks upfront.
+            {
+                uint8_t* sm2 = (uint8_t*)0x1CFDC5C;
+                for (int ci = 0; ci < 8; ci++) {
+                    s_juncCachedGfMasks[ci] = *(uint16_t*)(sm2 + 0x48C + ci * 0x98 + 0x58);
+                }
+                Log::Write("[JuncTTS] Cached GF bitmasks: [%04X %04X %04X %04X %04X %04X %04X %04X]",
+                           (unsigned)s_juncCachedGfMasks[0], (unsigned)s_juncCachedGfMasks[1],
+                           (unsigned)s_juncCachedGfMasks[2], (unsigned)s_juncCachedGfMasks[3],
+                           (unsigned)s_juncCachedGfMasks[4], (unsigned)s_juncCachedGfMasks[5],
+                           (unsigned)s_juncCachedGfMasks[6], (unsigned)s_juncCachedGfMasks[7]);
+            }
             Log::Write("[JuncTTS] Junction subsystem activated (+0x1E8=17)");
         }
         
@@ -590,11 +851,115 @@ static void PollJunctionSubmenu()
         
         if (!s_juncActive) return;
         
-        // ---- Character Select (focus == 0) ----
-        if (focus == 0) {
+        // DEBUG: Log unhandled focus states
+        if (focus != 0 && focus != 3 && focus != 8 && focus != 37 && focus != 38 && focus != 41 &&
+            !(focus >= 20 && focus <= 28)) {
+            static uint8_t s_lastLoggedFocus = 0xFF;
+            if (focus != s_lastLoggedFocus) {
+                s_lastLoggedFocus = focus;
+                Log::Write("[JuncTTS] Unhandled focus=%u +271=%u +272=%u +275=%u",
+                           (unsigned)focus, (unsigned)base[0x271], (unsigned)base[0x272], (unsigned)base[0x275]);
+            }
+        }
+        
+        // ---- Ability Screen (focus 20-28 range) ----
+        // v0.09.45: Confirmed via v0.09.44 diagnostic:
+        //   LEFT panel:  focus=28, cursor at +0x271 (equipped command/ability slots)
+        //   RIGHT panel: focus=24, cursor at +0x27C (available abilities from GFs)
+        //   Other focus values (21, 22, 26, 27) are transitions — ignore.
+        if (focus >= 20 && focus <= 28) {
+            // Detect panel transitions (focus changes between 24 and 28)
+            // Only re-announce when switching BETWEEN panels (24↔ 28), not on
+            // first entry from outside the 20-28 range (avoids transition artifact
+            // where focus passes through 28 briefly when entering from action menu).
+            if (focus != s_juncPrevAbilFocus) {
+                bool fromOtherPanel = (s_juncPrevAbilFocus == ABIL_LEFT_FOCUS ||
+                                       s_juncPrevAbilFocus == ABIL_RIGHT_FOCUS);
+                if (focus == ABIL_LEFT_FOCUS && fromOtherPanel) {
+                    s_juncPrevAbilLeftCursor = 0xFF;  // force re-announce on left entry
+                    Log::Write("[AbilTTS] -> LEFT panel (focus=%u)", (unsigned)focus);
+                }
+                if (focus == ABIL_RIGHT_FOCUS && fromOtherPanel) {
+                    s_juncPrevAbilRightCursor = 0xFF;  // force re-announce on right entry
+                    // v0.09.48: Rebuild available abilities list when entering right panel
+                    uint8_t charIdx = GetJuncSelectedCharIdx();
+                    BuildAbilityRightPanel(charIdx, s_abilLastLeftCursor);
+                    Log::Write("[AbilTTS] -> RIGHT panel (focus=%u, leftCursor=%u)",
+                               (unsigned)focus, (unsigned)s_abilLastLeftCursor);
+                }
+                s_juncPrevAbilFocus = focus;
+            }
+
+            // LEFT PANEL (focus=24): read equipped ability from savemap
+            if (focus == ABIL_LEFT_FOCUS) {
+                uint8_t cursor = base[ABIL_LEFT_CURSOR_OFF];
+                if (cursor != s_juncPrevAbilLeftCursor) {
+                    s_juncPrevAbilLeftCursor = cursor;
+                    s_abilLastLeftCursor = cursor;  // v0.09.48: track for right panel filtering
+                    __try {
+                        uint8_t charIdx = GetJuncSelectedCharIdx();
+                        if (charIdx <= 7) {
+                            uint8_t* sm = (uint8_t*)0x1CFDC5C;
+                            uint8_t* chr = sm + 0x48C + charIdx * 0x98;
+                            uint8_t abilId = 0;
+                            // Slot layout: cursor 0-2 = commands[0-2], cursor 3-6 = abilities[0-3]
+                            if (cursor <= 2) {
+                                abilId = chr[0x50 + cursor];
+                            } else if (cursor >= 3 && cursor <= 6) {
+                                abilId = chr[0x54 + (cursor - 3)];
+                            }
+                            const char* name = (abilId == 0) ? "Empty" : GetAbilityName(abilId);
+                            ScreenReader::Speak(name, true);
+                            Log::Write("[AbilTTS] LEFT slot %u: id=%u -> %s",
+                                       (unsigned)cursor, (unsigned)abilId, name);
+                        }
+                    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                }
+            }
+
+            // RIGHT PANEL (focus=28): available abilities from junctioned GFs
+            // v0.09.48: Index into reconstructed list built from GF completeAbilities bitmaps.
+            // The list is rebuilt each time the user enters the right panel.
+            if (focus == ABIL_RIGHT_FOCUS) {
+                uint8_t cursor = base[ABIL_RIGHT_CURSOR_OFF];
+                if (cursor != s_juncPrevAbilRightCursor) {
+                    s_juncPrevAbilRightCursor = cursor;
+                    // v0.09.48: Build list on demand if not yet built
+                    // (handles first entry without a left→right transition)
+                    if (s_abilRightListCount == 0) {
+                        uint8_t charIdx = GetJuncSelectedCharIdx();
+                        BuildAbilityRightPanel(charIdx, s_abilLastLeftCursor);
+                    }
+                    // Look up ability ID from our reconstructed list
+                    if (cursor < s_abilRightListCount) {
+                        uint8_t abilId = s_abilRightList[cursor];
+                        const char* name = GetAbilityName(abilId);
+                        ScreenReader::Speak(name, true);
+                        Log::Write("[AbilTTS] RIGHT cursor %u: id=%u -> %s",
+                                   (unsigned)cursor, (unsigned)abilId, name);
+                    } else {
+                        // Cursor past end of list = empty slot
+                        ScreenReader::Speak("Empty", true);
+                        Log::Write("[AbilTTS] RIGHT cursor %u: past list end (%d items) -> Empty",
+                                   (unsigned)cursor, s_abilRightListCount);
+                    }
+                }
+            }
+        }
+        
+        // ---- Character Select (focus == 0 or 8) ----
+        // v0.09.41: focus=8 is char select after Switch rearrangement.
+        // focus=0 is the normal char select on first entry.
+        if (focus == 0 || focus == 8) {
             uint8_t charCursor = base[JUNC_CHARSEL_CURSOR_OFF];
             if (charCursor <= 2 && charCursor != s_juncPrevCharCursor) {
                 AnnounceJuncCharSelect(charCursor);
+                // v0.09.49: Cache the resolved charIdx NOW, while formation is still intact.
+                // The engine rewrites the formation array once Junction editing starts.
+                {
+                    uint8_t ci = GetJuncSelectedCharIdx();
+                    if (ci != 0xFF) s_juncSelectedCharIdx = ci;
+                }
                 s_juncPrevCharCursor = charCursor;
                 s_juncCharSelectAnnounced = true;
             }
@@ -620,6 +985,11 @@ static void PollJunctionSubmenu()
             s_juncPrevCharCursor = 0xFF;
             s_juncPrevSuboptCursor = 0xFF;
             s_juncPrevGfListCursor = 0xFF;
+            // v0.09.48: Reset Ability screen state so re-entry announces correctly
+            s_juncPrevAbilLeftCursor = 0xFF;
+            s_juncPrevAbilRightCursor = 0xFF;
+            s_juncPrevAbilFocus = 0xFF;
+            s_abilRightListCount = 0;
         }
         
         // ---- Junction Sub-option (focus == 37 or 38) ----
@@ -716,9 +1086,9 @@ static void PollJunctionSubmenu()
             }
         }
         
-        // When returning to char select (focus==0) after being deeper,
+        // When returning to char select (focus==0 or 8) after being deeper,
         // force re-announce the current character
-        if (focus == 0 && s_juncPrevFocus != 0 && s_juncPrevFocus != 0xFF) {
+        if ((focus == 0 || focus == 8) && s_juncPrevFocus != 0 && s_juncPrevFocus != 8 && s_juncPrevFocus != 0xFF) {
             s_juncPrevCharCursor = 0xFF;
         }
         
@@ -3165,6 +3535,139 @@ static void PollItemSubmenu()
 }
 
 // ============================================================================
+// v0.09.41: Help bar text extraction from GCW buffer
+// ============================================================================
+// The GCW buffer captures all text rendered each frame. One render cycle:
+//   [menu items][help text][character name(s)][location]
+// The static menu items prefix is constant: "JunctionItemMagic...Save".
+// After "Save", the help text runs until the first party member name.
+
+// Build the static prefix from MENU_ITEMS[] (computed once)
+static const char* GetMenuItemsPrefix()
+{
+    static char s_prefix[128] = {};
+    static bool s_built = false;
+    if (!s_built) {
+        int pos = 0;
+        for (int i = 0; i < MENU_ITEMS_COUNT && pos < 120; i++)
+            pos += sprintf(s_prefix + pos, "%s", MENU_ITEMS[i]);
+        s_built = true;
+    }
+    return s_prefix;
+}
+
+// All possible character names to search for as help text end markers
+static const char* HELP_END_MARKERS[] = {
+    "Squall", "Zell", "Irvine", "Quistis", "Rinoa", "Selphie",
+    "Seifer", "Edea", "Laguna", "Kiros", "Ward",
+    nullptr
+};
+
+static void AnnounceHelpText()
+{
+    // Snapshot GCW buffer and decode
+    uint8_t gcwBuf[1024];
+    int gcwLen = FieldDialog::SnapshotGcwBuffer(gcwBuf, sizeof(gcwBuf));
+    if (gcwLen <= 0) {
+        ScreenReader::Speak("No help text", true);
+        Log::Write("[MenuTTS] HelpText: GCW buffer empty");
+        return;
+    }
+    
+    std::string decoded = FF8TextDecode::DecodeMenuText(gcwBuf, gcwLen);
+    if (decoded.empty()) {
+        ScreenReader::Speak("No help text", true);
+        return;
+    }
+    
+    // Strategy: The help bar text sits between a "--------" dash separator
+    // and the first character name that follows it. In deep submenus the
+    // render order is: [menu items][submenu items][dashes][HELP TEXT][char name].
+    // On the top-level menu it's: [menu items][HELP TEXT][char name].
+    // We try the dash strategy first (works in submenus), then fall back
+    // to extracting after the static prefix (works on top-level).
+    
+    // Find the FIRST occurrence of the dash separator within one render cycle.
+    // One cycle starts at the menu prefix; find prefix first to bound the search.
+    const char* prefix = GetMenuItemsPrefix();
+    size_t prefixPos = decoded.find(prefix);
+    size_t cycleStart = (prefixPos != std::string::npos) ? prefixPos : 0;
+    
+    // Find next cycle to bound our search (don't read into repeated frames)
+    size_t nextCycle = std::string::npos;
+    if (prefixPos != std::string::npos) {
+        nextCycle = decoded.find(prefix, prefixPos + strlen(prefix));
+    }
+    size_t searchEnd = (nextCycle != std::string::npos) ? nextCycle : decoded.size();
+    
+    // Look for dash separator within this cycle
+    static const char* DASH_SEP = "----";
+    size_t dashPos = decoded.find(DASH_SEP, cycleStart);
+    
+    size_t helpStart = std::string::npos;
+    
+    if (dashPos != std::string::npos && dashPos < searchEnd) {
+        // Skip past the dashes to find where help text starts
+        helpStart = dashPos;
+        while (helpStart < searchEnd && decoded[helpStart] == '-')
+            helpStart++;
+        // v0.09.42: If the text right after dashes starts with a character name,
+        // there's no help text (e.g. Ability Junction with empty slot).
+        for (const char** m = HELP_END_MARKERS; *m != nullptr; m++) {
+            size_t nameLen = strlen(*m);
+            if (helpStart + nameLen <= searchEnd &&
+                decoded.compare(helpStart, nameLen, *m) == 0) {
+                ScreenReader::Speak("Choose Ability", true);
+                Log::Write("[MenuTTS] HelpText: empty slot (char name '%s' at dash end)", *m);
+                return;
+            }
+        }
+    } else if (prefixPos != std::string::npos) {
+        // No dashes — top-level menu. Help text starts right after the prefix.
+        helpStart = prefixPos + strlen(prefix);
+    }
+    
+    if (helpStart == std::string::npos || helpStart >= searchEnd) {
+        ScreenReader::Speak("No help text", true);
+        Log::Write("[MenuTTS] HelpText: no start found");
+        return;
+    }
+    
+    // Find where help text ends: first character name after helpStart
+    size_t helpEnd = searchEnd;
+    for (const char** m = HELP_END_MARKERS; *m != nullptr; m++) {
+        size_t pos = decoded.find(*m, helpStart);
+        if (pos != std::string::npos && pos >= helpStart && pos < helpEnd)
+            helpEnd = pos;
+    }
+    
+    // Also stop at next dash separator (if there's another one)
+    size_t nextDash = decoded.find(DASH_SEP, helpStart);
+    if (nextDash != std::string::npos && nextDash < helpEnd)
+        helpEnd = nextDash;
+    
+    // Clamp length
+    if (helpEnd <= helpStart)
+        helpEnd = helpStart + 100;
+    if (helpEnd > searchEnd)
+        helpEnd = searchEnd;
+    
+    std::string helpText = decoded.substr(helpStart, helpEnd - helpStart);
+    
+    // Trim trailing spaces
+    while (!helpText.empty() && helpText.back() == ' ')
+        helpText.pop_back();
+    
+    if (helpText.empty()) {
+        ScreenReader::Speak("No help text", true);
+        Log::Write("[MenuTTS] HelpText: extracted empty");
+    } else {
+        ScreenReader::Speak(helpText.c_str(), true);
+        Log::Write("[MenuTTS] HelpText: \"%s\"", helpText.c_str());
+    }
+}
+
+// ============================================================================
 // v0.08.21: Individual info hotkeys (G/T/R/L) for menu mode
 // ============================================================================
 static void AnnounceGil()
@@ -3262,7 +3765,7 @@ void MenuTTS::Update()
     // Snapshots the accumulated character codes every 500ms, decodes them,
     // and logs the resulting text. This shows exactly what the save screen renders.
     // ========================================================================
-    if (GetAsyncKeyState(VK_F12) & 1) {
+    if ((GetAsyncKeyState(VK_F12) & 1)) {
         if (GetAsyncKeyState(VK_CONTROL) & 0x8000) {
             // Ctrl+F12: Savemap offset verification diagnostic
             ScreenReader::Speak("Savemap offset check", true);
@@ -3309,6 +3812,10 @@ void MenuTTS::Update()
         // R = SeeD Rank
         if (GetAsyncKeyState('R') & 1) {
             AnnounceSeedRank();
+        }
+        // / = Read help bar text (v0.09.41)
+        if (GetAsyncKeyState(VK_OEM_2) & 1) {
+            AnnounceHelpText();
         }
     }
     

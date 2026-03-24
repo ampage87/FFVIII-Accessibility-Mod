@@ -1,14 +1,35 @@
 # DEVNOTES - FF8 Accessibility Mod (Original PC + FFNx)
-## Last updated: 2026-03-23 (session 9)
+## Last updated: 2026-03-24 (session 11)
 
 > **File structure**: This file = current state + key learnings only (~10KB max).
 > Build history in `DEVNOTES_HISTORY.md`. Immediate context in `NEXT_SESSION_PROMPT.md`.
 
 ---
 
-## CURRENT OBJECTIVE: Menu TTS + GitHub Push
+## CURRENT OBJECTIVE: Battle TTS + GitHub Push
 
-### Current build: v0.09.40 (source + deployed)
+### Current build: v0.09.49 (source + deployed)
+
+### Ability Screen TTS — COMPLETE (v0.09.44–v0.09.48)
+- **Left panel** (focus=24, cursor +0x27C): Reads equipped ability IDs from savemap chr+0x50 (commands) / chr+0x54 (abilities). ABILITY_NAMES[116] lookup.
+- **Right panel** (focus=28, cursor +0x271): Reconstructs available list from GF completeAbilities[16] bitmaps. Union all junctioned GFs → filter by slot type (cmd IDs 20-38 or char/party IDs 39-82) → ascending ID order.
+- **GF bitmask caching**: Engine zeroes chr+0x58 during Junction editing. Cache all 8 chars' masks at activation (`s_juncCachedGfMasks[8]`). Three-layer fallback: live → cached → all existing GFs.
+- **CharIdx caching**: Engine rewrites formation array during Junction editing (moves active char to slot 0, clears rest). Cache resolved charIdx at char select (`s_juncSelectedCharIdx`), use as fallback in `GetJuncSelectedCharIdx()`.
+- **Transition artifact fix**: Only re-announce on 24↔28 panel switches, not on first entry from outside 20-28 range.
+- Discovery: 6 builds of diagnostics before finding panels use separate focus values + cursor offsets, GCW text is unreliable (1-2 frame lag), engine zeroes GF masks AND rewrites formation during editing.
+
+### Help Bar Text Hotkey (v0.09.42)
+- **"/" key** reads the currently displayed help bar text via TTS.
+- Works across all menu screens: top-level, Item, GF Junction, Ability Junction (with valid ability).
+- Parses GCW buffer: finds dash separator ("----"), extracts text between dashes and first character name.
+- Falls back to extracting after static prefix ("JunctionItem...Save") for top-level menus without dashes.
+- **Known issue**: Ability Junction with empty slot reads nonsense — no help text rendered, parser picks up stat labels.
+
+### Junction Char Select Fix — COMPLETE (v0.09.41)
+- **Bug**: Solo party member (Squall) was announced on wrong slot. With 1 member, Squall visually appears in the middle slot (cursor=1), but mod read from compacted party array at index 0.
+- **Root cause 1**: Code compacted formation array (skipping 0xFF) into dense array, losing positional info. Engine stores `formation[cursor]` directly — with 1 member: `[FF,0,FF,FF]` (Squall in slot 1).
+- **Root cause 2**: After Switch rearrangement, char select focus state changes from 0 to 8. Mod only handled focus=0.
+- **Fix**: Read `formation[cursorPos]` directly (0xFF = empty, announce "Empty"). Handle both focus=0 and focus=8 for char select. Same fix applied to `GetJuncSelectedCharIdx()`.
 
 ### GameAudio Module — COMPLETE (v0.09.22-v0.09.31)
 - **BGM volume**: Direct `nxAudioEngine.setMusicVolume()` call bypasses FFNx hold_volume_for_channel flag. Addresses auto-detected by scanning FFNx's compiled `set_music_volume_for_channel` for MOV ECX + CALL pattern.
@@ -26,9 +47,10 @@
 4. GF Assignment (v0.08.94–98): Junction→GF list, toggle assignment — MUST come first, unlocks everything
 5. Action Menu sub-options (v0.08.99–101): GF/Magic, Magic/All, Atk/Mag/Def
 6. Auto Execution (v0.08.102–103): Confirm auto-junction applied
-7. Ability Assignment (v0.08.104–108): Command + Support equip — **unblocks battle work**
-8. Off/Remove (v0.08.109–111): Off→Magic and Off→All
-9. Magic-to-Stat (deferred): Full stat preview system
+7. Ability Assignment (v0.09.43–v0.09.49): Command + Support equip — **COMPLETE** (both panels)
+8. Auto sub-options: DEFERRED — needs magic stocked
+9. Off/Remove: DEFERRED — low priority
+10. Magic-to-Stat: DEFERRED — complex, Auto junction is functional workaround
 
 **Key data**: Character junction fields at savemap char +0x58 (GF bitmask), +0x5C–0x6E (stat/elem/status junctions), +0x50–0x57 (abilities). GF structs at savemap +0x4C (16×68 bytes). See NEXT_SESSION_PROMPT.md for full offset table.
 
@@ -233,6 +255,6 @@ AccessibilityThread polls ~60Hz. Modules: TitleScreen, FieldDialog, FieldNavigat
 3. Read `DEVNOTES_HISTORY.md` ONLY if you need past build details
 4. Use filesystem MCP tools (not bash) for Windows file access
 5. `deploy.bat` is the ONLY build script
-6. Current version: v0.09.40 (source), v0.09.40 (deployed)
+6. Current version: v0.09.43 (source), v0.09.43 (deployed)
 7. "BAT" = read tail of `Logs/ff8_accessibility.log`
 8. GitHub repo: ampage87/FFVIII-Accessibility-Mod
