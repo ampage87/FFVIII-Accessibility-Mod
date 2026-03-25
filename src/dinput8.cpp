@@ -13,6 +13,7 @@
 #include "minhook/include/MinHook.h"
 #include "name_bypass.h"
 #include "menu_tts.h"
+#include "battle_tts.h"
 
 
 // ============================================================================
@@ -90,6 +91,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     NameBypass::Initialize();    // v04.26: Auto-bypass character/GF naming screens
     GameAudio::Initialize();      // v0.09.22: Centralized game audio control
     MenuTTS::Initialize();       // v07.00: In-game menu TTS diagnostic
+    BattleTTS::Initialize();     // v0.10.01: Battle sequence TTS
     
     // Enable all MinHook hooks
     mhStatus = MH_EnableHook(MH_ALL_HOOKS);
@@ -146,6 +148,9 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
 
         // In-game menu TTS (v07.00)
         MenuTTS::Update();
+
+        // Battle sequence TTS (v0.10.01)
+        BattleTTS::Update();
         
         // --- Accessibility keyboard shortcuts ---
         // `  = Repeat last dialog
@@ -191,6 +196,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     }
     
     // Cleanup
+    BattleTTS::Shutdown();       // v0.10.01: Battle TTS cleanup
     GameAudio::Shutdown();       // v0.09.22: Remove BGM volume hook
     NameBypass::Shutdown();      // v04.26: Remove naming screen hook
     FieldNavigation::Shutdown(); // v05.00: Field navigation cleanup

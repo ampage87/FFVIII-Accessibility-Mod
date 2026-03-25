@@ -35,7 +35,7 @@ static FF8SetMusicVolumeForChannel_t s_originalSetMusicVolumeForChannel = nullpt
 static void* s_hookedFuncAddr = nullptr;
 static bool s_hookInstalled = false;
 
-static float s_bgmVolume = 0.2f;  // User's desired BGM volume (0.0-1.0). Default 20%.
+static float s_bgmVolume = 0.1f;  // User's desired BGM volume (0.0-1.0). Default 10%.
 
 // Track the last volume the game requested per channel
 static uint32_t s_lastGameVolume[2] = { 127, 127 };
@@ -511,7 +511,7 @@ void Initialize()
     s_streamHandleOffset = 0;
     s_directCallAvailable = false;
     s_fmvVolumeAvailable = false;
-    s_bgmVolume = 0.2f;
+    s_bgmVolume = 0.1f;
     s_lastGameVolume[0] = 127;
     s_lastGameVolume[1] = 127;
     s_lastReapplyTick = GetTickCount();

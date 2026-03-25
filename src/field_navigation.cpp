@@ -3,7 +3,7 @@
 // See field_navigation.h for full architecture and phasing notes.
 //
 // ============================================================================
-// CURRENT STATE: v0.09.49 — Cleanup: removed Ability screen diagnostic code
+// CURRENT STATE: v0.10.14 — Fix command lookup: savemap uses GF ability IDs
 // ============================================================================
 //
 // What's new in v05.12:
@@ -4684,7 +4684,7 @@ void Initialize()
 
     s_initialized = true;
     s_lastLogTime = GetTickCount();
-    Log::Write("FieldNavigation: Initialized v0.09.49 — PSHM_W handler diagnostic + SET3 hook + direct read fallback.");
+    Log::Write("FieldNavigation: Initialized v0.10.14 — PSHM_W handler diagnostic + SET3 hook + direct read fallback.");
     Log::Write("FieldNavigation:   F9  = nearest character and compass direction (repeat to cycle)");
     Log::Write("FieldNavigation:   F10 = player field name and position");
 }

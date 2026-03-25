@@ -9,8 +9,8 @@
 // FF8 Original PC Accessibility Mod version
 // Increment on every build change
 // ================================================================
-#define FF8OPC_VERSION "0.09.49"  // Cleanup: removed Ability screen diagnostic code (F12 snapshot, hex dumps, tracking vars)
-#define FF8OPC_VERSION_DATE "2026-03-23"
+#define FF8OPC_VERSION "0.10.14"  // Fix command lookup: savemap uses GF ability IDs, not battle cmd IDs
+#define FF8OPC_VERSION_DATE "2026-03-24"
 
 // ============================================================================
 // FF8 Runtime Address Resolution

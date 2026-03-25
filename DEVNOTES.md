@@ -1,14 +1,29 @@
 # DEVNOTES - FF8 Accessibility Mod (Original PC + FFNx)
-## Last updated: 2026-03-24 (session 11)
+## Last updated: 2026-03-25 (session 12)
 
 > **File structure**: This file = current state + key learnings only (~10KB max).
 > Build history in `DEVNOTES_HISTORY.md`. Immediate context in `NEXT_SESSION_PROMPT.md`.
 
 ---
 
-## CURRENT OBJECTIVE: Battle TTS + GitHub Push
+## CURRENT OBJECTIVE: Battle TTS (Phase 3 in progress) + World Map Navigation
 
-### Current build: v0.09.49 (source + deployed)
+### Current build: v0.10.14 (source + deployed)
+
+### Battle TTS — Phases 1-3 COMPLETE, Phase 4+ next session
+- Deep research results: `Plan & Research Documents/Battle system memory map deep research results.md`
+- Implementation plan: `Plan & Research Documents/Battle TTS implementation plan.md`
+- **Phase 1 COMPLETE** (v0.10.01-05): Module skeleton, mode detection, enemy HP reading, FF8 text decoder, enemy name announce ("Battle! 2 Bite Bugs")
+- **Phase 2 COMPLETE** (v0.10.06-10): Turn announcements via `active_char_id` at 0x01D76844 (255→slot = turn start)
+- **Phase 3 COMPLETE** (v0.10.09-14): Battle command cursor at 0x01D76843, menu phase at 0x01D768D0, equipped commands from savemap. Turn announce + command navigation TTS working.
+- **Key discovery**: Savemap stores GF ability IDs at char+0x50, NOT battle command IDs. Ability ID = battle_cmd + 0x12 (e.g. 0x14=Magic, 0x15=GF, 0x16=Draw, 0x17=Item).
+- **Key discovery**: The -0x14 savemap header correction does NOT apply to SAVEMAP_CHAR_DATA_BASE. Uncorrected 0x1CFE0E8 is correct.
+- Phase 4 (target selection), Phase 5 (HP/status tracking), Phase 6 (battle results), Phase 7 (Draw system) still pending
+
+### World Map Accessibility — Deep Research PENDING
+- Prompt submitted: `Plan & Research Documents/World Map Accessibility deep research prompt for ChatGPT.md`
+- 15-area prompt covering coordinate system, wmset.obj, locations, terrain, vehicles, autopilot, etc.
+- Aaron will provide research results when available. Second priority after battle TTS.
 
 ### Ability Screen TTS — COMPLETE (v0.09.44–v0.09.48)
 - **Left panel** (focus=24, cursor +0x27C): Reads equipped ability IDs from savemap chr+0x50 (commands) / chr+0x54 (abilities). ABILITY_NAMES[116] lookup.
@@ -163,6 +178,7 @@ Auto-monitor infrastructure (SUBMON) still active for discovering future submenu
 | Naming bypass | v0.09.16 | Call original + suppress UI flags. Chars + GFs. No naming screen. |
 | GF acquisition TTS | v0.09.21 | MENUNAME snapshot before/after, zero polling. Suppresses char name when GF acquired. |
 | BGM+FMV volume ctrl | v0.09.31 | F3/F4, direct nxAudioEngine + SoLoud calls, bypasses FFNx hold flags. Default 20%. |
+| Battle TTS (partial) | v0.10.14 | Enemy announce, turn announce, command menu navigation. Ability ID mapping. |
 
 ---
 
@@ -255,6 +271,6 @@ AccessibilityThread polls ~60Hz. Modules: TitleScreen, FieldDialog, FieldNavigat
 3. Read `DEVNOTES_HISTORY.md` ONLY if you need past build details
 4. Use filesystem MCP tools (not bash) for Windows file access
 5. `deploy.bat` is the ONLY build script
-6. Current version: v0.09.43 (source), v0.09.43 (deployed)
+6. Current version: v0.10.14 (source + deployed)
 7. "BAT" = read tail of `Logs/ff8_accessibility.log`
 8. GitHub repo: ampage87/FFVIII-Accessibility-Mod
