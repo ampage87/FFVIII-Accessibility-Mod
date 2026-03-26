@@ -1,108 +1,78 @@
 # NEXT SESSION PROMPT — FF8 Accessibility Mod
-## Updated: 2026-03-25 (post-session 12, battle command menu TTS working)
-## Current build: v0.10.14 (source + deployed)
+## Updated: 2026-03-25 (post-session 13, Magic sub-menu TTS + Limit Break detection)
+## Current build: v0.10.22 (source + deployed)
 
 ---
 
-## SESSION 12 RECAP: Battle Command Menu TTS (v0.10.09–v0.10.14)
+## SESSION 13 RECAP: Battle Sub-menu TTS + Limit Break (v0.10.15–v0.10.22)
 
-This session completed battle command menu navigation TTS. Key results:
+### GitHub pushed at session start
+Commit: "v0.09.41-v0.10.14: Ability screen TTS, battle TTS phases 1-3"
 
-### Confirmed Battle Menu Addresses
+### Confirmed New Battle Menu Addresses
 | Address | Purpose |
 |---------|---------|
-| 0x01D76843 | Battle command cursor (0-3, cycles through 4 slots) |
-| 0x01D76844 | active_char_id (BYTE, 255=no turn, 0-2=party slot) |
-| 0x01D76845 | new_active_char_id |
-| 0x01D768D0 | Menu phase (1=open, 3=executing, 4=idle) |
-| 0x01D76860 | Cursor visual Y-position (87→118→131→202) |
-| 0x01D7689A | Which character's menu is active (alternates) |
-| 0x01D76968 | ATB timer ally 0 (monotonic) |
-| 0x01D769D4 | ATB timer ally 1 (monotonic) |
+| 0x01D768EC | Sub-menu list cursor (0-N, scrolls through spells/GFs/items) |
+| 0x01D7684A | Limit Break toggle byte: 0=Attack, 64=Limit Break at cursor 0 |
 
-### Key Discovery: Savemap Ability IDs
-- Savemap char struct at +0x50 stores **GF ability IDs**, NOT battle command IDs
-- Ability ID = battle_cmd_ID + 0x12
-- Mapping: 0x14=Magic, 0x15=GF, 0x16=Draw, 0x17=Item, 0x18=Card, 0x19=Devour, etc.
-- The -0x14 header correction does NOT apply to SAVEMAP_CHAR_DATA_BASE (0x1CFE0E8 is correct as-is)
-- Slot 0 is always "Attack" (hardcoded, not read from savemap)
+### What's Working Now (v0.10.22)
+- **Magic sub-menu TTS**: "Fire, 5" / "Cure, 3" as you scroll through spells
+  - 57-entry MAGIC_NAMES[] table (kernel.bin IDs 0x00-0x38)
+  - BuildMagicList() reads savemap char struct +0x10 (32 slots × 2 bytes)
+  - 300ms debounce after turn start prevents false sub-menu entry detection
+- **Limit Break toggle detection**: "Limit Break" / "Attack" announced when pressing Right on cursor 0
+  - Toggle byte at 0x01D7684A (0=Attack, 64=Limit Break)
+  - Turn start checks toggle byte for initial announcement
+- **Command menu TTS** (from session 12): turn announcement + cursor navigation still working
 
-### What Works Now
-- Turn announcement: "Quistis's turn. Attack." when ATB fills
-- Command navigation: "Magic", "GF", "Item" as you move cursor up/down
-- Character name resolved via SAVEMAP_PARTY_FORMATION (0x1CFE74C) → charIdx → CHAR_NAMES[]
+### Known Issue: cursor=3 out of range with 3 spells
+When a character has 3 spells, cursor wraps to position 3 which is out of range. The cursor byte represents visible list position (0-3 for 4 slots), not spell count. Need page offset byte for >4 spells (scrolled lists).
 
-### Diagnostic Code Still Present
-- v0.10.07 diagnostic code (6-approach name scan functions) still in battle_tts.cpp — cleanup needed
-- MENU-DIAG wide-scan logging still active (1024-byte region monitor) — should be disabled for production but useful for next phase
+### Diagnostic code still present (cleanup needed)
+- MENU-DIAG event-triggered scan (PollMenuDiagnostic) — 4096+2048 byte regions
+- CURSOR-HUNT continuous poll (PollCursorHunter) — 512 bytes at 16ms
+- PollLimitToggleFast/PollLimitToggleDiag stubs (empty, harmless)
 
 ---
 
-## IMMEDIATE PRIORITY: Battle TTS Phases 4-7
+## IMMEDIATE PRIORITY: Continue Battle TTS Phase 4
 
-### Phase 4: Command Sub-menus + Target Selection
-The next goals are:
-1. **Command sub-menu TTS** — when player selects Magic, GF, Draw, or Item, a sub-menu appears with a list of spells/GFs/items. Need to find the sub-menu cursor address and read the spell/GF/item names.
-   - Magic: list of stocked spells with quantities
-   - GF: list of junctioned GFs
-   - Draw: targets enemy draw slots (4 spells per enemy)
-   - Item: battle item list (already have display struct at 0x1D8DFF4 from menu work)
-   - Need diagnostic builds to find sub-menu cursor position
-   
-2. **Target selection TTS** — after selecting a command (or its sub-option), the game enters target selection mode where an arrow hovers over enemies/allies. Need to announce the currently selected target name.
-   - Target cursor address unknown — needs diagnostic
-   - Enemy names via entity array at 0x1D27B18 (already have decoder)
-   - Ally names via party formation array
-
-3. **Damage announcements** — announce damage dealt to enemies and allies
-   - HP change detection by polling entity HP values (already reading HP in Phase 1)
-   - Announce "[Name] takes X damage" or "[Name] defeated"
-
-4. **Healing announcements** — announce HP recovered
-   - Same HP polling, detect increases instead of decreases
-   - Announce "[Name] recovers X HP"
+### Next items (in suggested order):
+1. **GF sub-menu TTS** — sub-menu cursor at 0x01D768EC works for all sub-menus; need GF name lookup from savemap GF structs (savemap+0x4C, 16 GFs × 0x44 stride, name at +0x00)
+2. **Item sub-menu TTS** — item display struct at 0x1D8DFF4 (already known from menu work)
+3. **Draw sub-menu TTS** — draw slots at 0x1D28F18 (4 slots/enemy, 0x47 stride)
+4. **Magic list scrolling for >4 spells** — need to find page offset byte in battle menu struct
+5. **Target selection TTS** — target cursor address unknown, needs diagnostic. Phase sequence: 32→3→11 (target select)→14→21→33→34
+6. **Damage/healing announcements** — HP polling already functional
 
 ### Key Documents
 - **Implementation plan**: `Plan & Research Documents/Battle TTS implementation plan.md`
 - **Memory map**: `Plan & Research Documents/Battle system memory map deep research results.md`
-- **FFNx source**: `Plan & Research Documents/Battle TTS research - FFNx source analysis.md`
-
-### Key Code (battle_tts.cpp)
-- `PollTurnAndCommands()` — current turn detection + command cursor TTS
-- `GetCommandName()` — ability ID → name lookup (0x14=Magic through 0x38=Treatment)
-- `GetBattleCharName()` — party slot → character name
-- `BuildCharCommandList()` — reads equipped commands from savemap
-- Constants: BATTLE_CMD_CURSOR, BATTLE_MENU_PHASE, SAVEMAP_PARTY_FORMATION, SAVEMAP_CHAR_DATA_BASE
-- Enemy HP reading + name decode already functional from Phase 1
 
 ---
 
 ## SECOND PRIORITY: World Map Accessibility
 
 Research prompt submitted but results not yet received.
-**Prompt**: `Plan & Research Documents/World Map Accessibility deep research prompt for ChatGPT.md`
 
 ---
 
 ## DEFERRED
 
-- Junction Menu: Auto sub-options, manual magic-to-stat (needs magic stocked)
+- Junction Menu: Auto sub-options, manual magic-to-stat
 - Top-level menu navigation TTS
 - Save Game flow TTS  
 - Save Point entity catalog integration
 - Title Screen Continue TTS
-- SFX volume control (GitHub Issue #8)
 - PSHM_W Option F (force entity script execution — deep research pending)
-- Item screen HP not updated in real-time (GitHub Issue #10)
-- Cleanup v0.10.07 diagnostic code (6-approach name scan)
-- Remove MENU-DIAG wide-scan when no longer needed
+- Cleanup diagnostic code (MENU-DIAG, CURSOR-HUNT, v0.10.07 name scan)
 
 ---
 
 ## HOUSEKEEPING
 
-- **GitHub push needed**: v0.09.41–v0.10.14 unpushed (grew from 9 to ~23 builds)
-- Git: `cd C:\Users\ampag\OneDrive\Documents\FFVIII-Accessibility-Mod\FF8_OriginalPC_mod && git add -A && git commit -m "v0.09.41-v0.10.14: Ability screen TTS, battle TTS phases 1-3 (enemy announce, turn announce, command menu)" && git push origin main`
+- **GitHub push needed**: v0.10.15–v0.10.22 unpushed (8 builds this session)
+- Git: `cd C:\Users\ampag\OneDrive\Documents\FFVIII-Accessibility-Mod\FF8_OriginalPC_mod && git add -A && git commit -m "v0.10.15-v0.10.22: Magic sub-menu TTS, Limit Break toggle detection" && git push origin main`
 
 ---
 
@@ -112,22 +82,14 @@ Research prompt submitted but results not yet received.
 3. Init log string inside `src/field_navigation.cpp` Initialize() (~line 4683)
 4. Version comment + init log in `src/battle_tts.cpp`
 
-## KEY ADDRESSES (Battle-specific)
+## KEY ADDRESSES (Battle-specific, updated)
 - Entity array base: `0x1D27B18` (7 × 0xD0: allies 0-2, enemies 3-6)
-- Entity HP: +0x10 (cur), +0x14 (max) — uint16 allies, uint32 enemies  
-- Entity ATB: +0x0C (cur), +0x08 (max) — uint16 allies, uint32 enemies
 - Battle command cursor: `0x01D76843` (BYTE, 0-3)
 - Active char ID: `0x01D76844` (BYTE, 255=none, 0-2=slot)
-- Menu phase: `0x01D768D0` (BYTE, 1=open, 3=executing, 4=idle)
-- ATB timers: `0x01D76968` (ally 0), `0x01D769D4` (ally 1)
-- Savemap char data: `0x1CFE0E8` (8 × 0x98, equipped cmds at +0x50 as ability IDs)
+- Menu phase: `0x01D768D0` (BYTE, 32=cmd menu, 3=executing, 11=target, etc.)
+- Sub-menu list cursor: `0x01D768EC` (BYTE, 0-N)
+- Limit Break toggle: `0x01D7684A` (BYTE, 0=Attack, 64=Limit Break)
+- Savemap char data: `0x1CFE0E8` (8 × 0x98, magic at +0x10, cmds at +0x50)
 - Party formation: `0x1CFE74C` (3 bytes: slot→charIdx)
-- Entity statuses: +0x78 (persistent), +0x00-0x03 (timed)
-- Battle result state: `0x1CFF6E7` (2=escaped, 4=won)
-- XP earned: `0x1CFF574` (3 × uint16)
-- AP earned: `0x1CFF5C0` (uint16)
-- Prize items: `0x1CFF5E0` (4 × {id,qty})
 - Draw slots: `0x1D28F18` base, 4 slots/enemy, 0x47 stride
-- Encounter ID: `0x1CFF6E0` (WORD)
-- Computed stats: `0x1CFF000` (3 × 0x1D0)
-- Savemap base: `0x1CFDC5C`
+- Item display: `0x1D8DFF4`

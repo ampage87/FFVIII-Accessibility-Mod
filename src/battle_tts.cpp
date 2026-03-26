@@ -1,7 +1,7 @@
 // battle_tts.cpp - Battle sequence TTS for blind players
 //
 // ============================================================================
-// CURRENT STATE: v0.10.14 — Fix command lookup: savemap uses GF ability IDs
+// CURRENT STATE: v0.10.27 — EWM blacklist executing phases
 // ============================================================================
 //
 // Phase 1 (v0.10.01-05): Skeleton, mode detection, enemy announcement
@@ -19,6 +19,7 @@
 #include <windows.h>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <cmath>
 #include "ff8_accessibility.h"
 #include "ff8_addresses.h"
@@ -470,16 +471,28 @@ static uint8_t* s_pActiveCharId = nullptr;          // battle_current_active_cha
 static uint8_t* s_pNewActiveCharId = nullptr;       // battle_new_active_character_id
 
 // Snapshot buffer for change tracking
-// Scan 1024 bytes starting at 0x01D76800 — covers active_char_id (0x01D76844)
-// and extends toward pMenuStateA (0x01D76A9A). Battle menu cursor is likely here.
+// v0.10.15: Expanded to 4096 bytes starting at 0x01D76800 to cover sub-menu cursors.
+// Known offsets within scan: +0x43 = cmd cursor, +0xD0 = menu phase.
 static const uint32_t MENU_SCAN_BASE = 0x01D76800;
-static const int MENU_SNAP_SIZE = 1024;
+static const int MENU_SNAP_SIZE = 4096;
 static uint8_t s_menuSnap[MENU_SNAP_SIZE] = {};
 static bool s_menuSnapValid = false;
 static DWORD s_lastMenuDiagTick = 0;
 static const DWORD MENU_DIAG_INTERVAL_MS = 100; // poll every 100ms
 static uint8_t s_lastActiveCharId = 0xFF;
 static uint8_t s_lastNewActiveCharId = 0xFF;
+
+// v0.10.15: Event-triggered sub-menu diagnostic state
+static uint8_t s_lastMenuPhase = 0xFF;   // last BATTLE_MENU_PHASE value
+static uint8_t s_lastDiagCmdCursor = 0xFF; // last command cursor for event trigger
+static uint8_t* s_pBattleMenuStateByte = nullptr;  // battle_menu_state from sub_4CD350+0x29
+
+// v0.10.15: Second scan region for sub-menu data (may be outside primary range)
+// Start at 0x01D76000 (2KB before primary scan) to catch sub-menu list state.
+static const uint32_t MENU_SCAN2_BASE = 0x01D76000;
+static const int MENU_SNAP2_SIZE = 2048;
+static uint8_t s_menuSnap2[MENU_SNAP2_SIZE] = {};
+static bool s_menuSnap2Valid = false;
 
 static void ResolveBattleMenuAddresses()
 {
@@ -512,76 +525,443 @@ static void ResolveBattleMenuAddresses()
         Log::Write("BattleTTS: [MENU-DIAG] EXCEPTION resolving new_active_char_id");
     }
     
-    Log::Write("BattleTTS: [MENU-DIAG] Wide scan base: 0x%08X (%d bytes)", MENU_SCAN_BASE, MENU_SNAP_SIZE);
+    // v0.10.15: Resolve battle_menu_state from battle_pause_window_sub_4CD350 + 0x29
+    __try {
+        uint32_t menuStateAddr = *(uint32_t*)(ADDR_BATTLE_PAUSE_WINDOW_SUB + 0x29);
+        if (menuStateAddr > 0x00400000 && menuStateAddr < 0x7FFFFFFF) {
+            s_pBattleMenuStateByte = (uint8_t*)(uintptr_t)menuStateAddr;
+            Log::Write("BattleTTS: [MENU-DIAG] battle_menu_state resolved: 0x%08X", menuStateAddr);
+        } else {
+            Log::Write("BattleTTS: [MENU-DIAG] battle_menu_state bad addr: 0x%08X", menuStateAddr);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log::Write("BattleTTS: [MENU-DIAG] EXCEPTION resolving battle_menu_state");
+    }
+
+    Log::Write("BattleTTS: [MENU-DIAG] Wide scan base: 0x%08X (%d bytes), scan2: 0x%08X (%d bytes)",
+               MENU_SCAN_BASE, MENU_SNAP_SIZE, MENU_SCAN2_BASE, MENU_SNAP2_SIZE);
 }
 
-// Poll active char IDs + wide memory region for changes.
-// Logs only bytes that changed since last snapshot.
+// v0.10.15: Event-triggered sub-menu diagnostic.
+// Instead of logging every change every 100ms (extremely noisy with ATB timers),
+// this version takes snapshots and logs diffs ONLY when key state transitions occur:
+//   - BATTLE_MENU_PHASE changes (entering/leaving sub-menus)
+//   - battle_menu_state changes (FFNx's resolved menu state)
+//   - Command cursor changes within sub-menu context
+// This dramatically reduces noise and makes sub-menu cursor bytes easy to identify.
 static void PollMenuDiagnostic()
 {
     DWORD now = GetTickCount();
     if (now - s_lastMenuDiagTick < MENU_DIAG_INTERVAL_MS) return;
     s_lastMenuDiagTick = now;
     
-    // Track active char ID changes (always, independent of scan)
-    if (s_pActiveCharId) {
-        __try {
-            uint8_t cur = *s_pActiveCharId;
-            if (cur != s_lastActiveCharId) {
-                Log::Write("BattleTTS: [MENU-DIAG] active_char_id: %u -> %u",
-                           (unsigned)s_lastActiveCharId, (unsigned)cur);
-                s_lastActiveCharId = cur;
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    }
-    if (s_pNewActiveCharId) {
-        __try {
-            uint8_t cur = *s_pNewActiveCharId;
-            if (cur != s_lastNewActiveCharId) {
-                Log::Write("BattleTTS: [MENU-DIAG] new_active_char_id: %u -> %u",
-                           (unsigned)s_lastNewActiveCharId, (unsigned)cur);
-                s_lastNewActiveCharId = cur;
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    // Read current key state values
+    uint8_t curMenuPhase = 0xFF;
+    uint8_t curCmdCursor = 0xFF;
+    uint8_t curActiveChar = 0xFF;
+    uint8_t curMenuState = 0xFF;
+    __try { curMenuPhase = *(uint8_t*)0x01D768D0; } __except(EXCEPTION_EXECUTE_HANDLER) {}  // BATTLE_MENU_PHASE
+    __try { curCmdCursor = *(uint8_t*)0x01D76843; } __except(EXCEPTION_EXECUTE_HANDLER) {}  // BATTLE_CMD_CURSOR
+    if (s_pActiveCharId) { __try { curActiveChar = *s_pActiveCharId; } __except(EXCEPTION_EXECUTE_HANDLER) {} }
+    if (s_pBattleMenuStateByte) { __try { curMenuState = *s_pBattleMenuStateByte; } __except(EXCEPTION_EXECUTE_HANDLER) {} }
+    
+    // Detect events that trigger a full diff log
+    bool phaseChanged = (curMenuPhase != s_lastMenuPhase && s_lastMenuPhase != 0xFF);
+    bool menuStateChanged = false;
+    static uint8_t s_lastMenuStateByte = 0xFF;
+    if (curMenuState != s_lastMenuStateByte && s_lastMenuStateByte != 0xFF) menuStateChanged = true;
+    bool charChanged = (curActiveChar != s_lastActiveCharId && s_lastActiveCharId != 0xFF);
+    
+    // Always log state transitions (compact single line)
+    if (phaseChanged || menuStateChanged || charChanged) {
+        Log::Write("BattleTTS: [SUBMENU-DIAG] === STATE CHANGE === "
+                   "menuPhase: %u->%u  menuState: %u->%u  cmdCursor: %u  activeChar: %u->%u",
+                   (unsigned)s_lastMenuPhase, (unsigned)curMenuPhase,
+                   (unsigned)s_lastMenuStateByte, (unsigned)curMenuState,
+                   (unsigned)curCmdCursor,
+                   (unsigned)s_lastActiveCharId, (unsigned)curActiveChar);
     }
     
-    // Snapshot wide region at fixed base
-    uint8_t* base = (uint8_t*)MENU_SCAN_BASE;
+    // Take snapshots of both scan regions
     uint8_t newSnap[MENU_SNAP_SIZE];
-    __try {
-        memcpy(newSnap, base, MENU_SNAP_SIZE);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return;
-    }
+    uint8_t newSnap2[MENU_SNAP2_SIZE];
+    __try { memcpy(newSnap, (uint8_t*)MENU_SCAN_BASE, MENU_SNAP_SIZE); } __except(EXCEPTION_EXECUTE_HANDLER) { return; }
+    __try { memcpy(newSnap2, (uint8_t*)MENU_SCAN2_BASE, MENU_SNAP2_SIZE); } __except(EXCEPTION_EXECUTE_HANDLER) {}
     
     if (!s_menuSnapValid) {
-        // First snapshot — just store it
         memcpy(s_menuSnap, newSnap, MENU_SNAP_SIZE);
+        memcpy(s_menuSnap2, newSnap2, MENU_SNAP2_SIZE);
         s_menuSnapValid = true;
-        Log::Write("BattleTTS: [MENU-DIAG] First snapshot taken (0x%08X, %d bytes)",
-                   MENU_SCAN_BASE, MENU_SNAP_SIZE);
+        s_menuSnap2Valid = true;
+        Log::Write("BattleTTS: [SUBMENU-DIAG] First snapshot: scan1=0x%08X(%d) scan2=0x%08X(%d)",
+                   MENU_SCAN_BASE, MENU_SNAP_SIZE, MENU_SCAN2_BASE, MENU_SNAP2_SIZE);
+        s_lastMenuPhase = curMenuPhase;
+        s_lastMenuStateByte = curMenuState;
+        s_lastActiveCharId = curActiveChar;
+        s_lastDiagCmdCursor = curCmdCursor;
         return;
     }
     
-    // Compare and log changes (only log up to 20 changes per poll to avoid flood)
-    int changeCount = 0;
-    for (int i = 0; i < MENU_SNAP_SIZE && changeCount < 20; i++) {
-        if (newSnap[i] != s_menuSnap[i]) {
-            Log::Write("BattleTTS: [MENU-DIAG] +0x%03X (abs 0x%08X): %u -> %u",
-                       i, MENU_SCAN_BASE + i,
-                       (unsigned)s_menuSnap[i], (unsigned)newSnap[i]);
-            changeCount++;
+    // On STATE CHANGE events: log ALL changed bytes in both regions (up to 60)
+    if (phaseChanged || menuStateChanged) {
+        // Region 1
+        int changeCount = 0;
+        for (int i = 0; i < MENU_SNAP_SIZE && changeCount < 40; i++) {
+            if (newSnap[i] != s_menuSnap[i]) {
+                Log::Write("BattleTTS: [SUBMENU-DIAG] R1 +0x%04X (0x%08X): %u -> %u",
+                           i, MENU_SCAN_BASE + i,
+                           (unsigned)s_menuSnap[i], (unsigned)newSnap[i]);
+                changeCount++;
+            }
+        }
+        // Region 2
+        if (s_menuSnap2Valid) {
+            int changeCount2 = 0;
+            for (int i = 0; i < MENU_SNAP2_SIZE && changeCount2 < 20; i++) {
+                if (newSnap2[i] != s_menuSnap2[i]) {
+                    Log::Write("BattleTTS: [SUBMENU-DIAG] R2 +0x%04X (0x%08X): %u -> %u",
+                               i, MENU_SCAN2_BASE + i,
+                               (unsigned)s_menuSnap2[i], (unsigned)newSnap2[i]);
+                    changeCount2++;
+                }
+            }
+        }
+        if (changeCount == 0) {
+            Log::Write("BattleTTS: [SUBMENU-DIAG] (no byte changes in scanned regions)");
         }
     }
-    if (changeCount >= 20) {
-        // Count remaining changes
-        int extra = 0;
-        for (int i = 0; i < MENU_SNAP_SIZE; i++) {
-            if (newSnap[i] != s_menuSnap[i]) extra++;
-        }
-        Log::Write("BattleTTS: [MENU-DIAG] ... %d total changes (truncated)", extra);
-    }
+    
+    // Update snapshots and tracking state
     memcpy(s_menuSnap, newSnap, MENU_SNAP_SIZE);
+    if (s_menuSnap2Valid) memcpy(s_menuSnap2, newSnap2, MENU_SNAP2_SIZE);
+    s_lastMenuPhase = curMenuPhase;
+    s_lastMenuStateByte = curMenuState;
+    s_lastActiveCharId = curActiveChar;
+    s_lastDiagCmdCursor = curCmdCursor;
+}
+
+// ============================================================================
+// v0.10.16: Sub-menu cursor hunter (continuous poll)
+// ============================================================================
+// Scans a focused region around the known command cursor every 100ms while
+// a turn is active. Logs ONLY bytes whose change looks cursor-like:
+//   - abs(delta) between 1 and 10
+//   - new value < 64 (cursors are small indices, not animation/timer values)
+//   - old value < 64 (same)
+// This filters out ATB timers, animation state, and pointer churn.
+// Scan region: 0x01D76800 to 0x01D76A00 (512 bytes) — covers cmd cursor at +0x43
+// and extends to where sub-menu cursors likely live.
+
+static const uint32_t HUNT_SCAN_BASE = 0x01D76800;
+static const int HUNT_SCAN_SIZE = 512;
+static uint8_t s_huntSnap[512] = {};
+static bool s_huntSnapValid = false;
+static DWORD s_lastHuntTick = 0;
+static const DWORD HUNT_INTERVAL_MS = 100;
+
+// Known noisy offsets to skip (relative to HUNT_SCAN_BASE):
+// +0x42 = visual counter (always incrementing), +0x43 = cmd cursor (already tracked)
+static bool IsHuntNoisy(int off) {
+    if (off == 0x42) return true;  // visual counter
+    if (off == 0x43) return true;  // cmd cursor (already handled by PollTurnAndCommands)
+    if (off == 0x44) return true;  // active_char_id
+    if (off == 0x45) return true;  // new_active_char_id
+    return false;
+}
+
+static void PollCursorHunter()
+{
+    // Only run while a turn is active
+    if (!s_pActiveCharId) return;
+    uint8_t activeChar = 0xFF;
+    __try { activeChar = *s_pActiveCharId; } __except(EXCEPTION_EXECUTE_HANDLER) { return; }
+    if (activeChar >= 3) {
+        // No turn active — reset snapshot so we get a fresh baseline when next turn starts
+        if (s_huntSnapValid) {
+            s_huntSnapValid = false;
+        }
+        return;
+    }
+    
+    DWORD now = GetTickCount();
+    if (now - s_lastHuntTick < HUNT_INTERVAL_MS) return;
+    s_lastHuntTick = now;
+    
+    uint8_t newSnap[512];
+    __try {
+        memcpy(newSnap, (uint8_t*)HUNT_SCAN_BASE, HUNT_SCAN_SIZE);
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return; }
+    
+    if (!s_huntSnapValid) {
+        memcpy(s_huntSnap, newSnap, HUNT_SCAN_SIZE);
+        s_huntSnapValid = true;
+        return;
+    }
+    
+    // Compare and log cursor-like changes
+    for (int i = 0; i < HUNT_SCAN_SIZE; i++) {
+        if (newSnap[i] == s_huntSnap[i]) continue;
+        if (IsHuntNoisy(i)) { s_huntSnap[i] = newSnap[i]; continue; }
+        
+        uint8_t oldVal = s_huntSnap[i];
+        uint8_t newVal = newSnap[i];
+        int delta = (int)newVal - (int)oldVal;
+        int absDelta = (delta < 0) ? -delta : delta;
+        
+        // Cursor-like: both values small (<64), small change (1-10)
+        if (oldVal < 64 && newVal < 64 && absDelta >= 1 && absDelta <= 10) {
+            Log::Write("BattleTTS: [CURSOR-HUNT] +0x%03X (0x%08X): %u -> %u (delta=%+d)",
+                       i, HUNT_SCAN_BASE + i,
+                       (unsigned)oldVal, (unsigned)newVal, delta);
+        }
+    }
+    memcpy(s_huntSnap, newSnap, HUNT_SCAN_SIZE);
+}
+
+// ============================================================================
+// v0.10.22: Limit Break detection via toggle byte
+// ============================================================================
+// Confirmed by F12 snapshot diagnostic (v0.10.21):
+//   0x01D7684A: 0 = Attack showing at cursor 0
+//               64 (0x40) = Limit Break showing at cursor 0
+// Player presses Right on Attack to toggle to Limit Break (and vice versa).
+// We poll this single byte every frame while cursor=0 and turn is active.
+
+static const uint32_t BATTLE_LIMIT_TOGGLE = 0x01D7684A; // BYTE: 0=Attack, 64=Limit Break
+static bool s_limitBreakActive = false;     // true when toggle byte == 64
+static uint8_t s_lastLimitToggle = 0;       // last value of toggle byte
+
+static void PollLimitToggle()
+{
+    if (!s_pActiveCharId) return;
+    uint8_t activeChar = 0xFF;
+    __try { activeChar = *s_pActiveCharId; } __except(EXCEPTION_EXECUTE_HANDLER) { return; }
+    if (activeChar >= 3) return;  // no turn active
+    
+    // Only poll while cursor=0
+    uint8_t cmdCursor = 0xFF;
+    __try { cmdCursor = *(uint8_t*)0x01D76843; } __except(EXCEPTION_EXECUTE_HANDLER) { return; }
+    if (cmdCursor != 0) return;
+    
+    uint8_t toggle = 0;
+    __try { toggle = *(uint8_t*)BATTLE_LIMIT_TOGGLE; } __except(EXCEPTION_EXECUTE_HANDLER) { return; }
+    
+    if (toggle != s_lastLimitToggle) {
+        bool wasLimit = s_limitBreakActive;
+        s_limitBreakActive = (toggle == 64);
+        s_lastLimitToggle = toggle;
+        
+        if (s_limitBreakActive && !wasLimit) {
+            BattleSpeak("Limit Break", PRIO_MENU, true);
+            Log::Write("BattleTTS: [LIMIT] Attack -> Limit Break (toggle=%u)", (unsigned)toggle);
+        } else if (!s_limitBreakActive && wasLimit) {
+            BattleSpeak("Attack", PRIO_MENU, true);
+            Log::Write("BattleTTS: [LIMIT] Limit Break -> Attack (toggle=%u)", (unsigned)toggle);
+        }
+    }
+}
+
+// Legacy stubs
+static void PollLimitToggleFast() {}
+static void PollLimitToggleDiag() {}
+
+// ============================================================================
+// v0.10.25: Enhanced Wait Mode (EWM)
+// ============================================================================
+// Freezes ALL ATBs as soon as the command menu appears (active_char_id 0-2),
+// not just when sub-menus open like standard Wait Mode.
+// ATB stays frozen until the character's turn ends (active_char_id returns to 255).
+//
+// Implementation: snapshot all entity ATB values when turn starts, write them
+// back every frame while turn is active. No engine flags needed.
+//
+// Toggle: "O" key (works in all game modes, not just battle).
+// Persistence: ewm_config.txt in mod root ("1"=on, "0"=off). Default: on.
+
+static bool s_ewmEnabled = true;          // Enhanced Wait Mode toggle
+static bool s_ewmFreezing = false;        // currently writing back ATB values
+static bool s_ewmConfigLoaded = false;    // config file has been read
+static bool s_ewmOKeyWasDown = false;     // edge detection for O key
+
+// ATB snapshot: 4 bytes per slot (covers both uint16 ally and uint32 enemy ATB)
+static uint32_t s_ewmAtbSnapshot[BATTLE_TOTAL_SLOTS] = {};
+static bool s_ewmSnapshotValid = false;
+
+// Config file path (built at init time)
+static char s_ewmConfigPath[512] = {};
+
+static void EWM_BuildConfigPath()
+{
+    // Place ewm_config.txt in the same directory as the DLL (mod root)
+    char dllPath[512];
+    HMODULE hMod = NULL;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       (LPCSTR)EWM_BuildConfigPath, &hMod);
+    GetModuleFileNameA(hMod, dllPath, sizeof(dllPath));
+    // Strip filename, keep directory
+    char* lastSlash = strrchr(dllPath, '\\');
+    if (lastSlash) *(lastSlash + 1) = '\0';
+    snprintf(s_ewmConfigPath, sizeof(s_ewmConfigPath), "%sewm_config.txt", dllPath);
+}
+
+static void EWM_LoadConfig()
+{
+    if (s_ewmConfigLoaded) return;
+    s_ewmConfigLoaded = true;
+    
+    if (s_ewmConfigPath[0] == '\0') EWM_BuildConfigPath();
+    
+    FILE* f = fopen(s_ewmConfigPath, "r");
+    if (f) {
+        char buf[16] = {};
+        fgets(buf, sizeof(buf), f);
+        fclose(f);
+        if (buf[0] == '0') {
+            s_ewmEnabled = false;
+        } else {
+            s_ewmEnabled = true;  // default to on for any non-zero or missing value
+        }
+        Log::Write("BattleTTS: [EWM] Config loaded: %s (enabled=%d)", s_ewmConfigPath, (int)s_ewmEnabled);
+    } else {
+        // No config file — default to enabled, create it
+        s_ewmEnabled = true;
+        FILE* fw = fopen(s_ewmConfigPath, "w");
+        if (fw) { fputs("1", fw); fclose(fw); }
+        Log::Write("BattleTTS: [EWM] No config file, created with default ON: %s", s_ewmConfigPath);
+    }
+}
+
+static void EWM_SaveConfig()
+{
+    if (s_ewmConfigPath[0] == '\0') EWM_BuildConfigPath();
+    FILE* f = fopen(s_ewmConfigPath, "w");
+    if (f) {
+        fputs(s_ewmEnabled ? "1" : "0", f);
+        fclose(f);
+    }
+}
+
+// Called every frame from Update() — works in ALL game modes
+static void EWM_PollToggle()
+{
+    bool oDown = (GetAsyncKeyState('O') & 0x8000) != 0;
+    bool oPressed = oDown && !s_ewmOKeyWasDown;
+    s_ewmOKeyWasDown = oDown;
+    
+    if (!oPressed) return;
+    
+    s_ewmEnabled = !s_ewmEnabled;
+    EWM_SaveConfig();
+    
+    const char* msg = s_ewmEnabled ? "Enhanced Wait Mode on" : "Enhanced Wait Mode off";
+    ScreenReader::Speak(msg, true);
+    Log::Write("BattleTTS: [EWM] Toggled: %s", msg);
+}
+
+// Snapshot all entity ATB current values
+static void EWM_SnapshotATB()
+{
+    for (int slot = 0; slot < BATTLE_TOTAL_SLOTS; slot++) {
+        uint8_t* blk = GetEntityBlock(slot);
+        if (!blk) { s_ewmAtbSnapshot[slot] = 0; continue; }
+        __try {
+            if (slot < BATTLE_ALLY_SLOTS) {
+                s_ewmAtbSnapshot[slot] = (uint32_t)(*(uint16_t*)(blk + 0x0C));
+            } else {
+                s_ewmAtbSnapshot[slot] = *(uint32_t*)(blk + 0x0C);
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {
+            s_ewmAtbSnapshot[slot] = 0;
+        }
+    }
+    s_ewmSnapshotValid = true;
+}
+
+// Write back snapshot ATB values to all entities (prevents ATB advancement)
+static void EWM_FreezeATB()
+{
+    if (!s_ewmSnapshotValid) return;
+    for (int slot = 0; slot < BATTLE_TOTAL_SLOTS; slot++) {
+        uint8_t* blk = GetEntityBlock(slot);
+        if (!blk) continue;
+        __try {
+            if (slot < BATTLE_ALLY_SLOTS) {
+                *(uint16_t*)(blk + 0x0C) = (uint16_t)s_ewmAtbSnapshot[slot];
+            } else {
+                *(uint32_t*)(blk + 0x0C) = s_ewmAtbSnapshot[slot];
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
+}
+
+// Called every frame during battle from Update()
+// Freeze ATB while the player is actively deciding (command menu, sub-menu, target select).
+// Release when the action starts executing (phase >= 14) or when active_char_id goes to 255.
+//
+// Menu phase lifecycle for a typical command:
+//   0 or 32 = command menu / sub-menu open (DECIDING)
+//   64 = Limit Break showing (DECIDING)
+//   3 = brief transition after command select (DECIDING — loading target UI)
+//   11 = target selection (DECIDING)
+//   14 = target confirmed, action committed (EXECUTING — release here)
+//   21, 23, 33, 34 = animation/cleanup (EXECUTING)
+//   1, 4 = turn setup transitions (still DECIDING — keep freeze)
+
+static bool EWM_IsExecutingPhase(uint8_t phase)
+{
+    // Phases where the player's action has been committed and is executing/animating.
+    // ATB should resume during these.
+    // All other phases (0, 1, 3, 4, 11, 32, 64, etc.) occur during turn setup,
+    // command menu, sub-menu, or target selection — ATB should stay frozen.
+    return (phase == 14 || phase == 21 || phase == 23 || phase == 33 || phase == 34);
+}
+
+static void EWM_UpdateBattle()
+{
+    if (!s_ewmEnabled) {
+        if (s_ewmFreezing) {
+            s_ewmFreezing = false;
+            s_ewmSnapshotValid = false;
+            Log::Write("BattleTTS: [EWM] Freeze released (EWM disabled)");
+        }
+        return;
+    }
+    
+    if (!s_pActiveCharId) return;
+    uint8_t activeChar = 0xFF;
+    __try { activeChar = *s_pActiveCharId; } __except(EXCEPTION_EXECUTE_HANDLER) { return; }
+    
+    if (activeChar < 3) {
+        // A player turn is active — check if we should be freezing
+        uint8_t menuPhase = 0;
+        __try { menuPhase = *(uint8_t*)0x01D768D0; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        
+        if (!EWM_IsExecutingPhase(menuPhase)) {
+            // Player is deciding (any non-execution phase) — freeze ATB
+            if (!s_ewmFreezing) {
+                EWM_SnapshotATB();
+                s_ewmFreezing = true;
+                Log::Write("BattleTTS: [EWM] ATB frozen (deciding, char=%d, phase=%u)",
+                           (int)activeChar, (unsigned)menuPhase);
+            }
+            EWM_FreezeATB();
+        } else {
+            // Action is executing (phase 14, 21, 23, 33, 34) — release freeze
+            if (s_ewmFreezing) {
+                s_ewmFreezing = false;
+                s_ewmSnapshotValid = false;
+                Log::Write("BattleTTS: [EWM] ATB released (executing, phase=%u)",
+                           (unsigned)menuPhase);
+            }
+        }
+    } else {
+        // No turn active — release freeze
+        if (s_ewmFreezing) {
+            s_ewmFreezing = false;
+            s_ewmSnapshotValid = false;
+            Log::Write("BattleTTS: [EWM] ATB released (no turn active)");
+        }
+    }
 }
 
 // ============================================================================
@@ -589,8 +969,9 @@ static void PollMenuDiagnostic()
 // ============================================================================
 
 // Confirmed addresses from v0.10.10 diagnostic
-static const uint32_t BATTLE_CMD_CURSOR  = 0x01D76843; // BYTE, 0-3 (command slot index)
-static const uint32_t BATTLE_MENU_PHASE  = 0x01D768D0; // BYTE (1=open, 3=executing, 4=idle)
+static const uint32_t BATTLE_CMD_CURSOR     = 0x01D76843; // BYTE, 0-3 (command slot index)
+static const uint32_t BATTLE_MENU_PHASE     = 0x01D768D0; // BYTE (32=cmd menu, 3=executing, etc.)
+static const uint32_t BATTLE_SUBMENU_CURSOR = 0x01D768EC; // BYTE, 0-N sub-menu list cursor (v0.10.16 confirmed)
 
 // Savemap addresses
 static const uint32_t SAVEMAP_PARTY_FORMATION = 0x1CFE74C; // 3 bytes: slot→charIdx (confirmed)
@@ -634,6 +1015,128 @@ static const char* GetCommandName(uint8_t abilityId) {
         case 0x36: return "Mug";
         case 0x38: return "Treatment";
         default:   return "???";
+    }
+}
+
+// ============================================================================
+// v0.10.17: Magic name table (kernel.bin IDs 0-56)
+// ============================================================================
+// IDs from Doomtrain wiki / kernel.bin Section 4. Verified against game at runtime.
+static const char* MAGIC_NAMES[] = {
+    "(none)",      // 0x00
+    "Fire",        // 0x01
+    "Fira",        // 0x02
+    "Firaga",      // 0x03
+    "Blizzard",    // 0x04
+    "Blizzara",    // 0x05
+    "Blizzaga",    // 0x06
+    "Thunder",     // 0x07
+    "Thundara",    // 0x08
+    "Thundaga",    // 0x09
+    "Water",       // 0x0A
+    "Aero",        // 0x0B
+    "Bio",         // 0x0C
+    "Demi",        // 0x0D
+    "Holy",        // 0x0E
+    "Flare",       // 0x0F
+    "Meteor",      // 0x10
+    "Quake",       // 0x11
+    "Tornado",     // 0x12
+    "Ultima",      // 0x13
+    "Apocalypse",  // 0x14
+    "Cure",        // 0x15
+    "Cura",        // 0x16
+    "Curaga",      // 0x17
+    "Life",        // 0x18
+    "Full-Life",   // 0x19
+    "Regen",       // 0x1A
+    "Esuna",       // 0x1B
+    "Dispel",      // 0x1C
+    "Protect",     // 0x1D
+    "Shell",       // 0x1E
+    "Reflect",     // 0x1F
+    "Aura",        // 0x20
+    "Double",      // 0x21
+    "Triple",      // 0x22
+    "Haste",       // 0x23
+    "Slow",        // 0x24
+    "Stop",        // 0x25
+    "Blind",       // 0x26
+    "Confuse",     // 0x27
+    "Sleep",       // 0x28
+    "Silence",     // 0x29
+    "Break",       // 0x2A
+    "Death",       // 0x2B
+    "Drain",       // 0x2C
+    "Pain",        // 0x2D
+    "Berserk",     // 0x2E
+    "Float",       // 0x2F
+    "Zombie",      // 0x30
+    "Meltdown",    // 0x31
+    "Scan",        // 0x32
+    "Full-Cure",   // 0x33
+    "Wall",        // 0x34
+    "Rapture",     // 0x35
+    "Percent",     // 0x36
+    "Catastrophe", // 0x37
+    "The End",     // 0x38
+};
+static const int MAGIC_NAMES_COUNT = sizeof(MAGIC_NAMES) / sizeof(MAGIC_NAMES[0]);
+
+static const char* GetMagicName(uint8_t id) {
+    if (id < MAGIC_NAMES_COUNT) return MAGIC_NAMES[id];
+    return "???";
+}
+
+// ============================================================================
+// v0.10.17: Sub-menu tracking state
+// ============================================================================
+
+struct MagicEntry { uint8_t id; uint8_t qty; };
+static MagicEntry s_turnMagicList[32] = {};   // filtered list of spells with qty>0
+static int s_turnMagicCount = 0;               // number of entries in filtered list
+static uint8_t s_turnSubmenuCursor = 0xFF;     // last sub-menu cursor value
+static bool s_inSubmenu = false;               // true when sub-menu is open
+static uint8_t s_submenuCommandId = 0;         // ability ID of the command that opened the sub-menu
+static bool s_magicListBuilt = false;          // true after we build the magic list for current turn
+static DWORD s_submenuDebounceTick = 0;        // GetTickCount() when debounce started
+static bool s_submenuDebouncing = false;        // true for 300ms after turn start (ignores sub-menu cursor)
+
+// Build the filtered magic list for the active character.
+// Reads savemap char struct +0x10 (32 slots × 2 bytes: magic_id, qty).
+// Only includes slots with qty > 0, preserving savemap order (ascending magic_id).
+static void BuildMagicList(uint8_t partySlot)
+{
+    s_turnMagicCount = 0;
+    s_magicListBuilt = false;
+    if (partySlot >= 3) return;
+    
+    __try {
+        uint8_t charIdx = *(uint8_t*)(SAVEMAP_PARTY_FORMATION + partySlot);
+        if (charIdx >= 8) return;
+        
+        uint8_t* charBase = (uint8_t*)(SAVEMAP_CHAR_DATA_BASE + charIdx * SAVEMAP_CHAR_STRIDE);
+        uint8_t* magicBase = charBase + 0x10;  // 32 slots × 2 bytes
+        
+        for (int i = 0; i < 32 && s_turnMagicCount < 32; i++) {
+            uint8_t magicId = magicBase[i * 2];
+            uint8_t qty = magicBase[i * 2 + 1];
+            if (magicId == 0 || qty == 0) continue;
+            s_turnMagicList[s_turnMagicCount].id = magicId;
+            s_turnMagicList[s_turnMagicCount].qty = qty;
+            s_turnMagicCount++;
+        }
+        
+        s_magicListBuilt = true;
+        Log::Write("BattleTTS: [MAGIC-LIST] charIdx=%d has %d spells:", (int)charIdx, s_turnMagicCount);
+        for (int i = 0; i < s_turnMagicCount; i++) {
+            Log::Write("BattleTTS: [MAGIC-LIST]   [%d] id=0x%02X (%s) x%d",
+                       i, s_turnMagicList[i].id,
+                       GetMagicName(s_turnMagicList[i].id),
+                       (int)s_turnMagicList[i].qty);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log::Write("BattleTTS: [MAGIC-LIST] EXCEPTION reading magic for partySlot=%d", (int)partySlot);
     }
 }
 
@@ -690,13 +1193,28 @@ static void PollTurnAndCommands()
             s_turnActiveCharId = activeChar;
             BuildCharCommandList(activeChar);
             
-            // Announce "[Name]'s turn. [First command]."
+            // Reset sub-menu state for new turn
+            s_inSubmenu = false;
+            s_turnSubmenuCursor = 0xFF;
+            s_submenuCommandId = 0;
+            s_magicListBuilt = false;
+            s_turnMagicCount = 0;
+            s_submenuDebouncing = true;
+            s_submenuDebounceTick = GetTickCount();
+            
+            // v0.10.22: Check limit toggle byte for initial announcement
+            uint8_t initToggle = 0;
+            __try { initToggle = *(uint8_t*)BATTLE_LIMIT_TOGGLE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+            s_limitBreakActive = (initToggle == 64);
+            s_lastLimitToggle = initToggle;
+            
+            // Announce "[Name]'s turn. [First command]." (or Limit Break if toggle=64)
             const char* name = GetBattleCharName(activeChar);
-            const char* cmd = GetCommandName(s_turnCharCommands[0]);
+            const char* cmd = s_limitBreakActive ? "Limit Break" : GetCommandName(s_turnCharCommands[0]);
             char buf[128];
             snprintf(buf, sizeof(buf), "%s's turn. %s.", name, cmd);
             BattleSpeak(buf, PRIO_TURN, true);
-            Log::Write("BattleTTS: [TURN] %s (slot %d)", buf, (int)activeChar);
+            Log::Write("BattleTTS: [TURN] %s (slot %d, limitToggle=%u)", buf, (int)activeChar, (unsigned)initToggle);
             
             // Set cursor to 0 so we don't re-announce the initial command
             s_turnCmdCursor = 0;
@@ -705,6 +1223,8 @@ static void PollTurnAndCommands()
             // Turn ended
             s_turnActiveCharId = 0xFF;
             s_turnCmdCursor = 0xFF;
+            s_inSubmenu = false;
+            s_turnSubmenuCursor = 0xFF;
         }
         
         // Command cursor navigation (only while a turn is active)
@@ -712,9 +1232,85 @@ static void PollTurnAndCommands()
             uint8_t cursor = *(uint8_t*)BATTLE_CMD_CURSOR;
             if (cursor < 4 && cursor != s_turnCmdCursor) {
                 s_turnCmdCursor = cursor;
-                const char* cmd = GetCommandName(s_turnCharCommands[cursor]);
+                // Returning to command menu from sub-menu
+                if (s_inSubmenu) {
+                    s_inSubmenu = false;
+                    s_turnSubmenuCursor = 0xFF;
+                    Log::Write("BattleTTS: [SUBMENU] Exited sub-menu, back to command menu");
+                }
+                // v0.10.22: cursor=0 may be Attack or Limit Break depending on toggle byte
+                const char* cmd;
+                if (cursor == 0) {
+                    uint8_t toggle = 0;
+                    __try { toggle = *(uint8_t*)BATTLE_LIMIT_TOGGLE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                    s_limitBreakActive = (toggle == 64);
+                    s_lastLimitToggle = toggle;
+                    cmd = s_limitBreakActive ? "Limit Break" : GetCommandName(s_turnCharCommands[0]);
+                } else {
+                    cmd = GetCommandName(s_turnCharCommands[cursor]);
+                }
                 BattleSpeak(cmd, PRIO_MENU, true);
                 Log::Write("BattleTTS: [CMD-NAV] cursor=%d -> %s", (int)cursor, cmd);
+            }
+            
+            // v0.10.19/20: Limit Break toggle detection moved to PollLimitToggleFast()
+            
+            // v0.10.17: Sub-menu cursor tracking
+            // Debounce: ignore sub-menu cursor for 300ms after turn start.
+            // The engine resets this byte during turn transitions, causing false
+            // sub-menu entry detection (v0.10.17 glitch: "Fire" spoken on cmd menu).
+            if (s_submenuDebouncing) {
+                if (GetTickCount() - s_submenuDebounceTick > 300) {
+                    s_submenuDebouncing = false;
+                    // Capture current value as baseline after debounce expires
+                    s_turnSubmenuCursor = *(uint8_t*)BATTLE_SUBMENU_CURSOR;
+                }
+            }
+            
+            uint8_t subCursor = *(uint8_t*)BATTLE_SUBMENU_CURSOR;
+            if (!s_submenuDebouncing && subCursor != s_turnSubmenuCursor) {
+                if (!s_inSubmenu && s_turnCmdCursor < 4) {
+                    // Entering sub-menu — record which command opened it
+                    s_submenuCommandId = s_turnCharCommands[s_turnCmdCursor];
+                    s_inSubmenu = true;
+                    Log::Write("BattleTTS: [SUBMENU] Entered sub-menu for cmd 0x%02X (%s) at cursor %d",
+                               (unsigned)s_submenuCommandId,
+                               GetCommandName(s_submenuCommandId),
+                               (int)s_turnCmdCursor);
+                    
+                    // Build spell list if Magic sub-menu
+                    if (s_submenuCommandId == 0x14 && !s_magicListBuilt) { // 0x14 = Magic ability ID
+                        BuildMagicList(s_turnActiveCharId);
+                    }
+                }
+                
+                s_turnSubmenuCursor = subCursor;
+                
+                // Announce the current sub-menu item
+                if (s_inSubmenu) {
+                    if (s_submenuCommandId == 0x14 && s_magicListBuilt) {
+                        // Magic sub-menu: read spell at cursor position
+                        // Cursor 0-3 is visible position. With <=4 spells, maps directly.
+                        // TODO: handle scroll offset for >4 spells (need to find page offset byte)
+                        if ((int)subCursor < s_turnMagicCount) {
+                            const char* spellName = GetMagicName(s_turnMagicList[subCursor].id);
+                            int qty = (int)s_turnMagicList[subCursor].qty;
+                            char buf[128];
+                            snprintf(buf, sizeof(buf), "%s, %d", spellName, qty);
+                            BattleSpeak(buf, PRIO_MENU, true);
+                            Log::Write("BattleTTS: [SUBMENU-NAV] Magic cursor=%d -> %s x%d (id=0x%02X)",
+                                       (int)subCursor, spellName, qty,
+                                       (unsigned)s_turnMagicList[subCursor].id);
+                        } else {
+                            Log::Write("BattleTTS: [SUBMENU-NAV] Magic cursor=%d out of range (count=%d)",
+                                       (int)subCursor, s_turnMagicCount);
+                        }
+                    } else {
+                        // Other sub-menus (GF, Draw, Item) — log for now, implement later
+                        Log::Write("BattleTTS: [SUBMENU-NAV] cmd=0x%02X cursor=%d (not yet implemented)",
+                                   (unsigned)s_submenuCommandId, (int)subCursor);
+                    }
+                }
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -735,15 +1331,40 @@ static void OnBattleEnter()
     
     // Reset menu diagnostic state
     s_menuSnapValid = false;
+    s_menuSnap2Valid = false;
     s_lastMenuDiagTick = 0;
     s_lastActiveCharId = 0xFF;
     s_lastNewActiveCharId = 0xFF;
+    s_lastMenuPhase = 0xFF;
+    s_lastDiagCmdCursor = 0xFF;
     memset(s_menuSnap, 0, sizeof(s_menuSnap));
+    memset(s_menuSnap2, 0, sizeof(s_menuSnap2));
+    s_huntSnapValid = false;
+    s_lastHuntTick = 0;
+    memset(s_huntSnap, 0, sizeof(s_huntSnap));
     
     // Reset turn/command tracking
     s_turnActiveCharId = 0xFF;
     s_turnCmdCursor = 0xFF;
     memset(s_turnCharCommands, 0, sizeof(s_turnCharCommands));
+    
+    // Reset sub-menu state
+    s_inSubmenu = false;
+    s_turnSubmenuCursor = 0xFF;
+    s_submenuCommandId = 0;
+    s_magicListBuilt = false;
+    s_turnMagicCount = 0;
+    s_submenuDebouncing = false;
+    s_submenuDebounceTick = 0;
+    
+    // Reset Limit Break state
+    s_limitBreakActive = false;
+    s_lastLimitToggle = 0;
+    
+    // Reset EWM freeze state for new battle
+    s_ewmFreezing = false;
+    s_ewmSnapshotValid = false;
+    EWM_LoadConfig();  // ensure config is loaded on first battle
     
     // Resolve battle menu addresses on first battle entry
     if (!s_pBattleMenuState) {
@@ -835,13 +1456,18 @@ void Initialize()
     s_enemyAnnounceDone = false;
 
     s_initialized = true;
-    Log::Write("BattleTTS: Initialized v0.10.14 — module skeleton + battle entry/exit detection.");
+    EWM_LoadConfig();
+    Log::Write("BattleTTS: Initialized v0.10.27 — Enhanced Wait Mode (EWM=%s).",
+               s_ewmEnabled ? "ON" : "OFF");
 }
 
 void Update()
 {
     if (!s_initialized) return;
     if (!FF8Addresses::pGameMode) return;
+
+    // EWM toggle: "O" key works in ALL game modes (field, worldmap, battle, menu)
+    EWM_PollToggle();
 
     uint16_t mode = *FF8Addresses::pGameMode;
     // Battle mode is 3 (NOT 999 — FFNx's FF8_MODE_BATTLE=999 is an internal enum,
@@ -908,8 +1534,22 @@ void Update()
     if (s_initAnnounceDone && s_enemyAnnounceDone) {
         PollTurnAndCommands();
     }
-    // TODO v0.10.19+: Target selection
-    // TODO v0.10.25+: HP/status tracking
+
+    // v0.10.16: Sub-menu cursor hunter (continuous poll during active turns)
+    if (s_initAnnounceDone && s_enemyAnnounceDone) {
+        PollCursorHunter();
+    }
+
+    // v0.10.22: Limit Break toggle detection (polls 0x01D7684A while cursor=0)
+    if (s_initAnnounceDone && s_enemyAnnounceDone) {
+        PollLimitToggle();
+    }
+
+    // v0.10.25: Enhanced Wait Mode — freeze ATB while player is deciding
+    if (s_inBattle && s_initAnnounceDone) {
+        EWM_UpdateBattle();
+    }
+    // TODO: Target selection, HP/status tracking
 }
 
 void Shutdown()

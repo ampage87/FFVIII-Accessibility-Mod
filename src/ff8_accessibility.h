@@ -9,8 +9,8 @@
 // FF8 Original PC Accessibility Mod version
 // Increment on every build change
 // ================================================================
-#define FF8OPC_VERSION "0.10.14"  // Fix command lookup: savemap uses GF ability IDs, not battle cmd IDs
-#define FF8OPC_VERSION_DATE "2026-03-24"
+#define FF8OPC_VERSION "0.10.27"  // EWM fix: blacklist executing phases instead of whitelist deciding
+#define FF8OPC_VERSION_DATE "2026-03-25"
 
 // ============================================================================
 // FF8 Runtime Address Resolution
