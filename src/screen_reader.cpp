@@ -21,6 +21,7 @@
 #include "resources.h"
 #include <objbase.h>
 #include <sapi.h>
+#include <mmsystem.h>   // WAVE_MAPPER for SpMMAudioOut
 
 namespace ScreenReader {
 
@@ -54,6 +55,14 @@ static char s_extractedDllPath[MAX_PATH] = {};
 // ============================================================================
 
 static ISpVoice* s_pVoice = nullptr;
+static ISpVoice* s_pVoice2 = nullptr;   // v0.10.32: Second SAPI voice for battle event/damage channel
+
+// v0.10.43: Separate SpMMAudioOut objects to bypass SAPI serialization.
+// SAPI serializes all voices sharing an ISpAudio output. By giving each voice
+// its own SpMMAudioOut COM object (each opens an independent waveOut handle),
+// Windows mixes them at the WASAPI layer — enabling true simultaneous speech.
+static ISpMMSysAudio* s_pAudio1 = nullptr;  // audio output for voice 1 (menu/commands)
+static ISpMMSysAudio* s_pAudio2 = nullptr;  // audio output for voice 2 (damage/events)
 
 // v04.25: SAPI voice enumeration and rate control
 static IEnumSpObjectTokens* s_pVoiceEnum = nullptr;
@@ -216,7 +225,49 @@ static bool InitSAPI()
 
     // Apply default rate immediately.
     s_pVoice->SetRate(s_currentRate);
-    Log::Write("ScreenReader: SAPI voice initialized (default rate=%ld).", s_currentRate);
+    Log::Write("ScreenReader: SAPI voice 1 initialized (default rate=%ld).", s_currentRate);
+
+    // v0.10.32: Create second SAPI voice for battle event channel
+    hr = CoCreateInstance(CLSID_SpVoice, NULL, CLSCTX_ALL,
+                          IID_ISpVoice, (void**)&s_pVoice2);
+    if (SUCCEEDED(hr) && s_pVoice2) {
+        s_pVoice2->SetRate(s_currentRate);
+        s_pVoice2->SetVolume(s_currentVolume);
+        Log::Write("ScreenReader: SAPI voice 2 (event channel) initialized.");
+    } else {
+        Log::Write("ScreenReader: WARNING - SAPI voice 2 creation failed, events will use voice 1.");
+        s_pVoice2 = nullptr;
+    }
+
+    // v0.10.43: Create separate SpMMAudioOut objects to bypass SAPI serialization.
+    // Without this, two ISpVoice instances sharing the default audio output are
+    // serialized by SAPI's ISpAudio queue — only one can play at a time.
+    // By giving each voice its own SpMMAudioOut (each opens a separate waveOut
+    // handle), Windows mixes them independently at the WASAPI layer.
+    hr = CoCreateInstance(CLSID_SpMMAudioOut, NULL, CLSCTX_ALL,
+                          IID_ISpMMSysAudio, (void**)&s_pAudio1);
+    if (SUCCEEDED(hr) && s_pAudio1) {
+        s_pAudio1->SetDeviceId(WAVE_MAPPER);
+        hr = s_pVoice->SetOutput(s_pAudio1, TRUE);
+        Log::Write("ScreenReader: Voice 1 -> separate SpMMAudioOut (hr=0x%08X)", hr);
+    } else {
+        Log::Write("ScreenReader: SpMMAudioOut 1 creation failed (hr=0x%08X), using default output.", hr);
+        s_pAudio1 = nullptr;
+    }
+
+    if (s_pVoice2) {
+        hr = CoCreateInstance(CLSID_SpMMAudioOut, NULL, CLSCTX_ALL,
+                              IID_ISpMMSysAudio, (void**)&s_pAudio2);
+        if (SUCCEEDED(hr) && s_pAudio2) {
+            s_pAudio2->SetDeviceId(WAVE_MAPPER);
+            hr = s_pVoice2->SetOutput(s_pAudio2, TRUE);
+            Log::Write("ScreenReader: Voice 2 -> separate SpMMAudioOut (hr=0x%08X)", hr);
+        } else {
+            Log::Write("ScreenReader: SpMMAudioOut 2 creation failed (hr=0x%08X), using default output.", hr);
+            s_pAudio2 = nullptr;
+        }
+    }
+
     return true;
 }
 
@@ -257,9 +308,25 @@ bool Initialize(HMODULE hModule)
 
 void Shutdown()
 {
+    // Release voices first (they hold references to audio outputs)
+    if (s_pVoice2) {
+        s_pVoice2->Release();
+        s_pVoice2 = nullptr;
+    }
+
     if (s_pVoice) {
         s_pVoice->Release();
         s_pVoice = nullptr;
+    }
+
+    // v0.10.43: Release separate audio output objects
+    if (s_pAudio2) {
+        s_pAudio2->Release();
+        s_pAudio2 = nullptr;
+    }
+    if (s_pAudio1) {
+        s_pAudio1->Release();
+        s_pAudio1 = nullptr;
     }
 
     if (s_nvdaDll) {
@@ -417,6 +484,7 @@ void IncreaseRate()
     EnsureCOMInitialized();
     if (s_currentRate < 10) s_currentRate++;
     s_pVoice->SetRate(s_currentRate);
+    if (s_pVoice2) s_pVoice2->SetRate(s_currentRate);
     wchar_t msg[64];
     wsprintfW(msg, L"Rate %ld", s_currentRate);
     Log::Write("ScreenReader: Speech rate -> %ld", s_currentRate);
@@ -433,6 +501,7 @@ void SetRate(long rate)
         EnsureCOMInitialized();
         s_pVoice->SetRate(s_currentRate);
     }
+    if (s_pVoice2) s_pVoice2->SetRate(s_currentRate);
     Log::Write("ScreenReader: Speech rate set to %ld (silent).", s_currentRate);
 }
 
@@ -442,6 +511,7 @@ void DecreaseRate()
     EnsureCOMInitialized();
     if (s_currentRate > -10) s_currentRate--;
     s_pVoice->SetRate(s_currentRate);
+    if (s_pVoice2) s_pVoice2->SetRate(s_currentRate);
     wchar_t msg[64];
     wsprintfW(msg, L"Rate %ld", s_currentRate);
     Log::Write("ScreenReader: Speech rate -> %ld", s_currentRate);
@@ -450,7 +520,7 @@ void DecreaseRate()
 
 // ============================================================================
 // v05.13: SAPI volume control (0-100, step 10)
-// F11 = volume down, F12 = volume up
+// F5 = volume down, F6 = volume up (mapped in dinput8.cpp)
 // ============================================================================
 
 void IncreaseVolume()
@@ -461,6 +531,7 @@ void IncreaseVolume()
         s_currentVolume = (USHORT)min(100, (int)s_currentVolume + 10);
     }
     s_pVoice->SetVolume(s_currentVolume);
+    if (s_pVoice2) s_pVoice2->SetVolume(s_currentVolume);
     wchar_t msg[64];
     wsprintfW(msg, L"Volume %u percent", (unsigned)s_currentVolume);
     Log::Write("ScreenReader: Speech volume -> %u", (unsigned)s_currentVolume);
@@ -475,6 +546,7 @@ void DecreaseVolume()
         s_currentVolume = (USHORT)max(0, (int)s_currentVolume - 10);
     }
     s_pVoice->SetVolume(s_currentVolume);
+    if (s_pVoice2) s_pVoice2->SetVolume(s_currentVolume);
     wchar_t msg[64];
     wsprintfW(msg, L"Volume %u percent", (unsigned)s_currentVolume);
     Log::Write("ScreenReader: Speech volume -> %u", (unsigned)s_currentVolume);
@@ -531,10 +603,13 @@ bool Silence()
 
     bool ok = false;
 
-    // Cancel SAPI
+    // Cancel SAPI (both channels)
     if (s_pVoice) {
         EnsureCOMInitialized();
         ok = SUCCEEDED(s_pVoice->Speak(L"", SPF_ASYNC | SPF_PURGEBEFORESPEAK, NULL));
+    }
+    if (s_pVoice2) {
+        s_pVoice2->Speak(L"", SPF_ASYNC | SPF_PURGEBEFORESPEAK, NULL);
     }
 
     // Cancel NVDA
@@ -542,6 +617,43 @@ bool Silence()
         fn_cancelSpeech();
 
     return ok;
+}
+
+// ============================================================================
+// v0.10.32: Channel 2 — independent SAPI voice for battle events/damage
+// ============================================================================
+// Uses s_pVoice2 for audio output. Falls back to s_pVoice if voice 2 unavailable.
+// Does NOT touch NVDA speech or braille — this is a parallel audio-only channel.
+
+bool SpeakChannel2(const wchar_t* text, bool interrupt)
+{
+    if (!s_initialized || !text) return false;
+
+    bool usingVoice2 = (s_pVoice2 != nullptr);
+    ISpVoice* voice = usingVoice2 ? s_pVoice2 : s_pVoice;
+    if (!voice) return false;
+
+    EnsureCOMInitialized();
+    DWORD flags = SPF_ASYNC;
+    if (interrupt) flags |= SPF_PURGEBEFORESPEAK;
+    HRESULT hr = voice->Speak(text, flags, NULL);
+    // v0.10.33: Diagnostic — confirm channel 2 is actually producing audio
+    if (FAILED(hr)) {
+        Log::Write("ScreenReader: SpeakChannel2 FAILED hr=0x%08X voice2=%d", hr, (int)usingVoice2);
+    }
+    return SUCCEEDED(hr);
+}
+
+bool SpeakChannel2(const char* text, bool interrupt)
+{
+    if (!s_initialized || !text) return false;
+    int len = MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0);
+    if (len <= 0) return false;
+    wchar_t* wide = new wchar_t[len];
+    MultiByteToWideChar(CP_UTF8, 0, text, -1, wide, len);
+    bool result = SpeakChannel2(wide, interrupt);
+    delete[] wide;
+    return result;
 }
 
 std::string GetScreenReaderName()

@@ -9,8 +9,8 @@
 // FF8 Original PC Accessibility Mod version
 // Increment on every build change
 // ================================================================
-#define FF8OPC_VERSION "0.10.27"  // EWM fix: blacklist executing phases instead of whitelist deciding
-#define FF8OPC_VERSION_DATE "2026-03-25"
+#define FF8OPC_VERSION "0.10.105"  // Item sub-menu TTS (F12 item diag)
+#define FF8OPC_VERSION_DATE "2026-03-29"
 
 // ============================================================================
 // FF8 Runtime Address Resolution
@@ -58,6 +58,11 @@ void RepeatLast();      // Repeat last spoken dialog
 // v05.13: SAPI volume control
 void IncreaseVolume();  // Increase SAPI speech volume by 10% (F12)
 void DecreaseVolume();  // Decrease SAPI speech volume by 10% (F11)
+
+// v0.10.32: Channel 2 — independent SAPI voice for battle events/damage
+// Plays on a separate ISpVoice instance so it overlaps with menu speech.
+bool SpeakChannel2(const wchar_t* text, bool interrupt = false);
+bool SpeakChannel2(const char* text, bool interrupt = false);
 
 }  // namespace ScreenReader
 

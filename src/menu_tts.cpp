@@ -3760,24 +3760,8 @@ void MenuTTS::Update()
     // v0.09.19: GF acquisition detection moved to field_dialog.cpp Hook_opcode_menuname
     // (snapshot before/after original handler call — zero polling cost)
     
-    // ========================================================================
-    // F12 DIAGNOSTIC: Capture GCW (get_character_width) text during save screen
-    // Snapshots the accumulated character codes every 500ms, decodes them,
-    // and logs the resulting text. This shows exactly what the save screen renders.
-    // ========================================================================
-    if ((GetAsyncKeyState(VK_F12) & 1)) {
-        if (GetAsyncKeyState(VK_CONTROL) & 0x8000) {
-            // Ctrl+F12: Savemap offset verification diagnostic
-            ScreenReader::Speak("Savemap offset check", true);
-            VerifySavemapOffsets();
-            ScreenReader::Speak("Done, check log", true);
-        } else {
-            // F12: Save header memory scan diagnostic
-            ScreenReader::Speak("Scanning for save headers", true);
-            ScanForSaveHeaders();
-            ScreenReader::Speak("Scan complete, check log", true);
-        }
-    }
+    // F12 reserved for per-session diagnostic builds (set up in battle_tts.cpp or other modules).
+    // Old save header scan + savemap offset check removed v0.10.72.
 
     // v0.08.21: Menu mode hotkeys
     if (isMenuMode) {

@@ -49,6 +49,7 @@ static const uint32_t BENT_SPD              = 0xB9;  // uint8
 static const uint32_t BENT_LCK              = 0xBA;  // uint8
 static const uint32_t BENT_EVA              = 0xBB;  // uint8
 static const uint32_t BENT_HIT              = 0xBC;  // uint8
+static const uint32_t BENT_GF_SUMMON_FLAG   = 0x7C;  // uint16: non-zero when this character is summoning a GF
 static const uint32_t BENT_CRISIS_LEVEL     = 0xC2;  // uint8 (0-4)
 
 // Battle result addresses

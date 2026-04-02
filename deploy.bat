@@ -152,7 +152,8 @@ cl /nologo /W3 /EHsc /O2 /MD /LD ^
     "%BUILD_DIR%\resources.res" ^
     user32.lib ^
     ole32.lib ^
-    uuid.lib > "%SCRIPT_DIR%Logs\build_latest.log" 2>&1
+    uuid.lib ^
+    psapi.lib > "%SCRIPT_DIR%Logs\build_latest.log" 2>&1
 
 if errorlevel 1 (
     echo.
