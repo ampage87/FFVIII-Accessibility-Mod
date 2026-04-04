@@ -1,7 +1,7 @@
 // battle_tts.cpp - Battle sequence TTS for blind players
 //
 // ============================================================================
-// CURRENT STATE: v0.10.105 — Item sub-menu TTS (F12 comprehensive diagnostic)
+// CURRENT STATE: v0.10.112 — Draw 3-bug fix (target/stock/name)
 // ============================================================================
 //
 // Phase 1 (v0.10.01-05): Skeleton, mode detection, enemy announcement
@@ -1298,7 +1298,9 @@ static void PollTargetSelection()
     // v0.10.100: Use scope byte at 0x01D76883 to detect all-target vs single-target.
     // Observed values: 3 = single target (Attack), 1 = all enemies (GF).
     // When scope != 3, the action targets all entities on that side.
-    bool isAllTarget = (tgtScope != 3 && tgtScope != 0);
+    // v0.10.112: Also require multi-bit mask for all-target. Draw uses scope=1
+    // with a single-bit mask, which should announce the single enemy name.
+    bool isAllTarget = (tgtScope != 3 && tgtScope != 0 && CountBits(tgtMask) > 1);
     
     char buf[128];
     
@@ -2152,244 +2154,147 @@ static void TgtDiag_TakeSnapshot(int idx)
     __try { snap.subCursor = *(uint8_t*)0x01D76844; } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-// v0.10.105: F12 key — Item sub-menu comprehensive diagnostic
-// Fully self-contained (uses literal addresses to avoid MSVC forward-decl issues).
-// Dumps: battle_order, savemap region, display struct, pool nodes,
-// linked list, memory scans for handler/inventory pointers.
+// v0.10.107: F12 Draw sub-menu diagnostic.
+// Dumps target bitmask, cursor state, and draw spell slots for all enemies.
+// Draw spell slots: 0x1D28F18 base, 4 slots/enemy, 0x47 stride between enemies.
+// Each slot is 4 bytes (format TBD — this diagnostic will reveal it).
+static const uint32_t DRAW_SPELL_BASE = 0x1D28F18;   // Enemy 1 slot 0
+static const int      DRAW_SLOTS_PER_ENEMY = 4;
+static const int      DRAW_SLOT_SIZE = 4;             // bytes per slot
+static const int      DRAW_ENEMY_STRIDE = 0x47;       // bytes between enemy 1 and enemy 2
+static const int      DRAW_ENEMY_COUNT = 4;            // enemies 1-4 (slots 3-6)
+
 static void GF_BP_PollKey(void)
 {
-    // Local constants (duplicated from later definitions to satisfy MSVC single-pass)
-    const uint32_t D_BATTLE_ORDER   = 0x1CFE77C;
-    const uint32_t D_INVENTORY      = 0x1CFE79C;
-    const uint32_t D_POOL_BASE      = 0x1D76BC8;
-    const int      D_POOL_SLOTS     = 10;
-    const int      D_POOL_STRIDE    = 0x78;
-    const uint32_t D_ITEM_HANDLER   = 0x4F81F0;
-
     bool f12Down = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
     bool f12Pressed = f12Down && !s_gfBPF12WasDown;
     s_gfBPF12WasDown = f12Down;
     
     if (!f12Pressed || !s_inBattle) return;
     
-    Log::Write("BattleTTS: [ITEM-DIAG] ========== F12 ITEM SUB-MENU DIAGNOSTIC ==========");
-    ScreenReader::Speak("Item diagnostic running.", true);
+    Log::Write("BattleTTS: [F12-DRAW] === Draw Diagnostic Snapshot ===");
     
-    // --- 1. Context ---
-    uint8_t dMenuPhase = 0, dCmdCursor = 0, dSubCursor = 0, dActiveChar = 0xFF;
-    __try { dMenuPhase = *(uint8_t*)0x01D768D0; } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    __try { dCmdCursor = *(uint8_t*)0x01D76843; } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    __try { dSubCursor = *(uint8_t*)0x01D768EC; } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    if (s_pActiveCharId) { __try { dActiveChar = *s_pActiveCharId; } __except(EXCEPTION_EXECUTE_HANDLER) {} }
-    uint8_t dByteE4 = 0, dByteF0 = 0;
-    __try { dByteE4 = *(uint8_t*)0x01D768E4; } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    __try { dByteF0 = *(uint8_t*)0x01D768F0; } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    // Read submenu state from known addresses directly (avoids forward-decl)
-    // menuPhase 32=cmd menu open, byteF0 changes to 3 when Item sub-menu opens
-    Log::Write("BattleTTS: [ITEM-DIAG] Context: menuPhase=%u cmdCursor=%u subCursor=%u activeChar=%u byteE4=%u byteF0=%u",
-               (unsigned)dMenuPhase, (unsigned)dCmdCursor, (unsigned)dSubCursor, (unsigned)dActiveChar,
-               (unsigned)dByteE4, (unsigned)dByteF0);
+    // 1. Core state
+    uint8_t menuPhase = 0, cmdCursor = 0xFF, subCursor = 0xFF;
+    uint8_t activeChar = 0xFF;
+    uint8_t tgtMask = 0, tgtScope = 0;
+    __try { menuPhase = *(uint8_t*)0x01D768D0; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    __try { cmdCursor = *(uint8_t*)0x01D76843; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    __try { subCursor = *(uint8_t*)0x01D768EC; } __except(EXCEPTION_EXECUTE_HANDLER) {}  // BATTLE_SUBMENU_CURSOR
+    if (s_pActiveCharId) { __try { activeChar = *s_pActiveCharId; } __except(EXCEPTION_EXECUTE_HANDLER) {} }
+    __try { tgtMask = *(uint8_t*)BATTLE_TARGET_BITMASK; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    __try { tgtScope = *(uint8_t*)BATTLE_TARGET_SCOPE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
     
-    // --- 2. battle_order[32] raw dump + resolved items ---
-    Log::Write("BattleTTS: [ITEM-DIAG] --- battle_order[32] @ 0x%08X ---", D_BATTLE_ORDER);
-    __try {
-        uint8_t* bo = (uint8_t*)D_BATTLE_ORDER;
-        char hex[200] = {};
+    Log::Write("BattleTTS: [F12-DRAW] menuPhase=%u activeChar=%u cmdCursor=%u subCursor=%u",
+               (unsigned)menuPhase, (unsigned)activeChar, (unsigned)cmdCursor, (unsigned)subCursor);
+    // Note: s_inSubmenu and s_submenuCommandId are defined later in the file (MSVC single-pass).
+    // Read the raw submenu state from memory instead.
+    uint8_t menuPhaseVal = 0;
+    __try { menuPhaseVal = *(uint8_t*)0x01D768D0; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    Log::Write("BattleTTS: [F12-DRAW] tgtMask=0x%02X tgtScope=%u menuPhase2=%u",
+               (unsigned)tgtMask, (unsigned)tgtScope, (unsigned)menuPhaseVal);
+    
+    // 2. Draw spell slots for all 4 enemies — raw hex + decoded magic names
+    for (int e = 0; e < DRAW_ENEMY_COUNT; e++) {
+        uint32_t enemyBase = DRAW_SPELL_BASE + e * DRAW_ENEMY_STRIDE;
+        int slot = BATTLE_ALLY_SLOTS + e;  // entity slot 3-6
+        uint32_t hp = GetEntityHP(slot);
+        
+        // Read all 4 draw slots (16 bytes) as raw data
+        uint8_t raw[16] = {};
+        __try { memcpy(raw, (uint8_t*)enemyBase, 16); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        
+        // Format raw hex
+        char hexBuf[80] = {};
         int p = 0;
-        for (int i = 0; i < 32; i++)
-            p += snprintf(hex + p, sizeof(hex) - p, "%02X ", bo[i]);
-        Log::Write("BattleTTS: [ITEM-DIAG] raw: %s", hex);
-        uint8_t* inv = (uint8_t*)D_INVENTORY;
-        for (int i = 0; i < 32; i++) {
-            uint8_t idx = bo[i];
-            if (idx == 0xFF) {
-                Log::Write("BattleTTS: [ITEM-DIAG]   bo[%02d] = 0xFF (terminal)", i);
-            } else if (idx < 198) {
-                uint8_t id = inv[idx * 2];
-                uint8_t qty = inv[idx * 2 + 1];
-                bool isBattle = (id >= 1 && id < 33 && qty > 0);
-                Log::Write("BattleTTS: [ITEM-DIAG]   bo[%02d] = inv[%d] -> id=%u qty=%u %s%s",
-                           i, (int)idx, (unsigned)id, (unsigned)qty,
-                           (id >= 1 && id < 33) ? GetBattleItemName(id) : "(non-battle)",
-                           isBattle ? "" : " [SKIP]");
-            } else {
-                Log::Write("BattleTTS: [ITEM-DIAG]   bo[%02d] = %u (invalid)", i, (unsigned)idx);
-            }
+        for (int b = 0; b < 16; b++)
+            p += snprintf(hexBuf + p, sizeof(hexBuf) - p, "%02X ", raw[b]);
+        
+        Log::Write("BattleTTS: [F12-DRAW] Enemy%d (slot%d hp=%u) @0x%08X: %s",
+                   e + 1, slot, hp, enemyBase, hexBuf);
+        
+        // Interpret each 4-byte slot in multiple ways
+        for (int s = 0; s < DRAW_SLOTS_PER_ENEMY; s++) {
+            uint8_t* slotPtr = raw + s * DRAW_SLOT_SIZE;
+            uint8_t b0 = slotPtr[0], b1 = slotPtr[1], b2 = slotPtr[2], b3 = slotPtr[3];
+            uint16_t w0 = *(uint16_t*)slotPtr;
+            uint16_t w1 = *(uint16_t*)(slotPtr + 2);
+            
+            // Log raw values — magic name lookup is defined later in file (MSVC single-pass).
+            // Decode magic IDs from the log manually (1=Fire, 4=Blizzard, 7=Thunder, etc.)
+            Log::Write("BattleTTS: [F12-DRAW]   slot[%d] bytes=%02X %02X %02X %02X  "
+                       "w0=%u w1=%u  b0asId=%u w0asId=%u",
+                       s, b0, b1, b2, b3, (unsigned)w0, (unsigned)w1, (unsigned)b0, (unsigned)w0);
         }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        Log::Write("BattleTTS: [ITEM-DIAG] EXCEPTION reading battle_order");
     }
     
-    // --- 3. Savemap region around battle_order ---
-    Log::Write("BattleTTS: [ITEM-DIAG] --- Savemap region around battle_order ---");
+    // 3. Also dump the wider region around draw data (48 bytes before, 16 after last enemy)
+    // to see if there's a "current target enemy index" or draw list pointer nearby
+    uint32_t contextStart = DRAW_SPELL_BASE - 48;
+    Log::Write("BattleTTS: [F12-DRAW] --- Context dump around draw spell region ---");
     __try {
-        uint32_t regionStart = D_BATTLE_ORDER - 64;
-        for (int row = 0; row < 10; row++) {
-            uint32_t addr = regionStart + row * 16;
-            uint8_t* rp = (uint8_t*)addr;
-            char hex[100] = {};
-            int hp = 0;
+        for (uint32_t addr = contextStart; addr < DRAW_SPELL_BASE + DRAW_ENEMY_COUNT * DRAW_ENEMY_STRIDE + 16; addr += 16) {
+            uint8_t buf[16] = {};
+            memcpy(buf, (uint8_t*)addr, 16);
+            char hex[80] = {};
+            int hp2 = 0;
             for (int b = 0; b < 16; b++)
-                hp += snprintf(hex + hp, sizeof(hex) - hp, "%02X ", rp[b]);
-            const char* marker = "";
-            if (addr <= D_BATTLE_ORDER && addr + 16 > D_BATTLE_ORDER) marker = " <-- bo start";
-            if (addr <= D_BATTLE_ORDER + 32 && addr + 16 > D_BATTLE_ORDER + 32) marker = " <-- bo end";
-            Log::Write("BattleTTS: [ITEM-DIAG]   0x%08X: %s%s", addr, hex, marker);
+                hp2 += snprintf(hex + hp2, sizeof(hex) - hp2, "%02X ", buf[b]);
+            Log::Write("BattleTTS: [F12-DRAW] 0x%08X: %s", addr, hex);
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        Log::Write("BattleTTS: [ITEM-DIAG] EXCEPTION reading savemap region");
+        Log::Write("BattleTTS: [F12-DRAW] EXCEPTION reading context region");
     }
     
-    // --- 4. Display struct at 0x1D8DFF4 ---
-    Log::Write("BattleTTS: [ITEM-DIAG] --- Display struct @ 0x1D8DFF4 ---");
+    // 4. v0.10.110: EXPANDED — dump full 0xC0-0xFF range (64 bytes) to cover
+    //    the gap at D8-DF that was missing in v0.10.109. The Stock/Cast cursor
+    //    is likely in this gap (draw cursor confirmed at D8, Stock/Cast may be nearby).
+    Log::Write("BattleTTS: [F12-DRAW] --- Full menu state region 0xC0-0xFF (64 bytes) ---");
     __try {
-        uint8_t* ds = (uint8_t*)0x1D8DFF4;
+        uint8_t fullBuf[64] = {};
+        memcpy(fullBuf, (uint8_t*)0x01D768C0, 64);
+        // Log as 4 rows of 16 bytes each, with individual byte labels
         for (int row = 0; row < 4; row++) {
-            char hex[200] = {};
-            int p = 0;
+            char hex[120] = {};
+            int hp4 = 0;
             for (int b = 0; b < 16; b++)
-                p += snprintf(hex + p, sizeof(hex) - p, "%02X ", ds[row * 16 + b]);
-            Log::Write("BattleTTS: [ITEM-DIAG]   +%02X: %s", row * 16, hex);
+                hp4 += snprintf(hex + hp4, sizeof(hex) - hp4, "%02X ", fullBuf[row * 16 + b]);
+            Log::Write("BattleTTS: [F12-DRAW] 0x%02X-0x%02X: %s",
+                       0xC0 + row * 16, 0xCF + row * 16, hex);
         }
-        int dsNonZero = 0;
-        for (int i = 0; i < 32; i++) {
-            uint8_t id = ds[i * 2];
-            uint8_t qty = ds[i * 2 + 1];
-            if (id != 0 || qty != 0) {
-                Log::Write("BattleTTS: [ITEM-DIAG]   ds[%02d] = id=%u qty=%u %s",
-                           i, (unsigned)id, (unsigned)qty,
-                           (id >= 1 && id < 33) ? GetBattleItemName(id) : "(?)");
-                dsNonZero++;
-            }
-        }
-        if (dsNonZero == 0) Log::Write("BattleTTS: [ITEM-DIAG]   (all zeros)");
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        Log::Write("BattleTTS: [ITEM-DIAG] EXCEPTION reading display struct");
-    }
-    
-    // --- 5. Full pool scan (10 slots x 0x78 bytes) ---
-    Log::Write("BattleTTS: [ITEM-DIAG] --- Task pool @ 0x%08X (10 x 0x78) ---", D_POOL_BASE);
+        // Also log key individual bytes with labels for easy comparison
+        Log::Write("BattleTTS: [F12-DRAW] KEY BYTES: D0(menuPhase)=%u D4=%u D8(drawCur)=%u D9=%u DA=%u DB=%u DC=%u DD=%u DE=%u DF=%u",
+                   fullBuf[0x10], fullBuf[0x14], fullBuf[0x18], fullBuf[0x19],
+                   fullBuf[0x1A], fullBuf[0x1B], fullBuf[0x1C], fullBuf[0x1D],
+                   fullBuf[0x1E], fullBuf[0x1F]);
+        Log::Write("BattleTTS: [F12-DRAW] KEY BYTES: EC(subCur)=%u ED=%u EE=%u EF=%u F0=%u F1=%u F2=%u F3=%u",
+                   fullBuf[0x2C], fullBuf[0x2D], fullBuf[0x2E], fullBuf[0x2F],
+                   fullBuf[0x30], fullBuf[0x31], fullBuf[0x32], fullBuf[0x33]);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+
+    // 5. Also scan the UI task pool for a Draw controller node
+    // The pool at 0x1D76BC8 (10 x 0x78) may have a Draw handler with a Stock/Cast cursor
+    Log::Write("BattleTTS: [F12-DRAW] --- UI task pool scan ---");
     __try {
-        for (int slot = 0; slot < D_POOL_SLOTS; slot++) {
-            uint8_t* node = (uint8_t*)(D_POOL_BASE + slot * D_POOL_STRIDE);
-            bool allZero = true;
-            for (int b = 0; b < D_POOL_STRIDE; b++) {
-                if (node[b] != 0) { allZero = false; break; }
-            }
+        for (int pi = 0; pi < 10; pi++) {
+            uint8_t* node = (uint8_t*)(0x1D76BC8 + pi * 0x78);
             uint32_t h08 = *(uint32_t*)(node + 0x08);
             uint32_t h0C = *(uint32_t*)(node + 0x0C);
-            uint16_t ph10 = *(uint16_t*)(node + 0x10);
-            uint16_t iu12 = *(uint16_t*)(node + 0x12);
-            if (allZero) {
-                Log::Write("BattleTTS: [ITEM-DIAG]   Pool[%d] @ 0x%08X: ALL ZEROS", slot, (uint32_t)(uintptr_t)node);
-                continue;
-            }
-            bool isItem = (h08 == D_ITEM_HANDLER || h0C == D_ITEM_HANDLER);
-            Log::Write("BattleTTS: [ITEM-DIAG]   Pool[%d] @ 0x%08X: +08=0x%08X +0C=0x%08X ph=%u iu=%u %s",
-                       slot, (uint32_t)(uintptr_t)node, h08, h0C, (unsigned)ph10, (unsigned)iu12,
-                       isItem ? "*** ITEM ***" : "");
-            for (int row = 0; row < (D_POOL_STRIDE + 15) / 16; row++) {
-                char hex[100] = {};
-                int p = 0;
-                int so = row * 16;
-                for (int b = 0; b < 16 && so + b < D_POOL_STRIDE; b++)
-                    p += snprintf(hex + p, sizeof(hex) - p, "%02X ", node[so + b]);
-                Log::Write("BattleTTS: [ITEM-DIAG]     +%02X: %s", so, hex);
-            }
-            if (isItem) {
-                uint32_t invPtr = *(uint32_t*)(node + 0x20);
-                uint32_t boPtr = *(uint32_t*)(node + 0x24);
-                int16_t cur54 = *(int16_t*)(node + 0x54);
-                Log::Write("BattleTTS: [ITEM-DIAG]     DECODED: invPtr=0x%08X boPtr=0x%08X cur54=%d",
-                           invPtr, boPtr, (int)cur54);
+            uint16_t inUse = *(uint16_t*)(node + 0x12);
+            if (h08 != 0 || h0C != 0 || inUse != 0) {
+                // Dump first 32 bytes of active nodes
+                char nhex[100] = {};
+                int np = 0;
+                for (int nb = 0; nb < 32; nb++)
+                    np += snprintf(nhex + np, sizeof(nhex) - np, "%02X ", node[nb]);
+                Log::Write("BattleTTS: [F12-DRAW] pool[%d] h08=0x%08X h0C=0x%08X inUse=%u: %s",
+                           pi, h08, h0C, (unsigned)inUse, nhex);
             }
         }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        Log::Write("BattleTTS: [ITEM-DIAG] EXCEPTION scanning pool");
-    }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
     
-    // --- 6. Linked list walk from head at 0x1D76B48 ---
-    Log::Write("BattleTTS: [ITEM-DIAG] --- Linked list from 0x1D76B48 ---");
-    __try {
-        uint32_t head = *(uint32_t*)0x1D76B48;
-        Log::Write("BattleTTS: [ITEM-DIAG]   Head: 0x%08X", head);
-        uint32_t cur = head;
-        int nc = 0;
-        while (cur != 0 && cur > 0x00100000 && cur < 0x7FFFFFFF && nc < 20) {
-            uint8_t* nd = (uint8_t*)(uintptr_t)cur;
-            uint32_t nxt = *(uint32_t*)(nd + 0x00);
-            uint32_t prv = *(uint32_t*)(nd + 0x04);
-            uint32_t lh08 = *(uint32_t*)(nd + 0x08);
-            uint32_t lh0C = *(uint32_t*)(nd + 0x0C);
-            uint16_t lph = *(uint16_t*)(nd + 0x10);
-            bool isI = (lh08 == D_ITEM_HANDLER || lh0C == D_ITEM_HANDLER);
-            Log::Write("BattleTTS: [ITEM-DIAG]   LL[%d] @ 0x%08X: next=0x%08X prev=0x%08X +08=0x%08X +0C=0x%08X ph=%u%s",
-                       nc, cur, nxt, prv, lh08, lh0C, (unsigned)lph, isI ? " ***ITEM***" : "");
-            cur = nxt;
-            nc++;
-            if (cur == head) break;
-        }
-        Log::Write("BattleTTS: [ITEM-DIAG]   %d nodes total", nc);
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        Log::Write("BattleTTS: [ITEM-DIAG] EXCEPTION walking linked list");
-    }
-    
-    // --- 7. Pointer scan ---
-    Log::Write("BattleTTS: [ITEM-DIAG] --- Pointer scan 0x1D76000-0x1D78000 ---");
-    __try {
-        int foundH = 0, foundI = 0;
-        for (uint32_t addr = 0x1D76000; addr + 4 <= 0x1D78000; addr += 4) {
-            uint32_t val = *(uint32_t*)addr;
-            if (val == D_ITEM_HANDLER) {
-                Log::Write("BattleTTS: [ITEM-DIAG]   0x4F81F0 at 0x%08X", addr);
-                foundH++;
-            }
-            if (val == 0x01CFE79C) {
-                Log::Write("BattleTTS: [ITEM-DIAG]   0x01CFE79C at 0x%08X", addr);
-                foundI++;
-            }
-        }
-        if (foundH == 0) Log::Write("BattleTTS: [ITEM-DIAG]   0x4F81F0 NOT FOUND");
-        if (foundI == 0) Log::Write("BattleTTS: [ITEM-DIAG]   0x01CFE79C NOT FOUND");
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        Log::Write("BattleTTS: [ITEM-DIAG] EXCEPTION in pointer scan");
-    }
-    
-    // --- 8. Current cursor: inline pool-scan for item at cursor ---
-    Log::Write("BattleTTS: [ITEM-DIAG] --- Current cursor state ---");
-    Log::Write("BattleTTS: [ITEM-DIAG]   subCursor=%u", (unsigned)dSubCursor);
-    // Inline pool-scan for item controller (avoids forward-decl of FindItemControllerNode)
-    __try {
-        uint8_t* foundNode = nullptr;
-        for (int i = 0; i < D_POOL_SLOTS && !foundNode; i++) {
-            uint8_t* nd = (uint8_t*)(D_POOL_BASE + i * D_POOL_STRIDE);
-            if (*(uint32_t*)(nd + 0x0C) == D_ITEM_HANDLER) foundNode = nd;
-        }
-        for (int i = 0; i < D_POOL_SLOTS && !foundNode; i++) {
-            uint8_t* nd = (uint8_t*)(D_POOL_BASE + i * D_POOL_STRIDE);
-            if (*(uint32_t*)(nd + 0x08) == D_ITEM_HANDLER) foundNode = nd;
-        }
-        if (foundNode) {
-            int16_t absIdx = *(int16_t*)(foundNode + 0x54);
-            uint8_t* inv = (uint8_t*)D_INVENTORY;
-            if (absIdx >= 0 && absIdx < 198) {
-                uint8_t id = inv[absIdx * 2];
-                uint8_t qty = inv[absIdx * 2 + 1];
-                Log::Write("BattleTTS: [ITEM-DIAG]   PoolNode cursor: absIdx=%d id=%u qty=%u %s",
-                           (int)absIdx, (unsigned)id, (unsigned)qty,
-                           (id >= 1 && id < 33) ? GetBattleItemName(id) : "(?)");
-            } else {
-                Log::Write("BattleTTS: [ITEM-DIAG]   PoolNode cursor: absIdx=%d (out of range)", (int)absIdx);
-            }
-        } else {
-            Log::Write("BattleTTS: [ITEM-DIAG]   PoolNode: NOT FOUND (Item menu may not be open)");
-        }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        Log::Write("BattleTTS: [ITEM-DIAG] EXCEPTION in inline pool scan");
-    }
-    
-    Log::Write("BattleTTS: [ITEM-DIAG] ========== END DIAGNOSTIC ==========");
-    ScreenReader::Speak("Item diagnostic complete. Check log.", true);
+    Log::Write("BattleTTS: [F12-DRAW] === End Draw Diagnostic ===");
+    ScreenReader::Speak("Draw diagnostic captured.", true);
 }
 
 // v0.10.63: Function entry scan — read code bytes backward from the write instruction
@@ -3319,6 +3224,8 @@ static uint8_t s_submenuCommandId = 0;         // ability ID of the command that
 static bool s_magicListBuilt = false;          // true after we build the magic list for current turn
 static DWORD s_submenuDebounceTick = 0;        // GetTickCount() when debounce started
 static bool s_submenuDebouncing = false;        // true for 300ms after turn start (ignores sub-menu cursor)
+static bool s_pendingSubmenuEntry = false;       // v0.10.112: delayed submenu entry after command scroll
+static DWORD s_pendingSubmenuTick = 0;           // v0.10.112: GetTickCount() when pending entry was scheduled
 
 // Build the filtered magic list for the active character.
 // Reads savemap char struct +0x10 (32 slots × 2 bytes: magic_id, qty).
@@ -3550,6 +3457,72 @@ static void BuildItemList()
     }
 }
 
+// ============================================================================
+// v0.10.109: Draw sub-menu list (drawable spells from target enemy)
+// ============================================================================
+// Draw spell slots at 0x1D28F18 + enemyIdx * 0x47, 4 slots per enemy.
+// Each slot is uint32, byte 0 = magic_id (0 = empty). Confirmed v0.10.107 diagnostic.
+// Target enemy from target bitmask at 0x01D76884 (persists into Draw phase).
+struct DrawEntry { uint8_t magicId; };
+static DrawEntry s_turnDrawList[4] = {};        // all 4 slots (including empties)
+static int s_turnDrawCount = 0;                 // number of non-empty entries
+static bool s_drawListBuilt = false;
+static int s_drawTargetSlot = -1;               // entity slot (3-6) of draw target
+
+// v0.10.109 fix: Draw uses a DIFFERENT cursor byte from Magic/GF/Item.
+// 0x01D768EC only fires during phase transitions (engine init), NOT during
+// active up/down navigation of the draw spell list.
+// 0x01D768D8 is the real draw cursor (confirmed by CURSOR-HUNT diagnostic).
+static const uint32_t DRAW_CURSOR_ADDR = 0x01D768D8;
+static const uint32_t DRAW_STOCK_CAST_ADDR = 0x01D768D9; // v0.10.111: 0=Stock, 1=Cast
+static uint8_t s_drawCursorPrev = 0xFF;         // previous draw cursor value for change detection
+static uint8_t s_drawStockCastPrev = 0xFF;      // previous Stock/Cast cursor value
+static uint8_t s_lastDrawerPartySlot = 0xFF;    // v0.10.112: party slot of character who last used Draw
+static uint8_t s_drawLastMenuPhase = 0xFF;      // v0.10.112: track menuPhase for phase-transition resets
+
+static void BuildDrawList()
+{
+    s_turnDrawCount = 0;
+    s_drawListBuilt = false;
+    s_drawTargetSlot = -1;
+    memset(s_turnDrawList, 0, sizeof(s_turnDrawList));
+    
+    // Determine which enemy from target bitmask
+    uint8_t tgtMask = 0;
+    __try { tgtMask = *(uint8_t*)0x01D76884; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    if (tgtMask == 0) return;
+    
+    int slot = BitmaskToSlot(tgtMask);
+    if (slot < BATTLE_ALLY_SLOTS || slot >= BATTLE_TOTAL_SLOTS) return;
+    int enemyIdx = slot - BATTLE_ALLY_SLOTS;
+    s_drawTargetSlot = slot;
+    
+    // Read draw spell slots for this enemy
+    uint32_t enemyBase = DRAW_SPELL_BASE + enemyIdx * DRAW_ENEMY_STRIDE;
+    __try {
+        for (int i = 0; i < DRAW_SLOTS_PER_ENEMY; i++) {
+            uint8_t magicId = *(uint8_t*)(enemyBase + i * DRAW_SLOT_SIZE);
+            s_turnDrawList[i].magicId = magicId;
+            if (magicId != 0) s_turnDrawCount++;
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return; }
+    
+    s_drawListBuilt = true;
+    
+    // Log the draw list
+    char nameBuf[64];
+    const char* enemyName = GetSlotName(slot, nameBuf, sizeof(nameBuf));
+    Log::Write("BattleTTS: [DRAW-LIST] target=%s (slot%d) %d drawable spells:",
+               enemyName, slot, s_turnDrawCount);
+    for (int i = 0; i < DRAW_SLOTS_PER_ENEMY; i++) {
+        uint8_t mid = s_turnDrawList[i].magicId;
+        if (mid != 0) {
+            Log::Write("BattleTTS: [DRAW-LIST]   [%d] id=%u (%s)",
+                       i, (unsigned)mid, GetMagicName(mid));
+        }
+    }
+}
+
 // Turn/command tracking state
 static uint8_t s_turnActiveCharId = 0xFF;    // last active_char_id we announced
 static uint8_t s_turnCmdCursor = 0xFF;       // last command cursor position
@@ -3613,6 +3586,14 @@ static void PollTurnAndCommands()
             s_turnGFCount = 0;
             s_itemListBuilt = false;
             s_turnItemCount = 0;
+            s_drawListBuilt = false;
+            s_turnDrawCount = 0;
+            s_drawTargetSlot = -1;
+            s_drawCursorPrev = 0xFF;
+            s_drawStockCastPrev = 0xFF;
+            s_drawLastMenuPhase = 0xFF;
+            s_pendingSubmenuEntry = false;
+            s_pendingSubmenuTick = 0;
             s_submenuDebouncing = true;
             s_submenuDebounceTick = GetTickCount();
             
@@ -3649,6 +3630,7 @@ static void PollTurnAndCommands()
         
         // Command cursor navigation (only while a turn is active)
         if (s_turnActiveCharId < 3) {
+            bool cmdCursorChangedThisFrame = false;  // v0.10.112: suppress false submenu entry
             uint8_t cursor = *(uint8_t*)BATTLE_CMD_CURSOR;
             if (cursor < 4 && cursor != s_turnCmdCursor) {
                 s_turnCmdCursor = cursor;
@@ -3656,8 +3638,20 @@ static void PollTurnAndCommands()
                 if (s_inSubmenu) {
                     s_inSubmenu = false;
                     s_turnSubmenuCursor = 0xFF;
+                    // v0.10.112: Reset draw tracking so re-entry announces initial items
+                    s_drawCursorPrev = 0xFF;
+                    s_drawStockCastPrev = 0xFF;
+                    s_drawListBuilt = false;
+                    s_drawLastMenuPhase = 0xFF;
                     Log::Write("BattleTTS: [SUBMENU] Exited sub-menu, back to command menu");
                 }
+                // v0.10.112: Suppress false submenu entry on this frame AND capture
+                // baseline. Then schedule a delayed forced entry after 150ms so the
+                // command name has time to speak before the submenu item queues.
+                cmdCursorChangedThisFrame = true;
+                __try { s_turnSubmenuCursor = *(uint8_t*)BATTLE_SUBMENU_CURSOR; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                s_pendingSubmenuEntry = true;
+                s_pendingSubmenuTick = GetTickCount();
                 // v0.10.22: cursor=0 may be Attack or Limit Break depending on toggle byte
                 const char* cmd;
                 if (cursor == 0) {
@@ -3688,11 +3682,12 @@ static void PollTurnAndCommands()
             }
             
             uint8_t subCursor = *(uint8_t*)BATTLE_SUBMENU_CURSOR;
-            if (!s_submenuDebouncing && subCursor != s_turnSubmenuCursor) {
+            if (!s_submenuDebouncing && !cmdCursorChangedThisFrame && subCursor != s_turnSubmenuCursor) {
                 if (!s_inSubmenu && s_turnCmdCursor < 4) {
                     // Entering sub-menu — record which command opened it
                     s_submenuCommandId = s_turnCharCommands[s_turnCmdCursor];
                     s_inSubmenu = true;
+                    s_pendingSubmenuEntry = false;  // v0.10.112: cancel delayed entry
                     Log::Write("BattleTTS: [SUBMENU] Entered sub-menu for cmd 0x%02X (%s) at cursor %d",
                                (unsigned)s_submenuCommandId,
                                GetCommandName(s_submenuCommandId),
@@ -3709,6 +3704,11 @@ static void PollTurnAndCommands()
                     // v0.10.104: Build item list if Item sub-menu
                     if (s_submenuCommandId == 0x17 && !s_itemListBuilt) {
                         BuildItemList();
+                    }
+                    // v0.10.109: Build draw list if Draw sub-menu
+                    if (s_submenuCommandId == 0x16 && !s_drawListBuilt) {
+                        s_lastDrawerPartySlot = s_turnActiveCharId;  // v0.10.112: track who is drawing
+                        BuildDrawList();
                     }
 
                 }
@@ -3748,96 +3748,32 @@ static void PollTurnAndCommands()
                                        (int)subCursor, s_turnGFCount);
                         }
                     } else if (s_submenuCommandId == 0x17) {
-                        // v0.10.105: Item sub-menu — multi-source diagnostic.
-                        // Log every possible data source for this cursor position
-                        // so we can determine which one matches the screen.
+                        // v0.10.106: Item sub-menu — dual-source announce (cleaned up from v0.10.105 diagnostic).
+                        // Display struct at 0x1D8DFF4 when populated (after Items > Battle), else inv[cursor].
                         int sc = (int)subCursor;
-                        Log::Write("BattleTTS: [ITEM-MULTI] === cursor=%d ===", sc);
-                        
-                        // Source A: Display struct at 0x1D8DFF4
-                        uint8_t dsId = 0, dsQty = 0;
-                        __try {
-                            uint8_t* ds = (uint8_t*)0x1D8DFF4;
-                            if (sc < 32) { dsId = ds[sc*2]; dsQty = ds[sc*2+1]; }
-                        } __except(EXCEPTION_EXECUTE_HANDLER) {}
-                        Log::Write("BattleTTS: [ITEM-MULTI]   A(display):  id=%u qty=%u %s",
-                                   (unsigned)dsId, (unsigned)dsQty,
-                                   (dsId >= 1 && dsId < 33) ? GetBattleItemName(dsId) : "(empty)");
-                        
-                        // Source B: battle_order[cursor] -> inventory
-                        uint8_t boId = 0, boQty = 0;
-                        __try {
-                            uint8_t* bo = (uint8_t*)0x1CFE77C;
-                            uint8_t* inv = (uint8_t*)0x1CFE79C;
-                            if (sc < 32) {
-                                uint8_t idx = bo[sc];
-                                if (idx < 198) { boId = inv[idx*2]; boQty = inv[idx*2+1]; }
-                            }
-                        } __except(EXCEPTION_EXECUTE_HANDLER) {}
-                        Log::Write("BattleTTS: [ITEM-MULTI]   B(bo[cur]):  id=%u qty=%u %s",
-                                   (unsigned)boId, (unsigned)boQty,
-                                   (boId >= 1 && boId < 33) ? GetBattleItemName(boId) : "(non-battle)");
-                        
-                        // Source C: Nth battle item from battle_order (filtered)
-                        uint8_t fcId = 0, fcQty = 0;
-                        __try {
-                            uint8_t* bo = (uint8_t*)0x1CFE77C;
-                            uint8_t* inv = (uint8_t*)0x1CFE79C;
-                            int battleIdx = 0;
-                            for (int i = 0; i < 32; i++) {
-                                uint8_t idx = bo[i];
-                                if (idx >= 198) continue;
-                                uint8_t id = inv[idx*2];
-                                uint8_t qty = inv[idx*2+1];
-                                if (id >= 1 && id < 33 && qty > 0) {
-                                    if (battleIdx == sc) { fcId = id; fcQty = qty; break; }
-                                    battleIdx++;
-                                }
-                            }
-                        } __except(EXCEPTION_EXECUTE_HANDLER) {}
-                        Log::Write("BattleTTS: [ITEM-MULTI]   C(filtered): id=%u qty=%u %s",
-                                   (unsigned)fcId, (unsigned)fcQty,
-                                   (fcId >= 1 && fcId < 33) ? GetBattleItemName(fcId) : "(none)");
-                        
-                        // Source D: inventory directly at inv[cursor]
-                        uint8_t ivId = 0, ivQty = 0;
-                        __try {
-                            uint8_t* inv = (uint8_t*)0x1CFE79C;
-                            if (sc < 198) { ivId = inv[sc*2]; ivQty = inv[sc*2+1]; }
-                        } __except(EXCEPTION_EXECUTE_HANDLER) {}
-                        Log::Write("BattleTTS: [ITEM-MULTI]   D(inv[cur]): id=%u qty=%u %s",
-                                   (unsigned)ivId, (unsigned)ivQty,
-                                   (ivId >= 1 && ivId < 33) ? GetBattleItemName(ivId) : "(other)");
-                        
-                        // Announce: if display struct populated, use it exclusively
-                        // (qty=0 entries are valid empties). Otherwise use inv[cursor].
                         uint8_t annId = 0, annQty = 0;
-                        const char* annSrc = "";
-                        bool dsActive = (dsId != 0 || dsQty != 0);  // any non-zero = ds populated
-                        // Check broader: is ANY ds entry non-zero? (cached from first cursor)
+                        
+                        // Check if display struct is populated
+                        bool dsActive = false;
+                        __try {
+                            uint8_t* ds = (uint8_t*)ITEM_DISPLAY_STRUCT;
+                            for (int q = 0; q < 64; q++) {
+                                if (ds[q] != 0) { dsActive = true; break; }
+                            }
+                            if (dsActive && sc < 32) {
+                                annId = ds[sc * 2];
+                                annQty = ds[sc * 2 + 1];
+                            }
+                        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                        
                         if (!dsActive) {
-                            // Quick scan: check first 8 entries for any non-zero byte
+                            // Fallback: direct inventory at cursor position
                             __try {
-                                uint8_t* dsFull = (uint8_t*)0x1D8DFF4;
-                                for (int q = 0; q < 16; q++) {
-                                    if (dsFull[q] != 0) { dsActive = true; break; }
-                                }
+                                uint8_t* inv = (uint8_t*)ITEM_INVENTORY_ADDR;
+                                if (sc < 198) { annId = inv[sc * 2]; annQty = inv[sc * 2 + 1]; }
                             } __except(EXCEPTION_EXECUTE_HANDLER) {}
                         }
-                        if (dsActive) {
-                            // Display struct mode: trust ds exclusively
-                            if (dsId >= 1 && dsId < 33 && dsQty > 0) {
-                                annId = dsId; annQty = dsQty; annSrc = "display";
-                            }
-                            // else: ds entry is empty/qty=0 → announce Empty
-                        } else {
-                            // No display struct: use direct inventory
-                            if (ivId >= 1 && ivId < 33 && ivQty > 0) {
-                                annId = ivId; annQty = ivQty; annSrc = "inv[cur]";
-                            }
-                        }
                         
-                        // Page/item position (4 items per page, matching field menu convention)
                         int page = (sc / 4) + 1;
                         int itemNum = (sc % 4) + 1;
                         
@@ -3847,18 +3783,179 @@ static void PollTurnAndCommands()
                             snprintf(buf, sizeof(buf), "%s, quantity %d, page %d, item %d",
                                      itemName, (int)annQty, page, itemNum);
                             BattleSpeak(buf, PRIO_MENU, true);
-                            Log::Write("BattleTTS: [ITEM-MULTI]   ANNOUNCE(%s): %s x%d page%d item%d",
-                                       annSrc, itemName, (int)annQty, page, itemNum);
+                            Log::Write("BattleTTS: [ITEM] cursor=%d -> %s x%d page%d item%d",
+                                       sc, itemName, (int)annQty, page, itemNum);
                         } else {
                             char buf[64];
                             snprintf(buf, sizeof(buf), "Empty, page %d, item %d", page, itemNum);
                             BattleSpeak(buf, PRIO_MENU, true);
-                            Log::Write("BattleTTS: [ITEM-MULTI]   ANNOUNCE: Empty page%d item%d", page, itemNum);
+                            Log::Write("BattleTTS: [ITEM] cursor=%d -> Empty page%d item%d", sc, page, itemNum);
                         }
+                    } else if (s_submenuCommandId == 0x16 && s_drawListBuilt) {
+                        // v0.10.112: Draw sub-menu — generic subCursor fires on phase transitions,
+                        // NOT during active navigation. All draw spell announces go through the
+                        // draw-specific cursor poll at 0x01D768D8 below. Log only here.
+                        Log::Write("BattleTTS: [DRAW-NAV] generic subCursor=%d (ignored, handled by draw poll)",
+                                   (int)subCursor);
                     } else {
-                        // Other sub-menus (Draw) — log for now, implement later
-                        Log::Write("BattleTTS: [SUBMENU-NAV] cmd=0x%02X cursor=%d (not yet implemented)",
+                        // Other sub-menus — log for diagnostic
+                        Log::Write("BattleTTS: [SUBMENU-NAV] cmd=0x%02X cursor=%d (unhandled)",
                                    (unsigned)s_submenuCommandId, (int)subCursor);
+                    }
+                }
+            }
+            
+            // v0.10.112: Delayed submenu entry after command scroll.
+            // 150ms after scrolling to a new command, force-enter the submenu and
+            // announce the current item with interrupt=false (queued after command name).
+            if (s_pendingSubmenuEntry && !s_inSubmenu && 
+                GetTickCount() - s_pendingSubmenuTick > 150) {
+                s_pendingSubmenuEntry = false;
+                if (s_turnCmdCursor < 4) {
+                    uint8_t sc = 0;
+                    __try { sc = *(uint8_t*)BATTLE_SUBMENU_CURSOR; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                    s_submenuCommandId = s_turnCharCommands[s_turnCmdCursor];
+                    s_inSubmenu = true;
+                    s_turnSubmenuCursor = sc;
+                    
+                    Log::Write("BattleTTS: [SUBMENU] Delayed entry for cmd 0x%02X (%s) cursor %d",
+                               (unsigned)s_submenuCommandId,
+                               GetCommandName(s_submenuCommandId), (int)sc);
+                    
+                    // Build lists
+                    if (s_submenuCommandId == 0x14 && !s_magicListBuilt)
+                        BuildMagicList(s_turnActiveCharId);
+                    if (s_submenuCommandId == 0x15 && !s_gfListBuilt)
+                        BuildGFList(s_turnActiveCharId);
+                    if (s_submenuCommandId == 0x17 && !s_itemListBuilt)
+                        BuildItemList();
+                    if (s_submenuCommandId == 0x16 && !s_drawListBuilt) {
+                        s_lastDrawerPartySlot = s_turnActiveCharId;
+                        BuildDrawList();
+                    }
+                    
+                    // Announce current item (queued, not interrupting command name)
+                    if (s_submenuCommandId == 0x14 && s_magicListBuilt) {
+                        if ((int)sc < s_turnMagicCount) {
+                            const char* spellName = GetMagicName(s_turnMagicList[sc].id);
+                            int qty = (int)s_turnMagicList[sc].qty;
+                            char buf[128];
+                            snprintf(buf, sizeof(buf), "%s, %d", spellName, qty);
+                            BattleSpeak(buf, PRIO_MENU, false);
+                            Log::Write("BattleTTS: [SUBMENU-DELAYED] Magic cursor=%d -> %s x%d",
+                                       (int)sc, spellName, qty);
+                        }
+                    } else if (s_submenuCommandId == 0x15 && s_gfListBuilt) {
+                        if ((int)sc < s_turnGFCount) {
+                            BattleSpeak(s_turnGFList[sc].name, PRIO_MENU, false);
+                            Log::Write("BattleTTS: [SUBMENU-DELAYED] GF cursor=%d -> %s",
+                                       (int)sc, s_turnGFList[sc].name);
+                        }
+                    } else if (s_submenuCommandId == 0x17 && s_itemListBuilt) {
+                        // Item: read from display struct or inventory
+                        uint8_t annId = 0, annQty = 0;
+                        __try {
+                            uint8_t* ds = (uint8_t*)0x1D8DFF4;
+                            bool dsActive = false;
+                            for (int q = 0; q < 64; q++) { if (ds[q] != 0) { dsActive = true; break; } }
+                            if (dsActive && (int)sc < 32) { annId = ds[sc * 2]; annQty = ds[sc * 2 + 1]; }
+                            if (!dsActive && (int)sc < 198) {
+                                uint8_t* inv = (uint8_t*)0x1CFE79C;
+                                annId = inv[sc * 2]; annQty = inv[sc * 2 + 1];
+                            }
+                        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                        if (annId >= 1 && annId < 33 && annQty > 0) {
+                            const char* itemName = GetBattleItemName(annId);
+                            char buf[128];
+                            int page = ((int)sc / 4) + 1;
+                            int itemNum = ((int)sc % 4) + 1;
+                            snprintf(buf, sizeof(buf), "%s, quantity %d, page %d, item %d",
+                                     itemName, (int)annQty, page, itemNum);
+                            BattleSpeak(buf, PRIO_MENU, false);
+                            Log::Write("BattleTTS: [SUBMENU-DELAYED] Item cursor=%d -> %s x%d",
+                                       (int)sc, itemName, (int)annQty);
+                        }
+                    }
+                    // Draw and Item are handled by their dedicated poll blocks below
+                }
+            }
+            
+            // v0.10.109: Draw-specific cursor poll.
+            // Draw uses a SEPARATE cursor byte (0x01D768D8) from other sub-menus.
+            // 0x01D768EC only fires during engine init/phase transitions, NOT during
+            // active up/down navigation. We poll 0x01D768D8 independently here.
+            // NOTE: Also retry BuildDrawList if it hasn't succeeded yet — the target
+            // bitmask at 0x01D76884 may not be set until after target confirmation,
+            // which happens AFTER the submenu entry event fires.
+            if (s_inSubmenu && s_submenuCommandId == 0x16 && !s_drawListBuilt) {
+                BuildDrawList();  // retry until target bitmask is populated
+            }
+            if (s_inSubmenu && s_submenuCommandId == 0x16 && s_drawListBuilt) {
+                // v0.10.112: Keep drawer slot updated every frame while draw submenu is open
+                if (s_turnActiveCharId < 3)
+                    s_lastDrawerPartySlot = s_turnActiveCharId;
+                
+                // v0.10.112: Detect menuPhase transitions to reset cursor tracking.
+                // When canceling from Stock/Cast (phase 23) back to spell list (phase 14),
+                // reset draw cursor prev so the current spell re-announces.
+                // When canceling from spell list back to target select, reset everything.
+                uint8_t drawPhaseNow = 0;
+                __try { drawPhaseNow = *(uint8_t*)0x01D768D0; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                if (s_drawLastMenuPhase != 0xFF && drawPhaseNow != s_drawLastMenuPhase) {
+                    if (s_drawLastMenuPhase == 23 && drawPhaseNow < 23) {
+                        // Left Stock/Cast prompt backward → back to spell list
+                        s_drawCursorPrev = 0xFF;
+                        s_drawStockCastPrev = 0xFF;
+                        Log::Write("BattleTTS: [DRAW] Phase %u->%u: reset cursor tracking (back to spell list)",
+                                   (unsigned)s_drawLastMenuPhase, (unsigned)drawPhaseNow);
+                    }
+                    if (s_drawLastMenuPhase == 14 && drawPhaseNow < 14) {
+                        // Left spell list backward → back to target selection
+                        s_drawCursorPrev = 0xFF;
+                        s_drawStockCastPrev = 0xFF;
+                        s_drawListBuilt = false;  // force rebuild with potentially new target
+                        s_lastTargetBitmask = 0;  // force target re-announce
+                        s_lastTargetScope = 0;
+                        Log::Write("BattleTTS: [DRAW] Phase %u->%u: reset target+draw tracking (back to target select)",
+                                   (unsigned)s_drawLastMenuPhase, (unsigned)drawPhaseNow);
+                    }
+                }
+                s_drawLastMenuPhase = drawPhaseNow;
+                
+                uint8_t drawCur = 0xFF;
+                __try { drawCur = *(uint8_t*)DRAW_CURSOR_ADDR; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                if (drawCur != s_drawCursorPrev && drawCur < DRAW_SLOTS_PER_ENEMY) {
+                    s_drawCursorPrev = drawCur;
+                    uint8_t mid = s_turnDrawList[drawCur].magicId;
+                    if (mid != 0) {
+                        const char* spellName = GetMagicName(mid);
+                        char buf[128];
+                        snprintf(buf, sizeof(buf), "%s", spellName);
+                        BattleSpeak(buf, PRIO_MENU, true);
+                        Log::Write("BattleTTS: [DRAW-CUR] draw_cursor=%d -> %s (id=%u)",
+                                   (int)drawCur, spellName, (unsigned)mid);
+                    } else {
+                        BattleSpeak("Empty", PRIO_MENU, true);
+                        Log::Write("BattleTTS: [DRAW-CUR] draw_cursor=%d -> Empty", (int)drawCur);
+                    }
+                } else if (drawCur != s_drawCursorPrev && drawCur != 0xFF) {
+                    s_drawCursorPrev = drawCur;  // out of range, track but don't announce
+                }
+                // v0.10.111: Stock/Cast cursor at 0x01D768D9 (0=Stock, 1=Cast)
+                // v0.10.112: Only poll during Stock/Cast phase (menuPhase == 23).
+                // menuPhase=14 is the spell list; Stock/Cast prompt is specifically at 23.
+                // Without this guard, D9=0 (stale) triggers false "Stock" during spell list.
+                uint8_t drawMenuPhase = 0;
+                __try { drawMenuPhase = *(uint8_t*)0x01D768D0; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                if (drawMenuPhase == 23) {
+                    uint8_t stockCast = 0xFF;
+                    __try { stockCast = *(uint8_t*)DRAW_STOCK_CAST_ADDR; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                    if (stockCast != s_drawStockCastPrev && stockCast <= 1) {
+                        s_drawStockCastPrev = stockCast;
+                        const char* actionName = (stockCast == 0) ? "Stock" : "Cast";
+                        BattleSpeak(actionName, PRIO_MENU, true);
+                        Log::Write("BattleTTS: [DRAW-ACTION] Stock/Cast cursor=%u -> %s (phase=%u)",
+                                   (unsigned)stockCast, actionName, (unsigned)drawMenuPhase);
                     }
                 }
             }
@@ -3909,6 +4006,15 @@ static void OnBattleEnter()
     s_turnGFCount = 0;
     s_itemListBuilt = false;
     s_turnItemCount = 0;
+    s_drawListBuilt = false;
+    s_turnDrawCount = 0;
+    s_drawTargetSlot = -1;
+    s_drawCursorPrev = 0xFF;
+    s_drawStockCastPrev = 0xFF;
+    s_lastDrawerPartySlot = 0xFF;
+    s_drawLastMenuPhase = 0xFF;
+    s_pendingSubmenuEntry = false;
+    s_pendingSubmenuTick = 0;
     s_submenuDebouncing = false;
     s_submenuDebounceTick = 0;
     
@@ -4158,7 +4264,7 @@ void Initialize()
     s_gfVEHHandle = AddVectoredExceptionHandler(1, GF_BP_VectoredHandler);
     Log::Write("BattleTTS: [GF-BP] VEH registered: handle=0x%08X", (uint32_t)(uintptr_t)s_gfVEHHandle);
 
-    Log::Write("BattleTTS: Initialized v0.10.105 — Item sub-menu TTS F12 diag (EWM=%s, ATB=%s, GF=%s, FFNx=%s, PATCH=%s).",
+    Log::Write("BattleTTS: Initialized v0.10.112 — Draw 3-bug fix (EWM=%s, ATB=%s, GF=%s, FFNx=%s, PATCH=%s).",
                s_ewmEnabled ? "ON" : "OFF",
                s_ewmHookInstalled ? "OK" : "FAIL",
                s_gfTimerHookInstalled ? "OK" : "FAIL",
@@ -4318,6 +4424,15 @@ void Update()
     if (s_inBattle && s_initAnnounceDone && s_enemyAnnounceDone) {
         PollTargetSelection();
     }
+}
+
+// v0.10.112: Public accessor for the drawer's character name.
+// Called by FieldDialog to prepend name to "Received X spells!" text.
+const char* GetLastDrawerName()
+{
+    if (s_lastDrawerPartySlot < BATTLE_ALLY_SLOTS)
+        return GetBattleCharName(s_lastDrawerPartySlot);
+    return nullptr;
 }
 
 void Shutdown()

@@ -3,7 +3,7 @@
 // See field_navigation.h for full architecture and phasing notes.
 //
 // ============================================================================
-// CURRENT STATE: v0.10.105 — Item sub-menu TTS (F12 item diagnostic)
+// CURRENT STATE: v0.10.112 — Draw 3-bug fix (target/stock/name)
 // ============================================================================
 //
 // What's new in v05.12:
@@ -4684,7 +4684,7 @@ void Initialize()
 
     s_initialized = true;
     s_lastLogTime = GetTickCount();
-    Log::Write("FieldNavigation: Initialized v0.10.105 — Item sub-menu TTS pool-scan approach.");
+    Log::Write("FieldNavigation: Initialized v0.10.112 — Draw 3-bug fix.");
     Log::Write("FieldNavigation:   F9  = nearest character and compass direction (repeat to cycle)");
     Log::Write("FieldNavigation:   F10 = player field name and position");
 }

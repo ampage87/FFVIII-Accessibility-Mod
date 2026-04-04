@@ -9,7 +9,7 @@
 // FF8 Original PC Accessibility Mod version
 // Increment on every build change
 // ================================================================
-#define FF8OPC_VERSION "0.10.105"  // Item sub-menu TTS (F12 item diag)
+#define FF8OPC_VERSION "0.10.112"  // Draw 3-bug fix (target/stock/name)
 #define FF8OPC_VERSION_DATE "2026-03-29"
 
 // ============================================================================

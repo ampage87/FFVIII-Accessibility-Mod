@@ -1,5 +1,5 @@
 # DEVNOTES - FF8 Accessibility Mod (Original PC + FFNx)
-## Last updated: 2026-04-02 (sessions 27-29 — Item sub-menu TTS: FULLY WORKING, dual-source display-struct + inv[cursor])
+## Last updated: 2026-04-03 (session 31 — Draw sub-menu TTS v0.10.112, command menu polish WIP)
 
 > **File structure**: This file = current state + key learnings only (~10KB max).
 > Build history in `DEVNOTES_HISTORY.md`. Immediate context in `NEXT_SESSION_PROMPT.md`.
@@ -8,9 +8,11 @@
 
 ## CURRENT OBJECTIVE: Battle TTS (Phase 3 in progress) + World Map Navigation
 
-### Current build: v0.10.105 (source + deployed)
+### Current build: v0.10.112 (source + deployed)
 
 ### Battle TTS — Phases 1-8 COMPLETE, EWM GF fire prevention SOLVED
+- **Draw sub-menu TTS** (v0.10.107-112): **WORKING.** Spell list cursor at `0x01D768D8`, Stock/Cast cursor at `0x01D768D9`. Phase-gated polling (menuPhase=14 for spell list, menuPhase=23 for Stock/Cast). Generic subCursor handler for Draw is log-only; dedicated D8 cursor poll handles all Draw announces. Draw result prepends character name via show_dialog hook ("Squall received 4 Blizzards!"). Backward phase transitions reset tracking for re-entry.
+- **Battle command menu announce**: PARTIALLY WORKING. The tabbed command interface (subCursor changes on BOTH scrolling AND submenu entry) makes reliable detection difficult. Current delayed-entry approach (150ms `s_pendingSubmenuEntry`) has issues — sometimes announces submenu content on command menu, initial items inconsistent. Needs further work (menuPhase-based approach may be better).
 - **Phases 1-3**: Enemy announce, turn announce, command menu navigation, magic sub-menu
 - **Phase 4**: Target selection, Limit Break toggle
 - **Phase 5**: HP/damage tracking with anim flag trigger (0x01D280C0)
@@ -302,14 +304,12 @@ v0.10.95 implementation:
 - **Shift-pattern**: When first PSHM_W param is positive (mode selector) but Y,Z are negative passthrough, actual position is (litY, litZ).
 - **Dispatch table hook**: Write directly to `pExecuteOpcodeTable[index]` — MinHook conflicts with FFNx.
 
-### Item Sub-menu TTS (v0.10.101-105) — FULLY WORKING
+### Item Sub-menu TTS (v0.10.101-106) — FULLY WORKING
 - **Two-source approach** depending on display struct state:
   - **Display struct mode** (0x1D8DFF4 non-zero, after visiting Items > Battle): cursor indexes directly into 32-position display struct. Items with qty=0 are valid empties. Used exclusively when populated.
   - **Direct inventory mode** (display struct zeroed, normal gameplay): cursor byte at 0x01D768EC directly indexes into inventory array at 0x1CFE79C. `inv[cursor]` gives correct item if id 1-32.
 - **Display struct** is a field-menu-only cache — battle engine never depends on it. Populated when player visits Items > Battle screen, zeroed on game reload.
-- **Deep research confirmed**: battle_order[32] + items[198] in savemap are the persistent truth. Engine builds ephemeral working buffer via 0x4F8010 each time Item is selected in battle.
-- **Diagnostic approach**: 4-source comparison (display struct, bo[cursor]→inv, filtered walk, inv[cursor]) on every cursor change identified inv[cursor] as the correct source for non-rearranged case.
-- Deep research results: `Plan & Research Documents/Battle item cursor mapping deep research results.md`
+- **v0.10.106 cleanup**: Removed verbose 4-source [ITEM-MULTI] diagnostic logging, kept clean dual-source announce. F12 Item diagnostic removed (F12 freed for Draw).
 
 ### Exit Detection (4 patterns)
 - (A) Direct MAPJUMP, (B) REQ-following, (C) Variable-dispatch, (D) INF gateways
@@ -347,6 +347,6 @@ AccessibilityThread polls ~60Hz. Modules: TitleScreen, FieldDialog, FieldNavigat
 3. Read `DEVNOTES_HISTORY.md` ONLY if you need past build details
 4. Use filesystem MCP tools (not bash) for Windows file access
 5. `deploy.bat` is the ONLY build script
-6. Current version: v0.10.105 (source + deployed)
+6. Current version: v0.10.112 (source + deployed)
 7. "BAT" = read tail of `Logs/ff8_accessibility.log`
 8. GitHub repo: ampage87/FFVIII-Accessibility-Mod

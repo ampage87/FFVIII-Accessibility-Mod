@@ -15,6 +15,11 @@ void Initialize();
 void Update();
 void Shutdown();
 
+// v0.10.112: Returns the name of the character who last initiated Draw.
+// Used by FieldDialog to prepend "Squall" to "Received X spells!" text.
+// Returns nullptr if no draw has been initiated or name is unavailable.
+const char* GetLastDrawerName();
+
 }  // namespace BattleTTS
 
 // ============================================================================

@@ -75,6 +75,7 @@
 
 #include "ff8_accessibility.h"
 #include "ff8_text_decode.h"
+#include "battle_tts.h"       // v0.10.112: GetLastDrawerName() for draw result announcements
 #include "minhook/include/MinHook.h"
 #include <vector>
 
@@ -1042,10 +1043,20 @@ static char __cdecl Hook_show_dialog(int32_t window_id, uint32_t state, int16_t 
 
         MarkPendingAsSpoken(decoded);
 
+        // v0.10.112: In battle mode, prepend character name to "Received" draw results.
+        // "Received 4 Blizzards!" -> "Squall received 4 Blizzards!"
+        std::string speakText = decoded;
+        if (currentMode == 3 && decoded.length() > 8 && decoded.compare(0, 8, "Received") == 0) {
+            const char* drawer = BattleTTS::GetLastDrawerName();
+            if (drawer) {
+                speakText = std::string(drawer) + " r" + decoded.substr(1);
+            }
+        }
+
         Log::Write("FieldDialog: [SHOW_DIALOG-SPEAK] win[%d] mode=%u Speaking: \"%s\"",
-                   window_id, currentMode, decoded.c_str());
-        s_lastDialogSpoken = decoded;  // v04.25: track for F5 repeat
-        ScreenReader::Speak(decoded.c_str(), false);  // Queue mode
+                   window_id, currentMode, speakText.c_str());
+        s_lastDialogSpoken = speakText;  // v04.25: track for F5 repeat
+        ScreenReader::Speak(speakText.c_str(), false);  // Queue mode
     } else {
         Log::Write("FieldDialog: [SHOW_DIALOG-TEXT] win[%d] (already spoken by opcode hook)",
                    window_id);
