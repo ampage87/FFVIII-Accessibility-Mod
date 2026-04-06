@@ -87,10 +87,10 @@ static void EnsureCOMInitialized()
         HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
         if (SUCCEEDED(hr) || hr == S_FALSE || hr == RPC_E_CHANGED_MODE) {
             comInitialized = true;
-            Log::Write("ScreenReader: COM initialized on thread %lu (HRESULT: 0x%08X)",
+            Log::Mod("ScreenReader: COM initialized on thread %lu (HRESULT: 0x%08X)",
                        GetCurrentThreadId(), hr);
         } else {
-            Log::Write("ScreenReader: WARNING - COM init failed (HRESULT: 0x%08X)", hr);
+            Log::Mod("ScreenReader: WARNING - COM init failed (HRESULT: 0x%08X)", hr);
         }
     }
 }
@@ -103,21 +103,21 @@ static std::string ExtractResourceToTemp(HMODULE hModule, int resourceId, const 
 {
     HRSRC hRes = FindResourceA(hModule, MAKEINTRESOURCEA(resourceId), RT_RCDATA);
     if (!hRes) {
-        Log::Write("ScreenReader: FindResource failed for ID %d (error %lu)",
+        Log::Mod("ScreenReader: FindResource failed for ID %d (error %lu)",
                    resourceId, GetLastError());
         return "";
     }
 
     HGLOBAL hData = LoadResource(hModule, hRes);
     if (!hData) {
-        Log::Write("ScreenReader: LoadResource failed for ID %d", resourceId);
+        Log::Mod("ScreenReader: LoadResource failed for ID %d", resourceId);
         return "";
     }
 
     DWORD size = SizeofResource(hModule, hRes);
     const void* pData = LockResource(hData);
     if (!pData || size == 0) {
-        Log::Write("ScreenReader: LockResource failed or size=0 for ID %d", resourceId);
+        Log::Mod("ScreenReader: LockResource failed or size=0 for ID %d", resourceId);
         return "";
     }
 
@@ -131,7 +131,7 @@ static std::string ExtractResourceToTemp(HMODULE hModule, int resourceId, const 
     WIN32_FILE_ATTRIBUTE_DATA fileInfo;
     if (GetFileAttributesExA(fullPath.c_str(), GetFileExInfoStandard, &fileInfo)) {
         if (fileInfo.nFileSizeLow == size && fileInfo.nFileSizeHigh == 0) {
-            Log::Write("ScreenReader: %s already extracted (%lu bytes), reusing.", filename, size);
+            Log::Mod("ScreenReader: %s already extracted (%lu bytes), reusing.", filename, size);
             return fullPath;
         }
     }
@@ -139,7 +139,7 @@ static std::string ExtractResourceToTemp(HMODULE hModule, int resourceId, const 
     HANDLE hFile = CreateFileA(fullPath.c_str(), GENERIC_WRITE, 0, NULL,
                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) {
-        Log::Write("ScreenReader: Failed to create temp file %s (error %lu)",
+        Log::Mod("ScreenReader: Failed to create temp file %s (error %lu)",
                    fullPath.c_str(), GetLastError());
         return "";
     }
@@ -149,13 +149,13 @@ static std::string ExtractResourceToTemp(HMODULE hModule, int resourceId, const 
     CloseHandle(hFile);
 
     if (!ok || written != size) {
-        Log::Write("ScreenReader: Write failed for %s (wrote %lu of %lu)",
+        Log::Mod("ScreenReader: Write failed for %s (wrote %lu of %lu)",
                    fullPath.c_str(), written, size);
         DeleteFileA(fullPath.c_str());
         return "";
     }
 
-    Log::Write("ScreenReader: Extracted %s (%lu bytes) to %s", filename, size, fullPath.c_str());
+    Log::Mod("ScreenReader: Extracted %s (%lu bytes) to %s", filename, size, fullPath.c_str());
     return fullPath;
 }
 
@@ -168,7 +168,7 @@ static bool InitNVDA(HMODULE hModule)
     std::string dllPath = ExtractResourceToTemp(hModule, IDR_NVDA_CLIENT_DLL,
                                                  "nvdaControllerClient.dll");
     if (dllPath.empty()) {
-        Log::Write("ScreenReader: NVDA client DLL extraction failed.");
+        Log::Mod("ScreenReader: NVDA client DLL extraction failed.");
         return false;
     }
 
@@ -176,11 +176,11 @@ static bool InitNVDA(HMODULE hModule)
 
     s_nvdaDll = LoadLibraryA(dllPath.c_str());
     if (!s_nvdaDll) {
-        Log::Write("ScreenReader: LoadLibrary failed for %s (error %lu)",
+        Log::Mod("ScreenReader: LoadLibrary failed for %s (error %lu)",
                    dllPath.c_str(), GetLastError());
         return false;
     }
-    Log::Write("ScreenReader: nvdaControllerClient.dll loaded from %s", dllPath.c_str());
+    Log::Mod("ScreenReader: nvdaControllerClient.dll loaded from %s", dllPath.c_str());
 
     fn_testIfRunning  = (nvdaTestIfRunning_t)GetProcAddress(s_nvdaDll, "nvdaController_testIfRunning");
     fn_speakText      = (nvdaSpeakText_t)GetProcAddress(s_nvdaDll, "nvdaController_speakText");
@@ -188,23 +188,23 @@ static bool InitNVDA(HMODULE hModule)
     fn_brailleMessage = (nvdaBrailleMessage_t)GetProcAddress(s_nvdaDll, "nvdaController_brailleMessage");
 
     if (!fn_testIfRunning || !fn_speakText || !fn_cancelSpeech) {
-        Log::Write("ScreenReader: Failed to resolve NVDA controller functions.");
+        Log::Mod("ScreenReader: Failed to resolve NVDA controller functions.");
         FreeLibrary(s_nvdaDll);
         s_nvdaDll = nullptr;
         return false;
     }
-    Log::Write("ScreenReader: NVDA controller functions resolved.");
+    Log::Mod("ScreenReader: NVDA controller functions resolved.");
 
     unsigned long result = fn_testIfRunning();
     if (result != 0) {
-        Log::Write("ScreenReader: NVDA not running at startup (testIfRunning returned %lu).", result);
-        Log::Write("ScreenReader: NVDA DLL kept loaded — will re-check when speaking.");
+        Log::Mod("ScreenReader: NVDA not running at startup (testIfRunning returned %lu).", result);
+        Log::Mod("ScreenReader: NVDA DLL kept loaded — will re-check when speaking.");
         // v04.24: Keep DLL loaded, return true so we get NVDA_SAPI backend.
         // We'll check testIfRunning at speak time and fall back to SAPI if needed.
         return true;
     }
 
-    Log::Write("ScreenReader: NVDA is running and responsive.");
+    Log::Mod("ScreenReader: NVDA is running and responsive.");
     return true;
 }
 
@@ -219,13 +219,13 @@ static bool InitSAPI()
     HRESULT hr = CoCreateInstance(CLSID_SpVoice, NULL, CLSCTX_ALL,
                                   IID_ISpVoice, (void**)&s_pVoice);
     if (FAILED(hr) || !s_pVoice) {
-        Log::Write("ScreenReader: SAPI CoCreateInstance failed (HRESULT: 0x%08X)", hr);
+        Log::Mod("ScreenReader: SAPI CoCreateInstance failed (HRESULT: 0x%08X)", hr);
         return false;
     }
 
     // Apply default rate immediately.
     s_pVoice->SetRate(s_currentRate);
-    Log::Write("ScreenReader: SAPI voice 1 initialized (default rate=%ld).", s_currentRate);
+    Log::Mod("ScreenReader: SAPI voice 1 initialized (default rate=%ld).", s_currentRate);
 
     // v0.10.32: Create second SAPI voice for battle event channel
     hr = CoCreateInstance(CLSID_SpVoice, NULL, CLSCTX_ALL,
@@ -233,9 +233,9 @@ static bool InitSAPI()
     if (SUCCEEDED(hr) && s_pVoice2) {
         s_pVoice2->SetRate(s_currentRate);
         s_pVoice2->SetVolume(s_currentVolume);
-        Log::Write("ScreenReader: SAPI voice 2 (event channel) initialized.");
+        Log::Mod("ScreenReader: SAPI voice 2 (event channel) initialized.");
     } else {
-        Log::Write("ScreenReader: WARNING - SAPI voice 2 creation failed, events will use voice 1.");
+        Log::Mod("ScreenReader: WARNING - SAPI voice 2 creation failed, events will use voice 1.");
         s_pVoice2 = nullptr;
     }
 
@@ -249,9 +249,9 @@ static bool InitSAPI()
     if (SUCCEEDED(hr) && s_pAudio1) {
         s_pAudio1->SetDeviceId(WAVE_MAPPER);
         hr = s_pVoice->SetOutput(s_pAudio1, TRUE);
-        Log::Write("ScreenReader: Voice 1 -> separate SpMMAudioOut (hr=0x%08X)", hr);
+        Log::Mod("ScreenReader: Voice 1 -> separate SpMMAudioOut (hr=0x%08X)", hr);
     } else {
-        Log::Write("ScreenReader: SpMMAudioOut 1 creation failed (hr=0x%08X), using default output.", hr);
+        Log::Mod("ScreenReader: SpMMAudioOut 1 creation failed (hr=0x%08X), using default output.", hr);
         s_pAudio1 = nullptr;
     }
 
@@ -261,9 +261,9 @@ static bool InitSAPI()
         if (SUCCEEDED(hr) && s_pAudio2) {
             s_pAudio2->SetDeviceId(WAVE_MAPPER);
             hr = s_pVoice2->SetOutput(s_pAudio2, TRUE);
-            Log::Write("ScreenReader: Voice 2 -> separate SpMMAudioOut (hr=0x%08X)", hr);
+            Log::Mod("ScreenReader: Voice 2 -> separate SpMMAudioOut (hr=0x%08X)", hr);
         } else {
-            Log::Write("ScreenReader: SpMMAudioOut 2 creation failed (hr=0x%08X), using default output.", hr);
+            Log::Mod("ScreenReader: SpMMAudioOut 2 creation failed (hr=0x%08X), using default output.", hr);
             s_pAudio2 = nullptr;
         }
     }
@@ -277,7 +277,7 @@ static bool InitSAPI()
 
 bool Initialize(HMODULE hModule)
 {
-    Log::Write("ScreenReader: Initializing (NVDA + SAPI dual-output)...");
+    Log::Mod("ScreenReader: Initializing (NVDA + SAPI dual-output)...");
 
     EnsureCOMInitialized();
 
@@ -286,13 +286,13 @@ bool Initialize(HMODULE hModule)
 
     if (nvdaOk && sapiOk) {
         s_backend = Backend::NVDA_SAPI;
-        Log::Write("ScreenReader: Backend = NVDA+SAPI (NVDA for braille, SAPI for game audio)");
+        Log::Mod("ScreenReader: Backend = NVDA+SAPI (NVDA for braille, SAPI for game audio)");
     } else if (sapiOk) {
         s_backend = Backend::SAPI_ONLY;
-        Log::Write("ScreenReader: Backend = SAPI only (NVDA not available)");
+        Log::Mod("ScreenReader: Backend = SAPI only (NVDA not available)");
     } else {
         s_backend = Backend::NONE;
-        Log::Write("ScreenReader: WARNING - No speech backend available.");
+        Log::Mod("ScreenReader: WARNING - No speech backend available.");
     }
 
     s_initialized = (s_backend != Backend::NONE);
@@ -342,7 +342,7 @@ void Shutdown()
 
     s_backend = Backend::NONE;
     s_initialized = false;
-    Log::Write("ScreenReader: Shutdown complete.");
+    Log::Mod("ScreenReader: Shutdown complete.");
 }
 
 bool IsAvailable()
@@ -460,7 +460,7 @@ void CycleVoice()
         if (name) {
             wchar_t msg[256];
             wsprintfW(msg, L"Voice: %s", name);
-            Log::Write("ScreenReader: Switched to voice %lu/%lu: %ls",
+            Log::Mod("ScreenReader: Switched to voice %lu/%lu: %ls",
                        s_currentVoiceIndex + 1, count, name);
             Speak(msg, true);
             CoTaskMemFree(name);
@@ -487,7 +487,7 @@ void IncreaseRate()
     if (s_pVoice2) s_pVoice2->SetRate(s_currentRate);
     wchar_t msg[64];
     wsprintfW(msg, L"Rate %ld", s_currentRate);
-    Log::Write("ScreenReader: Speech rate -> %ld", s_currentRate);
+    Log::Mod("ScreenReader: Speech rate -> %ld", s_currentRate);
     Speak(msg, true);
 }
 
@@ -502,7 +502,7 @@ void SetRate(long rate)
         s_pVoice->SetRate(s_currentRate);
     }
     if (s_pVoice2) s_pVoice2->SetRate(s_currentRate);
-    Log::Write("ScreenReader: Speech rate set to %ld (silent).", s_currentRate);
+    Log::Mod("ScreenReader: Speech rate set to %ld (silent).", s_currentRate);
 }
 
 void DecreaseRate()
@@ -514,7 +514,7 @@ void DecreaseRate()
     if (s_pVoice2) s_pVoice2->SetRate(s_currentRate);
     wchar_t msg[64];
     wsprintfW(msg, L"Rate %ld", s_currentRate);
-    Log::Write("ScreenReader: Speech rate -> %ld", s_currentRate);
+    Log::Mod("ScreenReader: Speech rate -> %ld", s_currentRate);
     Speak(msg, true);
 }
 
@@ -534,7 +534,7 @@ void IncreaseVolume()
     if (s_pVoice2) s_pVoice2->SetVolume(s_currentVolume);
     wchar_t msg[64];
     wsprintfW(msg, L"Volume %u percent", (unsigned)s_currentVolume);
-    Log::Write("ScreenReader: Speech volume -> %u", (unsigned)s_currentVolume);
+    Log::Mod("ScreenReader: Speech volume -> %u", (unsigned)s_currentVolume);
     Speak(msg, true);
 }
 
@@ -549,7 +549,7 @@ void DecreaseVolume()
     if (s_pVoice2) s_pVoice2->SetVolume(s_currentVolume);
     wchar_t msg[64];
     wsprintfW(msg, L"Volume %u percent", (unsigned)s_currentVolume);
-    Log::Write("ScreenReader: Speech volume -> %u", (unsigned)s_currentVolume);
+    Log::Mod("ScreenReader: Speech volume -> %u", (unsigned)s_currentVolume);
     Speak(msg, true);
 }
 
@@ -563,7 +563,7 @@ void RepeatLast()
         Speak(L"Nothing to repeat.", true);
         return;
     }
-    Log::Write("ScreenReader: Repeating last dialog");
+    Log::Mod("ScreenReader: Repeating last dialog");
     Speak(s_lastSpokenText.c_str(), true);
 }
 

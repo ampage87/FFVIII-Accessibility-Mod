@@ -8,7 +8,7 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 Set WshShell = CreateObject("WScript.Shell")
 
 scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
-ps1Path = fso.BuildPath(scriptDir, "deploy.ps1")
+ps1Path = fso.BuildPath(scriptDir, "src\deploy.ps1")
 
 WshShell.CurrentDirectory = scriptDir
 WshShell.Run "powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & ps1Path & """", 0, True

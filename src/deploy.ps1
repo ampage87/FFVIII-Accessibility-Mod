@@ -8,14 +8,15 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$batPath   = Join-Path $scriptDir "deploy.bat"
-$logsDir   = Join-Path $scriptDir "Logs"
+$scriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
+$projectDir = Split-Path -Parent $scriptDir
+$batPath    = Join-Path $scriptDir "deploy.bat"
+$logsDir    = Join-Path $projectDir "Logs"
 if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir | Out-Null }
-$logPath   = Join-Path $logsDir "build_latest.log"
+$logPath    = Join-Path $logsDir "build_latest.log"
 
 # Extract version from ff8_accessibility.h
-$headerPath = Join-Path $scriptDir "src\ff8_accessibility.h"
+$headerPath = Join-Path $scriptDir "ff8_accessibility.h"
 $modVersion = "unknown"
 if (Test-Path $headerPath) {
     $versionLine = Select-String -Path $headerPath -Pattern '^#define FF8OPC_VERSION "([^"]+)"' | Select-Object -First 1
@@ -68,7 +69,7 @@ $form.Add_Shown({
 $process = New-Object System.Diagnostics.Process
 $process.StartInfo.FileName               = "cmd.exe"
 $process.StartInfo.Arguments              = "/c `"`"$batPath`"`""
-$process.StartInfo.WorkingDirectory        = $scriptDir
+$process.StartInfo.WorkingDirectory        = $projectDir
 $process.StartInfo.RedirectStandardOutput  = $true
 $process.StartInfo.RedirectStandardError   = $true
 $process.StartInfo.UseShellExecute         = $false

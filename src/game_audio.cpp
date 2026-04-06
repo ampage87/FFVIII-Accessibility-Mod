@@ -75,10 +75,10 @@ static void ExtractNxAudioEngineAddresses(void* ffnxFunc)
         uint32_t funcBase = (uint32_t)(uintptr_t)ffnxFunc;
 
         // Dump first 128 bytes for diagnostic
-        Log::Write("GameAudio: [SCAN] FFNx set_music_volume_for_channel at 0x%08X, first 128 bytes:", funcBase);
+        Log::Mod("GameAudio: [SCAN] FFNx set_music_volume_for_channel at 0x%08X, first 128 bytes:", funcBase);
         for (int row = 0; row < 8; row++) {
             int off = row * 16;
-            Log::Write("GameAudio: [SCAN] +%02X: %02X %02X %02X %02X %02X %02X %02X %02X  "
+            Log::Mod("GameAudio: [SCAN] +%02X: %02X %02X %02X %02X %02X %02X %02X %02X  "
                        "%02X %02X %02X %02X %02X %02X %02X %02X",
                        off,
                        code[off+0],  code[off+1],  code[off+2],  code[off+3],
@@ -114,25 +114,25 @@ static void ExtractNxAudioEngineAddresses(void* ffnxFunc)
                 if (callTarget < (funcBase - 0x01000000) || callTarget > (funcBase + 0x01000000)) continue;
 
                 // Found a valid MOV ECX, imm32 + CALL pattern
-                Log::Write("GameAudio: [SCAN] +%02X: MOV ECX, 0x%08X (nxAudioEngine candidate)", i, candidateThis);
-                Log::Write("GameAudio: [SCAN] +%02X: CALL 0x%08X (setMusicVolume candidate)", j, callTarget);
+                Log::Mod("GameAudio: [SCAN] +%02X: MOV ECX, 0x%08X (nxAudioEngine candidate)", i, candidateThis);
+                Log::Mod("GameAudio: [SCAN] +%02X: CALL 0x%08X (setMusicVolume candidate)", j, callTarget);
 
                 s_nxAudioEngine = (void*)(uintptr_t)candidateThis;
                 s_fnSetMusicVolume = (SetMusicVolumeFn)(uintptr_t)callTarget;
                 s_directCallAvailable = true;
 
-                Log::Write("GameAudio: Direct nxAudioEngine access ENABLED: "
+                Log::Mod("GameAudio: Direct nxAudioEngine access ENABLED: "
                            "nxAudioEngine=0x%08X setMusicVolume=0x%08X",
                            candidateThis, callTarget);
                 return;
             }
         }
 
-        Log::Write("GameAudio: [SCAN] WARNING: Could not find nxAudioEngine pattern. "
+        Log::Mod("GameAudio: [SCAN] WARNING: Could not find nxAudioEngine pattern. "
                    "Falling back to original function call (subject to hold flag).");
     }
     __except(EXCEPTION_EXECUTE_HANDLER) {
-        Log::Write("GameAudio: [SCAN] Exception scanning FFNx function bytes.");
+        Log::Mod("GameAudio: [SCAN] Exception scanning FFNx function bytes.");
     }
 }
 
@@ -153,7 +153,7 @@ static void ScanAllNxAudioEngineMethods(uint32_t knownFuncAddr)
     uint32_t scanStart = knownFuncAddr - 0x100000;
     uint32_t scanEnd   = knownFuncAddr + 0x100000;
 
-    Log::Write("GameAudio: [METHODS] Scanning 0x%08X-0x%08X for MOV ECX, 0x%08X (B9 %02X %02X %02X %02X)",
+    Log::Mod("GameAudio: [METHODS] Scanning 0x%08X-0x%08X for MOV ECX, 0x%08X (B9 %02X %02X %02X %02X)",
                scanStart, scanEnd, nxAddr, pattern[1], pattern[2], pattern[3], pattern[4]);
 
     // Collect unique call targets (static so stream trace can reference them)
@@ -196,14 +196,14 @@ static void ScanAllNxAudioEngineMethods(uint32_t knownFuncAddr)
             }
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        Log::Write("GameAudio: [METHODS] Exception during scan (found %d so far)", targetCount);
+        Log::Mod("GameAudio: [METHODS] Exception during scan (found %d so far)", targetCount);
     }
 
-    Log::Write("GameAudio: [METHODS] Found %d unique NxAudioEngine method targets:", targetCount);
+    Log::Mod("GameAudio: [METHODS] Found %d unique NxAudioEngine method targets:", targetCount);
     for (int i = 0; i < targetCount; i++) {
         const char* label = "";
         if (targets[i] == (uint32_t)(uintptr_t)s_fnSetMusicVolume) label = " <-- setMusicVolume (KNOWN)";
-        Log::Write("GameAudio: [METHODS]   #%02d: 0x%08X (caller at 0x%08X)%s",
+        Log::Mod("GameAudio: [METHODS]   #%02d: 0x%08X (caller at 0x%08X)%s",
                    i, targets[i], callerOffsets[i], label);
     }
 
@@ -244,7 +244,7 @@ static void ScanAllNxAudioEngineMethods(uint32_t knownFuncAddr)
                 stop_movie_game = update_movie_sample_game + 0x3E2 + 5 + r;
             }
         }
-        Log::Write("GameAudio: [STREAM] opcode_movie=0x%08X start_movie=0x%08X update_movie_sample=0x%08X stop_movie=0x%08X",
+        Log::Mod("GameAudio: [STREAM] opcode_movie=0x%08X start_movie=0x%08X update_movie_sample=0x%08X stop_movie=0x%08X",
                    opcode_movie, start_movie_game, update_movie_sample_game, stop_movie_game);
 
         // stop_movie should have been replaced by FFNx with a JMP (E9)
@@ -253,17 +253,17 @@ static void ScanAllNxAudioEngineMethods(uint32_t knownFuncAddr)
             if (sm[0] == 0xE9) {
                 int32_t r = *(int32_t*)(sm + 1);
                 uint32_t ff8StopMovie = stop_movie_game + 5 + r;
-                Log::Write("GameAudio: [STREAM] stop_movie JMP -> ff8_stop_movie at 0x%08X", ff8StopMovie);
+                Log::Mod("GameAudio: [STREAM] stop_movie JMP -> ff8_stop_movie at 0x%08X", ff8StopMovie);
 
                 // Scan ff8_stop_movie for B9 <nxAudioEngine> + E8 pattern
                 // ff8_stop_movie calls ffmpeg_stop_movie() which calls nxAudioEngine.stopStream()
                 // But the nxAudioEngine call may be inside ffmpeg_stop_movie, not ff8_stop_movie directly.
                 // First scan ff8_stop_movie for CALL instructions to find ffmpeg_stop_movie.
                 uint8_t* fsm = (uint8_t*)(uintptr_t)ff8StopMovie;
-                Log::Write("GameAudio: [STREAM] ff8_stop_movie first 64 bytes:");
+                Log::Mod("GameAudio: [STREAM] ff8_stop_movie first 64 bytes:");
                 for (int row2 = 0; row2 < 4; row2++) {
                     int off2 = row2 * 16;
-                    Log::Write("GameAudio: [STREAM] +%02X: %02X %02X %02X %02X %02X %02X %02X %02X  "
+                    Log::Mod("GameAudio: [STREAM] +%02X: %02X %02X %02X %02X %02X %02X %02X %02X  "
                                "%02X %02X %02X %02X %02X %02X %02X %02X",
                                off2,
                                fsm[off2+0],  fsm[off2+1],  fsm[off2+2],  fsm[off2+3],
@@ -276,7 +276,7 @@ static void ScanAllNxAudioEngineMethods(uint32_t knownFuncAddr)
                     if (fsm[k] == 0xE8) {
                         int32_t r2 = *(int32_t*)(fsm + k + 1);
                         uint32_t callTgt = ff8StopMovie + k + 5 + r2;
-                        Log::Write("GameAudio: [STREAM] ff8_stop_movie+%02X: CALL 0x%08X", k, callTgt);
+                        Log::Mod("GameAudio: [STREAM] ff8_stop_movie+%02X: CALL 0x%08X", k, callTgt);
                         
                         // Check if the call target contains B9 <nxAudioEngine> (it's ffmpeg_stop_movie -> stopStream)
                         uint8_t* ct = (uint8_t*)(uintptr_t)callTgt;
@@ -288,7 +288,7 @@ static void ScanAllNxAudioEngineMethods(uint32_t knownFuncAddr)
                                     if (ct[n] == 0xE8) {
                                         int32_t r3 = *(int32_t*)(ct + n + 1);
                                         uint32_t streamMethod = callTgt + n + 5 + r3;
-                                        Log::Write("GameAudio: [STREAM] Found stopStream candidate: 0x%08X (from ffmpeg func at 0x%08X+%02X)",
+                                        Log::Mod("GameAudio: [STREAM] Found stopStream candidate: 0x%08X (from ffmpeg func at 0x%08X+%02X)",
                                                    streamMethod, callTgt, n);
                                         
                                         // setStreamMasterVolume is declared 4 methods after stopStream in audio.h:
@@ -297,7 +297,7 @@ static void ScanAllNxAudioEngineMethods(uint32_t knownFuncAddr)
                                         // that has been seen called from the movie/stream context
                                         for (int t = 0; t < targetCount; t++) {
                                             if (targets[t] == streamMethod) {
-                                                Log::Write("GameAudio: [STREAM] stopStream confirmed as method #%02d", t);
+                                                Log::Mod("GameAudio: [STREAM] stopStream confirmed as method #%02d", t);
                                             }
                                         }
 
@@ -332,11 +332,11 @@ static void ScanAllNxAudioEngineMethods(uint32_t knownFuncAddr)
                                                 s_engineOffset = foundEngineOff;
                                                 s_fnSoLoudFadeVolume = (SoLoudFadeVolumeFn)(uintptr_t)foundFadeVolume;
                                                 s_fmvVolumeAvailable = true;
-                                                Log::Write("GameAudio: [STREAM] FMV volume ENABLED: "
+                                                Log::Mod("GameAudio: [STREAM] FMV volume ENABLED: "
                                                            "_engine=nxAE+0x%X, _currentStream.handle=nxAE+0x%X, fadeVolume=0x%08X",
                                                            s_engineOffset, s_streamHandleOffset, foundFadeVolume);
                                             } else {
-                                                Log::Write("GameAudio: [STREAM] FMV volume FAILED: "
+                                                Log::Mod("GameAudio: [STREAM] FMV volume FAILED: "
                                                            "handleOff=0x%X engineOff=0x%X fadeVol=0x%08X",
                                                            foundHandleOff, foundEngineOff, foundFadeVolume);
                                             }
@@ -352,7 +352,7 @@ static void ScanAllNxAudioEngineMethods(uint32_t knownFuncAddr)
             }
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        Log::Write("GameAudio: [STREAM] Exception during stop_movie trace");
+        Log::Mod("GameAudio: [STREAM] Exception during stop_movie trace");
     }
 }
 
@@ -430,7 +430,7 @@ static void ReapplyVolume()
     // Log periodically
     s_reapplyCount++;
     if (s_reapplyCount % 20 == 1) {
-        Log::Write("GameAudio: [REAPPLY] #%d vol=%.0f%% gameVol=[%u,%u] direct=%s",
+        Log::Mod("GameAudio: [REAPPLY] #%d vol=%.0f%% gameVol=[%u,%u] direct=%s",
                    s_reapplyCount,
                    s_bgmVolume * 100.0f,
                    s_lastGameVolume[0], s_lastGameVolume[1],
@@ -458,7 +458,7 @@ static void TryInstallHook()
         int32_t offset = *(int32_t*)(pFunc + 1);
         void* ffnxFunc = (void*)(pFunc + 5 + offset);
         s_hookedFuncAddr = ffnxFunc;
-        Log::Write("GameAudio: FFNx JMP detected at 0x%08X -> 0x%08X",
+        Log::Mod("GameAudio: FFNx JMP detected at 0x%08X -> 0x%08X",
                    funcAddr, (uint32_t)(uintptr_t)ffnxFunc);
 
         // IMPORTANT: Extract nxAudioEngine addresses BEFORE MinHook patches the bytes
@@ -472,16 +472,16 @@ static void TryInstallHook()
         // Now install MinHook
         MH_STATUS st = MH_CreateHook(ffnxFunc, (LPVOID)HookedSetMusicVolumeForChannel,
                                       (LPVOID*)&s_originalSetMusicVolumeForChannel);
-        Log::Write("GameAudio: MH_CreateHook(0x%08X) = %s",
+        Log::Mod("GameAudio: MH_CreateHook(0x%08X) = %s",
                    (uint32_t)(uintptr_t)ffnxFunc, MH_StatusToString(st));
 
         if (st == MH_OK) {
             MH_STATUS en = MH_EnableHook(ffnxFunc);
-            Log::Write("GameAudio: MH_EnableHook = %s", MH_StatusToString(en));
+            Log::Mod("GameAudio: MH_EnableHook = %s", MH_StatusToString(en));
             if (en == MH_OK) {
                 s_hookInstalled = true;
                 s_lastReapplyTick = GetTickCount();
-                Log::Write("GameAudio: Hook installed. BGM volume %.0f%%. Direct=%s, FMV=%s.",
+                Log::Mod("GameAudio: Hook installed. BGM volume %.0f%%. Direct=%s, FMV=%s.",
                            s_bgmVolume * 100.0f,
                            s_directCallAvailable ? "YES" : "NO (fallback)",
                            s_fmvVolumeAvailable ? "YES" : "NO");
@@ -491,7 +491,7 @@ static void TryInstallHook()
             }
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        Log::Write("GameAudio: Exception reading 0x%08X", funcAddr);
+        Log::Mod("GameAudio: Exception reading 0x%08X", funcAddr);
     }
 }
 
@@ -516,7 +516,7 @@ void Initialize()
     s_lastGameVolume[1] = 127;
     s_lastReapplyTick = GetTickCount();
     s_reapplyCount = 0;
-    Log::Write("GameAudio: Initialized. Default BGM volume %.0f%%.", s_bgmVolume * 100.0f);
+    Log::Mod("GameAudio: Initialized. Default BGM volume %.0f%%.", s_bgmVolume * 100.0f);
 }
 
 void Update()
@@ -551,14 +551,14 @@ void Shutdown()
 
     if (s_hookInstalled && s_hookedFuncAddr) {
         MH_DisableHook(s_hookedFuncAddr);
-        Log::Write("GameAudio: Hook disabled.");
+        Log::Mod("GameAudio: Hook disabled.");
     }
     s_hookInstalled = false;
     s_originalSetMusicVolumeForChannel = nullptr;
     s_hookedFuncAddr = nullptr;
     s_directCallAvailable = false;
     s_fmvVolumeAvailable = false;
-    Log::Write("GameAudio: Shutdown complete.");
+    Log::Mod("GameAudio: Shutdown complete.");
 }
 
 void VolumeDown()
@@ -567,7 +567,7 @@ void VolumeDown()
     if (newVol < 0.0f) newVol = 0.0f;
     s_bgmVolume = newVol;
 
-    Log::Write("GameAudio: BGM volume -> %.0f%%", s_bgmVolume * 100.0f);
+    Log::Mod("GameAudio: BGM volume -> %.0f%%", s_bgmVolume * 100.0f);
 
     if (s_hookInstalled) ReapplyVolume();
 
@@ -582,7 +582,7 @@ void VolumeUp()
     if (newVol > 1.0f) newVol = 1.0f;
     s_bgmVolume = newVol;
 
-    Log::Write("GameAudio: BGM volume -> %.0f%%", s_bgmVolume * 100.0f);
+    Log::Mod("GameAudio: BGM volume -> %.0f%%", s_bgmVolume * 100.0f);
 
     if (s_hookInstalled) ReapplyVolume();
 

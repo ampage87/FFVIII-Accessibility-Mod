@@ -11,9 +11,336 @@
 # If an AVI isn't detected, check ff8_accessibility.log for [FmvSkip] lines
 # showing the actual AVI filename opened by the game/FFNx.
 
-# Intro FMV (ocean, Rinoa, Squall vs Seifer cinematic - plays after selecting New Game)
+# ============================================================
+# DISC 0 (Game Disc 1) — Balamb Garden through End of Disc 1
+# ============================================================
+
+# Balamb Garden exterior establishing shot
+disc00_00h.avi = disc00_00h.vtt
+
+# Balamb Garden interior hallway
+disc00_01h.avi = disc00_01h.vtt
+
+# Quistis classroom / Garden interior transition
+disc00_02h.avi = disc00_02h.vtt
+
+# Dollet SeeD Field Exam — beach landing (long)
+disc00_03h.avi = disc00_03h.vtt
+
+# Dollet Communication Tower — satellite dish activation
+disc00_04h.avi = disc00_04h.vtt
+
+# X-ATM092 activation and Dollet chase (long)
+disc00_05h.avi = disc00_05h.vtt
+
+# Brief Dollet transition
+disc00_06h.avi = disc00_06h.vtt
+
+# Dollet beach evacuation and escape (long)
+disc00_07h.avi = disc00_07h.vtt
+
+# SeeD graduation ceremony and celebration
+disc00_08h.avi = disc00_08h.vtt
+
+# Ballroom dance — Waltz for the Moon (long, iconic)
+disc00_09h.avi = disc00_09h.vtt
+
+# Post-ball balcony scene
+disc00_10h.avi = disc00_10h.vtt
+
+# Training Center encounter
+disc00_11h.avi = disc00_11h.vtt
+
+# Brief transition
+disc00_12h.avi = disc00_12h.vtt
+
+# Very brief transition
+disc00_13h.avi = disc00_13h.vtt
+
+# Timber train coupling — first sequence
+disc00_14h.avi = disc00_14h.vtt
+
+# Timber train coupling — second sequence
+disc00_15h.avi = disc00_15h.vtt
+
+# Timber town transition
+disc00_16h.avi = disc00_16h.vtt
+
+# Timber TV Station sequence (long)
+disc00_17h.avi = disc00_17h.vtt
+
+# Transition to Galbadia
+disc00_18h.avi = disc00_18h.vtt
+
+# Galbadia Garden exterior
+disc00_19h.avi = disc00_19h.vtt
+
+# Deling City arrival
+disc00_20h.avi = disc00_20h.vtt
+
+# Sorceress Edea's Parade through Deling City (long)
+disc00_21h.avi = disc00_21h.vtt
+
+# Assassination mission setup
+disc00_22h.avi = disc00_22h.vtt
+
+# Opening credits FMV — Liberi Fatali (plays at game launch, before title screen)
+disc00_23h.avi = disc00_23h.vtt
+
+# Assassination attempt — Irvine's sniper sequence
+disc00_24h.avi = disc00_24h.vtt
+
+# Post-assassination transition
+disc00_25h.avi = disc00_25h.vtt
+
+# Seifer as Edea's knight
+disc00_26h.avi = disc00_26h.vtt
+
+# Squall vs Seifer rematch on parade float
+disc00_27h.avi = disc00_27h.vtt
+
+# Edea's ice lance impales Squall
+disc00_28h.avi = disc00_28h.vtt
+
+# End of Disc 1 — Squall falls
+disc00_29h.avi = disc00_29h.vtt
+
+# Intro FMV — ocean, Rinoa, Squall vs Seifer duel (plays after New Game)
 disc00_30h.avi = ff8_intro_ad.vtt
 
-# Opening credits FMV (black-and-white character intros with credits text)
-# TODO: verify the actual AVI filename during testing
-# disc00_23h.avi = ff8_opening_credits_ad.vtt
+# ============================================================
+# DISC 1 (Game Disc 2) — D-District Prison through Lunar Cry
+# ============================================================
+
+# D-District Prison establishing shot
+disc01_00h.avi = disc01_00h.vtt
+
+# Prison escape
+disc01_01h.avi = disc01_01h.vtt
+
+# Missile Base approach
+disc01_02h.avi = disc01_02h.vtt
+
+# Missile launch preparation
+disc01_03h.avi = disc01_03h.vtt
+
+# Brief transition
+disc01_04h.avi = disc01_04h.vtt
+
+# Balamb Garden emergency
+disc01_05h.avi = disc01_05h.vtt
+
+# Garden systems activate
+disc01_06h.avi = disc01_06h.vtt
+
+# MD Level discovery
+disc01_07h.avi = disc01_07h.vtt
+
+# Balamb Garden lifts off
+disc01_08h.avi = disc01_08h.vtt
+
+# Garden in flight / missile impact
+disc01_09h.avi = disc01_09h.vtt
+
+# Fisherman's Horizon crash
+disc01_10h.avi = disc01_10h.vtt
+
+# Fisherman's Horizon scenes
+disc01_11h.avi = disc01_11h.vtt
+
+# Galbadia Garden mobilizes
+disc01_12h.avi = disc01_12h.vtt
+
+# Two Gardens face off
+disc01_13h.avi = disc01_13h.vtt
+
+# Battle of the Gardens — collision (long)
+disc01_14h.avi = disc01_14h.vtt
+
+# Battle combat transition
+disc01_15h.avi = disc01_15h.vtt
+
+# Battle clip
+disc01_16h.avi = disc01_16h.vtt
+
+# Battle transition
+disc01_17h.avi = disc01_17h.vtt
+
+# Squall advances through battle
+disc01_18h.avi = disc01_18h.vtt
+
+# Squall confronts Edea / Ultimecia revealed
+disc01_19h.avi = disc01_19h.vtt
+
+# Battle aftermath — Gardens separate
+disc01_20h.avi = disc01_20h.vtt
+
+# Rinoa collapses into coma
+disc01_21h.avi = disc01_21h.vtt
+
+# Rinoa unconscious / aftermath
+disc01_22h.avi = disc01_22h.vtt
+
+# Travel toward Esthar
+disc01_23h.avi = disc01_23h.vtt
+
+# Esthar cloaking barrier / first glimpse
+disc01_24h.avi = disc01_24h.vtt
+
+# Esthar city panorama
+disc01_25h.avi = disc01_25h.vtt
+
+# Esthar interior transition
+disc01_26h.avi = disc01_26h.vtt
+
+# Brief Esthar transition
+disc01_27h.avi = disc01_27h.vtt
+
+# Sorceress Memorial / Odine's Lab
+disc01_28h.avi = disc01_28h.vtt
+
+# Lunar Gate launch sequence (long)
+disc01_29h.avi = disc01_29h.vtt
+
+# Pod approaching Lunar Base
+disc01_30h.avi = disc01_30h.vtt
+
+# Lunar Base establishing shot
+disc01_31h.avi = disc01_31h.vtt
+
+# Lunar Base interior
+disc01_32h.avi = disc01_32h.vtt
+
+# End of Disc 2 — Lunar Cry begins (long)
+disc01_33h.avi = disc01_33h.vtt
+
+# ============================================================
+# DISC 2 (Game Disc 3) — Space rescue through Time Compression
+# ============================================================
+
+# Space aftermath — Lunar Cry debris
+disc02_00h.avi = disc02_00h.vtt
+
+# Rinoa drifting in space
+disc02_01h.avi = disc02_01h.vtt
+
+# Brief space clip
+disc02_02h.avi = disc02_02h.vtt
+
+# Squall prepares for EVA
+disc02_03h.avi = disc02_03h.vtt
+
+# Squall exits into space
+disc02_04h.avi = disc02_04h.vtt
+
+# Reaching for Rinoa
+disc02_05h.avi = disc02_05h.vtt
+
+# Squall catches Rinoa
+disc02_06h.avi = disc02_06h.vtt
+
+# Floating toward the Ragnarok
+disc02_07h.avi = disc02_07h.vtt
+
+# Ragnarok exterior close-up
+disc02_08h.avi = disc02_08h.vtt
+
+# Boarding and activating the Ragnarok (long)
+disc02_09h.avi = disc02_09h.vtt
+
+# Atmospheric re-entry
+disc02_10h.avi = disc02_10h.vtt
+
+# Ragnarok descent through clouds
+disc02_11h.avi = disc02_11h.vtt
+
+# Landing at Esthar
+disc02_12h.avi = disc02_12h.vtt
+
+# Lunatic Pandora establishing shot
+disc02_13h.avi = disc02_13h.vtt
+
+# Brief Ragnarok/Esthar transition
+disc02_14h.avi = disc02_14h.vtt
+
+# Rinoa at Sorceress Memorial
+disc02_15h.avi = disc02_15h.vtt
+
+# Squall's rescue of Rinoa
+disc02_16h.avi = disc02_16h.vtt
+
+# Breaking Rinoa free
+disc02_17h.avi = disc02_17h.vtt
+
+# Escaping the Memorial
+disc02_18h.avi = disc02_18h.vtt
+
+# Ragnarok escape from Esthar
+disc02_19h.avi = disc02_19h.vtt
+
+# Ragnarok peaceful flight
+disc02_20h.avi = disc02_20h.vtt
+
+# Approaching Lunatic Pandora
+disc02_21h.avi = disc02_21h.vtt
+
+# Ragnarok breaches the Pandora
+disc02_22h.avi = disc02_22h.vtt
+
+# Inside the Lunatic Pandora
+disc02_23h.avi = disc02_23h.vtt
+
+# Confrontation with Seifer / Adel's tomb
+disc02_24h.avi = disc02_24h.vtt
+
+# Brief magical flash
+disc02_25h.avi = disc02_25h.vtt
+
+# Sorceress Adel released
+disc02_26h.avi = disc02_26h.vtt
+
+# Adel's defeat / Ultimecia possesses Rinoa
+disc02_27h.avi = disc02_27h.vtt
+
+# Ellone activates her power
+disc02_28h.avi = disc02_28h.vtt
+
+# Time Compression begins
+disc02_29h.avi = disc02_29h.vtt
+
+# Full Time Compression sequence (long)
+disc02_30h.avi = disc02_30h.vtt
+
+# Arrival at Ultimecia's era — castle approach (long)
+disc02_31h.avi = disc02_31h.vtt
+
+# ============================================================
+# DISC 3 (Game Disc 4) — Ultimecia's Castle, Final Battle, Ending
+# ============================================================
+
+# Ultimecia's Castle interior
+disc03_00h.avi = disc03_00h.vtt
+
+# Ultimecia's transformation and final battle (long)
+disc03_01h.avi = disc03_01h.vtt
+
+# Castle collapse / Time Compression unravels
+disc03_02h.avi = disc03_02h.vtt
+
+# Squall lost in Time Compression
+disc03_03h.avi = disc03_03h.vtt
+
+# Ending Part 1 — Celebration and memories (very long)
+disc03_04h.avi = disc03_04h.vtt
+
+# NOTE: disc03_05h.avi does not exist (no video file for this index)
+
+# Ending Part 2 — Squall & Rinoa reunion, final montage, credits (longest FMV)
+disc03_06h.avi = disc03_06h.vtt
+
+# ============================================================
+# DISC 4 (Common/System)
+# ============================================================
+
+# Squaresoft logo splash
+disc04_00h.avi = disc04_00h.vtt

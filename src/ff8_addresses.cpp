@@ -152,7 +152,7 @@ static uint32_t get_relative_call(uint32_t base, uint32_t offset)
         // FF 15 xx xx xx xx = call dword ptr [addr]
         size = 2;
     } else {
-        Log::Write("FF8Addresses: WARNING - unexpected opcode 0x%02X at 0x%08X + 0x%X",
+        Log::Mod("FF8Addresses: WARNING - unexpected opcode 0x%02X at 0x%08X + 0x%X",
                    opcode, base, offset);
         size = 1;  // try anyway
     }
@@ -197,7 +197,7 @@ static FF8Version detect_version()
         uint32_t v1 = *(uint32_t*)0x401004;
         uint32_t v2 = *(uint32_t*)0x401404;
 
-        Log::Write("FF8Addresses: Version check v1=0x%08X v2=0x%08X", v1, v2);
+        Log::Mod("FF8Addresses: Version check v1=0x%08X v2=0x%08X", v1, v2);
 
         if (v1 == 0x3885048D && v2 == 0x159618)  return VER_FF8_12_US;
         if (v1 == 0x3885048D && v2 == 0x1597C8)  return VER_FF8_12_US_NV;
@@ -218,7 +218,7 @@ static FF8Version detect_version()
         }
     }
     __except(EXCEPTION_EXECUTE_HANDLER) {
-        Log::Write("FF8Addresses: Exception during version detection!");
+        Log::Mod("FF8Addresses: Exception during version detection!");
     }
 
     return VER_UNKNOWN;
@@ -288,36 +288,36 @@ static bool extract_menu_state_addresses(uint32_t func_addr)
 
     // Verify prologue pattern: SUB ESP, imm32 = 81 EC xx xx xx xx
     if (code[0] != 0x81 || code[1] != 0xEC) {
-        Log::Write("FF8Addresses: WARNING - main_menu_controller prologue mismatch at +00: "
+        Log::Mod("FF8Addresses: WARNING - main_menu_controller prologue mismatch at +00: "
                    "expected 81 EC, got %02X %02X", code[0], code[1]);
         return false;
     }
 
     // +06: MOV AX, [imm32] = 66 A1 xx xx xx xx
     if (code[6] != 0x66 || code[7] != 0xA1) {
-        Log::Write("FF8Addresses: WARNING - main_menu_controller prologue mismatch at +06: "
+        Log::Mod("FF8Addresses: WARNING - main_menu_controller prologue mismatch at +06: "
                    "expected 66 A1, got %02X %02X", code[6], code[7]);
         return false;
     }
     uint32_t addrA = *(uint32_t*)(code + 8);
     pMenuStateA = (WORD*)addrA;
-    Log::Write("FF8Addresses:   pMenuStateA (WORD*) = 0x%08X  [extracted from MOV AX,[addr] at +06]", addrA);
+    Log::Mod("FF8Addresses:   pMenuStateA (WORD*) = 0x%08X  [extracted from MOV AX,[addr] at +06]", addrA);
 
     // +0C: PUSH EBX = 53
     if (code[12] != 0x53) {
-        Log::Write("FF8Addresses: WARNING - expected PUSH EBX (53) at +0C, got %02X", code[12]);
+        Log::Mod("FF8Addresses: WARNING - expected PUSH EBX (53) at +0C, got %02X", code[12]);
         // Non-fatal, continue
     }
 
     // +0D: MOV EBX, [imm32] = 8B 1D xx xx xx xx
     if (code[13] != 0x8B || code[14] != 0x1D) {
-        Log::Write("FF8Addresses: WARNING - main_menu_controller prologue mismatch at +0D: "
+        Log::Mod("FF8Addresses: WARNING - main_menu_controller prologue mismatch at +0D: "
                    "expected 8B 1D, got %02X %02X", code[13], code[14]);
         return false;
     }
     uint32_t addrB = *(uint32_t*)(code + 15);
     pMenuStateB = (uint32_t*)addrB;
-    Log::Write("FF8Addresses:   pMenuStateB (DWORD*) = 0x%08X [extracted from MOV EBX,[addr] at +0D]", addrB);
+    Log::Mod("FF8Addresses:   pMenuStateB (DWORD*) = 0x%08X [extracted from MOV EBX,[addr] at +0D]", addrB);
 
     return true;
 }
@@ -331,22 +331,22 @@ bool Resolve()
 {
     if (s_resolved) return true;
 
-    Log::Write("FF8Addresses: === Beginning address resolution ===");
+    Log::Mod("FF8Addresses: === Beginning address resolution ===");
 
     // Step 1: Detect game version
     FF8Version ver = detect_version();
     if (ver == VER_UNKNOWN) {
-        Log::Write("FF8Addresses: ERROR - Could not detect FF8 version.");
+        Log::Mod("FF8Addresses: ERROR - Could not detect FF8 version.");
         return false;
     }
-    Log::Write("FF8Addresses: Detected %s", version_name(ver));
+    Log::Mod("FF8Addresses: Detected %s", version_name(ver));
 
     s_start = get_start_address(ver);
     if (s_start == 0) {
-        Log::Write("FF8Addresses: ERROR - No start address for this version.");
+        Log::Mod("FF8Addresses: ERROR - No start address for this version.");
         return false;
     }
-    Log::Write("FF8Addresses: start = 0x%08X", s_start);
+    Log::Mod("FF8Addresses: start = 0x%08X", s_start);
 
     bool jp = is_jp(ver);
 
@@ -354,31 +354,31 @@ bool Resolve()
     __try {
         // ---- Chain: start -> winmain -> main_entry ----
         uint32_t winmain = get_relative_call(s_start, 0xDB);
-        Log::Write("FF8Addresses:   winmain = 0x%08X", winmain);
+        Log::Mod("FF8Addresses:   winmain = 0x%08X", winmain);
 
         uint32_t main_entry = get_relative_call(winmain, 0x4D);
-        Log::Write("FF8Addresses:   main_entry = 0x%08X", main_entry);
+        Log::Mod("FF8Addresses:   main_entry = 0x%08X", main_entry);
 
         if (jp) {
             main_entry = get_relative_call(main_entry, 0x0);
-            Log::Write("FF8Addresses:   main_entry (JP redirect) = 0x%08X", main_entry);
+            Log::Mod("FF8Addresses:   main_entry (JP redirect) = 0x%08X", main_entry);
         }
 
         // ---- Chain: main_entry -> pubintro -> credits -> main menu ----
         pubintro_main_loop = get_absolute_value(main_entry, 0x180);
-        Log::Write("FF8Addresses:   pubintro_main_loop = 0x%08X", pubintro_main_loop);
+        Log::Mod("FF8Addresses:   pubintro_main_loop = 0x%08X", pubintro_main_loop);
 
         credits_main_loop = get_absolute_value(pubintro_main_loop, 0x6D);
-        Log::Write("FF8Addresses:   credits_main_loop = 0x%08X", credits_main_loop);
+        Log::Mod("FF8Addresses:   credits_main_loop = 0x%08X", credits_main_loop);
 
         go_to_main_menu = get_absolute_value(credits_main_loop, 0xE2);
-        Log::Write("FF8Addresses:   go_to_main_menu_main_loop = 0x%08X", go_to_main_menu);
+        Log::Mod("FF8Addresses:   go_to_main_menu_main_loop = 0x%08X", go_to_main_menu);
 
         main_menu_enter = get_absolute_value(go_to_main_menu, 0x19);
-        Log::Write("FF8Addresses:   main_menu_enter = 0x%08X", main_menu_enter);
+        Log::Mod("FF8Addresses:   main_menu_enter = 0x%08X", main_menu_enter);
 
         main_menu_main_loop = get_absolute_value(go_to_main_menu, 0x2B);
-        Log::Write("FF8Addresses:   main_menu_main_loop = 0x%08X", main_menu_main_loop);
+        Log::Mod("FF8Addresses:   main_menu_main_loop = 0x%08X", main_menu_main_loop);
 
         // ---- v01.11: Extract runtime pointers from main_loop ----
         // v01.09/10 revealed the handler struct is empty at startup.
@@ -387,47 +387,47 @@ bool Resolve()
 
         // ---- Chain: main_menu_main_loop -> sub_470630 -> main_loop -> _mode ----
         uint32_t sub_470630 = get_absolute_value(main_menu_main_loop, 0xE4);
-        Log::Write("FF8Addresses:   sub_470630 = 0x%08X", sub_470630);
+        Log::Mod("FF8Addresses:   sub_470630 = 0x%08X", sub_470630);
 
         main_loop = get_absolute_value(sub_470630, 0x24);
-        Log::Write("FF8Addresses:   main_loop = 0x%08X", main_loop);
+        Log::Mod("FF8Addresses:   main_loop = 0x%08X", main_loop);
 
         uint32_t mode_offset = jp ? 0x118 : 0x115;
         uint32_t mode_addr = get_absolute_value(main_loop, mode_offset);
         pGameMode = (WORD*)mode_addr;
-        Log::Write("FF8Addresses:   _mode (WORD*) = 0x%08X", mode_addr);
+        Log::Mod("FF8Addresses:   _mode (WORD*) = 0x%08X", mode_addr);
 
         // ---- Chain: main_menu_main_loop -> menu_callbacks -> main_menu_controller ----
         uint32_t sub_497380 = get_relative_call(main_menu_main_loop, 0xAA);
-        Log::Write("FF8Addresses:   sub_497380 = 0x%08X", sub_497380);
+        Log::Mod("FF8Addresses:   sub_497380 = 0x%08X", sub_497380);
 
         uint32_t sub_4B3310 = get_relative_call(sub_497380, 0xD3);
-        Log::Write("FF8Addresses:   sub_4B3310 = 0x%08X", sub_4B3310);
+        Log::Mod("FF8Addresses:   sub_4B3310 = 0x%08X", sub_4B3310);
 
         uint32_t sub_4B3140 = get_relative_call(sub_4B3310, 0xC8);
-        Log::Write("FF8Addresses:   sub_4B3140 = 0x%08X", sub_4B3140);
+        Log::Mod("FF8Addresses:   sub_4B3140 = 0x%08X", sub_4B3140);
 
         uint32_t sub_4BDB30 = get_relative_call(sub_4B3140, 0x4);
-        Log::Write("FF8Addresses:   sub_4BDB30 = 0x%08X", sub_4BDB30);
+        Log::Mod("FF8Addresses:   sub_4BDB30 = 0x%08X", sub_4BDB30);
 
         uint32_t menu_callbacks_addr = get_absolute_value(sub_4BDB30, 0x11);
-        Log::Write("FF8Addresses:   menu_callbacks array = 0x%08X", menu_callbacks_addr);
+        Log::Mod("FF8Addresses:   menu_callbacks array = 0x%08X", menu_callbacks_addr);
 
         uint32_t menu_callback_16_func = *(uint32_t*)(menu_callbacks_addr + 16 * 8);
-        Log::Write("FF8Addresses:   menu_callbacks[16].func = 0x%08X", menu_callback_16_func);
+        Log::Mod("FF8Addresses:   menu_callbacks[16].func = 0x%08X", menu_callback_16_func);
 
         main_menu_controller = get_absolute_value(menu_callback_16_func, 0x8);
-        Log::Write("FF8Addresses:   main_menu_controller = 0x%08X", main_menu_controller);
+        Log::Mod("FF8Addresses:   main_menu_controller = 0x%08X", main_menu_controller);
 
         // ---- Extract cursor/state addresses from main_menu_controller prologue ----
-        Log::Write("FF8Addresses: --- Extracting menu state addresses from prologue ---");
+        Log::Mod("FF8Addresses: --- Extracting menu state addresses from prologue ---");
         if (!extract_menu_state_addresses(main_menu_controller)) {
-            Log::Write("FF8Addresses: WARNING - Could not extract menu state addresses from prologue.");
-            Log::Write("FF8Addresses: Falling back to hex dump for manual analysis.");
+            Log::Mod("FF8Addresses: WARNING - Could not extract menu state addresses from prologue.");
+            Log::Mod("FF8Addresses: Falling back to hex dump for manual analysis.");
             // Dump first 32 bytes for debugging
             uint8_t* code = (uint8_t*)main_menu_controller;
             for (int i = 0; i < 32; i += 16) {
-                Log::Write("  +%02X: %02X %02X %02X %02X %02X %02X %02X %02X  "
+                Log::Mod("  +%02X: %02X %02X %02X %02X %02X %02X %02X %02X  "
                            "%02X %02X %02X %02X %02X %02X %02X %02X",
                            i,
                            code[i+0],  code[i+1],  code[i+2],  code[i+3],
@@ -442,14 +442,14 @@ bool Resolve()
         // Values: 0=New Game, 1=Continue, 2=Credits.
         if (pMenuStateA != nullptr) {
             pTitleCursorPos = (uint8_t*)((uintptr_t)pMenuStateA + 0x1F6);
-            Log::Write("FF8Addresses:   pTitleCursorPos (BYTE*) = 0x%08X  [pMenuStateA + 0x1F6]",
+            Log::Mod("FF8Addresses:   pTitleCursorPos (BYTE*) = 0x%08X  [pMenuStateA + 0x1F6]",
                        (uint32_t)(uintptr_t)pTitleCursorPos);
         } else {
-            Log::Write("FF8Addresses: WARNING - pMenuStateA not resolved, cannot derive pTitleCursorPos.");
+            Log::Mod("FF8Addresses: WARNING - pMenuStateA not resolved, cannot derive pTitleCursorPos.");
         }
 
         // ---- Extract game object + mode-0 control pointers from main_loop ----
-        Log::Write("FF8Addresses: --- Extracting runtime pointers from main_loop ---");
+        Log::Mod("FF8Addresses: --- Extracting runtime pointers from main_loop ---");
         if (main_loop != 0) {
             uint8_t* code = (uint8_t*)main_loop;
 
@@ -457,10 +457,10 @@ bool Resolve()
             for (int i = 0; i < 60; i++) {
                 if (code[i] == 0x8B && code[i+1] == 0x35) {
                     pGameObjGlobal = *(uint32_t*)(code + i + 2);
-                    Log::Write("FF8Addresses:   pGameObjGlobal = 0x%08X (from main_loop+%02X)",
+                    Log::Mod("FF8Addresses:   pGameObjGlobal = 0x%08X (from main_loop+%02X)",
                                pGameObjGlobal, i);
                     uint32_t gameObj = *(uint32_t*)pGameObjGlobal;
-                    Log::Write("FF8Addresses:   *pGameObjGlobal = 0x%08X (game object)", gameObj);
+                    Log::Mod("FF8Addresses:   *pGameObjGlobal = 0x%08X (game object)", gameObj);
                     break;
                 }
             }
@@ -471,7 +471,7 @@ bool Resolve()
                 if (code[i] == 0x66 && code[i+1] == 0x39 && code[i+2] == 0x1D) {
                     uint32_t addr = *(uint32_t*)(code + i + 3);
                     pMode0InitFlag = (WORD*)addr;
-                    Log::Write("FF8Addresses:   pMode0InitFlag = 0x%08X (from main_loop+%02X, val=%u)",
+                    Log::Mod("FF8Addresses:   pMode0InitFlag = 0x%08X (from main_loop+%02X, val=%u)",
                                addr, i, (unsigned)*pMode0InitFlag);
                     break;
                 }
@@ -484,48 +484,48 @@ bool Resolve()
                     uint32_t addr = *(uint32_t*)(code + i + 2);
                     uint8_t cmpVal = code[i + 6];
                     pMode0Phase = (uint8_t*)addr;
-                    Log::Write("FF8Addresses:   pMode0Phase = 0x%08X (from main_loop+%02X, cmp=%u, val=%u)",
+                    Log::Mod("FF8Addresses:   pMode0Phase = 0x%08X (from main_loop+%02X, cmp=%u, val=%u)",
                                addr, i, cmpVal, (unsigned)*pMode0Phase);
                     break;
                 }
             }
         } else {
-            Log::Write("FF8Addresses:   main_loop not resolved, skipping pointer extraction.");
+            Log::Mod("FF8Addresses:   main_loop not resolved, skipping pointer extraction.");
         }
 
         // ---- Chain: main_loop -> field -> update_field_entities -> opcode table -> movie_object ----
         // Follows FFNx ff8_data.cpp resolution for movie detection.
-        Log::Write("FF8Addresses: --- Resolving movie object (FMV detection) ---");
+        Log::Mod("FF8Addresses: --- Resolving movie object (FMV detection) ---");
         {
             uint32_t field_main_loop_addr = get_absolute_value(main_loop, jp ? 0x144 + 3 : 0x144);
-            Log::Write("FF8Addresses:   field_main_loop = 0x%08X", field_main_loop_addr);
+            Log::Mod("FF8Addresses:   field_main_loop = 0x%08X", field_main_loop_addr);
 
             uint32_t sub_471F70 = get_relative_call(field_main_loop_addr, 0x148);
-            Log::Write("FF8Addresses:   sub_471F70 = 0x%08X", sub_471F70);
+            Log::Mod("FF8Addresses:   sub_471F70 = 0x%08X", sub_471F70);
 
             uint32_t sub_4767B0 = get_relative_call(sub_471F70, jp ? 0x4FE - 2 : 0x4FE);
-            Log::Write("FF8Addresses:   sub_4767B0 = 0x%08X", sub_4767B0);
+            Log::Mod("FF8Addresses:   sub_4767B0 = 0x%08X", sub_4767B0);
 
             uint32_t update_field_entities = get_relative_call(sub_4767B0, jp ? 0x14E + 1 : 0x14E);
             update_field_entities_addr = update_field_entities;
-            Log::Write("FF8Addresses:   update_field_entities = 0x%08X", update_field_entities);
+            Log::Mod("FF8Addresses:   update_field_entities = 0x%08X", update_field_entities);
 
             pExecuteOpcodeTable = (uint32_t*)get_absolute_value(update_field_entities, 0x65A);
-            Log::Write("FF8Addresses:   execute_opcode_table = 0x%08X", (uint32_t)pExecuteOpcodeTable);
+            Log::Mod("FF8Addresses:   execute_opcode_table = 0x%08X", (uint32_t)pExecuteOpcodeTable);
             uint32_t* execute_opcode_table = pExecuteOpcodeTable;  // local alias for existing code below
 
             uint32_t opcode_movieready = execute_opcode_table[0xA3];
-            Log::Write("FF8Addresses:   opcode_movieready [0xA3] = 0x%08X", opcode_movieready);
+            Log::Mod("FF8Addresses:   opcode_movieready [0xA3] = 0x%08X", opcode_movieready);
 
             uint32_t prepare_movie = get_relative_call(opcode_movieready, 0x99);
-            Log::Write("FF8Addresses:   prepare_movie = 0x%08X", prepare_movie);
+            Log::Mod("FF8Addresses:   prepare_movie = 0x%08X", prepare_movie);
 
             movieObjectAddr = get_absolute_value(prepare_movie, 0xDB);
-            Log::Write("FF8Addresses:   movie_object (struct addr) = 0x%08X", movieObjectAddr);
+            Log::Mod("FF8Addresses:   movie_object (struct addr) = 0x%08X", movieObjectAddr);
 
             // Resolve disc_pak_filenames from prepare_movie + 0xB2
             discPakFilenames = (char**)get_absolute_value(prepare_movie, 0xB2);
-            Log::Write("FF8Addresses:   disc_pak_filenames = 0x%08X", (uint32_t)discPakFilenames);
+            Log::Mod("FF8Addresses:   disc_pak_filenames = 0x%08X", (uint32_t)discPakFilenames);
 
             if (movieObjectAddr != 0 && movieObjectAddr < 0x7FFFFFFF) {
                 // ff8_movie_obj field offsets (from FFNx ff8.h):
@@ -538,13 +538,13 @@ bool Resolve()
                 pMovieIntroPak     = (uint32_t*)(movieObjectAddr + 0x4C4A4);
                 pMovieIsPlaying    = (uint32_t*)(movieObjectAddr + 0x4C4A8);
 
-                Log::Write("FF8Addresses:   pMovieIntroPak     = 0x%08X (val=%u)",
+                Log::Mod("FF8Addresses:   pMovieIntroPak     = 0x%08X (val=%u)",
                            (uint32_t)pMovieIntroPak, *pMovieIntroPak);
-                Log::Write("FF8Addresses:   pMovieIsPlaying    = 0x%08X (val=%u)",
+                Log::Mod("FF8Addresses:   pMovieIsPlaying    = 0x%08X (val=%u)",
                            (uint32_t)pMovieIsPlaying, *pMovieIsPlaying);
-                Log::Write("FF8Addresses:   pMovieCurrentFrame = 0x%08X (val=%u)",
+                Log::Mod("FF8Addresses:   pMovieCurrentFrame = 0x%08X (val=%u)",
                            (uint32_t)pMovieCurrentFrame, (unsigned)*pMovieCurrentFrame);
-                Log::Write("FF8Addresses:   pMovieTotalFrames  = 0x%08X (val=%u)",
+                Log::Mod("FF8Addresses:   pMovieTotalFrames  = 0x%08X (val=%u)",
                            (uint32_t)pMovieTotalFrames, (unsigned)*pMovieTotalFrames);
 
                 // Try to log the current movie filename
@@ -552,11 +552,11 @@ bool Resolve()
                     uint32_t pakIdx = *pMovieIntroPak;
                     char* fname = discPakFilenames[pakIdx];
                     if (fname != nullptr) {
-                        Log::Write("FF8Addresses:   Current movie [%u] = \"%s\"", pakIdx, fname);
+                        Log::Mod("FF8Addresses:   Current movie [%u] = \"%s\"", pakIdx, fname);
                     }
                 }
             } else {
-                Log::Write("FF8Addresses:   WARNING - movie_object address looks invalid (0x%08X)", movieObjectAddr);
+                Log::Mod("FF8Addresses:   WARNING - movie_object address looks invalid (0x%08X)", movieObjectAddr);
                 movieObjectAddr = 0;
             }
         }
@@ -564,12 +564,12 @@ bool Resolve()
         // ---- Resolve current_field_id and current_field_name ----
         // FFNx: current_field_id = (WORD*)get_absolute_value(main_loop, 0x21F)
         // FFNx: current_field_name = (char*)get_absolute_value(opcode_effectplay2, 0x75)
-        Log::Write("FF8Addresses: --- Resolving field ID and field name ---");
+        Log::Mod("FF8Addresses: --- Resolving field ID and field name ---");
         {
             uint32_t field_id_offset = jp ? 0x21F + 6 : 0x21F;
             uint32_t field_id_addr = get_absolute_value(main_loop, field_id_offset);
             pCurrentFieldId = (WORD*)field_id_addr;
-            Log::Write("FF8Addresses:   pCurrentFieldId (WORD*) = 0x%08X (from main_loop+0x%X, val=%u)",
+            Log::Mod("FF8Addresses:   pCurrentFieldId (WORD*) = 0x%08X (from main_loop+0x%X, val=%u)",
                        field_id_addr, field_id_offset, (unsigned)*pCurrentFieldId);
 
             // current_field_name from opcode_effectplay2 (opcode table index 0x21)
@@ -582,12 +582,12 @@ bool Resolve()
                 0x65A);
             uint32_t opcode_effectplay2 = exec_table[0x21];
             pCurrentFieldName = (char*)get_absolute_value(opcode_effectplay2, 0x75);
-            Log::Write("FF8Addresses:   pCurrentFieldName (char*) = 0x%08X (val=\"%s\")",
+            Log::Mod("FF8Addresses:   pCurrentFieldName (char*) = 0x%08X (val=\"%s\")",
                        (uint32_t)pCurrentFieldName, pCurrentFieldName ? pCurrentFieldName : "(null)");
         }
 
         // ---- v04.00: Resolve field dialog opcode addresses ----
-        Log::Write("FF8Addresses: --- Resolving field dialog opcodes ---");
+        Log::Mod("FF8Addresses: --- Resolving field dialog opcodes ---");
         if (pExecuteOpcodeTable != nullptr) {
             opcode_mesw     = pExecuteOpcodeTable[0x46];
             opcode_mes      = pExecuteOpcodeTable[0x47];
@@ -598,100 +598,100 @@ bool Resolve()
             opcode_ames     = pExecuteOpcodeTable[0x65];
             opcode_aask     = pExecuteOpcodeTable[0x6F];
 
-            Log::Write("FF8Addresses:   opcode_mesw     [0x46] = 0x%08X", opcode_mesw);
-            Log::Write("FF8Addresses:   opcode_mes      [0x47] = 0x%08X", opcode_mes);
-            Log::Write("FF8Addresses:   opcode_messync  [0x48] = 0x%08X", opcode_messync);
-            Log::Write("FF8Addresses:   opcode_ask      [0x4A] = 0x%08X", opcode_ask);
-            Log::Write("FF8Addresses:   opcode_winclose [0x4C] = 0x%08X", opcode_winclose);
-            Log::Write("FF8Addresses:   opcode_amesw    [0x64] = 0x%08X", opcode_amesw);
-            Log::Write("FF8Addresses:   opcode_ames     [0x65] = 0x%08X", opcode_ames);
-            Log::Write("FF8Addresses:   opcode_aask     [0x6F] = 0x%08X", opcode_aask);
+            Log::Mod("FF8Addresses:   opcode_mesw     [0x46] = 0x%08X", opcode_mesw);
+            Log::Mod("FF8Addresses:   opcode_mes      [0x47] = 0x%08X", opcode_mes);
+            Log::Mod("FF8Addresses:   opcode_messync  [0x48] = 0x%08X", opcode_messync);
+            Log::Mod("FF8Addresses:   opcode_ask      [0x4A] = 0x%08X", opcode_ask);
+            Log::Mod("FF8Addresses:   opcode_winclose [0x4C] = 0x%08X", opcode_winclose);
+            Log::Mod("FF8Addresses:   opcode_amesw    [0x64] = 0x%08X", opcode_amesw);
+            Log::Mod("FF8Addresses:   opcode_ames     [0x65] = 0x%08X", opcode_ames);
+            Log::Mod("FF8Addresses:   opcode_aask     [0x6F] = 0x%08X", opcode_aask);
 
             // Resolve sub-functions from opcode_mes
             if (opcode_mes != 0) {
                 field_get_dialog_string = get_relative_call(opcode_mes, 0x5D);
                 set_window_object       = get_relative_call(opcode_mes, 0x66);
-                Log::Write("FF8Addresses:   field_get_dialog_string = 0x%08X (from opcode_mes+0x5D)",
+                Log::Mod("FF8Addresses:   field_get_dialog_string = 0x%08X (from opcode_mes+0x5D)",
                            field_get_dialog_string);
-                Log::Write("FF8Addresses:   set_window_object       = 0x%08X (from opcode_mes+0x66)",
+                Log::Mod("FF8Addresses:   set_window_object       = 0x%08X (from opcode_mes+0x66)",
                            set_window_object);
 
                 // Resolve windows array from set_window_object+0x11
                 if (set_window_object != 0) {
                     uint32_t winAddr = get_absolute_value(set_window_object, 0x11);
                     pWindowsArray = (uint8_t*)winAddr;
-                    Log::Write("FF8Addresses:   pWindowsArray = 0x%08X (from set_window_object+0x11)",
+                    Log::Mod("FF8Addresses:   pWindowsArray = 0x%08X (from set_window_object+0x11)",
                                winAddr);
                 }
             }
         } else {
-            Log::Write("FF8Addresses:   WARNING - execute_opcode_table not resolved, skipping dialog opcodes.");
+            Log::Mod("FF8Addresses:   WARNING - execute_opcode_table not resolved, skipping dialog opcodes.");
         }
 
         // ---- v04.17: Resolve show_dialog (universal text renderer) ----
         // Chain: credits_main_loop -> sub_470440 -> sub_49ACD0 -> sub_4A0880
         //        -> sub_4A0C00 -> show_dialog
         // Same chain as FFNx ff8_data.cpp.
-        Log::Write("FF8Addresses: --- Resolving show_dialog (v04.17) ---");
+        Log::Mod("FF8Addresses: --- Resolving show_dialog (v04.17) ---");
         {
             uint32_t sub_470440 = get_absolute_value(credits_main_loop, 0xD2);
-            Log::Write("FF8Addresses:   sub_470440 = 0x%08X", sub_470440);
+            Log::Mod("FF8Addresses:   sub_470440 = 0x%08X", sub_470440);
 
             uint32_t sub_49ACD0 = get_relative_call(sub_470440, jp ? 0x9C : 0x98);
-            Log::Write("FF8Addresses:   sub_49ACD0 = 0x%08X", sub_49ACD0);
+            Log::Mod("FF8Addresses:   sub_49ACD0 = 0x%08X", sub_49ACD0);
 
             sub_4A0880 = get_relative_call(sub_49ACD0, 0x58);
-            Log::Write("FF8Addresses:   sub_4A0880 = 0x%08X", sub_4A0880);
+            Log::Mod("FF8Addresses:   sub_4A0880 = 0x%08X", sub_4A0880);
 
             sub_4A0C00 = get_absolute_value(sub_4A0880, 0x33);
-            Log::Write("FF8Addresses:   sub_4A0C00 = 0x%08X", sub_4A0C00);
+            Log::Mod("FF8Addresses:   sub_4A0C00 = 0x%08X", sub_4A0C00);
 
             show_dialog_addr = get_relative_call(sub_4A0C00, 0x5F);
-            Log::Write("FF8Addresses:   show_dialog = 0x%08X", show_dialog_addr);
+            Log::Mod("FF8Addresses:   show_dialog = 0x%08X", show_dialog_addr);
         }
 
         // ---- v04.17: Resolve opcode_tuto and current_tutorial_id ----
         if (pExecuteOpcodeTable != nullptr) {
             opcode_tuto = pExecuteOpcodeTable[0x177];
-            Log::Write("FF8Addresses:   opcode_tuto     [0x177] = 0x%08X", opcode_tuto);
+            Log::Mod("FF8Addresses:   opcode_tuto     [0x177] = 0x%08X", opcode_tuto);
 
             if (opcode_tuto != 0) {
                 pCurrentTutorialId = (uint8_t*)get_absolute_value(opcode_tuto, 0x2A);
-                Log::Write("FF8Addresses:   pCurrentTutorialId (BYTE*) = 0x%08X",
+                Log::Mod("FF8Addresses:   pCurrentTutorialId (BYTE*) = 0x%08X",
                            (uint32_t)(uintptr_t)pCurrentTutorialId);
             }
 
             // v04.21: mesmode and ramesw
             opcode_mesmode = pExecuteOpcodeTable[0x106];
             opcode_ramesw = pExecuteOpcodeTable[0x116];
-            Log::Write("FF8Addresses:   opcode_mesmode  [0x106] = 0x%08X", opcode_mesmode);
-            Log::Write("FF8Addresses:   opcode_ramesw   [0x116] = 0x%08X", opcode_ramesw);
+            Log::Mod("FF8Addresses:   opcode_mesmode  [0x106] = 0x%08X", opcode_mesmode);
+            Log::Mod("FF8Addresses:   opcode_ramesw   [0x116] = 0x%08X", opcode_ramesw);
 
             // v04.25: menuname (character naming screen)
             opcode_menuname = pExecuteOpcodeTable[0x129];
-            Log::Write("FF8Addresses:   opcode_menuname [0x129] = 0x%08X", opcode_menuname);
+            Log::Mod("FF8Addresses:   opcode_menuname [0x129] = 0x%08X", opcode_menuname);
 
             // v05.56: SETLINE/LINEON/LINEOFF for trigger zone detection
             opcode_setline = pExecuteOpcodeTable[0x39];
             opcode_lineon  = pExecuteOpcodeTable[0x3A];
             opcode_lineoff = pExecuteOpcodeTable[0x3B];
-            Log::Write("FF8Addresses:   opcode_setline  [0x039] = 0x%08X", opcode_setline);
-            Log::Write("FF8Addresses:   opcode_lineon   [0x03A] = 0x%08X", opcode_lineon);
-            Log::Write("FF8Addresses:   opcode_lineoff  [0x03B] = 0x%08X", opcode_lineoff);
+            Log::Mod("FF8Addresses:   opcode_setline  [0x039] = 0x%08X", opcode_setline);
+            Log::Mod("FF8Addresses:   opcode_lineon   [0x03A] = 0x%08X", opcode_lineon);
+            Log::Mod("FF8Addresses:   opcode_lineoff  [0x03B] = 0x%08X", opcode_lineoff);
 
             // v05.78: TALKRADIUS/PUSHRADIUS for interaction distance detection
             opcode_talkradius = pExecuteOpcodeTable[0x62];
             opcode_pushradius = pExecuteOpcodeTable[0x63];
-            Log::Write("FF8Addresses:   opcode_talkradius [0x062] = 0x%08X", opcode_talkradius);
-            Log::Write("FF8Addresses:   opcode_pushradius [0x063] = 0x%08X", opcode_pushradius);
+            Log::Mod("FF8Addresses:   opcode_talkradius [0x062] = 0x%08X", opcode_talkradius);
+            Log::Mod("FF8Addresses:   opcode_pushradius [0x063] = 0x%08X", opcode_pushradius);
 
             // v0.08.03: SET3 for runtime position capture of PSHM_W entities
             opcode_set3 = pExecuteOpcodeTable[0x1E];
-            Log::Write("FF8Addresses:   opcode_set3       [0x01E] = 0x%08X", opcode_set3);
+            Log::Mod("FF8Addresses:   opcode_set3       [0x01E] = 0x%08X", opcode_set3);
 
             // v0.08.07: PSHM_W for hooking (shared memory word read)
             opcode_pshm_w = pExecuteOpcodeTable[0x06];
-            Log::Write("FF8Addresses:   opcode_pshm_w     [0x006] = 0x%08X", opcode_pshm_w);
+            Log::Mod("FF8Addresses:   opcode_pshm_w     [0x006] = 0x%08X", opcode_pshm_w);
 
             // v0.08.06: PSHM_W handler diagnostic — dump machine code to find
             // the shared memory base address for direct variable reads.
@@ -699,17 +699,17 @@ bool Resolve()
             {
                 uint32_t pshm_w_handler = opcode_pshm_w;
                 uint32_t popm_w_handler = pExecuteOpcodeTable[0x0A];
-                Log::Write("FF8Addresses:   opcode_popm_w [0x00A] = 0x%08X", popm_w_handler);
+                Log::Mod("FF8Addresses:   opcode_popm_w [0x00A] = 0x%08X", popm_w_handler);
                 // Dump first 64 bytes of PSHM_W handler to find memory base pattern.
                 // Looking for: MOV reg, [absolute_addr] — loads shared memory pointer
                 // Pattern: 8B xx [4-byte addr] or A1 [4-byte addr]
                 if (pshm_w_handler > 0x10000 && pshm_w_handler < 0x7FFFFFFF) {
                     __try {
                         uint8_t* hc = (uint8_t*)pshm_w_handler;
-                        Log::Write("FF8Addresses: [PSHM_W-DIAG] handler bytes (512B):");
+                        Log::Mod("FF8Addresses: [PSHM_W-DIAG] handler bytes (512B):");
                         for (int row = 0; row < 32; row++) {
                             int off = row * 16;
-                            Log::Write("FF8Addresses: [PSHM_W-DIAG] +%02X: "
+                            Log::Mod("FF8Addresses: [PSHM_W-DIAG] +%02X: "
                                        "%02X %02X %02X %02X %02X %02X %02X %02X  "
                                        "%02X %02X %02X %02X %02X %02X %02X %02X",
                                        off,
@@ -731,12 +731,12 @@ bool Resolve()
                             if (hc[i] == 0xA1) {
                                 candidate = *(uint32_t*)(hc + i + 1);
                                 found = true;
-                                Log::Write("FF8Addresses: [PSHM_W-DIAG] +%02X: MOV EAX,[0x%08X]", i, candidate);
+                                Log::Mod("FF8Addresses: [PSHM_W-DIAG] +%02X: MOV EAX,[0x%08X]", i, candidate);
                             } else if (hc[i] == 0x8B && (hc[i+1] & 0xC7) == 0x05) {
                                 // 8B mod-reg-r/m: mod=00 r/m=101 (disp32)
                                 candidate = *(uint32_t*)(hc + i + 2);
                                 found = true;
-                                Log::Write("FF8Addresses: [PSHM_W-DIAG] +%02X: MOV %s,[0x%08X]",
+                                Log::Mod("FF8Addresses: [PSHM_W-DIAG] +%02X: MOV %s,[0x%08X]",
                                            i, (hc[i+1] == 0x0D) ? "ECX" :
                                               (hc[i+1] == 0x15) ? "EDX" :
                                               (hc[i+1] == 0x35) ? "ESI" :
@@ -745,21 +745,21 @@ bool Resolve()
                                 // CALL rel32
                                 int32_t rel = *(int32_t*)(hc + i + 1);
                                 uint32_t target = pshm_w_handler + i + 5 + rel;
-                                Log::Write("FF8Addresses: [PSHM_W-DIAG] +%02X: CALL 0x%08X", i, target);
+                                Log::Mod("FF8Addresses: [PSHM_W-DIAG] +%02X: CALL 0x%08X", i, target);
                             } else if (hc[i] == 0x0F && hc[i+1] == 0xBF && (hc[i+2] & 0xC7) == 0x05) {
                                 // MOVSX reg, WORD [abs32]: 0F BF modrm
                                 candidate = *(uint32_t*)(hc + i + 3);
-                                Log::Write("FF8Addresses: [PSHM_W-DIAG] +%02X: MOVSX r16,[0x%08X]", i, candidate);
+                                Log::Mod("FF8Addresses: [PSHM_W-DIAG] +%02X: MOVSX r16,[0x%08X]", i, candidate);
                             } else if (hc[i] == 0x0F && hc[i+1] == 0xBF && (hc[i+2] & 0xC0) == 0x00 && (hc[i+2] & 0x07) == 0x05) {
                                 // Already caught above, skip
                             } else if (hc[i] == 0x66 && hc[i+1] == 0x8B && (hc[i+2] & 0xC7) == 0x05) {
                                 // MOV r16, WORD [abs32]: 66 8B modrm
                                 candidate = *(uint32_t*)(hc + i + 3);
-                                Log::Write("FF8Addresses: [PSHM_W-DIAG] +%02X: MOV r16,[0x%08X]", i, candidate);
+                                Log::Mod("FF8Addresses: [PSHM_W-DIAG] +%02X: MOV r16,[0x%08X]", i, candidate);
                             }
                         }
                     } __except(EXCEPTION_EXECUTE_HANDLER) {
-                        Log::Write("FF8Addresses: [PSHM_W-DIAG] Exception reading handler bytes");
+                        Log::Mod("FF8Addresses: [PSHM_W-DIAG] Exception reading handler bytes");
                     }
                 }
                 // v0.08.06b: Dump the actual PSHM read sub at 0x0051C9C0
@@ -780,15 +780,15 @@ bool Resolve()
                             pshm_entity_sub = pshm_w_handler + 0x14F + 5 + rel2;
                         }
                     }
-                    Log::Write("FF8Addresses: [PSHM-SUB] core read sub = 0x%08X", pshm_read_sub);
-                    Log::Write("FF8Addresses: [PSHM-SUB] entity scope sub = 0x%08X", pshm_entity_sub);
+                    Log::Mod("FF8Addresses: [PSHM-SUB] core read sub = 0x%08X", pshm_read_sub);
+                    Log::Mod("FF8Addresses: [PSHM-SUB] entity scope sub = 0x%08X", pshm_entity_sub);
                     // Dump core read sub (0x0051C9C0) - 512 bytes
                     __try {
                         uint8_t* rc = (uint8_t*)pshm_read_sub;
-                        Log::Write("FF8Addresses: [PSHM-SUB] core read sub bytes (512B):");
+                        Log::Mod("FF8Addresses: [PSHM-SUB] core read sub bytes (512B):");
                         for (int row = 0; row < 32; row++) {
                             int off = row * 16;
-                            Log::Write("FF8Addresses: [PSHM-SUB] +%02X: "
+                            Log::Mod("FF8Addresses: [PSHM-SUB] +%02X: "
                                        "%02X %02X %02X %02X %02X %02X %02X %02X  "
                                        "%02X %02X %02X %02X %02X %02X %02X %02X",
                                        off,
@@ -802,33 +802,33 @@ bool Resolve()
                             if (rc[i] == 0xA1) {
                                 uint32_t c = *(uint32_t*)(rc + i + 1);
                                 if (c > 0x00400000 && c < 0x20000000)
-                                    Log::Write("FF8Addresses: [PSHM-SUB] +%02X: MOV EAX,[0x%08X]", i, c);
+                                    Log::Mod("FF8Addresses: [PSHM-SUB] +%02X: MOV EAX,[0x%08X]", i, c);
                             } else if (rc[i] == 0x8B && (rc[i+1] & 0xC7) == 0x05) {
                                 uint32_t c = *(uint32_t*)(rc + i + 2);
                                 if (c > 0x00400000 && c < 0x20000000)
-                                    Log::Write("FF8Addresses: [PSHM-SUB] +%02X: MOV reg,[0x%08X]", i, c);
+                                    Log::Mod("FF8Addresses: [PSHM-SUB] +%02X: MOV reg,[0x%08X]", i, c);
                             } else if (rc[i] == 0x0F && rc[i+1] == 0xBF && (rc[i+2] & 0xC7) == 0x05) {
                                 uint32_t c = *(uint32_t*)(rc + i + 3);
                                 if (c > 0x00400000 && c < 0x20000000)
-                                    Log::Write("FF8Addresses: [PSHM-SUB] +%02X: MOVSX r16,[0x%08X]", i, c);
+                                    Log::Mod("FF8Addresses: [PSHM-SUB] +%02X: MOVSX r16,[0x%08X]", i, c);
                             } else if (rc[i] == 0xE8) {
                                 int32_t rel = *(int32_t*)(rc + i + 1);
                                 uint32_t target = pshm_read_sub + i + 5 + rel;
                                 if (target > 0x00400000 && target < 0x00600000)
-                                    Log::Write("FF8Addresses: [PSHM-SUB] +%02X: CALL 0x%08X", i, target);
+                                    Log::Mod("FF8Addresses: [PSHM-SUB] +%02X: CALL 0x%08X", i, target);
                             }
                         }
                     } __except(EXCEPTION_EXECUTE_HANDLER) {
-                        Log::Write("FF8Addresses: [PSHM-SUB] Exception reading core sub");
+                        Log::Mod("FF8Addresses: [PSHM-SUB] Exception reading core sub");
                     }
                     // Dump entity scope sub (from PSHM_W +14F CALL) - 256 bytes
                     if (pshm_entity_sub > 0x10000) {
                         __try {
                             uint8_t* ec = (uint8_t*)pshm_entity_sub;
-                            Log::Write("FF8Addresses: [PSHM-ENTSUB] entity scope sub bytes (256B):");
+                            Log::Mod("FF8Addresses: [PSHM-ENTSUB] entity scope sub bytes (256B):");
                             for (int row = 0; row < 16; row++) {
                                 int off = row * 16;
-                                Log::Write("FF8Addresses: [PSHM-ENTSUB] +%02X: "
+                                Log::Mod("FF8Addresses: [PSHM-ENTSUB] +%02X: "
                                            "%02X %02X %02X %02X %02X %02X %02X %02X  "
                                            "%02X %02X %02X %02X %02X %02X %02X %02X",
                                            off,
@@ -842,24 +842,24 @@ bool Resolve()
                                 if (ec[i] == 0xA1) {
                                     uint32_t c = *(uint32_t*)(ec + i + 1);
                                     if (c > 0x00400000 && c < 0x20000000)
-                                        Log::Write("FF8Addresses: [PSHM-ENTSUB] +%02X: MOV EAX,[0x%08X]", i, c);
+                                        Log::Mod("FF8Addresses: [PSHM-ENTSUB] +%02X: MOV EAX,[0x%08X]", i, c);
                                 } else if (ec[i] == 0x8B && (ec[i+1] & 0xC7) == 0x05) {
                                     uint32_t c = *(uint32_t*)(ec + i + 2);
                                     if (c > 0x00400000 && c < 0x20000000)
-                                        Log::Write("FF8Addresses: [PSHM-ENTSUB] +%02X: MOV reg,[0x%08X]", i, c);
+                                        Log::Mod("FF8Addresses: [PSHM-ENTSUB] +%02X: MOV reg,[0x%08X]", i, c);
                                 } else if (ec[i] == 0x0F && ec[i+1] == 0xBF && (ec[i+2] & 0xC7) == 0x05) {
                                     uint32_t c = *(uint32_t*)(ec + i + 3);
                                     if (c > 0x00400000 && c < 0x20000000)
-                                        Log::Write("FF8Addresses: [PSHM-ENTSUB] +%02X: MOVSX r16,[0x%08X]", i, c);
+                                        Log::Mod("FF8Addresses: [PSHM-ENTSUB] +%02X: MOVSX r16,[0x%08X]", i, c);
                                 } else if (ec[i] == 0xE8) {
                                     int32_t rel = *(int32_t*)(ec + i + 1);
                                     uint32_t target = pshm_entity_sub + i + 5 + rel;
                                     if (target > 0x00400000 && target < 0x00600000)
-                                        Log::Write("FF8Addresses: [PSHM-ENTSUB] +%02X: CALL 0x%08X", i, target);
+                                        Log::Mod("FF8Addresses: [PSHM-ENTSUB] +%02X: CALL 0x%08X", i, target);
                                 }
                             }
                         } __except(EXCEPTION_EXECUTE_HANDLER) {
-                            Log::Write("FF8Addresses: [PSHM-ENTSUB] Exception");
+                            Log::Mod("FF8Addresses: [PSHM-ENTSUB] Exception");
                         }
                     }
                 }
@@ -867,10 +867,10 @@ bool Resolve()
                 if (popm_w_handler > 0x10000 && popm_w_handler < 0x7FFFFFFF) {
                     __try {
                         uint8_t* pc = (uint8_t*)popm_w_handler;
-                        Log::Write("FF8Addresses: [POPM_W-DIAG] handler bytes (256B):");
+                        Log::Mod("FF8Addresses: [POPM_W-DIAG] handler bytes (256B):");
                         for (int row = 0; row < 16; row++) {
                             int off = row * 16;
-                            Log::Write("FF8Addresses: [POPM_W-DIAG] +%02X: "
+                            Log::Mod("FF8Addresses: [POPM_W-DIAG] +%02X: "
                                        "%02X %02X %02X %02X %02X %02X %02X %02X  "
                                        "%02X %02X %02X %02X %02X %02X %02X %02X",
                                        off,
@@ -883,24 +883,24 @@ bool Resolve()
                         for (int i = 0; i < 240; i++) {
                             if (pc[i] == 0xA1) {
                                 uint32_t c = *(uint32_t*)(pc + i + 1);
-                                Log::Write("FF8Addresses: [POPM_W-DIAG] +%02X: MOV EAX,[0x%08X]", i, c);
+                                Log::Mod("FF8Addresses: [POPM_W-DIAG] +%02X: MOV EAX,[0x%08X]", i, c);
                             } else if (pc[i] == 0x8B && (pc[i+1] & 0xC7) == 0x05) {
                                 uint32_t c = *(uint32_t*)(pc + i + 2);
-                                Log::Write("FF8Addresses: [POPM_W-DIAG] +%02X: MOV reg,[0x%08X]", i, c);
+                                Log::Mod("FF8Addresses: [POPM_W-DIAG] +%02X: MOV reg,[0x%08X]", i, c);
                             } else if (pc[i] == 0x0F && pc[i+1] == 0xBF && (pc[i+2] & 0xC7) == 0x05) {
                                 uint32_t c = *(uint32_t*)(pc + i + 3);
-                                Log::Write("FF8Addresses: [POPM_W-DIAG] +%02X: MOVSX r16,[0x%08X]", i, c);
+                                Log::Mod("FF8Addresses: [POPM_W-DIAG] +%02X: MOVSX r16,[0x%08X]", i, c);
                             } else if (pc[i] == 0x89 && (pc[i+1] & 0xC7) == 0x05) {
                                 uint32_t c = *(uint32_t*)(pc + i + 2);
-                                Log::Write("FF8Addresses: [POPM_W-DIAG] +%02X: MOV [0x%08X],reg (WRITE)", i, c);
+                                Log::Mod("FF8Addresses: [POPM_W-DIAG] +%02X: MOV [0x%08X],reg (WRITE)", i, c);
                             } else if (pc[i] == 0xE8) {
                                 int32_t rel = *(int32_t*)(pc + i + 1);
                                 uint32_t target = popm_w_handler + i + 5 + rel;
-                                Log::Write("FF8Addresses: [POPM_W-DIAG] +%02X: CALL 0x%08X", i, target);
+                                Log::Mod("FF8Addresses: [POPM_W-DIAG] +%02X: CALL 0x%08X", i, target);
                             }
                         }
                     } __except(EXCEPTION_EXECUTE_HANDLER) {
-                        Log::Write("FF8Addresses: [POPM_W-DIAG] Exception");
+                        Log::Mod("FF8Addresses: [POPM_W-DIAG] Exception");
                     }
                 }
             }
@@ -913,11 +913,11 @@ bool Resolve()
                 uint32_t engine_eval_is_button_pressed = get_relative_call(engine_eval_keyboard_gamepad_input_addr, 0x4A6);
                 pEngineInputValidButtons     = (uint32_t*)get_absolute_value(engine_eval_is_button_pressed, 0x3C);
                 pEngineInputConfirmedButtons = (uint32_t*)get_absolute_value(engine_eval_is_button_pressed, 0x62);
-                Log::Write("FF8Addresses:   engine_eval_process_input           = 0x%08X", engine_eval_process_input);
-                Log::Write("FF8Addresses:   engine_eval_keyboard_gamepad_input  = 0x%08X", engine_eval_keyboard_gamepad_input_addr);
-                Log::Write("FF8Addresses:   engine_eval_is_button_pressed        = 0x%08X", engine_eval_is_button_pressed);
-                Log::Write("FF8Addresses:   pEngineInputValidButtons     = 0x%08X", (uint32_t)(uintptr_t)pEngineInputValidButtons);
-                Log::Write("FF8Addresses:   pEngineInputConfirmedButtons = 0x%08X", (uint32_t)(uintptr_t)pEngineInputConfirmedButtons);
+                Log::Mod("FF8Addresses:   engine_eval_process_input           = 0x%08X", engine_eval_process_input);
+                Log::Mod("FF8Addresses:   engine_eval_keyboard_gamepad_input  = 0x%08X", engine_eval_keyboard_gamepad_input_addr);
+                Log::Mod("FF8Addresses:   engine_eval_is_button_pressed        = 0x%08X", engine_eval_is_button_pressed);
+                Log::Mod("FF8Addresses:   pEngineInputValidButtons     = 0x%08X", (uint32_t)(uintptr_t)pEngineInputValidButtons);
+                Log::Mod("FF8Addresses:   pEngineInputConfirmedButtons = 0x%08X", (uint32_t)(uintptr_t)pEngineInputConfirmedButtons);
             }
 
             // v05.82: Resolve gamepad state struct for analog steering.
@@ -927,7 +927,7 @@ bool Resolve()
             //        -> +0xE3 -> get_vibration_capability
             //        -> get_absolute_value(+0x11) - 0xB = gamepad_states
             // Same chain as FFNx ff8_data.cpp.
-            Log::Write("FF8Addresses: --- Resolving gamepad state struct (v05.82) ---");
+            Log::Mod("FF8Addresses: --- Resolving gamepad state struct (v05.82) ---");
             {
                 uint32_t field_main_loop_for_gp = get_absolute_value(main_loop, jp ? 0x144 + 3 : 0x144);
                 uint32_t check_game_is_paused = get_relative_call(field_main_loop_for_gp, 0x16C);
@@ -939,11 +939,11 @@ bool Resolve()
                 uint32_t gamepad_states_addr = raw_addr - 0xB;
                 pGamepadStates = (uint8_t*)gamepad_states_addr;
 
-                Log::Write("FF8Addresses:   check_game_is_paused        = 0x%08X", check_game_is_paused);
-                Log::Write("FF8Addresses:   init_pause_menu             = 0x%08X", init_pause_menu);
-                Log::Write("FF8Addresses:   pause_menu_with_vibration   = 0x%08X", pause_menu_with_vibration);
-                Log::Write("FF8Addresses:   get_vibration_capability    = 0x%08X", get_vibration_capability);
-                Log::Write("FF8Addresses:   pGamepadStates (raw=0x%08X - 0xB) = 0x%08X", raw_addr, gamepad_states_addr);
+                Log::Mod("FF8Addresses:   check_game_is_paused        = 0x%08X", check_game_is_paused);
+                Log::Mod("FF8Addresses:   init_pause_menu             = 0x%08X", init_pause_menu);
+                Log::Mod("FF8Addresses:   pause_menu_with_vibration   = 0x%08X", pause_menu_with_vibration);
+                Log::Mod("FF8Addresses:   get_vibration_capability    = 0x%08X", get_vibration_capability);
+                Log::Mod("FF8Addresses:   pGamepadStates (raw=0x%08X - 0xB) = 0x%08X", raw_addr, gamepad_states_addr);
 
                 // v05.84: Resolve dinput_gamepad_device and dinput_gamepad_state pointers.
                 // Chain: engine_eval_keyboard_gamepad_input+0x1B -> dinput_update_gamepad_status
@@ -952,10 +952,10 @@ bool Resolve()
                 dinput_update_gamepad_status_addr = dinput_update_gamepad_status;
                 pDinputGamepadDevicePtr = (uint32_t*)get_absolute_value(dinput_update_gamepad_status, 0x16);
                 pDinputGamepadStatePtr  = (uint32_t*)get_absolute_value(dinput_update_gamepad_status, 0x1B);
-                Log::Write("FF8Addresses:   dinput_update_gamepad_status = 0x%08X", dinput_update_gamepad_status);
-                Log::Write("FF8Addresses:   pDinputGamepadDevicePtr = 0x%08X (val=0x%08X)",
+                Log::Mod("FF8Addresses:   dinput_update_gamepad_status = 0x%08X", dinput_update_gamepad_status);
+                Log::Mod("FF8Addresses:   pDinputGamepadDevicePtr = 0x%08X (val=0x%08X)",
                            (uint32_t)(uintptr_t)pDinputGamepadDevicePtr, *pDinputGamepadDevicePtr);
-                Log::Write("FF8Addresses:   pDinputGamepadStatePtr  = 0x%08X (val=0x%08X)",
+                Log::Mod("FF8Addresses:   pDinputGamepadStatePtr  = 0x%08X (val=0x%08X)",
                            (uint32_t)(uintptr_t)pDinputGamepadStatePtr, *pDinputGamepadStatePtr);
 
                 // v05.88: Resolve keyboard_state buffer pointer for arrow key suppression.
@@ -972,9 +972,9 @@ bool Resolve()
                     get_key_state_addr = get_key_state_fn;
                     uint32_t kb_state_addr = get_absolute_value(get_key_state_fn, 0x27);
                     pKeyboardState = (uint8_t**)kb_state_addr;
-                    Log::Write("FF8Addresses:   ctrl_keyboard_actions   = 0x%08X", ctrl_keyboard_actions);
-                    Log::Write("FF8Addresses:   get_key_state           = 0x%08X", get_key_state_fn);
-                    Log::Write("FF8Addresses:   pKeyboardState (byte**) = 0x%08X (val=0x%08X)",
+                    Log::Mod("FF8Addresses:   ctrl_keyboard_actions   = 0x%08X", ctrl_keyboard_actions);
+                    Log::Mod("FF8Addresses:   get_key_state           = 0x%08X", get_key_state_fn);
+                    Log::Mod("FF8Addresses:   pKeyboardState (byte**) = 0x%08X (val=0x%08X)",
                                kb_state_addr, (uint32_t)(uintptr_t)*pKeyboardState);
                 }
 
@@ -982,34 +982,34 @@ bool Resolve()
                 // This lets us verify the struct layout at runtime.
                 if (gamepad_states_addr > 0x10000 && gamepad_states_addr < 0x7FFFFFFF) {
                     uint8_t* gp = (uint8_t*)gamepad_states_addr;
-                    Log::Write("FF8Addresses:   [GPDIAG] gamepad_states first 32 bytes:");
-                    Log::Write("FF8Addresses:   [GPDIAG] +00: %02X %02X %02X %02X %02X %02X %02X %02X  %02X %02X %02X %02X %02X %02X %02X %02X",
+                    Log::Mod("FF8Addresses:   [GPDIAG] gamepad_states first 32 bytes:");
+                    Log::Mod("FF8Addresses:   [GPDIAG] +00: %02X %02X %02X %02X %02X %02X %02X %02X  %02X %02X %02X %02X %02X %02X %02X %02X",
                                gp[0], gp[1], gp[2], gp[3], gp[4], gp[5], gp[6], gp[7],
                                gp[8], gp[9], gp[10], gp[11], gp[12], gp[13], gp[14], gp[15]);
-                    Log::Write("FF8Addresses:   [GPDIAG] +10: %02X %02X %02X %02X %02X %02X %02X %02X  %02X %02X %02X %02X %02X %02X %02X %02X",
+                    Log::Mod("FF8Addresses:   [GPDIAG] +10: %02X %02X %02X %02X %02X %02X %02X %02X  %02X %02X %02X %02X %02X %02X %02X %02X",
                                gp[16], gp[17], gp[18], gp[19], gp[20], gp[21], gp[22], gp[23],
                                gp[24], gp[25], gp[26], gp[27], gp[28], gp[29], gp[30], gp[31]);
                     // entries_offset is at +0x18 in ff8_gamepad_vibration_state
                     uint8_t entries_offset = gp[0x18];
-                    Log::Write("FF8Addresses:   [GPDIAG] entries_offset (byte at +0x18) = %u", (unsigned)entries_offset);
+                    Log::Mod("FF8Addresses:   [GPDIAG] entries_offset (byte at +0x18) = %u", (unsigned)entries_offset);
                     // Each entry is 0x14 bytes (sizeof ff8_gamepad_vibration_state_entry = 16 bytes... let me check)
                     // From ff8.h: entry has analog_disabled(1), analog_flags(1), keyscan(2), analog_rx(1),
                     //   analog_ry(1), analog_lx(1), analog_ly(1), field_8(2), field_A(2), field_C(2),
                     //   field_E(2), keyon(2), keyscan_invert(2) = 20 bytes total
                     // entries[] starts at offset 0x1C in ff8_gamepad_vibration_state
                     uint32_t entry_base = 0x1C + entries_offset * 20;
-                    Log::Write("FF8Addresses:   [GPDIAG] active entry at struct+0x%X:", entry_base);
+                    Log::Mod("FF8Addresses:   [GPDIAG] active entry at struct+0x%X:", entry_base);
                     if (entry_base + 20 < 0xC4) { // sizeof(ff8_gamepad_vibration_state) = 0xC4
                         uint8_t* entry = gp + entry_base;
-                        Log::Write("FF8Addresses:   [GPDIAG]   analog_disabled=%u analog_flags=0x%02X keyscan=0x%04X",
+                        Log::Mod("FF8Addresses:   [GPDIAG]   analog_disabled=%u analog_flags=0x%02X keyscan=0x%04X",
                                    entry[0], entry[1], *(uint16_t*)(entry + 2));
-                        Log::Write("FF8Addresses:   [GPDIAG]   analog_rx=%u analog_ry=%u analog_lx=%u analog_ly=%u",
+                        Log::Mod("FF8Addresses:   [GPDIAG]   analog_rx=%u analog_ry=%u analog_lx=%u analog_ly=%u",
                                    entry[4], entry[5], entry[6], entry[7]);
-                        Log::Write("FF8Addresses:   [GPDIAG]   keyon=0x%04X keyscan_invert=0x%04X",
+                        Log::Mod("FF8Addresses:   [GPDIAG]   keyon=0x%04X keyscan_invert=0x%04X",
                                    *(uint16_t*)(entry + 16), *(uint16_t*)(entry + 18));
                     }
                 } else {
-                    Log::Write("FF8Addresses:   WARNING - gamepad_states address looks invalid");
+                    Log::Mod("FF8Addresses:   WARNING - gamepad_states address looks invalid");
                     pGamepadStates = nullptr;
                 }
             }
@@ -1018,40 +1018,40 @@ bool Resolve()
         // ---- v04.20: Resolve menu_draw_text (low-level text renderer) ----
         // Chain: sub_497380 -> sub_4B3410 -> sub_4BE4D0 -> sub_4BECC0 -> menu_draw_text
         // Same chain as FFNx ff8_data.cpp.
-        Log::Write("FF8Addresses: --- Resolving menu_draw_text (v04.20) ---");
+        Log::Mod("FF8Addresses: --- Resolving menu_draw_text (v04.20) ---");
         {
             // sub_497380 already resolved above
             uint32_t sub_4B3410 = get_relative_call(sub_497380, 0xAC);
-            Log::Write("FF8Addresses:   sub_4B3410 = 0x%08X", sub_4B3410);
+            Log::Mod("FF8Addresses:   sub_4B3410 = 0x%08X", sub_4B3410);
 
             uint32_t sub_4BE4D0 = get_relative_call(sub_4B3410, 0x68);
-            Log::Write("FF8Addresses:   sub_4BE4D0 = 0x%08X", sub_4BE4D0);
+            Log::Mod("FF8Addresses:   sub_4BE4D0 = 0x%08X", sub_4BE4D0);
 
             uint32_t sub_4BECC0 = get_relative_call(sub_4BE4D0, 0x39);
-            Log::Write("FF8Addresses:   sub_4BECC0 = 0x%08X", sub_4BECC0);
+            Log::Mod("FF8Addresses:   sub_4BECC0 = 0x%08X", sub_4BECC0);
 
             menu_draw_text_addr = get_relative_call(sub_4BECC0, 0x127);
-            Log::Write("FF8Addresses:   menu_draw_text = 0x%08X", menu_draw_text_addr);
+            Log::Mod("FF8Addresses:   menu_draw_text = 0x%08X", menu_draw_text_addr);
 
             if (menu_draw_text_addr != 0) {
                 get_character_width_addr = get_relative_call(menu_draw_text_addr, jp ? 0x1E1 : 0x1D0);
-                Log::Write("FF8Addresses:   get_character_width = 0x%08X", get_character_width_addr);
+                Log::Mod("FF8Addresses:   get_character_width = 0x%08X", get_character_width_addr);
             }
         }
 
         // ---- v05.00: Resolve field entity state arrays (player triangle) ----
         // Chain: sub_471F70 -> read_field_data -> field_scripts_init -> static addresses
         // Same chain as FFNx ff8_data.cpp: field_scripts_init derives both arrays.
-        Log::Write("FF8Addresses: --- Resolving field entity state arrays (v05.00) ---");
+        Log::Mod("FF8Addresses: --- Resolving field entity state arrays (v05.00) ---");
         {
             uint32_t field_main_loop_addr_v5 = get_absolute_value(main_loop, jp ? 0x144 + 3 : 0x144);
             uint32_t sub_471F70_v5 = get_relative_call(field_main_loop_addr_v5, 0x148);
             read_field_data_addr = get_relative_call(sub_471F70_v5, 0x23A);
-            Log::Write("FF8Addresses:   read_field_data = 0x%08X", read_field_data_addr);
+            Log::Mod("FF8Addresses:   read_field_data = 0x%08X", read_field_data_addr);
 
             uint32_t field_scripts_init = get_relative_call(read_field_data_addr, jp ? 0xEDC : 0xE49);
             field_scripts_init_addr = field_scripts_init;
-            Log::Write("FF8Addresses:   field_scripts_init = 0x%08X", field_scripts_init_addr);
+            Log::Mod("FF8Addresses:   field_scripts_init = 0x%08X", field_scripts_init_addr);
 
             // v05.10: resolve set_current_triangle_sub_45E160
             // Chain (FFNx ff8_data.cpp):
@@ -1068,39 +1068,39 @@ bool Resolve()
             uint32_t sub_530C30 = get_relative_call(sub_533CD0, 0x28E);
             uint32_t field_push_mch = get_relative_call(sub_530C30, 0x46A);
             set_current_triangle_addr = get_relative_call(field_push_mch, 0x48);
-            Log::Write("FF8Addresses:   sub_4767B0  = 0x%08X", sub_4767B0_v5);
-            Log::Write("FF8Addresses:   sub_472B30  = 0x%08X", sub_472B30);
-            Log::Write("FF8Addresses:   sub_530810  = 0x%08X", sub_530810);
-            Log::Write("FF8Addresses:   sub_533CD0  = 0x%08X", sub_533CD0);
-            Log::Write("FF8Addresses:   sub_530C30  = 0x%08X", sub_530C30);
-            Log::Write("FF8Addresses:   field_push_mch_vertices_rect = 0x%08X", field_push_mch);
-            Log::Write("FF8Addresses:   set_current_triangle_addr = 0x%08X", set_current_triangle_addr);
+            Log::Mod("FF8Addresses:   sub_4767B0  = 0x%08X", sub_4767B0_v5);
+            Log::Mod("FF8Addresses:   sub_472B30  = 0x%08X", sub_472B30);
+            Log::Mod("FF8Addresses:   sub_530810  = 0x%08X", sub_530810);
+            Log::Mod("FF8Addresses:   sub_533CD0  = 0x%08X", sub_533CD0);
+            Log::Mod("FF8Addresses:   sub_530C30  = 0x%08X", sub_530C30);
+            Log::Mod("FF8Addresses:   field_push_mch_vertices_rect = 0x%08X", field_push_mch);
+            Log::Mod("FF8Addresses:   set_current_triangle_addr = 0x%08X", set_current_triangle_addr);
 
             // pFieldStateOtherCount: BYTE* — MOVZX at field_scripts_init+0x2C4 operand
             // FFNx: (uint8_t*)get_absolute_value(field_scripts_init, 0x2C3+0x1)
             uint32_t otherCountAddr = get_absolute_value(field_scripts_init, 0x2C4);
             pFieldStateOtherCount = (uint8_t*)otherCountAddr;
-            Log::Write("FF8Addresses:   pFieldStateOtherCount (BYTE*) = 0x%08X (val=%u)",
+            Log::Mod("FF8Addresses:   pFieldStateOtherCount (BYTE*) = 0x%08X (val=%u)",
                        otherCountAddr, (unsigned)*pFieldStateOtherCount);
 
             // pFieldStateOthers: ptr-to-array — MOV at field_scripts_init+0x62E operand
             // FFNx: (ff8_field_state_other**)get_absolute_value(field_scripts_init, 0x62C+0x2)
             uint32_t othersAddr = get_absolute_value(field_scripts_init, 0x62E);
             pFieldStateOthers = (uint8_t**)othersAddr;
-            Log::Write("FF8Addresses:   pFieldStateOthers (uint8_t**) = 0x%08X", othersAddr);
+            Log::Mod("FF8Addresses:   pFieldStateOthers (uint8_t**) = 0x%08X", othersAddr);
 
             // v05.50: pFieldStateBackgroundCount: BYTE* — at field_scripts_init+0x2CE
             // FFNx: (uint8_t*)get_absolute_value(field_scripts_init, 0x2CD+0x1)
             uint32_t bgCountAddr = get_absolute_value(field_scripts_init, 0x2CE);
             pFieldStateBackgroundCount = (uint8_t*)bgCountAddr;
-            Log::Write("FF8Addresses:   pFieldStateBackgroundCount (BYTE*) = 0x%08X (val=%u)",
+            Log::Mod("FF8Addresses:   pFieldStateBackgroundCount (BYTE*) = 0x%08X (val=%u)",
                        bgCountAddr, (unsigned)*pFieldStateBackgroundCount);
 
             // v05.50: pFieldStateBackgrounds: ptr-to-array — at field_scripts_init+0x50D
             // FFNx: (ff8_field_state_background**)get_absolute_value(field_scripts_init, 0x50B+0x2)
             uint32_t bgAddr = get_absolute_value(field_scripts_init, 0x50D);
             pFieldStateBackgrounds = (uint8_t**)bgAddr;
-            Log::Write("FF8Addresses:   pFieldStateBackgrounds (uint8_t**) = 0x%08X", bgAddr);
+            Log::Mod("FF8Addresses:   pFieldStateBackgrounds (uint8_t**) = 0x%08X", bgAddr);
         }
 
         // ---- v0.07.24: Resolve set_midi_volume (music volume function for hooking) ----
@@ -1108,14 +1108,14 @@ bool Resolve()
         // FFNx replaces this with set_music_volume_for_channel(channel, volume).
         // This is the function that actually controls field/battle BGM volume.
         // (The credits-only function at dmusicperf_set_volume_sub_46C6F0 does NOT.)
-        Log::Write("FF8Addresses: --- Resolving set_midi_volume (v0.07.24) ---");
+        Log::Mod("FF8Addresses: --- Resolving set_midi_volume (v0.07.24) ---");
         {
             uint32_t sm_battle_sound_offset = jp ? 0x487 + 5 : 0x487;
             uint32_t sm_battle_sound = get_relative_call(main_loop, sm_battle_sound_offset);
             pSetMidiVolume = get_relative_call(sm_battle_sound, 0x173);
-            Log::Write("FF8Addresses:   sm_battle_sound = 0x%08X (from main_loop+0x%X)",
+            Log::Mod("FF8Addresses:   sm_battle_sound = 0x%08X (from main_loop+0x%X)",
                        sm_battle_sound, sm_battle_sound_offset);
-            Log::Write("FF8Addresses:   set_midi_volume = 0x%08X (from sm_battle_sound+0x173)",
+            Log::Mod("FF8Addresses:   set_midi_volume = 0x%08X (from sm_battle_sound+0x173)",
                        pSetMidiVolume);
         }
 
@@ -1123,11 +1123,11 @@ bool Resolve()
         // Chain: main_loop+0x9C -> sm_pc_read
         // Signature: uint32_t sm_pc_read(char* filename, void* buffer)
         // Called by the game when reading save files from disk.
-        Log::Write("FF8Addresses: --- Resolving sm_pc_read (v0.07.25) ---");
+        Log::Mod("FF8Addresses: --- Resolving sm_pc_read (v0.07.25) ---");
         {
             uint32_t sm_pc_read_offset = jp ? 0x9C + 3 : 0x9C;
             sm_pc_read_addr = get_relative_call(main_loop, sm_pc_read_offset);
-            Log::Write("FF8Addresses:   sm_pc_read = 0x%08X (from main_loop+0x%X)",
+            Log::Mod("FF8Addresses:   sm_pc_read = 0x%08X (from main_loop+0x%X)",
                        sm_pc_read_addr, sm_pc_read_offset);
         }
 
@@ -1135,35 +1135,35 @@ bool Resolve()
         // The game object is zero-initialized at startup; game_loop_obj is
         // populated later during engine init. Call TryResolveDeferredGameLoop()
         // from the polling loop once the game is running.
-        Log::Write("FF8Addresses: --- game_loop_obj.main_loop will be resolved via deferred scan ---");
-        Log::Write("FF8Addresses:   pGameObjGlobal = 0x%08X, pubintro_main_loop = 0x%08X",
+        Log::Mod("FF8Addresses: --- game_loop_obj.main_loop will be resolved via deferred scan ---");
+        Log::Mod("FF8Addresses:   pGameObjGlobal = 0x%08X, pubintro_main_loop = 0x%08X",
                    pGameObjGlobal, pubintro_main_loop);
 
         // ---- Log current values as sanity check ----
-        Log::Write("FF8Addresses: --- Current values snapshot ---");
-        Log::Write("FF8Addresses:   *_mode = %u", (unsigned)*pGameMode);
+        Log::Mod("FF8Addresses: --- Current values snapshot ---");
+        Log::Mod("FF8Addresses:   *_mode = %u", (unsigned)*pGameMode);
         if (pMenuStateA)
-            Log::Write("FF8Addresses:   *pMenuStateA = %u (0x%04X)", (unsigned)*pMenuStateA, (unsigned)*pMenuStateA);
+            Log::Mod("FF8Addresses:   *pMenuStateA = %u (0x%04X)", (unsigned)*pMenuStateA, (unsigned)*pMenuStateA);
         if (pMenuStateB)
-            Log::Write("FF8Addresses:   *pMenuStateB = %u (0x%08X)", *pMenuStateB, *pMenuStateB);
+            Log::Mod("FF8Addresses:   *pMenuStateB = %u (0x%08X)", *pMenuStateB, *pMenuStateB);
         if (pMode0LoopHandler) {
-            Log::Write("FF8Addresses:   *pMode0LoopHandler = 0x%08X", *pMode0LoopHandler);
+            Log::Mod("FF8Addresses:   *pMode0LoopHandler = 0x%08X", *pMode0LoopHandler);
             if (*pMode0LoopHandler == pubintro_main_loop)
-                Log::Write("FF8Addresses:     -> matches pubintro_main_loop (FMV phase)");
+                Log::Mod("FF8Addresses:     -> matches pubintro_main_loop (FMV phase)");
             else if (*pMode0LoopHandler == credits_main_loop)
-                Log::Write("FF8Addresses:     -> matches credits_main_loop");
+                Log::Mod("FF8Addresses:     -> matches credits_main_loop");
             else if (*pMode0LoopHandler == main_menu_main_loop)
-                Log::Write("FF8Addresses:     -> matches main_menu_main_loop (TITLE MENU)");
+                Log::Mod("FF8Addresses:     -> matches main_menu_main_loop (TITLE MENU)");
             else
-                Log::Write("FF8Addresses:     -> unknown handler");
+                Log::Mod("FF8Addresses:     -> unknown handler");
         }
 
         s_resolved = true;
-        Log::Write("FF8Addresses: === Resolution complete. All critical addresses found. ===");
+        Log::Mod("FF8Addresses: === Resolution complete. All critical addresses found. ===");
         return true;
     }
     __except(EXCEPTION_EXECUTE_HANDLER) {
-        Log::Write("FF8Addresses: EXCEPTION during resolution chain! Code=0x%08X",
+        Log::Mod("FF8Addresses: EXCEPTION during resolution chain! Code=0x%08X",
                    GetExceptionCode());
         return false;
     }
@@ -1215,7 +1215,7 @@ bool TryResolveDeferredGameLoop()
             for (int i = 0; i < 3; i++) {
                 if (val == targets[i]) {
                     pGameLoopMainLoop = (uint32_t*)(gameObjBase + off);
-                    Log::Write("FF8Addresses: DEFERRED SCAN: Found %s (0x%08X) at game_object + 0x%X "
+                    Log::Mod("FF8Addresses: DEFERRED SCAN: Found %s (0x%08X) at game_object + 0x%X "
                                "(abs addr 0x%08X, elapsed %ums)",
                                names[i], val, off,
                                (uint32_t)pGameLoopMainLoop, (now - s_firstScanTime));
@@ -1227,7 +1227,7 @@ bool TryResolveDeferredGameLoop()
     __except(EXCEPTION_EXECUTE_HANDLER) {
         // Hit unreadable memory — not unexpected for a wide scan.
         if (!s_deferredScanAttempted) {
-            Log::Write("FF8Addresses: Deferred scan hit unreadable memory in game object region.");
+            Log::Mod("FF8Addresses: Deferred scan hit unreadable memory in game object region.");
         }
     }
     
@@ -1235,9 +1235,9 @@ bool TryResolveDeferredGameLoop()
     // This helps us find if the pointers exist ANYWHERE near the game object.
     if (!s_diagnosticDumped && (now - s_firstScanTime) >= 5000) {
         s_diagnosticDumped = true;
-        Log::Write("FF8Addresses: === DIAGNOSTIC: Wide memory scan for handler function pointers ===");
-        Log::Write("FF8Addresses:   gameObjBase = 0x%08X", gameObjBase);
-        Log::Write("FF8Addresses:   Looking for: pubintro=0x%08X credits=0x%08X main_menu=0x%08X",
+        Log::Mod("FF8Addresses: === DIAGNOSTIC: Wide memory scan for handler function pointers ===");
+        Log::Mod("FF8Addresses:   gameObjBase = 0x%08X", gameObjBase);
+        Log::Mod("FF8Addresses:   Looking for: pubintro=0x%08X credits=0x%08X main_menu=0x%08X",
                    pubintro_main_loop, credits_main_loop, main_menu_main_loop);
         
         // Scan from gameObjBase-0x1000 to gameObjBase+0x8000
@@ -1251,7 +1251,7 @@ bool TryResolveDeferredGameLoop()
                 for (int i = 0; i < 3; i++) {
                     if (val == targets[i]) {
                         int32_t relOff = (int32_t)(addr - gameObjBase);
-                        Log::Write("FF8Addresses:   FOUND %s at abs=0x%08X (gameObj%+d / 0x%X)",
+                        Log::Mod("FF8Addresses:   FOUND %s at abs=0x%08X (gameObj%+d / 0x%X)",
                                    names[i], addr, relOff, (uint32_t)(addr - gameObjBase));
                         foundCount++;
                     }
@@ -1259,15 +1259,15 @@ bool TryResolveDeferredGameLoop()
             }
         }
         __except(EXCEPTION_EXECUTE_HANDLER) {
-            Log::Write("FF8Addresses:   (scan stopped at unreadable memory)");
+            Log::Mod("FF8Addresses:   (scan stopped at unreadable memory)");
         }
         
         if (foundCount == 0) {
-            Log::Write("FF8Addresses:   NO matches found in scan range 0x%08X - 0x%08X", scanStart, scanEnd);
-            Log::Write("FF8Addresses:   The game object may not store these function pointers,");
-            Log::Write("FF8Addresses:   or the game object base (0x%08X) may be wrong.", gameObjBase);
+            Log::Mod("FF8Addresses:   NO matches found in scan range 0x%08X - 0x%08X", scanStart, scanEnd);
+            Log::Mod("FF8Addresses:   The game object may not store these function pointers,");
+            Log::Mod("FF8Addresses:   or the game object base (0x%08X) may be wrong.", gameObjBase);
         }
-        Log::Write("FF8Addresses: === END DIAGNOSTIC ===");
+        Log::Mod("FF8Addresses: === END DIAGNOSTIC ===");
     }
     
     if (!s_deferredScanAttempted) {

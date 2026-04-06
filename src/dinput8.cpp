@@ -14,6 +14,7 @@
 #include "name_bypass.h"
 #include "menu_tts.h"
 #include "battle_tts.h"
+#include "field_archive.h"
 
 
 // ============================================================================
@@ -55,32 +56,32 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     // data addresses are populated.
     Sleep(500);
     
-    Log::Write("AccessibilityThread: Starting main loop (v%s).", FF8OPC_VERSION);
+    Log::Mod("AccessibilityThread: Starting main loop (v%s).", FF8OPC_VERSION);
     
     // Initialize screen reader (NVDA direct + SAPI fallback)
     if (!ScreenReader::Initialize(hOurModule)) {
-        Log::Write("AccessibilityThread: Screen reader init failed. Continuing with logging only.");
+        Log::Mod("AccessibilityThread: Screen reader init failed. Continuing with logging only.");
     }
 
     // Apply default speech rate silently.
     ScreenReader::SetRate(3);
-    Log::Write("AccessibilityThread: Default speech rate=3 applied.");
+    Log::Mod("AccessibilityThread: Default speech rate=3 applied.");
 
     // Resolve game addresses from the executable
     bool addressesValid = false;
     if (!FF8Addresses::Resolve()) {
-        Log::Write("AccessibilityThread: WARNING - Address resolution failed!");
+        Log::Mod("AccessibilityThread: WARNING - Address resolution failed!");
     } else {
         addressesValid = (FF8Addresses::pGameMode != nullptr);
-        Log::Write("AccessibilityThread: Address resolution succeeded.");
-        Log::Write("AccessibilityThread: pGameMode at 0x%08X, pTitleCursorPos at 0x%08X",
+        Log::Mod("AccessibilityThread: Address resolution succeeded.");
+        Log::Mod("AccessibilityThread: pGameMode at 0x%08X, pTitleCursorPos at 0x%08X",
                    (uint32_t)(uintptr_t)FF8Addresses::pGameMode,
                    (uint32_t)(uintptr_t)FF8Addresses::pTitleCursorPos);
     }
     
     // Initialize MinHook (needed for FMV skip kernel32 hooks)
     MH_STATUS mhStatus = MH_Initialize();
-    Log::Write("AccessibilityThread: MH_Initialize = %s", MH_StatusToString(mhStatus));
+    Log::Mod("AccessibilityThread: MH_Initialize = %s", MH_StatusToString(mhStatus));
     
     // Initialize accessibility modules
     TitleScreen::Initialize();
@@ -92,10 +93,11 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     GameAudio::Initialize();      // v0.09.22: Centralized game audio control
     MenuTTS::Initialize();       // v07.00: In-game menu TTS diagnostic
     BattleTTS::Initialize();     // v0.10.01: Battle sequence TTS
+    WorldMap::Initialize();       // v0.11.03: World map navigation
     
     // Enable all MinHook hooks
     mhStatus = MH_EnableHook(MH_ALL_HOOKS);
-    Log::Write("AccessibilityThread: MH_EnableHook(ALL) = %s", MH_StatusToString(mhStatus));
+    Log::Mod("AccessibilityThread: MH_EnableHook(ALL) = %s", MH_StatusToString(mhStatus));
     
     
     // Track previous state for edge detection
@@ -151,6 +153,9 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
 
         // Battle sequence TTS (v0.10.01)
         BattleTTS::Update();
+
+        // World map navigation TTS (v0.11.03)
+        WorldMap::Update();
         
         // --- Accessibility keyboard shortcuts ---
         // `  = Repeat last dialog
@@ -189,6 +194,222 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
             s_f5was = f5; s_f6was = f6;
             s_f7was = f7; s_f8was = f8;
         }
+
+        // ============================================================================
+        // v0.12.17: F12 Entity Activation Monitor diagnostic
+        // ============================================================================
+        // Monitors the engine's entity pointer table (0x1D9D020) and position data
+        // every frame to detect when entities like dic (Directory) get activated.
+        // F12 toggles monitoring on/off. First press dumps full entity table state.
+        // Subsequent frames log any changes in entity count, pointer validity, or
+        // position values, along with player position at the moment of change.
+        {
+            static bool s_f12was = false;
+            static bool s_entityMonitorActive = false;
+            // Snapshot of entity table state from previous frame
+            static const int ENT_TABLE_SIZE = 32;
+            static uint32_t s_prevPtrs[ENT_TABLE_SIZE] = {};
+            static int32_t  s_prevPosX[ENT_TABLE_SIZE] = {};
+            static int32_t  s_prevPosY[ENT_TABLE_SIZE] = {};
+            static uint16_t s_prevTri[ENT_TABLE_SIZE] = {};
+            static uint16_t s_prevTalk[ENT_TABLE_SIZE] = {};
+            static uint8_t  s_prevEntCount = 0;
+            static uint8_t  s_prevBgCount = 0;
+
+            bool f12 = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
+            bool f12Pressed = f12 && !s_f12was;
+            s_f12was = f12;
+
+            if (f12Pressed && addressesValid) {
+                s_entityMonitorActive = !s_entityMonitorActive;
+                if (s_entityMonitorActive) {
+                    ScreenReader::Speak("Entity monitor on", true);
+                    Log::Mod("[ENT-MON] === Entity Activation Monitor ON ===");
+
+                    // Full dump of entity table on first activation
+                    __try {
+                        uint8_t entCount = *(uint8_t*)0x1D9D0E1;
+                        Log::Mod("[ENT-MON] Active entity count (0x1D9D0E1): %u", (unsigned)entCount);
+                        s_prevEntCount = entCount;
+
+                        // Also read Others count if available
+                        if (FF8Addresses::pFieldStateOtherCount) {
+                            uint8_t othersCount = *FF8Addresses::pFieldStateOtherCount;
+                            Log::Mod("[ENT-MON] Others count (pFieldStateOtherCount): %u", (unsigned)othersCount);
+                        }
+
+                        // Read player position
+                        int playerIdx = FF8Addresses::GetPlayerEntityIndex();
+                        int32_t playerX = 0, playerY = 0;
+                        uint16_t playerTri = 0xFFFF;
+                        if (playerIdx >= 0 && FF8Addresses::pFieldStateOthers) {
+                            uint8_t* pEnt = FF8Addresses::pFieldStateOthers[playerIdx];
+                            if (pEnt) {
+                                playerX = *(int32_t*)(pEnt + 0x190) >> 12;
+                                playerY = *(int32_t*)(pEnt + 0x194) >> 12;
+                                playerTri = *(uint16_t*)(pEnt + 0x1FA);
+                            }
+                        }
+                        Log::Mod("[ENT-MON] Player pos: (%d, %d) tri=%u", playerX, playerY, (unsigned)playerTri);
+
+                        // Dump entity pointer table
+                        for (int i = 0; i < ENT_TABLE_SIZE; i++) {
+                            uint32_t ptr = *(uint32_t*)(0x1D9D020 + i * 4);
+                            s_prevPtrs[i] = ptr;
+                            if (ptr) {
+                                uint8_t* ent = (uint8_t*)ptr;
+                                int32_t px = *(int32_t*)(ent + 0x190) >> 12;
+                                int32_t py = *(int32_t*)(ent + 0x194) >> 12;
+                                uint16_t tri = *(uint16_t*)(ent + 0x1FA);
+                                uint16_t talk = *(uint16_t*)(ent + 0x1F8);
+                                uint16_t push = *(uint16_t*)(ent + 0x1F6);
+                                uint8_t setpc = *(uint8_t*)(ent + 0x255);
+                                int16_t modelId = *(int16_t*)(ent + 0x218);
+                                s_prevPosX[i] = px;
+                                s_prevPosY[i] = py;
+                                s_prevTri[i] = tri;
+                                s_prevTalk[i] = talk;
+                                Log::Mod("[ENT-MON]   [%2d] ptr=0x%08X pos=(%d,%d) tri=%u talk=%u push=%u model=%d setpc=%u",
+                                           i, ptr, px, py, (unsigned)tri, (unsigned)talk, (unsigned)push, (int)modelId, (unsigned)setpc);
+                            } else {
+                                s_prevPosX[i] = 0;
+                                s_prevPosY[i] = 0;
+                                s_prevTri[i] = 0;
+                                s_prevTalk[i] = 0;
+                                Log::Mod("[ENT-MON]   [%2d] NULL", i);
+                            }
+                        }
+
+                        // Also dump Backgrounds table if available
+                        if (FF8Addresses::pFieldStateBackgrounds && FF8Addresses::pFieldStateBackgroundCount) {
+                            uint8_t bgCount = *FF8Addresses::pFieldStateBackgroundCount;
+                            s_prevBgCount = bgCount;
+                            Log::Mod("[ENT-MON] Backgrounds count: %u", (unsigned)bgCount);
+                            // Dump first 20 background entity active flags
+                            uint8_t* bgBase = *FF8Addresses::pFieldStateBackgrounds;
+                            if (bgBase) {
+                                for (int i = 0; i < 20 && i < bgCount; i++) {
+                                    uint8_t* bg = bgBase + i * 0x18C; // stride from EXE disassembly (0x47B500)
+                                    uint8_t active = *(uint8_t*)(bg + 0x188);
+                                    uint8_t exec = *(uint8_t*)(bg + 0x18A);
+                                    Log::Mod("[ENT-MON]   BG[%2d] active=%u exec=%u", i, (unsigned)active, (unsigned)exec);
+                                }
+                            }
+                        }
+
+                        Log::Mod("[ENT-MON] === Initial dump complete ===");
+
+                        // v0.12.17: Dump JSM scripts for Background entities named dic/igyous
+                        if (FF8Addresses::pCurrentFieldName) {
+                            const char* fn = FF8Addresses::pCurrentFieldName;
+                            char symN[128][32] = {};
+                            int symC = 0;
+                            FieldArchive::LoadSYMNames(fn, symN, 128, symC);
+                            FieldArchive::JSMCounts jc = {};
+                            FieldArchive::LoadJSMCounts(fn, jc);
+                            for (int si = 0; si < symC; si++) {
+                                if (strstr(symN[si], "dic") || strstr(symN[si], "igyous")) {
+                                    int jsmIdx = si + jc.doors;  // SYM skips doors but not the rest
+                                    // Actually: SYM ordering is Line, BG, Other (after skipping doors)
+                                    // JSM entity ordering is Door[0..D-1], Line[D..], BG, Other
+                                    // So SYM[i] = JSM entity[i + countDoors]
+                                    Log::Mod("[ENT-MON] Dumping script for SYM[%d]='%s' -> JSM entity %d",
+                                               si, symN[si], jsmIdx);
+                                    FieldArchive::DumpEntityScript(fn, jsmIdx);
+                                }
+                            }
+                        }
+                    } __except(EXCEPTION_EXECUTE_HANDLER) {
+                        Log::Mod("[ENT-MON] EXCEPTION during initial dump");
+                    }
+                } else {
+                    ScreenReader::Speak("Entity monitor off", true);
+                    Log::Mod("[ENT-MON] === Entity Activation Monitor OFF ===");
+                }
+            }
+
+            // Per-frame monitoring when active
+            if (s_entityMonitorActive && addressesValid) {
+                __try {
+                    bool anyChange = false;
+
+                    // Check entity count change
+                    uint8_t entCount = *(uint8_t*)0x1D9D0E1;
+                    if (entCount != s_prevEntCount) {
+                        Log::Write("[ENT-MON] !!! Entity count changed: %u -> %u",
+                                   (unsigned)s_prevEntCount, (unsigned)entCount);
+                        s_prevEntCount = entCount;
+                        anyChange = true;
+                    }
+
+                    // Check each entity table slot
+                    for (int i = 0; i < ENT_TABLE_SIZE; i++) {
+                        uint32_t ptr = *(uint32_t*)(0x1D9D020 + i * 4);
+
+                        // Pointer appeared or disappeared
+                        if (ptr != s_prevPtrs[i]) {
+                            Log::Write("[ENT-MON] !!! Slot %d pointer changed: 0x%08X -> 0x%08X",
+                                       i, s_prevPtrs[i], ptr);
+                            s_prevPtrs[i] = ptr;
+                            anyChange = true;
+                        }
+
+                        // If pointer is valid, check data changes
+                        if (ptr) {
+                            uint8_t* ent = (uint8_t*)ptr;
+                            int32_t px = *(int32_t*)(ent + 0x190) >> 12;
+                            int32_t py = *(int32_t*)(ent + 0x194) >> 12;
+                            uint16_t tri = *(uint16_t*)(ent + 0x1FA);
+                            uint16_t talk = *(uint16_t*)(ent + 0x1F8);
+
+                            if (px != s_prevPosX[i] || py != s_prevPosY[i] ||
+                                tri != s_prevTri[i] || talk != s_prevTalk[i]) {
+                                Log::Write("[ENT-MON] !!! Slot %d data changed: pos(%d,%d)->(%d,%d) tri=%u->%u talk=%u->%u",
+                                           i, s_prevPosX[i], s_prevPosY[i], px, py,
+                                           (unsigned)s_prevTri[i], (unsigned)tri,
+                                           (unsigned)s_prevTalk[i], (unsigned)talk);
+                                s_prevPosX[i] = px;
+                                s_prevPosY[i] = py;
+                                s_prevTri[i] = tri;
+                                s_prevTalk[i] = talk;
+                                anyChange = true;
+                            }
+                        }
+                    }
+
+                    // If anything changed, log player position for correlation
+                    if (anyChange) {
+                        int playerIdx = FF8Addresses::GetPlayerEntityIndex();
+                        if (playerIdx >= 0 && FF8Addresses::pFieldStateOthers) {
+                            uint8_t* pEnt = FF8Addresses::pFieldStateOthers[playerIdx];
+                            if (pEnt) {
+                                int32_t px = *(int32_t*)(pEnt + 0x190) >> 12;
+                                int32_t py = *(int32_t*)(pEnt + 0x194) >> 12;
+                                uint16_t tri = *(uint16_t*)(pEnt + 0x1FA);
+                                Log::Write("[ENT-MON] Player at change: pos=(%d,%d) tri=%u", px, py, (unsigned)tri);
+                            }
+                        }
+                    }
+                } __except(EXCEPTION_EXECUTE_HANDLER) {
+                    // Silently continue — might be between field transitions
+                }
+            }
+
+            // Auto-disable on field change
+            if (s_entityMonitorActive) {
+                static uint16_t s_monFieldId = 0xFFFF;
+                if (FF8Addresses::pCurrentFieldId) {
+                    uint16_t fid = *FF8Addresses::pCurrentFieldId;
+                    if (s_monFieldId == 0xFFFF) {
+                        s_monFieldId = fid;
+                    } else if (fid != s_monFieldId) {
+                        Log::Write("[ENT-MON] Field changed %u -> %u, auto-disabling", (unsigned)s_monFieldId, (unsigned)fid);
+                        s_entityMonitorActive = false;
+                        s_monFieldId = 0xFFFF;
+                    }
+                }
+            }
+        }
         
         // --- Sleep to avoid burning CPU ---
         // 16ms ≈ 60 polls/sec, fast enough for menu navigation
@@ -197,6 +418,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     
     // Cleanup
     BattleTTS::Shutdown();       // v0.10.01: Battle TTS cleanup
+    WorldMap::Shutdown();         // v0.11.03: World map cleanup
     GameAudio::Shutdown();       // v0.09.22: Remove BGM volume hook
     NameBypass::Shutdown();      // v04.26: Remove naming screen hook
     FieldNavigation::Shutdown(); // v05.00: Field navigation cleanup

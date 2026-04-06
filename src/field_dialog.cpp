@@ -211,21 +211,21 @@ static bool PatchDispatchSite()
     // Verify the instruction is FF 14 85 [4-byte addr]
     uint8_t* code = (uint8_t*)s_dispatchAddr;
     if (code[0] != 0xFF || code[1] != 0x14 || (code[2] != 0x85 && code[2] != 0x95)) {
-        Log::Write("FieldDialog: [DISPATCH] Expected FF 14 85/95 at 0x%08X, got %02X %02X %02X",
+        Log::Dialog("FieldDialog: [DISPATCH] Expected FF 14 85/95 at 0x%08X, got %02X %02X %02X",
                    s_dispatchAddr, code[0], code[1], code[2]);
         return false;
     }
     bool indexInEdx = (code[2] == 0x95);  // 0x85=EAX, 0x95=EDX
-    Log::Write("FieldDialog: [DISPATCH] Opcode index register: %s", indexInEdx ? "EDX" : "EAX");
+    Log::Dialog("FieldDialog: [DISPATCH] Opcode index register: %s", indexInEdx ? "EDX" : "EAX");
 
     // Read the table address from the instruction operand
     s_opcodeTableAddr = *(uint32_t*)(code + 3);
-    Log::Write("FieldDialog: [DISPATCH] Found dispatch at 0x%08X, table=0x%08X",
+    Log::Dialog("FieldDialog: [DISPATCH] Found dispatch at 0x%08X, table=0x%08X",
                s_dispatchAddr, s_opcodeTableAddr);
 
     // Verify table matches what we resolved
     if (s_opcodeTableAddr != (uint32_t)FF8Addresses::pExecuteOpcodeTable) {
-        Log::Write("FieldDialog: [DISPATCH] WARNING: table mismatch! Expected 0x%08X",
+        Log::Dialog("FieldDialog: [DISPATCH] WARNING: table mismatch! Expected 0x%08X",
                    (uint32_t)FF8Addresses::pExecuteOpcodeTable);
         // Use the one from the instruction, not our resolved one
     }
@@ -236,7 +236,7 @@ static bool PatchDispatchSite()
     // Make writable
     DWORD oldProtect;
     if (!VirtualProtect((LPVOID)s_dispatchAddr, 7, PAGE_EXECUTE_READWRITE, &oldProtect)) {
-        Log::Write("FieldDialog: [DISPATCH] VirtualProtect failed (err=%u)", GetLastError());
+        Log::Dialog("FieldDialog: [DISPATCH] VirtualProtect failed (err=%u)", GetLastError());
         return false;
     }
 
@@ -252,7 +252,7 @@ static bool PatchDispatchSite()
     VirtualProtect((LPVOID)s_dispatchAddr, 7, oldProtect, &oldProtect);
 
     s_dispatchPatched = true;
-    Log::Write("FieldDialog: [DISPATCH] Patched! JMP to 0x%08X (%s stub), ret to 0x%08X",
+    Log::Dialog("FieldDialog: [DISPATCH] Patched! JMP to 0x%08X (%s stub), ret to 0x%08X",
                (uint32_t)stubTarget, indexInEdx ? "EDX" : "EAX", s_dispatchRetAddr);
 
     // Diagnostic: dump x86 bytes before the dispatch to understand how
@@ -273,14 +273,14 @@ static bool PatchDispatchSite()
             hp += snprintf(hexBuf + hp, 256 - hp, "%08X: ", addr);
             for (int b = 0; b < 16; b++)
                 hp += snprintf(hexBuf + hp, 256 - hp, "%02X ", p[row * 16 + b]);
-            Log::Write("FieldDialog: [X86DUMP] %s", hexBuf);
+            Log::Dialog("FieldDialog: [X86DUMP] %s", hexBuf);
         }
 
         // Also dump the instruction decoder function at 0x00530760
         // (called from the dispatch site to extract opcode from raw dword)
         uint32_t decoderAddr = 0x00530760;
         const uint8_t* dp2 = (const uint8_t*)decoderAddr;
-        Log::Write("FieldDialog: [X86DUMP] === Instruction decoder at 0x%08X ===", decoderAddr);
+        Log::Dialog("FieldDialog: [X86DUMP] === Instruction decoder at 0x%08X ===", decoderAddr);
         for (int row = 0; row < 16; row++) {
             char hexBuf2[256];
             int hp2 = 0;
@@ -288,7 +288,7 @@ static bool PatchDispatchSite()
             hp2 += snprintf(hexBuf2 + hp2, 256 - hp2, "%08X: ", a2);
             for (int b = 0; b < 16; b++)
                 hp2 += snprintf(hexBuf2 + hp2, 256 - hp2, "%02X ", dp2[row * 16 + b]);
-            Log::Write("FieldDialog: [X86DUMP] %s", hexBuf2);
+            Log::Dialog("FieldDialog: [X86DUMP] %s", hexBuf2);
         }
 
         // Re-apply patch
@@ -313,7 +313,7 @@ static void UnpatchDispatchSite()
         VirtualProtect((LPVOID)s_dispatchAddr, 7, oldProtect, &oldProtect);
     }
     s_dispatchPatched = false;
-    Log::Write("FieldDialog: [DISPATCH] Unpatched.");
+    Log::Dialog("FieldDialog: [DISPATCH] Unpatched.");
 }
 
 // v04.20: menu_draw_text — naked hook for zero-overhead call counting.
@@ -553,7 +553,7 @@ static void ScanAndSpeakAllWindows(const char* opcodeLabel)
             IsSuffixOrSubstring(ws.lastRawText, decoded)) {
             if (!ws.skipLogged) {
                 ws.skipLogged = true;
-                Log::Write("FieldDialog: [%s] win[%d] Skipping page advance (already spoken)",
+                Log::Dialog("FieldDialog: [%s] win[%d] Skipping page advance (already spoken)",
                            opcodeLabel, i);
             }
             continue;
@@ -579,7 +579,7 @@ static void ScanAndSpeakAllWindows(const char* opcodeLabel)
         // v04.16: Mark this text as spoken in pending queue
         MarkPendingAsSpoken(decoded);
 
-        Log::Write("FieldDialog: [%s] win[%d] Speaking: \"%s\"",
+        Log::Dialog("FieldDialog: [%s] win[%d] Speaking: \"%s\"",
                    opcodeLabel, i, decoded.c_str());
         s_lastDialogSpoken = decoded;  // v04.25: track for F5 repeat
         ScreenReader::Speak(decoded.c_str(), false);  // Queue mode
@@ -635,7 +635,7 @@ static void ScanAndSpeakChoiceWindows(const char* opcodeLabel)
             ws.lastSpokenChoice = curChoice;
 
             if (choiceIndex >= 0 && choiceIndex < (int)dialog.choices.size()) {
-                Log::Write("FieldDialog: [%s] win[%d] Choice changed -> %d: \"%s\"",
+                Log::Dialog("FieldDialog: [%s] win[%d] Choice changed -> %d: \"%s\"",
                            opcodeLabel, i, choiceIndex + 1,
                            dialog.choices[choiceIndex].c_str());
                 ScreenReader::Speak(dialog.choices[choiceIndex].c_str(), true);
@@ -652,7 +652,7 @@ static void ScanAndSpeakChoiceWindows(const char* opcodeLabel)
         ws.lastSpokenChoice = curChoice;
         ws.skipLogged = false;
 
-        Log::Write("FieldDialog: [%s] win[%d] Parsed %d choices (firstQ=%u lastQ=%u curChoice=%u)",
+        Log::Dialog("FieldDialog: [%s] win[%d] Parsed %d choices (firstQ=%u lastQ=%u curChoice=%u)",
                    opcodeLabel, i, (int)dialog.choices.size(), firstQ, lastQ, curChoice);
 
         std::string fullText = dialog.prompt;
@@ -673,7 +673,7 @@ static void ScanAndSpeakChoiceWindows(const char* opcodeLabel)
         MarkPendingAsSpoken(fullText);
         MarkPendingAsSpoken(ws.lastRawText);
 
-        Log::Write("FieldDialog: [%s] win[%d] Speaking: \"%s\"",
+        Log::Dialog("FieldDialog: [%s] win[%d] Speaking: \"%s\"",
                    opcodeLabel, i, fullText.c_str());
         s_lastDialogSpoken = fullText;  // v04.25: track for F5 repeat
         ScreenReader::Speak(fullText.c_str(), false);
@@ -736,14 +736,14 @@ static char* __cdecl Hook_field_get_dialog_string(char* msgBase, int dialogId)
     // Diagnostic: log first few calls unconditionally, then periodic summary
     s_getstrCallCount++;
     if (s_getstrCallCount <= 10) {
-        Log::Write("FieldDialog: [GETSTR-RAW] call#%d base=0x%08X dialogId=%d result=0x%08X",
+        Log::Dialog("FieldDialog: [GETSTR-RAW] call#%d base=0x%08X dialogId=%d result=0x%08X",
                    s_getstrCallCount, (uint32_t)(uintptr_t)msgBase, dialogId,
                    (uint32_t)(uintptr_t)result);
     } else {
         DWORD now = GetTickCount();
         if ((now - s_getstrLastDiagTime) >= 5000) {
             s_getstrLastDiagTime = now;
-            Log::Write("FieldDialog: [GETSTR-DIAG] %d total calls so far", s_getstrCallCount);
+            Log::Dialog("FieldDialog: [GETSTR-DIAG] %d total calls so far", s_getstrCallCount);
         }
     }
 
@@ -756,7 +756,7 @@ static char* __cdecl Hook_field_get_dialog_string(char* msgBase, int dialogId)
     if (decoded == s_lastGetstrText) return result;
     s_lastGetstrText = decoded;
 
-    Log::Write("FieldDialog: [GETSTR] dialogId=%d text=\"%s\"", dialogId, decoded.c_str());
+    Log::Dialog("FieldDialog: [GETSTR] dialogId=%d text=\"%s\"", dialogId, decoded.c_str());
 
     // Store as pending
     EnterCriticalSection(&s_cs);
@@ -820,7 +820,7 @@ static void CheckPendingTexts()
         s_pending[i].spoken = true;  // Mark as handled either way
 
         if (!alreadySpoken) {
-            Log::Write("FieldDialog: [GETSTR-DEFERRED] msgId=%d Speaking: \"%s\"",
+            Log::Dialog("FieldDialog: [GETSTR-DEFERRED] msgId=%d Speaking: \"%s\"",
                        s_pending[i].messageId, s_pending[i].decoded.c_str());
             ScreenReader::Speak(s_pending[i].decoded.c_str(), false);
         }
@@ -926,7 +926,7 @@ static char __cdecl Hook_show_dialog(int32_t window_id, uint32_t state, int16_t 
             LONG ufeDelta = ufeCount - s_ufeLastReported;
             s_ufeLastReported = ufeCount;
 
-            Log::Write("FieldDialog: [SHOW_DIALOG-DIAG] %d total calls, mode=%u, ufe=%ld(+%ld), mdt=%ld(+%ld), gcw=%ld(+%ld), dist:%s",
+            Log::Dialog("FieldDialog: [SHOW_DIALOG-DIAG] %d total calls, mode=%u, ufe=%ld(+%ld), mdt=%ld(+%ld), gcw=%ld(+%ld), dist:%s",
                        s_showDialogCallCount, currentMode, ufeCount, ufeDelta, mdtCount, mdtDelta, gcwCount, gcwDelta, dist);
 
             // v04.22: dump opcode histogram delta (only non-zero entries)
@@ -947,7 +947,7 @@ static char __cdecl Hook_show_dialog(int32_t window_id, uint32_t state, int16_t 
                 if (ovfDelta > 0)
                     opos += snprintf(opbuf + opos, sizeof(opbuf) - opos, " OVF=%ld", ovfDelta);
                 if (opos > 0)
-                    Log::Write("FieldDialog: [OPCODE-HIST]%s", opbuf);
+                    Log::Dialog("FieldDialog: [OPCODE-HIST]%s", opbuf);
             }
 
             // Reset counters for next interval
@@ -963,7 +963,7 @@ static char __cdecl Hook_show_dialog(int32_t window_id, uint32_t state, int16_t 
         static int s_oorCount = 0;
         s_oorCount++;
         if (s_oorCount <= 20) {
-            Log::Write("FieldDialog: [SHOW_DIALOG-OOR] winId=%d state=%u a3=%d mode=%u",
+            Log::Dialog("FieldDialog: [SHOW_DIALOG-OOR] winId=%d state=%u a3=%d mode=%u",
                        window_id, state, (int)a3, currentMode);
         }
         return result;
@@ -1004,7 +1004,7 @@ static char __cdecl Hook_show_dialog(int32_t window_id, uint32_t state, int16_t 
                      *FF8Addresses::pCurrentTutorialId : 0xFF;
     int16_t transition = GetWinOpenCloseTransition(winObj);
     bool usedText2 = (textPtr == text2 && textPtr != text1);
-    Log::Write("FieldDialog: [SHOW_DIALOG-TEXT] win[%d] mode=%u tutoId=%u state=%u tr=%d%s text=\"%s\"",
+    Log::Dialog("FieldDialog: [SHOW_DIALOG-TEXT] win[%d] mode=%u tutoId=%u state=%u tr=%d%s text=\"%s\"",
                window_id, currentMode, (unsigned)tutoId, state, (int)transition,
                usedText2 ? " [T2]" : "", decoded.c_str());
 
@@ -1053,12 +1053,12 @@ static char __cdecl Hook_show_dialog(int32_t window_id, uint32_t state, int16_t 
             }
         }
 
-        Log::Write("FieldDialog: [SHOW_DIALOG-SPEAK] win[%d] mode=%u Speaking: \"%s\"",
+        Log::Dialog("FieldDialog: [SHOW_DIALOG-SPEAK] win[%d] mode=%u Speaking: \"%s\"",
                    window_id, currentMode, speakText.c_str());
         s_lastDialogSpoken = speakText;  // v04.25: track for F5 repeat
         ScreenReader::Speak(speakText.c_str(), false);  // Queue mode
     } else {
-        Log::Write("FieldDialog: [SHOW_DIALOG-TEXT] win[%d] (already spoken by opcode hook)",
+        Log::Dialog("FieldDialog: [SHOW_DIALOG-TEXT] win[%d] (already spoken by opcode hook)",
                    window_id);
     }
     LeaveCriticalSection(&s_cs);
@@ -1091,7 +1091,7 @@ static int __cdecl Hook_opcode_tuto(int entityPtr)
     s_tutoCallCount++;
     const char* fieldName = FF8Addresses::pCurrentFieldName ?
                             FF8Addresses::pCurrentFieldName : "(null)";
-    Log::Write("FieldDialog: [TUTO] call#%d field=%s tutoId=%u->%u mode=%u->%u",
+    Log::Dialog("FieldDialog: [TUTO] call#%d field=%s tutoId=%u->%u mode=%u->%u",
                s_tutoCallCount, fieldName,
                (unsigned)tutoIdBefore, (unsigned)tutoIdAfter,
                (unsigned)modeBefore, (unsigned)modeAfter);
@@ -1115,7 +1115,7 @@ static int __cdecl Hook_opcode_mesmode(int entityPtr)
     s_mesmodeCallCount++;
     const char* fieldName = FF8Addresses::pCurrentFieldName ?
                             FF8Addresses::pCurrentFieldName : "(null)";
-    Log::Write("FieldDialog: [MESMODE] call#%d field=%s mode=%u->%u entity=0x%08X",
+    Log::Dialog("FieldDialog: [MESMODE] call#%d field=%s mode=%u->%u entity=0x%08X",
                s_mesmodeCallCount, fieldName,
                (unsigned)modeBefore, (unsigned)modeAfter, (uint32_t)entityPtr);
 
@@ -1144,7 +1144,7 @@ static int __cdecl Hook_opcode_ramesw(int entityPtr)
     s_rameswCallCount++;
     const char* fieldName = FF8Addresses::pCurrentFieldName ?
                             FF8Addresses::pCurrentFieldName : "(null)";
-    Log::Write("FieldDialog: [RAMESW] call#%d field=%s mode=%u->%u entity=0x%08X",
+    Log::Dialog("FieldDialog: [RAMESW] call#%d field=%s mode=%u->%u entity=0x%08X",
                s_rameswCallCount, fieldName,
                (unsigned)modeBefore, (unsigned)modeAfter, (uint32_t)entityPtr);
 
@@ -1246,7 +1246,7 @@ static void CheckGcwBuffer()
     }
 
     s_gcwLastSpoken = decoded;
-    Log::Write("FieldDialog: [GCW-SPEAK] %d chars -> \"%s\"", len, decoded.c_str());
+    Log::Dialog("FieldDialog: [GCW-SPEAK] %d chars -> \"%s\"", len, decoded.c_str());
     ScreenReader::Speak(decoded.c_str(), false);
 }
 
@@ -1318,7 +1318,7 @@ void RepeatLastDialog()
         ScreenReader::Speak("No dialog to repeat.", true);
         return;
     }
-    Log::Write("FieldDialog: [REPEAT] \"%s\"", s_lastDialogSpoken.c_str());
+    Log::Dialog("FieldDialog: [REPEAT] \"%s\"", s_lastDialogSpoken.c_str());
     ScreenReader::Speak(s_lastDialogSpoken.c_str(), true);  // Interrupt current speech
 }
 
@@ -1339,7 +1339,7 @@ static int __cdecl Hook_opcode_menuname(int entityPtr)
 {
     const char* fieldName = FF8Addresses::pCurrentFieldName ?
                             FF8Addresses::pCurrentFieldName : "?";
-    Log::Write("FieldDialog: [MENUNAME] Bypassing naming screen. field=%s entity=0x%08X",
+    Log::Dialog("FieldDialog: [MENUNAME] Bypassing naming screen. field=%s entity=0x%08X",
                fieldName, (uint32_t)entityPtr);
     // v0.09.14: Smart bypass with correct parameter reading.
     // Disassembly of opcode_menuname shows: param = entityPtr[stackPtr * 4]
@@ -1349,10 +1349,10 @@ static int __cdecl Hook_opcode_menuname(int entityPtr)
         uint8_t* ep = (uint8_t*)entityPtr;
         uint8_t sp = ep[0x184];
         param = *(int32_t*)(ep + sp * 4);
-        Log::Write("FieldDialog: [MENUNAME] stackPtr=%u, param=%d (at +0x%02X)",
+        Log::Dialog("FieldDialog: [MENUNAME] stackPtr=%u, param=%d (at +0x%02X)",
                    (unsigned)sp, param, sp * 4);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        Log::Write("FieldDialog: [MENUNAME] SEH reading param");
+        Log::Dialog("FieldDialog: [MENUNAME] SEH reading param");
     }
 
     // Character names (0-7) and GF names (8-23)
@@ -1382,14 +1382,14 @@ static int __cdecl Hook_opcode_menuname(int entityPtr)
     // Call original handler for ALL params — it does essential init work
     // (switch table writes savemap data, GF assignments, character setup).
     // Then suppress the naming UI by clearing the trigger flags.
-    Log::Write("FieldDialog: [MENUNAME] Calling original handler (param=%d)", param);
+    Log::Dialog("FieldDialog: [MENUNAME] Calling original handler (param=%d)", param);
     int result = s_origMenuname(entityPtr);
     // Clear naming UI triggers before main loop sees them
     __try {
         *(uint8_t*)0x01CE4760 = 0;   // pMode0Phase - clear naming UI mode
         *(uint8_t*)0x01CE490B = 0;   // naming flag - clear
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        Log::Write("FieldDialog: [MENUNAME] SEH clearing UI flags");
+        Log::Dialog("FieldDialog: [MENUNAME] SEH clearing UI flags");
     }
 
     // v0.09.19: Check for new GF acquisitions (exists flag 0→non-zero)
@@ -1408,7 +1408,7 @@ static int __cdecl Hook_opcode_menuname(int entityPtr)
                 char buf[128];
                 sprintf(buf, "GF %s acquired", GF_NAMES_LOCAL[g]);
                 ScreenReader::Speak(buf, false);  // queue after any dialog
-                Log::Write("FieldDialog: [MENUNAME] %s (idx=%d, flag 0x%02X)",
+                Log::Dialog("FieldDialog: [MENUNAME] %s (idx=%d, flag 0x%02X)",
                            buf, g, (unsigned)after);
             }
         }
@@ -1420,11 +1420,11 @@ static int __cdecl Hook_opcode_menuname(int entityPtr)
     // Squall (param 0) always announces because no GFs are given with him.
     if (param >= 0 && param <= 7 && !gfAcquired) {
         ScreenReader::Speak(s_charNames[param], false);
-        Log::Write("FieldDialog: [MENUNAME] Character: %s", s_charNames[param]);
+        Log::Dialog("FieldDialog: [MENUNAME] Character: %s", s_charNames[param]);
     } else if (param >= 0 && param <= 7) {
-        Log::Write("FieldDialog: [MENUNAME] Character: %s (suppressed, GF acquired)", s_charNames[param]);
+        Log::Dialog("FieldDialog: [MENUNAME] Character: %s (suppressed, GF acquired)", s_charNames[param]);
     }
-    Log::Write("FieldDialog: [MENUNAME] UI suppressed, returning %d", result);
+    Log::Dialog("FieldDialog: [MENUNAME] UI suppressed, returning %d", result);
     return result;
 }
 
@@ -1436,7 +1436,7 @@ static bool CreateDetourHook(uint32_t targetAddr, OpcodeHandler_t newHandler,
                               OpcodeHandler_t* outOriginal, const char* label)
 {
     if (targetAddr == 0) {
-        Log::Write("FieldDialog: Cannot hook %s - address is null", label);
+        Log::Dialog("FieldDialog: Cannot hook %s - address is null", label);
         return false;
     }
 
@@ -1444,12 +1444,12 @@ static bool CreateDetourHook(uint32_t targetAddr, OpcodeHandler_t newHandler,
         (LPVOID)targetAddr, (LPVOID)newHandler, (LPVOID*)outOriginal);
 
     if (status != MH_OK) {
-        Log::Write("FieldDialog: MH_CreateHook failed for %s at 0x%08X (status=%d)",
+        Log::Dialog("FieldDialog: MH_CreateHook failed for %s at 0x%08X (status=%d)",
                    label, targetAddr, (int)status);
         return false;
     }
 
-    Log::Write("FieldDialog: Hooked %s: target=0x%08X trampoline=0x%08X",
+    Log::Dialog("FieldDialog: Hooked %s: target=0x%08X trampoline=0x%08X",
                label, targetAddr, (uint32_t)(uintptr_t)*outOriginal);
     return true;
 }
@@ -1462,16 +1462,16 @@ bool Initialize()
 {
     if (s_initialized) return true;
 
-    Log::Write("FieldDialog: === Initializing field dialog hooks (v04.36) ===");
+    Log::Dialog("FieldDialog: === Initializing field dialog hooks (v04.36) ===");
 
     InitializeCriticalSection(&s_cs);
 
     if (FF8Addresses::opcode_mes == 0) {
-        Log::Write("FieldDialog: ERROR - opcode_mes not resolved.");
+        Log::Dialog("FieldDialog: ERROR - opcode_mes not resolved.");
         return false;
     }
 
-    Log::Write("FieldDialog: pWindowsArray = 0x%08X",
+    Log::Dialog("FieldDialog: pWindowsArray = 0x%08X",
                (uint32_t)(uintptr_t)FF8Addresses::pWindowsArray);
 
     bool anySuccess = false;
@@ -1496,12 +1496,12 @@ bool Initialize()
             (LPVOID)Hook_field_get_dialog_string,
             (LPVOID*)&s_origGetDialogString);
         if (st == MH_OK) {
-            Log::Write("FieldDialog: Hooked field_get_dialog_string: target=0x%08X trampoline=0x%08X",
+            Log::Dialog("FieldDialog: Hooked field_get_dialog_string: target=0x%08X trampoline=0x%08X",
                        FF8Addresses::field_get_dialog_string,
                        (uint32_t)(uintptr_t)s_origGetDialogString);
             anySuccess = true;
         } else {
-            Log::Write("FieldDialog: FAILED to hook field_get_dialog_string (status=%d)", (int)st);
+            Log::Dialog("FieldDialog: FAILED to hook field_get_dialog_string (status=%d)", (int)st);
         }
     }
 
@@ -1510,7 +1510,7 @@ bool Initialize()
         if (CreateDetourHook(FF8Addresses::opcode_tuto, Hook_opcode_tuto, &s_origTuto, "opcode_tuto"))
             anySuccess = true;
     } else {
-        Log::Write("FieldDialog: WARNING - opcode_tuto not resolved");
+        Log::Dialog("FieldDialog: WARNING - opcode_tuto not resolved");
     }
 
     // v04.21: Hook opcode_mesmode (0x106) and opcode_ramesw (0x116)
@@ -1518,13 +1518,13 @@ bool Initialize()
         if (CreateDetourHook(FF8Addresses::opcode_mesmode, Hook_opcode_mesmode, &s_origMesmode, "opcode_mesmode"))
             anySuccess = true;
     } else {
-        Log::Write("FieldDialog: WARNING - opcode_mesmode not resolved");
+        Log::Dialog("FieldDialog: WARNING - opcode_mesmode not resolved");
     }
     if (FF8Addresses::opcode_ramesw != 0) {
         if (CreateDetourHook(FF8Addresses::opcode_ramesw, Hook_opcode_ramesw, &s_origRamesw, "opcode_ramesw"))
             anySuccess = true;
     } else {
-        Log::Write("FieldDialog: WARNING - opcode_ramesw not resolved");
+        Log::Dialog("FieldDialog: WARNING - opcode_ramesw not resolved");
     }
 
     // v04.17: Hook show_dialog (universal text renderer) for MODE_TUTO
@@ -1534,15 +1534,15 @@ bool Initialize()
             (LPVOID)Hook_show_dialog,
             (LPVOID*)&s_origShowDialog);
         if (st == MH_OK) {
-            Log::Write("FieldDialog: Hooked show_dialog: target=0x%08X trampoline=0x%08X",
+            Log::Dialog("FieldDialog: Hooked show_dialog: target=0x%08X trampoline=0x%08X",
                        FF8Addresses::show_dialog_addr,
                        (uint32_t)(uintptr_t)s_origShowDialog);
             anySuccess = true;
         } else {
-            Log::Write("FieldDialog: FAILED to hook show_dialog (status=%d)", (int)st);
+            Log::Dialog("FieldDialog: FAILED to hook show_dialog (status=%d)", (int)st);
         }
     } else {
-        Log::Write("FieldDialog: WARNING - show_dialog not resolved, TUTO/thoughts won't be caught");
+        Log::Dialog("FieldDialog: WARNING - show_dialog not resolved, TUTO/thoughts won't be caught");
     }
 
     // v04.20: Hook menu_draw_text (naked counter for call-rate diagnostic)
@@ -1552,15 +1552,15 @@ bool Initialize()
             (LPVOID)Hook_menu_draw_text_naked,
             (LPVOID*)&s_origMenuDrawText_raw);
         if (st == MH_OK) {
-            Log::Write("FieldDialog: Hooked menu_draw_text: target=0x%08X trampoline=0x%08X",
+            Log::Dialog("FieldDialog: Hooked menu_draw_text: target=0x%08X trampoline=0x%08X",
                        FF8Addresses::menu_draw_text_addr,
                        (uint32_t)(uintptr_t)s_origMenuDrawText_raw);
             anySuccess = true;
         } else {
-            Log::Write("FieldDialog: FAILED to hook menu_draw_text (status=%d)", (int)st);
+            Log::Dialog("FieldDialog: FAILED to hook menu_draw_text (status=%d)", (int)st);
         }
     } else {
-        Log::Write("FieldDialog: WARNING - menu_draw_text not resolved");
+        Log::Dialog("FieldDialog: WARNING - menu_draw_text not resolved");
     }
 
     // v04.20: Hook get_character_width (per-glyph, accumulation-based text capture)
@@ -1570,27 +1570,27 @@ bool Initialize()
             (LPVOID)Hook_get_character_width,
             (LPVOID*)&s_origGetCharWidth);
         if (st == MH_OK) {
-            Log::Write("FieldDialog: Hooked get_character_width: target=0x%08X trampoline=0x%08X",
+            Log::Dialog("FieldDialog: Hooked get_character_width: target=0x%08X trampoline=0x%08X",
                        FF8Addresses::get_character_width_addr,
                        (uint32_t)(uintptr_t)s_origGetCharWidth);
             anySuccess = true;
         } else {
-            Log::Write("FieldDialog: FAILED to hook get_character_width (status=%d)", (int)st);
+            Log::Dialog("FieldDialog: FAILED to hook get_character_width (status=%d)", (int)st);
         }
     } else {
-        Log::Write("FieldDialog: WARNING - get_character_width not resolved");
+        Log::Dialog("FieldDialog: WARNING - get_character_width not resolved");
     }
 
     // v0.09.08: DISABLED update_field_entities hook for infirmary glitch diagnosis.
     // This naked hook intercepts the script interpreter entry point.
-    Log::Write("FieldDialog: [DIAG] update_field_entities hook DISABLED for infirmary glitch test");
+    Log::Dialog("FieldDialog: [DIAG] update_field_entities hook DISABLED for infirmary glitch test");
 
     // v0.09.04: Restored menuname hook (v04.35 style, minus enableGF)
     if (FF8Addresses::opcode_menuname != 0) {
         if (CreateDetourHook(FF8Addresses::opcode_menuname, Hook_opcode_menuname, &s_origMenuname, "opcode_menuname"))
             anySuccess = true;
     } else {
-        Log::Write("FieldDialog: WARNING - opcode_menuname not resolved");
+        Log::Dialog("FieldDialog: WARNING - opcode_menuname not resolved");
     }
 
     // v0.09.08: DISABLED dispatch patch + update_field_entities hook for infirmary glitch diagnosis.

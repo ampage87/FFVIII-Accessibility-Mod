@@ -128,7 +128,7 @@ namespace FmvSkip
         // If this is a different AVI, reset state
         if (!g_aviFilePath.empty() && ToLower(g_aviFilePath) != baseLower)
         {
-            Log::Write("[FmvSkip] New AVI detected (%s), clearing previous handles for %s",
+            Log::Mod("[FmvSkip] New AVI detected (%s), clearing previous handles for %s",
                 base.c_str(), g_aviFilePath.c_str());
             g_aviHandles.clear();
             g_skipActive.store(false);
@@ -144,10 +144,10 @@ namespace FmvSkip
             g_currentAvi = baseLower;
             g_skipActive.store(false);
             g_skipRequested.store(false);
-            Log::Write("[FmvSkip] FMV started: %s", base.c_str());
+            Log::Mod("[FmvSkip] FMV started: %s", base.c_str());
         }
 
-        Log::Write("[FmvSkip] AVI file opened via %s: %s (handle=0x%p, total=%zu)",
+        Log::Mod("[FmvSkip] AVI file opened via %s: %s (handle=0x%p, total=%zu)",
             source, base.c_str(), handle, g_aviHandles.size());
     }
 
@@ -160,13 +160,13 @@ namespace FmvSkip
             return;
 
         g_aviHandles.erase(it);
-        Log::Write("[FmvSkip] AVI handle closed: 0x%p (remaining=%zu) file=%s",
+        Log::Mod("[FmvSkip] AVI handle closed: 0x%p (remaining=%zu) file=%s",
             handle, g_aviHandles.size(), g_aviFilePath.c_str());
 
         if (g_aviHandles.empty() && g_moviePlaying)
         {
             bool wasSkipped = g_skipActive.load();
-            Log::Write("[FmvSkip] All AVI handles closed - FMV ended: %s%s",
+            Log::Mod("[FmvSkip] All AVI handles closed - FMV ended: %s%s",
                 g_aviFilePath.c_str(),
                 wasSkipped ? " [SKIPPED BY USER]" : " [NATURAL END]");
 
@@ -202,7 +202,7 @@ namespace FmvSkip
             // v0.07.57: Intercept .ff8 save file opens — read entire file for LZSS decompression
             std::string lower = ToLower(filename);
             if (lower.find(".ff8") != std::string::npos) {
-                Log::Write("[SaveFileIO] CreateFileA: \"%s\"", lpFileName);
+                Log::Mod("[SaveFileIO] CreateFileA: \"%s\"", lpFileName);
                 // Open our own handle, read entire file, close it
                 HANDLE hRead = g_originalCreateFileA(
                     lpFileName, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -215,7 +215,7 @@ namespace FmvSkip
                         // Notify MenuTTS to decompress + cache this save header
                         ::MenuTTS_CacheSaveHeader(lpFileName, buf, (int)bytesRead);
                     } else {
-                        Log::Write("[SaveFileIO]   read failed or too short (%u bytes)", bytesRead);
+                        Log::Mod("[SaveFileIO]   read failed or too short (%u bytes)", bytesRead);
                     }
                     g_originalCloseHandle(hRead);
                 }
@@ -283,7 +283,7 @@ namespace FmvSkip
                 static HANDLE lastLoggedHandle = INVALID_HANDLE_VALUE;
                 if (hFile != lastLoggedHandle)
                 {
-                    Log::Write("[FmvSkip] ReadFile intercepted: returning EOF for handle 0x%p (requested %u bytes)",
+                    Log::Mod("[FmvSkip] ReadFile intercepted: returning EOF for handle 0x%p (requested %u bytes)",
                         hFile, nNumberOfBytesToRead);
                     lastLoggedHandle = hFile;
                 }
@@ -333,14 +333,14 @@ namespace FmvSkip
             (LPVOID*)&g_originalReadFile);
         if (statusR == MH_OK) hookCount++;
 
-        Log::Write("[FmvSkip] Hooks: CreateFileA=%s CreateFileW=%s CloseHandle=%s ReadFile=%s (%d/4)",
+        Log::Mod("[FmvSkip] Hooks: CreateFileA=%s CreateFileW=%s CloseHandle=%s ReadFile=%s (%d/4)",
             statusA == MH_OK ? "OK" : "FAIL",
             statusW == MH_OK ? "OK" : "FAIL",
             statusC == MH_OK ? "OK" : "FAIL",
             statusR == MH_OK ? "OK" : "FAIL",
             hookCount);
 
-        Log::Write("[FmvSkip] FMV skip initialized (Backspace to skip).");
+        Log::Mod("[FmvSkip] FMV skip initialized (Backspace to skip).");
     }
 
     void Shutdown()
@@ -354,7 +354,7 @@ namespace FmvSkip
         g_skipActive.store(false);
         g_currentAvi.clear();
 
-        Log::Write("[FmvSkip] Shutdown.");
+        Log::Mod("[FmvSkip] Shutdown.");
     }
 
     bool IsMoviePlaying()
@@ -381,7 +381,7 @@ namespace FmvSkip
             bool playing = g_moviePlaying;
             bool alreadySkipping = g_skipActive.load();
 
-            Log::Write("[FmvSkip] Backspace pressed (moviePlaying=%d, skipActive=%d, handles=%zu)",
+            Log::Mod("[FmvSkip] Backspace pressed (moviePlaying=%d, skipActive=%d, handles=%zu)",
                 playing ? 1 : 0, alreadySkipping ? 1 : 0, g_aviHandles.size());
 
             if (playing && !alreadySkipping)
@@ -392,7 +392,7 @@ namespace FmvSkip
                 // Stop audio descriptions immediately
                 FmvAudioDesc::StopPlayback();
 
-                Log::Write("[FmvSkip] Skip activated - ReadFile will return EOF for AVI handles.");
+                Log::Mod("[FmvSkip] Skip activated - ReadFile will return EOF for AVI handles.");
             }
         }
         g_backspaceWasDown = backspaceDown;
@@ -414,7 +414,7 @@ namespace FmvSkip
             static bool s_lastGameState = false;
             if (gameThinks != s_lastGameState)
             {
-                Log::Write("[FmvSkip] Game movie state changed: %s (our state: playing=%d)",
+                Log::Mod("[FmvSkip] Game movie state changed: %s (our state: playing=%d)",
                     gameThinks ? "PLAYING" : "STOPPED", g_moviePlaying ? 1 : 0);
                 s_lastGameState = gameThinks;
             }

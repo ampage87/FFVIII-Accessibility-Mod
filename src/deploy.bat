@@ -3,11 +3,12 @@ setlocal enabledelayedexpansion
 
 REM ============================================================
 REM FF8 Original PC Accessibility Mod - Build and Deploy
+REM Lives in src\ — invoked by deploy.vbs in project root.
 REM ============================================================
 
 :: Extract version from ff8_accessibility.h
 set "VERSION=unknown"
-for /f "tokens=3 delims= " %%V in ('findstr /C:"FF8OPC_VERSION " "%~dp0src\ff8_accessibility.h" ^| findstr /V "DATE"') do (
+for /f "tokens=3 delims= " %%V in ('findstr /C:"FF8OPC_VERSION " "%~dp0ff8_accessibility.h" ^| findstr /V "DATE"') do (
     set "VERSION=%%~V"
 )
 
@@ -15,14 +16,15 @@ echo Building FF8 Original PC Accessibility Mod Version %VERSION%
 echo Build started at %date% %time%
 echo.
 
-:: Set paths
-set "SCRIPT_DIR=%~dp0"
-set "SRC_DIR=%SCRIPT_DIR%src"
-set "BUILD_DIR=%SCRIPT_DIR%build"
+:: Set paths — deploy.bat now lives in src\
+:: Normalize %~dp0 to strip trailing backslash (avoids \" quoting issues with cl.exe)
+for %%I in ("%~dp0.") do set "SRC_DIR=%%~fI"
+set "PROJECT_DIR=%SRC_DIR%\.."
+set "BUILD_DIR=%PROJECT_DIR%\build"
 set "MINHOOK_DIR=%SRC_DIR%\minhook"
 set "GAME_DIR=C:\Program Files (x86)\Steam\steamapps\common\FINAL FANTASY VIII"
 
-echo Script Directory: "%SCRIPT_DIR%"
+echo Project Directory: "%PROJECT_DIR%"
 echo Source Directory: "%SRC_DIR%"
 echo Game Directory: "%GAME_DIR%"
 echo.
@@ -41,15 +43,18 @@ if not exist "%GAME_DIR%" (
 )
 
 :: Ensure Logs directory exists
-if not exist "%SCRIPT_DIR%Logs" mkdir "%SCRIPT_DIR%Logs"
+if not exist "%PROJECT_DIR%\Logs" mkdir "%PROJECT_DIR%\Logs"
 
-:: Grab previous log before overwriting
-if exist "%GAME_DIR%\ff8_accessibility.log" (
-    echo Saving previous game log...
-    copy /Y "%GAME_DIR%\ff8_accessibility.log" "%SCRIPT_DIR%Logs\ff8_accessibility_prev.log" >nul
-    echo Previous log saved to Logs directory.
-    echo.
+:: Grab previous logs before they get overwritten by new game launch
+:: (The new multi-channel log system archives old logs automatically,
+::  but we also copy the game-dir logs to the project Logs folder.)
+for %%F in ("%GAME_DIR%\ff8_mod.log" "%GAME_DIR%\ff8_battle.log" "%GAME_DIR%\ff8_field.log" "%GAME_DIR%\ff8_world.log" "%GAME_DIR%\ff8_menu.log" "%GAME_DIR%\ff8_dialog.log") do (
+    if exist %%F (
+        copy /Y %%F "%PROJECT_DIR%\Logs\" >nul 2>nul
+    )
 )
+echo Previous game logs copied to Logs directory.
+echo.
 
 :: Clean previous build artifacts to avoid stale .obj files
 if exist "%BUILD_DIR%" (
@@ -108,7 +113,7 @@ echo.
 echo Building dinput8.dll (x86)...
 echo.
 
-cd /d "%SCRIPT_DIR%"
+cd /d "%PROJECT_DIR%"
 
 REM ---- Step 1: Compile resources (VTT files embedded in DLL) ----
 echo Compiling resources...
@@ -121,7 +126,7 @@ echo   resources.res OK
 echo.
 
 REM ---- Step 2: Compile and link ----
-echo Build output saved to: "%SCRIPT_DIR%Logs\build_latest.log"
+echo Build output saved to: "%PROJECT_DIR%\Logs\build_latest.log"
 cl /nologo /W3 /EHsc /O2 /MD /LD ^
     /I"%SRC_DIR%" ^
     /I"%MINHOOK_DIR%\include" ^
@@ -142,6 +147,7 @@ cl /nologo /W3 /EHsc /O2 /MD /LD ^
     "%SRC_DIR%\game_audio.cpp" ^
     "%SRC_DIR%\menu_tts.cpp" ^
     "%SRC_DIR%\battle_tts.cpp" ^
+    "%SRC_DIR%\world_map.cpp" ^
     "%SRC_DIR%\ff8_text_decode.cpp" ^
     "%MINHOOK_DIR%\src\buffer.c" ^
     "%MINHOOK_DIR%\src\hook.c" ^
@@ -153,12 +159,12 @@ cl /nologo /W3 /EHsc /O2 /MD /LD ^
     user32.lib ^
     ole32.lib ^
     uuid.lib ^
-    psapi.lib > "%SCRIPT_DIR%Logs\build_latest.log" 2>&1
+    psapi.lib > "%PROJECT_DIR%\Logs\build_latest.log" 2>&1
 
 if errorlevel 1 (
     echo.
     echo ERROR: Build failed! See build log:
-    type "%SCRIPT_DIR%Logs\build_latest.log"
+    type "%PROJECT_DIR%\Logs\build_latest.log"
     goto :error
 )
 
@@ -188,8 +194,8 @@ echo ============================================================
 echo.
 echo To test: Launch FF8 through Steam.
 echo Logs will appear in BOTH:
-echo   - "%GAME_DIR%\ff8_accessibility.log"
-echo   - "%SCRIPT_DIR%Logs\ff8_accessibility.log"
+echo   - "%GAME_DIR%\ff8_*.log" (6 channel files)
+echo   - "%PROJECT_DIR%\Logs\ff8_*.log"
 goto :end
 
 :error

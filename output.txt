@@ -1,0 +1,365 @@
+Archive dir: C:\Users\ampag\OneDrive\Documents\FFVIII-Accessibility-Mod\FF8_OriginalPC_mod\Game Files\FINAL FANTASY VIII\Data\lang-en
+
+======================================================================
+FIELD: bghall_1
+======================================================================
+JSM header: doors=0 lines=6 bg=6 others=31
+SYM names: 44
+INF gateways: 6
+  GW: (-416,-11211)->(-889,-11211) -> fepic1 ((-653,-11211))
+  GW: (9,-11221)->(-416,-11211) -> fepic1 ((-204,-11216))
+  GW: (9,-11221)->(649,-11025) -> fepic1 ((329,-11123))
+  GW: (-3068,-4922)->(-3198,-5264) -> feclock1 ((-3133,-5093))
+  GW: (2383,-5049)->(2296,-5812) -> felfst1 ((2339,-5431))
+  GW: (-475,-3737)->(490,-3737) -> ffhill1 ((7,-3737))
+
+ENTITIES WITH INTERACTION DATA:
+----------------------------------------------------------------------
+
+  ent6 [background] sym='selphies' (methods=2)
+    EXT_OPS: EXT_159(159)
+
+  ent7 [background] sym='quistis' (methods=2)
+
+  ent8 [background] sym='quistissd' (methods=2)
+    EXT_OPS: EXT_159(159)
+
+  ent9 [background] sym='rinoa' (methods=2)
+
+  ent10 [background] sym='irvine' (methods=2)
+    SET3: PSHM_W ['0x6', '0x51', '0x80000000', '0xe5', '0x0', '0xffffe266', '0x237']
+    EXT_OPS: EXT_90(90)
+
+  ent11 [background] sym='cid' (methods=2)
+
+  ent12 [other] sym='shu' (methods=9)
+    SET3: PSHM_W ['0x2', '0x1', '0x80000000', '0xffffffae', '0xffffe0ad', '0x237']
+    EXT_OPS: EXT_84(84), EXT_-1(-1)
+
+  ent13 [other] sym='dairi' (methods=6)
+    EXT_OPS: EXT_90(90)
+
+  ent14 [other] sym='seito3' (methods=4)
+    SET3: PSHM_W ['0x2', '0x1', '0x80000000', '0x24c', '0xffffd768', '0x237']
+    EXT_OPS: EXT_80(80)
+
+  ent15 [other] sym='seito4' (methods=4)
+
+  ent16 [other] sym='aniki' (methods=4)
+    EXT_OPS: EXT_-1(-1)
+
+  ent17 [other] sym='seito5' (methods=4)
+    SET3: PSHM_W ['0x80000000', '0x27b', '0xffffe657', '0x237']
+    EXT_OPS: EXT_90(90)
+
+  ent18 [other] sym='seito6' (methods=9)
+    SET3: PSHM_W ['0x1', '0x9d8', '0xffffea5f', '0x237']
+    EXT_OPS: EXT_90(90), EXT_82(82)
+
+  ent19 [other] sym='seito7' (methods=4)
+    EXT_OPS: EXT_0(0)
+
+  ent20 [other] sym='seito8' (methods=4)
+    EXT_OPS: EXT_0(0)
+
+  ent21 [other] sym='seito10' (methods=4)
+    EXT_OPS: EXT_60(60)
+
+  ent22 [other] sym='seito14' (methods=4)
+
+  ent23 [other] sym='seito15' (methods=4)
+    SET3: PSHM_W ['0x80000000', '0xfffffef9', '0xffffe23f', '0x237']
+    EXT_OPS: EXT_60(60)
+
+  ent24 [other] sym='dic' (methods=4)
+    EXT_OPS: EXT_92(92)
+
+  ent25 [other] sym='igyous1' (methods=4)
+
+  ent26 [other] sym='l5' (methods=7)
+    REQSW -> ent2147483648 method567 (in m2)
+    REQSW -> ent2147483648 method567 (in m2)
+    REQSW -> ent2147483648 method567 (in m2)
+    REQSW -> ent2147483648 method567 (in m2)
+    EXT_OPS: EXT_2147483648(2147483648), REQSW(228), EXT_80(80), MENUPHS(307), EXT_567(567), EXT_1(1), EXT_10(10), EXT_46(46), MENUSHOP(151), BATTLE(210)
+
+  ent27 [other] sym='savePoint' (methods=7)
+
+  ent28 [other] sym='cardgamemaster' (methods=5)
+
+  ent29 [other] sym='cardgamemaster2' (methods=4)
+
+  ent30 [other] sym='cardgamemaster3' (methods=6)
+
+  ent31 [other] sym='l1' (methods=5)
+
+  ent32 [other] sym='l2' (methods=4)
+    EXT_OPS: EXT_80(80)
+
+  ent33 [other] sym='l3' (methods=4)
+    EXT_OPS: EXT_2147483648(2147483648), MENUPHS(307), EXT_567(567), EXT_1(1), EXT_10(10), EXT_46(46), MENUSHOP(151), BATTLE(210)
+
+  ent34 [other] sym='l4' (methods=5)
+
+  ent35 [other] sym='l6' (methods=7)
+    EXT_OPS: MENUPHS(307), EXT_567(567), EXT_1(1), EXT_10(10), EXT_46(46), MENUSHOP(151), BATTLE(210)
+
+  ent36 [other] sym='saveline0' (methods=5)
+
+  ent37 [other] sym='water' (methods=4)
+    EXT_OPS: EXT_-1(-1)
+
+  ent38 [other] sym='elelight' (methods=5)
+
+  ent39 [other] sym='stairlight' (methods=4)
+
+  ent40 [other] sym='displight' (methods=35)
+    EXT_OPS: EXT_-1(-1)
+
+  ent41 [other] sym='cornerlight' (methods=26)
+    EXT_OPS: EXT_-1(-1)
+
+  ent42 [other] sym='sidelight' (methods=26)
+    EXT_OPS: MENUSHOP(151), BATTLE(210)
+
+======================================================================
+FIELD: bgroom_1
+======================================================================
+JSM header: doors=0 lines=8 bg=7 others=21
+SYM names: 37
+INF gateways: 1
+  GW: (1332,-3501)->(1505,-3501) -> ehback1 ((1418,-3501))
+
+ENTITIES WITH INTERACTION DATA:
+----------------------------------------------------------------------
+
+  ent6 [line] sym='Selphie' (methods=8)
+    SET3: PSHM_W ['0x0', '0x0', '0x61', '0x57', '0x2a9', '0xffffff7d', '0x0']
+    EXT_OPS: EXT_-1(-1), EXT_31(31)
+
+  ent8 [background] sym='Selphie_s' (methods=4)
+    SET3: PSHM_W ['0x1', '0x80000000', '0x80000000', '0xe5', '0x352', '0xffffffdf', '0x0']
+    EXT_OPS: EXT_31(31)
+
+  ent9 [background] sym='Seifer_n' (methods=4)
+    EXT_OPS: ADDPARTY(103)
+
+  ent10 [background] sym='Quistis_n' (methods=4)
+
+  ent11 [background] sym='Quistis' (methods=4)
+    EXT_OPS: EXT_-1(-1)
+
+  ent12 [background] sym='Rinoa' (methods=6)
+    EXT_OPS: BGOFF(77)
+
+  ent13 [background] sym='Irvine' (methods=4)
+
+  ent14 [background] sym='Student1' (methods=4)
+    EXT_OPS: EXT_159(159)
+
+  ent15 [other] sym='Student2' (methods=4)
+    EXT_OPS: EXT_40(40)
+
+  ent16 [other] sym='Student4' (methods=21)
+    EXT_OPS: EXT_10(10)
+
+  ent17 [other] sym='cardgamemaster' (methods=17)
+    EXT_OPS: EXT_1(1), EXT_10(10)
+
+  ent18 [other] sym='cardgamemaster2' (methods=6)
+    EXT_OPS: EXT_1(1)
+
+  ent19 [other] sym='cameraman' (methods=6)
+    EXT_OPS: EXT_88(88)
+
+  ent20 [other] sym='doorcont' (methods=4)
+    REQSW -> ent376 method0 (in m0)
+    EXT_OPS: EXT_2147483648(2147483648), EXT_0(0), REQSW(228), EXT_16(16), EXT_10(10), EXT_46(46), LINEOFF(323), BATTLE(210), EXT_1(1), EXT_60(60), EXT_314(314)
+
+  ent21 [other] sym='bgroom_1_jump01' (methods=6)
+
+  ent22 [other] sym='bgroom_1_jump02' (methods=6)
+
+  ent23 [other] sym='bgroom_2_jump01' (methods=6)
+
+  ent24 [other] sym='bgroom_2_jump02' (methods=7)
+
+  ent25 [other] sym='door01' (methods=6)
+
+  ent26 [other] sym='to_corridor' (methods=6)
+
+  ent27 [other] sym='Cliant' (methods=6)
+
+  ent28 [other] sym='BritinBoard' (methods=17)
+
+  ent29 [other] sym='cut' (methods=14)
+    EXT_OPS: EXT_-1(-1)
+
+  ent30 [other] sym='redlight' (methods=15)
+
+  ent31 [other] sym='greenlight' (methods=8)
+
+  ent32 [other] sym='doorlight' (methods=35)
+    EXT_OPS: EXT_-1(-1)
+
+  ent33 [other] sym='door' (methods=26)
+    EXT_OPS: LINEOFF(323), BATTLE(210), EXT_1(1), EXT_60(60), EXT_314(314)
+
+  ent34 [other] sym='student1' (methods=7)
+    EXT_OPS: EXT_-1(-1)
+
+  ent35 [other] sym='student2' (methods=9)
+    EXT_OPS: EXT_314(314), EXT_1(1)
+
+======================================================================
+FIELD: bgroom_2
+======================================================================
+JSM header: doors=55 lines=0 bg=0 others=-44
+SYM names: 0
+INF gateways: 0
+
+ENTITIES WITH INTERACTION DATA:
+----------------------------------------------------------------------
+  bgdorm_1: NOT FOUND
+  bgdorm_2: NOT FOUND
+
+======================================================================
+FIELD: bggate_2
+======================================================================
+JSM header: doors=0 lines=0 bg=2 others=17
+SYM names: 20
+INF gateways: 2
+  GW: (-799,923)->(804,934) -> fewater1 ((2,928))
+  GW: (122,-5076)->(-746,-6147) -> feart1f2 ((-312,-5612))
+
+ENTITIES WITH INTERACTION DATA:
+----------------------------------------------------------------------
+
+  ent0 [background] sym='squall' (methods=2)
+    EXT_OPS: EXT_159(159)
+
+  ent1 [background] sym='squalls' (methods=2)
+
+  ent2 [other] sym='zell' (methods=6)
+    EXT_OPS: EXT_159(159)
+
+  ent3 [other] sym='selphie' (methods=4)
+    EXT_OPS: EXT_-1(-1)
+
+  ent4 [other] sym='quistis' (methods=4)
+    EXT_OPS: EXT_159(159)
+
+  ent5 [other] sym='rinoa' (methods=4)
+    EXT_OPS: EXT_-1(-1)
+
+  ent6 [other] sym='irvine' (methods=4)
+    EXT_OPS: EXT_159(159)
+
+  ent7 [other] sym='dic' (methods=4)
+    EXT_OPS: EXT_159(159)
+
+  ent8 [other] sym='s1' (methods=4)
+    EXT_OPS: BGOFF(77)
+
+  ent9 [other] sym='s2' (methods=4)
+    SET3: PSHM_W ['0x80000000', '0x80000000', '0x80000000', '0x80000000', '0xfffffd72', '0xfffffc06', '0x0']
+    EXT_OPS: EXT_0(0)
+
+  ent10 [other] sym='s3' (methods=4)
+    SET3: PSHM_W ['0x2', '0x1', '0xfffffff8', '0xffffecfa', '0x1e1']
+    EXT_OPS: EXT_62(62)
+
+  ent11 [other] sym='s4' (methods=4)
+    SET3: PSHM_W ['0x2', '0x1', '0xfffff83a', '0xffffee53', '0x1e1']
+    EXT_OPS: EXT_90(90)
+
+  ent12 [other] sym='s5' (methods=4)
+    SET3: PSHM_W ['0x2', '0x1', '0xfffffff8', '0xffffecfa', '0x1e1']
+    EXT_OPS: EXT_62(62)
+
+  ent13 [other] sym='jimin01' (methods=4)
+    SET3: PSHM_W ['0x2', '0x1', '0xfffffff8', '0xffffecfa', '0x1e1']
+    EXT_OPS: EXT_90(90)
+
+  ent14 [other] sym='otokun01' (methods=4)
+    SET3: PSHM_W ['0x2', '0x1', '0xfffffb7e', '0xffffeb91', '0x1e1']
+    EXT_OPS: EXT_2147483648(2147483648), EXT_90(90)
+
+  ent15 [other] sym='otokun02' (methods=5)
+    EXT_OPS: EXT_32(32)
+
+  ent16 [other] sym='dp01' (methods=4)
+    EXT_OPS: EXT_16(16)
+
+  ent17 [other] sym='water' (methods=4)
+    SET3: PSHM_W ['0x0', '0x0', '0xfffff961', '0xfffff094', '0x1e1']
+    EXT_OPS: EXT_-1(-1), MENUSHOP(151)
+
+  ent18 [other] sym='clock' (methods=4)
+
+======================================================================
+FIELD: bggate_6
+======================================================================
+JSM header: doors=0 lines=5 bg=6 others=15
+SYM names: 27
+INF gateways: 1
+  GW: (-1204,544)->(-1527,1643) -> fejail1 ((-1366,1093))
+
+ENTITIES WITH INTERACTION DATA:
+----------------------------------------------------------------------
+
+  ent5 [background] sym='selphie' (methods=5)
+    EXT_OPS: EXT_159(159)
+
+  ent6 [background] sym='selphies' (methods=5)
+    EXT_OPS: EXT_-1(-1)
+
+  ent7 [background] sym='quistis' (methods=5)
+    EXT_OPS: BGOFF(77)
+
+  ent8 [background] sym='rinoa' (methods=2)
+
+  ent9 [background] sym='irvine' (methods=2)
+
+  ent10 [background] sym='meskun' (methods=2)
+    SET3: PSHM_W ['0x2', '0xfffff9b9', '0xfffffcc3', '0x1ae']
+    EXT_OPS: EXT_45(45)
+
+  ent11 [other] sym='dic' (methods=6)
+    EXT_OPS: EXT_2(2)
+
+  ent12 [other] sym='s1' (methods=6)
+    REQSW -> ent2147483648 method430 (in m3)
+    REQSW -> ent2147483648 method430 (in m3)
+    EXT_OPS: EXT_2147483648(2147483648), MENUPHS(307), REQSW(228), EXT_62(62), DRAWPOINT(153), BATTLE(210)
+
+  ent13 [other] sym='oyaji' (methods=6)
+
+  ent14 [other] sym='cardgamemaster' (methods=4)
+
+  ent15 [other] sym='l2_1' (methods=4)
+
+  ent16 [other] sym='l3_1' (methods=4)
+
+  ent17 [other] sym='ejl_1' (methods=4)
+
+  ent18 [other] sym='jl1' (methods=4)
+
+  ent19 [other] sym='jl2' (methods=4)
+
+  ent20 [other] sym='doorout' (methods=6)
+
+  ent21 [other] sym='doorin' (methods=5)
+    EXT_OPS: EXT_-1(-1)
+
+  ent22 [other] sym='doorbig' (methods=6)
+
+  ent23 [other] sym='light' (methods=4)
+
+  ent24 [other] sym='bluelight' (methods=8)
+
+  ent25 [other] sym='redlight' (methods=35)
+    EXT_OPS: DRAWPOINT(153), BATTLE(210)
+
+
+Results saved to: C:\Users\ampag\OneDrive\Documents\FFVIII-Accessibility-Mod\FF8_OriginalPC_mod\interaction_range_data.json

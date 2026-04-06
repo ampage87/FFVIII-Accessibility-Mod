@@ -28,7 +28,7 @@ void Initialize()
     s_active = false;
     s_announced = false;
     s_lastCursor = -1;
-    Log::Write("TitleScreen: Module initialized (v02.00 - memory read).");
+    Log::Mod("TitleScreen: Module initialized (v02.00 - memory read).");
 }
 
 void Activate()
@@ -37,7 +37,7 @@ void Activate()
         s_active = true;
         s_announced = false;
         s_lastCursor = -1;
-        Log::Write("TitleScreen: Activated.");
+        Log::Mod("TitleScreen: Activated.");
     }
 }
 
@@ -47,7 +47,7 @@ void Deactivate()
         s_active = false;
         s_announced = false;
         s_lastCursor = -1;
-        Log::Write("TitleScreen: Deactivated.");
+        Log::Mod("TitleScreen: Deactivated.");
     }
 }
 
@@ -71,7 +71,7 @@ void Update()
         wchar_t msg[128];
         wsprintfW(msg, L"Title Screen. %s", MENU_ITEMS[cursor]);
         ScreenReader::Output(msg, true);
-        Log::Write("TitleScreen: Announced title screen, cursor at %d (%ls).",
+        Log::Mod("TitleScreen: Announced title screen, cursor at %d (%ls).",
                    cursor, MENU_ITEMS[cursor]);
         s_announced = true;
         s_lastCursor = cursor;
@@ -80,7 +80,7 @@ void Update()
 
     // Detect cursor movement
     if (cursor != s_lastCursor) {
-        Log::Write("TitleScreen: Cursor moved %d -> %d (%ls)",
+        Log::Mod("TitleScreen: Cursor moved %d -> %d (%ls)",
                    s_lastCursor, cursor, MENU_ITEMS[cursor]);
         ScreenReader::Output(MENU_ITEMS[cursor], true);
         s_lastCursor = cursor;

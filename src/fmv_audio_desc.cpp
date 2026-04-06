@@ -104,7 +104,7 @@ namespace FmvAudioDesc
         HRSRC hRes = FindResourceA(hModule, MAKEINTRESOURCEA(resourceId), RT_RCDATA);
         if (!hRes)
         {
-            Log::Write("[FMV_AD] FindResource failed for ID %d (error %u)",
+            Log::Mod("[FMV_AD] FindResource failed for ID %d (error %u)",
                 resourceId, GetLastError());
             return "";
         }
@@ -112,7 +112,7 @@ namespace FmvAudioDesc
         HGLOBAL hData = LoadResource(hModule, hRes);
         if (!hData)
         {
-            Log::Write("[FMV_AD] LoadResource failed for ID %d", resourceId);
+            Log::Mod("[FMV_AD] LoadResource failed for ID %d", resourceId);
             return "";
         }
 
@@ -120,7 +120,7 @@ namespace FmvAudioDesc
         const char* data = static_cast<const char*>(LockResource(hData));
         if (!data || size == 0)
         {
-            Log::Write("[FMV_AD] LockResource failed or empty for ID %d", resourceId);
+            Log::Mod("[FMV_AD] LockResource failed or empty for ID %d", resourceId);
             return "";
         }
 
@@ -265,7 +265,7 @@ namespace FmvAudioDesc
     {
         if (content.empty())
         {
-            Log::Write("[FMV_AD] Mapping resource is empty, using defaults only");
+            Log::Mod("[FMV_AD] Mapping resource is empty, using defaults only");
             return;
         }
 
@@ -288,7 +288,7 @@ namespace FmvAudioDesc
             if (!aviName.empty() && !vttName.empty())
             {
                 g_aviToVtt[ToLower(aviName)] = ToLower(vttName);
-                Log::Write("[FMV_AD] Mapping: %s -> %s", aviName.c_str(), vttName.c_str());
+                Log::Mod("[FMV_AD] Mapping: %s -> %s", aviName.c_str(), vttName.c_str());
             }
         }
     }
@@ -314,7 +314,7 @@ namespace FmvAudioDesc
         g_lastStartedAvi = aviName;
         QueryPerformanceCounter(&g_startTime);
 
-        Log::Write("[FMV_AD] Started playback: %s (%zu cues, %.1f seconds)",
+        Log::Mod("[FMV_AD] Started playback: %s (%zu cues, %.1f seconds)",
             track->name.c_str(), track->cues.size(),
             track->cues.back().endTime);
     }
@@ -337,7 +337,7 @@ namespace FmvAudioDesc
 
             if (content.empty())
             {
-                Log::Write("[FMV_AD] Failed to load resource %d (%s)",
+                Log::Mod("[FMV_AD] Failed to load resource %d (%s)",
                     entry.resourceId, entry.vttName);
                 continue;
             }
@@ -348,13 +348,13 @@ namespace FmvAudioDesc
             if (ParseVttString(content, track))
             {
                 std::string key = ToLower(entry.vttName);
-                Log::Write("[FMV_AD] Loaded %s: %zu cues (from resource %d)",
+                Log::Mod("[FMV_AD] Loaded %s: %zu cues (from resource %d)",
                     entry.vttName, track.cues.size(), entry.resourceId);
                 g_tracks[key] = std::move(track);
             }
             else
             {
-                Log::Write("[FMV_AD] Parsed 0 cues from %s", entry.vttName);
+                Log::Mod("[FMV_AD] Parsed 0 cues from %s", entry.vttName);
             }
         }
 
@@ -368,7 +368,7 @@ namespace FmvAudioDesc
             if (g_aviToVtt.find(aviKey) == g_aviToVtt.end())
             {
                 g_aviToVtt[aviKey] = ToLower(vtt);
-                Log::Write("[FMV_AD] Default mapping: %s -> %s", avi, vtt);
+                Log::Mod("[FMV_AD] Default mapping: %s -> %s", avi, vtt);
             }
         };
 
@@ -376,7 +376,7 @@ namespace FmvAudioDesc
         addDefault("disc00_23h.avi", "ff8_opening_credits_ad.vtt");
 
         g_initialized = true;
-        Log::Write("[FMV_AD] Initialized: %zu tracks, %zu mappings (all embedded in DLL)",
+        Log::Mod("[FMV_AD] Initialized: %zu tracks, %zu mappings (all embedded in DLL)",
             g_tracks.size(), g_aviToVtt.size());
     }
 
@@ -388,14 +388,14 @@ namespace FmvAudioDesc
         g_lastStartedAvi.clear();
         g_hModule = nullptr;
         g_initialized = false;
-        Log::Write("[FMV_AD] Shutdown.");
+        Log::Mod("[FMV_AD] Shutdown.");
     }
 
     void StopPlayback()
     {
         if (g_playing)
         {
-            Log::Write("[FMV_AD] Stopped playback at %.1f seconds (cue %d/%zu)",
+            Log::Mod("[FMV_AD] Stopped playback at %.1f seconds (cue %d/%zu)",
                 GetElapsedSeconds(), g_nextCueIndex,
                 g_currentTrack ? g_currentTrack->cues.size() : 0);
         }
@@ -414,7 +414,7 @@ namespace FmvAudioDesc
 
         if (!currentAvi.empty() && currentAvi != g_lastStartedAvi)
         {
-            Log::Write("[FMV_AD] AVI detected via FmvSkip: %s", currentAvi.c_str());
+            Log::Mod("[FMV_AD] AVI detected via FmvSkip: %s", currentAvi.c_str());
 
             if (g_playing)
                 StopPlayback();
@@ -425,20 +425,20 @@ namespace FmvAudioDesc
                 auto trackIt = g_tracks.find(it->second);
                 if (trackIt != g_tracks.end())
                 {
-                    Log::Write("[FMV_AD] Matched %s -> %s",
+                    Log::Mod("[FMV_AD] Matched %s -> %s",
                         currentAvi.c_str(), it->second.c_str());
                     StartPlayback(&trackIt->second, currentAvi);
                 }
                 else
                 {
-                    Log::Write("[FMV_AD] Mapping found but track not loaded: %s",
+                    Log::Mod("[FMV_AD] Mapping found but track not loaded: %s",
                         it->second.c_str());
                     g_lastStartedAvi = currentAvi;
                 }
             }
             else
             {
-                Log::Write("[FMV_AD] No mapping for: %s", currentAvi.c_str());
+                Log::Mod("[FMV_AD] No mapping for: %s", currentAvi.c_str());
                 g_lastStartedAvi = currentAvi;
             }
         }
@@ -460,7 +460,7 @@ namespace FmvAudioDesc
             double lastEnd = g_currentTrack->cues.back().endTime;
             if (elapsed > lastEnd + 2.0)
             {
-                Log::Write("[FMV_AD] Playback complete (elapsed %.1f, last cue ended %.1f)",
+                Log::Mod("[FMV_AD] Playback complete (elapsed %.1f, last cue ended %.1f)",
                     elapsed, lastEnd);
                 StopPlayback();
             }
@@ -473,7 +473,7 @@ namespace FmvAudioDesc
 
             if (elapsed >= cue.startTime)
             {
-                Log::Write("[FMV_AD] [%.1fs] Cue %d: %s",
+                Log::Mod("[FMV_AD] [%.1fs] Cue %d: %s",
                     elapsed, g_nextCueIndex, cue.text.c_str());
 
                 ScreenReader::Speak(cue.text.c_str(), true);

@@ -43,14 +43,20 @@ struct GatewayInfo {
     char    destFieldName[64]; // looked up from field.fl if possible
 };
 
-// Trigger zone info extracted from INF file (at offset 0x140).
-// These are walkmesh line segments that activate JSM line entity scripts
-// when the player crosses them.
+// Trigger zone info extracted from INF file (at offset 0x1E4).
+// v0.12.16: Corrected from disassembly of 0x47B610 (trigger zone scanner).
+// 12 entries × 16 bytes each. These define proximity interaction zones
+// that activate Background entity scripts when the player is within
+// pushRadius of the line AND facing the right direction.
 struct TriggerInfo {
     float   centerX;          // midpoint X of the two vertices
-    float   centerZ;          // midpoint Z of the two vertices
-    int16_t x1, z1, x2, z2;  // raw vertex coordinates
-    int     triggerIdx;       // INF trigger index (0-15)
+    float   centerZ;          // midpoint Y of the two vertices (legacy name)
+    int16_t x1, y1, z1;      // line start (3D)
+    int16_t x2, y2, z2;      // line end (3D)
+    uint8_t entityIndex;      // JSM entity index activated by this zone (0xFF = empty)
+    uint8_t interactionType;  // 0-5: even=enter, odd=leave
+    int     triggerIdx;       // INF trigger slot index (0-11)
+    char    symName[32];      // resolved SYM name for the entity (if available)
 };
 
 // Initialize the archive reader.  Auto-detects the game directory from the
@@ -78,10 +84,10 @@ int GetFieldIdByInternalName(const char* internalName);
 bool LoadINFGateways(const char* fieldName, GatewayInfo* gateways, int maxGateways, int& outCount);
 
 // Load trigger zones from the INF file for the given field.
-// Triggers are at offset 0x140, 16 entries of 24 bytes each.
-// These map to JSM line entities and define walkmesh activation zones.
+// Triggers are at offset 0x1E4, 12 entries of 16 bytes each.
+// Each zone has a line segment, entity index, and interaction type.
 // triggers: array to receive trigger data.
-// maxTriggers: size of the triggers array (INF supports up to 16).
+// maxTriggers: size of the triggers array (INF supports up to 12).
 // outCount: number of active triggers found.
 // Returns true if the INF file was found and parsed.
 bool LoadINFTriggers(const char* fieldName, TriggerInfo* triggers, int maxTriggers, int& outCount);
@@ -138,6 +144,17 @@ struct JSMEntityInfo {
     int16_t        pshmAddrX;     // PSHM_W memory address for X coordinate
     int16_t        pshmAddrY;     // PSHM_W memory address for Y coordinate
     int16_t        pshmAddrZ;     // PSHM_W memory address for Z coordinate
+    // v0.12.09: Cross-entity draw point trigger detection.
+    // If this entity's talk script calls REQSW/REQEW to a JSM_ENT_DRAW_POINT entity,
+    // this field holds the JSM index of that draw point. -1 = not a trigger.
+    int            drawPointTriggerOf;
+    // v0.12.16: SETLINE interaction zone from JSM script.
+    // SETLINE defines the exact line segment where the player can interact.
+    // The line center is the precise interaction position (better than SET3
+    // which gives the entity graphic position, not the interaction zone).
+    bool           hasSetline;    // true if SETLINE opcode found with literal coords
+    int16_t        setlineX1, setlineY1, setlineZ1;
+    int16_t        setlineX2, setlineY2, setlineZ2;
 };
 
 const char* JSMEntityTypeName(JSMEntityType t);
@@ -150,6 +167,40 @@ const char* JSMEntityTypeName(JSMEntityType t);
 // outCount: number of entities found.
 // Returns true if the JSM was parsed successfully.
 bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEntities, int& outCount);
+
+// ============================================================================
+// Camera axes (.ca file) for screen-space direction mapping
+// ============================================================================
+
+// FF8 field camera data extracted from the .ca section of the field archive.
+// The camera defines how 3D walkmesh coordinates project to 2D entity/screen
+// coordinates. Entity X,Y at offsets 0x190/0x194 are camera-projected:
+//   entity_X = dot(camRight, walkmeshPoint3D)
+//   entity_Y = dot(camDown,  walkmeshPoint3D)
+// So deltas in entity space ARE screen-space deltas:
+//   +dX = right on screen, +dY = down on screen.
+//
+// The .ca format (per Qhimm wiki FF7/FF8 camera section):
+//   3 axis vectors as int16 (x,y,z), fixed-point /4096
+//   Camera position as 3x int32
+//   Zoom as int16
+//   ~38 bytes per camera setting; file may contain multiple settings.
+
+struct CameraAxes {
+    // Raw axis vectors from .ca file (int16 fixed-point, /4096 for normalized)
+    int16_t axis0[3];   // first axis vector (x,y,z)
+    int16_t axis1[3];   // second axis vector (x,y,z)
+    int16_t axis2[3];   // third axis vector (x,y,z)
+    int32_t posX, posY, posZ;  // camera world position
+    int16_t zoom;              // zoom/FOV factor
+    int     numSettings;       // how many camera settings in the .ca file
+    bool    valid;             // true if successfully parsed
+};
+
+// Load camera axes from the .ca file for the given field.
+// Reads the first camera setting (index 0 = default camera at field load).
+// Returns true if the .ca file was found and parsed.
+bool LoadCameraAxes(const char* fieldName, CameraAxes& outAxes);
 
 // ============================================================================
 // Walkmesh (ID file) data for A* pathfinding
@@ -182,6 +233,12 @@ bool LoadWalkmesh(const char* fieldName, WalkmeshData& outMesh);
 
 // Free heap-allocated walkmesh data.
 void FreeWalkmesh(WalkmeshData& mesh);
+
+// v0.12.17: Dump decoded JSM script opcodes for a specific entity.
+// Used to analyze interaction logic for Background entities like dic.
+// jsmEntityIndex is the flat JSM entity index (Door+Line+BG+Other ordering).
+// Logs all methods and decoded opcodes to the accessibility log.
+bool DumpEntityScript(const char* fieldName, int jsmEntityIndex);
 
 // Shut down and release memory.
 void Shutdown();

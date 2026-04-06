@@ -9,8 +9,8 @@
 // FF8 Original PC Accessibility Mod version
 // Increment on every build change
 // ================================================================
-#define FF8OPC_VERSION "0.10.112"  // Draw 3-bug fix (target/stock/name)
-#define FF8OPC_VERSION_DATE "2026-03-29"
+#define FF8OPC_VERSION "0.12.18"  // Multi-channel logging + archive system
+#define FF8OPC_VERSION_DATE "2026-04-06"
 
 // ============================================================================
 // FF8 Runtime Address Resolution
@@ -112,6 +112,12 @@ void Shutdown();
 #include "game_audio.h"
 
 // ============================================================================
+// World Map Module (v0.11.03)
+// ============================================================================
+
+#include "world_map.h"
+
+// ============================================================================
 // FF8 Text Decoder (v04.00)
 // ============================================================================
 
@@ -123,9 +129,21 @@ void Shutdown();
 
 namespace Log {
 
-void Init(const char* filename);
-void Write(const char* fmt, ...);
+void Init(const char* gameLogFilename);
 void Close();
+
+// Backward-compatible general write — goes to ff8_mod.log without channel prefix.
+// Use domain-specific functions below for new code.
+void Write(const char* fmt, ...);
+
+// Domain-specific log channels — each writes to its own file.
+// Use these in new/refactored code.
+void Mod(const char* fmt, ...);     // ff8_mod.log     — core init, modules, errors
+void Battle(const char* fmt, ...);  // ff8_battle.log  — battle TTS, EWM, GF
+void Field(const char* fmt, ...);   // ff8_field.log   — field nav, catalog, GPS
+void World(const char* fmt, ...);   // ff8_world.log   — world map navigation
+void Menu(const char* fmt, ...);    // ff8_menu.log    — menu TTS, junction, items
+void Dialog(const char* fmt, ...);  // ff8_dialog.log  — field dialog hooks
 
 }  // namespace Log
 

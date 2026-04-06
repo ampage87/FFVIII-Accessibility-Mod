@@ -51,16 +51,16 @@ static int __cdecl Hooked_Menuname(int entityPtr)
     uint16_t mode = FF8Addresses::GetCurrentMode();
     const char* field = FF8Addresses::pCurrentFieldName ? FF8Addresses::pCurrentFieldName : "?";
 
-    Log::Write("NameBypass: MENUNAME enter entity=0x%08X mode=%u field=%s session=%ld",
+    Log::Mod("NameBypass: MENUNAME enter entity=0x%08X mode=%u field=%s session=%ld",
                (unsigned)entityPtr, (unsigned)mode, field, session);
 
     // If bypass is off or SHIFT is held, call original and let player name.
     if (!s_enabled) {
-        Log::Write("NameBypass: bypass disabled, passing through session=%ld", session);
+        Log::Mod("NameBypass: bypass disabled, passing through session=%ld", session);
         return s_origMenuname ? s_origMenuname(entityPtr) : 3;
     }
     if (GetAsyncKeyState(VK_SHIFT) & 0x8000) {
-        Log::Write("NameBypass: SHIFT held, opt-out session=%ld", session);
+        Log::Mod("NameBypass: SHIFT held, opt-out session=%ld", session);
         return s_origMenuname ? s_origMenuname(entityPtr) : 3;
     }
 
@@ -78,12 +78,12 @@ static int __cdecl Hooked_Menuname(int entityPtr)
         volatile uint8_t* uiFlag = (volatile uint8_t*)0x01CE490BU;
         uint8_t flagBefore = *uiFlag;
         *uiFlag = 0;
-        Log::Write("NameBypass: Cleared UI flag (was %u) session=%ld", (unsigned)flagBefore, session);
+        Log::Mod("NameBypass: Cleared UI flag (was %u) session=%ld", (unsigned)flagBefore, session);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        Log::Write("NameBypass: SEH clearing UI flag session=%ld", session);
+        Log::Mod("NameBypass: SEH clearing UI flag session=%ld", session);
     }
     
-    Log::Write("NameBypass: Bypassed naming screen (orig ret=%d) session=%ld", ret, session);
+    Log::Mod("NameBypass: Bypassed naming screen (orig ret=%d) session=%ld", ret, session);
     ScreenReader::Speak("Naming screen bypassed", false);
 
     return 3;  // script advance
@@ -98,7 +98,7 @@ bool Initialize()
     // v0.09.04: Naming bypass is now handled by field_dialog.cpp's Hook_opcode_menuname
     // (restored v04.35 approach minus enableGF). This module is disabled to avoid
     // dual MinHook conflicts on the same target.
-    Log::Write("NameBypass: Disabled — bypass handled by field_dialog.cpp (v0.09.04)");
+    Log::Mod("NameBypass: Disabled — bypass handled by field_dialog.cpp (v0.09.04)");
     s_initialized = false;
     return true;
 }
@@ -112,7 +112,7 @@ void Shutdown()
     }
     s_origMenuname = nullptr;
     s_initialized  = false;
-    Log::Write("NameBypass: Shutdown.");
+    Log::Mod("NameBypass: Shutdown.");
 }
 
 // ============================================================================
