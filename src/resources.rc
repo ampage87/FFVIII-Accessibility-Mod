@@ -1,25 +1,149 @@
 // resources.rc - Embedded data files for FF8 Accessibility Mod
 //
-// VTT audio description files and mapping data are compiled into the DLL
-// as RCDATA resources. This means end users only need to install dinput8.dll
-// — no separate Audio Descriptions folder or screen reader DLLs required.
+// All VTT audio description files and mapping data are compiled into the DLL
+// as RCDATA resources. End users only need dinput8.dll — no external files.
 //
-// To add a new FMV audio description:
-// 1. Create the .vtt file in Audio Descriptions/
-// 2. Add a new IDR_ constant in resources.h
-// 3. Add an RCDATA entry below pointing to the file
-// 4. Add the mapping in the IDR_AD_MAPPING text or in the defaults in fmv_audio_desc.cpp
+// Resource ID scheme for disc VTTs: base + FMV number
+//   disc00 = 1000+N, disc01 = 2000+N, disc02 = 3000+N, disc03 = 4000+N, disc04 = 5000+N
 
 #include "resources.h"
 
-// Audio description VTT files (WebVTT format)
-// Paths are relative to the .rc file location (src/)
+// ============================================================
+// Special audio description VTTs
+// ============================================================
 IDR_VTT_INTRO           RCDATA "..\\Audio Descriptions\\ff8_intro_ad.vtt"
 IDR_VTT_OPENING_CREDITS RCDATA "..\\Audio Descriptions\\ff8_opening_credits_ad.vtt"
 
-// AVI-to-VTT mapping file
+// ============================================================
+// DISC 00 — disc00_00h through disc00_29h  (disc00_30h = intro, above)
+// ============================================================
+1000 RCDATA "..\\Audio Descriptions\\disc00_00h.vtt"
+1001 RCDATA "..\\Audio Descriptions\\disc00_01h.vtt"
+1002 RCDATA "..\\Audio Descriptions\\disc00_02h.vtt"
+1003 RCDATA "..\\Audio Descriptions\\disc00_03h.vtt"
+1004 RCDATA "..\\Audio Descriptions\\disc00_04h.vtt"
+1005 RCDATA "..\\Audio Descriptions\\disc00_05h.vtt"
+1006 RCDATA "..\\Audio Descriptions\\disc00_06h.vtt"
+1007 RCDATA "..\\Audio Descriptions\\disc00_07h.vtt"
+1008 RCDATA "..\\Audio Descriptions\\disc00_08h.vtt"
+1009 RCDATA "..\\Audio Descriptions\\disc00_09h.vtt"
+1010 RCDATA "..\\Audio Descriptions\\disc00_10h.vtt"
+1011 RCDATA "..\\Audio Descriptions\\disc00_11h.vtt"
+1012 RCDATA "..\\Audio Descriptions\\disc00_12h.vtt"
+1013 RCDATA "..\\Audio Descriptions\\disc00_13h.vtt"
+1014 RCDATA "..\\Audio Descriptions\\disc00_14h.vtt"
+1015 RCDATA "..\\Audio Descriptions\\disc00_15h.vtt"
+1016 RCDATA "..\\Audio Descriptions\\disc00_16h.vtt"
+1017 RCDATA "..\\Audio Descriptions\\disc00_17h.vtt"
+1018 RCDATA "..\\Audio Descriptions\\disc00_18h.vtt"
+1019 RCDATA "..\\Audio Descriptions\\disc00_19h.vtt"
+1020 RCDATA "..\\Audio Descriptions\\disc00_20h.vtt"
+1021 RCDATA "..\\Audio Descriptions\\disc00_21h.vtt"
+1022 RCDATA "..\\Audio Descriptions\\disc00_22h.vtt"
+1023 RCDATA "..\\Audio Descriptions\\disc00_23h.vtt"
+1024 RCDATA "..\\Audio Descriptions\\disc00_24h.vtt"
+1025 RCDATA "..\\Audio Descriptions\\disc00_25h.vtt"
+1026 RCDATA "..\\Audio Descriptions\\disc00_26h.vtt"
+1027 RCDATA "..\\Audio Descriptions\\disc00_27h.vtt"
+1028 RCDATA "..\\Audio Descriptions\\disc00_28h.vtt"
+1029 RCDATA "..\\Audio Descriptions\\disc00_29h.vtt"
+
+// ============================================================
+// DISC 01 — disc01_00h through disc01_33h
+// ============================================================
+2000 RCDATA "..\\Audio Descriptions\\disc01_00h.vtt"
+2001 RCDATA "..\\Audio Descriptions\\disc01_01h.vtt"
+2002 RCDATA "..\\Audio Descriptions\\disc01_02h.vtt"
+2003 RCDATA "..\\Audio Descriptions\\disc01_03h.vtt"
+2004 RCDATA "..\\Audio Descriptions\\disc01_04h.vtt"
+2005 RCDATA "..\\Audio Descriptions\\disc01_05h.vtt"
+2006 RCDATA "..\\Audio Descriptions\\disc01_06h.vtt"
+2007 RCDATA "..\\Audio Descriptions\\disc01_07h.vtt"
+2008 RCDATA "..\\Audio Descriptions\\disc01_08h.vtt"
+2009 RCDATA "..\\Audio Descriptions\\disc01_09h.vtt"
+2010 RCDATA "..\\Audio Descriptions\\disc01_10h.vtt"
+2011 RCDATA "..\\Audio Descriptions\\disc01_11h.vtt"
+2012 RCDATA "..\\Audio Descriptions\\disc01_12h.vtt"
+2013 RCDATA "..\\Audio Descriptions\\disc01_13h.vtt"
+2014 RCDATA "..\\Audio Descriptions\\disc01_14h.vtt"
+2015 RCDATA "..\\Audio Descriptions\\disc01_15h.vtt"
+2016 RCDATA "..\\Audio Descriptions\\disc01_16h.vtt"
+2017 RCDATA "..\\Audio Descriptions\\disc01_17h.vtt"
+2018 RCDATA "..\\Audio Descriptions\\disc01_18h.vtt"
+2019 RCDATA "..\\Audio Descriptions\\disc01_19h.vtt"
+2020 RCDATA "..\\Audio Descriptions\\disc01_20h.vtt"
+2021 RCDATA "..\\Audio Descriptions\\disc01_21h.vtt"
+2022 RCDATA "..\\Audio Descriptions\\disc01_22h.vtt"
+2023 RCDATA "..\\Audio Descriptions\\disc01_23h.vtt"
+2024 RCDATA "..\\Audio Descriptions\\disc01_24h.vtt"
+2025 RCDATA "..\\Audio Descriptions\\disc01_25h.vtt"
+2026 RCDATA "..\\Audio Descriptions\\disc01_26h.vtt"
+2027 RCDATA "..\\Audio Descriptions\\disc01_27h.vtt"
+2028 RCDATA "..\\Audio Descriptions\\disc01_28h.vtt"
+2029 RCDATA "..\\Audio Descriptions\\disc01_29h.vtt"
+2030 RCDATA "..\\Audio Descriptions\\disc01_30h.vtt"
+2031 RCDATA "..\\Audio Descriptions\\disc01_31h.vtt"
+2032 RCDATA "..\\Audio Descriptions\\disc01_32h.vtt"
+2033 RCDATA "..\\Audio Descriptions\\disc01_33h.vtt"
+
+// ============================================================
+// DISC 02 — disc02_00h through disc02_31h
+// NOTE: 00h-14h use non-_ad filenames (verified in earlier sessions)
+//       15h-31h use _ad filenames (verified this session)
+// ============================================================
+3000 RCDATA "..\\Audio Descriptions\\disc02_00h.vtt"
+3001 RCDATA "..\\Audio Descriptions\\disc02_01h.vtt"
+3002 RCDATA "..\\Audio Descriptions\\disc02_02h.vtt"
+3003 RCDATA "..\\Audio Descriptions\\disc02_03h.vtt"
+3004 RCDATA "..\\Audio Descriptions\\disc02_04h.vtt"
+3005 RCDATA "..\\Audio Descriptions\\disc02_05h.vtt"
+3006 RCDATA "..\\Audio Descriptions\\disc02_06h.vtt"
+3007 RCDATA "..\\Audio Descriptions\\disc02_07h.vtt"
+3008 RCDATA "..\\Audio Descriptions\\disc02_08h.vtt"
+3009 RCDATA "..\\Audio Descriptions\\disc02_09h.vtt"
+3010 RCDATA "..\\Audio Descriptions\\disc02_10h.vtt"
+3011 RCDATA "..\\Audio Descriptions\\disc02_11h.vtt"
+3012 RCDATA "..\\Audio Descriptions\\disc02_12h.vtt"
+3013 RCDATA "..\\Audio Descriptions\\disc02_13h.vtt"
+3014 RCDATA "..\\Audio Descriptions\\disc02_14h.vtt"
+3015 RCDATA "..\\Audio Descriptions\\disc02_15h_ad.vtt"
+3016 RCDATA "..\\Audio Descriptions\\disc02_16h_ad.vtt"
+3017 RCDATA "..\\Audio Descriptions\\disc02_17h_ad.vtt"
+3018 RCDATA "..\\Audio Descriptions\\disc02_18h_ad.vtt"
+3019 RCDATA "..\\Audio Descriptions\\disc02_19h_ad.vtt"
+3020 RCDATA "..\\Audio Descriptions\\disc02_20h_ad.vtt"
+3021 RCDATA "..\\Audio Descriptions\\disc02_21h_ad.vtt"
+3022 RCDATA "..\\Audio Descriptions\\disc02_22h_ad.vtt"
+3023 RCDATA "..\\Audio Descriptions\\disc02_23h_ad.vtt"
+3024 RCDATA "..\\Audio Descriptions\\disc02_24h_ad.vtt"
+3025 RCDATA "..\\Audio Descriptions\\disc02_25h_ad.vtt"
+3026 RCDATA "..\\Audio Descriptions\\disc02_26h_ad.vtt"
+3027 RCDATA "..\\Audio Descriptions\\disc02_27h_ad.vtt"
+3028 RCDATA "..\\Audio Descriptions\\disc02_28h_ad.vtt"
+3029 RCDATA "..\\Audio Descriptions\\disc02_29h_ad.vtt"
+3030 RCDATA "..\\Audio Descriptions\\disc02_30h_ad.vtt"
+3031 RCDATA "..\\Audio Descriptions\\disc02_31h_ad.vtt"
+
+// ============================================================
+// DISC 03 — disc03_00h through disc03_06h (no 05h — no AVI exists)
+// ============================================================
+4000 RCDATA "..\\Audio Descriptions\\disc03_00h_ad.vtt"
+4001 RCDATA "..\\Audio Descriptions\\disc03_01h_ad.vtt"
+4002 RCDATA "..\\Audio Descriptions\\disc03_02h_ad.vtt"
+4003 RCDATA "..\\Audio Descriptions\\disc03_03h_ad.vtt"
+4004 RCDATA "..\\Audio Descriptions\\disc03_04h_ad.vtt"
+// 4005 skipped — disc03_05h has no AVI file
+4006 RCDATA "..\\Audio Descriptions\\disc03_06h_ad.vtt"
+
+// ============================================================
+// DISC 04
+// ============================================================
+5000 RCDATA "..\\Audio Descriptions\\disc04_00h_ad.vtt"
+
+// ============================================================
+// Mapping file (kept for special-case overrides like intro/credits)
+// ============================================================
 IDR_AD_MAPPING          RCDATA "..\\Audio Descriptions\\mapping.txt"
 
 // NVDA controller client DLL (embedded for single-file distribution)
-// Extracted to temp directory at runtime, loaded via LoadLibrary.
 IDR_NVDA_CLIENT_DLL     RCDATA "..\\TOLK\\nvdaControllerClient.dll"

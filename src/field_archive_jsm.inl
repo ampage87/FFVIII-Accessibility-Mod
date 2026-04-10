@@ -109,8 +109,10 @@ const char* JSMEntityTypeName(JSMEntityType t)
         case JSM_ENT_LINE_CAMERA_PAN:   return "Camera Pan";
         case JSM_ENT_LINE_SCREEN_BOUND: return "Screen Boundary";
         case JSM_ENT_LINE_EVENT:        return "Event Trigger";
+        case JSM_ENT_LINE_INTERACTIVE: return "Interactive Line";
         case JSM_ENT_BACKGROUND:        return "Background";
         case JSM_ENT_INTERACTIVE_OBJECT: return "Interactive Object";
+        case JSM_ENT_DIRECTOR:          return "Director";
         default:                        return "Unknown";
     }
 }
@@ -318,6 +320,31 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
     static EntityPopms s_entityPopms[128];
     memset(s_entityPopms, 0, sizeof(s_entityPopms));
 
+    // v0.12.20: Per-entity persistent flags for Director detection.
+    // Tracks whether each entity has SETMODEL in init, dialog opcodes, etc.
+    static bool s_hasSetmodelInit[128];  // SETMODEL found in init method (method 0)
+    static bool s_hasDialogAny[128];     // MES/ASK/AMES/AASK in any method
+    static bool s_hasExtDispatchArr[128]; // 0x1C extended dispatch in any method
+    memset(s_hasSetmodelInit, 0, sizeof(s_hasSetmodelInit));
+    memset(s_hasDialogAny, 0, sizeof(s_hasDialogAny));
+    memset(s_hasExtDispatchArr, 0, sizeof(s_hasExtDispatchArr));
+
+    // v0.12.20: Init-method variable map for Director position extraction.
+    // Tracks PUSH literal + POPM_W pairs in method[0]. When a Director entity
+    // reads PSHM_W(addr) in interaction methods, we resolve addr→value from this map.
+    struct VarWrite { int32_t addr; int32_t value; };
+    static const int MAX_VAR_WRITES_PER_ENT = 64;
+    struct EntityVarMap { VarWrite writes[64]; int count; };
+    static EntityVarMap s_initVarMaps[128];
+    memset(s_initVarMaps, 0, sizeof(s_initVarMaps));
+
+    // v0.12.20: Per-entity REQ opcode count (independent of stack state).
+    // The stack-based REQ tracking in s_entityReqs often fails in complex
+    // Director methods (pushCount<3 when REQ fires). This counter simply
+    // counts REQ/REQSW/REQEW opcodes seen per entity, which is reliable.
+    static int s_reqOpcodeCount[128];
+    memset(s_reqOpcodeCount, 0, sizeof(s_reqOpcodeCount));
+
     // --- Scan each entity ---
     for (int e = 0; e < totalEntities && outCount < maxEntities; e++) {
         JSMEntityInfo& info = outEntities[outCount];
@@ -365,6 +392,7 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         bool foundLadder       = false;
         bool foundMapjump      = false;
         bool foundSetmodel     = false;
+        bool foundSetmodelInit = false;  // v0.12.20: SETMODEL specifically in method 0 (init)
         bool foundTalkon       = false;
         bool foundDoorline     = false;
         bool foundParticleon   = false;
@@ -391,13 +419,13 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
             int methodIdx = groups[e].startMethodIdx + m;
             if (methodIdx >= totalMethods) break;
 
-            uint16_t scriptStart = entryPoints[methodIdx];
+            uint16_t scriptStart = entryPoints[methodIdx] & 0x7FFF;  // v0.12.23: mask off bit15 flag (set on Door/Line/BG entities)
 
             // Find the end of this method: either the start of the next method,
             // or the end of the script data.
             uint16_t scriptEnd = (uint16_t)scriptDataDwords;
             if (methodIdx + 1 < totalMethods)
-                scriptEnd = entryPoints[methodIdx + 1];
+                scriptEnd = entryPoints[methodIdx + 1] & 0x7FFF;  // v0.12.23: mask bit15 here too
 
             // Reset push stack for each method.
             pushCount = 0;
@@ -535,6 +563,15 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                         case 0x02: // JPF - conditional jump, pops condition
                         case 0x08: // POPM_W - pop to memory word
                         case 0x0B: // POPM_L - pop to memory long
+                            // v0.12.20: Record PUSH+POPM_W pairs in init method for Director variable maps.
+                            // Must capture BEFORE the pop. Only record literal values (no PSHM markers).
+                            if ((highByte == 0x08 || highByte == 0x0B) && m == 0 && e < 128 &&
+                                pushCount > 0 && ((uint32_t)pushStack[pushCount-1] & 0x80000000u) == 0 &&
+                                s_initVarMaps[e].count < 64) {
+                                s_initVarMaps[e].writes[s_initVarMaps[e].count].addr = opcParam;
+                                s_initVarMaps[e].writes[s_initVarMaps[e].count].value = pushStack[pushCount-1];
+                                s_initVarMaps[e].count++;
+                            }
                             if (pushCount > 0) pushCount--;
                             // v0.07.87: Record POPM_W writes for variable-dispatch detection.
                             if ((highByte == 0x08 || highByte == 0x0B) && e < 128) {
@@ -730,6 +767,7 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
 
                 // Model assignment / talk.
                 if (opcode == JSM_OP_SETMODEL) foundSetmodel = true;
+                if (opcode == JSM_OP_SETMODEL && m == 0) foundSetmodelInit = true;  // v0.12.20
                 if (opcode == JSM_OP_TALKON)   foundTalkon = true;
 
                 // Door trigger line.
@@ -797,6 +835,9 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                     foundDialogOp = true;
 
                 // v0.07.84: Extract REQ/REQSW/REQEW call targets for indirect MAPJUMP detection.
+                // v0.12.20: Also count REQ opcodes per entity (stack-independent).
+                if ((opcode == JSM_OP_REQ || opcode == JSM_OP_REQSW || opcode == JSM_OP_REQEW) && e < 128)
+                    s_reqOpcodeCount[e]++;
                 // REQ pops 3 values: entity_id, method_id, priority.
                 // We record the target so we can check if it contains MAPJUMP.
                 if ((opcode == JSM_OP_REQ || opcode == JSM_OP_REQSW || opcode == JSM_OP_REQEW) &&
@@ -857,23 +898,37 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         // Otherwise, keep the default from JSM category assignment above.
 
         // v0.07.82: Classify Line entities by opcode signatures.
-        // Priority: MAPJUMP > save/draw (already above) > battle > event > camera pan > default.
-        // Only reclassify entities that are still JSM_ENT_LINE_TRIGGER (not already
-        // promoted to DRAW_POINT/SAVE_POINT/SHOP/etc. by the block above).
-        if (info.jsmCategory == 1 && info.type == JSM_ENT_LINE_TRIGGER) {
-            if (foundMapjump) {
-                info.type = JSM_ENT_LINE_SCREEN_BOUND;
-            } else if (foundBattle) {
-                info.type = JSM_ENT_LINE_EVENT;
-            } else if (foundEventOp) {
-                info.type = JSM_ENT_LINE_EVENT;
-            } else if (foundBgdraw || foundScroll) {
-                info.type = JSM_ENT_LINE_CAMERA_PAN;
-            } else {
-                // No distinctive opcodes — default to camera pan (most common
-                // line entity type per deep research).
-                info.type = JSM_ENT_LINE_CAMERA_PAN;
+        // Priority: dialog/interactive > MAPJUMP > battle > event > camera pan > default.
+        // v0.12.24: Run for ALL category-1 entities regardless of general classification.
+        // Line entities often have MAPJUMP (general block sets MAP_EXIT) AND dialog opcodes
+        // (e.g. bgryo1_4 'squall' handles both room exit and uniform interaction).
+        // The Line-specific block must override to get the correct line type.
+        if (info.jsmCategory == 1) {
+            if (foundDialogOp) {
+                info.type = JSM_ENT_LINE_INTERACTIVE;
+            } else if (info.type == JSM_ENT_LINE_TRIGGER || info.type == JSM_ENT_MAP_EXIT) {
+                if (foundMapjump) {
+                    info.type = JSM_ENT_LINE_SCREEN_BOUND;
+                } else if (foundBattle) {
+                    info.type = JSM_ENT_LINE_EVENT;
+                } else if (foundEventOp) {
+                    info.type = JSM_ENT_LINE_EVENT;
+                } else if (foundBgdraw || foundScroll) {
+                    info.type = JSM_ENT_LINE_CAMERA_PAN;
+                } else {
+                    info.type = JSM_ENT_LINE_CAMERA_PAN;
+                }
             }
+        }
+
+        // v0.12.24: Store ext dispatch flag for dual-purpose Line detection.
+        info.hasExtDispatch = foundExtDispatch;
+
+        // v0.12.20: Store persistent flags for Director/interaction detection.
+        if (e < 128) {
+            s_hasSetmodelInit[e] = foundSetmodelInit;
+            s_hasDialogAny[e] = foundDialogOp;
+            s_hasExtDispatchArr[e] = foundExtDispatch;
         }
 
         // v0.07.84: REQ-following post-classification.
@@ -1027,6 +1082,13 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
             }
         }
 
+        // v0.12.20: Store persistent per-entity flags for Director detection post-pass.
+        if (e < 128) {
+            s_hasSetmodelInit[e] = foundSetmodelInit;
+            s_hasDialogAny[e] = foundDialogOp;
+            s_hasExtDispatchArr[e] = foundExtDispatch;
+        }
+
         outCount++;
     }
 
@@ -1054,6 +1116,173 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                 }
             }
             if (outEntities[e2].drawPointTriggerOf >= 0) break;
+        }
+    }
+
+    // ======================================================================
+    // v0.12.20: Director-dispatched interaction detection
+    // ======================================================================
+    // (see block comment below for full description)
+    //
+    // DIAGNOSTIC: Log all Others entities' Director-relevant flags before filtering.
+    {
+        for (int dd = 0; dd < outCount && dd < 128; dd++) {
+            const JSMEntityInfo& de2 = outEntities[dd];
+            int di2 = de2.jsmIndex;
+            if (di2 < 0 || di2 >= 128) continue;
+            if (de2.jsmCategory != 3) continue;  // Others only
+            if (s_reqOpcodeCount[di2] == 0 && s_entityReqs[di2].count == 0 &&
+                !s_hasDialogAny[di2] && !s_hasExtDispatchArr[di2]) continue;
+            // Log REQ targets for entities with REQs
+            char reqBuf[256] = {};
+            int rp = 0;
+            for (int rr = 0; rr < s_entityReqs[di2].count && rp < 240; rr++)
+                rp += snprintf(reqBuf + rp, 256 - rp, "ent%d.m%d ",
+                               s_entityReqs[di2].calls[rr].targetEntity,
+                               s_entityReqs[di2].calls[rr].targetMethod);
+            Log::Field("FieldArchive: [DIR-DIAG] ent%d '%s' type=%s setmodelInit=%d "
+                       "dialog=%d extDisp=%d reqOps=%d reqResolved=%d initVars=%d reqs=[%s]",
+                       di2, de2.symName, JSMEntityTypeName(de2.type),
+                       (int)s_hasSetmodelInit[di2],
+                       (int)s_hasDialogAny[di2], (int)s_hasExtDispatchArr[di2],
+                       s_reqOpcodeCount[di2], s_entityReqs[di2].count,
+                       s_initVarMaps[di2].count, reqBuf);
+        }
+    }
+
+    // Director detection post-pass
+    // A Director is an invisible Others entity (no SETMODEL in init) that
+    // dispatches interactions via REQ calls to dialog target entities.
+    {
+        int directorsFound = 0;
+        int targetsPromoted = 0;
+        for (int de = 0; de < outCount && de < 128; de++) {
+            JSMEntityInfo& dirEnt = outEntities[de];
+            int dIdx = dirEnt.jsmIndex;
+            if (dIdx < 0 || dIdx >= 128) continue;
+
+            // Director criteria:
+            //   1. Cat=3 (Others)
+            //   2. No SETMODEL in init (invisible)
+            //   3. Still unclassified (UNKNOWN or NPC without specific role)
+            //   4. Has >= 2 REQ calls to other entities
+            //   5. At least 2 distinct REQ targets have dialog or EXT_DISPATCH
+            if (dirEnt.jsmCategory != 3) continue;
+            if (s_hasSetmodelInit[dIdx]) continue;
+            if (dirEnt.type != JSM_ENT_UNKNOWN && dirEnt.type != JSM_ENT_NPC) continue;
+            // v0.12.20: Use REQ opcode count (stack-independent) instead of
+            // s_entityReqs which requires pushCount>=3 and often fails.
+            if (s_reqOpcodeCount[dIdx] < 2) continue;
+
+            // Count potential dispatch targets: Other entities on this field
+            // with extDispatch or dialog, no SETMODEL in init, not this entity.
+            // We can't rely on parsed REQ target IDs (stack simulation too weak),
+            // so we use a heuristic: nearby entities with dialog capability.
+            int dialogTargetCount = 0;
+            for (int tc = 0; tc < outCount && tc < 128; tc++) {
+                int tci = outEntities[tc].jsmIndex;
+                if (tci == dIdx || tci < 0 || tci >= 128) continue;
+                if (outEntities[tc].jsmCategory != 3) continue;
+                if (!s_hasDialogAny[tci] && !s_hasExtDispatchArr[tci]) continue;
+                dialogTargetCount++;
+            }
+            if (dialogTargetCount < 2) continue;
+
+            // === This entity is a Director ===
+            dirEnt.type = JSM_ENT_DIRECTOR;
+            directorsFound++;
+
+            // v0.12.23: Also dump Background entities on this field.
+            // Deep research suggests interaction zones may be in Background
+            // entity init scripts (SETLINE/SET3/TALKRADIUS), not Others.
+            for (int bg = countDoors + countLines; bg < countDoors + countLines + countBg; bg++) {
+                int bgSymIdx = bg - countDoors;
+                const char* bgSym = (bgSymIdx >= 0 && bgSymIdx < symCount) ? symNames[bgSymIdx] : "?";
+                Log::Field("FieldArchive: [DIRECTOR]   dumping Background entity %d '%s'", bg, bgSym);
+                DumpEntityScript(fieldName, bg);
+            }
+
+            Log::Field("FieldArchive: [DIRECTOR] Detected: ent%d '%s' on '%s' — "
+                       "%d REQ opcodes, %d dialog targets, %d init vars",
+                       dIdx, dirEnt.symName, fieldName,
+                       s_reqOpcodeCount[dIdx], dialogTargetCount,
+                       s_initVarMaps[dIdx].count);
+
+            // Log init variable map for diagnostics and future position extraction.
+            // These are PUSH literal + POPM_W pairs from the Director's init method.
+            // Interaction zone X/Y coordinates are stored at these addresses.
+            for (int v = 0; v < s_initVarMaps[dIdx].count && v < 20; v++) {
+                Log::Field("FieldArchive: [DIRECTOR]   initVar[%d] addr=%d value=%d",
+                           v, (int)s_initVarMaps[dIdx].writes[v].addr,
+                           (int)s_initVarMaps[dIdx].writes[v].value);
+            }
+
+            // v0.12.20: Dump Director's full decoded script for position pattern analysis.
+            DumpEntityScript(fieldName, dIdx);
+
+            // Promote each potential dispatch target to INTERACTIVE_OBJECT.
+            // Since REQ target IDs aren't reliably parsed, we promote all
+            // non-SETMODEL Others with dialog/extDispatch on this field.
+            for (int tc = 0; tc < outCount && tc < 128; tc++) {
+                int tgt = outEntities[tc].jsmIndex;
+                if (tgt == dIdx || tgt < 0 || tgt >= 128) continue;
+                if (outEntities[tc].jsmCategory != 3) continue;
+                if (!s_hasDialogAny[tgt] && !s_hasExtDispatchArr[tgt]) continue;
+
+                // Get target SYM name
+                int tgtSymIdx = tgt - countDoors;
+                const char* tgtSym = (tgtSymIdx >= 0 && tgtSymIdx < symCount)
+                                     ? symNames[tgtSymIdx] : "?";
+
+                // v0.12.22: Filter out party character names to reduce false promotions.
+                // Party characters are Director dispatch targets for party-related interactions
+                // (e.g. "talk to Selphie") but are NOT background interactive objects.
+                if (_strnicmp(tgtSym, "squall", 6) == 0 ||
+                    _strnicmp(tgtSym, "zell", 4) == 0 ||
+                    _strnicmp(tgtSym, "selphie", 7) == 0 ||
+                    _strnicmp(tgtSym, "quistis", 7) == 0 ||
+                    _strnicmp(tgtSym, "rinoa", 5) == 0 ||
+                    _strnicmp(tgtSym, "irvine", 6) == 0 ||
+                    _strnicmp(tgtSym, "seifer", 6) == 0 ||
+                    _strnicmp(tgtSym, "edea", 4) == 0 ||
+                    _strnicmp(tgtSym, "laguna", 6) == 0 ||
+                    _strnicmp(tgtSym, "kiros", 5) == 0 ||
+                    _strnicmp(tgtSym, "ward", 4) == 0) {
+                    continue;  // skip party character
+                }
+
+                // Skip if already classified as something useful
+                JSMEntityType tType = outEntities[tc].type;
+                if (tType == JSM_ENT_INTERACTIVE_OBJECT ||
+                    tType == JSM_ENT_DRAW_POINT ||
+                    tType == JSM_ENT_SAVE_POINT ||
+                    tType == JSM_ENT_SHOP ||
+                    tType == JSM_ENT_MAP_EXIT ||
+                    tType == JSM_ENT_DIRECTOR) {
+                    continue;
+                }
+
+                // Promote target to INTERACTIVE_OBJECT
+                const char* oldType = JSMEntityTypeName(outEntities[tc].type);
+                outEntities[tc].type = JSM_ENT_INTERACTIVE_OBJECT;
+                targetsPromoted++;
+                Log::Field("FieldArchive: [DIRECTOR]   promoted ent%d '%s' %s -> Interactive Object "
+                           "(pos=%s %d,%d)",
+                           tgt, tgtSym, oldType,
+                           outEntities[tc].hasPosition ? "YES" : "no",
+                           (int)outEntities[tc].posX,
+                           (int)outEntities[tc].posY);
+                // v0.12.22: Dump init script for unpositioned targets to verify
+                // whether they contain SETLINE/SET3/TALKRADIUS literals.
+                // Deep research suggests coordinates should be here.
+                if (!outEntities[tc].hasPosition) {
+                    DumpEntityScript(fieldName, tgt);
+                }
+            }
+        }
+        if (directorsFound > 0) {
+            Log::Field("FieldArchive: [DIRECTOR] '%s': %d Directors detected, %d targets promoted",
+                       fieldName, directorsFound, targetsPromoted);
         }
     }
 
@@ -1165,9 +1394,47 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         }
     }
 
+    // v0.12.24: REQ-following for Line entity interaction detection.
+    // If a Line entity REQs another entity that has dialog opcodes or ext dispatch,
+    // the Line is dual-purpose (exit + interaction). Mark it with hasExtDispatch
+    // so the catalog Interaction section can detect it.
+    for (int i = 0; i < outCount; i++) {
+        if (outEntities[i].jsmCategory != 1) continue;  // Line entities only
+        if (outEntities[i].hasExtDispatch) continue;     // already flagged
+        int e = outEntities[i].jsmIndex;
+        if (e >= 128) continue;
+        // Check if this Line entity REQs any entity with dialog/ext dispatch.
+        // First try resolved REQ targets.
+        bool reqsInteractive = false;
+        for (int r = 0; r < s_entityReqs[e].count && !reqsInteractive; r++) {
+            int tgt = s_entityReqs[e].calls[r].targetEntity;
+            if (tgt >= 0 && tgt < 128) {
+                if (s_hasDialogAny[tgt] || s_hasExtDispatchArr[tgt])
+                    reqsInteractive = true;
+            }
+        }
+        // Fallback: if entity has unresolved REQ opcodes (stack lost track),
+        // check if ANY Interactive Object entity exists on this field.
+        // Interactive Objects are specifically the targets of dual-purpose Line
+        // entity interactions (dormitory bed/desk/wardrobe, etc.).
+        if (!reqsInteractive && s_reqOpcodeCount[e] > 0 && s_entityReqs[e].count == 0) {
+            for (int ii = 0; ii < outCount && !reqsInteractive; ii++) {
+                if (outEntities[ii].type == JSM_ENT_INTERACTIVE_OBJECT)
+                    reqsInteractive = true;
+            }
+        }
+        if (reqsInteractive) {
+            outEntities[i].hasExtDispatch = true;
+            Log::Field("FieldArchive: [JSMScan] REQ-interact: Line ent%d '%s' REQs interactive entity -> hasExtDispatch=1",
+                       e, outEntities[i].symName);
+        }
+    }
+
     // --- Log results ---
     int drawPoints = 0, savePoints = 0, shops = 0, cards = 0, ladders = 0, exits = 0;
     int lineCameraPans = 0, lineScreenBounds = 0, lineEvents = 0, interactiveObjects = 0;
+    int lineInteractive = 0;  // v0.12.24
+    int directors = 0;  // v0.12.20
     int pshmCoords = 0;  // v0.07.99: entities with PSHM_W coordinate markers
     for (int i = 0; i < outCount; i++) {
         const JSMEntityInfo& e = outEntities[i];
@@ -1181,16 +1448,18 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
             case JSM_ENT_LINE_CAMERA_PAN:   lineCameraPans++; break;
             case JSM_ENT_LINE_SCREEN_BOUND: lineScreenBounds++; break;
             case JSM_ENT_LINE_EVENT:        lineEvents++; break;
+            case JSM_ENT_LINE_INTERACTIVE:  lineInteractive++; break;
             case JSM_ENT_INTERACTIVE_OBJECT: interactiveObjects++; break;
+            case JSM_ENT_DIRECTOR:          directors++; break;
             default: break;
         }
         if (outEntities[i].hasPshmCoords) pshmCoords++;
     }
     Log::Field("FieldArchive: [JSMScan] '%s' results: %d entities scanned — "
                "DrawPts=%d SavePts=%d Shops=%d Cards=%d Ladders=%d Exits=%d "
-               "LineCamPan=%d LineScreenBd=%d LineEvent=%d IntObj=%d PshmCoord=%d",
+               "LineCamPan=%d LineScreenBd=%d LineEvent=%d LineInteract=%d IntObj=%d Dir=%d PshmCoord=%d",
                fieldName, outCount, drawPoints, savePoints, shops, cards, ladders, exits,
-               lineCameraPans, lineScreenBounds, lineEvents, interactiveObjects, pshmCoords);
+               lineCameraPans, lineScreenBounds, lineEvents, lineInteractive, interactiveObjects, directors, pshmCoords);
 
     // Detailed log for each classified entity.
     for (int i = 0; i < outCount; i++) {
@@ -1339,18 +1608,18 @@ bool DumpEntityScript(const char* fieldName, int jsmEntityIndex)
 
     Log::Field("FieldArchive: [SCRIPT-DUMP] === Entity %d '%s' (%s) on '%s' ===",
                jsmEntityIndex, entName, cat, fieldName);
-    Log::Field("FieldArchive: [SCRIPT-DUMP] methods=%d startMethodIdx=%d",
-               methodCount, startMethodIdx);
+    Log::Field("FieldArchive: [SCRIPT-DUMP] methods=%d startMethodIdx=%d fileSize=%d posFirst=%d posScripts=%d scriptDataDwords=%d",
+               methodCount, startMethodIdx, (int)jsmData.size(), (int)posFirst, (int)posScripts, scriptDataDwords);
 
     // Iterate through all methods (0 = init, 1+ = per-frame/interaction)
     for (int m = 0; m <= methodCount; m++) {
         int methodIdx = startMethodIdx + m;
         if (methodIdx >= totalMethods) break;
 
-        uint16_t scriptStart = entryPoints[methodIdx];
+        uint16_t scriptStart = entryPoints[methodIdx] & 0x7FFF;  // v0.12.23: mask bit15 flag
         uint16_t scriptEnd   = (uint16_t)scriptDataDwords;
         if (methodIdx + 1 < totalMethods)
-            scriptEnd = entryPoints[methodIdx + 1];
+            scriptEnd = entryPoints[methodIdx + 1] & 0x7FFF;  // v0.12.23: mask bit15
 
         int instrCount = (int)scriptEnd - (int)scriptStart;
         if (instrCount <= 0) {
@@ -1359,6 +1628,13 @@ bool DumpEntityScript(const char* fieldName, int jsmEntityIndex)
         }
         Log::Field("FieldArchive: [SCRIPT-DUMP]   method[%d] dwords %d-%d (%d instructions):",
                    m, (int)scriptStart, (int)scriptEnd - 1, instrCount);
+
+        // v0.12.23: Bounds check diagnostic
+        if ((int)scriptStart >= scriptDataDwords) {
+            Log::Field("FieldArchive: [SCRIPT-DUMP]   SKIPPED: scriptStart=%d >= scriptDataDwords=%d (file too small or uint16 overflow)",
+                       (int)scriptStart, scriptDataDwords);
+            continue;
+        }
 
         // Decode instructions
         int pushStack[16] = {};

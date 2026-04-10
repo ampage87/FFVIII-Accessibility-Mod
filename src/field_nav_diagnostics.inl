@@ -170,3 +170,60 @@ static void PollDescriptorTable()
     }
 }
 
+// v0.12.22: Varblock poller — automatic polling of shared memory varblock
+// after field load. Reads varblock[0..799] as int16 every 1s for 10s.
+// When the Director entity activates (normal gameplay door transition),
+// its POPM_W writes populate interaction zone positions. We capture them here.
+// Confirmed by disassembly: PSHM_W(param) = read uint16 at 0x1CFE9B8 + param (byte offset).
+static const uint32_t VARBLOCK_BASE_ADDR = 0x1CFE9B8;
+static const int VARBLOCK_POLL_RANGE = 800;  // scan first 800 bytes as int16
+static const DWORD VARBLOCK_POLL_DURATION_MS = 10000;
+static const DWORD VARBLOCK_POLL_INTERVAL_MS = 1000;
+
+static void PollVarblock()
+{
+    if (!s_varblockPollActive) return;
+
+    DWORD now = GetTickCount();
+
+    // Duration expired?
+    if (now - s_varblockPollStart > VARBLOCK_POLL_DURATION_MS) {
+        Log::Field("FieldNavigation: [VBPOLL] === COMPLETE === %d polls done",
+                   s_varblockPollCount);
+        s_varblockPollActive = false;
+        return;
+    }
+
+    // Interval check
+    if (now - s_varblockPollLastCheck < VARBLOCK_POLL_INTERVAL_MS) return;
+    s_varblockPollLastCheck = now;
+    s_varblockPollCount++;
+
+    __try {
+        const uint8_t* vbBase = (const uint8_t*)VARBLOCK_BASE_ADDR;
+        int nonZero = 0;
+        char summary[2048] = {};
+        int sp = 0;
+
+        for (int offset = 0; offset < VARBLOCK_POLL_RANGE; offset += 2) {
+            int16_t val = *(const int16_t*)(vbBase + offset);
+            if (val != 0) {
+                nonZero++;
+                if (sp < 1900)
+                    sp += snprintf(summary + sp, 2048 - sp, "%d=%d ", offset, (int)val);
+            }
+        }
+
+        Log::Field("FieldNavigation: [VBPOLL] poll#%d t=+%ds nonZero=%d%s",
+                   s_varblockPollCount,
+                   (int)((now - s_varblockPollStart) / 1000),
+                   nonZero,
+                   nonZero > 0 ? " FOUND VALUES" : "");
+        if (nonZero > 0)
+            Log::Field("FieldNavigation: [VBPOLL]   %s", summary);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log::Field("FieldNavigation: [VBPOLL] Exception reading varblock");
+        s_varblockPollActive = false;
+    }
+}
+

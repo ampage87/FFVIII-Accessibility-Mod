@@ -298,9 +298,7 @@ bool Initialize(HMODULE hModule)
     s_initialized = (s_backend != Backend::NONE);
 
     if (s_initialized) {
-        wchar_t announcement[128];
-        wsprintfW(announcement, L"FF8 Accessibility Mod version %hs loaded.", FF8OPC_VERSION);
-        Output(announcement, true);
+        Output(L"Final Fantasy 8 Accessibility Mod loaded.", true);
     }
 
     return s_initialized;

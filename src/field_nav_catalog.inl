@@ -383,6 +383,23 @@ static void RefreshCatalog()
             if (GetEntityPos(s_playerEntityIdx, scrPlayerX, scrPlayerY)) {
                 for (int t = 0; t < s_capturedLineCount && newCount < MAX_CATALOG; t++) {
                     if (!s_capturedLines[t].active) continue;
+                    // v0.12.24: Check if this field has Interactive Objects.
+                    // On such fields (dormitories), SETLINE screen boundaries serve
+                    // dual purposes (exit + interaction) and their CENTER position is
+                    // the interaction zone, not the exit. INF gateways handle exits.
+                    // Convert these SETLINEs to Interactions instead of Exits.
+                    bool fieldHasInteractiveObjects = false;
+                    for (int ji = 0; ji < s_jsmEntityCount; ji++) {
+                        if (s_jsmEntities[ji].type == FieldArchive::JSM_ENT_INTERACTIVE_OBJECT) {
+                            fieldHasInteractiveObjects = true; break;
+                        }
+                    }
+                    Log::Field("FieldNavigation: [EXIT-INTOBJ] line%d jsmCount=%d fieldHasIntObj=%d lineType=%d",
+                               t, s_jsmEntityCount, (int)fieldHasInteractiveObjects, (int)s_capturedLines[t].lineType);
+                    if (s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_SCREEN_BOUND &&
+                        fieldHasInteractiveObjects) {
+                        continue;  // skip — will be added as Interaction below
+                    }
                     if (s_capturedLines[t].lineType != FieldArchive::JSM_ENT_LINE_SCREEN_BOUND) continue;
                     float tcx = (float)(s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2.0f;
                     float tcy = (float)(s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2.0f;
@@ -439,6 +456,7 @@ static void RefreshCatalog()
                     // is confusing (player arrives and nothing happens).
                     if (s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_CAMERA_PAN ||
                         s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_EVENT ||
+                        s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_SCREEN_BOUND ||
                         s_capturedLines[t].lineType == FieldArchive::JSM_ENT_UNKNOWN)
                         continue;
                     // Reachability check (same as screen transitions).
@@ -499,6 +517,54 @@ static void RefreshCatalog()
                     strncpy(evEntry.name, "Event", sizeof(evEntry.name) - 1);
                     evEntry.name[sizeof(evEntry.name) - 1] = '\0';
                     newCatalog[newCount++] = evEntry;
+                }
+            }
+        }
+
+        // v0.12.24: Add SETLINE-triggered interactive objects as "Interaction N".
+        // Line entities classified as JSM_ENT_LINE_INTERACTIVE have dialog opcodes
+        // (MES/ASK/AMES/AASK) or runtime ext dispatch — genuine player-facing
+        // interactions (dormitory bed/desk/wardrobe, classroom desk/sign, etc.).
+        // These use SETLINE center as navigation position.
+        if (s_capturedLineCount > 0 && s_playerEntityIdx >= 0) {
+            float intPlayerX = 0, intPlayerY = 0;
+            if (GetEntityPos(s_playerEntityIdx, intPlayerX, intPlayerY)) {
+                int interactionNum = 0;
+                for (int t = 0; t < s_capturedLineCount && newCount < MAX_CATALOG; t++) {
+                    if (!s_capturedLines[t].active) continue;
+                    bool isInteractive = (s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_INTERACTIVE);
+                    if (!isInteractive &&
+                        s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_SCREEN_BOUND) {
+                        // v0.12.24: On fields with Interactive Objects, SETLINE screen
+                        // boundaries are dual-purpose (exit + interaction). Their center
+                        // position is the interaction zone. Add as Interaction.
+                        bool fhio = false;
+                        for (int ji = 0; ji < s_jsmEntityCount; ji++) {
+                            if (s_jsmEntities[ji].type == FieldArchive::JSM_ENT_INTERACTIVE_OBJECT) {
+                                fhio = true; break;
+                            }
+                        }
+                        if (fhio) isInteractive = true;
+                    }
+                    Log::Field("FieldNavigation: [INTERACT-CHECK] line%d type=%d isInteractive=%d jsmCount=%d",
+                               t, (int)s_capturedLines[t].lineType, (int)isInteractive, s_jsmEntityCount);
+                    if (!isInteractive) continue;
+                    // Don't check alreadyAdded — Interactions use sentinel -600-t,
+                    // distinct from exit sentinel -200-t, so both can coexist.
+                    // Reachability: must be on same side of screen-boundary trigger lines.
+                    float tcx = (float)(s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2.0f;
+                    float tcy = (float)(s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2.0f;
+                    if (IsSeparatedByTriggerLine(intPlayerX, intPlayerY, tcx, tcy))
+                        continue;
+                    interactionNum++;
+                    EntityInfo intEntry = {};
+                    intEntry.entityIdx  = -200 - t;  // same sentinel as exits — position lookup works identically
+                    intEntry.modelId    = -1;
+                    intEntry.triangleId = 0;
+                    intEntry.type       = ENT_INTERACTION;
+                    intEntry.gatewayIdx = -1;
+                    snprintf(intEntry.name, sizeof(intEntry.name), "Interaction %d", interactionNum);
+                    newCatalog[newCount++] = intEntry;
                 }
             }
         }

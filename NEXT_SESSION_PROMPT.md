@@ -1,58 +1,44 @@
-# NEXT SESSION PROMPT — v0.12.18
+# NEXT SESSION PROMPT — v0.12.25
 
-## What just happened (session 38)
+## What just happened (session 45)
 
-### Project Reorganization — COMPLETE
-Major cleanup session covering logging, file splitting, and log migration.
+### Startup speech no longer announces version
+Changed startup TTS from "FF8 Accessibility Mod version X loaded" to "Final Fantasy 8 Accessibility Mod loaded." This prevents the version speech from talking over the Square Electronic Arts FMV audio description.
 
-**1. Multi-channel logging system (log.cpp rewrite)**
-- 6 domain-specific log files: `ff8_mod.log`, `ff8_battle.log`, `ff8_field.log`, `ff8_world.log`, `ff8_menu.log`, `ff8_dialog.log`
-- Each writes to both game directory and dev `Logs/` directory
-- Auto-archives old logs to `Logs/archive/` with timestamps on game launch
-- Domain functions: `Log::Mod()`, `Log::Battle()`, `Log::Field()`, `Log::World()`, `Log::Menu()`, `Log::Dialog()`
-- `Log::Write()` preserved for backward compatibility (routes to ff8_mod.log)
+### V key announces mod version on demand
+Pressing V now speaks "Version 0.12.25" (or current FF8OPC_VERSION). Added to the keyboard shortcut block in dinput8.cpp alongside the other hotkeys. V does not conflict with FF8's default keyboard bindings or any existing mod shortcuts.
 
-**2. Source file splitting (`.inl` textual-include approach)**
-- field_navigation.cpp: 343KB → 48KB + 13 .inl files
-- battle_tts.cpp: 193KB → 25KB + 5 .inl files
-- menu_tts.cpp: 174KB → 33KB + 5 .inl files
-- field_archive.cpp: 119KB → 44KB + 1 .inl file
-- Total: 829KB → 150KB main files + 24 .inl section files
-- No deploy.bat changes needed — `.inl` files are `#include`d from main `.cpp` files
-
-**3. Log::Write migration — 100% COMPLETE**
-- Every `Log::Write()` call in every source file migrated to the appropriate domain function
-- Field files → `Log::Field()`, Battle → `Log::Battle()`, Menu → `Log::Menu()`
-- World → `Log::World()`, Dialog → `Log::Dialog()`, Core modules → `Log::Mod()`
-
-**4. Documentation trimmed**
-- DEVNOTES.md: 41KB → 6.5KB (includes new file layout reference)
-- NEXT_SESSION_PROMPT.md: updated (this file)
-
-### Build verified: v0.12.18 compiled and ran correctly with all changes.
+### Files modified in v0.12.25
+- `ff8_accessibility.h` — FF8OPC_VERSION bump
+- `screen_reader.cpp` — Simplified startup announcement (no version number)
+- `dinput8.cpp` — Added V key shortcut for version announce, updated shortcut comment
+- `field_navigation.cpp` — Version bumps (header + Initialize log)
+- `battle_tts.cpp` — Version bumps (header + Initialize log)
 
 ---
 
-## What to do next (session 39)
+## What to do next (session 46)
 
-### Priority 1: Dormitory bed — missing from entity catalog
-Squall's bed in B-Garden Dormitory ("Rest up" dialog) is not in the catalog. Investigate:
-- Identify the dormitory field name (probably `bgdorm_1` or similar)
-- Use F12 script dump diagnostic on that field to find the bed entity
-- Check if it uses SETLINE, trigger zones, or another mechanism
-- Add to catalog with correct interaction position
+### Priority 1: Clean up diagnostic logs
+Remove `[EXIT-INTOBJ]`, `[INTERACT-CHECK]`, `extDisp=` diagnostic logs added during development. Keep the core feature logic.
 
-### Priority 2: Field navigation overhaul evaluation
-- Current A* pathfinding + analog steering is described as "clunky/fragile"
-- Dynamic runtime polling approach was proposed for entities like `dic` that load beyond the active window
-- Evaluate whether to improve the current system or replace it
+### Priority 2: INF gateway exit coordinate investigation
+The exit direction on bgryo1_4 is wrong ("right" vs actual "down"). Options:
+- Compare INF gateway center with MAPJUMP destination coordinates from Line entity script
+- Use the suppressed SETLINE exit position as a reference to find the actual exit zone
+- Check if other dormitory fields have the same directional error
+- May need to use SETLINE geometry endpoints (not center) to find exit positions
 
-### Priority 3: GitHub push (~50+ builds unpushed)
+### Priority 3: Test on more field types
+- bgroom_1 (classroom) — verify interactions vs exits
+- bgryo1_2, bgryo1_3 (other dormitory variants)
+- bghall_1 — verify NO regression (pure screen-boundary exits should still work, but bghall_1 also has Interactive Objects — need to check if SETLINE exits were incorrectly suppressed)
+- **REGRESSION RISK**: bghall_1 has Interactive Objects (displight, elelight). The `fieldHasInteractiveObjects` heuristic would suppress ALL SETLINE exits on bghall_1, falling back to INF gateways. Verify this doesn't break navigation on the main hallway.
 
-### Parked items (tracked as GitHub issues)
-- World map vehicle BFS, GPS mode, location announce
-- Battle command menu announce improvements
-- Walk-and-talk dialog gap (hardcoded engine path)
+### Priority 4: Name the interactions
+Currently labeled "Interaction 1", "Interaction 2", etc. Associate with actual object names from SYM data (bed, desk, wardrobe, uniform).
+
+### Priority 5: GitHub push (~50+ builds unpushed)
 
 ---
 
@@ -60,22 +46,21 @@ Squall's bed in B-Garden Dormitory ("Rest up" dialog) is not in the catalog. Inv
 
 ### Build workflow
 1. Edit source files using filesystem MCP tools (NEVER bash for Windows files)
-2. Aaron runs `deploy.bat` (the ONLY build script)
+2. Aaron runs deploy.vbs → deploy.ps1 → deploy.bat
 3. "BAT" = Built And Tested → Claude reads tail of game log
-4. Version bump in 4 places: `ff8_accessibility.h`, `field_navigation.cpp` (header + Initialize), `battle_tts.cpp` (header + Initialize)
+4. Version bump in 5 places: `ff8_accessibility.h`, `field_navigation.cpp` (header + Initialize), `battle_tts.cpp` (header + Initialize)
+
+### Key diagnostic keys
+- F2 = Director varblock + entity struct diagnostic
+- F11 = Visibility flag dump
+- F12 = On-demand POPM_W capture (10s window) with entity position snapshot
 
 ### Log channels
-| Function | Log file | Use for |
-|----------|----------|---------|
-| `Log::Mod()` | ff8_mod.log | Core module messages |
-| `Log::Battle()` | ff8_battle.log | Battle TTS, EWM, GF |
-| `Log::Field()` | ff8_field.log | Field nav, archive, hooks |
-| `Log::World()` | ff8_world.log | World map navigation |
-| `Log::Menu()` | ff8_menu.log | Menu TTS, junction, save |
-| `Log::Dialog()` | ff8_dialog.log | Field dialog, opcodes |
-
-### File reading strategy
-- For field nav work: read the specific `.inl` file (8-70KB each) instead of the 48KB main file
-- For battle work: read the specific `battle_tts_*.inl` file
-- For menu work: read the specific `menu_tts_*.inl` file
-- Full file list in DEVNOTES.md "Source File Layout" section
+| Function | Log file |
+|----------|----------|
+| `Log::Field()` | ff8_field.log |
+| `Log::Dialog()` | ff8_dialog.log |
+| `Log::Battle()` | ff8_battle.log |
+| `Log::World()` | ff8_world.log |
+| `Log::Menu()` | ff8_menu.log |
+| `Log::Mod()` | ff8_mod.log |

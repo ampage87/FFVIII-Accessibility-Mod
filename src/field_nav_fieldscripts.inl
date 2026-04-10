@@ -89,6 +89,13 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
     s_pshmCaptureStartTime = GetTickCount();
     s_pshmSummaryLogged = false;
 
+    // v0.12.22: Reset POPM varblock write capture.
+    s_varWriteCount = 0;
+    s_capturingVarWrites = true;
+    s_varWriteCaptureStart = GetTickCount();
+    s_varWriteSummaryLogged = false;
+    memset(s_varWrites, 0, sizeof(s_varWrites));
+
     int ret = s_originalFieldScriptsInit(unk1, unk2, unk3, unk4);
 
     // v0.08.26: SET3 capture stays active PERMANENTLY (persistent hook).
@@ -432,13 +439,15 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                 int linesMapped = 0;
                 for (int t = 0; t < s_capturedLineCount; t++) {
                     s_capturedLines[t].lineType = FieldArchive::JSM_ENT_UNKNOWN;
-                    s_capturedLines[t].destFieldId = -1;  // v0.07.83
+                    s_capturedLines[t].destFieldId = -1;
+                    s_capturedLines[t].hasExtDispatch = false;
                     // Map captured line t to JSM Line entity at jsmDoors + t.
                     // Line entities in JSM: indices [jsmDoors .. jsmDoors+jsmLines-1].
                     int jsmIdx = s_jsmDoors + t;
                     if (jsmIdx < s_jsmEntityCount &&
                         s_jsmEntities[jsmIdx].jsmCategory == 1) {  // category 1 = Line
                         s_capturedLines[t].lineType = s_jsmEntities[jsmIdx].type;
+                        s_capturedLines[t].hasExtDispatch = s_jsmEntities[jsmIdx].hasExtDispatch;
                         // v0.07.83: Capture MAPJUMP destination for screen boundary lines.
                         if (s_jsmEntities[jsmIdx].type == FieldArchive::JSM_ENT_LINE_SCREEN_BOUND) {
                             s_capturedLines[t].destFieldId = s_jsmEntities[jsmIdx].param;
@@ -447,28 +456,47 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                     }
                 }
                 // Log the mapping results.
-                int cameraPans = 0, screenBounds = 0, lineEvents = 0, lineUnknown = 0;
+                int cameraPans = 0, screenBounds = 0, lineEvents = 0, lineUnknown = 0, lineInteractive = 0;
                 for (int t = 0; t < s_capturedLineCount; t++) {
                     switch (s_capturedLines[t].lineType) {
                         case FieldArchive::JSM_ENT_LINE_CAMERA_PAN:   cameraPans++; break;
                         case FieldArchive::JSM_ENT_LINE_SCREEN_BOUND: screenBounds++; break;
                         case FieldArchive::JSM_ENT_LINE_EVENT:        lineEvents++; break;
+                        case FieldArchive::JSM_ENT_LINE_INTERACTIVE:  lineInteractive++; break;
                         default: lineUnknown++; break;
                     }
                 }
                 Log::Field("FieldNavigation: [fieldload] lineType assigned: %d captured, %d mapped "
-                           "(camPan=%d screenBd=%d event=%d unknown=%d)",
+                           "(camPan=%d screenBd=%d event=%d interact=%d unknown=%d)",
                            s_capturedLineCount, linesMapped,
-                           cameraPans, screenBounds, lineEvents, lineUnknown);
+                           cameraPans, screenBounds, lineEvents, lineInteractive, lineUnknown);
                 // Detailed per-line log for first few fields.
                 for (int t = 0; t < s_capturedLineCount; t++) {
                     int jsmIdx = s_jsmDoors + t;
                     const char* typeName = (jsmIdx < s_jsmEntityCount)
                         ? FieldArchive::JSMEntityTypeName(s_jsmEntities[jsmIdx].type) : "(no JSM)";
-                    Log::Field("FieldNavigation: [fieldload]   line%d order=%d type=%s center=(%.0f,%.0f)",
+                    Log::Field("FieldNavigation: [fieldload]   line%d order=%d type=%s extDisp=%d center=(%.0f,%.0f)",
                                t, s_capturedLines[t].lineOrder, typeName,
+                               (int)s_capturedLines[t].hasExtDispatch,
                                (float)(s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2.0f,
                                (float)(s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2.0f);
+                }
+
+                // v0.12.23: Dump scripts of Event Trigger and Unknown-type Line entities.
+                // These are interaction mediators on shared dormitory/classroom fields.
+                // Their scripts contain REQ opcodes targeting Others entities — revealing
+                // which interactive object (bed/desk/wardrobe) each SETLINE zone controls.
+                for (int ld = 0; ld < s_capturedLineCount; ld++) {
+                    int ldJsmIdx = s_jsmDoors + ld;
+                    if (ldJsmIdx >= s_jsmEntityCount) continue;
+                    int ldType = s_jsmEntities[ldJsmIdx].type;
+                    if (ldType != FieldArchive::JSM_ENT_LINE_CAMERA_PAN &&
+                        ldType != FieldArchive::JSM_ENT_LINE_SCREEN_BOUND) {
+                        Log::Field("FieldNavigation: [LINE-SCRIPT] Dumping Line entity %d '%s' (type=%s)",
+                                   ldJsmIdx, s_jsmEntities[ldJsmIdx].symName,
+                                   FieldArchive::JSMEntityTypeName((FieldArchive::JSMEntityType)ldType));
+                        FieldArchive::DumpEntityScript(fieldName, ldJsmIdx);
+                    }
                 }
             }
 
@@ -557,6 +585,102 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                 if (setlineOverridden > 0)
                     Log::Field("FieldNavigation: [SETLINE-POS] %d PSHM entity positions overridden from %d SETLINE trigger lines",
                                setlineOverridden, s_capturedLineCount);
+            }
+
+            // v0.12.22: Walkmesh dead-end detection for Director-dispatched interactive objects.
+            // Interactive background objects (beds, desks, wardrobes) are typically in walkmesh
+            // alcoves/dead-ends. Find these and match to unpositioned interactive objects.
+            if (s_walkmesh.valid && s_jsmEntityCount > 0) {
+                // Step 1: Count neighbors per triangle
+                static int s_neighborCount[4096];
+                int numTri = s_walkmesh.numTriangles;
+                if (numTri > 4096) numTri = 4096;
+                for (int t = 0; t < numTri; t++) {
+                    s_neighborCount[t] = 0;
+                    for (int e = 0; e < 3; e++)
+                        if (s_walkmesh.triangles[t].neighbor[e] != 0xFFFF)
+                            s_neighborCount[t]++;
+                }
+
+                // Step 2: BFS cluster dead-ends (1-neighbor) through narrow passages (2-neighbor)
+                static bool s_deadVisited[4096];
+                memset(s_deadVisited, 0, numTri * sizeof(bool));
+
+                struct DeadEndCluster {
+                    float centerX, centerY;
+                    int triCount;
+                    int seedTri;
+                };
+                static const int MAX_DEAD_CLUSTERS = 32;
+                DeadEndCluster deadClusters[MAX_DEAD_CLUSTERS];
+                int deadClusterCount = 0;
+                int totalDeadEnds = 0, totalNarrow = 0;
+
+                for (int t = 0; t < numTri; t++) {
+                    if (s_neighborCount[t] == 1) totalDeadEnds++;
+                    else if (s_neighborCount[t] == 2) totalNarrow++;
+                }
+
+                for (int t = 0; t < numTri && deadClusterCount < MAX_DEAD_CLUSTERS; t++) {
+                    if (s_deadVisited[t] || s_neighborCount[t] != 1) continue;
+                    // BFS from this dead-end through narrow (<=2 neighbor) triangles
+                    float sumX = 0, sumY = 0;
+                    int count = 0;
+                    static uint16_t bfsQ[512];
+                    int qH = 0, qT = 0;
+                    bfsQ[qT++] = (uint16_t)t;
+                    s_deadVisited[t] = true;
+                    while (qH < qT) {
+                        uint16_t cur = bfsQ[qH++];
+                        sumX += s_walkmesh.triangles[cur].centerX;
+                        sumY += s_walkmesh.triangles[cur].centerY;
+                        count++;
+                        for (int e = 0; e < 3; e++) {
+                            uint16_t nb = s_walkmesh.triangles[cur].neighbor[e];
+                            if (nb == 0xFFFF || nb >= (uint16_t)numTri) continue;
+                            if (s_deadVisited[nb]) continue;
+                            if (s_neighborCount[nb] <= 2) {
+                                s_deadVisited[nb] = true;
+                                if (qT < 512) bfsQ[qT++] = nb;
+                            }
+                        }
+                    }
+                    deadClusters[deadClusterCount].centerX = sumX / (float)count;
+                    deadClusters[deadClusterCount].centerY = sumY / (float)count;
+                    deadClusters[deadClusterCount].triCount = count;
+                    deadClusters[deadClusterCount].seedTri = t;
+                    deadClusterCount++;
+                }
+
+                Log::Field("FieldNavigation: [DEADEND] %s: %d tris, %d dead-ends, %d narrow, %d clusters",
+                           fieldName, numTri, totalDeadEnds, totalNarrow, deadClusterCount);
+
+                // Step 3: Log significant clusters and match to unpositioned interactive objects.
+                static const int MIN_CLUSTER_TRIS = 2;
+                int significantClusters = 0;
+                for (int c = 0; c < deadClusterCount; c++) {
+                    const char* tag = (deadClusters[c].triCount >= MIN_CLUSTER_TRIS) ? "*" : " ";
+                    if (deadClusters[c].triCount >= MIN_CLUSTER_TRIS) significantClusters++;
+                    Log::Field("FieldNavigation: [DEADEND]  %s cluster[%d] center=(%.0f,%.0f) tris=%d seed=%d",
+                               tag, c, deadClusters[c].centerX, deadClusters[c].centerY,
+                               deadClusters[c].triCount, deadClusters[c].seedTri);
+                }
+                Log::Field("FieldNavigation: [DEADEND] %d significant clusters (>=%d tris)",
+                           significantClusters, MIN_CLUSTER_TRIS);
+
+                int matched = 0;
+                for (int ei = 0; ei < s_jsmEntityCount; ei++) {
+                    FieldArchive::JSMEntityInfo& je = s_jsmEntities[ei];
+                    if (je.type != FieldArchive::JSM_ENT_INTERACTIVE_OBJECT) continue;
+                    if (je.hasPosition && (je.posX != 0 || je.posY != 0)) continue;
+                    Log::Field("FieldNavigation: [DEADEND]   unpositioned intobj: ent%d '%s' (%d sig. clusters)",
+                               je.jsmIndex, je.symName, significantClusters);
+                    matched++;
+                }
+                if (matched > 0) {
+                    Log::Field("FieldNavigation: [DEADEND]   %d unpositioned objects, %d significant clusters",
+                               matched, significantClusters);
+                }
             }
 
             Log::Field("FieldNavigation: [fieldload] SYM: %d names, %d entities, offset=0, %d triggers, walkmesh=%s",

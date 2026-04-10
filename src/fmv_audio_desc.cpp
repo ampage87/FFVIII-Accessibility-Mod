@@ -26,6 +26,7 @@
 #include <sstream>
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 
 namespace FmvAudioDesc
 {
@@ -44,19 +45,21 @@ namespace FmvAudioDesc
         std::vector<Cue> cues;
     };
 
-    // Table mapping resource IDs to their VTT track names.
-    // Add entries here when adding new audio description VTT resources.
-    struct ResourceEntry
+    // Resource IDs for disc VTTs are auto-derived:
+    //   disc00_NNh = IDR_VTT_DISC00_BASE + NN, etc.
+    // Special VTTs (intro, opening credits) use explicit IDs.
+    struct SpecialVtt
     {
         int resourceId;
-        const char* vttName;    // lowercase, matches mapping.txt values
+        const char* vttName;
+        const char* aviOverride;  // AVI that maps to this VTT (null = use mapping.txt)
     };
 
-    static const ResourceEntry g_resourceTable[] = {
-        { IDR_VTT_INTRO,           "ff8_intro_ad.vtt" },
-        { IDR_VTT_OPENING_CREDITS, "ff8_opening_credits_ad.vtt" },
+    static const SpecialVtt g_specialVtts[] = {
+        { IDR_VTT_INTRO,           "ff8_intro_ad.vtt",           "disc00_30h.avi" },
+        { IDR_VTT_OPENING_CREDITS, "ff8_opening_credits_ad.vtt", "disc00_23h.avi" },
     };
-    static const int g_resourceTableCount = sizeof(g_resourceTable) / sizeof(g_resourceTable[0]);
+    static const int g_specialVttCount = sizeof(g_specialVtts) / sizeof(g_specialVtts[0]);
 
     // ---- State ----
 
@@ -329,51 +332,82 @@ namespace FmvAudioDesc
         g_hModule = dllModule;
         QueryPerformanceFrequency(&g_perfFreq);
 
-        // Load VTT tracks from embedded resources
-        for (int i = 0; i < g_resourceTableCount; i++)
-        {
-            const ResourceEntry& entry = g_resourceTable[i];
-            std::string content = LoadResourceString(g_hModule, entry.resourceId);
+        // ---- Load all disc VTT resources using systematic ID scheme ----
+        // Resource ID = base + FMV number.  AVI/VTT names derived automatically.
+        struct DiscRange { int disc; int maxNum; int base; };
+        static const DiscRange ranges[] = {
+            { 0, 29, IDR_VTT_DISC00_BASE },  // disc00_30h is intro, handled below
+            { 1, 33, IDR_VTT_DISC01_BASE },
+            { 2, 31, IDR_VTT_DISC02_BASE },
+            { 3,  6, IDR_VTT_DISC03_BASE },  // no 05h
+            { 4,  0, IDR_VTT_DISC04_BASE },
+        };
 
+        int totalLoaded = 0;
+        for (const auto& range : ranges)
+        {
+            for (int num = 0; num <= range.maxNum; num++)
+            {
+                if (range.disc == 3 && num == 5)
+                    continue;  // disc03_05h has no AVI
+
+                int resId = range.base + num;
+                std::string content = LoadResourceString(g_hModule, resId);
+                if (content.empty())
+                    continue;
+
+                char vttBuf[32], aviBuf[32];
+                sprintf_s(vttBuf, "disc%02d_%02dh.vtt", range.disc, num);
+                sprintf_s(aviBuf, "disc%02d_%02dh.avi", range.disc, num);
+
+                VttTrack track;
+                track.name = vttBuf;
+
+                if (ParseVttString(content, track) && !track.cues.empty())
+                {
+                    std::string vttKey = ToLower(vttBuf);
+                    std::string aviKey = ToLower(aviBuf);
+                    g_tracks[vttKey] = std::move(track);
+                    g_aviToVtt[aviKey] = vttKey;
+                    totalLoaded++;
+                    Log::Mod("[FMV_AD] Loaded %s: %zu cues (resource %d)",
+                        vttBuf, g_tracks[vttKey].cues.size(), resId);
+                }
+            }
+        }
+        Log::Mod("[FMV_AD] Loaded %d disc VTT tracks from resources.", totalLoaded);
+
+        // ---- Load special VTTs (intro, opening credits) ----
+        for (int i = 0; i < g_specialVttCount; i++)
+        {
+            const SpecialVtt& sv = g_specialVtts[i];
+            std::string content = LoadResourceString(g_hModule, sv.resourceId);
             if (content.empty())
             {
-                Log::Mod("[FMV_AD] Failed to load resource %d (%s)",
-                    entry.resourceId, entry.vttName);
+                Log::Mod("[FMV_AD] Failed to load special resource %d (%s)",
+                    sv.resourceId, sv.vttName);
                 continue;
             }
 
             VttTrack track;
-            track.name = entry.vttName;
+            track.name = sv.vttName;
+            if (ParseVttString(content, track) && !track.cues.empty())
+            {
+                std::string vttKey = ToLower(sv.vttName);
+                g_tracks[vttKey] = std::move(track);
+                Log::Mod("[FMV_AD] Loaded %s: %zu cues (resource %d)",
+                    sv.vttName, g_tracks[vttKey].cues.size(), sv.resourceId);
 
-            if (ParseVttString(content, track))
-            {
-                std::string key = ToLower(entry.vttName);
-                Log::Mod("[FMV_AD] Loaded %s: %zu cues (from resource %d)",
-                    entry.vttName, track.cues.size(), entry.resourceId);
-                g_tracks[key] = std::move(track);
-            }
-            else
-            {
-                Log::Mod("[FMV_AD] Parsed 0 cues from %s", entry.vttName);
+                // Apply AVI override mapping (replaces any auto-derived mapping)
+                if (sv.aviOverride)
+                {
+                    std::string aviKey = ToLower(sv.aviOverride);
+                    g_aviToVtt[aviKey] = vttKey;
+                    Log::Mod("[FMV_AD] Special mapping: %s -> %s",
+                        sv.aviOverride, sv.vttName);
+                }
             }
         }
-
-        // Load mapping from embedded resource
-        std::string mappingContent = LoadResourceString(g_hModule, IDR_AD_MAPPING);
-        ParseMappingString(mappingContent);
-
-        // Apply default mappings for any AVI files not explicitly mapped.
-        auto addDefault = [](const char* avi, const char* vtt) {
-            std::string aviKey = ToLower(avi);
-            if (g_aviToVtt.find(aviKey) == g_aviToVtt.end())
-            {
-                g_aviToVtt[aviKey] = ToLower(vtt);
-                Log::Mod("[FMV_AD] Default mapping: %s -> %s", avi, vtt);
-            }
-        };
-
-        addDefault("disc00_30h.avi", "ff8_intro_ad.vtt");
-        addDefault("disc00_23h.avi", "ff8_opening_credits_ad.vtt");
 
         g_initialized = true;
         Log::Mod("[FMV_AD] Initialized: %zu tracks, %zu mappings (all embedded in DLL)",

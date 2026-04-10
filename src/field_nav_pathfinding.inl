@@ -108,6 +108,9 @@ struct CapturedTriggerLine {
     // v0.07.83: Destination field ID for LINE_SCREEN_BOUND (from MAPJUMP param).
     // -1 = unknown, -2 = world map, >= 0 = field ID.
     int destFieldId;
+    // v0.12.24: True if the JSM entity also has foundExtDispatch (runtime 0x1C dispatch).
+    // Used to identify dual-purpose Lines (exit + interaction via PSHM_W-dispatched dialog).
+    bool hasExtDispatch;
 };
 static const int MAX_CAPTURED_LINES = 32;
 static CapturedTriggerLine s_capturedLines[MAX_CAPTURED_LINES] = {};

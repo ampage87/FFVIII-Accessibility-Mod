@@ -9,8 +9,8 @@
 // FF8 Original PC Accessibility Mod version
 // Increment on every build change
 // ================================================================
-#define FF8OPC_VERSION "0.12.18"  // Multi-channel logging + archive system
-#define FF8OPC_VERSION_DATE "2026-04-06"
+#define FF8OPC_VERSION "0.12.25"  // V key version announce, quieter startup speech
+#define FF8OPC_VERSION_DATE "2026-04-07"
 
 // ============================================================================
 // FF8 Runtime Address Resolution

@@ -64,102 +64,115 @@ static void HandleKeys()
     }
     s_f11WasDown = f11;
 
-    // v0.12.13: F12 = Interaction Range Diagnostic.
-    // Dumps RUNTIME talkRadius, pushRadius, position, and distance from player
-    // for ALL entities on the field. This reveals the engine-set interaction
-    // ranges that the static JSM scan can't see.
+    // v0.12.21: F2 = Director Varblock + Entity Struct Diagnostic.
+    // (Moved from F12 — F12 conflicts with screen reader entity monitor.)
+    static bool s_f2WasDown = false;
+    bool f2 = (GetAsyncKeyState(VK_F2) & 0x8000) != 0;
+    if (f2 && !s_f2WasDown) {
+        __try {
+            const char* fieldName = FF8Addresses::pCurrentFieldName
+                                    ? FF8Addresses::pCurrentFieldName : "?";
+            Log::Field("FieldNavigation: [DIRVAR-DIAG] === %s ===", fieldName);
+
+            // 1. Read varblock at known Director PSHM addresses.
+            static const uint32_t VARBLOCK_BASE = 0x1CFE9B8;
+            // Key addresses from seed's script dump on bgryo1_4:
+            //   PSHM_W: 0,1,2,3 (zone index + entity ID), 58,62,63,64 (method IDs), 145 (X coord)
+            //   PSHM_L: 720 (player pos, 32-bit)
+            int16_t vbAddrs[] = {0, 1, 2, 3, 58, 62, 63, 64, 145, 175};
+            for (int va = 0; va < 10; va++) {
+                int16_t addr = vbAddrs[va];
+                int16_t valW = *(int16_t*)(VARBLOCK_BASE + (uint16_t)addr);
+                Log::Field("FieldNavigation: [DIRVAR-DIAG] varblock[%d] = %d (0x%04X)",
+                           (int)addr, (int)valW, (unsigned)(uint16_t)valW);
+            }
+            // PSHM_L at addr 720 (32-bit)
+            int32_t valL720 = *(int32_t*)(VARBLOCK_BASE + 720);
+            Log::Field("FieldNavigation: [DIRVAR-DIAG] varblock_L[720] = %d (0x%08X)",
+                       valL720, (unsigned)valL720);
+            // Dump varblock[0..199] as non-zero int16 values for pattern discovery
+            int nonZero = 0;
+            for (int vd = 0; vd < 200; vd += 2) {
+                int16_t v = *(int16_t*)(VARBLOCK_BASE + vd);
+                if (v != 0) {
+                    Log::Field("FieldNavigation: [DIRVAR-DIAG] vb[%d]=%d", vd, (int)v);
+                    nonZero++;
+                }
+            }
+            Log::Field("FieldNavigation: [DIRVAR-DIAG] %d non-zero entries in varblock[0..199]", nonZero);
+
+            // 2. Read entity struct positions for ALL JSM Others (beyond active window).
+            //    The engine allocates structs for all Others, but only runs scripts
+            //    for the active window. Structs beyond the window may have zero positions.
+            if (FF8Addresses::pFieldStateOthers) {
+                uint8_t* base = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+                if (base) {
+                    int totalOthers = s_jsmOthers;
+                    int activeCount = (int)*FF8Addresses::pFieldStateOtherCount;
+                    Log::Field("FieldNavigation: [DIRVAR-DIAG] Others: %d JSM, %d active, base=0x%08X",
+                               totalOthers, activeCount, (uint32_t)(uintptr_t)base);
+                    int scanLim = (totalOthers < 20) ? totalOthers : 20;  // safety
+                    for (int oi = 0; oi < scanLim; oi++) {
+                        uint8_t* blk = base + ENTITY_STRIDE * oi;
+                        int32_t fpX = *(int32_t*)(blk + 0x190);
+                        int32_t fpY = *(int32_t*)(blk + 0x194);
+                        int16_t mdl = *(int16_t*)(blk + 0x218);
+                        uint16_t tri = *(uint16_t*)(blk + 0x1FA);
+                        // SYM name
+                        const char* sym = "";
+                        int si = s_symOthersOffset + oi;
+                        if (si >= 0 && si < s_symNameCount) sym = s_symNames[si];
+                        Log::Field("FieldNavigation: [DIRVAR-DIAG] struct[%d] '%s' model=%d "
+                                   "fp=(%d,%d)/4096=(%d,%d) tri=%u%s",
+                                   oi, sym, (int)mdl, fpX, fpY, fpX/4096, fpY/4096,
+                                   (unsigned)tri,
+                                   (oi < activeCount) ? " [ACTIVE]" : " [BEYOND]");
+                    }
+                }
+            }
+            Log::Field("FieldNavigation: [DIRVAR-DIAG] === END ===");
+            ScreenReader::Speak("Director varblock diagnostic logged.");
+        } __except(EXCEPTION_EXECUTE_HANDLER) {
+            Log::Field("FieldNavigation: [DIRVAR-DIAG] Exception");
+        }
+    }
+    s_f2WasDown = f2;
+
+    // v0.12.23: F12 = On-demand POPM_W capture (10s window).
+    // Walk to the interaction zone, press F12, then interact with the bed.
+    // If the Director entity activates on proximity, POPM_W writes will appear.
     static bool s_f12WasDown = false;
     bool f12 = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
     if (f12 && !s_f12WasDown) {
-        if (s_playerEntityIdx >= 0 && FF8Addresses::pFieldStateOthers) {
-            __try {
-                uint8_t entCount = *FF8Addresses::pFieldStateOtherCount;
+        s_varWriteCount = 0;
+        s_capturingVarWrites = true;
+        s_varWriteCaptureStart = GetTickCount();
+        s_varWriteSummaryLogged = false;
+        memset(s_varWrites, 0, sizeof(s_varWrites));
+        // Also log player position and all entity struct positions at this moment
+        __try {
+            const char* fn = FF8Addresses::pCurrentFieldName ? FF8Addresses::pCurrentFieldName : "?";
+            if (FF8Addresses::pFieldStateOthers) {
                 uint8_t* base = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
-                if (base && entCount > 0) {
-                    uint8_t lim = (entCount < MAX_ENTITIES) ? entCount : (uint8_t)MAX_ENTITIES;
-                    float px = 0, py = 0;
-                    GetEntityPos(s_playerEntityIdx, px, py);
-                    const char* fieldName = FF8Addresses::pCurrentFieldName
-                                            ? FF8Addresses::pCurrentFieldName : "?";
-                    Log::Field("FieldNavigation: [INTERACT-DIAG] === %s === player=ent%d pos=(%.0f,%.0f)",
-                               fieldName, s_playerEntityIdx, px, py);
-                    for (int i = 0; i < (int)lim; i++) {
-                        uint8_t* blk = base + ENTITY_STRIDE * i;
-                        int16_t  modelId      = *(int16_t*)(blk + 0x218);
-                        uint16_t triId        = *(uint16_t*)(blk + 0x1FA);
-                        uint16_t talkRad      = *(uint16_t*)(blk + 0x1F8);
-                        uint16_t pushRad      = *(uint16_t*)(blk + 0x1F6);
-                        uint8_t  talkonoff    = *(blk + 0x24B);
-                        uint8_t  pushonoff    = *(blk + 0x249);
-                        uint8_t  throughonoff = *(blk + 0x24C);
-                        uint8_t  setpc        = *(blk + 0x255);
-                        int32_t  fpX          = *(int32_t*)(blk + 0x190);
-                        int32_t  fpY          = *(int32_t*)(blk + 0x194);
-                        float ex = (float)(fpX / 4096);
-                        float ey = (float)(fpY / 4096);
-                        float dx = ex - px;
-                        float dy = ey - py;
-                        float dist = sqrtf(dx*dx + dy*dy);
-                        // SYM name
+                if (base) {
+                    int lim = s_jsmOthers < 16 ? s_jsmOthers : 16;
+                    for (int oi = 0; oi < lim; oi++) {
+                        uint8_t* blk = base + ENTITY_STRIDE * oi;
+                        int32_t fpX = *(int32_t*)(blk + 0x190);
+                        int32_t fpY = *(int32_t*)(blk + 0x194);
+                        uint16_t tri = *(uint16_t*)(blk + 0x1FA);
+                        uint16_t talk = *(uint16_t*)(blk + 0x1F8);
                         const char* sym = "";
-                        int si = s_symOthersOffset + i;
-                        if (si >= 0 && si < s_symNameCount) sym = s_symNames[si];
-                        Log::Field("FieldNavigation: [INTERACT-DIAG] ent%d '%s' model=%d "
-                                   "pos=(%.0f,%.0f) dist=%.0f tri=0x%04X "
-                                   "talkRad=%u pushRad=%u talk=%d push=%d thru=%d setpc=%d%s",
-                                   i, sym, (int)modelId, ex, ey, dist, (unsigned)triId,
-                                   (unsigned)talkRad, (unsigned)pushRad,
-                                   (int)talkonoff, (int)pushonoff, (int)throughonoff, (int)setpc,
-                                   (i == s_playerEntityIdx) ? " [PLAYER]" : "");
+                        if (oi < s_symNameCount) sym = s_symNames[oi];
+                        Log::Field("FieldNavigation: [F12-CAPTURE] ent%d '%s' fp=(%d,%d) tri=%u talk=%u%s",
+                                   oi, sym, fpX/4096, fpY/4096, (unsigned)tri, (unsigned)talk,
+                                   (oi == s_playerEntityIdx) ? " [PLAYER]" : "");
                     }
-                    Log::Field("FieldNavigation: [INTERACT-DIAG] === END Others ===");
-                    // Also dump Backgrounds array.
-                    if (FF8Addresses::HasFieldStateBackgrounds()) {
-                        uint8_t bgCount = *FF8Addresses::pFieldStateBackgroundCount;
-                        uint8_t* bgBase = reinterpret_cast<uint8_t*>(
-                            *reinterpret_cast<uint32_t*>(FF8Addresses::pFieldStateBackgrounds));
-                        if (bgBase && bgCount > 0) {
-                            uint8_t bgLim = (bgCount < MAX_BG_ENTITIES) ? bgCount : (uint8_t)MAX_BG_ENTITIES;
-                            Log::Field("FieldNavigation: [INTERACT-DIAG] === Backgrounds: %d ===", (int)bgLim);
-                            for (int b = 0; b < (int)bgLim; b++) {
-                                uint8_t* blk = bgBase + BG_STRIDE * b;
-                                // BG struct is 0x1B4 — smaller than Others (0x264).
-                                // Common offsets (from ff8_field_state_common) should be same:
-                                // 0x190=fpX, 0x194=fpY, but interaction offsets may differ.
-                                // Dump what we can safely read within 0x1B4.
-                                int32_t fpX = *(int32_t*)(blk + 0x190);
-                                int32_t fpY = *(int32_t*)(blk + 0x194);
-                                float bx = (float)(fpX / 4096);
-                                float by = (float)(fpY / 4096);
-                                float bdx = bx - px;
-                                float bdy = by - py;
-                                float bdist = sqrtf(bdx*bdx + bdy*bdy);
-                                uint32_t execFlags = *(uint32_t*)(blk + 0x160);
-                                // BG struct ends at 0x1B4, so offsets like 0x1F8 (talkRad)
-                                // and 0x218 (model) are OUT OF BOUNDS for BG structs.
-                                // Dump the post-common region (0x188..0x1B3) as hex.
-                                char hexTail[140] = {};
-                                for (int h = 0; h < 44 && h < (int)(BG_STRIDE - 0x188); h++)
-                                    snprintf(hexTail + h*3, 4, "%02X ", blk[0x188 + h]);
-                                // SYM name: BG entities are at SYM[jsmLines + b]
-                                const char* bgSym = "";
-                                int bgSymIdx = s_jsmLines + b;
-                                if (bgSymIdx >= 0 && bgSymIdx < s_symNameCount)
-                                    bgSym = s_symNames[bgSymIdx];
-                                Log::Field("FieldNavigation: [INTERACT-DIAG] bg%d '%s' "
-                                           "pos=(%.0f,%.0f) dist=%.0f exec=0x%X",
-                                           b, bgSym, bx, by, bdist, execFlags);
-                                Log::Field("FieldNavigation: [INTERACT-DIAG]   @0x188: %s", hexTail);
-                            }
-                            Log::Field("FieldNavigation: [INTERACT-DIAG] === END Backgrounds ===");
-                        }
-                    }
-                    ScreenReader::Speak("Interaction diagnostic logged.");
                 }
-            } __except(EXCEPTION_EXECUTE_HANDLER) {
-                Log::Field("FieldNavigation: [INTERACT-DIAG] Exception");
             }
-        }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        Log::Field("FieldNavigation: [F12-CAPTURE] On-demand POPM_W capture started (10s window)");
+        ScreenReader::Speak("Capture started.");
     }
     s_f12WasDown = f12;
 

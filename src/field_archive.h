@@ -122,9 +122,11 @@ enum JSMEntityType {
     JSM_ENT_LINE_TRIGGER,    // JSM Line category (generic/unclassified trigger)
     JSM_ENT_LINE_CAMERA_PAN, // v0.07.82: Line with BGDRAW/BGOFF/scroll — transparent for screen filtering
     JSM_ENT_LINE_SCREEN_BOUND, // v0.07.82: Line with MAPJUMP — filters entities on other side
-    JSM_ENT_LINE_EVENT,      // v0.07.82: Line with SHOW/HIDE/MES/BATTLE — transparent
+    JSM_ENT_LINE_EVENT,      // v0.07.82: Line with SHOW/HIDE/BATTLE — transparent (visual effects only)
+    JSM_ENT_LINE_INTERACTIVE, // v0.12.24: Line with MES/ASK/AMES/AASK or ext dispatch — player-facing interaction
     JSM_ENT_BACKGROUND,      // JSM Background category (unclassified)
-    JSM_ENT_INTERACTIVE_OBJECT // v0.07.98: Background entity with dialog opcodes + position (Directory, desks, etc.)
+    JSM_ENT_INTERACTIVE_OBJECT, // v0.07.98: Background entity with dialog opcodes + position (Directory, desks, etc.)
+    JSM_ENT_DIRECTOR             // v0.12.20: Invisible Others entity that dispatches interaction zones via REQ (dormitory bed/desk, classroom desk/sign)
 };
 
 // Classification result for a single JSM entity.
@@ -148,6 +150,9 @@ struct JSMEntityInfo {
     // If this entity's talk script calls REQSW/REQEW to a JSM_ENT_DRAW_POINT entity,
     // this field holds the JSM index of that draw point. -1 = not a trigger.
     int            drawPointTriggerOf;
+    // v0.12.24: True if entity uses runtime 0x1C extended dispatch (PSHM_W-based).
+    // Indicates potential runtime-dispatched dialog opcodes not detectable statically.
+    bool           hasExtDispatch;
     // v0.12.16: SETLINE interaction zone from JSM script.
     // SETLINE defines the exact line segment where the player can interact.
     // The line center is the precise interaction position (better than SET3

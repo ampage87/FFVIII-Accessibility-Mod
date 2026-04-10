@@ -1,7 +1,7 @@
 // battle_tts.cpp - Battle sequence TTS for blind players
 //
 // ============================================================================
-// CURRENT STATE: v0.12.18 — Multi-channel logging + archive system
+// CURRENT STATE: v0.12.25 — V key version announce
 // ============================================================================
 //
 // Phase 1 (v0.10.01-05): Skeleton, mode detection, enemy announcement
@@ -485,7 +485,7 @@ void Initialize()
     s_gfVEHHandle = AddVectoredExceptionHandler(1, GF_BP_VectoredHandler);
     Log::Battle("BattleTTS: [GF-BP] VEH registered: handle=0x%08X", (uint32_t)(uintptr_t)s_gfVEHHandle);
 
-    Log::Battle("BattleTTS: Initialized v0.12.18 — Multi-channel logging (EWM=%s, ATB=%s, GF=%s, FFNx=%s, PATCH=%s).",
+    Log::Battle("BattleTTS: Initialized v0.12.25 — SETLINE interactive object catalog (EWM=%s, ATB=%s, GF=%s, FFNx=%s, PATCH=%s).",
                s_ewmEnabled ? "ON" : "OFF",
                s_ewmHookInstalled ? "OK" : "FAIL",
                s_gfTimerHookInstalled ? "OK" : "FAIL",

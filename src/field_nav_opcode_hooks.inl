@@ -81,6 +81,114 @@ static int __cdecl HookedSetline(int entityPtr)
     return result;
 }
 
+// ============================================================================
+// v0.12.22: POPM_W/B/L shared memory write hooks — capture varblock writes
+// ============================================================================
+//
+// The engine's POPM_W handler at 0x0051CCD0 writes a uint16 value from the
+// entity's VM stack to the field temp memory block (varblock) at a byte offset.
+// Signature: int __cdecl PopmWSharedMem(int entityPtr, int byteOffset)
+//
+// Disassembly (confirmed from FF8_EN.exe session 42):
+//   mov ecx, [esp+4]          // entityPtr
+//   mov esi, [esp+0xc]        // byteOffset (after push esi)
+//   movsx edx, al             // read stack pointer
+//   dec al                    // pop VM stack
+//   mov dx, [ecx+edx*4]       // read value from VM stack slot
+//   mov word ptr [esi+0x1CFE9B8], dx  // WRITE to varblock
+//
+// We intercept BEFORE the original runs to read the value from the VM stack,
+// then call the original to let it complete the write.
+
+static int __cdecl HookedPopmWShared(int entityPtr, int byteOffset)
+{
+    if (s_capturingVarWrites && s_varWriteCount < MAX_VAR_WRITES) {
+        // Read the value about to be written from the entity's VM stack.
+        // VM stack pointer is at entityPtr + 0x184 (signed byte).
+        // Stack slots are at entityPtr + stackPtr*4 (int32 each).
+        int32_t value = 0;
+        __try {
+            int8_t stackPtr = *(int8_t*)((uint8_t*)entityPtr + 0x184);
+            value = *(int32_t*)((uint8_t*)entityPtr + (int)stackPtr * 4);
+        } __except(EXCEPTION_EXECUTE_HANDLER) { value = 0xDEAD; }
+
+        // Store capture (dedup: update existing entry for same offset)
+        int slot = -1;
+        for (int i = 0; i < s_varWriteCount; i++) {
+            if (s_varWrites[i].byteOffset == byteOffset && s_varWrites[i].writeSize == 2) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0 && s_varWriteCount < MAX_VAR_WRITES)
+            slot = s_varWriteCount++;
+        if (slot >= 0) {
+            s_varWrites[slot].byteOffset = byteOffset;
+            s_varWrites[slot].value = (int16_t)(value & 0xFFFF);  // POPM_W writes 16-bit
+            s_varWrites[slot].entityAddr = (uint32_t)entityPtr;
+            s_varWrites[slot].writeSize = 2;
+            s_varWrites[slot].logged = false;
+        }
+    }
+    return s_originalPopmW(entityPtr, byteOffset);
+}
+
+static int __cdecl HookedPopmBShared(int entityPtr, int byteOffset)
+{
+    if (s_capturingVarWrites && s_varWriteCount < MAX_VAR_WRITES) {
+        int32_t value = 0;
+        __try {
+            int8_t stackPtr = *(int8_t*)((uint8_t*)entityPtr + 0x184);
+            value = *(int32_t*)((uint8_t*)entityPtr + (int)stackPtr * 4);
+        } __except(EXCEPTION_EXECUTE_HANDLER) { value = 0xDEAD; }
+
+        int slot = -1;
+        for (int i = 0; i < s_varWriteCount; i++) {
+            if (s_varWrites[i].byteOffset == byteOffset && s_varWrites[i].writeSize == 1) {
+                slot = i; break;
+            }
+        }
+        if (slot < 0 && s_varWriteCount < MAX_VAR_WRITES)
+            slot = s_varWriteCount++;
+        if (slot >= 0) {
+            s_varWrites[slot].byteOffset = byteOffset;
+            s_varWrites[slot].value = (int8_t)(value & 0xFF);
+            s_varWrites[slot].entityAddr = (uint32_t)entityPtr;
+            s_varWrites[slot].writeSize = 1;
+            s_varWrites[slot].logged = false;
+        }
+    }
+    return s_originalPopmB(entityPtr, byteOffset);
+}
+
+static int __cdecl HookedPopmLShared(int entityPtr, int byteOffset)
+{
+    if (s_capturingVarWrites && s_varWriteCount < MAX_VAR_WRITES) {
+        int32_t value = 0;
+        __try {
+            int8_t stackPtr = *(int8_t*)((uint8_t*)entityPtr + 0x184);
+            value = *(int32_t*)((uint8_t*)entityPtr + (int)stackPtr * 4);
+        } __except(EXCEPTION_EXECUTE_HANDLER) { value = 0xDEAD; }
+
+        int slot = -1;
+        for (int i = 0; i < s_varWriteCount; i++) {
+            if (s_varWrites[i].byteOffset == byteOffset && s_varWrites[i].writeSize == 4) {
+                slot = i; break;
+            }
+        }
+        if (slot < 0 && s_varWriteCount < MAX_VAR_WRITES)
+            slot = s_varWriteCount++;
+        if (slot >= 0) {
+            s_varWrites[slot].byteOffset = byteOffset;
+            s_varWrites[slot].value = value;
+            s_varWrites[slot].entityAddr = (uint32_t)entityPtr;
+            s_varWrites[slot].writeSize = 4;
+            s_varWrites[slot].logged = false;
+        }
+    }
+    return s_originalPopmL(entityPtr, byteOffset);
+}
+
 static int __cdecl HookedLineon(int entityPtr)
 {
     int result = s_originalLineon(entityPtr);
