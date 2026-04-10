@@ -97,6 +97,18 @@ The mod operates as a DirectInput proxy DLL. When the game loads `dinput8.dll`, 
 - **[Echo-S](https://github.com/tangtang95/ff8-echo-s)** voice mod — confirmed that field dialog hooks are viable, providing early proof of concept.
 - **Qhimm community** — decades of FF8 reverse engineering that documented the game's internal structures.
 
+## Supporting This Project
+
+The FF8 Accessibility Mod is free and always will be. However, development takes significant time and effort, and the AI tools used in building it (such as Claude by Anthropic) have ongoing costs.
+
+If you find this mod valuable, there are two ways you can help:
+
+**Contribute to development** — Bug reports, testing, code contributions, and documentation are all welcome. Check the [Issues](https://github.com/ampage87/FFVIII-Accessibility-Mod/issues) page for things to work on.
+
+**Make a donation** — If you're able and willing, you can sponsor this project through [GitHub Sponsors](https://github.com/sponsors/ampage87). Every contribution helps keep development going.
+
+Thank you to everyone who has supported this project in any way.
+
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
