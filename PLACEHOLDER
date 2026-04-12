@@ -1,0 +1,6 @@
+static int s_victoryAutoCapture = 0;
+
+// v0.12.96: GDI+ for PNG screenshots (used by screenshot.inl and victory.inl)
+static ULONG_PTR s_gdiplusToken = 0;
+
+// v0.13.28: Pre-battle EXP snapshots for level-up detection
