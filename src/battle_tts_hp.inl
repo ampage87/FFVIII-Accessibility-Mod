@@ -2,6 +2,19 @@
 // Included from battle_tts.cpp. Do not compile independently.
 // v0.12.18: Extracted for readability.
 
+// v0.12.48: Per-slot GF animation fired tracking.
+// Set by HookedBattleEffect when a GF animation dispatches for a slot.
+// Cleared by EWM_ClampGFState when a new GF starts loading for a slot.
+// Used by AnnouncePartyMemberHP to stop showing GF HP after animation fires.
+static volatile bool s_gfAnimFired[BATTLE_ALLY_SLOTS] = {};
+
+// v0.12.46: Per-slot GF HP substitution tracking (DEPRECATED, kept for cleanup).
+// Set when a character confirms a GF command (turn ends with GF selected).
+// Cleared when that character gets their next turn.
+// Engine flags (entity+0x7C, 0x01D76971) are unreliable — they stay stale forever.
+static bool s_gfHpSubstitutionActive[BATTLE_ALLY_SLOTS] = {};
+static uint8_t s_gfSummonedIdx[BATTLE_ALLY_SLOTS] = {0xFF, 0xFF, 0xFF}; // v0.12.83: which GF (savemap index) each slot is summoning
+
 // v0.10.34: Damage/healing TTS — display-triggered announcements
 // ============================================================================
 // HP changes are tracked silently. Damage announcements are triggered when
@@ -204,7 +217,22 @@ static bool GetActiveGFInfo(int partySlot, char* nameOut, int nameMax, uint16_t*
     *hpOut = 0;
     if (partySlot < 0 || partySlot >= BATTLE_ALLY_SLOTS) return false;
     
-    // Approach 1: Runtime pointer (only valid during fire/animation phase AND for gfSlot)
+    // v0.12.83: Direct lookup using saved GF index from submenu selection.
+    // This is authoritative — it records exactly which GF the player selected.
+    if (s_gfSummonedIdx[partySlot] < 16) {
+        __try {
+            uint8_t* gfBase = (uint8_t*)(SAVEMAP_GF_BASE + s_gfSummonedIdx[partySlot] * SAVEMAP_GF_STRIDE);
+            DecodeFF8String(gfBase, nameOut, nameMax);
+            *hpOut = *(uint16_t*)(gfBase + 0x12);
+            if (nameOut[0] != '\0') {
+                Log::Battle("BattleTTS: [HP-CHECK] GF direct lookup: slot=%d gfIdx=%d name='%s' hp=%u",
+                           partySlot, (int)s_gfSummonedIdx[partySlot], nameOut, (unsigned)*hpOut);
+                return true;
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    
+    // Fallback: Runtime pointer (only valid during fire/animation phase AND for gfSlot)
     __try {
         int8_t gfSlot = *(int8_t*)GF_SLOT_ADDR;
         if (gfSlot == partySlot) {
@@ -253,7 +281,10 @@ static void AnnouncePartyMemberHP(int partySlot)
     if (partySlot < 0 || partySlot >= BATTLE_ALLY_SLOTS) return;
     
     // v0.10.95: Check if this slot is summoning a GF (per-character flag)
-    if (IsSlotSummoningGF(partySlot)) {
+    // v0.12.48: entity+0x7C for per-slot detection, s_gfAnimFired for clearing.
+    // Show GF HP from when entity+0x7C is set (loading starts) until the
+    // battle effect dispatcher fires the GF animation (s_gfAnimFired set).
+    if (IsSlotSummoningGF(partySlot) && !s_gfAnimFired[partySlot]) {
         char gfName[64];
         uint16_t gfHP = 0;
         if (GetActiveGFInfo(partySlot, gfName, sizeof(gfName), &gfHP)) {

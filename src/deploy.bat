@@ -159,7 +159,10 @@ cl /nologo /W3 /EHsc /O2 /MD /LD ^
     user32.lib ^
     ole32.lib ^
     uuid.lib ^
-    psapi.lib > "%PROJECT_DIR%\Logs\build_latest.log" 2>&1
+    psapi.lib ^
+    gdi32.lib ^
+    gdiplus.lib ^
+    opengl32.lib > "%PROJECT_DIR%\Logs\build_latest.log" 2>&1
 
 if errorlevel 1 (
     echo.

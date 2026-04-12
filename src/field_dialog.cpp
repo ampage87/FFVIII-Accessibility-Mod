@@ -1047,6 +1047,7 @@ static char __cdecl Hook_show_dialog(int32_t window_id, uint32_t state, int16_t 
         // "Received 4 Blizzards!" -> "Squall received 4 Blizzards!"
         std::string speakText = decoded;
         if (currentMode == 3 && decoded.length() > 8 && decoded.compare(0, 8, "Received") == 0) {
+            BattleTTS::ValidateDrawCharacter(0);  // diff inventories, store result
             const char* drawer = BattleTTS::GetLastDrawerName();
             if (drawer) {
                 speakText = std::string(drawer) + " r" + decoded.substr(1);

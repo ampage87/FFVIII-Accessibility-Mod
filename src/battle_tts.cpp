@@ -1,7 +1,7 @@
 // battle_tts.cpp - Battle sequence TTS for blind players
 //
 // ============================================================================
-// CURRENT STATE: v0.12.25 — V key version announce
+// CURRENT STATE: See FF8OPC_VERSION in ff8_accessibility.h
 // ============================================================================
 //
 // Phase 1 (v0.10.01-05): Skeleton, mode detection, enemy announcement
@@ -23,6 +23,15 @@
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
+#include <cerrno>
+#include <intrin.h>
+#include <gdiplus.h>
+#include <gl/GL.h>
+#ifndef GL_BGR_EXT
+#define GL_BGR_EXT 0x80E0
+#endif
+#pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "opengl32.lib")
 #include "ff8_accessibility.h"
 #include "ff8_addresses.h"
 #include "battle_tts.h"
@@ -70,42 +79,23 @@ static char s_repeatBuffer[256] = {};     // last non-PRIO_MENU text spoken
 static bool s_repeatKeyWasDown = false;   // edge detection for backtick key
 
 // v0.10.32: BattleSpeak — Channel 1 (menu/command voice)
-// Uses the main ScreenReader::Speak with priority-based interruption.
-// v0.10.45: Channel 1 is for turn identification + command menu navigation:
-//   - Turn announcements ("Squall's turn. Attack.") — interrupt=true
-//   - Command cursor movement (Attack/Magic/GF/Draw)
-//   - Sub-menu cursor navigation (spell list, etc.)
-//   - Limit Break toggle
-// All battle EVENTS go through Channel 2 (BattleSpeakEvent).
 static void BattleSpeak(const char* text, SpeechPriority prio, bool interrupt = false)
 {
     if (!text || text[0] == '\0') return;
 
-    // If interrupt requested or new speech has higher (lower number) priority, cancel current
     if (interrupt || (int)prio <= s_currentSpeakPriority) {
         ScreenReader::Speak(text, interrupt || ((int)prio < s_currentSpeakPriority));
         s_currentSpeakPriority = (int)prio;
     } else {
-        // Queue: just speak without interrupting
         ScreenReader::Speak(text, false);
     }
 }
 
 // v0.10.32: BattleSpeakEvent — Channel 2 (event/status voice)
-// Uses ScreenReader::SpeakChannel2 (independent SAPI ISpVoice instance).
-// v0.10.43: Each voice has its own SpMMAudioOut, enabling true simultaneous audio.
-// v0.10.47: Channel 2 carries all battle EVENTS (not turn ID or menu nav):
-//   - Battle start ("Battle! 2 Bite Bugs.")
-//   - Damage/healing ("Bite Bug takes 52 damage.")
-//   - HP check keys (1/2/3/H)
-// ALL events queue (interrupt=false) so nothing cuts off anything else.
-// Only exception: backtick repeat key uses interrupt=true (user-initiated).
-// Also stores text in the repeat buffer for backtick.
 static void BattleSpeakEvent(const char* text, bool interrupt = false)
 {
     if (!text || text[0] == '\0') return;
 
-    // Always store in repeat buffer
     strncpy(s_repeatBuffer, text, sizeof(s_repeatBuffer) - 1);
     s_repeatBuffer[sizeof(s_repeatBuffer) - 1] = '\0';
 
@@ -116,16 +106,12 @@ static void BattleSpeakEvent(const char* text, bool interrupt = false)
 // Entity array reading helpers
 // ============================================================================
 
-// The entity array is at the static address 0x1D27B18.
-// The pointer at 0x1D27B10 stays NULL (FFNx hooks the resolution function),
-// but the data is populated directly at the static address.
 static uint8_t* GetEntityBlock(int slot)
 {
     if (slot < 0 || slot >= BATTLE_TOTAL_SLOTS) return nullptr;
     return (uint8_t*)(BATTLE_ENTITY_ARRAY_BASE + slot * BATTLE_ENTITY_STRIDE);
 }
 
-// Read current HP for a slot. Allies = uint16, enemies = uint32.
 static uint32_t GetEntityHP(int slot)
 {
     uint8_t* blk = GetEntityBlock(slot);
@@ -139,7 +125,6 @@ static uint32_t GetEntityHP(int slot)
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-// Read max HP for a slot. Allies = uint16, enemies = uint32.
 static uint32_t GetEntityMaxHP(int slot)
 {
     uint8_t* blk = GetEntityBlock(slot);
@@ -153,7 +138,6 @@ static uint32_t GetEntityMaxHP(int slot)
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-// Check if entity is KO'd (persistent status bit 0).
 static bool IsEntityKO(int slot)
 {
     uint8_t* blk = GetEntityBlock(slot);
@@ -163,7 +147,6 @@ static bool IsEntityKO(int slot)
     } __except (EXCEPTION_EXECUTE_HANDLER) { return true; }
 }
 
-// Count active enemies (HP > 0 in slots 3-6).
 static int CountActiveEnemies()
 {
     int count = 0;
@@ -188,6 +171,56 @@ static int CountActiveEnemies()
 
 // --- Turn/command menu, magic/GF/item/draw sub-menus (extracted v0.12.18) ---
 #include "battle_tts_menu.inl"
+
+// ============================================================================
+// Shared victory state — used by both screenshot.inl and victory.inl
+// ============================================================================
+
+// v0.12.85: Victory screen state (forward declarations, used by OnBattleEnter)
+static bool s_victoryDumpDone = false;
+static bool s_victoryScreenActive = false;
+static DWORD s_victoryEntryTime = 0;
+static uint16_t s_prevGameMode = 0;
+static int s_victoryStepCount = 0;
+static bool s_victoryF12WasDown = false;
+
+// v0.13.36: Pre-battle GF struct snapshots for FindChangedGF fallback.
+static uint8_t s_preBattleGFStructs[16][0x44] = {};
+static bool s_preBattleGFSnapValid = false;
+
+// Known victory data addresses
+static const uint32_t VICTORY_EXP_BASE = 0x01CFF574;       // 3×u16: EXP earned per party slot
+static const uint32_t VICTORY_AP_BASE  = 0x01CFF5C2;       // 3×u16: AP earned per party slot
+static const uint32_t VICTORY_PARTY_ADDR = 0x01CFE74C;     // 4 bytes: party composition (char IDs)
+
+// CHAR_NAMES[] already defined in battle_tts_menu.inl
+static const char* GetCharNameById(uint8_t id)
+{
+    if (id < 8) return CHAR_NAMES[id];
+    if (id == 8) return "Laguna";
+    if (id == 9) return "Kiros";
+    if (id == 10) return "Ward";
+    return "Unknown";
+}
+
+static int s_victoryAutoCapture = 0;
+
+// v0.12.96: GDI+ for PNG screenshots (used by screenshot.inl and victory.inl)
+static ULONG_PTR s_gdiplusToken = 0;
+
+// v0.13.28: Pre-battle EXP snapshots for level-up detection
+static uint32_t s_preBattleExpAll[11] = {};
+static bool s_preBattleExpSnapValid = false;
+
+// --- GL screenshot capture, memory diff, victory step diagnostics (extracted v0.13.45) ---
+#include "battle_tts_screenshot.inl"
+
+// --- Victory TTS: hooks, phase detection, GF/ability tables, thread (extracted v0.13.45) ---
+#include "battle_tts_victory.inl"
+
+// ============================================================================
+// Battle enter/exit
+// ============================================================================
 
 static void OnBattleEnter()
 {
@@ -243,6 +276,9 @@ static void OnBattleEnter()
     s_limitBreakActive = false;
     s_lastLimitToggle = 0;
     
+    // v0.12.46: Reset GF HP substitution tracking
+    memset(s_gfHpSubstitutionActive, 0, sizeof(s_gfHpSubstitutionActive));
+    
     // Reset repeat buffer for new battle
     s_repeatBuffer[0] = '\0';
     s_repeatKeyWasDown = false;
@@ -276,7 +312,7 @@ static void OnBattleEnter()
     s_ewmCapGF = false;
     s_ewmLastActiveChar = 0xFF;
     s_ewmNewTurnGrace = false;
-    s_gfSnapValid = false;  // reset GF state snapshot
+    s_gfSnapValid = false;
     s_gfSnapLastTick = 0;
     s_gfHookLastLogTick = 0;
     s_gfState68Clamped = false;
@@ -288,34 +324,88 @@ static void OnBattleEnter()
     s_gfStickyHidden = false;
     s_gfAutoArmLastActive = 0;
     s_gfAutoArmDone = false;
-    // v0.10.88: Reset GF timer scan state
     s_gfScanValid = false;
     s_gfScanLogCount = 0;
     memset(s_gfScanSnap, 0, sizeof(s_gfScanSnap));
-    // v0.10.96: Reset target selection diagnostic
     s_tgtDiagStage = 0;
-    // v0.10.97: Reset target selection TTS state
     s_lastTargetBitmask = 0;
     s_lastTargetScope = 0;
     s_inTargetSelect = false;
     s_targetLastAnnounceTick = 0;
-    // v0.10.84: Ensure fire byte is restored at battle start
     if (s_gfFirePatched && s_gfFirePatchReady) {
         *(uint8_t*)GF_FIRE_PATCH_ADDR = GF_FIRE_VALUE;
         s_gfFirePatched = false;
     }
-    EWM_LoadConfig();  // ensure config is loaded on first battle
+    EWM_LoadConfig();
     
-    // Resolve battle menu addresses on first battle entry
     if (!s_pBattleMenuState) {
         ResolveBattleMenuAddresses();
     }
 
-    // v0.10.77: Install FFNx GF hook on first battle entry (deferred from Initialize)
     if (!s_ffnxGFHookInstalled) {
         EWM_InstallFFNxGFHook();
         Log::Battle("BattleTTS: [FFNx-GF] Deferred install result: %s", s_ffnxGFHookInstalled ? "OK" : "FAIL");
     }
+
+    if (!s_battleEffectHookInstalled) {
+        EWM_InstallBattleEffectHook();
+    }
+    
+    memset((void*)s_gfAnimFired, 0, sizeof(s_gfAnimFired));
+    s_prevBattleMagicId = -1;
+
+    // Reset victory screen diagnostic state
+    s_victoryDumpDone = false;
+    s_victoryScreenActive = false;
+    s_victoryEntryTime = 0;
+    s_victoryStepCount = 0;
+    s_victoryF12WasDown = false;
+    s_diffSnapValid = false;
+    ResetVictoryTTS();
+
+    // Snapshot savemap EXP for all 11 characters at battle entry
+    s_preBattleExpSnapValid = false;
+    __try {
+        for (int c = 0; c < 11; c++) {
+            uint8_t* ch = (uint8_t*)(0x1CFE0E8 + c * 0x98);
+            s_preBattleExpAll[c] = *(uint32_t*)(ch + 0x04);
+        }
+        s_preBattleExpSnapValid = true;
+        Log::Battle("BattleTTS: [VICTORY-SNAP] Pre-battle EXP snapshot: [%u,%u,%u,%u,%u,%u]",
+                   s_preBattleExpAll[0], s_preBattleExpAll[1], s_preBattleExpAll[2],
+                   s_preBattleExpAll[3], s_preBattleExpAll[4], s_preBattleExpAll[5]);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log::Battle("BattleTTS: [VICTORY-SNAP] Pre-battle EXP snapshot FAILED");
+    }
+
+    // Snapshot all 16 GF structs for level-up/ability identification
+    s_preBattleGFSnapValid = false;
+    __try {
+        for (int g = 0; g < 16; g++) {
+            memcpy(s_preBattleGFStructs[g],
+                   (void*)(SAVEMAP_GF_BASE + g * SAVEMAP_GF_STRIDE),
+                   SAVEMAP_GF_STRIDE);
+        }
+        s_preBattleGFSnapValid = true;
+        for (int g = 0; g < 16; g++) {
+            if (s_preBattleGFStructs[g][0x11]) {
+                uint32_t gfExp = *(uint32_t*)(s_preBattleGFStructs[g] + 0x0C);
+                uint8_t learnIdx = s_preBattleGFStructs[g][0x41];
+                Log::Battle("BattleTTS: [VICTORY-SNAP] GF%d: EXP=%u learnIdx=%u", g, gfExp, learnIdx);
+            }
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log::Battle("BattleTTS: [VICTORY-SNAP] Pre-battle GF snapshot FAILED");
+    }
+
+    // Install battle text hooks on first battle entry
+    if (!s_battleTextHooksInstalled) {
+        InstallBattleTextHooks();
+    }
+    InterlockedExchange(&s_btCount1, 0);
+    InterlockedExchange(&s_btCount2, 0);
+    InterlockedExchange(&s_btCount3, 0);
+    InterlockedExchange(&s_btCount4, 0);
 
     Log::Battle("BattleTTS: === BATTLE ENTERED === (encounter ID: %u)",
                (unsigned)(*(uint16_t*)BATTLE_ENCOUNTER_ID));
@@ -324,6 +414,7 @@ static void OnBattleEnter()
 static void OnBattleExit()
 {
     Log::Battle("BattleTTS: === BATTLE EXITED ===");
+    
     s_inBattle = false;
     s_battleJustStarted = false;
     s_initAnnounceDone = false;
@@ -337,15 +428,13 @@ static void AnnounceBattleStart()
 {
     if (s_initAnnounceDone) return;
 
-    // Wait for entity data to populate at the static address.
-    // Enforce minimum delay (swirl animation), then poll ally slot 0 maxHP > 0.
     DWORD elapsed = GetTickCount() - s_battleEntryTime;
-    if (elapsed < BATTLE_INIT_MIN_DELAY_MS) return;  // still in swirl
+    if (elapsed < BATTLE_INIT_MIN_DELAY_MS) return;
     
     __try {
         uint16_t allyMaxHP = *(uint16_t*)(BATTLE_ENTITY_ARRAY_BASE + BENT_MAX_HP);
         if (allyMaxHP == 0) {
-            if (elapsed < BATTLE_INIT_TIMEOUT_MS) return;  // keep polling
+            if (elapsed < BATTLE_INIT_TIMEOUT_MS) return;
             Log::Battle("BattleTTS: Entity array not populated after %ums", BATTLE_INIT_TIMEOUT_MS);
         } else {
             Log::Battle("BattleTTS: Entity array ready after %ums (ally0 maxHP=%u)",
@@ -357,7 +446,6 @@ static void AnnounceBattleStart()
 
     s_initAnnounceDone = true;
 
-    // Log all slot data for diagnostics
     for (int i = 0; i < BATTLE_TOTAL_SLOTS; i++) {
         uint32_t hp = GetEntityHP(i);
         uint32_t maxHp = GetEntityMaxHP(i);
@@ -369,13 +457,10 @@ static void AnnounceBattleStart()
                    hp, maxHp, (unsigned)lvl, (unsigned)sts);
     }
 
-    // Count active enemies and build name string
     int enemyCount = CountActiveEnemies();
 
-    // Announce
     char buf[256];
     if (enemyCount == 0) {
-        // Enemies may not be populated yet — second-pass will catch them
         snprintf(buf, sizeof(buf), "Battle!");
     } else {
         char enemyStr[200];
@@ -385,7 +470,7 @@ static void AnnounceBattleStart()
         if (!s_enemyNameCacheBuilt) BuildEnemyNameCache();
     }
 
-    BattleSpeakEvent(buf);  // v0.10.47: Ch2 queued (no interrupting other events)
+    BattleSpeakEvent(buf);
     Log::Battle("BattleTTS: %s", buf);
 }
 
@@ -405,65 +490,16 @@ void Initialize()
     s_initialized = true;
     EWM_LoadConfig();
 
-    // v0.10.73: Dump GF timer function code BEFORE hooks overwrite the entry.
-    // Function at 0x004B0500, write instruction at 0x004B063B.
-    // Dump 0x004B0500 through 0x004B0680 (384 bytes) to cover the full function.
-    // This reveals what addresses the function READS to compute the visual timer,
-    // which should point us to the master GF countdown the fire logic also reads.
-    {
-        const uint32_t funcStart = 0x004B0500;
-        const int dumpLen = 384;
-        Log::Battle("BattleTTS: [GF-DISASM] === GF timer function code dump (PRE-HOOK) ===");
-        Log::Battle("BattleTTS: [GF-DISASM] 0x%08X through 0x%08X (%d bytes)",
-                   funcStart, funcStart + dumpLen, dumpLen);
-        __try {
-            uint8_t* code = (uint8_t*)funcStart;
-            for (int off = 0; off < dumpLen; off += 16) {
-                char hex[80] = {};
-                int p = 0;
-                for (int b = 0; b < 16 && off + b < dumpLen; b++)
-                    p += snprintf(hex + p, sizeof(hex) - p, "%02X ", code[off + b]);
-                Log::Battle("BattleTTS: [GF-DISASM] %08X: %s", funcStart + off, hex);
-            }
-        } __except(EXCEPTION_EXECUTE_HANDLER) {
-            Log::Battle("BattleTTS: [GF-DISASM] EXCEPTION reading function code");
-        }
-        Log::Battle("BattleTTS: [GF-DISASM] === End dump ===");
-    }
-
-    // v0.10.88: Dump code at 0x004B0400-0x004B0500 to find the GF timer check.
-    // The state machine handlers are at 0x004B0440-04FF. The CALLER of the
-    // state=5 handler at 0x004B04B4 contains the timer comparison.
-    {
-        Log::Battle("BattleTTS: [GF-DISASM] === Code dump 0x004B0400-0x004B0500 ===");
-        __try {
-            for (uint32_t addr = 0x004B0400; addr < 0x004B0500; addr += 16) {
-                uint8_t* p = (uint8_t*)addr;
-                char hex[100] = {};
-                int pos = 0;
-                for (int i = 0; i < 16; i++)
-                    pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X ", p[i]);
-                Log::Battle("BattleTTS: [GF-DISASM] %08X: %s", addr, hex);
-            }
-        } __except(EXCEPTION_EXECUTE_HANDLER) {
-            Log::Battle("BattleTTS: [GF-DISASM] EXCEPTION reading code");
-        }
-        Log::Battle("BattleTTS: [GF-DISASM] === End dump ===");
-    }
-    
-    // v0.10.84: Make the fire instruction byte writable for code patching.
-    // VirtualProtect the page containing 0x004B04BA to PAGE_EXECUTE_READWRITE.
     {
         DWORD oldProtect = 0;
         BOOL ok = VirtualProtect((LPVOID)GF_FIRE_PATCH_ADDR, 1, PAGE_EXECUTE_READWRITE, &oldProtect);
         s_gfFirePatchReady = (ok != FALSE);
         if (s_gfFirePatchReady) {
-            // Verify the byte is what we expect (0x05)
             uint8_t curByte = *(uint8_t*)GF_FIRE_PATCH_ADDR;
             if (curByte != GF_FIRE_VALUE) {
                 Log::Battle("BattleTTS: [GF-PATCH] WARNING: byte at 0x%08X is 0x%02X, expected 0x%02X",
                            GF_FIRE_PATCH_ADDR, (unsigned)curByte, (unsigned)GF_FIRE_VALUE);
-                s_gfFirePatchReady = false;  // don't patch unknown code
+                s_gfFirePatchReady = false;
             } else {
                 Log::Battle("BattleTTS: [GF-PATCH] Code page writable, fire byte verified at 0x%08X",
                            GF_FIRE_PATCH_ADDR);
@@ -475,22 +511,32 @@ void Initialize()
     
     EWM_InstallHook();
     EWM_InstallGFHook();
-    // v0.10.103: InstallBattleItemHook() REMOVED — ESI calling convention mismatch.
-    // Item sub-menu uses direct cursor→list mapping via BuildItemList() instead.
-    // v0.10.77: FFNx GF hook deferred to first battle entry.
-    // At Initialize() time, MH_EnableHook(ALL) hasn't run yet, so FFNx's JMP
-    // at set_midi_volume isn't active and we can't find the FFNx module.
 
-    // v0.10.70/91: Register VEH for hardware BP (v0.10.91: READ on display timer 0x01D769D6)
     s_gfVEHHandle = AddVectoredExceptionHandler(1, GF_BP_VectoredHandler);
     Log::Battle("BattleTTS: [GF-BP] VEH registered: handle=0x%08X", (uint32_t)(uintptr_t)s_gfVEHHandle);
 
-    Log::Battle("BattleTTS: Initialized v0.12.25 — SETLINE interactive object catalog (EWM=%s, ATB=%s, GF=%s, FFNx=%s, PATCH=%s).",
+    Log::Battle("BattleTTS: Initialized v%s (EWM=%s, ATB=%s, GF=%s, FFNx=%s, PATCH=%s, BT=%s).",
+               FF8OPC_VERSION,
                s_ewmEnabled ? "ON" : "OFF",
                s_ewmHookInstalled ? "OK" : "FAIL",
                s_gfTimerHookInstalled ? "OK" : "FAIL",
                s_ffnxGFHookInstalled ? "OK" : "FAIL",
-               s_gfFirePatchReady ? "OK" : "FAIL");
+               s_gfFirePatchReady ? "OK" : "FAIL",
+               s_battleTextHooksInstalled ? "OK" : "deferred");
+
+    // Initialize GDI+ for PNG screenshots
+    Gdiplus::GdiplusStartupInput gdiplusStartupInput;
+    Gdiplus::GdiplusStartup(&s_gdiplusToken, &gdiplusStartupInput, NULL);
+    Log::Battle("BattleTTS: [GDI+] Initialized (token=%lu)", (unsigned long)s_gdiplusToken);
+
+    // Hook SwapBuffers for OpenGL screenshot capture
+    InstallSwapBuffersHook();
+
+    // Start victory screen monitor thread
+    s_victoryThreadStop = false;
+    s_victoryThread = CreateThread(NULL, 0, VictoryScreenThreadFunc, NULL, 0, NULL);
+    Log::Battle("BattleTTS: [VICTORY-THREAD] Created: handle=0x%08X",
+               (uint32_t)(uintptr_t)s_victoryThread);
 }
 
 void Update()
@@ -498,36 +544,29 @@ void Update()
     if (!s_initialized) return;
     if (!FF8Addresses::pGameMode) return;
 
-    // EWM toggle: "O" key works in ALL game modes (field, worldmap, battle, menu)
     EWM_PollToggle();
 
     uint16_t mode = *FF8Addresses::pGameMode;
-    // Battle mode is 3 (NOT 999 — FFNx's FF8_MODE_BATTLE=999 is an internal enum,
-    // not the raw game mode value). Confirmed from log: battle dialog fires at mode 3.
-    // Mode sequence: field(1) -> worldmap(2) -> battle(3) -> 5 -> 100 -> after_battle(4) -> worldmap(2)
     bool isBattle = (mode == 3);
 
-    // Edge detection: battle entry/exit
+    s_prevGameMode = mode;
+
     if (isBattle && !s_inBattle) {
         OnBattleEnter();
     } else if (!isBattle && s_inBattle) {
         OnBattleExit();
     }
 
-    // Not in battle — nothing to do
     if (!s_inBattle) return;
 
-    // Clear edge trigger after first frame
     if (s_battleJustStarted) {
         s_battleJustStarted = false;
     }
 
-    // Battle start announcement (delayed for engine init)
     if (!s_initAnnounceDone) {
         AnnounceBattleStart();
     }
 
-    // Second-pass: announce enemies if they weren't ready at initial announcement
     if (s_initAnnounceDone && !s_enemyAnnounceDone) {
         int enemyCount = CountActiveEnemies();
         if (enemyCount > 0) {
@@ -537,9 +576,8 @@ void Update()
             BuildEnemyNameString(enemyStr, sizeof(enemyStr));
             char buf[256];
             snprintf(buf, sizeof(buf), "%s.", enemyStr);
-            BattleSpeakEvent(buf, false);  // v0.10.44: Ch2 event (queue after battle start)
+            BattleSpeakEvent(buf, false);
             Log::Battle("BattleTTS: [second-pass] %s (enemies appeared after initial announce)", buf);
-            // Log enemy data
             for (int i = BATTLE_ALLY_SLOTS; i < BATTLE_TOTAL_SLOTS; i++) {
                 char name[64];
                 GetEnemyName(i, name, sizeof(name));
@@ -553,38 +591,30 @@ void Update()
                 }
             }
         } else if (GetTickCount() - s_battleEntryTime > BATTLE_INIT_TIMEOUT_MS) {
-            s_enemyAnnounceDone = true;  // give up on enemy detection
+            s_enemyAnnounceDone = true;
             Log::Battle("BattleTTS: No enemies detected after %ums timeout", BATTLE_INIT_TIMEOUT_MS);
         }
     }
 
-    // Menu cursor diagnostic — runs every 100ms during battle
     if (s_initAnnounceDone && s_enemyAnnounceDone) {
         PollMenuDiagnostic();
     }
 
-    // Turn announcements + command menu cursor TTS
     if (s_initAnnounceDone && s_enemyAnnounceDone) {
         PollTurnAndCommands();
     }
 
-    // v0.10.16: Sub-menu cursor hunter (continuous poll during active turns)
     if (s_initAnnounceDone && s_enemyAnnounceDone) {
         PollCursorHunter();
     }
 
-    // v0.10.22: Limit Break toggle detection (polls 0x01D7684A while cursor=0)
     if (s_initAnnounceDone && s_enemyAnnounceDone) {
         PollLimitToggle();
     }
 
-    // v0.10.38: Enhanced Wait Mode — MinHook-based ATB freeze
     if (s_inBattle && s_initAnnounceDone) {
         EWM_UpdateBattle();
     }
-    // v0.10.95: Mod-thread GF max inflation backup — per-slot via entity+0x7C.
-    // Primary inflation runs on game thread (HookedATBUpdate). This is a
-    // secondary safety net from the mod thread.
     if (s_inBattle && s_ewmCapGF) {
         __try {
             for (int gs = 0; gs < BATTLE_ALLY_SLOTS; gs++) {
@@ -605,67 +635,105 @@ void Update()
             }
         } __except(EXCEPTION_EXECUTE_HANDLER) {}
     }
-    // v0.10.65: GF timer hook diagnostic stats + state change monitor
     if (s_inBattle) {
         GF_LogHookStats();
         GF_PollStateChanges();
+        PollBattleMagicId();
     }
 
-    // v0.10.83: Auto-arm HW BP on state68 when GF loading starts
     if (s_inBattle) {
         GF_BP_AutoArm();
     }
-    
-    // F12 manual fallback
-    if (s_inBattle) {
-        GF_BP_PollKey();
+
+    if (s_inBattle && s_initAnnounceDone && s_enemyAnnounceDone) {
+        bool allEnemiesDead = true;
+        for (int i = BATTLE_ALLY_SLOTS; i < BATTLE_TOTAL_SLOTS; i++) {
+            if (GetEntityMaxHP(i) > 0 && GetEntityHP(i) > 0) {
+                allEnemiesDead = false;
+                break;
+            }
+        }
+        if (allEnemiesDead && !s_victoryScreenActive) {
+            s_victoryScreenActive = true;
+            s_victoryEntryTime = GetTickCount();
+            s_victoryStepCount = 0;
+            s_victoryF12WasDown = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
+            Log::Battle("BattleTTS: [VICTORY] All enemies dead — victory capture enabled");
+            DumpVictoryStep(0);
+        }
+        if (s_victoryScreenActive) {
+            bool f12Down = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
+            bool f12Pressed = f12Down && !s_victoryF12WasDown;
+            s_victoryF12WasDown = f12Down;
+            if (f12Pressed) {
+                s_victoryStepCount++;
+                Log::Battle("BattleTTS: [VICTORY] F12 — step %d", s_victoryStepCount);
+                DumpVictoryStep(s_victoryStepCount);
+                char buf[64];
+                snprintf(buf, sizeof(buf), "Step %d captured.", s_victoryStepCount);
+                ScreenReader::Speak(buf, true);
+            }
+        }
     }
 
-    // HP tracking: damage/healing announcements (v0.10.29)
     if (s_inBattle && s_initAnnounceDone && s_enemyAnnounceDone) {
         PollHPChanges();
     }
 
-    // v0.10.35: HP check keys (1/2/3 = individual, H = full party)
     if (s_inBattle && s_initAnnounceDone) {
         PollHPCheckKeys();
     }
 
-    // v0.10.30: Backtick repeat key — re-speak last non-menu announcement
     if (s_inBattle) {
-        bool backtickDown = (GetAsyncKeyState(VK_OEM_3) & 0x8000) != 0;  // ` / ~ key
+        bool backtickDown = (GetAsyncKeyState(VK_OEM_3) & 0x8000) != 0;
         bool backtickPressed = backtickDown && !s_repeatKeyWasDown;
         s_repeatKeyWasDown = backtickDown;
         if (backtickPressed && s_repeatBuffer[0] != '\0') {
-            ScreenReader::SpeakChannel2(s_repeatBuffer, true);  // Interrupt channel 2 to repeat
+            ScreenReader::SpeakChannel2(s_repeatBuffer, true);
             Log::Battle("BattleTTS: [REPEAT] '%s'", s_repeatBuffer);
         }
     }
-    // v0.10.97: Target selection TTS
     if (s_inBattle && s_initAnnounceDone && s_enemyAnnounceDone) {
         PollTargetSelection();
     }
 }
 
-// v0.10.112: Public accessor for the drawer's character name.
-// Called by FieldDialog to prepend name to "Received X spells!" text.
 const char* GetLastDrawerName()
 {
-    if (s_lastDrawerPartySlot < BATTLE_ALLY_SLOTS)
-        return GetBattleCharName(s_lastDrawerPartySlot);
+    if (s_lastValidatedDrawSlot < BATTLE_ALLY_SLOTS)
+        return GetBattleCharName(s_lastValidatedDrawSlot);
     return nullptr;
+}
+
+uint8_t GetDrawExecutingSlot()
+{
+    uint8_t execSlot = 0xFF;
+    __try { execSlot = *(uint8_t*)DRAW_EXEC_SLOT_ADDR; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return execSlot;
+}
+
+void ValidateDrawCharacter(uint8_t claimedSlot)
+{
+    s_lastValidatedDrawSlot = DiffMagicInventories(claimedSlot);
 }
 
 void Shutdown()
 {
     if (!s_initialized) return;
-    // v0.10.86: Sticky hide restore REMOVED (v0.10.88). Flag-hiding abandoned.
-    // v0.10.84: Restore fire byte before shutdown
+    if (s_victoryThread) {
+        s_victoryThreadStop = true;
+        WaitForSingleObject(s_victoryThread, 2000);
+        CloseHandle(s_victoryThread);
+        s_victoryThread = NULL;
+    }
+    if (s_gdiplusToken) {
+        Gdiplus::GdiplusShutdown(s_gdiplusToken);
+        s_gdiplusToken = 0;
+    }
     if (s_gfFirePatched && s_gfFirePatchReady) {
         *(uint8_t*)GF_FIRE_PATCH_ADDR = GF_FIRE_VALUE;
         s_gfFirePatched = false;
     }
-    // v0.10.70: Remove VEH on shutdown
     if (s_gfVEHHandle) {
         RemoveVectoredExceptionHandler(s_gfVEHHandle);
         s_gfVEHHandle = nullptr;

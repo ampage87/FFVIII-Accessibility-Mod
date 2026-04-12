@@ -3,6 +3,22 @@
 
 > This file is the archaeological record. Consult ONLY when you need to understand
 > WHY a past decision was made, or to trace the evolution of a specific feature.
+
+---
+
+## Session 54 (2026-04-11) — Victory TTS phase detection + encoding fix (v0.13.24–26)
+
+6 builds. Key breakthroughs:
+1. **Fixed battle text encoding**: Was using kernel.bin encoding (0x02-0x1B=A-Z) which was WRONG. Battle text uses standard FF8 menu encoding (0x45-0x5E=A-Z, 0x5F-0x78=a-z). Same as enemy names in DecodeFF8String.
+2. **Phase-to-text-ID mapping confirmed**: textID 22/23=EXP, 21=Items, 109=GF AP, 121=GF level-up, 127=ability learned. Smart BTXT logging (only log NEW/CHANGED text IDs) + F12 step markers mapped phases precisely.
+3. **Phase-based victory TTS built**: BTXT hook sets phase flags → victory thread announces per-phase. GF AP ("GF received 2 AP.") confirmed working. Level-up detection via savemap EXP polling confirmed.
+4. **sub_5348E0 NOT called during victory**: Hooked it (E9 JMP from FFNx), zero calls during mode 4. Victory code expands 0x0A control codes inline at 0x4A51F0.
+5. **Memory-based TTS pivots corrected**: Aaron flagged twice that TTS must come from text renderer hooks, not memory address dumps. All-at-once memory reads leave blind players pressing through unannounced screens. Added to project memory #25.
+6. **Victory screen layout documented from screenshots**: EXP shows Name/Lv/EXP Acquired/Current EXP/Next LEVEL. Items shown one-at-a-time. GF AP/Level-Up/Ability each in center box under "Raising GF" header.
+
+## Session 53 (2026-04-11) — Battle text retrieval function identified (v0.13.14–22)
+
+10 builds. BREAKTHROUGH: sub_47EC70 identified as get_battle_text(text_id) via disassembly. 261 call sites. Signature: looks up 16-bit offset at 0x1CF8B50+id*2, returns ptr to 0x1CF3E48+base+offset. 1774 calls during victory. Text IDs: 11 (per-frame graphics), 22/23 (one-time labels), 29/30/31 (per-frame character rows). Also identified sub_47EA30 (entity names), sub_5348E0 (ctrl code expansion), sub_4A37E0 (text display). tkmenu functions (4BD850/4BD630/4BD920) confirmed ZERO calls during battle — dead code.
 > For current state, read `DEVNOTES.md` and `NEXT_SESSION_PROMPT.md`.
 >
 > **Versioning note**: Builds prior to v0.07.16 used the old format without the

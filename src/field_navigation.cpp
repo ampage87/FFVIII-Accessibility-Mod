@@ -3,7 +3,7 @@
 // See field_navigation.h for full architecture and phasing notes.
 //
 // ============================================================================
-// CURRENT STATE: v0.12.25 — V key version announce, quieter startup speech
+// CURRENT STATE: See FF8OPC_VERSION in ff8_accessibility.h
 // ============================================================================
 //
 // What's new in v05.12:
@@ -826,7 +826,7 @@ void Initialize()
 
     s_initialized = true;
     s_lastLogTime = GetTickCount();
-    Log::Field("FieldNavigation: Initialized v0.12.25.");
+    Log::Field("FieldNavigation: Initialized v%s.", FF8OPC_VERSION);
     Log::Field("FieldNavigation:   F9  = nearest character and compass direction (repeat to cycle)");
     Log::Field("FieldNavigation:   F10 = player field name and position");
 }

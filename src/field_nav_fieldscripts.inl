@@ -470,17 +470,6 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                            "(camPan=%d screenBd=%d event=%d interact=%d unknown=%d)",
                            s_capturedLineCount, linesMapped,
                            cameraPans, screenBounds, lineEvents, lineInteractive, lineUnknown);
-                // Detailed per-line log for first few fields.
-                for (int t = 0; t < s_capturedLineCount; t++) {
-                    int jsmIdx = s_jsmDoors + t;
-                    const char* typeName = (jsmIdx < s_jsmEntityCount)
-                        ? FieldArchive::JSMEntityTypeName(s_jsmEntities[jsmIdx].type) : "(no JSM)";
-                    Log::Field("FieldNavigation: [fieldload]   line%d order=%d type=%s extDisp=%d center=(%.0f,%.0f)",
-                               t, s_capturedLines[t].lineOrder, typeName,
-                               (int)s_capturedLines[t].hasExtDispatch,
-                               (float)(s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2.0f,
-                               (float)(s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2.0f);
-                }
 
                 // v0.12.23: Dump scripts of Event Trigger and Unknown-type Line entities.
                 // These are interaction mediators on shared dormitory/classroom fields.

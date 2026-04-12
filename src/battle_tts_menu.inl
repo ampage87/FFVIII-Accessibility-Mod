@@ -138,6 +138,18 @@ static DWORD s_submenuDebounceTick = 0;        // GetTickCount() when debounce s
 static bool s_submenuDebouncing = false;        // true for 300ms after turn start (ignores sub-menu cursor)
 static bool s_pendingSubmenuEntry = false;       // v0.10.112: delayed submenu entry after command scroll
 static DWORD s_pendingSubmenuTick = 0;           // v0.10.112: GetTickCount() when pending entry was scheduled
+static bool s_submenuReentryNeeded = false;      // v0.12.28: armed after exiting submenu, for re-entry detection
+static uint8_t s_lastMenuPhaseForReentry = 0xFF; // v0.12.28: track menuPhase to detect submenu open
+static uint8_t s_commandMenuPhase = 0xFF;        // v0.12.32: dynamically captured command menu phase value
+static uint8_t s_prevMenuPhaseForTarget = 0xFF;   // v0.12.56: track menuPhase for target-exit detection
+static bool s_wasInTargetPhase = false;              // v0.12.61: pure phase-based target tracking
+static bool s_gfTargetAnnounced = false;              // v0.12.65: GF target announced this submenu session
+static uint8_t s_prevTargetActive = 0xFF;              // v0.12.66: previous 0x01D7689D value for transition detection
+static bool s_pendingGFCancel = false;                  // v0.12.72: deferred GF target cancel
+static DWORD s_pendingGFCancelTick = 0;                 // v0.12.72: tick when GF cancel was deferred
+static char s_pendingGFCancelName[64] = {};             // v0.12.72: name to announce if cancel confirmed
+static uint8_t s_prevSubmenuMode = 0xFE;                // v0.12.75: promoted to file scope for exit detection
+static bool s_drawPhase14Visited = false;               // v0.12.82: track first phase 14 visit per draw session
 
 // Build the filtered magic list for the active character.
 // Reads savemap char struct +0x10 (32 slots × 2 bytes: magic_id, qty).
@@ -392,6 +404,69 @@ static uint8_t s_drawStockCastPrev = 0xFF;      // previous Stock/Cast cursor va
 static uint8_t s_lastDrawerPartySlot = 0xFF;    // v0.10.112: party slot of character who last used Draw
 static uint8_t s_drawLastMenuPhase = 0xFF;      // v0.10.112: track menuPhase for phase-transition resets
 
+// ============================================================================
+// v0.12.52: Magic inventory snapshot for Draw validation
+// Captures all 3 party members' magic arrays at turn start.
+// When "Received" fires, we diff to verify which character gained spells.
+// ============================================================================
+static const uint32_t DRAW_EXEC_SLOT_ADDR = 0x01D768D4; // engine's executing character party slot
+struct MagicSlot { uint8_t id; uint8_t qty; };
+static MagicSlot s_magicSnapshotBefore[3][32] = {};  // [partySlot][magicSlotIdx]
+static bool s_magicSnapshotValid = false;
+
+static void SnapshotAllMagicInventories()
+{
+    s_magicSnapshotValid = false;
+    __try {
+        for (int slot = 0; slot < 3; slot++) {
+            uint8_t charIdx = *(uint8_t*)(SAVEMAP_PARTY_FORMATION + slot);
+            if (charIdx >= 8) {
+                memset(s_magicSnapshotBefore[slot], 0, sizeof(s_magicSnapshotBefore[slot]));
+                continue;
+            }
+            uint8_t* magicBase = (uint8_t*)(SAVEMAP_CHAR_DATA_BASE + charIdx * SAVEMAP_CHAR_STRIDE + 0x10);
+            for (int i = 0; i < 32; i++) {
+                s_magicSnapshotBefore[slot][i].id  = magicBase[i * 2];
+                s_magicSnapshotBefore[slot][i].qty = magicBase[i * 2 + 1];
+            }
+        }
+        s_magicSnapshotValid = true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log::Battle("BattleTTS: [DRAW-VALID] EXCEPTION snapshotting magic inventories");
+    }
+}
+
+// Called from field_dialog.cpp when "Received" fires.
+// Diffs current magic inventories against the snapshot, logs changes per character.
+// Returns the party slot (0-2) that actually gained spells, or 0xFF if none/error.
+static uint8_t s_lastValidatedDrawSlot = 0xFF;
+
+static uint8_t DiffMagicInventories(uint8_t claimedSlot)
+{
+    if (!s_magicSnapshotValid) {
+        return 0xFF;
+    }
+    uint8_t gainedSlot = 0xFF;
+    __try {
+        for (int slot = 0; slot < 3; slot++) {
+            uint8_t charIdx = *(uint8_t*)(SAVEMAP_PARTY_FORMATION + slot);
+            if (charIdx >= 8) continue;
+            uint8_t* magicBase = (uint8_t*)(SAVEMAP_CHAR_DATA_BASE + charIdx * SAVEMAP_CHAR_STRIDE + 0x10);
+            for (int i = 0; i < 32; i++) {
+                if (magicBase[i * 2] != s_magicSnapshotBefore[slot][i].id ||
+                    magicBase[i * 2 + 1] != s_magicSnapshotBefore[slot][i].qty) {
+                    gainedSlot = (uint8_t)slot;
+                    break;  // found the recipient, no need to enumerate every change
+                }
+            }
+            if (gainedSlot != 0xFF) break;  // only one character gains per draw
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    // Re-snapshot so next "Received" diffs against fresh state
+    SnapshotAllMagicInventories();
+    return gainedSlot;
+}
+
 static void BuildDrawList()
 {
     s_turnDrawCount = 0;
@@ -488,6 +563,17 @@ static void PollTurnAndCommands()
             s_turnActiveCharId = activeChar;
             BuildCharCommandList(activeChar);
             
+            // v0.12.46: Clear GF HP substitution for this slot — their GF is done
+            s_gfHpSubstitutionActive[activeChar] = false;
+            s_gfSummonedIdx[activeChar] = 0xFF;  // v0.12.83
+            
+            // v0.12.77: Suppress any pending GF cancel — new turn starting means
+            // the previous GF was confirmed (turn transitioned char→char, not char→0xFF).
+            if (s_pendingGFCancel) {
+                Log::Battle("BattleTTS: [TARGET-ACTIVE] Pending GF cancel suppressed (new turn started)");
+                s_pendingGFCancel = false;
+            }
+            
             // Reset sub-menu state for new turn
             s_inSubmenu = false;
             s_turnSubmenuCursor = 0xFF;
@@ -504,8 +590,18 @@ static void PollTurnAndCommands()
             s_drawCursorPrev = 0xFF;
             s_drawStockCastPrev = 0xFF;
             s_drawLastMenuPhase = 0xFF;
+            s_drawPhase14Visited = false;  // v0.12.82
             s_pendingSubmenuEntry = false;
             s_pendingSubmenuTick = 0;
+            s_submenuReentryNeeded = false;  // v0.12.28
+            s_lastMenuPhaseForReentry = 0xFF;  // v0.12.28
+            s_commandMenuPhase = 0xFF;  // v0.12.32
+            s_prevMenuPhaseForTarget = 0xFF;  // v0.12.56
+            s_wasInTargetPhase = false;  // v0.12.61
+            s_gfTargetAnnounced = false;  // v0.12.65
+            s_prevTargetActive = 0xFF;  // v0.12.66
+            s_pendingGFCancel = false;  // v0.12.72
+            s_prevSubmenuMode = 0xFE;  // v0.12.79: reset so GF entry transition is detected
             s_submenuDebouncing = true;
             s_submenuDebounceTick = GetTickCount();
             
@@ -529,11 +625,35 @@ static void PollTurnAndCommands()
             BattleSpeak(buf, PRIO_TURN, true);
             Log::Battle("BattleTTS: [TURN] %s (slot %d, limitToggle=%u)", buf, (int)activeChar, (unsigned)initToggle);
             
+            // v0.12.52: Snapshot all party magic inventories for Draw validation
+            SnapshotAllMagicInventories();
+            
             // Set cursor to 0 so we don't re-announce the initial command
             s_turnCmdCursor = 0;
         }
         else if (activeChar == 0xFF && s_turnActiveCharId != 0xFF) {
             // Turn ended
+            // v0.12.72: Suppress any pending GF cancel — turn ending means confirm, not cancel
+            if (s_pendingGFCancel) {
+                Log::Battle("BattleTTS: [TARGET-ACTIVE] Pending GF cancel suppressed (turn ended = confirm)");
+                s_pendingGFCancel = false;
+            }
+            // v0.12.46: If the command was GF, enable HP substitution for this slot
+            if (s_submenuCommandId == 0x15 && s_turnActiveCharId < BATTLE_ALLY_SLOTS) {
+                s_gfHpSubstitutionActive[s_turnActiveCharId] = true;
+                // v0.12.83: Record which GF was selected from the submenu list
+                uint8_t lastGFCursor = s_turnSubmenuCursor;
+                if (lastGFCursor < s_turnGFCount) {
+                    s_gfSummonedIdx[s_turnActiveCharId] = s_turnGFList[lastGFCursor].gfIdx;
+                    Log::Battle("BattleTTS: [GF-HP-SUB] Enabled for slot %d (GF command confirmed, gfIdx=%d '%s')",
+                               (int)s_turnActiveCharId, (int)s_turnGFList[lastGFCursor].gfIdx,
+                               s_turnGFList[lastGFCursor].name);
+                } else {
+                    s_gfSummonedIdx[s_turnActiveCharId] = 0xFF;
+                    Log::Battle("BattleTTS: [GF-HP-SUB] Enabled for slot %d (GF command confirmed, cursor=%d out of range)",
+                               (int)s_turnActiveCharId, (int)lastGFCursor);
+                }
+            }
             s_turnActiveCharId = 0xFF;
             s_turnCmdCursor = 0xFF;
             s_inSubmenu = false;
@@ -550,11 +670,16 @@ static void PollTurnAndCommands()
                 if (s_inSubmenu) {
                     s_inSubmenu = false;
                     s_turnSubmenuCursor = 0xFF;
+                    s_submenuReentryNeeded = true;  // v0.12.28: arm re-entry detection
                     // v0.10.112: Reset draw tracking so re-entry announces initial items
                     s_drawCursorPrev = 0xFF;
                     s_drawStockCastPrev = 0xFF;
                     s_drawListBuilt = false;
                     s_drawLastMenuPhase = 0xFF;
+                    s_drawPhase14Visited = false;  // v0.12.82
+                    s_magicListBuilt = false;
+                    s_gfListBuilt = false;
+                    s_itemListBuilt = false;
                     Log::Battle("BattleTTS: [SUBMENU] Exited sub-menu, back to command menu");
                 }
                 // v0.10.112: Suppress false submenu entry on this frame AND capture
@@ -562,8 +687,7 @@ static void PollTurnAndCommands()
                 // command name has time to speak before the submenu item queues.
                 cmdCursorChangedThisFrame = true;
                 __try { s_turnSubmenuCursor = *(uint8_t*)BATTLE_SUBMENU_CURSOR; } __except(EXCEPTION_EXECUTE_HANDLER) {}
-                s_pendingSubmenuEntry = true;
-                s_pendingSubmenuTick = GetTickCount();
+                s_pendingSubmenuEntry = false;
                 // v0.10.22: cursor=0 may be Attack or Limit Break depending on toggle byte
                 const char* cmd;
                 if (cursor == 0) {
@@ -590,10 +714,211 @@ static void PollTurnAndCommands()
                     s_submenuDebouncing = false;
                     // Capture current value as baseline after debounce expires
                     s_turnSubmenuCursor = *(uint8_t*)BATTLE_SUBMENU_CURSOR;
+                    // v0.12.32: Capture the menuPhase that's active during command menu
+                    __try { s_commandMenuPhase = *(uint8_t*)BATTLE_MENU_PHASE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                    Log::Battle("BattleTTS: [SUBMENU] Command menu phase captured: %u", (unsigned)s_commandMenuPhase);
                 }
             }
             
+            // v0.12.61: Detect cancel from target selection via pure menuPhase tracking.
+            // Attack target = phase 1, Draw target = phase 3.
+            // Cancel exits to phase 5 or 6. Confirm exits to phase 7 (execute).
+            // No dependency on s_inTargetSelect or target bitmask.
+            {
+                uint8_t curPhase = 0xFF;
+                __try { curPhase = *(uint8_t*)BATTLE_MENU_PHASE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                bool isTargetPhase = (curPhase == 1 || curPhase == 3);
+                
+                if (isTargetPhase && !s_wasInTargetPhase) {
+                    s_wasInTargetPhase = true;
+                    Log::Battle("BattleTTS: [TARGET] Entered target phase %u", (unsigned)curPhase);
+                    // v0.12.62: Force-announce current target on entry.
+                    // PollTargetSelection won't fire if mask hasn't changed since last time.
+                    uint8_t entryMask = 0, entryScope = 0;
+                    __try { entryMask = *(uint8_t*)BATTLE_TARGET_BITMASK; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                    __try { entryScope = *(uint8_t*)BATTLE_TARGET_SCOPE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                    if (entryMask != 0) {
+                        bool isAll = (entryScope != 3 && entryScope != 0 && CountBits(entryMask) > 1);
+                        char tgtBuf[128];
+                        if (isAll) {
+                            int slot = BitmaskToSlot(entryMask);
+                            snprintf(tgtBuf, sizeof(tgtBuf), "%s",
+                                     (slot >= BATTLE_ALLY_SLOTS) ? "All enemies" : "All allies");
+                        } else if (CountBits(entryMask) == 1) {
+                            int slot = BitmaskToSlot(entryMask);
+                            if (slot >= 0) {
+                                char nameBuf[64];
+                                snprintf(tgtBuf, sizeof(tgtBuf), "%s", GetSlotName(slot, nameBuf, sizeof(nameBuf)));
+                            } else { tgtBuf[0] = '\0'; }
+                        } else {
+                            bool hasEn = (entryMask & 0x78) != 0;
+                            bool hasAl = (entryMask & 0x07) != 0;
+                            snprintf(tgtBuf, sizeof(tgtBuf), "%s",
+                                     (hasEn && !hasAl) ? "All enemies" : (hasAl && !hasEn) ? "All allies" : "All targets");
+                        }
+                        if (tgtBuf[0] != '\0') {
+                            BattleSpeak(tgtBuf, PRIO_MENU, true);
+                            Log::Battle("BattleTTS: [TARGET] Entry announce: %s (mask=0x%02X scope=%u)",
+                                       tgtBuf, (unsigned)entryMask, (unsigned)entryScope);
+                        }
+                        // Sync PollTargetSelection tracking so it doesn't double-announce
+                        s_lastTargetBitmask = entryMask;
+                        s_lastTargetScope = entryScope;
+                        s_inTargetSelect = true;
+                    }
+                }
+                
+                if (s_wasInTargetPhase && !isTargetPhase) {
+                    s_wasInTargetPhase = false;
+                    // Only announce on cancel destinations (phase 5=cmd menu, 6=intermediate).
+                    // Phase 7=execute, 14=Draw spell list, 0xFF=unknown — don't announce.
+                    bool isCancelPhase = (curPhase == 5 || curPhase == 6);
+                    if (isCancelPhase && s_turnCmdCursor < 4) {
+                        const char* cmd;
+                        if (s_turnCmdCursor == 0) {
+                            uint8_t toggle = 0;
+                            __try { toggle = *(uint8_t*)BATTLE_LIMIT_TOGGLE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                            cmd = (s_limitBreakActive || toggle == 64) ? "Limit Break" : GetCommandName(s_turnCharCommands[0]);
+                        } else {
+                            cmd = GetCommandName(s_turnCharCommands[s_turnCmdCursor]);
+                        }
+                        BattleSpeak(cmd, PRIO_MENU, true);
+                        Log::Battle("BattleTTS: [TARGET-EXIT] Phase %u->%u, cancelled, announcing: %s",
+                                   (unsigned)s_prevMenuPhaseForTarget, (unsigned)curPhase, cmd);
+                    }
+                    // Sync 0x9D tracker so TARGET-ACTIVE handler doesn't double-announce
+                    __try { s_prevTargetActive = *(uint8_t*)0x01D7689D; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                }
+                
+                // v0.12.63: Detect Draw spell list entry (phase 14).
+                // When phase transitions to 14, force-announce the current draw spell
+                // and reset draw cursor tracking so navigation works immediately.
+                if (curPhase == 14 && s_prevMenuPhaseForTarget != 14) {
+                    // v0.12.82: Only reset draw cursor on RE-ENTRY to phase 14.
+                    // s_drawPhase14Visited is false on first visit (set at submenu
+                    // entry and turn start), true after. This avoids the double-
+                    // announce where the draw cursor poll fires before this handler.
+                    if (s_drawPhase14Visited) {
+                        s_drawCursorPrev = 0xFF;
+                    }
+                    s_drawPhase14Visited = true;
+                    s_drawStockCastPrev = 0xFF;
+                    Log::Battle("BattleTTS: [DRAW] Entered spell list (phase %u->14, revisit=%d)",
+                               (unsigned)s_prevMenuPhaseForTarget, (int)(s_drawPhase14Visited));
+                }
+                
+                s_prevMenuPhaseForTarget = curPhase;
+            }
+            
             uint8_t subCursor = *(uint8_t*)BATTLE_SUBMENU_CURSOR;
+
+            // v0.12.34: Detect submenu entry/exit via 0x01D768EB.
+            // This byte is the engine's "submenu mode" indicator:
+            //   0xFE = command menu (arrow keys control command cursor)
+            //   0x02 = Magic/GF submenu (arrow keys control spell/GF cursor)
+            // Discovered via F12 battle state snapshot diagnostic (session 46).
+            {
+                static const uint32_t SUBMENU_MODE_ADDR = 0x01D768EB;
+                uint8_t sm = 0xFF;
+                __try { sm = *(uint8_t*)SUBMENU_MODE_ADDR; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                // s_prevSubmenuMode is file-scoped (v0.12.75) for cross-block access
+                bool wasCommandMenu = (s_prevSubmenuMode == 0xFE || s_prevSubmenuMode == 0x00);
+                bool nowInSubmenu = (sm != 0xFE && sm != 0x00);
+                bool nowCommandMenu = (sm == 0xFE);
+                // v0.12.72: When sm transitions TO 0x00, check menuPhase as fallback.
+                // Engine sometimes uses 0x00 instead of 0x01/0x02 for submenus.
+                // Only check on transitions to avoid per-frame spam.
+                if (sm == 0x00 && sm != s_prevSubmenuMode) {
+                    uint8_t fallbackPhase = 0xFF;
+                    __try { fallbackPhase = *(uint8_t*)BATTLE_MENU_PHASE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                    if (fallbackPhase == 32 || fallbackPhase == 80) {
+                        nowInSubmenu = true;
+                        nowCommandMenu = false;
+                        wasCommandMenu = true;  // treat previous state as cmd menu for entry detection
+                        Log::Battle("BattleTTS: [SUBMENU] Mode 0x%02X->0x00 + phase %u -> treating as submenu entry",
+                                   (unsigned)s_prevSubmenuMode, (unsigned)fallbackPhase);
+                    } else {
+                        // 0x00 with non-submenu phase = command menu
+                        nowCommandMenu = true;
+                        nowInSubmenu = false;
+                    }
+                } else if (sm == 0x00 && sm == s_prevSubmenuMode) {
+                    // Steady state 0x00 — no transition, don't change anything
+                    nowInSubmenu = false;
+                    nowCommandMenu = false;  // prevent false exit detection
+                }
+                if (sm != s_prevSubmenuMode) {
+                    if (wasCommandMenu && nowInSubmenu && !s_inSubmenu) {
+                        // Entering submenu — reset cursor tracking to force announcement
+                        // v0.12.82: Gate on !s_inSubmenu to prevent false re-entry when
+                        // submenuMode bounces (e.g. 0x01->0x00 while already in submenu).
+                        s_turnSubmenuCursor = 0xFF;
+                        Log::Battle("BattleTTS: [SUBMENU] Entry detected via submenu mode 0x%02X->0x%02X",
+                                   (unsigned)s_prevSubmenuMode, (unsigned)sm);
+                    } else if (nowCommandMenu && s_inSubmenu) {
+                        // v0.12.75: Simplified exit check — if mod knows we're in submenu
+                        // and engine says command menu, that's an exit. Previous check
+                        // (!wasCommandMenu) failed when prevMode was 0x00.
+                        // Returning to command menu — announce current command
+                        uint8_t exitCmd = s_submenuCommandId;
+                        s_inSubmenu = false;
+                        s_magicListBuilt = false;
+                        s_gfListBuilt = false;
+                        s_itemListBuilt = false;
+                        s_gfTargetAnnounced = false;  // v0.12.65
+                        s_drawCursorPrev = 0xFF;
+                        s_drawStockCastPrev = 0xFF;
+                        s_drawListBuilt = false;
+                        s_drawLastMenuPhase = 0xFF;
+                        Log::Battle("BattleTTS: [SUBMENU] Exit detected via submenu mode 0x%02X->0xFE",
+                                   (unsigned)s_prevSubmenuMode);
+                        // Announce the command we're returning to
+                        if (s_turnCmdCursor < 4) {
+                            const char* cmd = GetCommandName(s_turnCharCommands[s_turnCmdCursor]);
+                            BattleSpeak(cmd, PRIO_MENU, true);
+                            Log::Battle("BattleTTS: [SUBMENU] Exit announce: %s (cursor=%d, was cmd 0x%02X)",
+                                       cmd, (int)s_turnCmdCursor, (unsigned)exitCmd);
+                        }
+                        // Sync menuPhase tracker so target-exit doesn't also fire
+                        __try { s_prevMenuPhaseForTarget = *(uint8_t*)BATTLE_MENU_PHASE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                    }
+                }
+                s_prevSubmenuMode = sm;
+            }
+
+            // v0.12.73: MenuPhase fallback for submenu entry detection.
+            // When both 0xEB and subCursor fail to signal entry (e.g. first GF entry
+            // where 0xEB stays 0x00 and cursor stays 0), menuPhase transition to
+            // 32 or 80 is the definitive signal.
+            if (!s_submenuDebouncing && !s_inSubmenu && s_turnCmdCursor < 4) {
+                uint8_t mpNow = 0xFF;
+                __try { mpNow = *(uint8_t*)BATTLE_MENU_PHASE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                static uint8_t s_prevMenuPhaseForSubmenu = 0xFF;
+                bool wasNonSubmenu = (s_prevMenuPhaseForSubmenu != 32 && s_prevMenuPhaseForSubmenu != 80);
+                bool nowSubmenu = (mpNow == 32 || mpNow == 80);
+                if (wasNonSubmenu && nowSubmenu) {
+                    s_submenuCommandId = s_turnCharCommands[s_turnCmdCursor];
+                    s_inSubmenu = true;
+                    s_turnSubmenuCursor = 0xFF;  // force announce on next cursor read
+                    // v0.12.75: Force prevSubmenuMode so exit detection works
+                    s_prevSubmenuMode = 0x01;  // one-shot: won't re-trigger since s_inSubmenu is now true
+                    Log::Battle("BattleTTS: [SUBMENU] Phase fallback entry: phase %u->%u, cmd 0x%02X (%s)",
+                               (unsigned)s_prevMenuPhaseForSubmenu, (unsigned)mpNow,
+                               (unsigned)s_submenuCommandId, GetCommandName(s_submenuCommandId));
+                    // Build lists
+                    if (s_submenuCommandId == 0x14 && !s_magicListBuilt)
+                        BuildMagicList(s_turnActiveCharId);
+                    if (s_submenuCommandId == 0x15 && !s_gfListBuilt)
+                        BuildGFList(s_turnActiveCharId);
+                    if (s_submenuCommandId == 0x17 && !s_itemListBuilt)
+                        BuildItemList();
+                    if (s_submenuCommandId == 0x16 && !s_drawListBuilt) {
+                        s_lastDrawerPartySlot = s_turnActiveCharId;
+                        BuildDrawList();
+                    }
+                }
+                s_prevMenuPhaseForSubmenu = mpNow;
+            }
             if (!s_submenuDebouncing && !cmdCursorChangedThisFrame && subCursor != s_turnSubmenuCursor) {
                 if (!s_inSubmenu && s_turnCmdCursor < 4) {
                     // Entering sub-menu — record which command opened it
@@ -871,9 +1196,151 @@ static void PollTurnAndCommands()
                     }
                 }
             }
+            
+            // v0.12.72: Process deferred GF cancel.
+            // If 150ms pass without turn ending, it's a real cancel.
+            if (s_pendingGFCancel && GetTickCount() - s_pendingGFCancelTick > 150) {
+                s_pendingGFCancel = false;
+                BattleSpeak(s_pendingGFCancelName, PRIO_MENU, true);
+                Log::Battle("BattleTTS: [TARGET-ACTIVE] Deferred GF cancel confirmed, announcing: %s",
+                           s_pendingGFCancelName);
+            }
+
+            // v0.12.66: All-target entry detection via 0x01D7689D transition.
+            // GF target doesn't use menuPhase 1 or 3, so phase-based entry
+            // doesn't work. Watch target-active byte 0→1 transition instead.
+            // Gated by !s_wasInTargetPhase to avoid double-announcing Attack/Draw.
+            {
+                uint8_t tgtAct = 0;
+                __try { tgtAct = *(uint8_t*)0x01D7689D; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                if (tgtAct == 1 && s_prevTargetActive == 0 && !s_wasInTargetPhase) {
+                    uint8_t aMask = 0, aScope = 0;
+                    __try { aMask = *(uint8_t*)BATTLE_TARGET_BITMASK; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                    __try { aScope = *(uint8_t*)BATTLE_TARGET_SCOPE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                    if (aMask != 0) {
+                        // For non-phase targets (GF), scope alone determines targeting:
+                        // scope=1 = All enemies, scope=2 = All allies (mask is just cursor anchor)
+                        char tgtBuf[128];
+                        if (aScope == 1) {
+                            snprintf(tgtBuf, sizeof(tgtBuf), "All enemies");
+                        } else if (aScope == 2) {
+                            snprintf(tgtBuf, sizeof(tgtBuf), "All allies");
+                        } else if (CountBits(aMask) == 1) {
+                            int slot = BitmaskToSlot(aMask);
+                            char nameBuf[64];
+                            snprintf(tgtBuf, sizeof(tgtBuf), "%s",
+                                     (slot >= 0) ? GetSlotName(slot, nameBuf, sizeof(nameBuf)) : "???");
+                        } else {
+                            snprintf(tgtBuf, sizeof(tgtBuf), "All targets");
+                        }
+                        BattleSpeak(tgtBuf, PRIO_MENU, true);
+                        Log::Battle("BattleTTS: [TARGET-ACTIVE] 0x9D 0->1: %s (mask=0x%02X scope=%u)",
+                                   tgtBuf, (unsigned)aMask, (unsigned)aScope);
+                        s_lastTargetBitmask = aMask;
+                        s_lastTargetScope = aScope;
+                        s_inTargetSelect = true;
+                    }
+                }
+                // v0.12.67/72: Detect GF target cancel via 0x9D going 1->0.
+                // For GF command, defer the cancel announce by 150ms.
+                // If the turn ends within that window (activeChar→0xFF), it was
+                // a confirm, not a cancel, and the pending announce is suppressed.
+                if (tgtAct == 0 && s_prevTargetActive == 1 && !s_wasInTargetPhase &&
+                    s_inTargetSelect && s_turnActiveCharId < 3) {
+                    uint8_t cancelPhase = 0xFF;
+                    __try { cancelPhase = *(uint8_t*)BATTLE_MENU_PHASE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                    bool isDrawProgression = (cancelPhase == 11 || cancelPhase == 12 ||
+                                              cancelPhase == 14 || cancelPhase == 21 ||
+                                              cancelPhase == 23 || cancelPhase == 28 ||
+                                              cancelPhase == 33 || cancelPhase == 34);
+                    s_inTargetSelect = false;
+                    if (!isDrawProgression && s_turnCmdCursor < 4) {
+                        if (s_submenuCommandId == 0x15 && s_gfListBuilt && s_turnGFCount > 0) {
+                            // v0.12.72: Defer GF cancel — might be confirm
+                            uint8_t gfCur = 0;
+                            __try { gfCur = *(uint8_t*)BATTLE_SUBMENU_CURSOR; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                            const char* gfName = (gfCur < s_turnGFCount) ? s_turnGFList[gfCur].name : s_turnGFList[0].name;
+                            strncpy(s_pendingGFCancelName, gfName, sizeof(s_pendingGFCancelName) - 1);
+                            s_pendingGFCancelName[sizeof(s_pendingGFCancelName) - 1] = '\0';
+                            s_pendingGFCancel = true;
+                            s_pendingGFCancelTick = GetTickCount();
+                            Log::Battle("BattleTTS: [TARGET-ACTIVE] 0x9D 1->0: GF cancel deferred for: %s", gfName);
+                        } else if (s_inSubmenu && s_submenuCommandId == 0x14) {
+                            // v0.12.80: Magic target cancel — returns to spell list.
+                            // Reset cursor tracking so current spell re-announces.
+                            s_turnSubmenuCursor = 0xFF;
+                            Log::Battle("BattleTTS: [TARGET-ACTIVE] 0x9D 1->0: Magic target cancel, reset spell cursor");
+                        } else if (s_inSubmenu && s_submenuCommandId == 0x16) {
+                            // v0.12.81: Draw target cancel — returns to Stock/Cast.
+                            // Only reset Stock/Cast tracking, NOT spell cursor.
+                            // Resetting drawCursorPrev causes a false spell announce
+                            // when the user is at the Stock/Cast prompt.
+                            s_drawStockCastPrev = 0xFF;
+                            Log::Battle("BattleTTS: [TARGET-ACTIVE] 0x9D 1->0: Draw target cancel, reset Stock/Cast cursor");
+                        } else {
+                            const char* cmd = GetCommandName(s_turnCharCommands[s_turnCmdCursor]);
+                            BattleSpeak(cmd, PRIO_MENU, true);
+                            Log::Battle("BattleTTS: [TARGET-ACTIVE] 0x9D 1->0: cancelled, announcing: %s", cmd);
+                        }
+                    }
+                }
+                s_prevTargetActive = tgtAct;
+            }
         }
 
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+// ============================================================================
+// v0.12.74: F12 battle glitch marker — press when something sounds wrong.
+// Dumps full battle menu/submenu/target state to ff8_battle.log tagged [GLITCH-MARK].
+// ============================================================================
+static bool s_glitchKeyWasDown = false;
+
+static void PollGlitchMarker()
+{
+    bool f12 = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
+    bool pressed = f12 && !s_glitchKeyWasDown;
+    s_glitchKeyWasDown = f12;
+    if (!pressed) return;
+
+    ScreenReader::Speak("Marked", true);
+
+    uint8_t menuPhase = 0xFF, submenuMode = 0xFF, tgtActive = 0xFF;
+    uint8_t cmdCursor = 0xFF, subCursor = 0xFF, activeChar = 0xFF;
+    uint8_t tgtMask = 0, tgtScope = 0;
+    __try { menuPhase = *(uint8_t*)BATTLE_MENU_PHASE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    __try { submenuMode = *(uint8_t*)0x01D768EB; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    __try { tgtActive = *(uint8_t*)0x01D7689D; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    __try { cmdCursor = *(uint8_t*)BATTLE_CMD_CURSOR; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    __try { subCursor = *(uint8_t*)BATTLE_SUBMENU_CURSOR; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    __try { activeChar = *s_pActiveCharId; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    __try { tgtMask = *(uint8_t*)BATTLE_TARGET_BITMASK; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    __try { tgtScope = *(uint8_t*)BATTLE_TARGET_SCOPE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+
+    Log::Battle("BattleTTS: [GLITCH-MARK] ========== F12 GLITCH MARKER ==========");
+    Log::Battle("BattleTTS: [GLITCH-MARK] Engine: activeChar=%u menuPhase=%u submenuMode=0x%02X",
+               (unsigned)activeChar, (unsigned)menuPhase, (unsigned)submenuMode);
+    Log::Battle("BattleTTS: [GLITCH-MARK] Engine: cmdCursor=%u subCursor=%u tgtActive=%u tgtMask=0x%02X tgtScope=%u",
+               (unsigned)cmdCursor, (unsigned)subCursor, (unsigned)tgtActive,
+               (unsigned)tgtMask, (unsigned)tgtScope);
+    Log::Battle("BattleTTS: [GLITCH-MARK] Mod: s_turnActiveCharId=%u s_turnCmdCursor=%u s_inSubmenu=%d",
+               (unsigned)s_turnActiveCharId, (unsigned)s_turnCmdCursor, (int)s_inSubmenu);
+    Log::Battle("BattleTTS: [GLITCH-MARK] Mod: s_submenuCommandId=0x%02X (%s) s_inTargetSelect=%d",
+               (unsigned)s_submenuCommandId, GetCommandName(s_submenuCommandId), (int)s_inTargetSelect);
+    Log::Battle("BattleTTS: [GLITCH-MARK] Mod: s_wasInTargetPhase=%d s_prevTargetActive=%u s_pendingGFCancel=%d",
+               (int)s_wasInTargetPhase, (unsigned)s_prevTargetActive, (int)s_pendingGFCancel);
+    Log::Battle("BattleTTS: [GLITCH-MARK] Mod: s_submenuDebouncing=%d s_magicListBuilt=%d s_gfListBuilt=%d",
+               (int)s_submenuDebouncing, (int)s_magicListBuilt, (int)s_gfListBuilt);
+    if (s_turnCmdCursor < 4) {
+        Log::Battle("BattleTTS: [GLITCH-MARK] Cmds: [%s, %s, %s, %s] current=%s",
+                   GetCommandName(s_turnCharCommands[0]),
+                   GetCommandName(s_turnCharCommands[1]),
+                   GetCommandName(s_turnCharCommands[2]),
+                   GetCommandName(s_turnCharCommands[3]),
+                   GetCommandName(s_turnCharCommands[s_turnCmdCursor]));
+    }
+    Log::Battle("BattleTTS: [GLITCH-MARK] ========================================");
 }
 
 // ============================================================================

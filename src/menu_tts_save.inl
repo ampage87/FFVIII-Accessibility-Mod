@@ -907,7 +907,7 @@ static void PollBlockCursor(int offset)
     __try {
         uint8_t blockIdx = *((uint8_t*)pMenuStateA + offset);
         
-        if (blockIdx > 14) return;
+        if (blockIdx >= 30) return;
         
         if (blockIdx != s_prevBlockCursor) {
             int blockNum = blockIdx + 1;

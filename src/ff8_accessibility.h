@@ -9,8 +9,8 @@
 // FF8 Original PC Accessibility Mod version
 // Increment on every build change
 // ================================================================
-#define FF8OPC_VERSION "0.12.25"  // V key version announce, quieter startup speech
-#define FF8OPC_VERSION_DATE "2026-04-07"
+#define FF8OPC_VERSION "0.13.45"  // Source split: battle_tts_screenshot.inl + battle_tts_victory.inl extracted from battle_tts.cpp
+#define FF8OPC_VERSION_DATE "2026-04-12"
 
 // ============================================================================
 // FF8 Runtime Address Resolution

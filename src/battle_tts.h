@@ -16,9 +16,14 @@ void Update();
 void Shutdown();
 
 // v0.10.112: Returns the name of the character who last initiated Draw.
-// Used by FieldDialog to prepend "Squall" to "Received X spells!" text.
-// Returns nullptr if no draw has been initiated or name is unavailable.
+// Uses engine byte 0x01D768D4 (executing character party slot).
 const char* GetLastDrawerName();
+
+// v0.12.52: Return the raw executing slot byte for diagnostics.
+uint8_t GetDrawExecutingSlot();
+
+// v0.12.52: Validate Draw character by diffing magic inventories.
+void ValidateDrawCharacter(uint8_t claimedSlot);
 
 }  // namespace BattleTTS
 

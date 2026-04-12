@@ -50,8 +50,9 @@ static char DecodeFF8Char(uint8_t b)
     if (b >= 0x45 && b <= 0x5E) return (char)(b - 4);        // A-Z
     if (b >= 0x5F && b <= 0x78) return (char)(b + 2);        // a-z
     if (b >= 0x24 && b <= 0x2D) return (char)(b - 0x24 + '0'); // 0-9 (estimated)
-    if (b == 0x2F) return '-';   // dash (estimated)
-    if (b == 0x06) return '\'';  // apostrophe (estimated)
+    if (b == 0x2F) return '-';   // dash
+    if (b == 0x32) return '-';   // v0.13.34: hyphen (confirmed: M-Stone Piece)
+    if (b == 0x06) return '\'';  // apostrophe
     // Unknown byte — return '?' rather than garbage
     return '?';
 }

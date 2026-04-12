@@ -394,8 +394,6 @@ static void RefreshCatalog()
                             fieldHasInteractiveObjects = true; break;
                         }
                     }
-                    Log::Field("FieldNavigation: [EXIT-INTOBJ] line%d jsmCount=%d fieldHasIntObj=%d lineType=%d",
-                               t, s_jsmEntityCount, (int)fieldHasInteractiveObjects, (int)s_capturedLines[t].lineType);
                     if (s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_SCREEN_BOUND &&
                         fieldHasInteractiveObjects) {
                         continue;  // skip — will be added as Interaction below
@@ -546,8 +544,6 @@ static void RefreshCatalog()
                         }
                         if (fhio) isInteractive = true;
                     }
-                    Log::Field("FieldNavigation: [INTERACT-CHECK] line%d type=%d isInteractive=%d jsmCount=%d",
-                               t, (int)s_capturedLines[t].lineType, (int)isInteractive, s_jsmEntityCount);
                     if (!isInteractive) continue;
                     // Don't check alreadyAdded — Interactions use sentinel -600-t,
                     // distinct from exit sentinel -200-t, so both can coexist.
