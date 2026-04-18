@@ -92,6 +92,8 @@ static void BattleSpeak(const char* text, SpeechPriority prio, bool interrupt = 
 }
 
 // v0.10.32: BattleSpeakEvent — Channel 2 (event/status voice)
+// v0.13.48: Temporarily routed to Channel 1 (main voice) to disable multi-channel.
+// The Channel 2 SAPI voice and SpeakChannel2() API remain intact for future re-enablement.
 static void BattleSpeakEvent(const char* text, bool interrupt = false)
 {
     if (!text || text[0] == '\0') return;
@@ -99,7 +101,7 @@ static void BattleSpeakEvent(const char* text, bool interrupt = false)
     strncpy(s_repeatBuffer, text, sizeof(s_repeatBuffer) - 1);
     s_repeatBuffer[sizeof(s_repeatBuffer) - 1] = '\0';
 
-    ScreenReader::SpeakChannel2(text, interrupt);
+    ScreenReader::Speak(text, interrupt);  // was SpeakChannel2 — single-channel for now
 }
 
 // ============================================================================
@@ -292,6 +294,7 @@ static void OnBattleEnter()
     // Reset enemy name cache for new battle
     s_enemyNameCacheBuilt = false;
     memset(s_enemyNameCache, 0, sizeof(s_enemyNameCache));
+    memset(s_enemyNameCachePrevHP, 0, sizeof(s_enemyNameCachePrevHP));
 
     // Reset HP tracking for new battle
     s_hpTrackingReady = false;
@@ -337,6 +340,10 @@ static void OnBattleEnter()
         s_gfFirePatched = false;
     }
     EWM_LoadConfig();
+
+    // v0.13.59: Reset per-slot turn counter on battle entry. This must happen
+    // before any ATB is sampled so the first battle's turns aren't skipped.
+    EWM_ResetTurnCount();
     
     if (!s_pBattleMenuState) {
         ResolveBattleMenuAddresses();
@@ -352,6 +359,10 @@ static void OnBattleEnter()
     }
     
     memset((void*)s_gfAnimFired, 0, sizeof(s_gfAnimFired));
+    memset(s_prevSlotSummoning, 0, sizeof(s_prevSlotSummoning));
+    memset(s_gfHpPrev, 0, sizeof(s_gfHpPrev));
+    memset(s_gfHpTracking, 0, sizeof(s_gfHpTracking));
+    memset(s_gfSummonedIdx, 0xFF, sizeof(s_gfSummonedIdx));
     s_prevBattleMagicId = -1;
 
     // Reset victory screen diagnostic state
@@ -414,6 +425,12 @@ static void OnBattleEnter()
 static void OnBattleExit()
 {
     Log::Battle("BattleTTS: === BATTLE EXITED ===");
+    
+    // v0.13.59: Log per-slot turn-count summary before clearing s_inBattle.
+    // Runs regardless of EWM state so EWM-on and EWM-off battles are directly
+    // comparable. Safe to call on battles that ended without victory (flee,
+    // game over, etc.) — just reports whatever turns were observed.
+    EWM_LogTurnCountSummary();
     
     s_inBattle = false;
     s_battleJustStarted = false;
@@ -511,6 +528,8 @@ void Initialize()
     
     EWM_InstallHook();
     EWM_InstallGFHook();
+    EWM_InstallProcessReadyHook();  // v0.13.55: turn dispatch hook
+    EWM_InstallActionExecuteHook(); // v0.13.56: action execute hook (sub_482F80)
 
     s_gfVEHHandle = AddVectoredExceptionHandler(1, GF_BP_VectoredHandler);
     Log::Battle("BattleTTS: [GF-BP] VEH registered: handle=0x%08X", (uint32_t)(uintptr_t)s_gfVEHHandle);
@@ -523,6 +542,11 @@ void Initialize()
                s_ffnxGFHookInstalled ? "OK" : "FAIL",
                s_gfFirePatchReady ? "OK" : "FAIL",
                s_battleTextHooksInstalled ? "OK" : "deferred");
+
+    Log::Battle("BattleTTS: [DISPATCH] sub_483470 hook: %s",
+               s_processReadyHookInstalled ? "OK" : "FAIL");
+    Log::Battle("BattleTTS: [DISPATCH] sub_482F80 hook: %s",
+               s_actionExecuteHookInstalled ? "OK" : "FAIL");
 
     // Initialize GDI+ for PNG screenshots
     Gdiplus::GdiplusStartupInput gdiplusStartupInput;
@@ -558,6 +582,11 @@ void Update()
     }
 
     if (!s_inBattle) return;
+
+    // v0.13.59: Per-slot turn counter — runs unconditionally inside a battle,
+    // independent of EWM state or init-announce progress. Gives apples-to-apples
+    // turn counts between EWM-on and EWM-off battles.
+    EWM_TrackTurnCount();
 
     if (s_battleJustStarted) {
         s_battleJustStarted = false;
@@ -639,6 +668,7 @@ void Update()
         GF_LogHookStats();
         GF_PollStateChanges();
         PollBattleMagicId();
+        EWM_LogDispatchStats();  // v0.13.55: dispatch hook stats
     }
 
     if (s_inBattle) {
@@ -678,6 +708,23 @@ void Update()
 
     if (s_inBattle && s_initAnnounceDone && s_enemyAnnounceDone) {
         PollHPChanges();
+    }
+
+    // v0.13.52: Fire any deferred turn announcement once damage TTS clears.
+    // Must run AFTER PollHPChanges so this frame's HP deltas and s_ewmHold
+    // flag are already accounted for before we decide whether to release.
+    if (s_inBattle && s_initAnnounceDone && s_enemyAnnounceDone) {
+        PollDeferredTurnAnnounce();
+    }
+
+    // v0.13.47: Track GF summon start (repeated summon fix) and GF HP damage
+    if (s_inBattle && s_initAnnounceDone && s_enemyAnnounceDone) {
+        PollGFSummonState();
+    }
+
+    // v0.13.46: Refresh enemy name cache for mid-battle spawns
+    if (s_inBattle && s_initAnnounceDone && s_enemyNameCacheBuilt) {
+        RefreshEnemyNameCache();
     }
 
     if (s_inBattle && s_initAnnounceDone) {
