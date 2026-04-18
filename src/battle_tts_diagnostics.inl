@@ -425,3 +425,48 @@ static void BuildEnemyNameCache()
 }
 
 // ============================================================================
+// v0.13.46: Mid-battle enemy name cache refresh
+// ============================================================================
+// Handles bosses that appear mid-battle (e.g. Elvoret after Biggs/Wedge die).
+// Tracks previous HP for each enemy slot. When HP transitions from 0 to non-zero
+// and the cached name is a generic fallback ("Enemy N"), re-read the real name.
+static uint32_t s_enemyNameCachePrevHP[BATTLE_ENEMY_SLOTS] = {};
+
+static void RefreshEnemyNameCache()
+{
+    if (!s_enemyNameCacheBuilt) return;
+    
+    bool anyRefreshed = false;
+    for (int i = 0; i < BATTLE_ENEMY_SLOTS; i++) {
+        int slot = BATTLE_ALLY_SLOTS + i;
+        uint32_t hp = GetEntityHP(slot);
+        uint32_t prevHP = s_enemyNameCachePrevHP[i];
+        s_enemyNameCachePrevHP[i] = hp;
+        
+        if (prevHP == 0 && hp > 0) {
+            char prefix[16];
+            snprintf(prefix, sizeof(prefix), "Enemy %d", i + 1);
+            if (strcmp(s_enemyNameCache[i], prefix) == 0 || s_enemyNameCache[i][0] == '\0') {
+                char newName[64];
+                if (GetEnemyName(slot, newName, sizeof(newName)) && newName[0] != '\0') {
+                    strncpy(s_enemyNameCache[i], newName, sizeof(s_enemyNameCache[i]) - 1);
+                    s_enemyNameCache[i][sizeof(s_enemyNameCache[i]) - 1] = '\0';
+                    Log::Battle("BattleTTS: [NAME-CACHE] Refreshed slot%d = \"%s\" (was \"%s\", HP 0->%u)",
+                               slot, newName, prefix, hp);
+                    anyRefreshed = true;
+                }
+            }
+        }
+    }
+    
+    if (anyRefreshed) {
+        char enemyStr[200];
+        BuildEnemyNameString(enemyStr, sizeof(enemyStr));
+        char buf[256];
+        snprintf(buf, sizeof(buf), "%s appeared.", enemyStr);
+        BattleSpeakEvent(buf, false);
+        Log::Battle("BattleTTS: [NAME-CACHE] Mid-battle refresh: %s", buf);
+    }
+}
+
+// ============================================================================

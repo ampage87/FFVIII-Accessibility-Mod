@@ -6,6 +6,113 @@
 
 ---
 
+## Sessions 75–76 (2026-04-17) — EWM Cap→Freeze + Principle Validation
+
+### v0.13.57 (session 75) — Cap→Freeze + Damage-Anim Diagnostic
+
+**Conceptual change.** Prior versions used a "cap at max-1" sandwich: entities advanced naturally during freeze windows but clamped at max-1. During long holds (GF summons, damage windows) everyone converged at 11999, erasing the natural ATB race. Changed sandwich to true freeze: restore ATB to exact pre-sandwich value, so entities stay at whatever value they had when freeze engaged. Same for GF loading counter.
+
+**Files touched:**
+- `src/battle_tts_ewm.inl` — removed cap-at-max-1 logic from POST-FREEZE for both ATB and GF loading counter; new `EWM_FormatATBSnapshot()` + `EWM_PollDiagnostics()` called each frame from `EWM_UpdateBattle`. New log tags: `[DMG-DIAG]`, `[ACT-DIAG]`, `[FRZ-DIAG]`, `[POST-REL]`.
+
+**BAT result:** Aaron reported "I didn't notice any overlap, which was fantastic!" — the TTS-damage-overlap bug that sessions 69–74 chased is **resolved** by switching to freeze semantics + keeping the dispatch hooks from v0.13.55/56.
+
+**Side observation:** Aaron noticed party getting 2–3 turns per enemy turn. Initially thought a bug, but analysis showed this is just 3v1 arithmetic + G-Soldier's slower speed. Both sides' ATB was correctly frozen during each other's actions (verified by ATB snapshots in log). Chose option 1: live with it (matches Wait mode economy).
+
+### v0.13.58 (session 76) — Turn-Counter Diagnostic (first attempt)
+
+**Goal:** Let Aaron A/B test EWM-on vs EWM-off turn ratios empirically to confirm freeze has zero impact on turn economy.
+
+**Implementation:** `EWM_TrackTurnCount()` detects a turn start by watching each slot's ATB transition from high (>10000) to low (<2000). Called from inside `EWM_UpdateBattle`.
+
+**Bug:** `EWM_UpdateBattle` is gated behind `s_initAnnounceDone && s_ewmEnabled && s_ewmHookInstalled`, so the `s_inBattle` transitions the tracker tried to detect weren't reliably visible. Reset-on-battle-start and summary-on-battle-end only fired on the first battle of a session. Counters ran continuously across all subsequent battles.
+
+### v0.13.59 (session 76) — Turn-Counter Lifecycle Fix
+
+**Architectural split.** Broke the tracker into three functions called from three different lifecycle points:
+- `EWM_ResetTurnCount()` — called from `OnBattleEnter()` in `battle_tts.cpp`
+- `EWM_TrackTurnCount()` — per-frame poll called from `BattleTTS::Update()` gated only on `s_inBattle`
+- `EWM_LogTurnCountSummary()` — called from `OnBattleExit()` before `s_inBattle = false`
+
+Each hook now fires exactly when it's supposed to regardless of EWM state or init progress.
+
+**BAT result (10-battle A/B test):**
+
+| | EWM ON | EWM OFF |
+|---|---|---|
+| Battles (with ≥1 enemy turn) | 3 of 5 | 4 of 4 |
+| Party turns (aggregated) | 18 | 21 |
+| Enemy turns (aggregated) | 8 | 9 |
+| **Party:enemy ratio** | **2.25 : 1** | **2.33 : 1** |
+
+Ratios within 3.5% of each other. 2v2 battles matched exactly (2.25:1 both). 1-enemy single-turn battles all landed at exactly 2.00:1 regardless of EWM state. **Conclusion:** EWM freeze has no measurable effect on turn economy. Principle validated empirically.
+
+### v0.13.60 (session 76) — Turn-Summary Format Cosmetic Fix
+
+**Bug found in BAT log:** Summary line printed `s7=257 (total=0)` — `s7` doesn't exist. `BATTLE_TOTAL_SLOTS=7` means enemy slots are s3–s6 (indices 3, 4, 5, 6). The format string included a spurious `s7` which was an out-of-bounds read of whatever happened to be in the adjacent memory. Ratio math was always correct (loop summed the right indices); only the per-slot display had garbage.
+
+Fixed format string to print s3–s6 only. No behavior change; next battle logs will show clean summary. Ships silent — no further BAT needed.
+
+### Key Learnings from Sessions 75–76
+
+1. **The overlap bug's real root cause** was the cap's "converge at max-1" behavior, not a dispatch race. Dispatch hooks (v0.13.55/56) were necessary defense-in-depth but didn't solve it alone. Switching cap→freeze eliminated the simultaneous-tie-dispatch-at-release condition.
+
+2. **EWM principle crystallized.** Memory #26 updated: "Enhanced Wait Mode retrofits FF8 into sequential turn-based — only ONE action/menu occurs at a time. ATB still races normally; whoever fills first goes first (no advantage, same turn economy as vanilla). During ANY action (menu, attack, GF, damage anim), ALL other ATB freezes. Gameplay-neutral — doesn't add turns or prevent enemy attacks, just sequences them for TTS. Preserve: (1) first-to-fill acts first, (2) no skipped turns, (3) natural ally/enemy ratio."
+
+3. **Diagnostic lifecycle hooks beat inline state machines.** Version 0.13.58 tried to detect battle-enter/exit transitions inside the per-frame tick; v0.13.59 split the work across the battle lifecycle functions that already existed. Cleaner, more reliable, easier to read.
+
+4. **Turn-counter detector is EWM-independent.** ATB high→low watch works whether the freeze sandwich is active or not, so A/B comparisons are apples-to-apples. Reusable for any future turn-economy question.
+
+### v0.13.55–56 Outcome (retrospective)
+
+Keep both dispatch hooks (`sub_483470` + `sub_482F80`) — they're doing their job at the dispatch layer even though the visible-overlap symptom was actually solved by cap→freeze at the ATB layer. The hooks provide defense-in-depth for edge cases (fast enemy attacks during transition-hold windows). Removing them is not planned.
+
+---
+
+## Sessions 69–74 (2026-04-16 → 2026-04-17) — Damage / Command-Menu Overlap Race
+
+**7+ builds across 6 sessions.** Progressive attempts to stop enemy attacks from landing visually during the next player's command menu. Full per-session transcripts at `/mnt/transcripts/`; key decisions summarized:
+
+### v0.13.51 (session 69) — Draw-submenu ATB cap hotfix
+Unrelated to overlap bug but shipped same session. Three-edit fix: moved `s_inSubmenu` from menu.inl to hp.inl so ewm.inl can read it; extended `submenuOpen` check to `(menuPhaseDword >= 0x00400000) || s_inSubmenu`. Aaron BAT-confirmed 20:07:43: "It is working for suppressing ATB while moving around menus."
+
+### v0.13.52 (sessions 70–71) — Dual-layer TTS ordering fix
+**Layer 1** (ewm.inl): extended damage-TTS-hold block to cover five signals: `s_ewmHoldForDamageTTS`, `s_anyHpPending`, `s_damageAnimWasActive`, `*(uint8_t*)0x01D280C0 != 0`, `*(uint32_t*)0x01D27B00 != 0`. When any active AND `activeChar == 0xFF`, cap all slots with `excludeSlot=0xFF`.
+**Layer 2** (menu.inl): added `s_deferredTurnBuf/Pending/Tick` state; turn-announce site defers if damage signals active; new `PollDeferredTurnAnnounce()` wired into `battle_tts.cpp::Update()` after `PollHPChanges`.
+Result: TTS ordering correct, but enemy attack still lands visually during menu.
+
+### v0.13.53 (session 72) — Post-turn grace + stale-deferral cancel
+Added 1000 ms post-turn grace after activeChar transitions player→0xFF. `s_ewmPrevSeenActiveChar`, `s_ewmPostTurnGraceEnd`, `EWM_POST_TURN_GRACE_MS`. Also: `s_deferredTurnChar` tracks turn at defer time, cancels if activeChar changed. Dropped `ScreenReader::IsSpeaking()` gate in `PollDeferredTurnAnnounce` (caused 4-second-stale announcements during menu nav). Narrower race, still fails for GF-completion case.
+
+### v0.13.54 (session 72) — Post-action cooldown
+`EWM_POST_ACTION_COOLDOWN_MS = 500`, tracked via `s_ewmLastSignalTime`. `damageOrActionActive = postTurnGraceActive || anyActiveNow || postActionCooldown`. Narrows the window further but doesn't close it — fast actions where `[0x01D27B00]` flickers between 0 and 1 too briefly for mod thread to observe.
+
+### v0.13.55 (session 73) — **Architectural shift**: MinHook on sub_483470
+Cap-based approach abandoned in favor of direct dispatch intercept. `s_blockProcessReady = damageOrActionActive || (activeChar < 3)`. Hook returns early when flag set.
+**Critical BAT result**: log showed `[DISPATCH] sub_483470: calls=6 blocks=6 block-flag=1` during bug window — hook caught every call, yet enemy attack still landed. Proved `sub_483470` is not the sole dispatch path.
+
+### v0.13.56 (session 74) — Add sub_482F80 hook, awaiting BAT
+Hypothesis: `sub_483470` + `sub_482F80` are a natural pair called back-to-back under the same engine gate. 483470 = queue/player-menu side, 482F80 = execution side. Added second MinHook, plus "passes" counter and always-on dispatch stats log for better diagnosis. See current DEVNOTES.md for full details.
+
+### Cumulative key learnings from this saga
+- Cap-based prevention has an unavoidable 16 ms race window at mod-thread poll boundaries
+- `[0x01D27B00]` is not a persistent animation flag for fast actions
+- Dispatch-layer hooks are the right intervention point (atomic, no race)
+- Multi-function dispatch: FF8 appears to split queue processing and action execution across two functions
+- `s_blockProcessReady` read is safe with `volatile bool` on x86 (no explicit synchronization needed)
+
+---
+
+## Session 67 (2026-04-16) — GF Submenu Fix + Code Cleanup + Draw Fix (v0.13.49→v0.13.50)
+
+3 builds. Key changes:
+1. **GF submenu detection build error**: `wasCommandMenu` undeclared after previous session's cleanup removed it. Fixed stray reference in `sm == 0x00` fallback block.
+2. **Code cleanup — `EnterSubmenu()` helper**: Consolidated ~60 lines of duplicated list-building code across 4 detection paths (submenuMode, dword, subCursor, delayed entry) into single 20-line shared function. Removed dead variables: `s_submenuReentryNeeded`, `s_lastMenuPhaseForReentry`, `s_commandMenuPhase`, `s_prevMenuPhaseForSubmenu`. Removed 20-line commented-out phase fallback → 2-line note.
+3. **Draw submenu false exit — FIXED**: `EnterSubmenu()` sets `s_prevSubmenuMode = 0x01`, and the submenuMode exit handler detects 0x01→0xFE as an exit. But Draw's internal phase transitions (target → spell list → Stock/Cast) briefly flip submenuMode to 0xFE, causing false exits. Fix: suppressed submenuMode exit when `s_submenuCommandId == 0x16` (Draw). Real Draw exits caught by cmdCursor change handler.
+4. **EWM issues identified**: (a) Command menu interrupts damage TTS — need delay after attack animations. (b) Enemy attacks during menu navigation — ATB releasing during submenu transitions.
+
+---
+
 ## Session 54 (2026-04-11) — Victory TTS phase detection + encoding fix (v0.13.24–26)
 
 6 builds. Key breakthroughs:

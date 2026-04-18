@@ -848,41 +848,44 @@ static void __cdecl HookedATBUpdate(void)
     // --- CALL ORIGINAL: ATB increments from 0, status timers run normally ---
     s_originalATBUpdate();
     
-    // v0.10.95: POST-CAP for GF loading counter — per-slot.
+    // v0.13.57: POST-FREEZE for GF loading counter — restore to exact
+    // pre-sandwich value (matching ATB freeze semantics). GF loading
+    // only advances when freeze is released (i.e., during the active
+    // player's GF-cast animation), never during menu/freeze windows.
     for (int gs = 0; gs < BATTLE_ALLY_SLOTS; gs++) {
         if (!gfLoadActive[gs]) continue;
         uint8_t* cs = (uint8_t*)(BATTLE_COMP_STATS_BASE + gs * BATTLE_COMP_STATS_STRIDE);
         uint16_t* pGFLoad = (uint16_t*)(cs + 0x14);
-        uint16_t gfIncrement = *pGFLoad;  // increment from 0
-        uint32_t realGFLoad = (uint32_t)savedGFLoad[gs] + gfIncrement;
-        if (gfLoadMax[gs] > 1 && realGFLoad >= gfLoadMax[gs]) {
-            realGFLoad = gfLoadMax[gs] - 1;  // cap at max-1: prevents fire
-        }
-        *pGFLoad = (uint16_t)realGFLoad;
+        *pGFLoad = savedGFLoad[gs];
     }
     
     // v0.10.82: Real GF timer post-cap REMOVED (v0.10.88) — was Enemy 1's ATB.
     
-    // --- POST-CAP: compute increment, restore + cap ---
+    // v0.13.57: POST-FREEZE — restore ATB to exact pre-sandwich value.
+    // Previously (v0.13.56 and earlier) this was a "cap at max-1" sandwich
+    // that ADDED the per-frame increment on top of savedATB, then clamped.
+    // That preserved race order for entities below max-1 but CONVERGED
+    // everyone at max-1 during long freezes (GF summons, damage windows),
+    // erasing the natural ATB race — multiple entities would tie at 11999
+    // and all dispatch simultaneously when the freeze released.
+    //
+    // Freeze semantics match Aaron's turn-based retrofit model: "the enemy's
+    // ATB and other party members ATB are held in place" — held literally
+    // means their value does not change. When the freeze releases, each
+    // entity resumes from exactly where it was; whoever was closest to max
+    // wins the natural race a few frames later (no ties created by the
+    // mod).
     for (int slot = 0; slot < BATTLE_TOTAL_SLOTS; slot++) {
         if (slot == (int)excludeSlot) continue;
         
         uint8_t* base = (uint8_t*)(BATTLE_ENTITY_ARRAY_BASE + slot * BATTLE_ENTITY_STRIDE);
         
         if (slot < BATTLE_ALLY_SLOTS) {
-            uint16_t maxATB = *(uint16_t*)(base + BENT_MAX_ATB);
             uint16_t* pCurATB = (uint16_t*)(base + BENT_CUR_ATB);
-            uint32_t increment = *pCurATB;  // new value after function ran (started from 0)
-            uint32_t realATB = savedATB[slot] + increment;
-            if (maxATB > 1 && realATB >= maxATB) realATB = maxATB - 1;
-            *pCurATB = (uint16_t)realATB;
+            *pCurATB = (uint16_t)savedATB[slot];
         } else {
-            uint32_t maxATB = *(uint32_t*)(base + BENT_MAX_ATB);
             uint32_t* pCurATB = (uint32_t*)(base + BENT_CUR_ATB);
-            uint32_t increment = *pCurATB;  // new value after function ran (started from 0)
-            uint64_t realATB = (uint64_t)savedATB[slot] + increment;
-            if (maxATB > 1 && realATB >= maxATB) realATB = maxATB - 1;
-            *pCurATB = (uint32_t)realATB;
+            *pCurATB = (uint32_t)savedATB[slot];
         }
     }
 
@@ -947,45 +950,22 @@ static bool s_ewmFreezing = false;        // currently requesting freeze
 static bool s_ewmConfigLoaded = false;    // config file has been read
 static bool s_ewmOKeyWasDown = false;     // edge detection for O key
 
-static char s_ewmConfigPath[512] = {};
-
-static void EWM_BuildConfigPath()
-{
-    char dllPath[512];
-    HMODULE hMod = NULL;
-    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       (LPCSTR)EWM_BuildConfigPath, &hMod);
-    GetModuleFileNameA(hMod, dllPath, sizeof(dllPath));
-    char* lastSlash = strrchr(dllPath, '\\');
-    if (lastSlash) *(lastSlash + 1) = '\0';
-    snprintf(s_ewmConfigPath, sizeof(s_ewmConfigPath), "%sewm_config.txt", dllPath);
-}
-
+// v0.13.51: EWM toggle persistence moved to the shared Config INI.
+// Legacy ewm_config.txt (single "1"/"0" byte) is imported by Config::Load on
+// first run and deleted, so existing installs preserve their setting.
 static void EWM_LoadConfig()
 {
     if (s_ewmConfigLoaded) return;
     s_ewmConfigLoaded = true;
-    if (s_ewmConfigPath[0] == '\0') EWM_BuildConfigPath();
-    FILE* f = fopen(s_ewmConfigPath, "r");
-    if (f) {
-        char buf[16] = {};
-        fgets(buf, sizeof(buf), f);
-        fclose(f);
-        s_ewmEnabled = (buf[0] != '0');
-        Log::Battle("BattleTTS: [EWM] Config loaded: %s (enabled=%d)", s_ewmConfigPath, (int)s_ewmEnabled);
-    } else {
-        s_ewmEnabled = true;
-        FILE* fw = fopen(s_ewmConfigPath, "w");
-        if (fw) { fputs("1", fw); fclose(fw); }
-        Log::Battle("BattleTTS: [EWM] No config file, created with default ON: %s", s_ewmConfigPath);
-    }
+    Config::Load();
+    s_ewmEnabled = (Config::GetInt("ewm_enabled", 1) != 0);
+    Log::Battle("BattleTTS: [EWM] Config loaded: ewm_enabled=%d (from %s)",
+               (int)s_ewmEnabled, Config::GetPath());
 }
 
 static void EWM_SaveConfig()
 {
-    if (s_ewmConfigPath[0] == '\0') EWM_BuildConfigPath();
-    FILE* f = fopen(s_ewmConfigPath, "w");
-    if (f) { fputs(s_ewmEnabled ? "1" : "0", f); fclose(f); }
+    Config::SetInt("ewm_enabled", s_ewmEnabled ? 1 : 0);
 }
 
 static void EWM_PollToggle()
@@ -1024,6 +1004,144 @@ static void EWM_InstallHook()
     Log::Battle("BattleTTS: [EWM] ATB hook @ 0x%08X — %s (trampoline=0x%08X)",
                ATB_UPDATE_FUNC_ADDR, MH_StatusToString(st),
                (uint32_t)(uintptr_t)s_originalATBUpdate);
+}
+
+// ============================================================================
+// v0.13.55: Turn/action dispatch hook (sub_483470)
+// ============================================================================
+// sub_483470 at 0x00483470 is the engine's "process ready characters /
+// dispatch turns" function. Called every frame from the main battle loop at
+// 0x0047D7F1, it iterates entities and dispatches any whose ATB is at max
+// (queued earlier by sub_483EB0). Dispatching means:
+//   - Player character → set activeChar to 0-2, open command menu
+//   - Enemy → start their attack animation
+//
+// Previous versions of this fix layered an ATB cap + grace + cooldown to
+// prevent actions from firing during damage/TTS windows. That approach has
+// an unavoidable race: the mod thread polls every ~16 ms, but the game
+// thread runs the ATB hook + main battle loop every frame. When the mod
+// thread releases the cap, in the SAME game-thread tick the ATB function
+// can let an enemy top out, sub_483EB0 queues them, sub_483470 dispatches
+// them, and the attack begins — all before the mod thread polls again.
+// [0x01D27B00] (engine action-in-progress) is not a persistent "animation
+// playing" flag for fast actions; sub_47E080(5) only sets it briefly
+// inside sub_483EB0 during queuing.
+//
+// This hook is the clean intervention point. Returning early from
+// sub_483470 means no dispatch can happen, period — no enemy attack starts,
+// no command menu opens. The mod thread's decision takes effect on the
+// very next call to sub_483470 (next game frame), closing the race.
+//
+// Block conditions (OR'd):
+//   - damageOrActionActive — our existing signal bundle (damage TTS,
+//     HP pending, anim flags, grace period, post-action cooldown)
+//   - activeChar < 3 — player's command menu is open; nothing else should
+//     dispatch until they confirm (also stops queued enemy actions that
+//     slipped in from firing mid-decision)
+static const uint32_t PROCESS_READY_FUNC_ADDR = 0x00483470;
+typedef void (__cdecl *ProcessReadyFn)(void);
+static ProcessReadyFn s_originalProcessReady = nullptr;
+static bool s_processReadyHookInstalled = false;
+static volatile bool s_blockProcessReady = false;
+static volatile LONG s_processReadyCalls = 0;
+static volatile LONG s_processReadyBlocks = 0;
+static volatile LONG s_processReadyPasses = 0;
+static DWORD s_processReadyLogTick = 0;
+
+// v0.13.56: Second dispatch-layer hook on sub_482F80. In the main battle
+// loop, sub_483470 and sub_482F80 are called back-to-back under the same
+// engine gate ([0x01D27B00]==0 && running-flag==1). sub_483470 appears to
+// handle player-ATB-ready dispatch (opens command menus); sub_482F80
+// appears to handle the execution side (starts enemy animations, damage
+// impact, etc.). v0.13.55 blocked 6/6 sub_483470 calls during the bug
+// window yet the enemy attack still landed, which means sub_482F80 is
+// the path for enemy action execution. Hook both to close the gap.
+static const uint32_t ACTION_EXECUTE_FUNC_ADDR = 0x00482F80;
+typedef void (__cdecl *ActionExecuteFn)(void);
+static ActionExecuteFn s_originalActionExecute = nullptr;
+static bool s_actionExecuteHookInstalled = false;
+static volatile LONG s_actionExecuteCalls  = 0;
+static volatile LONG s_actionExecuteBlocks = 0;
+static volatile LONG s_actionExecutePasses = 0;
+
+static void __cdecl HookedProcessReady(void)
+{
+    InterlockedIncrement(&s_processReadyCalls);
+    if (s_blockProcessReady) {
+        InterlockedIncrement(&s_processReadyBlocks);
+        return;
+    }
+    InterlockedIncrement(&s_processReadyPasses);
+    if (s_originalProcessReady) {
+        s_originalProcessReady();
+    }
+}
+
+static void __cdecl HookedActionExecute(void)
+{
+    InterlockedIncrement(&s_actionExecuteCalls);
+    if (s_blockProcessReady) {
+        InterlockedIncrement(&s_actionExecuteBlocks);
+        return;
+    }
+    InterlockedIncrement(&s_actionExecutePasses);
+    if (s_originalActionExecute) {
+        s_originalActionExecute();
+    }
+}
+
+static void EWM_InstallProcessReadyHook()
+{
+    if (s_processReadyHookInstalled) return;
+    MH_STATUS st = MH_CreateHook(
+        (LPVOID)(uintptr_t)PROCESS_READY_FUNC_ADDR,
+        (LPVOID)HookedProcessReady,
+        (LPVOID*)&s_originalProcessReady);
+    if (st == MH_OK) {
+        st = MH_EnableHook((LPVOID)(uintptr_t)PROCESS_READY_FUNC_ADDR);
+    }
+    s_processReadyHookInstalled = (st == MH_OK);
+    Log::Battle("BattleTTS: [DISPATCH] sub_483470 hook @ 0x%08X — %s (trampoline=0x%08X)",
+               PROCESS_READY_FUNC_ADDR, MH_StatusToString(st),
+               (uint32_t)(uintptr_t)s_originalProcessReady);
+}
+
+static void EWM_InstallActionExecuteHook()
+{
+    if (s_actionExecuteHookInstalled) return;
+    MH_STATUS st = MH_CreateHook(
+        (LPVOID)(uintptr_t)ACTION_EXECUTE_FUNC_ADDR,
+        (LPVOID)HookedActionExecute,
+        (LPVOID*)&s_originalActionExecute);
+    if (st == MH_OK) {
+        st = MH_EnableHook((LPVOID)(uintptr_t)ACTION_EXECUTE_FUNC_ADDR);
+    }
+    s_actionExecuteHookInstalled = (st == MH_OK);
+    Log::Battle("BattleTTS: [DISPATCH] sub_482F80 hook @ 0x%08X — %s (trampoline=0x%08X)",
+               ACTION_EXECUTE_FUNC_ADDR, MH_StatusToString(st),
+               (uint32_t)(uintptr_t)s_originalActionExecute);
+}
+
+// Periodically log dispatch hook stats for BOTH hooks so we can distinguish
+// calls/blocks/passes and see which path actions are taking. Logs every
+// second whenever there's any activity at all (calls or block-flag).
+static void EWM_LogDispatchStats()
+{
+    DWORD now = GetTickCount();
+    if (now - s_processReadyLogTick < 1000) return;
+    s_processReadyLogTick = now;
+    LONG prCalls  = InterlockedExchange(&s_processReadyCalls, 0);
+    LONG prBlocks = InterlockedExchange(&s_processReadyBlocks, 0);
+    LONG prPasses = InterlockedExchange(&s_processReadyPasses, 0);
+    LONG aeCalls  = InterlockedExchange(&s_actionExecuteCalls, 0);
+    LONG aeBlocks = InterlockedExchange(&s_actionExecuteBlocks, 0);
+    LONG aePasses = InterlockedExchange(&s_actionExecutePasses, 0);
+    if (prCalls > 0 || aeCalls > 0 || s_blockProcessReady) {
+        Log::Battle("BattleTTS: [DISPATCH] sub_483470: calls=%ld blocks=%ld passes=%ld | sub_482F80: calls=%ld blocks=%ld passes=%ld | block-flag=%d",
+                   prCalls, prBlocks, prPasses,
+                   aeCalls, aeBlocks, aePasses,
+                   (int)s_blockProcessReady);
+    }
 }
 
 // ============================================================================
@@ -1281,10 +1399,247 @@ static void EWM_InstallFFNxGFHook(void)
 static uint8_t s_ewmLastActiveChar = 0xFF;  // track active_char_id changes for turn edge
 static bool s_ewmNewTurnGrace = false;       // v0.10.41: suppress phase-based release until non-executing phase seen
 
+// v0.13.53: Post-turn grace period. When a player's action completes and
+// activeChar transitions from 0-2 to 0xFF, hold the excludeSlot=0xFF cap for
+// this window so no entity (player OR enemy) can top out and fire in the
+// 1-2 frame race window before engine flags catch up. After the grace
+// expires the cap releases normally and whoever has the highest ATB gets
+// the next turn (engine-decided, as usual).
+static const DWORD EWM_POST_TURN_GRACE_MS = 1000;
+static uint8_t s_ewmPrevSeenActiveChar = 0xFF;
+static DWORD s_ewmPostTurnGraceEnd = 0;
+
+// v0.13.54: Post-action cooldown. The post-turn grace covers player-action
+// endings, but there's a second race: when something like a GF summon
+// completes, engine's [0x01D27B00] transitions 1→0, the mod thread releases
+// the cap, and in the SAME game-frame the ATB hook (uncapped) lets an enemy
+// sitting at 11999 top out, sub_483EB0 queues their action, and the engine
+// executes it before the mod thread polls again. We bridge that gap by
+// tracking the last time any damage/action signal was seen active and
+// holding the cap for this cooldown afterward.
+static const DWORD EWM_POST_ACTION_COOLDOWN_MS = 500;
+static DWORD s_ewmLastSignalTime = 0;
+
+// v0.13.57: Damage-anim transition diagnostic. Polls [0x01D280C0] (the
+// engine's damage animation counter) every mod frame. When it transitions
+// 0→1 (first damage animation starts), log a full state snapshot: all 8
+// entity ATB values, s_ewmShouldCap, activeChar, [0x01D27B00], and ms
+// elapsed since the last freeze-release. This tells us EXACTLY what state
+// the game was in at the instant a damage animation started — which is
+// the real "bug moment" we've been trying to localize.
+//
+// Also logs s_ewmShouldCap transitions and post-release ATB values for
+// 500ms to see whether any entity slipped past the freeze.
+static uint8_t s_diagPrevDamageAnim = 0;
+static uint32_t s_diagPrevActionInProgress = 0;
+static bool s_diagPrevShouldCap = false;
+static DWORD s_diagFreezeReleaseTime = 0;
+static int s_diagPostReleaseLogsRemaining = 0;
+
+// v0.13.58: Per-slot turn counter for comparing EWM-on vs EWM-off turn
+// ratios. Detects a turn start by watching each slot's ATB transition from
+// high (>10000) to low (<2000) — the engine resets an acting entity's
+// ATB to 0 at the start of its action. This detection is independent of
+// EWM state (works with or without the freeze sandwich), so the counts
+// are directly comparable across EWM-on/off battles against the same
+// enemy type. Counters reset on each battle start; a summary is logged
+// on battle end.
+static uint32_t s_prevSlotATB[BATTLE_TOTAL_SLOTS] = {};
+static int      s_slotTurnCount[BATTLE_TOTAL_SLOTS] = {};
+static bool     s_slotATBInit = false;
+static bool     s_turnCountPrevInBattle = false;
+
 static bool EWM_IsExecutingPhase(uint8_t phase)
 {
     return (phase == 14 || phase == 21 || phase == 23 || phase == 33 || phase == 34);
 }
+
+// v0.13.57: Build a compact ATB snapshot string for diagnostic logging.
+// Format: "s0=cur/max s1=cur/max ... s3=cur/max(HP=x)"
+static void EWM_FormatATBSnapshot(char* buf, int bufSize)
+{
+    int pos = 0;
+    pos += snprintf(buf + pos, bufSize - pos, "ATB=[");
+    for (int slot = 0; slot < BATTLE_TOTAL_SLOTS && pos < bufSize - 32; slot++) {
+        uint8_t* base = (uint8_t*)(BATTLE_ENTITY_ARRAY_BASE + slot * BATTLE_ENTITY_STRIDE);
+        __try {
+            if (slot < BATTLE_ALLY_SLOTS) {
+                uint16_t cur = *(uint16_t*)(base + BENT_CUR_ATB);
+                uint16_t max = *(uint16_t*)(base + BENT_MAX_ATB);
+                if (max > 0) {
+                    pos += snprintf(buf + pos, bufSize - pos, "s%d=%u/%u ",
+                                   slot, (unsigned)cur, (unsigned)max);
+                }
+            } else {
+                uint32_t cur = *(uint32_t*)(base + BENT_CUR_ATB);
+                uint32_t max = *(uint32_t*)(base + BENT_MAX_ATB);
+                uint32_t hp  = *(uint32_t*)(base + BENT_CUR_HP);
+                if (max > 0) {
+                    pos += snprintf(buf + pos, bufSize - pos, "s%d=%u/%u(hp%u) ",
+                                   slot, cur, max, hp);
+                }
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    pos += snprintf(buf + pos, bufSize - pos, "]");
+}
+
+// v0.13.57: Poll engine flags and ATB state every frame. Log on transitions
+// and during the 500 ms window after freeze release.
+static void EWM_PollDiagnostics(uint8_t activeChar)
+{
+    uint8_t  curDamageAnim = 0;
+    uint32_t curActionInProgress = 0;
+    __try { curDamageAnim = *(uint8_t*)0x01D280C0; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    __try { curActionInProgress = *(uint32_t*)0x01D27B00; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+
+    DWORD now = GetTickCount();
+
+    // -- [0x01D280C0] transitions (damage animation counter) --
+    if (curDamageAnim != s_diagPrevDamageAnim) {
+        char atbBuf[512] = {};
+        EWM_FormatATBSnapshot(atbBuf, sizeof(atbBuf));
+        DWORD msSinceRelease = s_diagFreezeReleaseTime ? (now - s_diagFreezeReleaseTime) : 0;
+        Log::Battle("BattleTTS: [DMG-DIAG] [0x01D280C0] %u->%u | activeChar=%d shouldCap=%d [0x01D27B00]=%u msSinceRelease=%u | %s",
+                   (unsigned)s_diagPrevDamageAnim, (unsigned)curDamageAnim,
+                   (int)activeChar, (int)s_ewmShouldCap,
+                   (unsigned)curActionInProgress,
+                   (unsigned)msSinceRelease, atbBuf);
+        s_diagPrevDamageAnim = curDamageAnim;
+    }
+
+    // -- [0x01D27B00] transitions (engine action-in-progress flag) --
+    if (curActionInProgress != s_diagPrevActionInProgress) {
+        Log::Battle("BattleTTS: [ACT-DIAG] [0x01D27B00] %u->%u | activeChar=%d shouldCap=%d engAnim=%u",
+                   (unsigned)s_diagPrevActionInProgress, (unsigned)curActionInProgress,
+                   (int)activeChar, (int)s_ewmShouldCap, (unsigned)curDamageAnim);
+        s_diagPrevActionInProgress = curActionInProgress;
+    }
+
+    // -- s_ewmShouldCap transitions (freeze state) --
+    if (s_ewmShouldCap != s_diagPrevShouldCap) {
+        char atbBuf[512] = {};
+        EWM_FormatATBSnapshot(atbBuf, sizeof(atbBuf));
+        Log::Battle("BattleTTS: [FRZ-DIAG] shouldCap %d->%d | activeChar=%d engAnim=%u [0x01D27B00]=%u excludeSlot=%u | %s",
+                   (int)s_diagPrevShouldCap, (int)s_ewmShouldCap,
+                   (int)activeChar, (unsigned)curDamageAnim,
+                   (unsigned)curActionInProgress, (unsigned)s_ewmCapExcludeSlot,
+                   atbBuf);
+        if (s_diagPrevShouldCap && !s_ewmShouldCap) {
+            // Freeze just released — start the post-release trace window.
+            s_diagFreezeReleaseTime = now;
+            s_diagPostReleaseLogsRemaining = 30;  // ~500 ms at 60 Hz polling
+        }
+        s_diagPrevShouldCap = s_ewmShouldCap;
+    }
+
+    // -- Post-release trace window: log every frame for up to ~500 ms --
+    if (s_diagPostReleaseLogsRemaining > 0 && !s_ewmShouldCap) {
+        char atbBuf[512] = {};
+        EWM_FormatATBSnapshot(atbBuf, sizeof(atbBuf));
+        DWORD ms = now - s_diagFreezeReleaseTime;
+        Log::Battle("BattleTTS: [POST-REL] ms=%u activeChar=%d engAnim=%u [0x01D27B00]=%u | %s",
+                   (unsigned)ms, (int)activeChar,
+                   (unsigned)curDamageAnim, (unsigned)curActionInProgress, atbBuf);
+        s_diagPostReleaseLogsRemaining--;
+    }
+}
+
+// v0.13.59: Per-slot turn counter. Runs from BattleTTS::Update() unconditionally
+// (not gated behind EWM_UpdateBattle's early returns) so ratios are directly
+// comparable between EWM-on and EWM-off battles. Detects an entity's turn by
+// watching for a high→low ATB transition (engine resets acting entity's ATB
+// to 0 at action start). Logs each turn and a battle summary on exit.
+//
+// Reset and summary are driven by OnBattleEnter()/OnBattleExit() via
+// EWM_ResetTurnCount() and EWM_LogTurnCountSummary(), which see the s_inBattle
+// transitions reliably regardless of EWM state or init-announce progress.
+
+// Reset counters at battle entry. Called from OnBattleEnter().
+static void EWM_ResetTurnCount()
+{
+    for (int i = 0; i < BATTLE_TOTAL_SLOTS; i++) {
+        s_slotTurnCount[i] = 0;
+        s_prevSlotATB[i] = 0;
+    }
+    s_slotATBInit = false;
+    s_turnCountPrevInBattle = true;
+    Log::Battle("BattleTTS: [TURN-COUNT] === Battle START (EWM=%s) — counters reset ===",
+               s_ewmEnabled ? "ON" : "OFF");
+}
+
+// Log summary at battle exit. Called from OnBattleExit().
+static void EWM_LogTurnCountSummary()
+{
+    if (!s_turnCountPrevInBattle) return;  // nothing to summarize
+    int partyTotal = s_slotTurnCount[0] + s_slotTurnCount[1] + s_slotTurnCount[2];
+    int enemyTotal = 0;
+    for (int i = BATTLE_ALLY_SLOTS; i < BATTLE_TOTAL_SLOTS; i++) {
+        enemyTotal += s_slotTurnCount[i];
+    }
+    Log::Battle("BattleTTS: [TURN-COUNT] === Battle END (EWM=%s) — summary ===",
+               s_ewmEnabled ? "ON" : "OFF");
+    Log::Battle("BattleTTS: [TURN-COUNT]   Party:   s0=%d s1=%d s2=%d (total=%d)",
+               s_slotTurnCount[0], s_slotTurnCount[1], s_slotTurnCount[2], partyTotal);
+    // v0.13.60 bug fix: BATTLE_TOTAL_SLOTS=7, so enemy slots are s3..s6 (4 slots).
+    // The old format string included s7 which was an out-of-bounds read.
+    Log::Battle("BattleTTS: [TURN-COUNT]   Enemies: s3=%d s4=%d s5=%d s6=%d (total=%d)",
+               s_slotTurnCount[3], s_slotTurnCount[4],
+               s_slotTurnCount[5], s_slotTurnCount[6], enemyTotal);
+    if (enemyTotal > 0) {
+        int ratio_x100 = (partyTotal * 100) / enemyTotal;
+        Log::Battle("BattleTTS: [TURN-COUNT]   Ratio party:enemy = %d.%02d:1 (%d vs %d)",
+                   ratio_x100 / 100, ratio_x100 % 100, partyTotal, enemyTotal);
+    } else {
+        Log::Battle("BattleTTS: [TURN-COUNT]   Ratio party:enemy = N/A (no enemy turns observed)");
+    }
+    s_turnCountPrevInBattle = false;
+}
+
+// Per-frame poll. Called from BattleTTS::Update() while s_inBattle is true.
+// Independent of EWM state — counts are apples-to-apples comparable across
+// EWM-on and EWM-off battles.
+static void EWM_TrackTurnCount()
+{
+    if (!s_inBattle) return;  // defensive; the caller already gates on s_inBattle
+
+    // Sample ATB for each slot and detect high→low transitions.
+    for (int slot = 0; slot < BATTLE_TOTAL_SLOTS; slot++) {
+        uint32_t curATB = 0;
+        uint32_t maxATB = 0;
+        uint8_t* base = (uint8_t*)(BATTLE_ENTITY_ARRAY_BASE + slot * BATTLE_ENTITY_STRIDE);
+        __try {
+            if (slot < BATTLE_ALLY_SLOTS) {
+                curATB = *(uint16_t*)(base + BENT_CUR_ATB);
+                maxATB = *(uint16_t*)(base + BENT_MAX_ATB);
+            } else {
+                curATB = *(uint32_t*)(base + BENT_CUR_ATB);
+                maxATB = *(uint32_t*)(base + BENT_MAX_ATB);
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {
+            continue;
+        }
+        // Skip empty/inactive slots
+        if (maxATB == 0) continue;
+
+        // Detect action start: ATB was high (>10000), now low (<2000)
+        if (s_slotATBInit && s_prevSlotATB[slot] > 10000 && curATB < 2000) {
+            s_slotTurnCount[slot]++;
+            int partyTotal = s_slotTurnCount[0] + s_slotTurnCount[1] + s_slotTurnCount[2];
+            int enemyTotal = 0;
+            for (int i = BATTLE_ALLY_SLOTS; i < BATTLE_TOTAL_SLOTS; i++) {
+                enemyTotal += s_slotTurnCount[i];
+            }
+            Log::Battle("BattleTTS: [TURN-COUNT] slot=%d turn#%d (ATB %u→%u) | running: party=%d enemy=%d",
+                       slot, s_slotTurnCount[slot],
+                       s_prevSlotATB[slot], curATB,
+                       partyTotal, enemyTotal);
+        }
+        s_prevSlotATB[slot] = curATB;
+    }
+    s_slotATBInit = true;
+}
+
 
 // GF loading diagnostic (v0.10.57): logs ATB values for all slots while cap
 // is active. Tells us whether GF charge gauge uses entity+0x0C (same as ATB)
@@ -1351,7 +1706,115 @@ static void EWM_UpdateBattle()
     if (!s_pActiveCharId) return;
     uint8_t activeChar = 0xFF;
     __try { activeChar = *s_pActiveCharId; } __except(EXCEPTION_EXECUTE_HANDLER) { return; }
-    
+
+    // v0.13.57: Run diagnostic poll every frame. Logs on transitions and
+    // during post-freeze-release windows. Pure observation — no side effects
+    // on game state or EWM decisions.
+    EWM_PollDiagnostics(activeChar);
+
+    // v0.13.51: Damage TTS hold — release state machine.
+    // FlushHPAnnouncements raises s_ewmHoldForDamageTTS when it announces damage.
+    // We release when SAPI reports the voice(s) are no longer speaking. To avoid
+    // releasing before SAPI has started (its queue latency after Speak()), we
+    // require s_ewmDamageTTSStarted to be set first (meaning we observed
+    // SPRS_IS_SPEAKING at least once). Two escape hatches: max-hold timeout
+    // and start-never-observed timeout (for super-short messages or speak
+    // failures).
+    if (s_ewmHoldForDamageTTS) {
+        DWORD elapsed = GetTickCount() - s_ewmDamageTTSStartTick;
+        bool speaking = ScreenReader::IsSpeaking();
+        if (speaking) s_ewmDamageTTSStarted = true;
+
+        if (elapsed >= EWM_DAMAGE_TTS_MAX_MS) {
+            s_ewmHoldForDamageTTS = false;
+            Log::Battle("BattleTTS: [EWM] Damage TTS hold released (max timeout %u ms)",
+                       (unsigned)elapsed);
+        } else if (s_ewmDamageTTSStarted && !speaking) {
+            s_ewmHoldForDamageTTS = false;
+            Log::Battle("BattleTTS: [EWM] Damage TTS hold released (speech done after %u ms)",
+                       (unsigned)elapsed);
+        } else if (!s_ewmDamageTTSStarted && elapsed >= EWM_DAMAGE_TTS_START_TIMEOUT_MS) {
+            s_ewmHoldForDamageTTS = false;
+            Log::Battle("BattleTTS: [EWM] Damage TTS hold released (speech never observed after %u ms)",
+                       (unsigned)elapsed);
+        }
+    }
+
+    // v0.13.52 / v0.13.53 / v0.13.54: Cap during any damage/action window,
+    // during a post-turn grace period, AND for a brief cooldown after the
+    // last signal clears. Without the cooldown, there's a game-thread frame
+    // race at the MOMENT the cap releases: mod thread sees all signals clear
+    // and drops the cap, but in the same game-thread tick an enemy sitting
+    // at 11999 tops out, sub_483EB0 queues their action, the engine executes
+    // it, and by the time the mod thread polls again the damage has already
+    // landed. The cooldown extends cap-engaged by EWM_POST_ACTION_COOLDOWN_MS
+    // after the last anyActiveNow=true frame, giving us several poll cycles
+    // to observe any newly-queued action and re-engage before execution.
+    //
+    // Signals checked:
+    //   s_ewmHoldForDamageTTS — our SAPI damage speech hold flag
+    //   s_anyHpPending        — HP deltas detected, awaiting flush
+    //   s_damageAnimWasActive — our tracking of the damage animation flag
+    //   [0x01D280C0] != 0     — engine's damage animation flag
+    //   [0x01D27B00] != 0     — engine's "action in progress" flag
+    //   post-turn grace       — 1s window after a player action ends
+    //   post-action cooldown  — 500ms window after the last signal cleared
+    if (s_ewmPrevSeenActiveChar < 3 && activeChar == 0xFF) {
+        // Player's turn just ended — open the grace window.
+        s_ewmPostTurnGraceEnd = GetTickCount() + EWM_POST_TURN_GRACE_MS;
+        Log::Battle("BattleTTS: [EWM] Post-turn grace started (%ums) prevChar=%u",
+                   (unsigned)EWM_POST_TURN_GRACE_MS, (unsigned)s_ewmPrevSeenActiveChar);
+    }
+    s_ewmPrevSeenActiveChar = activeChar;
+    bool postTurnGraceActive = (GetTickCount() < s_ewmPostTurnGraceEnd);
+
+    uint8_t  engineDamageAnim = 0;
+    uint32_t engineActionInProgress = 0;
+    __try { engineDamageAnim = *(uint8_t*)0x01D280C0; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    __try { engineActionInProgress = *(uint32_t*)0x01D27B00; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    bool anyActiveNow = s_ewmHoldForDamageTTS || s_anyHpPending ||
+                        s_damageAnimWasActive ||
+                        (engineDamageAnim != 0) ||
+                        (engineActionInProgress != 0);
+
+    // v0.13.54: Track last-active time for the post-action cooldown.
+    DWORD nowTick = GetTickCount();
+    if (anyActiveNow) {
+        s_ewmLastSignalTime = nowTick;
+    }
+    bool postActionCooldown = (s_ewmLastSignalTime != 0) &&
+                              (nowTick - s_ewmLastSignalTime < EWM_POST_ACTION_COOLDOWN_MS);
+
+    bool damageOrActionActive = postTurnGraceActive || anyActiveNow || postActionCooldown;
+
+    // v0.13.55: Update dispatch-block flag. HookedProcessReady reads this
+    // on the game thread and returns early when set, preventing sub_483470
+    // from dispatching new turns / enemy actions. Matches the cap conditions
+    // plus "player is deciding" — anything the cap was supposed to block
+    // at the queuing layer, this blocks at the dispatch layer as a backstop.
+    s_blockProcessReady = damageOrActionActive || (activeChar < 3);
+
+    // If any transition-hold signal is active AND nobody is deciding yet,
+    // force the cap on EVERY slot (excludeSlot=0xFF). If a player was already
+    // deciding (activeChar < 3) the command menu is already visible and the
+    // normal cap logic below handles the rest — no need for a full-everyone
+    // cap that would demote the active character's ATB.
+    if (damageOrActionActive && activeChar == 0xFF) {
+        s_ewmCapGF = true;
+        EWM_ClampGFState();
+        s_ewmCapExcludeSlot = 0xFF;
+        s_ewmShouldCap = true;
+        if (!s_ewmFreezing) {
+            s_ewmFreezing = true;
+            Log::Battle("BattleTTS: [EWM] ATB capped during transition (grace=%d cooldown=%d tts=%d hp=%d anim=%d engAnim=%d engAct=%u)",
+                       (int)postTurnGraceActive, (int)postActionCooldown,
+                       (int)s_ewmHoldForDamageTTS, (int)s_anyHpPending,
+                       (int)s_damageAnimWasActive,
+                       (int)engineDamageAnim, (unsigned)engineActionInProgress);
+        }
+        return;  // skip normal logic — hold dominates
+    }
+
     // v0.10.75: GF cap stays active during turn transitions (activeChar==0xFF)
     // as long as a GF is loading. Only release when an action is executing.
     // This closes the gap where the GF loading counter crossed max during
@@ -1368,8 +1831,32 @@ static void EWM_UpdateBattle()
         bool newTurnEdge = (activeChar != s_ewmLastActiveChar);
         s_ewmLastActiveChar = activeChar;
         
-        uint8_t menuPhase = 0;
-        __try { menuPhase = *(uint8_t*)0x01D768D0; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        uint32_t menuPhaseDword = 0;
+        __try { menuPhaseDword = *(uint32_t*)0x01D768D0; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        // v0.13.51 bug fix #2: 0x01D768D0 is dual-purpose — it holds a small
+        // phase integer (0-43) on the command menu, but when a submenu opens
+        // the engine writes a FUNCTION POINTER here (0x004XXXXX range, i.e.
+        // >= 0x00400000). The submenu per-frame handler at 0x4FDD90 actually
+        // calls `call dword ptr [0x1d768d0]` every frame, treating the value
+        // as a code pointer. Reading a single byte from this address can
+        // coincidentally match an executing-phase value (14/21/23/33/34)
+        // during submenu navigation, which was releasing the ATB cap and
+        // letting enemies attack while the player navigated a submenu.
+        // Treat any dword >= 0x00400000 as "submenu open == definitely deciding",
+        // matching the same threshold used in battle_tts_menu.inl.
+        //
+        // v0.13.51 hotfix (post-BAT): The dword check alone is not enough.
+        // Draw is a multi-phase submenu where 0x01D768D0 holds PLAIN PHASE
+        // INTEGERS (14 = spell list, 21/23 = transitions, 25 = Stock/Cast)
+        // during navigation — no function pointer gets written. Phases 14/21/23
+        // are in EWM's "executing" list (correct for Attack, wrong for Draw),
+        // so the cap was released mid-submenu and enemies got free attacks.
+        // Fix: ALSO consult s_inSubmenu (maintained in menu.inl, declared in
+        // hp.inl) — it's the authoritative "player is in a submenu" flag,
+        // including Draw's phase-transition exit suppression. If it's true,
+        // we treat the phase as deciding no matter what the byte says.
+        bool submenuOpen = (menuPhaseDword >= 0x00400000) || s_inSubmenu;
+        uint8_t menuPhase = (uint8_t)(menuPhaseDword & 0xFF);
         
         if (newTurnEdge) {
             // New turn — ALWAYS cap, regardless of menuPhase.
@@ -1383,8 +1870,11 @@ static void EWM_UpdateBattle()
             Log::Battle("BattleTTS: [EWM] ATB capped (new turn, char=%d, phase=%u)",
                        (int)activeChar, (unsigned)menuPhase);
         } else {
-            // Same turn continuing — use menuPhase to decide cap vs release
-            if (!EWM_IsExecutingPhase(menuPhase)) {
+            // Same turn continuing — use menuPhase to decide cap vs release.
+            // v0.13.51: `submenuOpen` from the dword check forces the "deciding"
+            // path even if the low byte of the function pointer looks like an
+            // executing phase.
+            if (submenuOpen || !EWM_IsExecutingPhase(menuPhase)) {
                 // Player is deciding (command menu, sub-menu, target select)
                 if (s_ewmNewTurnGrace) {
                     // Grace period satisfied — we've seen a non-executing phase,

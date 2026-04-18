@@ -9,8 +9,8 @@
 // FF8 Original PC Accessibility Mod version
 // Increment on every build change
 // ================================================================
-#define FF8OPC_VERSION "0.13.45"  // Source split: battle_tts_screenshot.inl + battle_tts_victory.inl extracted from battle_tts.cpp
-#define FF8OPC_VERSION_DATE "2026-04-12"
+#define FF8OPC_VERSION "0.13.61"  // GitHub catch-up: sessions 65–76 batch push, baseline for session 77 work
+#define FF8OPC_VERSION_DATE "2026-04-17"
 
 // ============================================================================
 // FF8 Runtime Address Resolution
@@ -19,6 +19,13 @@
 // ============================================================================
 
 #include "ff8_addresses.h"
+
+// ============================================================================
+// Persistent settings (v0.13.51)
+// Back-end for SAPI voice/rate/volume, EWM toggle, BGM volume, etc.
+// ============================================================================
+
+#include "config.h"
 
 // ============================================================================
 // Screen Reader Interface (NVDA direct + SAPI fallback)
@@ -44,6 +51,10 @@ bool Output(const char* text, bool interrupt = true);
 
 // Silence current speech
 bool Silence();
+
+// v0.13.51: Returns true while SAPI (voice 1 or voice 2) is actively rendering
+// audio. Used by BattleTTS EWM to hold ATB until damage TTS finishes.
+bool IsSpeaking();
 
 // Get detected screen reader name (empty if none)
 std::string GetScreenReaderName();

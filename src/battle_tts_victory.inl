@@ -41,8 +41,21 @@ static bool s_expTextCaptured[3] = {};        // which characters have captured 
 static bool s_itemsPhaseAnnounced = false;
 static bool s_victoryNoItems = false;  // v0.13.30: textID=28 "Couldn't find items" vs textID=21
 
+// v0.13.46: Track announced item IDs for multi-item victory pages
+static uint16_t s_announcedItemIds[8] = {};
+static int s_announcedItemCount = 0;
+
 // GF phase state
 static bool s_gfAPAnnounced = false;
+
+// v0.13.46: Naming bypass state for battle-drawn GFs
+static bool s_namingBypassActive = false;
+static bool s_namingBypassAnnounced = false;
+static bool s_namingPatchApplied = false;
+static uint8_t s_namingOrigBytes1[9] = {};  // stores 9 bytes of original MOV instruction
+static uint8_t s_namingOrigBytes2[2] = {};  // unused, kept for compat
+static const uint32_t NAMING_PATCH_ADDR1 = 0x00470AB2;  // THE mode-11 write instruction
+static const uint32_t NAMING_PATCH_ADDR2 = 0x00470A72;  // unused, kept for compat
 
 // v0.13.30: ABILITY + GF_LEVELUP phase state and entity name capture
 static bool s_abilityAnnounced   = false;
@@ -146,13 +159,19 @@ static void DecodeFF8TextPreview(const uint8_t* src, char* dst, int maxOut)
             }
         }
         else if (b >= 0x79) {
-            // v0.13.35: Compressed token lookup
+            // v0.13.46: Complete compressed token table from sysfnt.bin.
+            // Field dialog bytes 0xE8-0xFF = sysfnt bytes 0xC8-0xDF.
+            // Previous table had only 6 entries with 2 errors (0xF9, 0xFB).
             static const struct { uint8_t tok; const char* s; } TOKENS[] = {
-                { 0xE9, "e " }, { 0xEA, "ne" }, { 0xEB, "to" }, { 0xF6, " w" },
-                { 0xF9, "i"  }, { 0xFB, "f"  },
+                { 0xE8, "in" }, { 0xE9, "e " }, { 0xEA, "ne" }, { 0xEB, "to" },
+                { 0xEC, "re" }, { 0xED, "HP" }, { 0xEE, "l " }, { 0xEF, "ll" },
+                { 0xF0, "GF" }, { 0xF1, "nt" }, { 0xF2, "il" }, { 0xF3, "o " },
+                { 0xF4, "ef" }, { 0xF5, "on" }, { 0xF6, " w" }, { 0xF7, " r" },
+                { 0xF8, "wi" }, { 0xF9, "fi" }, { 0xFA, "EC" }, { 0xFB, "s " },
+                { 0xFC, "ar" }, { 0xFD, "FE" }, { 0xFE, " S" }, { 0xFF, "ag" },
             };
             bool found = false;
-            for (int t = 0; t < 6; t++) {
+            for (int t = 0; t < 24; t++) {
                 if (TOKENS[t].tok == b) {
                     for (const char* p = TOKENS[t].s; *p && out < maxOut - 1; p++)
                         dst[out++] = *p;
@@ -481,6 +500,11 @@ static void StripDescriptionTokens(const char* src, char* dst, int maxOut)
 }
 
 // v0.13.30: Hook for sub_47EA30 — entity name retrieval
+// v0.13.47: Per-a1 dedup logging — only log first occurrence of each (a1,text) pair
+static const int BT5_DEDUP_MAX = 16;
+static struct { uint32_t a1; char text[64]; } s_bt5Dedup[BT5_DEDUP_MAX] = {};
+static int s_bt5DedupCount = 0;
+
 static uint32_t __cdecl HookedBtCandidate5(uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4,
                                             uint32_t a5, uint32_t a6, uint32_t a7, uint32_t a8)
 {
@@ -497,11 +521,31 @@ static uint32_t __cdecl HookedBtCandidate5(uint32_t a1, uint32_t a2, uint32_t a3
             if (decoded[0] == '\0')
                 DecodeFF8TextPreview((const uint8_t*)result, decoded, sizeof(decoded));
             if (decoded[0] != '\0' && decoded[0] != '{') {
-                Log::Battle("BattleTTS: [BT5-EA30] mode=%u a1=%u -> \"%s\"", mode, a1, decoded);
+                // v0.13.47: Only log first occurrence of each (a1,text) pair
+                bool bt5AlreadySeen = false;
+                for (int di = 0; di < s_bt5DedupCount; di++) {
+                    if (s_bt5Dedup[di].a1 == a1 && strcmp(s_bt5Dedup[di].text, decoded) == 0) {
+                        bt5AlreadySeen = true;
+                        break;
+                    }
+                }
+                if (!bt5AlreadySeen) {
+                    if (s_bt5DedupCount < BT5_DEDUP_MAX) {
+                        s_bt5Dedup[s_bt5DedupCount].a1 = a1;
+                        strncpy(s_bt5Dedup[s_bt5DedupCount].text, decoded, 63);
+                        s_bt5Dedup[s_bt5DedupCount].text[63] = '\0';
+                        s_bt5DedupCount++;
+                    }
+                    Log::Battle("BattleTTS: [BT5-EA30] mode=%u a1=%u -> \"%s\"", mode, a1, decoded);
+                }
                 if (mode == 4) {
                     // v0.13.32: Announce item name immediately when VP_ITEMS first fires.
                     if (s_victoryPhase == VP_ITEMS && !s_itemsPhaseAnnounced) {
                     s_itemsPhaseAnnounced = true;
+                    // Record this item as announced
+                    if (s_announcedItemCount < 8) {
+                        s_announcedItemIds[s_announcedItemCount++] = (uint16_t)a1;
+                    }
 
                     // v0.13.40: Read item quantity from victory state drop list.
                     int itemQty = 0;
@@ -553,6 +597,59 @@ static uint32_t __cdecl HookedBtCandidate5(uint32_t a1, uint32_t a2, uint32_t a3
                     ScreenReader::Speak(buf, false);
                     Log::Battle("BattleTTS: [VICTORY-TTS] Item (EA30): %s", buf);
                 }
+                    // v0.13.46: Handle subsequent item pages (textID=6 triggers new a1 values)
+                    else if (s_victoryPhase == VP_ITEMS && s_itemsPhaseAnnounced) {
+                        // Check if this a1 is already announced
+                        bool alreadyAnnounced = false;
+                        for (int ai = 0; ai < s_announcedItemCount; ai++) {
+                            if (s_announcedItemIds[ai] == (uint16_t)a1) {
+                                alreadyAnnounced = true;
+                                break;
+                            }
+                        }
+                        if (!alreadyAnnounced && a1 != 0) {
+                            // Record this item
+                            if (s_announcedItemCount < 8) {
+                                s_announcedItemIds[s_announcedItemCount++] = (uint16_t)a1;
+                            }
+                            // Look up quantity from ITEM-DROP list
+                            int itemQty = 1;
+                            __try {
+                                uint8_t* dropList = *(uint8_t**)(0x01A78C88 + 0x50);
+                                if (dropList) {
+                                    for (int di = 0; di < 8; di++) {
+                                        uint16_t entryWord = *(uint16_t*)(dropList + di * 4);
+                                        uint8_t entryQty = *(uint8_t*)(dropList + di * 4 + 2);
+                                        if (entryWord == 0) break;
+                                        int entryId = (entryWord >= 0x100) ? (entryWord & 0xFF) : entryWord;
+                                        if (entryId == (int)a1 && entryQty > 0) {
+                                            itemQty = entryQty;
+                                            break;
+                                        }
+                                    }
+                                }
+                            } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                            // Fetch description
+                            char descRaw2[128] = {};
+                            char descClean2[128] = {};
+                            if (s_origBt6) {
+                                __try {
+                                    uint32_t descResult = s_origBt6(a1, 0, 0, 0, 0, 0, 0, 0);
+                                    if (descResult >= 0x00400000 && descResult < 0x02800000) {
+                                        DecodeFF8TextPreview((const uint8_t*)descResult, descRaw2, sizeof(descRaw2));
+                                        StripDescriptionTokens(descRaw2, descClean2, sizeof(descClean2));
+                                    }
+                                } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                            }
+                            char buf2[256];
+                            if (descClean2[0])
+                                snprintf(buf2, sizeof(buf2), "Received %d %s. Description: %s", itemQty, decoded, descClean2);
+                            else
+                                snprintf(buf2, sizeof(buf2), "Received %d %s.", itemQty, decoded);
+                            ScreenReader::Speak(buf2, false);
+                            Log::Battle("BattleTTS: [VICTORY-TTS] Item page (EA30): %s", buf2);
+                        }
+                    }
                     // Capture during ABILITY/GF_LEVELUP phase
                     if (s_entityNameCaptureActive && s_entityNameCaptureCount < 2) {
                         int captureIdx = s_entityNameCaptureCount;
@@ -570,6 +667,11 @@ static uint32_t __cdecl HookedBtCandidate5(uint32_t a1, uint32_t a2, uint32_t a3
 }
 
 // v0.13.31: Hook for sub_47EA90 — sibling name retrieval
+// v0.13.47: Per-a1 dedup logging — only log first occurrence of each (a1,text) pair
+static const int BT6_DEDUP_MAX = 16;
+static struct { uint32_t a1; char text[64]; } s_bt6Dedup[BT6_DEDUP_MAX] = {};
+static int s_bt6DedupCount = 0;
+
 static uint32_t __cdecl HookedBtCandidate6(uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4,
                                             uint32_t a5, uint32_t a6, uint32_t a7, uint32_t a8)
 {
@@ -584,7 +686,23 @@ static uint32_t __cdecl HookedBtCandidate6(uint32_t a1, uint32_t a2, uint32_t a3
             char decoded[64] = {};
             DecodeFF8TextPreview((const uint8_t*)result, decoded, sizeof(decoded));
             if (decoded[0] != '\0' && decoded[0] != '{') {
-                Log::Battle("BattleTTS: [BT6-EA90] mode=%u a1=%u -> \"%s\"", mode, a1, decoded);
+                // v0.13.47: Only log first occurrence of each (a1,text) pair
+                bool bt6AlreadySeen = false;
+                for (int di = 0; di < s_bt6DedupCount; di++) {
+                    if (s_bt6Dedup[di].a1 == a1 && strcmp(s_bt6Dedup[di].text, decoded) == 0) {
+                        bt6AlreadySeen = true;
+                        break;
+                    }
+                }
+                if (!bt6AlreadySeen) {
+                    if (s_bt6DedupCount < BT6_DEDUP_MAX) {
+                        s_bt6Dedup[s_bt6DedupCount].a1 = a1;
+                        strncpy(s_bt6Dedup[s_bt6DedupCount].text, decoded, 63);
+                        s_bt6Dedup[s_bt6DedupCount].text[63] = '\0';
+                        s_bt6DedupCount++;
+                    }
+                    Log::Battle("BattleTTS: [BT6-EA90] mode=%u a1=%u -> \"%s\"", mode, a1, decoded);
+                }
                 if (mode == 4 && s_entityNameCaptureActive && s_entityNameCaptureCount < 2) {
                     int captureIdx = s_entityNameCaptureCount;
                     strncpy(s_entityNameCaptures[captureIdx], decoded, 63);
@@ -1008,6 +1126,8 @@ static void ResetVictoryTTS()
     s_expPhase1Time = 0;
     s_expPollLastLog = 0;
     s_itemsPhaseAnnounced = false;
+    s_announcedItemCount = 0;
+    memset(s_announcedItemIds, 0, sizeof(s_announcedItemIds));
     s_gfAPAnnounced = false;
     s_victoryNoItems = false;
     s_abilityAnnounced = false;
@@ -1021,6 +1141,15 @@ static void ResetVictoryTTS()
     s_gfNameCaptured = false;
     s_abilityNameCaptured = false;
     s_lastAnnouncedVictoryGFName[0] = '\0';
+    s_namingBypassActive = false;
+    s_namingBypassAnnounced = false;
+    // Note: s_namingPatchApplied is NOT reset here — it's managed by the
+    // patch/restore logic in the thread loop. Resetting it would leak a patch.
+    // v0.13.47: Reset BT5/BT6 dedup trackers
+    s_bt5DedupCount = 0;
+    memset(s_bt5Dedup, 0, sizeof(s_bt5Dedup));
+    s_bt6DedupCount = 0;
+    memset(s_bt6Dedup, 0, sizeof(s_bt6Dedup));
     for (int i = 0; i < 3; i++) {
         s_capturedExpText[i][0] = '\0';
         s_expTextCaptured[i] = false;
@@ -1104,10 +1233,140 @@ static DWORD WINAPI VictoryScreenThreadFunc(LPVOID)
             if (prevMode == 4 && mode != 4) {
                 ResetVictoryTTS();
             }
+            
+            // v0.13.46: Auto-bypass naming screen for battle-drawn GFs.
+            // When a GF is drawn during battle, the naming screen fires as mode 11
+            // directly from the battle system — NOT through the MENUNAME field opcode.
+            // Strategy: detect new GF during victory (mode 4), then continuously
+            // clear the naming flag every frame so the naming screen never opens.
+            // Also clear when mode 11 fires as a safety net.
+            
+            if (mode == 4 && prevMode != 4) {
+                // Reset bypass state on victory entry
+                s_namingBypassActive = false;
+                s_namingBypassAnnounced = false;
+                // Check if a new GF was acquired during this battle
+                if (s_preBattleGFSnapValid) {
+                    __try {
+                        for (int g = 0; g < 16; g++) {
+                            uint8_t preBattleExists = s_preBattleGFStructs[g][0x11];
+                            uint8_t* gfNow = (uint8_t*)(SAVEMAP_GF_BASE + g * SAVEMAP_GF_STRIDE);
+                            uint8_t nowExists = gfNow[0x11];
+                            if (preBattleExists == 0 && nowExists != 0) {
+                                s_namingBypassActive = true;
+                                Log::Battle("BattleTTS: [NAME-BYPASS] New GF detected (idx=%d), bypass armed", g);
+                                break;
+                            }
+                        }
+                    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                }
+            }
+            
+            // Mode 11 fallback: if the naming screen still appears despite flag clearing,
+            // log it for diagnostic purposes.
+            if (mode == 11 && (prevMode == 4 || prevMode == 100 || prevMode == 5)) {
+                Log::Battle("BattleTTS: [NAME-BYPASS] WARNING: Mode 11 still appeared despite flag clearing!");
+                if (!s_namingBypassAnnounced) {
+                    s_namingBypassAnnounced = true;
+                    ScreenReader::Speak("Naming screen appeared.", true);
+                }
+            }
+            
+            // Deactivate bypass when we leave victory/naming (mode 4→1 or 11→1)
+            if (s_namingBypassActive && (prevMode == 11 || prevMode == 4) && mode == 1) {
+                // Announce AFTER victory sequence completes
+                if (!s_namingBypassAnnounced && s_preBattleGFSnapValid) {
+                    s_namingBypassAnnounced = true;
+                    static const char* GF_NM2[] = {
+                        "Quezacotl", "Shiva", "Ifrit", "Siren", "Brothers", "Diablos",
+                        "Carbuncle", "Leviathan", "Pandemona", "Cerberus", "Alexander",
+                        "Doomtrain", "Bahamut", "Cactuar", "Tonberry", "Eden"
+                    };
+                    for (int g = 0; g < 16; g++) {
+                        uint8_t pre = s_preBattleGFStructs[g][0x11];
+                        uint8_t* gfNow = (uint8_t*)(SAVEMAP_GF_BASE + g * SAVEMAP_GF_STRIDE);
+                        if (pre == 0 && gfNow[0x11] != 0) {
+                            char gfName[64] = {};
+                            DecodeFF8String(gfNow, gfName, sizeof(gfName));
+                            if (gfName[0] == '\0') strncpy(gfName, GF_NM2[g], 63);
+                            char buf3[128];
+                            snprintf(buf3, sizeof(buf3), "GF %s acquired.", gfName);
+                            ScreenReader::Speak(buf3, false);
+                            Log::Battle("BattleTTS: [NAME-BYPASS] %s (idx=%d)", buf3, g);
+                        }
+                    }
+                }
+                s_namingBypassActive = false;
+                Log::Battle("BattleTTS: [NAME-BYPASS] Bypass deactivated (mode %u->%u)", prevMode, mode);
+            }
         }
         
         // F12 capture
         bool f12Down = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
+        
+        // v0.13.46: Naming bypass via CODE PATCH.
+        // Change the immediate value in the ONLY instruction that writes mode=11:
+        //   0x00470AB2: mov word ptr [0x1cd8fc6], 0xb
+        //   Encoding: 66 C7 05 [C6 8F CD 01] [0B] 00
+        //   Patch byte at 0x00470AB9 from 0x0B to 0x01 (mode=field instead of naming)
+        // This preserves the full control flow — mode transitions from 4 to 1 (field)
+        // instead of 4 to 11 (naming screen).
+        static const uint32_t MODE11_PATCH_BYTE = 0x00470AB9;  // the 0x0B immediate
+        
+        if (s_namingBypassActive && !s_namingPatchApplied) {
+            Log::Battle("BattleTTS: [NAME-BYPASS] Applying code patch: mode-11 -> mode-1");
+            DWORD oldProt;
+            if (VirtualProtect((LPVOID)MODE11_PATCH_BYTE, 1, PAGE_EXECUTE_READWRITE, &oldProt)) {
+                s_namingOrigBytes1[0] = *(uint8_t*)MODE11_PATCH_BYTE;
+                *(uint8_t*)MODE11_PATCH_BYTE = 0x01;  // mode 1 (field) instead of 0x0B (naming)
+                VirtualProtect((LPVOID)MODE11_PATCH_BYTE, 1, oldProt, &oldProt);
+                Log::Battle("BattleTTS: [NAME-BYPASS] Patched 0x%08X: %02X -> 01",
+                           MODE11_PATCH_BYTE, s_namingOrigBytes1[0]);
+            } else {
+                Log::Battle("BattleTTS: [NAME-BYPASS] VirtualProtect FAILED (err=%u)", GetLastError());
+            }
+            s_namingPatchApplied = true;
+            // Announcement deferred to mode 4->1 transition (after victory completes)
+        }
+        
+        // Restore patch when bypass deactivates
+        if (s_namingPatchApplied && !s_namingBypassActive) {
+            DWORD oldProt;
+            if (VirtualProtect((LPVOID)MODE11_PATCH_BYTE, 1, PAGE_EXECUTE_READWRITE, &oldProt)) {
+                *(uint8_t*)MODE11_PATCH_BYTE = s_namingOrigBytes1[0];
+                VirtualProtect((LPVOID)MODE11_PATCH_BYTE, 1, oldProt, &oldProt);
+            }
+            s_namingPatchApplied = false;
+            Log::Battle("BattleTTS: [NAME-BYPASS] Patch restored");
+            
+            // v0.13.47: Fire the bypass announcement here instead of the deactivation block.
+            // The deactivation condition (s_namingBypassActive && prevMode==4 && mode==1) has a 
+            // race/caching issue where s_namingBypassActive reads as false on the 4->1 transition.
+            // This patch restore block is proven to fire correctly.
+            if (!s_namingBypassAnnounced && s_preBattleGFSnapValid) {
+                s_namingBypassAnnounced = true;
+                static const char* GF_NM3[] = {
+                    "Quezacotl", "Shiva", "Ifrit", "Siren", "Brothers", "Diablos",
+                    "Carbuncle", "Leviathan", "Pandemona", "Cerberus", "Alexander",
+                    "Doomtrain", "Bahamut", "Cactuar", "Tonberry", "Eden"
+                };
+                for (int g = 0; g < 16; g++) {
+                    uint8_t pre = s_preBattleGFStructs[g][0x11];
+                    __try {
+                        uint8_t* gfNow = (uint8_t*)(SAVEMAP_GF_BASE + g * SAVEMAP_GF_STRIDE);
+                        if (pre == 0 && gfNow[0x11] != 0) {
+                            char gfName[64] = {};
+                            DecodeFF8String(gfNow, gfName, sizeof(gfName));
+                            if (gfName[0] == '\0') strncpy(gfName, GF_NM3[g], 63);
+                            char buf3[128];
+                            snprintf(buf3, sizeof(buf3), "GF %s acquired.", gfName);
+                            ScreenReader::Speak(buf3, false);
+                            Log::Battle("BattleTTS: [NAME-BYPASS] %s (idx=%d)", buf3, g);
+                        }
+                    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                }
+            }
+        }
         bool f12Pressed = f12Down && !f12WasDown;
         f12WasDown = f12Down;
         

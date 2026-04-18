@@ -15,6 +15,10 @@
 //   - NVDA receives braille output when available.
 //   - Voice cycling (F6), rate up (F8), rate down (F7) supported via SAPI.
 //
+// v0.13.51: Persistent settings.
+//   Voice ID / rate / volume are loaded from the INI at Initialize() and
+//   saved whenever the user cycles voice, adjusts rate, or adjusts volume.
+//
 // The public API (Speak, Output, Silence, etc.) is unchanged.
 
 #include "ff8_accessibility.h"
@@ -209,6 +213,64 @@ static bool InitNVDA(HMODULE hModule)
 }
 
 // ============================================================================
+// v0.13.51: Apply a saved SAPI voice (by token ID) to both voices.
+// Called after InitSAPI() if Config has a speech_voice_id entry.
+// Returns true if the voice was found and applied.
+// ============================================================================
+
+static bool ApplySavedVoiceId(const char* voiceIdNarrow)
+{
+    if (!s_pVoice || !voiceIdNarrow || voiceIdNarrow[0] == '\0') return false;
+
+    wchar_t wantId[512];
+    int len = MultiByteToWideChar(CP_UTF8, 0, voiceIdNarrow, -1, wantId,
+                                   (int)(sizeof(wantId) / sizeof(wantId[0])));
+    if (len <= 0) return false;
+
+    ISpObjectTokenCategory* pCat = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_SpObjectTokenCategory, NULL, CLSCTX_ALL,
+                                   IID_ISpObjectTokenCategory, (void**)&pCat);
+    if (FAILED(hr) || !pCat) return false;
+
+    if (FAILED(pCat->SetId(SPCAT_VOICES, FALSE))) { pCat->Release(); return false; }
+
+    IEnumSpObjectTokens* pEnum = nullptr;
+    hr = pCat->EnumTokens(NULL, NULL, &pEnum);
+    pCat->Release();
+    if (FAILED(hr) || !pEnum) return false;
+
+    ULONG count = 0;
+    pEnum->GetCount(&count);
+
+    bool applied = false;
+    for (ULONG i = 0; i < count && !applied; i++) {
+        ISpObjectToken* pToken = nullptr;
+        if (FAILED(pEnum->Item(i, &pToken)) || !pToken) continue;
+
+        LPWSTR tokId = nullptr;
+        if (SUCCEEDED(pToken->GetId(&tokId)) && tokId) {
+            if (_wcsicmp(tokId, wantId) == 0) {
+                s_pVoice->SetVoice(pToken);
+                if (s_pVoice2) s_pVoice2->SetVoice(pToken);
+                s_currentVoiceIndex = i;
+                Log::Mod("ScreenReader: Applied saved voice (index=%lu/%lu, id=%ls)",
+                           i, count, tokId);
+                applied = true;
+            }
+            CoTaskMemFree(tokId);
+        }
+        pToken->Release();
+    }
+    pEnum->Release();
+
+    if (!applied) {
+        Log::Mod("ScreenReader: Saved voice id '%s' not found among %lu installed voices",
+                   voiceIdNarrow, count);
+    }
+    return applied;
+}
+
+// ============================================================================
 // SAPI backend initialization
 // ============================================================================
 
@@ -223,9 +285,11 @@ static bool InitSAPI()
         return false;
     }
 
-    // Apply default rate immediately.
+    // v0.13.51: Apply loaded rate AND volume immediately (previously only rate was set).
     s_pVoice->SetRate(s_currentRate);
-    Log::Mod("ScreenReader: SAPI voice 1 initialized (default rate=%ld).", s_currentRate);
+    s_pVoice->SetVolume(s_currentVolume);
+    Log::Mod("ScreenReader: SAPI voice 1 initialized (rate=%ld, volume=%u).",
+               s_currentRate, (unsigned)s_currentVolume);
 
     // v0.10.32: Create second SAPI voice for battle event channel
     hr = CoCreateInstance(CLSID_SpVoice, NULL, CLSCTX_ALL,
@@ -281,8 +345,28 @@ bool Initialize(HMODULE hModule)
 
     EnsureCOMInitialized();
 
+    // v0.13.51: Load persistent settings BEFORE SAPI so InitSAPI applies the
+    // correct rate/volume on voice creation.
+    Config::Load();
+    int savedRate = Config::GetInt("speech_rate", 3);
+    int savedVolume = Config::GetInt("speech_volume", 100);
+    if (savedRate < -10) savedRate = -10; else if (savedRate > 10) savedRate = 10;
+    if (savedVolume < 0) savedVolume = 0; else if (savedVolume > 100) savedVolume = 100;
+    s_currentRate = (long)savedRate;
+    s_currentVolume = (USHORT)savedVolume;
+    Log::Mod("ScreenReader: Config loaded rate=%ld volume=%u (from %s)",
+               s_currentRate, (unsigned)s_currentVolume, Config::GetPath());
+
     bool nvdaOk = InitNVDA(hModule);
     bool sapiOk = InitSAPI();
+
+    // v0.13.51: After SAPI is up, apply saved voice ID (if any).
+    if (sapiOk) {
+        char savedVoiceId[512] = {};
+        if (Config::GetString("speech_voice_id", savedVoiceId, sizeof(savedVoiceId), "")) {
+            ApplySavedVoiceId(savedVoiceId);
+        }
+    }
 
     if (nvdaOk && sapiOk) {
         s_backend = Backend::NVDA_SAPI;
@@ -346,6 +430,31 @@ void Shutdown()
 bool IsAvailable()
 {
     return s_initialized && s_backend != Backend::NONE;
+}
+
+// ============================================================================
+// v0.13.51: IsSpeaking
+// Returns true if either SAPI voice is currently rendering audio.
+// Used by BattleTTS EWM to delay command menu appearance until damage TTS
+// finishes speaking. Queued speech on a voice reports SPRS_IS_SPEAKING for
+// the entire queue duration, which is exactly the behavior we want.
+// ============================================================================
+
+bool IsSpeaking()
+{
+    if (!s_initialized) return false;
+    EnsureCOMInitialized();
+
+    SPVOICESTATUS status = {};
+    if (s_pVoice) {
+        HRESULT hr = s_pVoice->GetStatus(&status, NULL);
+        if (SUCCEEDED(hr) && status.dwRunningState == SPRS_IS_SPEAKING) return true;
+    }
+    if (s_pVoice2) {
+        HRESULT hr = s_pVoice2->GetStatus(&status, NULL);
+        if (SUCCEEDED(hr) && status.dwRunningState == SPRS_IS_SPEAKING) return true;
+    }
+    return false;
 }
 
 // ============================================================================
@@ -419,6 +528,9 @@ bool Speak(const wchar_t* text, bool interrupt)
 
 // ============================================================================
 // v04.25: SAPI voice cycling
+// v0.13.51: Saves voice token ID to Config so it persists across sessions.
+//           Also applies the new voice to s_pVoice2 (prior versions only
+//           updated s_pVoice, leaving battle-event speech on the old voice).
 // ============================================================================
 
 void CycleVoice()
@@ -451,6 +563,23 @@ void CycleVoice()
     hr = pEnum->Item(s_currentVoiceIndex, &pToken);
     if (SUCCEEDED(hr) && pToken) {
         s_pVoice->SetVoice(pToken);
+        if (s_pVoice2) s_pVoice2->SetVoice(pToken);  // v0.13.51
+
+        // v0.13.51: Save the token ID so it persists across sessions.
+        // Token IDs are stable registry paths (e.g.
+        //   "HKEY_LOCAL_MACHINE\\...\\Tokens\\TTS_MS_EN-US_ZIRA_11.0"),
+        // unlike the index which depends on enumeration order.
+        LPWSTR tokId = nullptr;
+        if (SUCCEEDED(pToken->GetId(&tokId)) && tokId) {
+            char idNarrow[512];
+            int nb = WideCharToMultiByte(CP_UTF8, 0, tokId, -1,
+                                          idNarrow, sizeof(idNarrow), NULL, NULL);
+            if (nb > 0) {
+                Config::SetString("speech_voice_id", idNarrow);
+                Log::Mod("ScreenReader: Saved voice_id='%s'", idNarrow);
+            }
+            CoTaskMemFree(tokId);
+        }
 
         // Get voice name for announcement
         WCHAR* name = nullptr;
@@ -474,6 +603,7 @@ void CycleVoice()
 
 // ============================================================================
 // v04.25: SAPI speech rate control (-10 to +10)
+// v0.13.51: Saves to Config on every change.
 // ============================================================================
 
 void IncreaseRate()
@@ -483,13 +613,15 @@ void IncreaseRate()
     if (s_currentRate < 10) s_currentRate++;
     s_pVoice->SetRate(s_currentRate);
     if (s_pVoice2) s_pVoice2->SetRate(s_currentRate);
+    Config::SetInt("speech_rate", (int)s_currentRate);  // v0.13.51
     wchar_t msg[64];
     wsprintfW(msg, L"Rate %ld", s_currentRate);
     Log::Mod("ScreenReader: Speech rate -> %ld", s_currentRate);
     Speak(msg, true);
 }
 
-// Set rate silently (no announcement) — used for applying defaults at startup.
+// Set rate silently (no announcement) — used internally (e.g. for startup).
+// v0.13.51: Does NOT write to Config; only for applying loaded values.
 void SetRate(long rate)
 {
     if (rate < -10) rate = -10;
@@ -510,6 +642,7 @@ void DecreaseRate()
     if (s_currentRate > -10) s_currentRate--;
     s_pVoice->SetRate(s_currentRate);
     if (s_pVoice2) s_pVoice2->SetRate(s_currentRate);
+    Config::SetInt("speech_rate", (int)s_currentRate);  // v0.13.51
     wchar_t msg[64];
     wsprintfW(msg, L"Rate %ld", s_currentRate);
     Log::Mod("ScreenReader: Speech rate -> %ld", s_currentRate);
@@ -519,6 +652,7 @@ void DecreaseRate()
 // ============================================================================
 // v05.13: SAPI volume control (0-100, step 10)
 // F5 = volume down, F6 = volume up (mapped in dinput8.cpp)
+// v0.13.51: Saves to Config on every change.
 // ============================================================================
 
 void IncreaseVolume()
@@ -530,6 +664,7 @@ void IncreaseVolume()
     }
     s_pVoice->SetVolume(s_currentVolume);
     if (s_pVoice2) s_pVoice2->SetVolume(s_currentVolume);
+    Config::SetInt("speech_volume", (int)s_currentVolume);  // v0.13.51
     wchar_t msg[64];
     wsprintfW(msg, L"Volume %u percent", (unsigned)s_currentVolume);
     Log::Mod("ScreenReader: Speech volume -> %u", (unsigned)s_currentVolume);
@@ -545,6 +680,7 @@ void DecreaseVolume()
     }
     s_pVoice->SetVolume(s_currentVolume);
     if (s_pVoice2) s_pVoice2->SetVolume(s_currentVolume);
+    Config::SetInt("speech_volume", (int)s_currentVolume);  // v0.13.51
     wchar_t msg[64];
     wsprintfW(msg, L"Volume %u percent", (unsigned)s_currentVolume);
     Log::Mod("ScreenReader: Speech volume -> %u", (unsigned)s_currentVolume);

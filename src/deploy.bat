@@ -136,6 +136,7 @@ cl /nologo /W3 /EHsc /O2 /MD /LD ^
     "%SRC_DIR%\ff8_addresses.cpp" ^
     "%SRC_DIR%\screen_reader.cpp" ^
     "%SRC_DIR%\log.cpp" ^
+    "%SRC_DIR%\config.cpp" ^
     "%SRC_DIR%\title_screen.cpp" ^
     "%SRC_DIR%\fmv_audio_desc.cpp" ^
     "%SRC_DIR%\fmv_skip.cpp" ^

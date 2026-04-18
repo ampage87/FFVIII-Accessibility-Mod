@@ -63,9 +63,9 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
         Log::Mod("AccessibilityThread: Screen reader init failed. Continuing with logging only.");
     }
 
-    // Apply default speech rate silently.
-    ScreenReader::SetRate(3);
-    Log::Mod("AccessibilityThread: Default speech rate=3 applied.");
+    // v0.13.51: Default speech rate is now loaded from ff8_accessibility.ini
+    // inside ScreenReader::Initialize. The prior unconditional SetRate(3) call
+    // here was overwriting the persisted value on every launch — removed.
 
     // Resolve game addresses from the executable
     bool addressesValid = false;

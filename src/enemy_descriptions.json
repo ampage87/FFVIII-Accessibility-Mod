@@ -1,0 +1,711 @@
+{
+  "meta": {
+    "title": "FFVIII Enemy Visual Descriptions for Accessibility",
+    "version": "1.0.0",
+    "description": "Detailed visual descriptions of all encounterable enemies in Final Fantasy VIII, designed for screen reader accessibility. Press the describe key during battle to hear what the enemy looks like.",
+    "author": "FFVIII Accessibility Mod",
+    "note": "Monster IDs correspond to the c0m### numbering in battle.fs. The 'model_id' field matches the index used by the game engine."
+  },
+  "enemies": [
+    {
+      "model_id": 0,
+      "name": "Dummy",
+      "description": "A blank placeholder model used internally by the game engine. It has no visual form and should not be encountered during normal gameplay."
+    },
+    {
+      "model_id": 1,
+      "name": "GIM52A",
+      "description": "A humanoid military robot standing roughly seven feet tall, with a stocky, barrel-chested torso of riveted gunmetal-gray armor plating. Its head is a featureless dome with a single glowing red optical sensor in the center. Thick hydraulic arms end in oversized three-fingered clamp hands, and its legs are reinforced with heavy pistons at the knees. Galbadian military insignia are stamped on its shoulder plates. When preparing to attack, its optical sensor brightens to a fierce crimson and steam vents from joints along its arms, signaling an incoming strike."
+    },
+    {
+      "model_id": 2,
+      "name": "Blobra",
+      "description": "A large, amorphous blob of translucent purple-pink gelatinous matter that quivers and undulates constantly. It stands about four feet tall in a rough dome shape, with darker violet veins pulsing visibly beneath its semi-transparent surface. Embedded within its jelly-like body are partially dissolved bones and debris. Two darker spots near its top serve as rudimentary eyes. When it attacks, its body stretches and elongates dramatically before snapping forward. Its surface glistens with a wet, oily sheen that reflects light, and it leaves a trail of corrosive slime beneath it."
+    },
+    {
+      "model_id": 3,
+      "name": "Thrustaevis",
+      "description": "A large predatory bird roughly the size of an eagle, with a wingspan of about eight feet. Its plumage is a striking combination of deep crimson on the body and dark navy blue on the wing tips and tail feathers. A sharp, hooked beak of pale ivory juts from its angular head, and its eyes are bright yellow with slit pupils. Its talons are long, curved, and metallic-black, clearly built for tearing prey. A crest of spiked feathers rises from the back of its head like a mohawk. In its attack stance, it banks sharply with wings fully extended, talons thrust forward, and lets out a piercing shriek before diving."
+    },
+    {
+      "model_id": 4,
+      "name": "Geezard",
+      "description": "A small, pudgy lizard-like creature about two feet long, resembling a gecko or salamander. Its skin is a mottled olive-green and tan, with a pale yellowish underbelly. It has large, bulging orange eyes set on either side of a wide, flat head, and a row of small rounded bumps runs along its spine. Its stubby legs end in tiny clawed feet, and it has a thick, tapering tail that drags behind it. Despite its comical, harmless appearance, it can lash out with surprising speed. When agitated, the bumps along its back flush a brighter orange as a warning display."
+    },
+    {
+      "model_id": 5,
+      "name": "Belhelmel",
+      "description": "A grotesque floating creature resembling a disembodied jack-o-lantern head with a jester's motif. Its main body is a large, rounded head about three feet across with sickly grayish-purple skin stretched taut over an angular skull. It has a wide, leering mouth full of jagged teeth frozen in a permanent grin, and hollow, glowing yellow eyes. A tattered jester's hat with two drooping points sits atop its head, colored in faded red and purple stripes. Below the head, ragged strips of torn cloth hang like a ghostly collar. It bobs and weaves erratically through the air, and its eyes flare bright white just before it unleashes a magical attack."
+    },
+    {
+      "model_id": 6,
+      "name": "Glacial Eye",
+      "description": "A floating eyeball-like creature about two feet in diameter, encased in a shell of pale blue crystalline ice. The central eye is enormous, with a deep blue iris and a jet-black pupil that darts around watchfully. Jagged formations of translucent ice radiate outward from the eye like frozen eyelashes or crystalline spikes, giving it a starburst silhouette. A faint cold mist constantly drifts from its surface, and frost particles glitter in the air around it. When it prepares to cast ice magic, the crystalline spikes glow with an intense azure light from within, and the temperature around it drops noticeably. The pupil contracts to a pinpoint just before it fires a beam of freezing energy."
+    },
+    {
+      "model_id": 7,
+      "name": "SAM08G",
+      "description": "A large Galbadian military mech standing about ten feet tall, built like a walking weapons platform. Its body is angular and heavily armored in dark steel-blue and charcoal plating with sharp geometric edges. The torso houses a pair of missile launcher pods on its shoulders, each containing rows of warheads visible through slatted openings. Its head is a narrow sensor array with a glowing green visor strip. Two powerful mechanical arms end in heavy weapon mounts rather than hands — one arm carries a rotary cannon and the other a rocket launcher. Its legs are thick, reverse-jointed like a bird's, giving it a menacing, predatory stance. Before launching missiles, the shoulder pods open wide with an audible mechanical whir and the green visor flashes rapidly."
+    },
+    {
+      "model_id": 8,
+      "name": "GIM47N",
+      "description": "A humanoid combat robot of Galbadian design, smaller and more agile than the GIM52A, standing about six feet tall. Its frame is built from brushed bronze and copper-toned metal with visible rivets and mechanical joints. Its head is a cylindrical unit with a pair of glowing amber optical sensors that look like eyes. Multiple tool-arms and weapon attachments fold out from compartments in its torso, including retractable blades and an electrical discharge emitter. Its body has a utilitarian, industrial appearance with exposed wiring and hydraulic tubing visible at the joints. Sparks of electricity crackle between its appendages when it charges up for an electrical attack."
+    },
+    {
+      "model_id": 9,
+      "name": "Mesmerize",
+      "description": "A graceful, horse-like creature standing about five feet tall at the shoulder, with an elegant and almost magical appearance. Its coat is a soft lavender-purple that fades to a paler mauve along its underbelly and legs. A single long, spiraling horn of pale ivory extends from its forehead, curving gently backward — reminiscent of a unicorn. Its mane is flowing and silky, colored a deeper violet, cascading down one side of its arched neck. Its eyes are large and deep crimson, giving it an enchanting but unsettling gaze. Its hooves are sharp and cloven. When it lowers its head to charge, the horn glows with a faint white aura, indicating it is about to perform a healing gore attack that paradoxically restores its own HP upon impact."
+    },
+    {
+      "model_id": 10,
+      "name": "Buel",
+      "description": "A small, bat-winged demon about three feet tall with an impish, unsettling appearance. Its body is round and dark reddish-brown, almost like a furry ball with stubby limbs. Two large, leathery wings in deep maroon spread from its back, each ribbed with thin bone-like struts. Its face is dominated by a wide mouth with small fangs and a pair of bright, beady yellow eyes that glow faintly in the dark. Two small, pointed horns sprout from its forehead. Its feet are tiny clawed appendages that dangle beneath it as it hovers. Buel attacks with elemental magic, and the tips of its wings glow with the element it is about to cast — red for fire, blue for ice, or yellow for thunder."
+    },
+    {
+      "model_id": 11,
+      "name": "Sphinxaur",
+      "description": "The lower half of a larger composite creature, resembling the body of a great lion. It has a powerful feline torso covered in tawny golden-brown fur, with four muscular legs ending in massive paws armed with curved claws. Its haunches are thick and powerful, built for pouncing. A long tail with a tuft of darker fur at the tip lashes behind it. Where its neck would be, the body connects to its upper half, the Sphinxara. On its own, the Sphinxaur fights as a headless lion body, swiping with its enormous claws. Before a physical attack, it crouches low and its claws extend visibly, scraping against the ground."
+    },
+    {
+      "model_id": 12,
+      "name": "Sphinxara",
+      "description": "The upper half of a composite sphinx creature — a woman's torso and head mounted atop great feathered wings. She has pale, almost marble-white skin and long dark hair that flows behind her. Her face is coldly beautiful with sharp features and glowing amber eyes. Large, eagle-like wings with brown and gold feathers extend from her back, spanning roughly twelve feet. Her arms are slender but end in sharp-nailed fingers. She wears ornate golden jewelry around her neck and upper arms. When combined with Sphinxaur below her, together they form a complete sphinx. She casts magic independently, and her eyes blaze with white light and her wings spread wide when channeling a spell."
+    },
+    {
+      "model_id": 13,
+      "name": "Snow Lion",
+      "description": "A massive feline predator about the size of a large tiger, adapted to icy environments. Its thick fur is predominantly white with pale blue-gray markings along its flanks and legs, providing camouflage in snowy terrain. A magnificent mane of longer, shaggier fur in cream and golden tones frames its broad face and extends down its chest. Its eyes are a piercing ice-blue, and its breath comes in visible puffs of frost. Large, padded paws with retractable claws grip the ground firmly, and its powerful tail is bushy and tipped with white. When preparing its devastating ice breath attack, it rears back, opens its jaws wide to reveal long fangs, and a visible buildup of swirling frost energy gathers in its mouth."
+    },
+    {
+      "model_id": 14,
+      "name": "Anacondaur",
+      "description": "An enormous serpent easily thirty feet long and as thick as a tree trunk. Its scales are a richly textured pattern of golden-brown and dark olive, arranged in a banded pattern along its length, with a paler cream-colored underbelly showing segmented scutes. Its head is broad and triangular like a viper's, with two large, menacing yellow eyes with vertical slit pupils. A forked tongue flickers constantly from between its jaws, which can unhinge to reveal enormous curved fangs dripping with venom. A frill of darker scaled ridges runs along the top of its head and down its spine. When it coils to strike, its body draws into tight S-shaped loops and its neck flattens like a cobra's hood, a clear sign that a venomous bite is imminent."
+    },
+    {
+      "model_id": 15,
+      "name": "Grat",
+      "description": "A carnivorous plant creature standing about five feet tall, rooted in place but capable of lunging with its tendrils. Its main body is a thick, gnarled stalk of dark green plant matter, topped with a large bulbous head that opens into a mouth-like pod ringed with thorn-like teeth. Multiple vine-like tentacles extend from its base, each tipped with smaller snapping pods. Its leaves are broad, veined, and tinged with reddish-purple edges. A sweet but cloying scent emanates from its open pod, which it uses to lure prey. The reddish portions of its body pulse and darken before it releases a cloud of sleep-inducing pollen — a visual warning that a status attack is incoming."
+    },
+    {
+      "model_id": 16,
+      "name": "Cockatrice",
+      "description": "A large, rooster-like bird standing about four feet tall with a reptilian twist. Its body is covered in coarse feathers of rusty brown and dark red, but its legs and tail are distinctly reptilian — scaly, muscular, and ending in sharp taloned feet. A bright red comb and wattle adorn its head, and its beak is short, sharp, and hooked. Its eyes are an eerie, unnatural gold with vertically slit pupils rather than round ones. A fan of stiff tail feathers in iridescent dark green spreads behind it. Its most dangerous visual cue is when its eyes begin to glow with an intense stony gray light — this signals its petrifying gaze attack, which can turn a target to stone."
+    },
+    {
+      "model_id": 17,
+      "name": "Caterchipillar",
+      "description": "A giant caterpillar about six feet long and two feet in diameter, with a segmented body of alternating bright green and yellow-green rings. Each segment has a pair of stubby, rounded legs on its underside. Its head is round with two large, innocent-looking black eyes, short antennae, and a small round mouth. Despite its almost cute appearance, it can spit sticky silk threads. Its skin has a slightly fuzzy, velvety texture. A row of small orange dots runs along each side of its body. Before attacking, it rears up the front third of its body and its mouth opens wide, revealing the spinnerets that produce its binding silk thread attack."
+    },
+    {
+      "model_id": 18,
+      "name": "Red Bat",
+      "description": "A large bat with a wingspan of about four feet, colored in vivid shades of deep crimson and dark red. Its leathery wings are thin and translucent at the edges, revealing the dark vein structure within. Its body is compact and furry, covered in short russet-red fur. It has a squashed, pig-like snout with tiny nostrils, and its mouth is full of small, needle-sharp fangs. Its ears are enormous, pointed, and constantly twitching. Small, beady eyes gleam red in the darkness. It swoops and darts erratically through the air, making it difficult to track. Before a draining bite attack, it folds its wings tight and dives in a straight line at high speed."
+    },
+    {
+      "model_id": 19,
+      "name": "Blitz",
+      "description": "A heavily armored Galbadian soldier in full combat gear, standing about six feet tall. He wears a dark gunmetal-gray suit of articulated power armor with a sealed helmet featuring a narrow, glowing red visor slit across the eyes. The armor has angular, faceted plates across the chest, shoulders, and thighs, with a dark blue-black bodysuit visible at the joints. Heavy gauntlets cover his hands, and armored boots reach to mid-calf. He carries a large, electrified tonfa-style weapon in each hand — metal batons that crackle with visible arcs of blue-white electricity. Before his Thunder attack, the tonfas spark intensely and the air around him hums with electrical charge."
+    },
+    {
+      "model_id": 20,
+      "name": "Fastitocalon-F",
+      "description": "A large, flat fish-like creature that burrows in sandy ground, visible only as a mound of sand with a fin poking out. When fully exposed, it is about six feet long with a round, flattened body like a massive flounder. Its skin is rough and sandy-brown on top for camouflage, with a pale white underside. Small, dull eyes sit on top of its flat head, and a wide mouth stretches across its face. Its fins are broad and edged with a slightly darker brown. It attacks by lunging upward from the sand. When submerged, only a telltale ripple in the ground and its dorsal fin are visible — the fin twitching signals an imminent ambush attack."
+    },
+    {
+      "model_id": 21,
+      "name": "Fastitocalon",
+      "description": "The mature, ocean-dwelling version of the Fastitocalon, considerably larger at about ten feet long. It has the same flattened, disc-like body as its juvenile form but is darker in coloration — a deep slate blue-gray on top with mottled patterns of darker spots. Its eyes are slightly larger and more alert, and its mouth reveals rows of small, crushing teeth. Its fins are more developed and powerful, allowing it to propel itself out of water to strike. The edges of its fins have a faint bioluminescent blue glow. It is encountered near beaches and ocean areas, and it shakes the ground when it surfaces for an attack."
+    },
+    {
+      "model_id": 22,
+      "name": "Gesper",
+      "description": "A small, mechanical-looking creature about two feet tall, resembling a floating blue metallic orb with appendages. Its main body is a smooth, glossy sphere of deep cobalt blue with a large single eye — a circular lens with a bright blue-white pupil in the center. Two small, articulated mechanical arms extend from its sides, each ending in tiny pincers. It hovers in the air using a small propulsion unit on its underside that emits a faint blue glow. Various small tools and devices are attached to its body. It makes soft whirring and clicking sounds. Before casting a debuff spell, its central eye dilates wide and pulses with a rhythmic blue flash."
+    },
+    {
+      "model_id": 23,
+      "name": "Creeps",
+      "description": "A skeletal, spider-like undead creature about three feet across, made of animated bones held together by dark magical energy. Its body is a central mass of fused rib-like bones, from which six to eight spindly bone-legs extend in all directions. A skull-like head sits at the front with empty eye sockets that glow with faint green necrotic light. Its bones are yellowed and cracked with age, and wisps of dark purple energy trail from its joints. It moves with unsettling, jerky motions like a broken marionette. The green glow in its eye sockets intensifies just before it casts Thunder magic, with small arcs of electricity jumping between its bone limbs."
+    },
+    {
+      "model_id": 24,
+      "name": "Hexadragon",
+      "description": "A towering dragon standing about fifteen feet tall on four powerful legs, with rough, heavily armored scales. Its hide is a deep forest green with plates of darker olive armor along its spine and flanks. Six heads — yes, six — extend from its thick neck on separate stalks, each a miniature dragon head with glowing orange eyes and a mouth full of sharp fangs. The heads move independently, snapping and hissing in different directions. Its body is stocky and muscular, with a thick tail studded with bony spikes. Small, vestigial wings fold against its back. When all six heads turn to face the same target and open their mouths simultaneously, a devastating fire breath attack is about to be unleashed."
+    },
+    {
+      "model_id": 25,
+      "name": "Blood Soul",
+      "description": "A floating undead creature resembling a ghostly, decayed human torso trailing off into ragged wisps of dark energy below the waist. Its skin is deathly pale — a sickly grayish-white — stretched tightly over a gaunt, skeletal frame. Its face is frozen in a perpetual silent scream, with hollow eye sockets that burn with dim red light and a gaping mouth revealing blackened teeth. Its arms are thin and elongated with claw-like fingers that reach outward. Tattered remnants of dark clothing cling to its frame. A faint aura of dark red energy surrounds it, and droplets of what appears to be blood float upward around its body, defying gravity. It is undead and therefore vulnerable to healing magic and fire — a key tactical cue."
+    },
+    {
+      "model_id": 26,
+      "name": "Elastoid",
+      "description": "A bizarre, disc-shaped mechanical enemy about four feet in diameter that resembles a flying saucer or robotic frisbee. Its body is a flattened oval of sleek, silvery-blue metal with concentric ring patterns etched into its surface. A ring of small, glowing blue lights runs around its outer edge. In its center is a single large lens that serves as both eye and weapon emitter, glowing with shifting colors. Multiple thin, retractable tentacle-like cables extend from slots around its perimeter. It hovers silently and spins slowly in place. Before firing its beam attack, the central lens focuses with an audible whine and shifts to a bright orange-red color."
+    },
+    {
+      "model_id": 27,
+      "name": "Armadodo",
+      "description": "A hulking, armadillo-like beast standing about five feet tall at the shoulder on four thick, stumpy legs. Its entire back is covered by a massive domed shell of interlocking bone-colored plates, ridged and scarred from countless battles. Its underside and legs are covered in tough, leathery grayish-brown skin. Its head pokes out from under the front edge of its shell — small-eyed, blunt-snouted, and heavy-jawed with a prominent underbite. Its claws are thick and blunt, built for digging. Despite its slow, lumbering appearance, it can curl into a ball and roll at enemies with devastating force. When it tucks its head and begins to curl, an extremely powerful rolling charge attack is incoming."
+    },
+    {
+      "model_id": 28,
+      "name": "Bite Bug",
+      "description": "A giant insect about three feet long, resembling an oversized wasp or hornet. Its body is segmented into three distinct parts — head, thorax, and abdomen — colored in alternating bands of vivid yellow-orange and dark brown-black, similar to a wasp's warning coloration. Two pairs of translucent, iridescent wings buzz rapidly on its back, creating a loud droning sound. Its head features large, multifaceted compound eyes that shimmer with a reddish-brown hue, a pair of long segmented antennae, and prominent mandibles. A sharp, curved stinger protrudes from the tip of its abdomen. Six jointed legs with hooked tarsi hang beneath it in flight. When it darts forward with its stinger extended and wings buzzing at maximum pitch, it is about to deliver its venomous sting attack."
+    },
+    {
+      "model_id": 29,
+      "name": "Jelleye",
+      "description": "A floating jellyfish-like creature about three feet in diameter, translucent and eerily beautiful. Its bell-shaped main body is a shimmering, semi-transparent pale blue that pulses with internal bioluminescent light. Beneath the bell, dozens of long, trailing tentacles dangle downward, each tipped with tiny glowing nodes of electric blue. A single large eye is visible through the translucent bell, dark and watchful with a pale iris. The creature drifts lazily through the air, its tentacles swaying gently as if underwater. When it gathers energy for a magical attack, its entire body brightens dramatically and the tentacles draw upward and inward, concentrating their glow into the bell."
+    },
+    {
+      "model_id": 30,
+      "name": "Tri-Point",
+      "description": "A massive insectoid creature standing about twelve feet tall, with a triangular body plan that gives it its name. Its exoskeleton is a sleek, dark midnight-blue chitin with sharp angular plates and edges. Three long, blade-like limbs extend from its central body, each ending in a wickedly sharp point — these serve as both legs and weapons. A cluster of small, glowing red eyes sits atop its triangular head. Its body tapers to a point at the rear. Lightning occasionally arcs between its three blade-limbs. It is innately tied to Thunder element — when struck by Thunder magic, its body absorbs the electricity and its limbs crackle with amplified power, signaling a devastating counter-attack. This is an important combat cue: do not use Thunder against it."
+    },
+    {
+      "model_id": 31,
+      "name": "Turtapod",
+      "description": "A mechanical tortoise-like enemy about four feet long, combining biological and technological elements. Its shell is a dome of riveted steel plates in dark olive-green, mounted with small antennae and sensor arrays. Its head, legs, and tail are organic — scaly and reptilian in muted green-brown tones — but reinforced with metal plating and cybernetic implants. Its eyes glow a steady amber. It can retract fully into its armored shell, becoming nearly impervious to physical attacks. When withdrawn into its shell, only the smooth metal dome is visible with a faint hum of active sensors. When it emerges, the shell plates shift and separate slightly with mechanical clicking sounds, indicating it is about to attack."
+    },
+    {
+      "model_id": 32,
+      "name": "Wendigo",
+      "description": "A massive, ape-like humanoid standing about eight feet tall with an enormous, muscular frame. Its body is covered in shaggy, coarse fur that ranges from dark brown on its back to a lighter tan on its chest and belly. Its arms are disproportionately long and thick, reaching nearly to the ground, with huge fists like wrecking balls. Its face is broad and flat with a heavy brow ridge, small red-tinged eyes full of rage, a flat nose, and a wide mouth bristling with yellow fangs. It moves with a hunched, gorilla-like posture, occasionally pounding the ground with its fists. When it rears up to its full height and beats its chest, it is about to unleash a devastating physical attack — one of the hardest-hitting regular enemy strikes in the early game."
+    },
+    {
+      "model_id": 33,
+      "name": "Gayla",
+      "description": "A large, manta ray-like creature that glides through the air with slow, graceful wingbeats. Its body is flat and wide, about six feet across, shaped like a diamond with rounded edges. The dorsal side is a deep indigo blue with patterns of lighter blue spots that faintly bioluminesce, while the ventral side is pale white. A long, whip-like tail trails behind it, tipped with a barbed stinger. Its head blends seamlessly into its body, with two small dark eyes on the upper surface and a small mouth on the underside. Its movements are fluid and hypnotic. When its spots begin pulsing rapidly and its tail curls forward over its body, it is preparing to release a bolt of Thunder magic or sting with its venomous tail."
+    },
+    {
+      "model_id": 34,
+      "name": "Gerogero",
+      "description": "A horrifying undead monstrosity that appears as a grotesquely decayed humanoid corpse animated by dark magic. Standing about seven feet tall, its body is a nightmarish patchwork of rotting gray-green flesh, exposed bone, and hanging strips of decomposed skin. Its face is the most disturbing element — half the skull is exposed, one eye socket is empty and dark while the other holds a bulging, bloodshot eye that stares with malevolent intelligence. Its mouth hangs open in a permanent grimace, revealing broken teeth and a blackened tongue. Tattered remnants of what might have been fine clothing cling to its frame. Clouds of flies and wisps of noxious green vapor surround it. Every attack it makes carries a risk of inflicting status ailments — when the green vapor thickens around its hands, a status-inflicting attack like Berserk, Silence, or Blind is coming."
+    },
+    {
+      "model_id": 35,
+      "name": "Death Claw",
+      "description": "A terrifying mechanical-organic hybrid about six feet tall, resembling a skeletal praying mantis made of dark metal and sinew. Its body is angular and gaunt, with a narrow torso of dark gray metallic plating over a framework of exposed mechanical joints. Its most prominent feature is a pair of enormous scythe-like claws, each nearly as long as its body, that extend from its forelimbs — they are razor-sharp, dark silver, and serrated along the inner edge. Its head is small and insectoid, with two glowing red photoreceptor eyes. It moves with terrifying mechanical precision. When it raises both claws high and crosses them in an X-shape, it is about to execute its signature move that reduces a target's HP to critical levels."
+    },
+    {
+      "model_id": 36,
+      "name": "Tri-Face",
+      "description": "A massive, grotesque three-headed abomination about ten feet tall and equally wide. Its body is a bloated, roughly spherical mass of sickly green-brown flesh covered in warts and pustules. Three long, serpentine necks extend from the top, each ending in a head that is essentially a giant mouth — no eyes, no nose, just a gaping circular maw ringed with concentric rows of razor-sharp teeth, like a lamprey. Each head moves independently, snapping and biting in different directions. Thick, stubby legs support the bloated body. A nauseating stench emanates from its mouths. Its most dangerous attack is signaled when all three mouths open simultaneously and a dark purple miasma forms between them — this precedes a devastating triple bite or a Poison or Blind status attack."
+    },
+    {
+      "model_id": 37,
+      "name": "Grand Mantis",
+      "description": "An enormous praying mantis standing about eight feet tall in its upright hunting posture. Its exoskeleton is a mottled pattern of leaf-green and darker forest-green, providing effective camouflage in vegetated areas. Its triangular head swivels nearly 180 degrees, bearing two enormous compound eyes of dark amber and three smaller simple eyes on its forehead. Its most striking feature is its pair of massive raptorial forelegs — folded in the classic praying mantis pose — each lined with rows of sharp spines for gripping prey. Its wings are folded along its back, visible as a thin translucent green edge. Four walking legs support its elongated body. When its raptorial arms unfold and snap forward, the speed is blinding — a powerful physical strike that can deal heavy damage."
+    },
+    {
+      "model_id": 38,
+      "name": "Krysta",
+      "description": "A stunningly beautiful crystalline entity that appears as a feminine humanoid figure sculpted entirely from translucent ice crystal. Standing about six feet tall, her body catches and refracts light into dazzling prismatic patterns. Her form is elegant and angular, with crystalline 'hair' that fans out behind her like a frozen waterfall. Her face is serene and expressionless, with faceted gemstone-like eyes that shift between pale blue and white. Jagged crystal formations grow from her shoulders and back like frozen wings. Her fingers taper into sharp icicle points. A cold mist perpetually surrounds her. When she raises her arms and the crystals on her body begin resonating with a high-pitched chime, she is about to unleash a devastating ice-element attack."
+    },
+    {
+      "model_id": 39,
+      "name": "Lefty",
+      "description": "One half of the boss Vysage's attendant pair — a massive disembodied left hand and forearm, about five feet from wrist to fingertip. The hand is grayish-green with mottled, leathery skin stretched over thick knuckles and joints. Each finger is as thick as a human arm, tipped with cracked, yellowed nails. Visible veins and tendons bulge beneath the surface. The wrist ends abruptly in a ragged, dark stump that trails wisps of shadowy energy, keeping it aloft. It floats alongside Vysage, clenching and unclenching menacingly. When it draws back with fingers curled into a tight fist, a powerful punching attack is about to land."
+    },
+    {
+      "model_id": 40,
+      "name": "Righty",
+      "description": "The mirror counterpart to Lefty — a massive disembodied right hand and forearm floating in the air. Identical in size and texture to Lefty, about five feet from wrist to fingertip, with the same grayish-green mottled skin, thick joints, and cracked nails. It is distinguished from Lefty only by being a right hand. It also floats alongside the Vysage boss, trailing dark energy from its severed wrist. Righty tends to perform magical attacks rather than physical ones. When its fingers splay wide open and dark energy gathers in its palm, it is channeling a spell. Together with Lefty and Vysage, this trio fights as a coordinated unit."
+    },
+    {
+      "model_id": 41,
+      "name": "Blue Dragon",
+      "description": "A massive serpentine dragon about twenty feet long, primarily encountered in cold, mountainous regions. Its scales are a deep, lustrous sapphire blue that shimmer with an inner light, growing lighter to an icy pale blue along its underbelly. Unlike traditional four-legged dragons, the Blue Dragon has a more serpentine body with two powerful forelegs ending in sharp talons and smaller hind legs. Its head is elongated and reptilian with a pronounced snout, icy blue eyes, and a crest of backward-sweeping horns. Frost constantly rimes its scales. A pair of powerful wings with membrane stretched between dark blue bone struts allow it to hover. When it inhales deeply and frost crystals visibly gather around its maw, a devastating ice breath attack is imminent."
+    },
+    {
+      "model_id": 42,
+      "name": "Forbidden",
+      "description": "An animated suit of ancient, rusted armor standing about six feet tall — a haunted relic of a long-dead knight. The armor is dark reddish-brown from centuries of oxidation, with plates that are dented, cracked, and partially crumbling. Through the gaps in the armor, there is nothing inside but an eerie dark void and occasional flickers of ghostly blue-white light. The helmet visor is raised, revealing only hollow darkness with two faintly glowing blue pinpoints where eyes should be. It carries a corroded but still-sharp bastard sword in one gauntlet and a battered shield bearing an unrecognizable coat of arms in the other. Its movements are stiff and jerky. Being undead, it is vulnerable to Holy and Fire magic — when struck by these elements, the ghostly light within it flickers violently."
+    },
+    {
+      "model_id": 43,
+      "name": "Bomb",
+      "description": "A floating spherical creature about three feet in diameter, essentially a living fireball with a face. Its body is a roiling orb of orange and red flames that constantly shift and dance, giving it an ever-changing silhouette. Through the flames, a menacing face is visible — angry, narrowed eyes of bright yellow, a scowling mouth, and a furrowed brow, all rendered in darker, more solid fire. Small flickers and embers constantly break away from its surface and drift upward. It radiates intense heat, causing the air around it to shimmer with heat distortion. The critical combat cue: as it takes damage, it grows visibly larger and its flames burn hotter, shifting from orange to white-hot. If it reaches critical size, it will self-destruct in a massive explosion. Defeating it quickly or using ice magic prevents this."
+    },
+    {
+      "model_id": 44,
+      "name": "Abyss Worm",
+      "description": "An enormous burrowing worm that erupts from the ground, revealing only its upper third — roughly ten feet of visible body emerging from the earth, with an unknown length still buried below. Its skin is segmented and rough, colored in bands of sandy brown and darker umber, with a texture like wet, gritty leather. Its head is simply a massive circular mouth — a ring of concentric razor-sharp teeth arranged in spiraling rows, designed to bore through rock and consume anything in its path. No eyes are visible. Thick mucus glistens on its skin. The ground trembles before it surfaces. When it rears back and its mouth opens to maximum width, it is about to unleash its powerful Earthquake attack — a devastating earth-element strike that hits all targets."
+    },
+    {
+      "model_id": 45,
+      "name": "Ochu",
+      "description": "A massive plant monster standing about eight feet tall, resembling a giant venus flytrap crossed with an octopus. Its central body is a thick stalk of dark green and brown plant matter, crowned with an enormous trap-like head that opens into a cavernous mouth lined with thorn-like teeth and dripping with sticky digestive fluids. Numerous thick, vine-like tentacles sprout from its base, writhing independently and covered in tiny barbs. Its coloring is deep green with splotches of toxic purple on the inner surfaces of its mouth and tentacle tips. Small, beady yellow-green eyes peer from above its maw. When all its tentacles rise simultaneously and the purple coloration intensifies, it is preparing a devastating Earthquake-type stomp or a toxic status attack."
+    },
+    {
+      "model_id": 46,
+      "name": "Adamantoise",
+      "description": "A colossal tortoise the size of a small building, standing about twelve feet tall with a shell spanning twenty feet across. Its shell is composed of enormous hexagonal plates of dark gray-brown stone-like material, scarred and weathered like ancient rock, with patches of moss and lichen growing in the crevices. Its skin is tough, wrinkled, and dark olive-gray, and its four pillar-like legs are as thick as tree trunks. Its head is relatively small compared to its body, with a beaked mouth and small, ancient-looking dark eyes. Despite its massive size, it can retreat into its shell for near-impenetrable defense. When it withdraws and the shell begins to glow faintly, it is about to follow up with a devastating counter-attack upon emerging."
+    },
+    {
+      "model_id": 47,
+      "name": "Chimera",
+      "description": "A nightmarish fusion of multiple animals standing about seven feet tall. Its body combines elements of a lion, a goat, and a serpent — it has the powerful, tawny-furred torso and forelegs of a lion, the hind legs and horns of a goat (dark and ridged, curving backward from its skull), and a long serpentine tail that ends in a living snake head with its own fangs and eyes. Its primary face is lion-like but distorted, with an oversized mane of dirty golden hair and glowing red eyes. A second, goat-like head sprouts from its shoulder. Bat-like wings of dark leathery membrane extend from its back. It attacks with multiple elements — fire from the lion head, water from the serpent tail, and wind from its wings. Which head is facing forward indicates which elemental attack is next."
+    },
+    {
+      "model_id": 48,
+      "name": "Malboro",
+      "description": "One of the most feared regular enemies in the game — a massive, disgusting plant-beast about ten feet wide. Its body is a squat, bulbous mass of mottled dark green and brownish-yellow flesh that resembles a giant, rotting gourd. Its most horrifying feature is its enormous mouth, which takes up nearly half its body — a gaping, permanent grin filled with rows of jagged, yellowed fangs dripping with noxious saliva. Dozens of thick, tentacle-like vines extend from its body in all directions. Small, malevolent red eyes are scattered across its surface. An overwhelming stench of decay surrounds it. Its most dangerous attack is Bad Breath — when it inhales deeply and its cheeks visibly bulge, it is about to exhale a cloud of green-purple toxic gas that inflicts nearly every negative status ailment simultaneously. This is one of the most devastating attacks in the game."
+    },
+    {
+      "model_id": 49,
+      "name": "Iron Giant",
+      "description": "A towering suit of enchanted heavy armor standing twelve to fifteen feet tall, like a massive animated knight. Its armor is forged from dark, blue-black iron with a faint purplish sheen, consisting of enormous interlocking plates with rivets as large as fists. Its helmet has a narrow T-shaped visor slit that glows with a deep violet inner light — the only hint that something supernatural animates this hollow shell. It wields an absolutely enormous zweihander sword, nearly as tall as itself, with a broad dark blade. Its pauldrons are massive and spiked, and a tattered dark cape hangs from its shoulders. Its footsteps shake the ground. When it raises its massive sword overhead with both hands, a tremendously powerful cleaving attack is about to come down — one of the strongest physical attacks from any regular enemy."
+    },
+    {
+      "model_id": 50,
+      "name": "Behemoth",
+      "description": "A massive, muscular beast standing about ten feet tall at the shoulder on four powerful legs, resembling a nightmarish cross between a bull and a demon. Its hide is thick and leathery, colored in deep purple and dark violet, with lighter patches on its underbelly. A pair of enormous, curved horns sweep forward from its massive skull — each horn is several feet long and wickedly sharp. Its face is brutish and bestial with a broad snout, flaring nostrils, burning red-orange eyes, and a mouth full of tusks. Its body is incredibly muscular, with visible sinew and veins. A ridge of bony spikes runs down its spine, and its tail is thick and powerful. When it lowers its head and stamps its hooves, it is about to charge with a devastating physical attack. Late in battle, when it rears up on its hind legs and a magical aura gathers around its horns, it can also cast powerful Flare magic."
+    },
+    {
+      "model_id": 51,
+      "name": "T-Rexaur",
+      "description": "A massive tyrannosaurus-like dinosaur standing about fifteen feet tall, one of the most powerful regular enemies encountered throughout the game. Its scales are a deep olive-green with darker mottling across its back and lighter, yellowish scales on its underbelly. Its head is enormous relative to its body, with powerful jaws lined with serrated teeth each the size of daggers. Small, intelligent yellow eyes track its prey from beneath heavy brow ridges. Its arms are characteristically small but tipped with sharp claws. Its legs are massively muscular, built for explosive lunging speed. Its tail is long and thick, used for balance. The ground shakes with each step. When it opens its jaws wide and roars, a devastating bite attack is imminent that can deal extreme damage to a single target."
+    },
+    {
+      "model_id": 52,
+      "name": "Ruby Dragon",
+      "description": "A magnificent and terrifying dragon covered in scales that gleam like polished rubies. Standing about twenty feet tall, its entire body shimmers in deep crimson and fiery red, with its scales catching light in dazzling flashes of scarlet. Its wings are enormous, spanning perhaps thirty feet, with membranes of translucent red that glow when backlit like stained glass. Its head is crowned with a rack of dark horns, and its eyes are molten gold. Long, curved talons of dark obsidian tip each of its four powerful limbs. Its breath constantly shimmers with heat distortion. When it inhales and its chest swells with visible internal flame that glows through its scales, a devastating fire breath attack is incoming. It can also cast powerful Meteor magic — signaled by its eyes flashing white."
+    },
+    {
+      "model_id": 53,
+      "name": "Grendel",
+      "description": "A large, bipedal dragon-like creature standing about eight feet tall, built more for ground combat than flight. Its body is covered in rough, dark green scales with a lighter, armored chest plate of pale yellow-green scutes. It stands upright on powerful hind legs with large, clawed feet, and has a strong, counterbalancing tail. Its forelegs are more like muscular arms with grasping claws. Its head is angular and crocodilian, with a long snout full of visible teeth and sharp, forward-pointing horns. Its eyes glow a fierce amber. Small, ridge-like crests run along the top of its skull. Despite having small wing-like protrusions on its back, it is primarily a ground fighter. When it snorts visibly and its chest inflates, it is about to use its breath weapon."
+    },
+    {
+      "model_id": 54,
+      "name": "Vysage",
+      "description": "A large, disembodied face floating in the air, about four feet across — the central figure of a three-part boss accompanied by Lefty and Righty. It appears as a massive, grotesque stone mask with exaggerated features — heavy-lidded eyes with glowing yellow irises, a broad flat nose, thick lips twisted into a contemptuous sneer, and deep-set wrinkles carved into its surface. Its skin is grayish-green like weathered stone or decayed flesh, with a rough, craggy texture. Dark energy coils around its edges, and its expression shifts between sneering disdain and furious rage. When its eyes widen fully and its mouth opens to reveal a dark void within, it is preparing to cast a powerful spell. It commands Lefty and Righty telepathically."
+    },
+    {
+      "model_id": 55,
+      "name": "Cactuar",
+      "description": "A small, iconic creature standing about two feet tall, shaped like a stylized cactus brought to life. Its body is bright green and smooth, shaped like a simple humanoid figure — a cylindrical torso with two stubby arm-branches held permanently up in the air and two leg-branches in a running pose, as if perpetually mid-sprint. Three dark dots on its face form two eyes and an open mouth in a permanent expression of surprise or alarm. Despite its comical, minimalist appearance, it is deceptively fast and powerful. Its signature attack, 1000 Needles, deals exactly 1000 points of fixed damage — when tiny white spines visibly protrude from all over its body, this devastating attack is about to fire in all directions."
+    },
+    {
+      "model_id": 56,
+      "name": "Tonberry",
+      "description": "A small, rotund creature standing about three feet tall, wearing a hooded brown cloak that conceals most of its body. Beneath the hood, a green, lizard-like face peers out with large, round, luminous yellow eyes that glow softly in the dark. It carries two items — in its right hand, a small lantern that emits a warm, flickering golden light, and in its left hand, a small but incredibly sharp chef's knife, stained and well-used. It moves with agonizingly slow, deliberate steps, taking one tiny step at a time toward its target. Despite its adorable appearance, it is extremely dangerous. When it finally reaches melee range and raises its knife, its signature Chef's Knife attack deals devastating damage. Its slow, relentless advance is the primary visual cue — each step brings it closer to a potential one-hit kill."
+    },
+    {
+      "model_id": 57,
+      "name": "Torama",
+      "description": "A large, panther-like feline predator about five feet tall at the shoulder, with a sleek and powerful build. Its fur is a tawny golden-brown with darker brown spots and rosettes along its flanks, similar to a leopard's pattern. Its head is broad with large, pointed ears, a flat feline nose, and piercing green eyes with vertical slit pupils. Its mouth conceals long, saber-like fangs. What sets it apart from an ordinary big cat are two long, flexible tentacle-like appendages that extend from its shoulders or upper back, each about six feet long and tipped with a luminous blue-green bulb. These tentacles sway hypnotically and glow intensely when it uses its mental attacks. When the tentacle tips flare bright blue and point directly at a target, it is about to use a powerful psychic attack that can confuse or damage a party member."
+    },
+    {
+      "model_id": 58,
+      "name": "Funguar",
+      "description": "A walking mushroom creature standing about four feet tall. Its cap is large, round, and bright red with white spots — the classic toadstool appearance. Beneath the cap, a simple face with small beady eyes and a round, open mouth gives it a surprised expression. Its body is a thick, pale stalk with two stubby leg-like roots that allow it to waddle about, and two small arm-like branches. It bounces lightly as it moves. Despite its whimsical appearance, it can inflict the dangerous Blind or Silence status. When its cap tilts forward and a cloud of yellowish spores begins to gather beneath it, a status-inflicting spore attack is imminent."
+    },
+    {
+      "model_id": 59,
+      "name": "Imp",
+      "description": "A small, winged demon about two feet tall with a mischievous and malevolent appearance. Its body is lean and wiry, covered in dark reddish-purple skin. It has a pointed face with a sharp chin, a wide grin full of tiny sharp teeth, narrow glowing yellow eyes, and tall, pointed ears like a bat's. Small horns curl from its forehead. A pair of small, leathery bat-like wings on its back allow it to flutter erratically through the air. Its hands and feet end in tiny but sharp claws. A thin, pointed tail with a spade-shaped tip curls behind it. It giggles and cackles as it fights. When it raises both hands above its head and a dark sphere of energy forms between them, it is casting a magical attack."
+    },
+    {
+      "model_id": 60,
+      "name": "PuPu",
+      "description": "A tiny, adorable extraterrestrial creature standing barely one foot tall. It has a classic 'gray alien' appearance — a large, bulbous head that is disproportionately big compared to its small, slender body. Its skin is a uniform pale blue-gray. Its face is dominated by two enormous, shiny black eyes that take up most of its head, with a tiny slit for a mouth and no visible nose. Its body is thin with small arms and legs. It moves with jerky, nervous motions. This creature is part of a special sidequest involving UFO sightings. It is extremely rare and should ideally be given Elixirs rather than attacked. If you encounter it, it is a unique event — it means the UFO sidequest is reaching its conclusion."
+    },
+    {
+      "model_id": 61,
+      "name": "Ifrit",
+      "description": "A towering fire demon standing about ten feet tall, with a massively muscular humanoid build that radiates raw physical power. His skin is a deep, burnt orange-red, textured like cooling lava with cracks of brighter molten orange glowing along his arms and chest. His face is bestial and fierce — a heavy brow, burning yellow eyes with slit pupils, a broad flat nose, and a wide mouth full of prominent fangs. Two enormous horns, dark brown and ridged, sweep backward from his forehead like a ram's. His hands are massive, with thick clawed fingers. Wild, flame-like hair in shades of dark red and orange flows from his head. His legs are digitigrade, ending in cloven hooves. Flames constantly lick across his body. When encountered as a boss in the Fire Cavern, defeating him within the time limit recruits him as a Guardian Force. When he crouches and cups his hands with gathering flame, his Hell Fire attack is imminent."
+    },
+    {
+      "model_id": 62,
+      "name": "Minotaur",
+      "description": "A large, humanoid bull-man standing about eight feet tall with a powerfully built physique. His skin is a dark blue-purple, smooth but thick like hide. His head is that of a massive bull — broad, with a wide snout, flaring nostrils, and two thick horns that curve outward and upward from the sides of his skull. His eyes are small and fierce, glowing with a reddish tint. His body is extremely muscular, with a barrel chest and enormous arms. He wears minimal clothing — leather straps, metal bracers, and a worn loincloth. His hooves are dark and heavy. He fights alongside his brother Sacred as part of a Guardian Force boss encounter in the Tomb of the Unknown King. He favors powerful physical attacks — when he snorts, lowers his horns, and charges, a devastating rush attack is incoming."
+    },
+    {
+      "model_id": 63,
+      "name": "Sacred",
+      "description": "The larger brother of Minotaur, standing about ten feet tall with an even more imposing build. His skin is the same dark blue-purple as his brother's, but his frame is heavier and more massive. His bull-like head bears even larger horns that curve upward dramatically. He wears ornate golden-brown accessories — armlets, a decorated belt, and ankle guards that distinguish him from the simpler Minotaur. A large, heavy mace or club is his weapon of choice. His demeanor is slightly more composed than the raging Minotaur. He has the ability to regenerate health, so when a soft green glow surrounds his body between attacks, he is healing himself — a critical cue that you need to deal damage faster than he can recover. Together with Minotaur, defeating them grants the Brothers Guardian Force."
+    },
+    {
+      "model_id": 64,
+      "name": "Base Leader",
+      "description": "A Galbadian military officer in a more decorated version of the standard soldier uniform. He wears a dark blue-gray military tunic with rank insignia on the shoulders, a peaked officer's cap, and polished boots. His face is middle-aged and stern, with sharp features. He carries a standard-issue saber. He is encountered during the Dollet SeeD exam mission and is not significantly visually different from other Galbadian officers, though his uniform is slightly more ornate with gold trim on the collar and cuffs."
+    },
+    {
+      "model_id": 65,
+      "name": "Cerberus",
+      "description": "A massive three-headed dog standing about eight feet tall at the shoulder, a guardian beast of immense power. Its body is muscular and canine, covered in short, sleek fur of midnight black that seems to absorb light. Each of its three heads is wolf-like with a long snout, glowing red eyes, and a mouth full of razor-sharp fangs. The central head is the largest, while the left and right heads are slightly smaller. A thick, dark mane of longer fur runs down each neck. Its claws are long and curved. Chains or spiked collars adorn each of its three necks. A dark, smoky aura surrounds its body. When all three heads howl simultaneously and the aura intensifies, it is about to cast Triple — a powerful support spell. Defeating it recruits it as a Guardian Force."
+    },
+    {
+      "model_id": 66,
+      "name": "Diablos",
+      "description": "A tall, sinister demon standing about nine feet tall with a lithe, athletic build. His skin is jet black with a faint purplish sheen, smooth and almost metallic in appearance. His most striking features are his enormous bat-like wings, spanning perhaps twenty feet when fully extended, with membranes of dark crimson between black bone struts. His face is angular and demonic — sharp cheekbones, glowing red eyes, pointed ears, and a thin mouth set in a permanent smirk. His horns are small and swept back. His hands end in long, sharp claws. He wears no clothing, his body naturally armored by his dark hide. A long, thin tail curls behind him. He is associated with gravity magic. When he crosses his arms and dark purple energy spirals inward around him, he is preparing his devastating Gravija attack, which reduces all targets' HP by a significant percentage."
+    },
+    {
+      "model_id": 67,
+      "name": "Bahamut",
+      "description": "The legendary dragon king — an immense dragon standing about thirty feet tall, the most majestic and powerful dragon in the game. His scales are a deep midnight blue-black, each one perfectly formed and gleaming like polished obsidian. His body is powerfully built with four massive limbs, each ending in talons that could crush a car. His wings are colossal, spanning perhaps fifty feet, with membranes of dark blue that shimmer with inner energy. His head is crowned with a fan of swept-back horns, and his face is regal and fierce with brilliant golden eyes that radiate ancient intelligence. His chest has a distinctive pale underside. When his chest begins to glow with concentrated energy and he rears back with his mouth open, he is charging his legendary Mega Flare — a devastating non-elemental beam attack. Defeating him at the Deep Sea Research Center recruits him as a Guardian Force."
+    },
+    {
+      "model_id": 68,
+      "name": "NORG Pod",
+      "description": "A large, mechanical pod or capsule roughly eight feet in diameter, resembling an oversized metallic egg or escape pod. Its surface is smooth, dark metallic gray-green with visible rivets and seams. Colored panels and indicator lights are embedded in its surface — these change color during the battle, cycling from blue (safe) to yellow (warning) to red (danger). The pod houses NORG inside and must be damaged to force it open. Mechanical ports and vents line its equator. When the indicator lights turn red and steam vents from its surface, it is about to open and reveal NORG within. Targeting the colored orbs on either side of the pod is key to the battle strategy."
+    },
+    {
+      "model_id": 69,
+      "name": "Garden Faculty",
+      "description": "A staff member of Balamb Garden wearing the distinctive faculty uniform — a long, dark maroon-red robe or coat that reaches to mid-calf, with a high collar and wide sleeves. On their face, they wear a peculiar yellow full-face visor or mask with a smooth, featureless surface, giving them an anonymous, almost sinister appearance. Under the robe, they wear lighter-colored clothing. They are human-sized and proportioned. Their helmet-like yellow visor completely hides their identity. During the Garden civil war sequence, they fight as enemies loyal to NORG. Their attacks are basic physical strikes with limited threat."
+    },
+    {
+      "model_id": 70,
+      "name": "Odin",
+      "description": "A legendary warrior mounted on a six-legged horse, together standing about twelve feet tall. Odin himself is a regal, armored knight clad in ornate dark steel armor with golden trim and intricate engravings. His helmet has a dramatic winged crest, and beneath it his face is partially visible — stern and noble with glowing eyes. He carries his legendary sword Zantetsuken — an impossibly long, single-edged curved blade that gleams with a cold silver light. His steed, Sleipnir, is a powerful horse with six muscular legs, dark-coated with a flowing mane. Odin is not fought directly but appears as a random summon. When he raises Zantetsuken high and the blade catches a flash of blinding white light, his instant-death slash cleaves through all enemies on screen."
+    },
+    {
+      "model_id": 71,
+      "name": "G-Soldier",
+      "description": "A standard Galbadian infantry soldier in full combat gear. He wears a dark blue military uniform with protective body armor over the torso — a breastplate and shoulder pads in matte dark blue-gray. His face is concealed behind a rounded blue helmet with a dark visor that covers his eyes. He carries a standard-issue rifle or sword. His boots and gloves are black, and ammunition pouches line his belt. The Galbadian military emblem is visible on his shoulder and chest plates. He is one of the most common human enemies, encountered throughout Galbadia-controlled territories. His attacks are straightforward physical strikes and the occasional beam weapon shot."
+    },
+    {
+      "model_id": 72,
+      "name": "Elite Soldier",
+      "description": "A higher-ranking Galbadian soldier with noticeably better equipment than the standard G-Soldier. His armor is the same dark blue-gray color scheme but more heavily plated, with larger shoulder pauldrons and additional thigh and arm guards. His helmet is more angular and aggressive in design, with a narrower red-tinted visor. He often dual-wields weapons — typically a sword and a pistol. Red trim on his armor distinguishes his elite status. His posture is more confident and aggressive than the regular infantry. He is faster and hits harder than standard soldiers, and when he switches his grip to hold his weapon with both hands, a stronger charged attack is incoming."
+    },
+    {
+      "model_id": 73,
+      "name": "Wedge",
+      "description": "A named Galbadian soldier — one half of the recurring comic relief duo with Biggs. Wedge is a younger, shorter soldier in standard Galbadian blue military uniform with slightly less polished armor than his superior. His helmet visor is pushed up, revealing a youthful, somewhat anxious face. He carries standard Galbadian weaponry. He is distinguished from generic soldiers by his slightly more personalized gear and the fact that he often appears alongside Biggs. He is encountered during the Dollet communications tower mission and again later in the game. His attacks are standard military fare — nothing exceptional, but he should not be underestimated as part of a pair."
+    },
+    {
+      "model_id": 74,
+      "name": "Biggs",
+      "description": "The higher-ranking half of the Biggs and Wedge comic relief duo — a Galbadian officer with a more commanding presence than his partner. He wears a Galbadian uniform with officer's insignia, slightly more decorated than Wedge's. His armor is darker and more polished, with rank markings on the shoulders. His face, when visible, shows an older, more weathered soldier with a stern expression. He carries a more impressive weapon than Wedge. Encountered during the Dollet communications tower mission where he is repairing the satellite dish. He is the stronger of the pair and tends to attack more aggressively. When he calls out orders or gestures to Wedge, a coordinated dual attack may follow."
+    },
+    {
+      "model_id": 75,
+      "name": "Fake President",
+      "description": "Initially appears as President Deling of Galbadia — a middle-aged man in an expensive dark blue business suit with slicked-back dark hair and a stern, authoritative face. However, this is actually a monster in disguise. During the train mission, when unmasked, the creature's true form is revealed to be Gerogero (the undead boss). The visual transition shows the President's form distorting and melting away to reveal the horrifying zombie beneath. In his disguised form, he looks like a perfectly normal human political figure — well-dressed, composed, and dignified — making the reveal all the more shocking."
+    },
+    {
+      "model_id": 76,
+      "name": "Guard",
+      "description": "A Galbadian security guard in a lighter, less militarized version of the standard uniform. He wears a dark blue security uniform with a peaked cap rather than a full combat helmet, and lighter body armor focused on a vest rather than full plating. His face is visible — a standard-looking adult male. He carries a baton or light sidearm rather than heavy military weapons. Guards are encountered in Galbadian government facilities and are among the weaker human enemies. Their attacks are simple physical strikes with minimal threat to a prepared party."
+    },
+    {
+      "model_id": 77,
+      "name": "NORG",
+      "description": "A grotesque, obese creature that is the secret financial master of Balamb Garden. NORG is a Shumi tribesman who has become morbidly bloated — his body is an enormous, bulging mass of dark purplish-blue flesh crammed into a mechanical life-support pod. His head is proportionally small, bald, and round with tiny, squinting eyes, a wide flat nose, and a thick-lipped mouth twisted in a perpetual expression of greed and anger. He wears ornate dark robes and golden jewelry that strain against his massive girth. Mechanical apparatus and tubes connect from his pod to his body. He is flanked by two colored orbs — one on each side — that change color during battle to indicate his attack state. When both orbs turn red simultaneously, a powerful magical attack is imminent."
+    },
+    {
+      "model_id": 78,
+      "name": "Esthar Soldier",
+      "description": "A soldier of the technologically advanced Esthar military, wearing sleek, futuristic armor vastly different from Galbadian designs. The armor is form-fitting and smooth, made of a glossy, high-tech material in shades of deep red and dark maroon with silver accents. The helmet is smooth and rounded with a large, opaque teal-blue visor that wraps around the face, giving an insectoid appearance. The armor has no visible rivets or seams — it looks seamless and almost organic. They carry advanced energy weapons — rifles or blades that glow with technological power. Esthar soldiers move with precise, disciplined coordination. Their energy weapon attacks produce visible beams of light when fired."
+    },
+    {
+      "model_id": 79,
+      "name": "Esthar Soldier (Cyborg)",
+      "description": "A variant of the Esthar soldier with extensive cybernetic augmentation. This version retains the same sleek red-and-maroon Esthar armor but with visible cybernetic enhancements — mechanical joints, glowing circuitry patterns visible through transparent armor panels, and enhanced limb actuators. The visor may glow more intensely. They are stronger and more durable than standard Esthar soldiers. Mechanical whirring sounds accompany their movements. When their cybernetic components light up with a brighter glow, they are channeling power for a stronger-than-normal attack."
+    },
+    {
+      "model_id": 80,
+      "name": "Right Orb",
+      "description": "One of two magical orbs flanking NORG during his boss battle. It is a perfectly spherical floating orb about two feet in diameter, smooth and metallic. Its surface shifts through multiple colors during battle — cycling from blue to yellow to red. The color indicates its current state and threat level: blue means it is dormant, yellow means it is building energy, and red means it is about to fire a magical attack. The orb rotates slowly in place and hums with increasing intensity as it changes color. Targeting it to keep it from reaching red is a key battle strategy."
+    },
+    {
+      "model_id": 81,
+      "name": "Left Orb",
+      "description": "The counterpart to the Right Orb in NORG's boss battle — functionally identical but positioned on NORG's left side. It is the same smooth, metallic sphere about two feet in diameter that cycles through blue, yellow, and red color states. It operates independently of the Right Orb, so both must be monitored simultaneously. Its behavior mirrors the Right Orb — dormant when blue, charging when yellow, and ready to attack when red. Managing both orbs while damaging NORG himself is the central tactical challenge of this battle."
+    },
+    {
+      "model_id": 82,
+      "name": "Gunblade",
+      "description": "Not a creature but a weapon model — the iconic gunblade wielded by Squall and Seifer. It appears as a large sword with a revolver-style firing mechanism built into the hilt and blade base. The blade is long, single-edged, and slightly curved. A pistol grip with trigger sits at the hilt, and a revolving cylinder chamber is visible where the blade meets the guard. This model is used during certain cutscene battles and training sequences."
+    },
+    {
+      "model_id": 83,
+      "name": "Tonberry King",
+      "description": "An enormous version of the standard Tonberry, standing about six feet tall — three times the size of a normal Tonberry. It wears the same hooded brown robe, but a golden crown sits atop its head, partially visible beneath the hood. Its face is the same green, lizard-like visage with large yellow eyes, but scarred and ancient-looking, bearing the weight of countless years. It carries a much larger version of the Chef's Knife and a grand, ornate lantern that burns with a brighter, more intense golden flame. Its movements are still slow and deliberate like its smaller kin, but each step carries far more menace. Its Junk attack calls upon the spirits of all the Tonberries you have defeated — when ghostly images of small Tonberries swirl around it, this devastating revenge attack is about to strike, dealing damage based on how many Tonberries you've killed."
+    },
+    {
+      "model_id": 84,
+      "name": "Jumbo Cactuar",
+      "description": "A gigantic version of the Cactuar standing about twenty feet tall — a massive green cactus in humanoid form. It retains the exact same iconic design as the small Cactuar — the simple cylindrical body, the permanently raised arms, the running legs, and the three-dot face with two eyes and an open mouth — but scaled up to absurd proportions. Its skin is smooth, bright green, and covered with visible cactus needles. A distinctive mustache of two dark curved marks appears below its eyes, distinguishing it from the regular Cactuar. The ground shakes with each of its lumbering steps. Its signature attack, 10,000 Needles, is telegraphed by its entire body vibrating rapidly and thousands of visible spines extending outward before firing — dealing exactly 10,000 damage. Defeating it earns the Cactuar Guardian Force."
+    },
+    {
+      "model_id": 85,
+      "name": "Seifer (First Encounter)",
+      "description": "Squall's rival — a tall, athletic young man of about eighteen with a confident, aggressive bearing. He has short, slicked-back blond hair, striking blue-green eyes, and a distinctive diagonal scar running across his forehead and the bridge of his nose (mirroring Squall's scar in the opposite direction). He wears his signature long gray trench coat over a dark vest and light-colored shirt, with dark pants and boots. A red cross-like design is embroidered on the sleeves of his coat. He wields Hyperion, his own gunblade — similar in design to Squall's but with a slightly different blade shape. His fighting stance is aggressive and forward-leaning. When he assumes a wide, two-handed grip and fire magic crackles along his blade, a powerful fire-enhanced slash is incoming."
+    },
+    {
+      "model_id": 86,
+      "name": "Seifer (Second Encounter)",
+      "description": "Seifer as encountered later in the game, now serving as the Sorceress's Knight. His appearance is largely the same — the blond hair, the scar, the trench coat — but with subtle changes reflecting his fall to darkness. His expression is more intense and desperate. His coat may appear more battle-worn. He still wields Hyperion, his gunblade. His fighting style has become more aggressive and reckless than before, incorporating fire magic more freely. The same visual cues apply — fire along his blade means a fire-enhanced attack."
+    },
+    {
+      "model_id": 87,
+      "name": "Seifer (Third Encounter)",
+      "description": "Seifer in his final encounter, deep in Lunatic Pandora. He appears further changed — still recognizably Seifer with his blond hair and scarred face, but his demeanor is at its most desperate and unhinged. His coat is visibly damaged and his expression wild. He may channel Sorceress-granted dark energy in addition to his fire magic. He wields Hyperion one final time. When a dark aura joins the fire along his blade, his attacks in this encounter carry greater power and may include new, darker techniques."
+    },
+    {
+      "model_id": 88,
+      "name": "Edea (First Boss Battle)",
+      "description": "Sorceress Edea Kramer in her full sorceress regalia — a tall, imposing woman with an otherworldly, darkly elegant presence. She wears an elaborate gown of deep purple and black that flows around her like living shadow. Her most striking visual feature is her headdress — an enormous, sweeping ornamental piece that extends upward and outward from her head like dark wings or horns, crafted from black and purple material with golden accents. Her face is pale and beautiful but severe, with sharp features, dark eye makeup, and glowing amber eyes. Her long black hair cascades from beneath the headdress. She floats slightly above the ground. Dark magical energy constantly swirls around her hands and headdress. When she raises her arms and the dark energy concentrates into a visible sphere between her palms, a powerful ice or non-elemental magic attack is imminent."
+    },
+    {
+      "model_id": 89,
+      "name": "Propagator",
+      "description": "An alien creature encountered aboard the Ragnarok spaceship — a large, bipedal monster standing about seven feet tall with an insectoid-alien hybrid appearance. Its body is smooth and organic, with a hard carapace covering its back and limbs. The most important visual feature is its COLOR — Propagators come in pairs of matching colors: purple, red, yellow, and green. Each one has its distinctive color visible across its entire body. Its head has an elongated shape with no visible eyes, and a wide mouth with sharp teeth. Its arms are long, ending in sharp claws. A thin tail extends behind it. The critical combat cue: Propagators must be defeated in matching color pairs in immediate succession, or they will revive. Remembering which color you just defeated is essential to clearing the Ragnarok."
+    },
+    {
+      "model_id": 90,
+      "name": "Ultima Weapon",
+      "description": "An immensely powerful superboss — a colossal beast standing about twenty feet tall with an otherworldly, almost ethereal appearance. Its body is a deep blue-violet with an iridescent sheen, muscular and vaguely humanoid but with distinctly inhuman proportions — enormously long arms, a relatively small head, and massive clawed hands. Crystalline formations sprout from its shoulders and back, glowing with inner light. Its face is bestial with glowing white eyes and a fanged maw. A perpetual aura of dark energy surrounds it. Multiple orbs of light orbit its body. It is encountered deep in the Research Center underwater. When it gathers all the orbiting light spheres into its chest and the crystalline formations blaze with white light, its devastating Light Pillar attack is imminent — one of the most powerful single attacks in the game."
+    },
+    {
+      "model_id": 91,
+      "name": "Elvoret",
+      "description": "A large, winged demon encountered as a boss at the top of the Dollet communications tower during the SeeD exam. It stands about twelve feet tall with a hunched, gargoyle-like posture. Its body is muscular and covered in rough, dark gray-brown hide. Enormous bat-like wings extend from its back, spanning roughly twenty feet, with tattered membranes showing holes and tears. Its face is monstrous — a broad, ape-like visage with glowing red eyes, a heavy brow, a snout-like nose, and a wide mouth full of fangs. Long, matted hair or fur hangs from its head. Its arms are long and powerful, ending in sharp claws. A long, whip-like tail curls behind it. When it raises its head, spreads its wings to full span, and takes a deep breath, its devastating Storm Breath attack is about to hit all party members with powerful wind-element damage."
+    },
+    {
+      "model_id": 92,
+      "name": "X-ATM092",
+      "description": "A massive spider-like military robot standing about fifteen feet tall, encountered during the Dollet SeeD exam as a relentless pursuer. Its body is a central, heavily armored pod of dark steel-blue plating, roughly spherical, with eight powerful mechanical legs extending outward — each ending in sharp, pointed tips that dig into the ground. A cluster of red optical sensors on its front serves as its 'face.' Heavy armor plates cover its dorsal surface, and weapon ports are visible along its sides. Galbadian military markings are stamped on its hull. It is almost indestructible and regenerates damage rapidly — when its damaged plating glows orange and begins to visibly knit back together, it is repairing itself. The primary strategy is to flee rather than fight. If you must engage, when it crouches and its legs tense, it is about to perform a devastating charge or stomp attack."
+    },
+    {
+      "model_id": 93,
+      "name": "Iguion",
+      "description": "A stone gargoyle-like lizard creature about five feet long, encountered in pairs during the Deling City parade assassination mission. Its body is that of a sleek, agile lizard or iguana, but its skin appears to be made of dark, mottled gray stone, giving it a statue-like appearance when still. Its eyes glow with a faint red light. Sharp claws tip its four legs, and a row of bony spines runs along its back. Its mouth is filled with small, sharp teeth. Its long, flexible tail can be used as a whip. When it opens its mouth wide and its throat glows with a reddish-orange light, it is about to use its Magma Breath — a fire-element attack. Its petrifying gaze is signaled by its red eyes flaring to intense brightness."
+    },
+    {
+      "model_id": 94,
+      "name": "Gargantua",
+      "description": "A massive, stitched-together humanoid monstrosity standing about twelve feet tall, encountered in Ultimecia's Castle. Its body appears to be assembled from multiple corpses — patches of different-colored skin in grays, greens, and pale flesh tones are stitched together with thick, visible sutures of dark thread. Its proportions are deliberately wrong — one arm is longer than the other, its head sits slightly askew on its neck. Its face is a horrifying patchwork with mismatched eyes (one larger than the other), a crooked mouth with uneven teeth, and bolts or metal clamps holding sections of its skull together. Heavy chains and restraints hang from its wrists and ankles. Its movements are lumbering but powerful. When it raises both fists above its head and the stitches across its body glow with dark energy, a devastating physical attack is coming."
+    },
+    {
+      "model_id": 95,
+      "name": "Granaldo",
+      "description": "A large insectoid boss encountered at Balamb Garden's training center. It resembles a massive beetle or roach about eight feet long, with a hard, dark brown chitinous exoskeleton. Its body is oval and heavily armored on top, with multiple jointed legs tucked beneath. Its head features large compound eyes, snapping mandibles, and two long antennae. Small, vestigial wings occasionally buzz beneath its wing covers. It is typically accompanied by several Raldo — its smaller offspring. When it rears up and its wing covers open, it is preparing a flying charge attack. It can also summon more Raldo, signaled by a high-pitched chittering call."
+    },
+    {
+      "model_id": 96,
+      "name": "Raldo",
+      "description": "A small, beetle-like creature about two feet in diameter, the juvenile form or offspring of Granaldo. It has a round, heavily armored dark brown shell and short, scrabbling legs. Its face pokes out from under the front of its shell with small, beady eyes and tiny mandibles. It can curl into a ball like a pill bug. Individually weak, Raldos are dangerous in groups and when supporting Granaldo. When they curl up and begin rolling, a charging roll attack is incoming."
+    },
+    {
+      "model_id": 97,
+      "name": "Propagator (Red)",
+      "description": "A red-colored variant of the Propagator alien aboard the Ragnarok. Identical in body shape to the standard Propagator — about seven feet tall, bipedal, with smooth insectoid carapace, elongated eyeless head, clawed arms, and tail. Distinguished by its deep crimson-red coloration across its entire body. It must be defeated along with its matching red partner in immediate succession to prevent regeneration."
+    },
+    {
+      "model_id": 98,
+      "name": "Propagator (Purple)",
+      "description": "A purple-colored variant of the Propagator alien aboard the Ragnarok. Identical body shape to other Propagators, distinguished by its dark violet-purple coloration. Like all Propagators, it must be defeated in sequence with its matching purple partner to be permanently eliminated."
+    },
+    {
+      "model_id": 99,
+      "name": "Oilboyle",
+      "description": "A pair of large, grotesque blob-like creatures encountered as a boss in the D-District Prison. Each Oilboyle is about five feet tall and roughly spherical, composed of glistening, oily black-brown sludge. Their surface is slick and constantly dripping with thick, tar-like fluid. Two small, beady eyes peer out from the top of the blob, and a gaping, toothless mouth opens in the front. They wobble and jiggle as they move. Their most dangerous attack is Oil Shot — when they compress their body and their surface ripples visibly, they are about to spit a stream of oil at the party, which coats the target and makes them extremely vulnerable to fire damage."
+    },
+    {
+      "model_id": 100,
+      "name": "Edea (Second Boss Battle)",
+      "description": "Sorceress Edea encountered for the second time, at the end of Disc 2 in Galbadia Garden. Her appearance is the same as the first encounter — the elaborate purple-black gown, the dramatic sweeping headdress, the pale face with dark makeup, and the flowing black hair. However, her magical aura may be more intense in this encounter. The same combat cues apply — dark energy gathering between raised palms signals a powerful magical attack. This time she is fought alongside Seifer."
+    },
+    {
+      "model_id": 101,
+      "name": "BGH251F2 (First Encounter)",
+      "description": "A massive Galbadian war machine — a heavily armored mobile weapons platform that resembles a robotic spider-tank. Its main body is a large, angular armored hull of dark blue-black military plating, roughly the size of a small building. The hull sits atop four to six articulated mechanical legs that allow it to traverse any terrain. A large cannon turret sits on top of the hull as its primary weapon. Smaller weapon ports and sensor arrays dot its surface. The Galbadian military emblem is prominently displayed on its flanks. Red and amber warning lights blink across its hull. When the main cannon turret charges — accompanied by a visible buildup of energy at the barrel tip and an audible whine — its devastating Beam Cannon attack is about to fire."
+    },
+    {
+      "model_id": 102,
+      "name": "BGH251F2 (Second Encounter)",
+      "description": "The same Galbadian war machine encountered a second time, now heavily damaged from the previous battle. Its armor plating is dented, cracked, and scorched, with sections missing entirely to reveal sparking internals. Some of its legs are damaged, causing it to move unevenly. Smoke and small fires trail from multiple points on its hull. Despite the damage, its main cannon is still operational. The same visual cues apply for its Beam Cannon attack, though the damaged hull now sparks and groans with each shot. It is weaker in this encounter due to accumulated battle damage."
+    },
+    {
+      "model_id": 103,
+      "name": "Abadon",
+      "description": "A massive undead creature encountered in the Great Salt Lake, resembling a colossal decaying corpse that has been twisted by dark magic. Standing about twelve feet tall, its body is a horrific mass of rotting gray-green flesh, exposed bone, and hanging strips of putrid skin. Its ribcage is partially exposed, revealing a dark, hollow interior. Its arms are elongated and skeletal, ending in bony claws. Its head is skull-like with scraps of flesh clinging to it, empty eye sockets glowing with sickly green light, and a jaw that hangs open perpetually. Being undead, it absorbs dark and poison attacks but is devastatingly weak to curative magic and Holy — casting Curaga on it deals massive damage. When a green miasma gathers around its body, it is preparing a status-inflicting attack."
+    },
+    {
+      "model_id": 104,
+      "name": "Abadon (Ultimecia's Castle)",
+      "description": "A variant of Abadon encountered in Ultimecia's Castle, visually similar to the first — the same enormous undead form of rotting flesh and exposed bone, with sickly green glowing eye sockets. It may appear slightly more decayed or empowered by Ultimecia's time-compressed magic. The same tactical cues apply: curative magic and Holy deal devastating damage, and the green miasma signals incoming status attacks."
+    },
+    {
+      "model_id": 105,
+      "name": "Mobile Type 8",
+      "description": "A massive Galbadian military mech, one of the largest mechanical enemies in the game. It stands about twenty feet tall and is built like a heavily armored humanoid robot with a broad, angular torso, thick arms, and sturdy legs. Its armor is dark blue-gray military plating with orange-red warning stripes. Its head is a compact sensor dome with multiple glowing optical arrays. Two large weapons pods are mounted on its shoulders. It is flanked by two detachable probes (Left Probe and Right Probe). When its chest plates open to reveal a glowing energy core and the shoulder weapons align forward, its devastating Corona attack is charging — this is an extremely powerful attack that should be prepared for with Shell or defensive measures."
+    },
+    {
+      "model_id": 106,
+      "name": "Left Probe",
+      "description": "A small, floating support drone that accompanies Mobile Type 8 in battle. It is a compact, roughly cylindrical mechanical unit about three feet long, colored in the same dark blue-gray as its parent machine with orange accent lights. A single large sensor lens on its front serves as its eye and weapon emitter. Small stabilizer fins keep it airborne. It provides support functions to Mobile Type 8 and must be dealt with tactically — destroying it reduces Mobile Type 8's combat capabilities."
+    },
+    {
+      "model_id": 107,
+      "name": "Right Probe",
+      "description": "The counterpart to Left Probe — a floating support drone identical in appearance but positioned on Mobile Type 8's right side. Same dark blue-gray cylindrical body with orange accents and a sensor lens on front. Like Left Probe, destroying it weakens Mobile Type 8's offensive and defensive options."
+    },
+    {
+      "model_id": 108,
+      "name": "Paratrooper",
+      "description": "A Galbadian soldier specializing in airborne assault, wearing a modified version of the standard military uniform with jump equipment. His armor is the familiar dark blue-gray but supplemented with a parachute harness, additional padding for impact, and lighter plating for mobility. He wears jump boots and a streamlined helmet with a clear visor. He may carry lighter, more compact weapons suited to rapid deployment — a submachine gun or compact sword. He is encountered during the Balamb Garden defense sequence and similar military operations. His attacks are quick and mobile."
+    },
+    {
+      "model_id": 109,
+      "name": "Trauma",
+      "description": "A bizarre and unsettling boss encountered in Ultimecia's Castle, resembling a massive ornate golden throne or mechanical apparatus that has come to life. Its body is a large, elaborate structure of dark gold and bronze metallic elements with intricate baroque decorative flourishes — scrollwork, ornamental faces, and curved metallic tendrils. At its center, a face-like arrangement of features serves as its 'head' — with dark eye-like recesses and an opening that functions as a mouth. Multiple mechanical tentacle-arms extend from its body. It hovers in place and has an oppressive, ancient presence. When golden energy pulses through the decorative scrollwork and converges at its center, it is preparing a powerful magical attack."
+    },
+    {
+      "model_id": 110,
+      "name": "Droma",
+      "description": "A smaller companion creature that accompanies Trauma in Ultimecia's Castle. It resembles a miniature version of Trauma's baroque golden aesthetic — a floating ornamental construct about two feet in diameter, with swirling golden metallic surfaces and decorative filigree. It orbits around Trauma during battle. It provides support to Trauma and can be destroyed, though Trauma can summon more. When multiple Dromas gather close together and their golden surfaces pulse in unison, a combined attack or healing action for Trauma is imminent."
+    },
+    {
+      "model_id": 111,
+      "name": "Propagator (Green)",
+      "description": "A green-colored variant of the Propagator alien aboard the Ragnarok. Same seven-foot bipedal insectoid body as other Propagators, distinguished by its vivid green coloration. Must be defeated alongside its matching green partner in immediate succession."
+    },
+    {
+      "model_id": 112,
+      "name": "Adel",
+      "description": "Sorceress Adel — the former tyrannical ruler of Esthar — a towering, imposing figure about ten feet tall with a powerful, almost masculine build unusual for the sorceresses in the game. She has an angular face with harsh features, dark eye makeup forming dramatic shapes around her glowing orange-red eyes, and wild dark hair swept back from her face. Her skin is pale with a faintly golden hue. She wears elaborate sorceress armor — dark metallic plates with golden trim and ornate designs, with a large, dramatic collar piece that frames her head. A flowing dark cape extends behind her. She holds Rinoa trapped in a magical embrace against her chest during the battle. The critical tactical element: Rinoa is junctioned to Adel and any attack that hits Adel may also damage Rinoa — if Rinoa dies, it is game over. When Adel's arms glow with intense orange-red energy, she is about to cast a powerful attack."
+    },
+    {
+      "model_id": 113,
+      "name": "Rinoa (Junctioned to Adel)",
+      "description": "Rinoa Heartilly — one of the main party members — held captive against Adel's body during the boss battle. She appears as a young woman with shoulder-length black hair with highlights, wearing her signature blue duster over a black top. Her face shows distress and she is restrained by magical energy. This is not an enemy to attack — she is a hostage. Damaging her risks a game over. The visual cue of Rinoa's position against Adel's body is critical: curative magic should be directed at Rinoa to keep her alive while attacking Adel carefully to avoid splash damage."
+    },
+    {
+      "model_id": 114,
+      "name": "Omega Weapon",
+      "description": "The ultimate superboss of Final Fantasy VIII — a towering, nightmarish entity standing about twenty-five feet tall. Its body is vaguely humanoid but twisted and otherworldly, composed of dark blue-black metallic or crystalline material that seems to absorb surrounding light. Its proportions are exaggerated — enormously long arms with massive clawed hands, a relatively narrow torso, and powerful legs. Its head is crested with a crown of swept-back horns or crystalline spikes. Its eyes blaze with intense white-blue light. A perpetual aura of distorted space surrounds it, like heat shimmer but darker. Omega Weapon is the single most powerful enemy in the game. Its Megiddo Flame attack — signaled by it raising both arms as reality warps around it and a sphere of annihilating energy forms above its head — deals 9,998 damage to all party members. Its light-based Terra Break is signaled by beams of light shooting from its body in all directions."
+    },
+    {
+      "model_id": 115,
+      "name": "Sorceress (Ultimecia's Castle)",
+      "description": "A generic sorceress enemy encountered in Ultimecia's Castle. She appears as a female humanoid figure in flowing dark robes with an ornate headdress, her face partially obscured by shadow. Dark magical energy swirls around her form. She is one of the regular enemies in the castle and casts various offensive spells. When her hands glow and her robes billow outward from magical energy, a spell is incoming."
+    },
+    {
+      "model_id": 118,
+      "name": "UFO",
+      "description": "An unidentified flying object encountered as part of the PuPu sidequest — a classic flying saucer about ten feet in diameter. It has a smooth, disc-shaped metallic hull in silver-gray with a domed upper section. Colored lights ring its equator, cycling through patterns. It appears briefly in various locations throughout the game before the final encounter with PuPu. It hovers silently and may emit a beam of light downward. It is more of a scripted event encounter than a traditional enemy."
+    },
+    {
+      "model_id": 119,
+      "name": "Fujin",
+      "description": "A young woman and member of Seifer's Disciplinary Committee posse, alongside Raijin. She is short and slight of build, with striking silver-white hair cut in a sharp, asymmetric style — shorter on one side. She wears a distinctive dark blue outfit — a fitted jacket and pants with a high collar. An eyepatch covers her left eye, and her visible right eye is a piercing dark red. She wears dark boots and carries a circular bladed weapon — a pinwheel or chakram — that she throws with deadly accuracy. Her demeanor is cold and terse. She specializes in wind magic. When she raises her chakram and wind visibly spirals around her, a wind-element attack is imminent."
+    },
+    {
+      "model_id": 120,
+      "name": "Raijin",
+      "description": "A large, muscular young man and member of Seifer's Disciplinary Committee. He has dark skin, a broad, friendly face, and his dark hair is styled upward. He wears a loose, open blue vest over his bare chest, baggy dark pants, and combat boots. A large medallion hangs around his neck. He fights with a long staff or bo weapon that he wields with surprising skill despite his somewhat lumbering appearance. His body is heavily muscled. He specializes in thunder magic and physical attacks. When he plants his staff on the ground and electricity crackles up its length, a Thunder-enhanced attack is about to strike."
+    },
+    {
+      "model_id": 121,
+      "name": "Ultimecia (First Form)",
+      "description": "The final boss of Final Fantasy VIII — Sorceress Ultimecia in her initial human form. She is a tall, striking woman with an imposing supernatural presence. Her skin is pale lavender-gray. Her hair is silver-white and styled in an elaborate upswept fashion with two horn-like points. She wears a revealing, form-fitting dark crimson dress with feathered or fur-trimmed edges. Her face is coldly beautiful with dramatic dark facial markings around her eyes — almost like a masquerade mask — and her eyes glow with yellow-golden light. Dark, wing-like tattoos or markings extend across her back and shoulders. Long, claw-like painted fingernails extend from elegant hands. She exudes an aura of temporal distortion — the air around her seems to shimmer as if time itself is bending. When she gestures with both hands and the temporal distortion intensifies, a powerful time-based or non-elemental magic attack is coming."
+    },
+    {
+      "model_id": 122,
+      "name": "Griever",
+      "description": "A legendary lion-like Guardian Force summoned by Ultimecia during the final battle — named after the symbol on Squall's ring. Griever is an immense, majestic beast standing about fifteen feet tall, combining features of a lion and a demonic entity. Its body is powerfully muscular, covered in dark charcoal-gray and deep blue-black fur. Its mane is enormous and wild, sweeping backward in jagged spikes. Its face is lion-like but more angular and fierce, with glowing red eyes and a maw of enormous fangs. Large, dark feathered wings extend from its shoulders. Its claws are massive. A long, tufted tail lashes behind it. Ornate markings or runes glow faintly on its flanks. When it rears back and roars with its mane flaring outward, its Shockwave Pulsar attack is charging — a devastating non-elemental attack that hits all party members."
+    },
+    {
+      "model_id": 124,
+      "name": "Ultimecia (Junctioned to Griever)",
+      "description": "The third phase of the final battle — Ultimecia has fused with Griever to create a horrifying hybrid form. The upper body is Ultimecia's humanoid torso, now more monstrous with clawed hands and distorted features, emerging from where Griever's head once was. Griever's powerful lion body serves as the lower portion, now twisted and darker. The combined form is about twenty feet tall. Multiple wings — some feathered, some bat-like — extend from the joined body. The creature is a nightmarish centaur-like fusion of sorceress and beast. When both the humanoid upper body and the bestial lower body glow simultaneously with dark energy, the most powerful attacks of this phase are imminent."
+    },
+    {
+      "model_id": 125,
+      "name": "Helix",
+      "description": "A pair of support entities that accompany the Ultimecia-Griever fusion during the third phase of the final battle. Each Helix appears as a floating, twisted metallic or crystalline structure — roughly three feet long, shaped like a double helix or spiraling ribbon of dark material that rotates slowly in the air. They orbit around the main boss. They can cast supportive spells for Ultimecia-Griever and also launch their own attacks. When both Helixes align vertically and spin at increased speed, they are about to perform a coordinated magical attack."
+    },
+    {
+      "model_id": 126,
+      "name": "Ultimecia (Final Form)",
+      "description": "The absolute final form of Ultimecia — a vast, abstract, and nightmarish entity that has partially transcended physical form. Her lower body has become an enormous mass of organic and spectral matter — twisting tendrils, flowing darkness, and fragmented reality, spanning perhaps thirty feet. Her upper body remains vaguely humanoid but greatly distorted — her torso is elongated, her arms stretch impossibly long with blade-like fingers, and her head is framed by a massive, sweeping organic structure that replaces her headdress. Her face retains recognizable features but is now otherworldly — her eyes are blazing points of white light, and her mouth opens impossibly wide when casting spells. Reality visibly fractures around her, with fragments of time and space floating nearby. Her ultimate attack, Hell's Judgment, reduces all party members' HP to 1 — signaled by the fractures in reality around her converging into a blinding point of darkness before shattering outward."
+    },
+    {
+      "model_id": 128,
+      "name": "Seifer (Lunatic Pandora)",
+      "description": "Seifer as encountered in Lunatic Pandora. Visually the same as his other encounters — blond hair, scar, gray trench coat, Hyperion gunblade — but now at his most desperate. He fights with wild, aggressive attacks. This is essentially a repeat encounter visually identical to his other battle appearances."
+    },
+    {
+      "model_id": 129,
+      "name": "Slapper",
+      "description": "A small aquatic creature encountered near beaches and waterways. It resembles an oversized fish or ray, about three feet long, with a flat, disc-like body in muted blue-gray and silver tones. Its fins are wide and paddle-like. Its eyes are small and positioned on top of its flat head. A small mouth on its underside contains tiny teeth. Its tail is thin and whip-like. It attacks by slapping with its fins or tail. A relatively weak enemy with simple physical attacks."
+    },
+    {
+      "model_id": 130,
+      "name": "Red Giant",
+      "description": "An enormous suit of crimson-red enchanted armor standing about fifteen feet tall, similar in concept to the Iron Giant but colored in deep blood-red. Its armor is forged from dark red-crimson metal with brass or gold accents, with massive riveted plates covering its entire body. Like the Iron Giant, it is a hollow, animated suit with no visible inhabitant — only a faint glow visible through its narrow visor slit. It wields an enormous dark sword with a red-tinged blade. Its pauldrons are massive and its proportions exaggerated for intimidation. Heavy chains or decorative elements hang from its armor. Encountered in Ultimecia's Castle. When it raises its massive sword overhead with a slow, deliberate motion, an extremely powerful physical attack is about to land."
+    },
+    {
+      "model_id": 131,
+      "name": "Elnoyle",
+      "description": "A sinister, elegant monster encountered in Esthar and Ultimecia's Castle. It has a humanoid upper body with pale, almost porcelain-white skin, a slender torso, and long arms ending in blade-like appendages. Its lower body tapers into a serpentine or spectral trail of dark energy. Its head has an elongated, alien beauty — smooth features, dark markings around closed or narrow eyes, and a small mouth. Dark, flowing wing-like structures extend from its back. It floats rather than walks, drifting smoothly through the air. When the blade-like extensions of its arms glow and it crosses them in front of its body, a powerful slashing attack is imminent."
+    },
+    {
+      "model_id": 132,
+      "name": "Tiamat",
+      "description": "A legendary dragon boss encountered in Ultimecia's Castle — a powerful dark dragon standing about twenty feet tall. Its scales are deep indigo blue with golden-bronze ornamental patterning visible in its texture, giving it an almost regal appearance despite its menace. Its body is powerfully built, with four massive legs and enormous wings that have intricate bone-work in their struts. Its head is crowned with sweeping horns and a crest of spines. Golden eyes burn with fierce intelligence. Its chest bears distinctive golden markings. In FF8, Tiamat is actually a corrupted Guardian Force. When it rises to its full height and its chest markings blaze with golden light, its devastating Dark Flare attack is about to be unleashed — a powerful non-elemental breath weapon."
+    },
+    {
+      "model_id": 133,
+      "name": "Catoblepas",
+      "description": "A large, bull-like creature encountered in Ultimecia's Castle, about ten feet tall at the shoulder. Its body is massive and bovine, with thick, dark gray-black hide that has a rough, almost stone-like texture. Its head is enormous and heavy, hanging low on a thick neck — it has a broad, flat face with red eyes, flared nostrils, and short curved horns. Its most dangerous feature is its petrifying gaze. Its legs are thick and columnar like an elephant's. A heavy tail swings behind it. Red-and-black coloring with metallic accents gives it an almost demonic bovine appearance. The critical combat warning: when it slowly raises its heavy head and its eyes glow with intense white light, its petrification gaze attack is about to fire. Characters without Petrify protection should look away — or in gameplay terms, be prepared with protective junctions."
+    },
+    {
+      "model_id": 134,
+      "name": "Wedge (Revisited)",
+      "description": "Wedge encountered again later in the game, still in Galbadian military uniform. His appearance is the same as his earlier encounter — the younger, shorter soldier with standard blue armor. He may appear slightly more battle-hardened."
+    },
+    {
+      "model_id": 135,
+      "name": "Biggs (Revisited)",
+      "description": "Biggs encountered again later in the game in his Galbadian officer uniform. Same appearance as before — the older, more decorated officer. He may appear more determined or desperate in this later encounter."
+    },
+    {
+      "model_id": 136,
+      "name": "Fujin (Boss Battle)",
+      "description": "Fujin as encountered in a boss battle at Lunatic Pandora, alongside Raijin. Her appearance is the same as described previously — the silver-haired young woman with the eyepatch, dark blue outfit, and chakram weapon. In this encounter she fights with greater intensity and more powerful wind magic. The same visual cues apply."
+    },
+    {
+      "model_id": 137,
+      "name": "Raijin (Boss Battle)",
+      "description": "Raijin as encountered in a boss battle at Lunatic Pandora, alongside Fujin. His appearance is the same — the large, muscular young man with the vest, dark skin, and staff weapon. He fights more aggressively with enhanced thunder magic. The same visual cues apply."
+    },
+    {
+      "model_id": 138,
+      "name": "UFO (Encounter 1)",
+      "description": "The first UFO sighting as part of the PuPu sidequest. The flying saucer appears briefly — a silver disc-shaped craft with colored lights around its rim, hovering at a distance. This is a scripted encounter in the Winhill bluffs area."
+    },
+    {
+      "model_id": 139,
+      "name": "UFO (Encounter 2)",
+      "description": "The second UFO sighting in the Mandy Beach area near Timber. The same silver disc-shaped craft appears, slightly closer than before. Its lights pulse in a different pattern."
+    },
+    {
+      "model_id": 140,
+      "name": "UFO (Encounter 3)",
+      "description": "The third UFO sighting on Kashkabald Desert. The craft appears closer still, and may briefly hover before departing. The colored lights are more active."
+    },
+    {
+      "model_id": 141,
+      "name": "UFO (Encounter 4)",
+      "description": "The fourth and final UFO sighting above the Trabia Heath Peninsula. The craft appears very close before departing. After this encounter, PuPu can be found at the crater site near Balamb for the quest's conclusion."
+    },
+    {
+      "model_id": 142,
+      "name": "Gunblade (Seifer)",
+      "description": "Seifer's gunblade, Hyperion — a weapon model used in certain battle sequences. Similar to Squall's gunblade but with a wider, more curved blade and a slightly different hilt design. The blade has a distinctive shape that flares slightly near the tip."
+    },
+    {
+      "model_id": 143,
+      "name": "Base Soldier",
+      "description": "A basic Galbadian ground soldier encountered during the Dollet mission and similar early-game scenarios. He wears standard-issue dark blue Galbadian military fatigues with light body armor — a simple breastplate and helmet. His equipment is less polished than the G-Soldier variant, suggesting a lower rank or garrison posting. He carries a basic sword or rifle. His attacks are simple, low-damage physical strikes, making him one of the weakest human enemies in the game."
+    }
+  ]
+}

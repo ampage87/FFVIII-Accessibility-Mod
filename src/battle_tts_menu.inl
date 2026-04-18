@@ -123,6 +123,34 @@ static const char* GetMagicName(uint8_t id) {
     return "???";
 }
 
+// v0.13.46: Get name for a draw list entry (handles both magic spells and GFs).
+// In FF8's draw system, magic IDs < 0x40 are spells, IDs >= 0x40 are GFs.
+// GF index = draw_id - 0x40 (e.g. id=67=0x43 -> GF index 3 = Siren).
+static const char* GetDrawEntryName(uint8_t drawId, char* nameBuf, int bufSize)
+{
+    if (drawId == 0) return "Empty";
+    if (drawId < 0x40) return GetMagicName(drawId);
+    // GF entry: look up name from savemap
+    int gfIdx = drawId - 0x40;
+    if (gfIdx >= 0 && gfIdx < 16) {
+        __try {
+            uint8_t* gfBase = (uint8_t*)(SAVEMAP_GF_BASE + gfIdx * SAVEMAP_GF_STRIDE);
+            if (gfBase[0x11] != 0) {
+                DecodeFF8String(gfBase, nameBuf, bufSize);
+                if (nameBuf[0] != '\0') return nameBuf;
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        static const char* GF_DRAW_NAMES[] = {
+            "Quezacotl", "Shiva", "Ifrit", "Siren", "Brothers", "Diablos",
+            "Carbuncle", "Leviathan", "Pandemona", "Cerberus", "Alexander",
+            "Doomtrain", "Bahamut", "Cactuar", "Tonberry", "Eden"
+        };
+        return GF_DRAW_NAMES[gfIdx];
+    }
+    snprintf(nameBuf, bufSize, "Unknown(%u)", (unsigned)drawId);
+    return nameBuf;
+}
+
 // ============================================================================
 // v0.10.17: Sub-menu tracking state
 // ============================================================================
@@ -131,16 +159,15 @@ struct MagicEntry { uint8_t id; uint8_t qty; };
 static MagicEntry s_turnMagicList[32] = {};   // filtered list of spells with qty>0
 static int s_turnMagicCount = 0;               // number of entries in filtered list
 static uint8_t s_turnSubmenuCursor = 0xFF;     // last sub-menu cursor value
-static bool s_inSubmenu = false;               // true when sub-menu is open
+// v0.13.51 hotfix: s_inSubmenu moved to battle_tts_hp.inl so ewm.inl can
+// read it. It's still modified here; the declaration just lives earlier in
+// the translation unit now.
 static uint8_t s_submenuCommandId = 0;         // ability ID of the command that opened the sub-menu
 static bool s_magicListBuilt = false;          // true after we build the magic list for current turn
 static DWORD s_submenuDebounceTick = 0;        // GetTickCount() when debounce started
 static bool s_submenuDebouncing = false;        // true for 300ms after turn start (ignores sub-menu cursor)
 static bool s_pendingSubmenuEntry = false;       // v0.10.112: delayed submenu entry after command scroll
 static DWORD s_pendingSubmenuTick = 0;           // v0.10.112: GetTickCount() when pending entry was scheduled
-static bool s_submenuReentryNeeded = false;      // v0.12.28: armed after exiting submenu, for re-entry detection
-static uint8_t s_lastMenuPhaseForReentry = 0xFF; // v0.12.28: track menuPhase to detect submenu open
-static uint8_t s_commandMenuPhase = 0xFF;        // v0.12.32: dynamically captured command menu phase value
 static uint8_t s_prevMenuPhaseForTarget = 0xFF;   // v0.12.56: track menuPhase for target-exit detection
 static bool s_wasInTargetPhase = false;              // v0.12.61: pure phase-based target tracking
 static bool s_gfTargetAnnounced = false;              // v0.12.65: GF target announced this submenu session
@@ -150,6 +177,35 @@ static DWORD s_pendingGFCancelTick = 0;                 // v0.12.72: tick when G
 static char s_pendingGFCancelName[64] = {};             // v0.12.72: name to announce if cancel confirmed
 static uint8_t s_prevSubmenuMode = 0xFE;                // v0.12.75: promoted to file scope for exit detection
 static bool s_drawPhase14Visited = false;               // v0.12.82: track first phase 14 visit per draw session
+
+// v0.13.49: Definitive submenu-open detection via menuPhase dword.
+// The engine repurposes 0x1D768D0: when on the command menu it holds a small
+// phase number (0-43). When a submenu is open it holds a FUNCTION POINTER
+// (0x004XXXXX range, i.e. >= 0x00400000). Reading as uint32 and checking
+// >= 0x00400000 is unambiguous — adjacent bytes at D1-D3 may be non-zero
+// during command menu, so a simple > 0xFF check gives false positives.
+// Discovered via disassembly: the submenu per-frame handler at 0x4FDD90 calls
+// `call dword ptr [0x1d768d0]` every frame, treating the value as a code pointer.
+static bool s_submenuOpenByDword = false;  // true when dword check confirms submenu open
+
+// v0.13.52: Deferred turn TTS state.
+// Layer 1 (battle_tts_ewm.inl) keeps the ATB cap engaged during damage/action
+// windows to prevent new turns from starting. But there's still a frame-level
+// race: engine can set activeChar to 0-2 on the exact same frame an enemy
+// attack lands (HP change + anim flag raised). The visual menu is already open
+// at that point — we can't cleanly un-open it without patching engine state.
+// As the next best thing, we defer the "X's turn. Attack." announcement behind
+// any in-flight damage TTS so audio order is correct (damage first, turn next).
+//
+// v0.13.53: Added s_deferredTurnChar so PollDeferredTurnAnnounce can cancel
+// the pending TTS if the turn has already advanced past the character we
+// deferred for (e.g. damage TTS blocked release long enough for the user to
+// finish their whole action). Firing a stale announcement mid-next-turn is
+// much worse than silently dropping it.
+static char    s_deferredTurnBuf[128] = "";
+static bool    s_deferredTurnPending = false;
+static DWORD   s_deferredTurnTick = 0;
+static uint8_t s_deferredTurnChar = 0xFF;  // v0.13.53: active char at defer time
 
 // Build the filtered magic list for the active character.
 // Reads savemap char struct +0x10 (32 slots × 2 bytes: magic_id, qty).
@@ -504,8 +560,10 @@ static void BuildDrawList()
     for (int i = 0; i < DRAW_SLOTS_PER_ENEMY; i++) {
         uint8_t mid = s_turnDrawList[i].magicId;
         if (mid != 0) {
-            Log::Battle("BattleTTS: [DRAW-LIST]   [%d] id=%u (%s)",
-                       i, (unsigned)mid, GetMagicName(mid));
+            char dnameBuf[64];
+            Log::Battle("BattleTTS: [DRAW-LIST]   [%d] id=%u (%s%s)",
+                       i, (unsigned)mid, GetDrawEntryName(mid, dnameBuf, sizeof(dnameBuf)),
+                       (mid >= 0x40) ? " [GF]" : "");
         }
     }
 }
@@ -514,6 +572,28 @@ static void BuildDrawList()
 static uint8_t s_turnActiveCharId = 0xFF;    // last active_char_id we announced
 static uint8_t s_turnCmdCursor = 0xFF;       // last command cursor position
 static uint8_t s_turnCharCommands[4] = {};    // command IDs for current turn's 4 slots
+
+// v0.13.49: Shared submenu entry helper.
+// Called from all detection paths (submenuMode, dword, subCursor) to ensure
+// consistent state setup and list building regardless of which path triggers.
+static void EnterSubmenu(uint8_t cmdId, const char* source)
+{
+    s_submenuCommandId = cmdId;
+    s_inSubmenu = true;
+    s_turnSubmenuCursor = 0xFF;  // force announce on next cursor read
+    s_prevSubmenuMode = 0x01;    // so exit detection works
+    s_pendingSubmenuEntry = false;
+    Log::Battle("BattleTTS: [SUBMENU] Entry via %s: cmd 0x%02X (%s)",
+               source, (unsigned)cmdId, GetCommandName(cmdId));
+    // Build the appropriate list for this submenu type
+    if (cmdId == 0x14 && !s_magicListBuilt) BuildMagicList(s_turnActiveCharId);
+    if (cmdId == 0x15 && !s_gfListBuilt) BuildGFList(s_turnActiveCharId);
+    if (cmdId == 0x17 && !s_itemListBuilt) BuildItemList();
+    if (cmdId == 0x16 && !s_drawListBuilt) {
+        s_lastDrawerPartySlot = s_turnActiveCharId;
+        BuildDrawList();
+    }
+}
 
 static const char* GetBattleCharName(uint8_t partySlot) {
     if (partySlot >= 3) return "???";
@@ -560,6 +640,28 @@ static void PollTurnAndCommands()
         
         // Turn start: active_char_id transitions to a valid slot
         if (activeChar < 3 && activeChar != s_turnActiveCharId) {
+            // v0.13.48: Handle char→char turn transition (no 0xFF gap).
+            // If the departing character was commanding a GF, enable HP substitution.
+            // The turn-END handler (activeChar==0xFF) normally does this, but char→char
+            // transitions skip 0xFF entirely — high GF compatibility makes this common.
+            if (s_turnActiveCharId < BATTLE_ALLY_SLOTS && s_submenuCommandId == 0x15) {
+                s_gfHpSubstitutionActive[s_turnActiveCharId] = true;
+                s_gfAnimFired[s_turnActiveCharId] = false;
+                s_gfHpTracking[s_turnActiveCharId] = false;
+                s_prevSlotSummoning[s_turnActiveCharId] = false;
+                uint8_t lastGFCursor = s_turnSubmenuCursor;
+                if (lastGFCursor < s_turnGFCount) {
+                    s_gfSummonedIdx[s_turnActiveCharId] = s_turnGFList[lastGFCursor].gfIdx;
+                    Log::Battle("BattleTTS: [GF-HP-SUB] Enabled for slot %d (char->char transition, gfIdx=%d '%s')",
+                               (int)s_turnActiveCharId, (int)s_turnGFList[lastGFCursor].gfIdx,
+                               s_turnGFList[lastGFCursor].name);
+                } else {
+                    s_gfSummonedIdx[s_turnActiveCharId] = 0xFF;
+                    Log::Battle("BattleTTS: [GF-HP-SUB] Enabled for slot %d (char->char transition, cursor=%d out of range)",
+                               (int)s_turnActiveCharId, (int)lastGFCursor);
+                }
+            }
+            
             s_turnActiveCharId = activeChar;
             BuildCharCommandList(activeChar);
             
@@ -593,15 +695,13 @@ static void PollTurnAndCommands()
             s_drawPhase14Visited = false;  // v0.12.82
             s_pendingSubmenuEntry = false;
             s_pendingSubmenuTick = 0;
-            s_submenuReentryNeeded = false;  // v0.12.28
-            s_lastMenuPhaseForReentry = 0xFF;  // v0.12.28
-            s_commandMenuPhase = 0xFF;  // v0.12.32
             s_prevMenuPhaseForTarget = 0xFF;  // v0.12.56
             s_wasInTargetPhase = false;  // v0.12.61
             s_gfTargetAnnounced = false;  // v0.12.65
             s_prevTargetActive = 0xFF;  // v0.12.66
             s_pendingGFCancel = false;  // v0.12.72
             s_prevSubmenuMode = 0xFE;  // v0.12.79: reset so GF entry transition is detected
+            s_submenuOpenByDword = false;  // v0.13.49: reset dword-based submenu detection
             s_submenuDebouncing = true;
             s_submenuDebounceTick = GetTickCount();
             
@@ -622,8 +722,32 @@ static void PollTurnAndCommands()
             const char* cmd = s_limitBreakActive ? "Limit Break" : GetCommandName(s_turnCharCommands[0]);
             char buf[128];
             snprintf(buf, sizeof(buf), "%s's turn. %s.", name, cmd);
-            BattleSpeak(buf, PRIO_TURN, true);
-            Log::Battle("BattleTTS: [TURN] %s (slot %d, limitToggle=%u)", buf, (int)activeChar, (unsigned)initToggle);
+
+            // v0.13.52: Defer turn TTS if damage is pending/animating/speaking.
+            // The EWM cap in battle_tts_ewm.inl prevents most same-frame races,
+            // but when the engine sets activeChar on the exact frame an enemy
+            // attack lands, we need to order the audio manually: let the damage
+            // TTS speak first, then fire the turn announcement. All state setup
+            // above still runs (command list, submenu reset, etc.) — only the
+            // spoken "X's turn. Y." line is held back. PollDeferredTurnAnnounce()
+            // fires it when the damage conditions clear.
+            uint8_t engDmgAnimTurn = 0;
+            __try { engDmgAnimTurn = *(uint8_t*)0x01D280C0; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+            bool turnDamageInFlight = s_ewmHoldForDamageTTS || s_anyHpPending ||
+                                      s_damageAnimWasActive || (engDmgAnimTurn != 0);
+            if (turnDamageInFlight) {
+                strncpy(s_deferredTurnBuf, buf, sizeof(s_deferredTurnBuf) - 1);
+                s_deferredTurnBuf[sizeof(s_deferredTurnBuf) - 1] = '\0';
+                s_deferredTurnPending = true;
+                s_deferredTurnTick = GetTickCount();
+                s_deferredTurnChar = activeChar;  // v0.13.53: anchor to this turn
+                Log::Battle("BattleTTS: [TURN] Deferred (damage in flight): %s (tts=%d hp=%d anim=%d engAnim=%d)",
+                           buf, (int)s_ewmHoldForDamageTTS, (int)s_anyHpPending,
+                           (int)s_damageAnimWasActive, (int)engDmgAnimTurn);
+            } else {
+                BattleSpeak(buf, PRIO_TURN, true);
+                Log::Battle("BattleTTS: [TURN] %s (slot %d, limitToggle=%u)", buf, (int)activeChar, (unsigned)initToggle);
+            }
             
             // v0.12.52: Snapshot all party magic inventories for Draw validation
             SnapshotAllMagicInventories();
@@ -641,6 +765,13 @@ static void PollTurnAndCommands()
             // v0.12.46: If the command was GF, enable HP substitution for this slot
             if (s_submenuCommandId == 0x15 && s_turnActiveCharId < BATTLE_ALLY_SLOTS) {
                 s_gfHpSubstitutionActive[s_turnActiveCharId] = true;
+                // v0.13.47: Clear animation-fired flag so HP check works for this new summon.
+                // entity+0x7C stays non-zero between consecutive summons (stale flag),
+                // so the 0->non-zero transition in PollGFSummonState never fires.
+                // This is the definitive moment a new GF summon starts for this slot.
+                s_gfAnimFired[s_turnActiveCharId] = false;
+                s_gfHpTracking[s_turnActiveCharId] = false;
+                s_prevSlotSummoning[s_turnActiveCharId] = false;  // v0.13.48: force PollGFSummonState edge re-detection
                 // v0.12.83: Record which GF was selected from the submenu list
                 uint8_t lastGFCursor = s_turnSubmenuCursor;
                 if (lastGFCursor < s_turnGFCount) {
@@ -670,13 +801,12 @@ static void PollTurnAndCommands()
                 if (s_inSubmenu) {
                     s_inSubmenu = false;
                     s_turnSubmenuCursor = 0xFF;
-                    s_submenuReentryNeeded = true;  // v0.12.28: arm re-entry detection
-                    // v0.10.112: Reset draw tracking so re-entry announces initial items
+                    // Reset tracking so re-entry rebuilds lists and announces items
                     s_drawCursorPrev = 0xFF;
                     s_drawStockCastPrev = 0xFF;
                     s_drawListBuilt = false;
                     s_drawLastMenuPhase = 0xFF;
-                    s_drawPhase14Visited = false;  // v0.12.82
+                    s_drawPhase14Visited = false;
                     s_magicListBuilt = false;
                     s_gfListBuilt = false;
                     s_itemListBuilt = false;
@@ -714,9 +844,17 @@ static void PollTurnAndCommands()
                     s_submenuDebouncing = false;
                     // Capture current value as baseline after debounce expires
                     s_turnSubmenuCursor = *(uint8_t*)BATTLE_SUBMENU_CURSOR;
-                    // v0.12.32: Capture the menuPhase that's active during command menu
-                    __try { s_commandMenuPhase = *(uint8_t*)BATTLE_MENU_PHASE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
-                    Log::Battle("BattleTTS: [SUBMENU] Command menu phase captured: %u", (unsigned)s_commandMenuPhase);
+                    Log::Battle("BattleTTS: [SUBMENU] Debounce expired");
+                    // v0.13.49: Snapshot submenuMode so the first post-debounce frame
+                    // doesn't see a false change from stale per-frame handler writes.
+                    __try { s_prevSubmenuMode = *(uint8_t*)0x01D768EB; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                    // v0.13.49: Snapshot dword state so the first post-debounce frame
+                    // doesn't see a false transition if the engine hasn't fully settled.
+                    {
+                        uint32_t dw = 0;
+                        __try { dw = *(uint32_t*)BATTLE_MENU_PHASE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                        s_submenuOpenByDword = (dw >= 0x00400000);
+                    }
                 }
             }
             
@@ -822,7 +960,14 @@ static void PollTurnAndCommands()
                 uint8_t sm = 0xFF;
                 __try { sm = *(uint8_t*)SUBMENU_MODE_ADDR; } __except(EXCEPTION_EXECUTE_HANDLER) {}
                 // s_prevSubmenuMode is file-scoped (v0.12.75) for cross-block access
-                bool wasCommandMenu = (s_prevSubmenuMode == 0xFE || s_prevSubmenuMode == 0x00);
+                // v0.13.49: Removed the wasCommandMenu requirement. The old check
+                // only recognized 0xFE and 0x00 as "command menu" values, but
+                // submenuMode is actually the ACTIVE PARTY SLOT INDEX for input
+                // routing (0/1/2 = submenu for that slot, 0xFE = command cursor).
+                // Stale per-frame handler writes from the previous turn can leave
+                // it at a non-0xFE/non-0x00 value even when we're on the command menu.
+                // The correct condition: if we're NOT in a submenu (!s_inSubmenu)
+                // and the mode just changed to a submenu value, that's an entry.
                 bool nowInSubmenu = (sm != 0xFE && sm != 0x00);
                 bool nowCommandMenu = (sm == 0xFE);
                 // v0.12.72: When sm transitions TO 0x00, check menuPhase as fallback.
@@ -834,7 +979,6 @@ static void PollTurnAndCommands()
                     if (fallbackPhase == 32 || fallbackPhase == 80) {
                         nowInSubmenu = true;
                         nowCommandMenu = false;
-                        wasCommandMenu = true;  // treat previous state as cmd menu for entry detection
                         Log::Battle("BattleTTS: [SUBMENU] Mode 0x%02X->0x00 + phase %u -> treating as submenu entry",
                                    (unsigned)s_prevSubmenuMode, (unsigned)fallbackPhase);
                     } else {
@@ -848,106 +992,86 @@ static void PollTurnAndCommands()
                     nowCommandMenu = false;  // prevent false exit detection
                 }
                 if (sm != s_prevSubmenuMode) {
-                    if (wasCommandMenu && nowInSubmenu && !s_inSubmenu) {
-                        // Entering submenu — reset cursor tracking to force announcement
-                        // v0.12.82: Gate on !s_inSubmenu to prevent false re-entry when
-                        // submenuMode bounces (e.g. 0x01->0x00 while already in submenu).
-                        s_turnSubmenuCursor = 0xFF;
-                        Log::Battle("BattleTTS: [SUBMENU] Entry detected via submenu mode 0x%02X->0x%02X",
-                                   (unsigned)s_prevSubmenuMode, (unsigned)sm);
+                    if (nowInSubmenu && !s_inSubmenu && !s_submenuDebouncing) {
+                        // v0.13.49: Use shared helper for consistent entry across all paths.
+                        if (s_turnCmdCursor < 4) {
+                            char modeSrc[64];
+                            snprintf(modeSrc, sizeof(modeSrc), "submenu mode 0x%02X->0x%02X",
+                                     (unsigned)s_prevSubmenuMode, (unsigned)sm);
+                            EnterSubmenu(s_turnCharCommands[s_turnCmdCursor], modeSrc);
+                        }
                     } else if (nowCommandMenu && s_inSubmenu) {
                         // v0.12.75: Simplified exit check — if mod knows we're in submenu
                         // and engine says command menu, that's an exit. Previous check
                         // (!wasCommandMenu) failed when prevMode was 0x00.
-                        // Returning to command menu — announce current command
-                        uint8_t exitCmd = s_submenuCommandId;
-                        s_inSubmenu = false;
-                        s_magicListBuilt = false;
-                        s_gfListBuilt = false;
-                        s_itemListBuilt = false;
-                        s_gfTargetAnnounced = false;  // v0.12.65
-                        s_drawCursorPrev = 0xFF;
-                        s_drawStockCastPrev = 0xFF;
-                        s_drawListBuilt = false;
-                        s_drawLastMenuPhase = 0xFF;
-                        Log::Battle("BattleTTS: [SUBMENU] Exit detected via submenu mode 0x%02X->0xFE",
-                                   (unsigned)s_prevSubmenuMode);
-                        // Announce the command we're returning to
-                        if (s_turnCmdCursor < 4) {
-                            const char* cmd = GetCommandName(s_turnCharCommands[s_turnCmdCursor]);
-                            BattleSpeak(cmd, PRIO_MENU, true);
-                            Log::Battle("BattleTTS: [SUBMENU] Exit announce: %s (cursor=%d, was cmd 0x%02X)",
-                                       cmd, (int)s_turnCmdCursor, (unsigned)exitCmd);
+                        // v0.13.50: EXCEPTION: Draw (0x16) has a complex multi-phase flow
+                        // where submenuMode briefly flips to 0xFE during internal phase
+                        // transitions (target → spell list → Stock/Cast). This causes false
+                        // exits. For Draw, we rely on the cmdCursor change handler for exit
+                        // detection instead (user presses cancel → cursor returns to cmd menu).
+                        if (s_submenuCommandId == 0x16) {
+                            Log::Battle("BattleTTS: [SUBMENU] Suppressed false exit for Draw (mode 0x%02X->0xFE, phase transition)",
+                                       (unsigned)s_prevSubmenuMode);
+                        } else {
+                            // Returning to command menu — announce current command
+                            uint8_t exitCmd = s_submenuCommandId;
+                            s_inSubmenu = false;
+                            s_magicListBuilt = false;
+                            s_gfListBuilt = false;
+                            s_itemListBuilt = false;
+                            s_gfTargetAnnounced = false;  // v0.12.65
+                            s_drawCursorPrev = 0xFF;
+                            s_drawStockCastPrev = 0xFF;
+                            s_drawListBuilt = false;
+                            s_drawLastMenuPhase = 0xFF;
+                            Log::Battle("BattleTTS: [SUBMENU] Exit detected via submenu mode 0x%02X->0xFE",
+                                       (unsigned)s_prevSubmenuMode);
+                            // Announce the command we're returning to
+                            if (s_turnCmdCursor < 4) {
+                                const char* cmd = GetCommandName(s_turnCharCommands[s_turnCmdCursor]);
+                                BattleSpeak(cmd, PRIO_MENU, true);
+                                Log::Battle("BattleTTS: [SUBMENU] Exit announce: %s (cursor=%d, was cmd 0x%02X)",
+                                           cmd, (int)s_turnCmdCursor, (unsigned)exitCmd);
+                            }
+                            // Sync menuPhase tracker so target-exit doesn't also fire
+                            __try { s_prevMenuPhaseForTarget = *(uint8_t*)BATTLE_MENU_PHASE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
                         }
-                        // Sync menuPhase tracker so target-exit doesn't also fire
-                        __try { s_prevMenuPhaseForTarget = *(uint8_t*)BATTLE_MENU_PHASE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
                     }
                 }
                 s_prevSubmenuMode = sm;
             }
 
-            // v0.12.73: MenuPhase fallback for submenu entry detection.
-            // When both 0xEB and subCursor fail to signal entry (e.g. first GF entry
-            // where 0xEB stays 0x00 and cursor stays 0), menuPhase transition to
-            // 32 or 80 is the definitive signal.
-            if (!s_submenuDebouncing && !s_inSubmenu && s_turnCmdCursor < 4) {
-                uint8_t mpNow = 0xFF;
-                __try { mpNow = *(uint8_t*)BATTLE_MENU_PHASE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
-                static uint8_t s_prevMenuPhaseForSubmenu = 0xFF;
-                bool wasNonSubmenu = (s_prevMenuPhaseForSubmenu != 32 && s_prevMenuPhaseForSubmenu != 80);
-                bool nowSubmenu = (mpNow == 32 || mpNow == 80);
-                if (wasNonSubmenu && nowSubmenu) {
-                    s_submenuCommandId = s_turnCharCommands[s_turnCmdCursor];
-                    s_inSubmenu = true;
-                    s_turnSubmenuCursor = 0xFF;  // force announce on next cursor read
-                    // v0.12.75: Force prevSubmenuMode so exit detection works
-                    s_prevSubmenuMode = 0x01;  // one-shot: won't re-trigger since s_inSubmenu is now true
-                    Log::Battle("BattleTTS: [SUBMENU] Phase fallback entry: phase %u->%u, cmd 0x%02X (%s)",
-                               (unsigned)s_prevMenuPhaseForSubmenu, (unsigned)mpNow,
-                               (unsigned)s_submenuCommandId, GetCommandName(s_submenuCommandId));
-                    // Build lists
-                    if (s_submenuCommandId == 0x14 && !s_magicListBuilt)
-                        BuildMagicList(s_turnActiveCharId);
-                    if (s_submenuCommandId == 0x15 && !s_gfListBuilt)
-                        BuildGFList(s_turnActiveCharId);
-                    if (s_submenuCommandId == 0x17 && !s_itemListBuilt)
-                        BuildItemList();
-                    if (s_submenuCommandId == 0x16 && !s_drawListBuilt) {
-                        s_lastDrawerPartySlot = s_turnActiveCharId;
-                        BuildDrawList();
+            // v0.12.73: MenuPhase byte fallback removed in v0.13.49. Phase 80 is
+            // ambiguous (command menu AND submenu). Superseded by dword detection.
+            // v0.13.49: Definitive submenu detection via menuPhase DWORD.
+            // When the engine opens a submenu, 0x1D768D0 transitions from a small
+            // phase number (0-43) to a FUNCTION POINTER (0x004XXXXX range).
+            // Reading as uint32 and checking > 0xFF is unambiguous.
+            // Discovered via disassembly: submenu handler at 0x4FDD90 executes
+            // `call dword ptr [0x1d768d0]` — treating the value as a code pointer.
+            {
+                uint32_t menuDword = 0;
+                __try { menuDword = *(uint32_t*)BATTLE_MENU_PHASE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                bool submenuNowOpen = (menuDword >= 0x00400000);
+                if (submenuNowOpen && !s_submenuOpenByDword && !s_submenuDebouncing &&
+                    !s_inSubmenu && s_turnCmdCursor < 4) {
+                    uint8_t cmdAtCursor = s_turnCharCommands[s_turnCmdCursor];
+                    if (cmdAtCursor == 0x14 || cmdAtCursor == 0x15 || cmdAtCursor == 0x16 || cmdAtCursor == 0x17) {
+                        char dwordSrc[64];
+                        snprintf(dwordSrc, sizeof(dwordSrc), "menuPhase dword 0x%08X", menuDword);
+                        EnterSubmenu(cmdAtCursor, dwordSrc);
                     }
                 }
-                s_prevMenuPhaseForSubmenu = mpNow;
+                // Only track state after debounce — during debounce the dword may
+                // still hold a stale function pointer from the previous turn's submenu,
+                // which would poison the flag and suppress the real transition later.
+                if (!s_submenuDebouncing)
+                    s_submenuOpenByDword = submenuNowOpen;
             }
             if (!s_submenuDebouncing && !cmdCursorChangedThisFrame && subCursor != s_turnSubmenuCursor) {
                 if (!s_inSubmenu && s_turnCmdCursor < 4) {
-                    // Entering sub-menu — record which command opened it
-                    s_submenuCommandId = s_turnCharCommands[s_turnCmdCursor];
-                    s_inSubmenu = true;
-                    s_pendingSubmenuEntry = false;  // v0.10.112: cancel delayed entry
-                    Log::Battle("BattleTTS: [SUBMENU] Entered sub-menu for cmd 0x%02X (%s) at cursor %d",
-                               (unsigned)s_submenuCommandId,
-                               GetCommandName(s_submenuCommandId),
-                               (int)s_turnCmdCursor);
-                    
-                    // Build spell list if Magic sub-menu
-                    if (s_submenuCommandId == 0x14 && !s_magicListBuilt) { // 0x14 = Magic ability ID
-                        BuildMagicList(s_turnActiveCharId);
-                    }
-                    // v0.10.98: Build GF list if GF sub-menu
-                    if (s_submenuCommandId == 0x15 && !s_gfListBuilt) { // 0x15 = GF ability ID
-                        BuildGFList(s_turnActiveCharId);
-                    }
-                    // v0.10.104: Build item list if Item sub-menu
-                    if (s_submenuCommandId == 0x17 && !s_itemListBuilt) {
-                        BuildItemList();
-                    }
-                    // v0.10.109: Build draw list if Draw sub-menu
-                    if (s_submenuCommandId == 0x16 && !s_drawListBuilt) {
-                        s_lastDrawerPartySlot = s_turnActiveCharId;  // v0.10.112: track who is drawing
-                        BuildDrawList();
-                    }
-
+                    // Entering sub-menu — use shared helper
+                    EnterSubmenu(s_turnCharCommands[s_turnCmdCursor], "subCursor change");
                 }
                 
                 s_turnSubmenuCursor = subCursor;
@@ -973,15 +1097,21 @@ static void PollTurnAndCommands()
                         }
                     } else if (s_submenuCommandId == 0x15 && s_gfListBuilt) {
                         // v0.10.98: GF sub-menu — announce junctioned GF at cursor position
-                        if ((int)subCursor < s_turnGFCount) {
-                            const char* gfName = s_turnGFList[subCursor].name;
+                        // v0.13.46: Clamp cursor to valid range — stale cursor from previous
+                        // character's GF selection can be out of range for this character.
+                        // v0.13.49: Announce GF name or "Empty GF slot" based on cursor position.
+                        // Cursor positions >= s_turnGFCount represent empty/unjunctioned slots.
+                        int gfCur = (int)subCursor;
+                        if (gfCur < s_turnGFCount) {
+                            const char* gfName = s_turnGFList[gfCur].name;
                             char buf[128];
                             snprintf(buf, sizeof(buf), "%s", gfName);
                             BattleSpeak(buf, PRIO_MENU, true);
                             Log::Battle("BattleTTS: [SUBMENU-NAV] GF cursor=%d -> %s (gfIdx=%d)",
-                                       (int)subCursor, gfName, (int)s_turnGFList[subCursor].gfIdx);
+                                       gfCur, gfName, (int)s_turnGFList[gfCur].gfIdx);
                         } else {
-                            Log::Battle("BattleTTS: [SUBMENU-NAV] GF cursor=%d out of range (count=%d)",
+                            BattleSpeak("Empty GF slot", PRIO_MENU, true);
+                            Log::Battle("BattleTTS: [SUBMENU-NAV] GF cursor=%d -> Empty GF slot (count=%d)",
                                        (int)subCursor, s_turnGFCount);
                         }
                     } else if (s_submenuCommandId == 0x17) {
@@ -1051,25 +1181,8 @@ static void PollTurnAndCommands()
                 if (s_turnCmdCursor < 4) {
                     uint8_t sc = 0;
                     __try { sc = *(uint8_t*)BATTLE_SUBMENU_CURSOR; } __except(EXCEPTION_EXECUTE_HANDLER) {}
-                    s_submenuCommandId = s_turnCharCommands[s_turnCmdCursor];
-                    s_inSubmenu = true;
+                    EnterSubmenu(s_turnCharCommands[s_turnCmdCursor], "delayed entry");
                     s_turnSubmenuCursor = sc;
-                    
-                    Log::Battle("BattleTTS: [SUBMENU] Delayed entry for cmd 0x%02X (%s) cursor %d",
-                               (unsigned)s_submenuCommandId,
-                               GetCommandName(s_submenuCommandId), (int)sc);
-                    
-                    // Build lists
-                    if (s_submenuCommandId == 0x14 && !s_magicListBuilt)
-                        BuildMagicList(s_turnActiveCharId);
-                    if (s_submenuCommandId == 0x15 && !s_gfListBuilt)
-                        BuildGFList(s_turnActiveCharId);
-                    if (s_submenuCommandId == 0x17 && !s_itemListBuilt)
-                        BuildItemList();
-                    if (s_submenuCommandId == 0x16 && !s_drawListBuilt) {
-                        s_lastDrawerPartySlot = s_turnActiveCharId;
-                        BuildDrawList();
-                    }
                     
                     // Announce current item (queued, not interrupting command name)
                     if (s_submenuCommandId == 0x14 && s_magicListBuilt) {
@@ -1087,6 +1200,10 @@ static void PollTurnAndCommands()
                             BattleSpeak(s_turnGFList[sc].name, PRIO_MENU, false);
                             Log::Battle("BattleTTS: [SUBMENU-DELAYED] GF cursor=%d -> %s",
                                        (int)sc, s_turnGFList[sc].name);
+                        } else {
+                            BattleSpeak("Empty GF slot", PRIO_MENU, false);
+                            Log::Battle("BattleTTS: [SUBMENU-DELAYED] GF cursor=%d -> Empty GF slot (count=%d)",
+                                       (int)sc, s_turnGFCount);
                         }
                     } else if (s_submenuCommandId == 0x17 && s_itemListBuilt) {
                         // Item: read from display struct or inventory
@@ -1165,12 +1282,19 @@ static void PollTurnAndCommands()
                     s_drawCursorPrev = drawCur;
                     uint8_t mid = s_turnDrawList[drawCur].magicId;
                     if (mid != 0) {
-                        const char* spellName = GetMagicName(mid);
+                        char drawNameBuf[64];
+                        const char* drawName = GetDrawEntryName(mid, drawNameBuf, sizeof(drawNameBuf));
                         char buf[128];
-                        snprintf(buf, sizeof(buf), "%s", spellName);
+                        // v0.13.46: Prefix GF entries with "GF: " to distinguish from spells
+                        if (mid >= 0x40) {
+                            snprintf(buf, sizeof(buf), "GF: %s", drawName);
+                        } else {
+                            snprintf(buf, sizeof(buf), "%s", drawName);
+                        }
                         BattleSpeak(buf, PRIO_MENU, true);
-                        Log::Battle("BattleTTS: [DRAW-CUR] draw_cursor=%d -> %s (id=%u)",
-                                   (int)drawCur, spellName, (unsigned)mid);
+                        Log::Battle("BattleTTS: [DRAW-CUR] draw_cursor=%d -> %s (id=%u%s)",
+                                   (int)drawCur, drawName, (unsigned)mid,
+                                   (mid >= 0x40) ? " GF" : "");
                     } else {
                         BattleSpeak("Empty", PRIO_MENU, true);
                         Log::Battle("BattleTTS: [DRAW-CUR] draw_cursor=%d -> Empty", (int)drawCur);
@@ -1218,6 +1342,25 @@ static void PollTurnAndCommands()
                     __try { aMask = *(uint8_t*)BATTLE_TARGET_BITMASK; } __except(EXCEPTION_EXECUTE_HANDLER) {}
                     __try { aScope = *(uint8_t*)BATTLE_TARGET_SCOPE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
                     if (aMask != 0) {
+                        // v0.13.46: If this is a GF command and we never entered the submenu
+                        // (detection was missed), build the GF list now and announce the GF name.
+                        if (s_turnCmdCursor < 4 && s_turnCharCommands[s_turnCmdCursor] == 0x15 && !s_gfListBuilt) {
+                            BuildGFList(s_turnActiveCharId);
+                            s_submenuCommandId = 0x15;
+                            s_inSubmenu = true;
+                            if (s_turnGFCount > 0) {
+                                // v0.13.46: Read actual submenu cursor instead of hardcoding 0
+                                uint8_t subCur = 0;
+                                __try { subCur = *(uint8_t*)BATTLE_SUBMENU_CURSOR; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                                if (subCur >= s_turnGFCount) subCur = 0;
+                                const char* gfName = s_turnGFList[subCur].name;
+                                char preBuf[128];
+                                snprintf(preBuf, sizeof(preBuf), "%s", gfName);
+                                BattleSpeak(preBuf, PRIO_MENU, true);
+                                Log::Battle("BattleTTS: [TARGET-ACTIVE] GF submenu missed — built GF list, announcing: %s (cursor=%u)",
+                                           gfName, (unsigned)subCur);
+                            }
+                        }
                         // For non-phase targets (GF), scope alone determines targeting:
                         // scope=1 = All enemies, scope=2 = All allies (mask is just cursor anchor)
                         char tgtBuf[128];
@@ -1289,6 +1432,68 @@ static void PollTurnAndCommands()
         }
 
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+// ============================================================================
+// v0.13.52: Deferred turn announcement poll.
+// Called from battle_tts.cpp Update() after PollHPChanges so any damage TTS
+// raised this frame is reflected in s_ewmHoldForDamageTTS before we decide
+// whether to fire.
+//
+// v0.13.53 changes:
+//   1. Cancel the pending TTS if activeChar no longer matches what it was
+//      at defer time. Damage TTS can hold long enough for the player to
+//      finish their entire action; firing "X's turn. Attack." during X+1's
+//      turn (or during the gap) is worse than silently dropping it.
+//   2. Drop the ScreenReader::IsSpeaking() gate. It was causing indefinite
+//      deferrals when the user was actively navigating menus — SAPI was
+//      never idle, the TTS never fired, and ended up ~4 seconds stale.
+//      PRIO_TURN will interrupt whatever lower-priority speech is playing,
+//      so firing promptly is fine.
+// Release conditions:
+//   - Damage signals clear, OR
+//   - 5-second safety timeout (signals stuck), OR
+//   - activeChar changed — cancel (return without firing).
+// ============================================================================
+static void PollDeferredTurnAnnounce()
+{
+    if (!s_deferredTurnPending) return;
+
+    // v0.13.53: If the turn we deferred for has already ended or advanced
+    // to a different character, cancel instead of firing a stale line.
+    uint8_t curChar = 0xFF;
+    if (s_pActiveCharId) {
+        __try { curChar = *s_pActiveCharId; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    if (curChar != s_deferredTurnChar) {
+        Log::Battle("BattleTTS: [TURN] Deferred cancelled (char %u -> %u, stale): %s",
+                   (unsigned)s_deferredTurnChar, (unsigned)curChar, s_deferredTurnBuf);
+        s_deferredTurnPending = false;
+        s_deferredTurnBuf[0] = '\0';
+        s_deferredTurnChar = 0xFF;
+        return;
+    }
+
+    DWORD elapsed = GetTickCount() - s_deferredTurnTick;
+    bool timeout = (elapsed >= 5000);
+
+    uint8_t engDmgAnim = 0;
+    __try { engDmgAnim = *(uint8_t*)0x01D280C0; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    bool damageStillActive = s_ewmHoldForDamageTTS || s_anyHpPending ||
+                             s_damageAnimWasActive || (engDmgAnim != 0);
+
+    // Wait for damage conditions to clear (unless we hit the safety timeout).
+    if (!timeout && damageStillActive) return;
+
+    // v0.13.53: No IsSpeaking() gate — fire now. PRIO_TURN interrupts anything
+    // queued below it, and waiting for SAPI idle was producing stale 4s+
+    // deferrals when the user was actively navigating menus.
+    BattleSpeak(s_deferredTurnBuf, PRIO_TURN, true);
+    Log::Battle("BattleTTS: [TURN] Deferred fired after %u ms: %s%s",
+               (unsigned)elapsed, s_deferredTurnBuf, timeout ? " (timeout)" : "");
+    s_deferredTurnPending = false;
+    s_deferredTurnBuf[0] = '\0';
+    s_deferredTurnChar = 0xFF;
 }
 
 // ============================================================================

@@ -511,12 +511,19 @@ void Initialize()
     s_streamHandleOffset = 0;
     s_directCallAvailable = false;
     s_fmvVolumeAvailable = false;
-    s_bgmVolume = 0.1f;
+    // v0.13.51: Load persistent BGM volume from INI (percent 0-100, default 10).
+    // Stored as integer so the INI is easy to hand-edit.
+    Config::Load();
+    int pct = Config::GetInt("game_volume", 10);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    s_bgmVolume = (float)pct / 100.0f;
     s_lastGameVolume[0] = 127;
     s_lastGameVolume[1] = 127;
     s_lastReapplyTick = GetTickCount();
     s_reapplyCount = 0;
-    Log::Mod("GameAudio: Initialized. Default BGM volume %.0f%%.", s_bgmVolume * 100.0f);
+    Log::Mod("GameAudio: Initialized. BGM volume %.0f%% (loaded from config).",
+               s_bgmVolume * 100.0f);
 }
 
 void Update()
@@ -571,6 +578,9 @@ void VolumeDown()
 
     if (s_hookInstalled) ReapplyVolume();
 
+    // v0.13.51: Persist BGM volume as integer percent.
+    Config::SetInt("game_volume", (int)(s_bgmVolume * 100.0f + 0.5f));
+
     char msg[48];
     snprintf(msg, sizeof(msg), "Music volume %d percent", (int)(s_bgmVolume * 100.0f + 0.5f));
     ScreenReader::Speak(msg, true);
@@ -585,6 +595,9 @@ void VolumeUp()
     Log::Mod("GameAudio: BGM volume -> %.0f%%", s_bgmVolume * 100.0f);
 
     if (s_hookInstalled) ReapplyVolume();
+
+    // v0.13.51: Persist BGM volume as integer percent.
+    Config::SetInt("game_volume", (int)(s_bgmVolume * 100.0f + 0.5f));
 
     char msg[48];
     snprintf(msg, sizeof(msg), "Music volume %d percent", (int)(s_bgmVolume * 100.0f + 0.5f));

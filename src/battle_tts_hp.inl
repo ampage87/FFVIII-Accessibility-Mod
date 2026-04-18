@@ -4,9 +4,20 @@
 
 // v0.12.48: Per-slot GF animation fired tracking.
 // Set by HookedBattleEffect when a GF animation dispatches for a slot.
-// Cleared by EWM_ClampGFState when a new GF starts loading for a slot.
+// Cleared by PollGFSummonState when entity+0x7C transitions 0->non-zero (new summon).
+// Also cleared by EWM_ClampGFState when state68==5 (belt-and-suspenders).
 // Used by AnnouncePartyMemberHP to stop showing GF HP after animation fires.
 static volatile bool s_gfAnimFired[BATTLE_ALLY_SLOTS] = {};
+
+// v0.13.47: Per-slot entity+0x7C transition tracking.
+// Detects when a new GF summon starts so we can reset s_gfAnimFired.
+static bool s_prevSlotSummoning[BATTLE_ALLY_SLOTS] = {};
+
+// v0.13.47: GF savemap HP tracking for damage announcements during GF summon.
+// When a GF absorbs damage in place of a character, entity HP doesn't change —
+// only the GF's savemap HP does. We track it here to announce GF damage.
+static uint16_t s_gfHpPrev[BATTLE_ALLY_SLOTS] = {};
+static bool s_gfHpTracking[BATTLE_ALLY_SLOTS] = {};
 
 // v0.12.46: Per-slot GF HP substitution tracking (DEPRECATED, kept for cleanup).
 // Set when a character confirms a GF command (turn ends with GF selected).
@@ -63,6 +74,56 @@ static uint8_t s_hpTurnFlushLastChar = 0xFF;             // last active_char_id 
 // reach zero because EWM freezes the ATB function that drives it, but by the
 // time the next turn starts the animation is visually done.
 static uint8_t s_hpTrackLastActiveChar = 0xFF;           // track turn transitions for flush
+
+// ============================================================================
+// v0.13.51: Damage TTS EWM hold
+// ============================================================================
+// When damage is announced, we raise s_ewmHoldForDamageTTS so that EWM caps
+// ATB for ALL entities until SAPI finishes rendering the damage speech.
+// Without this, a player character's ATB can top out mid-announcement, the
+// game transitions to its command menu, and the "Attack" cursor TTS interrupts
+// the damage announcement. EWM_UpdateBattle polls ScreenReader::IsSpeaking()
+// to release the hold when SAPI goes idle.
+//
+// The state is defined here (in hp.inl) because FlushHPAnnouncements triggers
+// it, but is consumed by EWM_UpdateBattle in ewm.inl (included after hp.inl,
+// so the declarations are visible).
+static volatile bool s_ewmHoldForDamageTTS = false;
+static DWORD s_ewmDamageTTSStartTick = 0;
+// True once we've observed ScreenReader::IsSpeaking() returning true after the
+// hold started. We don't release on !IsSpeaking() until this fires, so we don't
+// release prematurely if SAPI hasn't started rendering yet.
+static bool s_ewmDamageTTSStarted = false;
+// Safety: if SAPI never reports speaking within this window, release anyway.
+// (Could happen with a failed Speak call or an extremely short message that
+// started and finished between two mod-thread poll ticks.)
+static const DWORD EWM_DAMAGE_TTS_START_TIMEOUT_MS = 500;
+// Absolute maximum hold duration — protects against any stuck-speaking state.
+static const DWORD EWM_DAMAGE_TTS_MAX_MS = 10000;
+
+static void BeginDamageTTSHold()
+{
+    s_ewmHoldForDamageTTS = true;
+    s_ewmDamageTTSStartTick = GetTickCount();
+    s_ewmDamageTTSStarted = false;
+    Log::Battle("BattleTTS: [EWM] Damage TTS hold engaged");
+}
+
+// ============================================================================
+// v0.13.51 hotfix: Shared submenu state, visible to EWM
+// ============================================================================
+// s_inSubmenu is authoritative for "player is in a submenu and the engine's
+// phase numbers don't mean what EWM thinks they mean." It's maintained by
+// battle_tts_menu.inl via submenu entry/exit detection (including the Draw
+// phase-transition exit suppression). EWM_UpdateBattle needs to read it to
+// avoid releasing the ATB cap on phases 14/21/23 during Draw's spell-list /
+// Stock-Cast navigation — those phases mean "executing" for Attack but
+// "deciding" for Draw, and menu.inl's submenu state is the only source of
+// truth that disambiguates.
+//
+// Declared here (in hp.inl) so ewm.inl (included after hp.inl) can see it.
+// menu.inl (included after ewm.inl) modifies it but no longer redeclares it.
+static bool s_inSubmenu = false;
 
 // Get a name for any battle slot (allies 0-2, enemies 3-6)
 // Uses the persistent name cache for enemies (survives KO).
@@ -225,8 +286,6 @@ static bool GetActiveGFInfo(int partySlot, char* nameOut, int nameMax, uint16_t*
             DecodeFF8String(gfBase, nameOut, nameMax);
             *hpOut = *(uint16_t*)(gfBase + 0x12);
             if (nameOut[0] != '\0') {
-                Log::Battle("BattleTTS: [HP-CHECK] GF direct lookup: slot=%d gfIdx=%d name='%s' hp=%u",
-                           partySlot, (int)s_gfSummonedIdx[partySlot], nameOut, (unsigned)*hpOut);
                 return true;
             }
         } __except(EXCEPTION_EXECUTE_HANDLER) {}
@@ -264,8 +323,6 @@ static bool GetActiveGFInfo(int partySlot, char* nameOut, int nameMax, uint16_t*
             if (hp > 0) {
                 DecodeFF8String(gfBase, nameOut, nameMax);
                 *hpOut = hp;
-                Log::Battle("BattleTTS: [HP-CHECK] GF junction lookup: slot=%d charIdx=%d gfIdx=%d name='%s' hp=%u mask=0x%04X",
-                           partySlot, (int)charIdx, gfIdx, nameOut, (unsigned)hp, (unsigned)gfMask);
                 return (nameOut[0] != '\0');
             }
         }
@@ -284,7 +341,11 @@ static void AnnouncePartyMemberHP(int partySlot)
     // v0.12.48: entity+0x7C for per-slot detection, s_gfAnimFired for clearing.
     // Show GF HP from when entity+0x7C is set (loading starts) until the
     // battle effect dispatcher fires the GF animation (s_gfAnimFired set).
-    if (IsSlotSummoningGF(partySlot) && !s_gfAnimFired[partySlot]) {
+    // v0.13.48: Also check s_gfHpSubstitutionActive as backup — entity+0x7C
+    // can be briefly 0 between consecutive summons (old GF done, new GF not yet
+    // loading), but s_gfHpSubstitutionActive is set definitively at GF command confirm.
+    // s_gfAnimFired still gates this to stop at animation start (visual parity).
+    if ((IsSlotSummoningGF(partySlot) || s_gfHpSubstitutionActive[partySlot]) && !s_gfAnimFired[partySlot]) {
         char gfName[64];
         uint16_t gfHP = 0;
         if (GetActiveGFInfo(partySlot, gfName, sizeof(gfName), &gfHP)) {
@@ -475,7 +536,11 @@ static void FlushHPAnnouncements(const char* trigger)
     // Use max(abs(delta), displayValue) to announce the correct number.
     uint16_t displayVal = 0;
     __try { displayVal = *(uint16_t*)BATTLE_DAMAGE_DISPLAY_ADDR; } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    
+
+    // v0.13.51: Track whether any damage (not healing) was announced in this
+    // flush, so we can raise the EWM hold after the loop.
+    bool anyDamageAnnounced = false;
+
     for (int slot = 0; slot < BATTLE_TOTAL_SLOTS; slot++) {
         if (!s_hpAccumPending[slot]) continue;
         
@@ -505,6 +570,7 @@ static void FlushHPAnnouncements(const char* trigger)
                 snprintf(buf, sizeof(buf), "%s takes %u damage.", name, dmg);
             }
             BattleSpeakEvent(buf);
+            anyDamageAnnounced = true;  // v0.13.51
             Log::Battle("BattleTTS: [HP-TRACK] %s (slot%d, hpDelta=%d, display=%u, used=%u, hp=%u/%u, trigger=%s)",
                        buf, slot, accum, (unsigned)displayVal, dmg,
                        GetEntityHP(slot), GetEntityMaxHP(slot), trigger);
@@ -522,6 +588,12 @@ static void FlushHPAnnouncements(const char* trigger)
         }
     }
     s_anyHpPending = false;
+
+    // v0.13.51: If we announced damage, hold ATB until SAPI finishes speaking
+    // so the command menu doesn't pop up and interrupt the announcement.
+    if (anyDamageAnnounced) {
+        BeginDamageTTSHold();
+    }
 }
 
 static void PollHPChanges()
@@ -648,6 +720,65 @@ static void PollHPChanges()
     } else {
         // No pending HP changes — reset tracking
         s_damageAnimWasActive = false;
+    }
+}
+
+// ============================================================================
+// v0.13.47: GF summon state tracking — repeated summon fix + GF damage announce
+// ============================================================================
+// Bug 1 fix: When entity+0x7C transitions from 0 to non-zero for a slot, a new
+// GF summon is starting. Clear s_gfAnimFired so the HP check key (1/2/3) shows
+// GF HP during the loading phase.
+//
+// Bug 2 fix: Track GF savemap HP per summoning slot. When enemy attacks during
+// a GF summon, the GF absorbs damage — entity HP stays unchanged, but savemap
+// GF HP decreases. Announce damage/healing to the GF.
+static void PollGFSummonState()
+{
+    for (int gs = 0; gs < BATTLE_ALLY_SLOTS; gs++) {
+        bool nowSummoning = IsSlotSummoningGF(gs);
+        
+        // Bug 1: Detect new summon starting — clear animation-fired flag
+        if (nowSummoning && !s_prevSlotSummoning[gs]) {
+            s_gfAnimFired[gs] = false;
+            s_gfHpTracking[gs] = false;  // reset HP baseline for new summon
+            Log::Battle("BattleTTS: [GF-SUMMON] New summon detected for slot %d (entity+0x7C 0->non-zero)", gs);
+        }
+        
+        // Bug 2: Track GF HP for damage announcements during summon
+        if (nowSummoning && !s_gfAnimFired[gs]) {
+            char gfName[64];
+            uint16_t gfHP = 0;
+            if (GetActiveGFInfo(gs, gfName, sizeof(gfName), &gfHP)) {
+                if (!s_gfHpTracking[gs]) {
+                    // First read — set baseline, don't announce
+                    s_gfHpPrev[gs] = gfHP;
+                    s_gfHpTracking[gs] = true;
+                    Log::Battle("BattleTTS: [GF-SUMMON] HP baseline for slot %d: %s %u HP", gs, gfName, (unsigned)gfHP);
+                } else if (gfHP != s_gfHpPrev[gs]) {
+                    int32_t delta = (int32_t)gfHP - (int32_t)s_gfHpPrev[gs];
+                    char buf[256];
+                    if (delta < 0) {
+                        uint32_t dmg = (uint32_t)(-delta);
+                        if (gfHP == 0) {
+                            snprintf(buf, sizeof(buf), "%s takes %u damage. Defeated.", gfName, dmg);
+                        } else {
+                            snprintf(buf, sizeof(buf), "%s takes %u damage.", gfName, dmg);
+                        }
+                    } else {
+                        snprintf(buf, sizeof(buf), "%s recovers %u HP.", gfName, (uint32_t)delta);
+                    }
+                    BattleSpeakEvent(buf);
+                    Log::Battle("BattleTTS: [GF-SUMMON] %s (slot %d, %u->%u)", buf, gs, (unsigned)s_gfHpPrev[gs], (unsigned)gfHP);
+                    s_gfHpPrev[gs] = gfHP;
+                }
+            }
+        } else {
+            // Not summoning or animation fired — stop tracking GF HP
+            s_gfHpTracking[gs] = false;
+        }
+        
+        s_prevSlotSummoning[gs] = nowSummoning;
     }
 }
 
