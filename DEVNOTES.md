@@ -1,6 +1,6 @@
 # DEVNOTES — FF8 Accessibility Mod
 
-## Current Build: v0.13.60 (ships silent — cosmetic format fix only)
+## Current Build: v0.13.61 (GitHub catch-up baseline, session 77 starting point)
 
 ### Status
 

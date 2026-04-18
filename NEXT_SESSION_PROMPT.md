@@ -1,6 +1,6 @@
 # NEXT SESSION PROMPT — FF8 Accessibility Mod (Session 77)
 
-## Current Build: v0.13.60 (ships silent — EWM subsystem stable)
+## Current Build: v0.13.61 (GitHub-synced, ready for session 77 item 2)
 
 ## Session 77 Goals (4 items)
 
