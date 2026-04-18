@@ -887,6 +887,14 @@ static void PollTurnAndCommands()
                             if (slot >= 0) {
                                 char nameBuf[64];
                                 snprintf(tgtBuf, sizeof(tgtBuf), "%s", GetSlotName(slot, nameBuf, sizeof(nameBuf)));
+                                // v0.13.63: Append active statuses for enemy targets.
+                                if (slot >= BATTLE_ALLY_SLOTS) {
+                                    char _st[160];
+                                    if (BuildStatusString(slot, _st, sizeof(_st)) > 0) {
+                                        size_t n = strlen(tgtBuf);
+                                        snprintf(tgtBuf + n, sizeof(tgtBuf) - n, ", %s", _st);
+                                    }
+                                }
                             } else { tgtBuf[0] = '\0'; }
                         } else {
                             bool hasEn = (entryMask & 0x78) != 0;
@@ -1373,6 +1381,14 @@ static void PollTurnAndCommands()
                             char nameBuf[64];
                             snprintf(tgtBuf, sizeof(tgtBuf), "%s",
                                      (slot >= 0) ? GetSlotName(slot, nameBuf, sizeof(nameBuf)) : "???");
+                            // v0.13.63: Append active statuses for enemy targets.
+                            if (slot >= BATTLE_ALLY_SLOTS) {
+                                char _st[160];
+                                if (BuildStatusString(slot, _st, sizeof(_st)) > 0) {
+                                    size_t n = strlen(tgtBuf);
+                                    snprintf(tgtBuf + n, sizeof(tgtBuf) - n, ", %s", _st);
+                                }
+                            }
                         } else {
                             snprintf(tgtBuf, sizeof(tgtBuf), "All targets");
                         }

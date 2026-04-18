@@ -176,20 +176,21 @@ static int BuildStatusString(int slot, char* buf, int bufSize)
         uint8_t timed2  = *(blk + BENT_TIMED_STATUS_2);
         uint8_t timed3  = *(blk + BENT_TIMED_STATUS_3);
         
-        // Persistent statuses (0x78)
+        // Persistent statuses (0x78) — v0.13.62 adjective form
         if (persist & 0x01) APPEND_STATUS("KO");
-        if (persist & 0x02) APPEND_STATUS("Poison");
-        if (persist & 0x04) APPEND_STATUS("Petrify");
-        if (persist & 0x08) APPEND_STATUS("Blind");
-        if (persist & 0x10) APPEND_STATUS("Silence");
+        if (persist & 0x02) APPEND_STATUS("Poisoned");
+        if (persist & 0x04) APPEND_STATUS("Petrified");
+        if (persist & 0x08) APPEND_STATUS("Blinded");
+        if (persist & 0x10) APPEND_STATUS("Silenced");
         if (persist & 0x20) APPEND_STATUS("Berserk");
-        if (persist & 0x40) APPEND_STATUS("Zombie");
+        if (persist & 0x40) APPEND_STATUS("Zombified");
         
-        // Timed statuses (0x00)
-        if (timed0 & 0x01) APPEND_STATUS("Sleep");
-        if (timed0 & 0x02) APPEND_STATUS("Haste");
-        if (timed0 & 0x04) APPEND_STATUS("Slow");
-        if (timed0 & 0x08) APPEND_STATUS("Stop");
+        // Timed statuses (0x00) — v0.13.62 adjective form for ailments,
+        // noun form for buffs that don't verb naturally.
+        if (timed0 & 0x01) APPEND_STATUS("Asleep");
+        if (timed0 & 0x02) APPEND_STATUS("Hasted");
+        if (timed0 & 0x04) APPEND_STATUS("Slowed");
+        if (timed0 & 0x08) APPEND_STATUS("Stopped");
         if (timed0 & 0x10) APPEND_STATUS("Regen");
         if (timed0 & 0x20) APPEND_STATUS("Protect");
         if (timed0 & 0x40) APPEND_STATUS("Shell");
@@ -197,15 +198,18 @@ static int BuildStatusString(int slot, char* buf, int bufSize)
         
         // Timed statuses (0x01)
         if (timed1 & 0x01) APPEND_STATUS("Aura");
-        if (timed1 & 0x02) APPEND_STATUS("Curse");
-        if (timed1 & 0x04) APPEND_STATUS("Doom");
-        if (timed1 & 0x10) APPEND_STATUS("Gradual Petrify");
+        if (timed1 & 0x02) APPEND_STATUS("Cursed");
+        if (timed1 & 0x04) APPEND_STATUS("Doomed");
+        if (timed1 & 0x08) APPEND_STATUS("Invincible");
+        if (timed1 & 0x10) APPEND_STATUS("Turning to stone");
         if (timed1 & 0x20) APPEND_STATUS("Float");
-        if (timed1 & 0x40) APPEND_STATUS("Confuse");
+        if (timed1 & 0x40) APPEND_STATUS("Confused");
+        if (timed1 & 0x80) APPEND_STATUS("Drained");
         
         // Timed statuses (0x02)
-        if (timed2 & 0x04) APPEND_STATUS("Double");
-        if (timed2 & 0x08) APPEND_STATUS("Triple");
+        if (timed2 & 0x02) APPEND_STATUS("Double");
+        if (timed2 & 0x04) APPEND_STATUS("Triple");
+        if (timed2 & 0x08) APPEND_STATUS("Defending");
         
         // Timed statuses (0x03)
         if (timed3 & 0x02) APPEND_STATUS("Angel Wing");
@@ -500,7 +504,19 @@ static void PollTargetSelection()
         if (slot < 0) return;
         char nameBuf[64];
         const char* name = GetSlotName(slot, nameBuf, sizeof(nameBuf));
-        snprintf(buf, sizeof(buf), "%s", name);
+        // v0.13.62: Append active statuses for enemy targets.
+        // Party targets use 1/2/3 for HP+status readout, so skip there to
+        // avoid cluttering the turn-cursor announcement with status chatter.
+        char statusBuf[192];
+        int statusCount = 0;
+        if (slot >= BATTLE_ALLY_SLOTS) {
+            statusCount = BuildStatusString(slot, statusBuf, sizeof(statusBuf));
+        }
+        if (statusCount > 0) {
+            snprintf(buf, sizeof(buf), "%s, %s", name, statusBuf);
+        } else {
+            snprintf(buf, sizeof(buf), "%s", name);
+        }
     } else {
         // Multi-bit bitmask (fallback for multi-target with scope=3)
         bool hasAllies = (tgtMask & 0x07) != 0;

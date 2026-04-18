@@ -9,7 +9,7 @@
 // FF8 Original PC Accessibility Mod version
 // Increment on every build change
 // ================================================================
-#define FF8OPC_VERSION "0.13.61"  // GitHub catch-up: sessions 65–76 batch push, baseline for session 77 work
+#define FF8OPC_VERSION "0.13.63"  // Session 77 item 2 fixes — enemy target status + animation-hold gating
 #define FF8OPC_VERSION_DATE "2026-04-17"
 
 // ============================================================================

@@ -168,6 +168,9 @@ static int CountActiveEnemies()
 // --- HP tracking, damage, target selection, HP check (extracted v0.12.18) ---
 #include "battle_tts_hp.inl"
 
+// --- Status ailment/buff transition detection (v0.13.62) ---
+#include "battle_status.inl"
+
 // --- EWM, GF fire prevention, ATB hook, FFNx hook (extracted v0.12.18) ---
 #include "battle_tts_ewm.inl"
 
@@ -344,6 +347,10 @@ static void OnBattleEnter()
     // v0.13.59: Reset per-slot turn counter on battle entry. This must happen
     // before any ATB is sampled so the first battle's turns aren't skipped.
     EWM_ResetTurnCount();
+
+    // v0.13.62: Capture status baseline so pre-existing buffs (Regen from
+    // equipment, etc.) don't spam as "just applied" on battle start.
+    InitStatusBaseline();
     
     if (!s_pBattleMenuState) {
         ResolveBattleMenuAddresses();
@@ -708,6 +715,13 @@ void Update()
 
     if (s_inBattle && s_initAnnounceDone && s_enemyAnnounceDone) {
         PollHPChanges();
+    }
+
+    // v0.13.62: Per-frame status ailment / buff transition detection.
+    // Runs after PollHPChanges so KO (bit 0 of persist) is already announced
+    // via the HP tracker before we'd redundantly announce "knocked out".
+    if (s_inBattle && s_initAnnounceDone && s_enemyAnnounceDone) {
+        PollStatusChanges();
     }
 
     // v0.13.52: Fire any deferred turn announcement once damage TTS clears.
