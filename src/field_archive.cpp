@@ -13,6 +13,10 @@
 #include <string>
 #include "field_archive.h"
 #include "ff8_accessibility.h"
+#include "ff8_addresses.h"
+
+// Forward declarations for cross-module namespaces (restored in v0.14.28 build recovery).
+namespace Log { void Field(const char* format, ...); }
 
 namespace FieldArchive {
 

@@ -10,11 +10,28 @@
 //         read of cursor position at pMenuStateA + 0x1F6.
 
 #include "ff8_accessibility.h"
+#include "ff8_addresses.h"
+#include "mod_forward_decls.h"
 #include "minhook/include/MinHook.h"
 #include "name_bypass.h"
 #include "menu_tts.h"
 #include "battle_tts.h"
 #include "field_archive.h"
+#include "field_dialog.h"
+#include "field_navigation.h"
+#include "fmv_audio_desc.h"
+#include "fmv_skip.h"
+#include "game_audio.h"
+#include "world_map.h"
+
+// Forward declarations for TitleScreen (no title_screen.h exists; defined in title_screen.cpp).
+namespace TitleScreen {
+    void Initialize();
+    void Shutdown();
+    void Activate();
+    void Deactivate();
+    void Update();
+}
 
 
 // ============================================================================

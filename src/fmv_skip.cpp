@@ -21,6 +21,7 @@
 //   - Logging: Log::Write replaces OutputDebug
 
 #include "ff8_accessibility.h"
+#include "ff8_addresses.h"
 #include "fmv_skip.h"
 #include "fmv_audio_desc.h"
 #include "minhook/include/MinHook.h"
@@ -30,6 +31,10 @@
 #include <atomic>
 #include <mutex>
 #include <set>
+
+// Forward declarations for cross-module namespaces (restored in v0.14.29 build recovery).
+namespace Log { void Mod(const char* format, ...); }
+namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); }
 
 // Forward declaration for save cache (defined in menu_tts.cpp)
 void MenuTTS_CacheSaveHeader(const char* filename, const uint8_t* data, int dataLen);

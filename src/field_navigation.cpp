@@ -47,6 +47,23 @@
 #include "field_display_names.h"
 #include "entity_classifications.h"
 
+// Forward declarations for cross-module namespaces (restored in v0.14.28 build recovery).
+namespace Log { void Field(const char* format, ...); }
+namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); }
+namespace NavLog {
+    void SessionStart();
+    void FieldLoad(const char* fieldName, int fieldId, int numTris, int numEntities, int numExits, int numEvents);
+    void DriveStart(const char* fieldName, const char* targetName, const char* targetType,
+                    int startTri, float startX, float startY,
+                    int goalTri, float goalX, float goalY, float talkRadius,
+                    int astarTris, int waypointCount, bool usedFunnel);
+    void DriveWaypoint(int wpIndex, int wpTotal, float playerX, float playerY, float distToTarget, int tick);
+    void DriveSample(float playerX, float playerY, int playerTri, float distToTarget, int wpIndex, int wpTotal, int tick);
+    void DriveRecovery(int phase, int playerTri, float playerX, float playerY, float distToTarget);
+    void DriveEnd(const char* result, int totalTicks, float finalDist, int recoveryPhases, float startDist);
+    void CoordSample(const char* fieldName, int triIdx, float posX, float posY, float wx, float wy, float wz);
+}
+
 namespace FieldNavigation {
 
 // ============================================================================

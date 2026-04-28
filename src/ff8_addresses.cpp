@@ -5,6 +5,7 @@
 
 #include "ff8_addresses.h"
 #include "ff8_accessibility.h"
+#include "mod_forward_decls.h"
 #include <cstdio>
 
 namespace FF8Addresses {

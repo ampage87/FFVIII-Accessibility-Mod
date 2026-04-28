@@ -22,6 +22,7 @@
 // The public API (Speak, Output, Silence, etc.) is unchanged.
 
 #include "ff8_accessibility.h"
+#include "mod_forward_decls.h"
 #include "resources.h"
 #include <objbase.h>
 #include <sapi.h>
@@ -490,19 +491,21 @@ bool Speak(const wchar_t* text, bool interrupt)
 
             // SAPI for audio
             bool sapiOk = false;
-            if (s_pVoice)
+            if (s_pVoice) {
                 sapiOk = SUCCEEDED(s_pVoice->Speak(text, SPF_ASYNC, NULL));
+            }
 
             // NVDA for speech + braille
-            if (fn_speakText) fn_speakText(text);
+            if (fn_speakText)      fn_speakText(text);
             if (fn_brailleMessage) fn_brailleMessage(text);
 
             return sapiOk;
         } else {
             // Queue mode: SAPI for audio (survives keypresses), NVDA braille only
             bool sapiOk = false;
-            if (s_pVoice)
+            if (s_pVoice) {
                 sapiOk = SUCCEEDED(s_pVoice->Speak(text, SPF_ASYNC, NULL));
+            }
 
             if (fn_brailleMessage) fn_brailleMessage(text);
 

@@ -21,8 +21,15 @@
 //   Then call it directly via __fastcall thiscall shim.
 
 #include "ff8_accessibility.h"
+#include "ff8_addresses.h"
 #include "game_audio.h"
 #include "minhook/include/MinHook.h"
+
+// Forward declarations for cross-module namespaces (deleted from earlier and
+// restored in v0.14.26 build recovery).
+namespace Log { void Mod(const char* format, ...); }
+namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); }
+namespace Config { void Load(); int GetInt(const char* key, int defaultValue); void SetInt(const char* key, int value); }
 
 namespace GameAudio {
 

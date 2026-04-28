@@ -290,150 +290,115 @@ static void BuildGFList(uint8_t partySlot)
 }
 
 // ============================================================================
-// v0.10.101: Item sub-menu list (battle items from display struct)
+// v0.14.42: Item sub-menu — read directly from engine's battle items buffer.
 // ============================================================================
-// Battle items: The display struct at 0x1D8DFF4 IS the authoritative visual layout.
-// v0.10.105 diagnostic proved it persists from field menu into battle.
-// Format: 32 x {uint8 id, uint8 qty} in the visual order set by Items > Battle.
-// Engine renders only entries with qty>0, so cursor position maps to Nth non-zero entry.
-static const uint32_t BATTLE_ORDER_ADDR = 0x1CFE77C;   // uint8[32] inventory slot indices
-static const uint32_t ITEM_INVENTORY_ADDR = 0x1CFE79C;  // 198 x {id, qty} byte pairs
-static const int BATTLE_ITEM_MAX = 32;
+//
+// Architecture (confirmed by FF8_EN.exe disassembly, session 71):
+//
+// The in-battle items submenu reads from a dedicated buffer at 0x1D28E78,
+// stride 5 bytes per entry, 32 entries (range 0x1D28E78..0x1D28F18).
+// Each entry: byte 0 = item id, byte 1 = quantity, bytes 2-4 = unused.
+// The cursor at 0x01D768EC indexes this buffer DIRECTLY (cursor=N -> entry N).
+// Pages are simple 4-per-page: page = cursor/4 + 1, slot = cursor%4 + 1.
+// Empty entries (id=0 or qty=0) are still cursor-positioned -> announce as
+// "Empty page N item M".
+//
+// Buffer population (confirmed at 0x0048C6E0 — battle-start populator):
+//   1. Clear all 32 entries to {0,0,0,0,0}.
+//   2. Walk full inventory at 0x1CFE79C (198 x {id,qty}, stride 2).
+//   3. For each entry with id > 0 AND id < 33:
+//        pos = arrangement[id - 1]    ; byte at 0x1CFE77C + (id - 1)
+//        battle_buffer[pos].id  = id
+//        battle_buffer[pos].qty = qty
+//
+// So 0x1CFE77C is the user's saved Battle arrangement, indexed by item id
+// (NOT by position as we previously assumed). It's how the player's
+// "Items > Battle" rearrangement persists between battles.
+//
+// Aaron's reported visual layout (saved arrangement bytes
+// 00 03 04 05 06 07 01 08 09 0A 0B 0C 0D 0E 0F 02...) decodes as:
+//   id=1  Potion        -> position 0
+//   id=7  Phoenix Down  -> position 1
+//   id=9  Elixir        -> position 9   <- matches "page 3 slot 2"
+//   id=16 Remedy        -> position 2
+// ...with empty positions between Remedy and Elixir, exactly as observed.
+//
+// As item qtys decrement to 0 during battle, the engine zeroes the
+// corresponding entry's id (function at 0x00486B40), creating gaps. The
+// engine renders gaps as blank rows. We mirror that with "Empty" announces.
+static const uint32_t BATTLE_ITEM_BUFFER_ADDR  = 0x1D28E78;  // 32 x 5-byte entries
+static const uint32_t BATTLE_ITEM_ARRANGE_ADDR = 0x1CFE77C;  // 32 bytes, arrangement[id-1] = position
+static const uint32_t ITEM_INVENTORY_ADDR      = 0x1CFE79C;  // 198 x {id, qty} byte pairs (full inv)
+static const int      BATTLE_ITEM_BUFFER_STRIDE = 5;         // bytes per entry
+static const int      BATTLE_ITEM_MAX           = 32;         // entry count
 
+// In v0.14.42 we no longer compact battle items into a filtered list. Cursor
+// indexes the engine buffer DIRECTLY, so per-cursor reads happen at announce
+// time. We retain s_itemListBuilt as a guard for ordering (so the announce
+// path doesn't fire before BuildItemList has logged the snapshot), and keep
+// s_turnItemList as a one-shot snapshot purely for diagnostic logging.
 struct BattleItemEntry { uint8_t id; uint8_t qty; };
 static BattleItemEntry s_turnItemList[BATTLE_ITEM_MAX] = {};
 static int s_turnItemCount = 0;
 static bool s_itemListBuilt = false;
 
-// v0.10.103: MinHook on 0x4F81F0 REMOVED (v0.10.102 proved ESI calling convention
-// mismatch — controller struct passed via ESI register, not cdecl stack argument).
-// v0.10.104: POOL-SCAN approach — deep research revealed the Item controller is a
-// pool node at 0x1D76BC8 (10 slots × 0x78 bytes). Scan for [node+0x0C]==0x4F81F0
-// to find the active Item controller, then read [node+0x54] for absolute inventory
-// index. No hooking or list-building needed.
-
-// ============================================================================
-// v0.10.104: Battle UI task pool scanner
-// ============================================================================
-// The engine uses a 10-slot pool at 0x1D76BC8 for battle UI controllers.
-// Each node is 0x78 bytes. The Item handler address (0x4F81F0) is stored at
-// +0x0C (or possibly +0x08 — we check both). When the Item sub-menu is open,
-// the node contains the controller state including:
-//   +0x20: inventory pointer (should be 0x01CFE79C)
-//   +0x24: battle_order pointer (should be 0x01CFE77C)
-//   +0x54: absolute inventory index (int16) — the currently highlighted item
-static const uint32_t POOL_BASE     = 0x1D76BC8;
-static const int      POOL_SLOTS    = 10;
-static const int      POOL_STRIDE   = 0x78;
-static const uint32_t ITEM_HANDLER  = 0x4F81F0;
-static const int      HANDLER_OFF_A = 0x0C;  // primary handler offset
-static const int      HANDLER_OFF_B = 0x08;  // fallback handler offset
-static const int      POOL_INUSE    = 0x12;  // uint16 in-use flag
-static const int      POOL_INV_PTR  = 0x20;  // uint32 inventory pointer
-static const int      POOL_CURSOR   = 0x54;  // int16 absolute inventory index
-
-// Find the active Item controller node in the pool.
-// Returns pointer to the node, or NULL if not found.
-static uint8_t* FindItemControllerNode()
+// Read one entry from the battle items buffer. Returns false on access error.
+static bool ReadBattleItemEntry(int cursor, uint8_t* outId, uint8_t* outQty)
 {
+    if (cursor < 0 || cursor >= BATTLE_ITEM_MAX) return false;
     __try {
-        for (int i = 0; i < POOL_SLOTS; i++) {
-            uint8_t* node = (uint8_t*)(POOL_BASE + i * POOL_STRIDE);
-            uint32_t handler = *(uint32_t*)(node + HANDLER_OFF_A);
-            if (handler == ITEM_HANDLER) return node;
-        }
-        // Fallback: check +0x08 in case handler is stored there
-        for (int i = 0; i < POOL_SLOTS; i++) {
-            uint8_t* node = (uint8_t*)(POOL_BASE + i * POOL_STRIDE);
-            uint32_t handler = *(uint32_t*)(node + HANDLER_OFF_B);
-            if (handler == ITEM_HANDLER) return node;
-        }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    return nullptr;
-}
-
-// Read the currently highlighted item from the pool node.
-// Returns true if successful and populates outId/outQty.
-static bool ReadItemFromPoolNode(uint8_t* node, uint8_t* outId, uint8_t* outQty, int16_t* outAbsIdx)
-{
-    if (!node) return false;
-    __try {
-        int16_t absIdx = *(int16_t*)(node + POOL_CURSOR);
-        if (absIdx < 0 || absIdx >= 198) return false;
-        uint8_t* inv = (uint8_t*)ITEM_INVENTORY_ADDR;
-        *outAbsIdx = absIdx;
-        *outId = inv[absIdx * 2];
-        *outQty = inv[absIdx * 2 + 1];
+        const uint8_t* p = (const uint8_t*)(BATTLE_ITEM_BUFFER_ADDR + cursor * BATTLE_ITEM_BUFFER_STRIDE);
+        *outId  = p[0];
+        *outQty = p[1];
         return true;
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    return false;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
 
-// v0.10.105: Display struct at 0x1D8DFF4 is the authoritative visual layout.
-// Confirmed by F12 diagnostic: it IS populated during battle (persists from
-// field menu Items > Battle arrangement). Contains 32 x {id, qty} pairs in
-// visual order. Engine renders only entries with qty>0, skipping empties.
-// We filter the same way to build a cursor-indexed list matching the screen.
-static const uint32_t ITEM_DISPLAY_STRUCT = 0x1D8DFF4;  // 32 x {uint8 id, uint8 qty}
+// Compute visual (page, slot) for a cursor position. With v0.14.42 the
+// cursor IS the visual position — no boIdx indirection needed.
+static void GetItemVisualPos(int cursor, int* outPage, int* outItem)
+{
+    if (cursor < 0) cursor = 0;
+    *outPage = (cursor / 4) + 1;
+    *outItem = (cursor % 4) + 1;
+}
 
 static void BuildItemList()
 {
     s_turnItemCount = 0;
     s_itemListBuilt = false;
     __try {
-        uint8_t* battleOrder = (uint8_t*)BATTLE_ORDER_ADDR;
-        uint8_t* inventory   = (uint8_t*)ITEM_INVENTORY_ADDR;
-        
-        // v0.10.105: Two modes depending on display struct state.
-        // When display struct at 0x1D8DFF4 is populated (after visiting field
-        // menu Items > Battle), cursor indexes into ALL 32 positions (with gaps).
-        // When zeroed (normal gameplay), cursor indexes into filtered battle items.
-        uint8_t* ds = (uint8_t*)ITEM_DISPLAY_STRUCT;
-        bool dsPopulated = false;
-        for (int i = 0; i < 64; i++) {
-            if (ds[i] != 0) { dsPopulated = true; break; }
+        // Snapshot the battle items buffer to s_turnItemList for diagnostic
+        // logging only. The announce path reads from the engine buffer live
+        // (so qty decrements during battle are picked up immediately).
+        for (int i = 0; i < BATTLE_ITEM_MAX; i++) {
+            uint8_t id = 0, qty = 0;
+            if (!ReadBattleItemEntry(i, &id, &qty)) break;
+            s_turnItemList[i].id  = id;
+            s_turnItemList[i].qty = qty;
         }
-        
-        int visCount = 0;
-        if (dsPopulated) {
-            // Display struct mode: cursor indexes ALL 32 positions including empties
-            for (int i = 0; i < BATTLE_ITEM_MAX; i++) {
-                s_turnItemList[i].id  = ds[i * 2];
-                s_turnItemList[i].qty = ds[i * 2 + 1];
-                if (s_turnItemList[i].id >= 1 && s_turnItemList[i].id < 33 && s_turnItemList[i].qty > 0)
-                    visCount++;
-            }
-            s_turnItemCount = BATTLE_ITEM_MAX;
-            Log::Battle("BattleTTS: [ITEM-LIST] Display struct mode: %d visible of %d", visCount, s_turnItemCount);
-        } else {
-            // Filtered mode: cursor indexes only valid battle items (compacted)
-            for (int i = 0; i < BATTLE_ITEM_MAX; i++) {
-                uint8_t invIdx = battleOrder[i];
-                if (invIdx >= 198) continue;
-                uint8_t id  = inventory[invIdx * 2];
-                uint8_t qty = inventory[invIdx * 2 + 1];
-                if (id >= 1 && id < 33 && qty > 0) {
-                    s_turnItemList[s_turnItemCount].id  = id;
-                    s_turnItemList[s_turnItemCount].qty = qty;
-                    s_turnItemCount++;
-                    visCount++;
-                }
-            }
-            Log::Battle("BattleTTS: [ITEM-LIST] Filtered mode: %d battle items", s_turnItemCount);
-        }
-        
+        s_turnItemCount = BATTLE_ITEM_MAX;
         s_itemListBuilt = true;
-        Log::Battle("BattleTTS: [ITEM-LIST] battle_order loaded: %d battle items of %d total", visCount, s_turnItemCount);
-        for (int i = 0; i < s_turnItemCount; i++) {
+
+        int populated = 0;
+        for (int i = 0; i < BATTLE_ITEM_MAX; i++) {
+            if (s_turnItemList[i].id >= 1 && s_turnItemList[i].id < 33 && s_turnItemList[i].qty > 0)
+                populated++;
+        }
+        Log::Battle("BattleTTS: [ITEM-LIST] battle_buffer @ 0x%08X: %d populated of %d positions",
+                   (unsigned)BATTLE_ITEM_BUFFER_ADDR, populated, BATTLE_ITEM_MAX);
+        for (int i = 0; i < BATTLE_ITEM_MAX; i++) {
             uint8_t id = s_turnItemList[i].id;
             uint8_t qty = s_turnItemList[i].qty;
             if (id >= 1 && id < 33 && qty > 0) {
-                Log::Battle("BattleTTS: [ITEM-LIST]   [%d] bo->inv id=%u qty=%u -> %s",
+                Log::Battle("BattleTTS: [ITEM-LIST]   [%d] id=%u qty=%u -> %s",
                            i, (unsigned)id, (unsigned)qty, GetBattleItemName(id));
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        Log::Battle("BattleTTS: [ITEM-LIST] EXCEPTION reading battle_order");
+        Log::Battle("BattleTTS: [ITEM-LIST] EXCEPTION reading battle items buffer");
     }
 }
 
@@ -1017,8 +982,24 @@ static void PollTurnAndCommands()
                         // transitions (target → spell list → Stock/Cast). This causes false
                         // exits. For Draw, we rely on the cmdCursor change handler for exit
                         // detection instead (user presses cancel → cursor returns to cmd menu).
-                        if (s_submenuCommandId == 0x16) {
-                            Log::Battle("BattleTTS: [SUBMENU] Suppressed false exit for Draw (mode 0x%02X->0xFE, phase transition)",
+                        // v0.13.50 / v0.14.38: EXCEPTION for Draw (0x16) and Item (0x17).
+                        // Both submenus exhibit transient submenuMode 0x01->0xFE flips during
+                        // normal in-submenu navigation, NOT real exits.
+                        //   Draw (v0.13.50): multi-phase flow (target -> spell list -> Stock/Cast)
+                        //     causes the engine to briefly drop submenuMode during phase
+                        //     transitions.
+                        //   Item (v0.14.38): every cursor up/down within the submenu causes
+                        //     submenuMode to flip 0x01->0xFE for ~1 frame and back to 0x01.
+                        //     v0.14.37 BAT proved this: per-item BattleSpeak was firing
+                        //     correctly with the right text, but ~10ms later this block fired
+                        //     a spurious "Item" announce with interrupt=true, purging the
+                        //     in-progress per-item speech via SAPI's PURGEBEFORESPEAK. Aaron
+                        //     only ever heard the "Item" exit announce.
+                        // For both, we rely on the cmdCursor change handler for real exit
+                        // detection (user presses cancel -> cursor returns to cmd menu).
+                        if (s_submenuCommandId == 0x16 || s_submenuCommandId == 0x17) {
+                            Log::Battle("BattleTTS: [SUBMENU] Suppressed false exit for %s (mode 0x%02X->0xFE, transient cursor flip)",
+                                       GetCommandName(s_submenuCommandId),
                                        (unsigned)s_prevSubmenuMode);
                         } else {
                             // Returning to command menu — announce current command
@@ -1077,6 +1058,16 @@ static void PollTurnAndCommands()
                     s_submenuOpenByDword = submenuNowOpen;
             }
             if (!s_submenuDebouncing && !cmdCursorChangedThisFrame && subCursor != s_turnSubmenuCursor) {
+                // v0.14.14: Suppress the regular command-submenu path while a Limit
+                // Break submenu is open. The regular handler classifies subCursor
+                // changes by `s_turnCharCommands[s_turnCmdCursor]`, which for
+                // cmdCursor=0 always resolves to Attack (0x01) — that's wrong
+                // when the engine is actually in a limit submenu (e.g. Quistis'
+                // Blue Magic spell list). The limit-submenu path in PollLimitDiag
+                // owns the announcement for those cursor moves.
+                if (s_inLimitSubmenu) {
+                    s_turnSubmenuCursor = subCursor;
+                } else
                 if (!s_inSubmenu && s_turnCmdCursor < 4) {
                     // Entering sub-menu — use shared helper
                     EnterSubmenu(s_turnCharCommands[s_turnCmdCursor], "subCursor change");
@@ -1123,48 +1114,30 @@ static void PollTurnAndCommands()
                                        (int)subCursor, s_turnGFCount);
                         }
                     } else if (s_submenuCommandId == 0x17) {
-                        // v0.10.106: Item sub-menu — dual-source announce (cleaned up from v0.10.105 diagnostic).
-                        // Display struct at 0x1D8DFF4 when populated (after Items > Battle), else inv[cursor].
+                        // v0.14.42: Item sub-menu announce.
+                        // Read directly from the engine's battle items buffer at
+                        // 0x1D28E78 + cursor * 5. The cursor is the visible position;
+                        // empty buffer entries (id=0 or qty=0) announce as "Empty".
                         int sc = (int)subCursor;
-                        uint8_t annId = 0, annQty = 0;
-                        
-                        // Check if display struct is populated
-                        bool dsActive = false;
-                        __try {
-                            uint8_t* ds = (uint8_t*)ITEM_DISPLAY_STRUCT;
-                            for (int q = 0; q < 64; q++) {
-                                if (ds[q] != 0) { dsActive = true; break; }
-                            }
-                            if (dsActive && sc < 32) {
-                                annId = ds[sc * 2];
-                                annQty = ds[sc * 2 + 1];
-                            }
-                        } __except(EXCEPTION_EXECUTE_HANDLER) {}
-                        
-                        if (!dsActive) {
-                            // Fallback: direct inventory at cursor position
-                            __try {
-                                uint8_t* inv = (uint8_t*)ITEM_INVENTORY_ADDR;
-                                if (sc < 198) { annId = inv[sc * 2]; annQty = inv[sc * 2 + 1]; }
-                            } __except(EXCEPTION_EXECUTE_HANDLER) {}
-                        }
-                        
-                        int page = (sc / 4) + 1;
-                        int itemNum = (sc % 4) + 1;
-                        
-                        if (annId >= 1 && annId < 33 && annQty > 0) {
-                            const char* itemName = GetBattleItemName(annId);
+                        uint8_t bufId = 0, bufQty = 0;
+                        bool bufOk = ReadBattleItemEntry(sc, &bufId, &bufQty);
+                        int page = 0, itemNum = 0;
+                        GetItemVisualPos(sc, &page, &itemNum);
+
+                        if (bufOk && bufId >= 1 && bufId < 33 && bufQty > 0) {
+                            const char* itemName = GetBattleItemName(bufId);
                             char buf[128];
                             snprintf(buf, sizeof(buf), "%s, quantity %d, page %d, item %d",
-                                     itemName, (int)annQty, page, itemNum);
+                                     itemName, (int)bufQty, page, itemNum);
                             BattleSpeak(buf, PRIO_MENU, true);
-                            Log::Battle("BattleTTS: [ITEM] cursor=%d -> %s x%d page%d item%d",
-                                       sc, itemName, (int)annQty, page, itemNum);
+                            Log::Battle("BattleTTS: [ITEM] cursor=%d -> %s x%d page%d item%d (id=%u src=battle_buffer)",
+                                       sc, itemName, (int)bufQty, page, itemNum, (unsigned)bufId);
                         } else {
                             char buf[64];
                             snprintf(buf, sizeof(buf), "Empty, page %d, item %d", page, itemNum);
                             BattleSpeak(buf, PRIO_MENU, true);
-                            Log::Battle("BattleTTS: [ITEM] cursor=%d -> Empty page%d item%d", sc, page, itemNum);
+                            Log::Battle("BattleTTS: [ITEM] cursor=%d -> Empty page%d item%d (bufOk=%d id=%u qty=%u)",
+                                       sc, page, itemNum, (int)bufOk, (unsigned)bufId, (unsigned)bufQty);
                         }
                     } else if (s_submenuCommandId == 0x16 && s_drawListBuilt) {
                         // v0.10.112: Draw sub-menu — generic subCursor fires on phase transitions,
@@ -1214,28 +1187,19 @@ static void PollTurnAndCommands()
                                        (int)sc, s_turnGFCount);
                         }
                     } else if (s_submenuCommandId == 0x17 && s_itemListBuilt) {
-                        // Item: read from display struct or inventory
-                        uint8_t annId = 0, annQty = 0;
-                        __try {
-                            uint8_t* ds = (uint8_t*)0x1D8DFF4;
-                            bool dsActive = false;
-                            for (int q = 0; q < 64; q++) { if (ds[q] != 0) { dsActive = true; break; } }
-                            if (dsActive && (int)sc < 32) { annId = ds[sc * 2]; annQty = ds[sc * 2 + 1]; }
-                            if (!dsActive && (int)sc < 198) {
-                                uint8_t* inv = (uint8_t*)0x1CFE79C;
-                                annId = inv[sc * 2]; annQty = inv[sc * 2 + 1];
-                            }
-                        } __except(EXCEPTION_EXECUTE_HANDLER) {}
-                        if (annId >= 1 && annId < 33 && annQty > 0) {
-                            const char* itemName = GetBattleItemName(annId);
+                        // v0.14.42: Read directly from battle items buffer.
+                        uint8_t bufId = 0, bufQty = 0;
+                        bool bufOk = ReadBattleItemEntry((int)sc, &bufId, &bufQty);
+                        if (bufOk && bufId >= 1 && bufId < 33 && bufQty > 0) {
+                            const char* itemName = GetBattleItemName(bufId);
                             char buf[128];
-                            int page = ((int)sc / 4) + 1;
-                            int itemNum = ((int)sc % 4) + 1;
+                            int page = 0, itemNum = 0;
+                            GetItemVisualPos((int)sc, &page, &itemNum);
                             snprintf(buf, sizeof(buf), "%s, quantity %d, page %d, item %d",
-                                     itemName, (int)annQty, page, itemNum);
+                                     itemName, (int)bufQty, page, itemNum);
                             BattleSpeak(buf, PRIO_MENU, false);
-                            Log::Battle("BattleTTS: [SUBMENU-DELAYED] Item cursor=%d -> %s x%d",
-                                       (int)sc, itemName, (int)annQty);
+                            Log::Battle("BattleTTS: [SUBMENU-DELAYED] Item cursor=%d -> %s x%d page%d item%d",
+                                       (int)sc, itemName, (int)bufQty, page, itemNum);
                         }
                     }
                     // Draw and Item are handled by their dedicated poll blocks below

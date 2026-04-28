@@ -183,6 +183,17 @@ static void FlushStatusAnnouncements(const char* trigger)
             const StatusDef& def = STATUS_TABLE[p.statusIdx];
             const char* fmt = p.isOn ? def.applyFmt : def.removeFmt;
             snprintf(phrase, sizeof(phrase), fmt, name);
+
+            // v0.13.81: emit [VALIDATE] breadcrumb before speaking.
+            // kind="status-applied" / "status-removed"; value field carries
+            // the StatusDef shortName index in bits 0-7 and the on/off flag
+            // in bit 8 for grep filtering, but the TTS string in claimedText
+            // is the human-readable label.
+            Validate_AnnounceEvent(p.isOn ? "status-applied" : "status-removed",
+                                    slot,
+                                    (int)p.statusIdx,
+                                    phrase,
+                                    trigger);
             BattleSpeak(phrase, PRIO_STATUS, false);
             Log::Battle("BattleTTS: [STATUS] slot%d %s %s: %s (trigger=%s)",
                        slot, p.isOn ? "+" : "-", def.shortName, phrase, trigger);

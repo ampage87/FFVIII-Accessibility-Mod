@@ -25,6 +25,7 @@
 //   to check broader memory for cursor candidates.
 
 #include "ff8_accessibility.h"
+#include "ff8_addresses.h"
 #include "menu_tts.h"
 #include "field_dialog.h"
 #include "ff8_text_decode.h"
@@ -32,6 +33,11 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+
+// Forward declarations for namespaces used in .inl files
+namespace Log { void Menu(const char* format, ...); }
+namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); bool IsSpeaking(); }
+namespace Config { void Load(); int GetInt(const char* key, int defaultValue); void SetInt(const char* key, int value); const char* GetPath(); }
 
 using namespace FF8Addresses;
 

@@ -4,6 +4,7 @@
 
 #include "config.h"
 #include "ff8_accessibility.h"
+#include "mod_forward_decls.h"
 #include <cstring>
 #include <cstdio>
 

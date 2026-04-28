@@ -13,8 +13,9 @@
 // Phase 7 (v0.10.38-42): Draw system
 // Phase 8 (v0.10.43-50): Events + limit breaks
 //
-// See: Plan & Research Documents/Battle TTS implementation plan.md
-//      Plan & Research Documents/Battle system memory map deep research results.md
+// v0.14.24 build recovery: restored from GitHub HEAD v0.13.61 base, plus the
+// v0.13.62-v0.14.x .inl additions wired into the include chain in dependency
+// order. See DEVNOTES.md session 65 for the recovery narrative.
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -38,6 +39,11 @@
 #include "ff8_item_names.h"
 #include "minhook/include/MinHook.h"
 
+// Forward declarations for namespaces used in .inl files
+namespace Log { void Battle(const char* format, ...); }
+namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); bool SpeakChannel2(const char* text, bool interrupt = false); bool IsSpeaking(); }
+namespace Config { void Load(); int GetInt(const char* key, int defaultValue); void SetInt(const char* key, int value); const char* GetPath(); }
+
 namespace BattleTTS {
 
 // ============================================================================
@@ -52,7 +58,7 @@ static DWORD s_battleEntryTime  = 0;      // GetTickCount() when battle was ente
 // The engine needs time to populate the entity array after mode transitions to 3.
 // Mode 3 starts during the swirl animation, before entity data is ready.
 // We enforce a 2s minimum delay, then poll until ally slot 0 maxHP > 0.
-// Enemies may populate later than allies — second-pass catches them.
+// Enemies may populate later than allies -- second-pass catches them.
 static const DWORD BATTLE_INIT_MIN_DELAY_MS = 2000;   // minimum wait before checking (swirl animation)
 static const DWORD BATTLE_INIT_TIMEOUT_MS   = 10000;  // max wait before giving up
 static bool s_initAnnounceDone = false;
@@ -63,7 +69,7 @@ static bool s_enemyAnnounceDone = false;  // second-pass: announce enemies when 
 // ============================================================================
 
 enum SpeechPriority {
-    PRIO_CRITICAL = 0,  // KO / Game Over — always interrupt
+    PRIO_CRITICAL = 0,  // KO / Game Over -- always interrupt
     PRIO_TURN     = 1,  // "Squall's turn" / Limit Ready
     PRIO_MENU     = 2,  // Cursor navigation
     PRIO_ACTION   = 3,  // "Drew 3 Fire" / "Squall attacks!"
@@ -74,11 +80,11 @@ enum SpeechPriority {
 
 static int s_currentSpeakPriority = 99;  // higher = nothing speaking
 
-// v0.10.30: Repeat buffer — stores last non-menu speech for backtick repeat key
+// v0.10.30: Repeat buffer -- stores last non-menu speech for backtick repeat key
 static char s_repeatBuffer[256] = {};     // last non-PRIO_MENU text spoken
 static bool s_repeatKeyWasDown = false;   // edge detection for backtick key
 
-// v0.10.32: BattleSpeak — Channel 1 (menu/command voice)
+// v0.10.32: BattleSpeak -- Channel 1 (menu/command voice)
 static void BattleSpeak(const char* text, SpeechPriority prio, bool interrupt = false)
 {
     if (!text || text[0] == '\0') return;
@@ -91,9 +97,7 @@ static void BattleSpeak(const char* text, SpeechPriority prio, bool interrupt = 
     }
 }
 
-// v0.10.32: BattleSpeakEvent — Channel 2 (event/status voice)
-// v0.13.48: Temporarily routed to Channel 1 (main voice) to disable multi-channel.
-// The Channel 2 SAPI voice and SpeakChannel2() API remain intact for future re-enablement.
+// v0.10.32: BattleSpeakEvent -- Channel 2 (event/status voice)
 static void BattleSpeakEvent(const char* text, bool interrupt = false)
 {
     if (!text || text[0] == '\0') return;
@@ -101,7 +105,7 @@ static void BattleSpeakEvent(const char* text, bool interrupt = false)
     strncpy(s_repeatBuffer, text, sizeof(s_repeatBuffer) - 1);
     s_repeatBuffer[sizeof(s_repeatBuffer) - 1] = '\0';
 
-    ScreenReader::Speak(text, interrupt);  // was SpeakChannel2 — single-channel for now
+    ScreenReader::SpeakChannel2(text, interrupt);
 }
 
 // ============================================================================
@@ -158,6 +162,28 @@ static int CountActiveEnemies()
     return count;
 }
 
+// ============================================================================
+// Cross-.inl forward declarations (v0.14.24 build recovery)
+// ============================================================================
+// These functions are defined in later .inl files but called from earlier ones.
+// Forward declaring them here keeps the existing include order intact.
+
+// Defined in battle_tts_validate.inl. Called from hp.inl, sprite.inl,
+// battle_status.inl, noeffect.inl.
+static void Validate_AnnounceEvent(const char* kind,
+                                    int slot,
+                                    int claimedValue,
+                                    const char* claimedText,
+                                    const char* trigger);
+
+// Defined in battle_tts_noeffect.inl. Called from sprite.inl.
+static void NoEffect_QueueAnnouncement(int slot, int value,
+                                        const char* text,
+                                        const char* validateKind);
+
+// Defined in battle_tts_noeffect.inl. Called from sprite_spawn.inl.
+static void NoEffect_RecordSnapshot(uint32_t targetMask);
+
 
 // --- Enemy names, text decoder, entity helpers (extracted v0.12.18) ---
 #include "battle_tts_helpers.inl"
@@ -168,17 +194,47 @@ static int CountActiveEnemies()
 // --- HP tracking, damage, target selection, HP check (extracted v0.12.18) ---
 #include "battle_tts_hp.inl"
 
-// --- Status ailment/buff transition detection (v0.13.62) ---
-#include "battle_status.inl"
-
 // --- EWM, GF fire prevention, ATB hook, FFNx hook (extracted v0.12.18) ---
 #include "battle_tts_ewm.inl"
 
 // --- Turn/command menu, magic/GF/item/draw sub-menus (extracted v0.12.18) ---
 #include "battle_tts_menu.inl"
 
+// --- Action announcements via sprite data (added between menu and noeffect) ---
+#include "battle_tts_sprite.inl"
+
+// --- Status ailment / buff transition TTS (v0.13.62-63; needs hp.inl + menu.inl) ---
+#include "battle_status.inl"
+
+// --- "No effect!" detection (v0.13.83; needs sprite.inl + battle_status.inl) ---
+#include "battle_tts_noeffect.inl"
+
+// --- Popup table polling, SpriteRec, KIND4_SCREENSHOT_DIR, DrainDeferredTextSpriteLog ---
+#include "battle_tts_sprite_spawn.inl"
+
+// --- TTS announcement breadcrumb logging (defines Validate_AnnounceEvent) ---
+#include "battle_tts_validate.inl"
+
+// --- Hardware write BP on damage display (v0.14.2) ---
+#include "battle_tts_dmgbp.inl"
+
+// --- MinHook on sub_48EF80 popup creator (v0.14.4) ---
+#include "battle_tts_dmg_popup_hook.inl"
+
+// --- Hardware read BP on damage display (v0.14.6) ---
+#include "battle_tts_dmg_read_bp.inl"
+
+// --- MinHook on sub_5068B0 impact-time renderer (v0.14.8) ---
+#include "battle_tts_dmg_render_hook.inl"
+
+// --- Per-frame slot-pool + anim-flag-region poll (v0.14.0) ---
+#include "battle_tts_spritepool.inl"
+
+// --- ROI calibration auto-capture (v0.13.95; defines RoiCalib_OnSwapBuffers) ---
+#include "battle_tts_roi_calib.inl"
+
 // ============================================================================
-// Shared victory state — used by both screenshot.inl and victory.inl
+// Shared victory state -- used by both screenshot.inl and victory.inl
 // ============================================================================
 
 // v0.12.85: Victory screen state (forward declarations, used by OnBattleEnter)
@@ -194,8 +250,8 @@ static uint8_t s_preBattleGFStructs[16][0x44] = {};
 static bool s_preBattleGFSnapValid = false;
 
 // Known victory data addresses
-static const uint32_t VICTORY_EXP_BASE = 0x01CFF574;       // 3×u16: EXP earned per party slot
-static const uint32_t VICTORY_AP_BASE  = 0x01CFF5C2;       // 3×u16: AP earned per party slot
+static const uint32_t VICTORY_EXP_BASE = 0x01CFF574;       // 3x u16: EXP earned per party slot
+static const uint32_t VICTORY_AP_BASE  = 0x01CFF5C2;       // 3x u16: AP earned per party slot
 static const uint32_t VICTORY_PARTY_ADDR = 0x01CFE74C;     // 4 bytes: party composition (char IDs)
 
 // CHAR_NAMES[] already defined in battle_tts_menu.inl
@@ -210,12 +266,14 @@ static const char* GetCharNameById(uint8_t id)
 
 static int s_victoryAutoCapture = 0;
 
-// v0.12.96: GDI+ for PNG screenshots (used by screenshot.inl and victory.inl)
-static ULONG_PTR s_gdiplusToken = 0;
-
 // v0.13.28: Pre-battle EXP snapshots for level-up detection
 static uint32_t s_preBattleExpAll[11] = {};
 static bool s_preBattleExpSnapValid = false;
+
+// v0.13.45: GDI+ token shared between Initialize/Shutdown (here) and the PNG
+// encoding paths in screenshot.inl / roi_calib.inl. Lives in this shared
+// section so all consumers see the same value regardless of include order.
+static ULONG_PTR s_gdiplusToken = 0;
 
 // --- GL screenshot capture, memory diff, victory step diagnostics (extracted v0.13.45) ---
 #include "battle_tts_screenshot.inl"
@@ -297,7 +355,6 @@ static void OnBattleEnter()
     // Reset enemy name cache for new battle
     s_enemyNameCacheBuilt = false;
     memset(s_enemyNameCache, 0, sizeof(s_enemyNameCache));
-    memset(s_enemyNameCachePrevHP, 0, sizeof(s_enemyNameCachePrevHP));
 
     // Reset HP tracking for new battle
     s_hpTrackingReady = false;
@@ -310,6 +367,38 @@ static void OnBattleEnter()
     s_damageAnimWasActive = false;
     s_damageAnimStartTime = 0;
     s_hpTrackLastActiveChar = 0xFF;
+
+    // v0.14.32: Reset v0.14.x damage-popup signal state (popup-create + impact-render).
+    // Both pairs were inadvertently dropped from OnBattleEnter during the v0.14.24
+    // build recovery: the recovery rebuilt battle_tts.cpp from GitHub HEAD v0.13.61
+    // (which predates these hooks), wired the new .inl files into the include chain,
+    // but never called the install/reset functions. Without these calls,
+    // s_lastDmgRenderTick stays 0, the impact-time render trigger never fires, and
+    // PollHPChanges falls back to the v0.13.90 anim-flag-fall path — which is the
+    // OLD pre-v0.14.10 "announce at animation end" timing. Restoring these calls
+    // re-enables the impact-time trigger documented in battle_tts_dmg_render_hook.inl.
+    DmgPopupHook_Reset();
+    DmgRenderHook_Reset();
+
+    // v0.14.33: Reset no-effect watchdog state and hook counters. Same
+    // regression class as v0.14.32: the v0.14.24 build recovery wired
+    // battle_tts_noeffect.inl into the include chain but never called its
+    // ResetNoEffectState() in OnBattleEnter, and the sub_48E830 hook it
+    // depends on was an empty stub in sprite_spawn.inl after the v0.13.93
+    // architectural pivot. Without the reset, stale s_pendingSpellNoEffect
+    // state from a prior battle could fire spurious 'No effect on X' lines
+    // in the new battle.
+    ResetNoEffectState();
+    Sub48E830Hook_Reset();
+
+    // v0.14.34: Reset battle_tts_sprite.inl per-battle dedup state. Same
+    // regression class — the v0.14.24 build recovery wired this .inl into
+    // the include chain but never called ResetSpriteSpawnState() in
+    // OnBattleEnter. Without the reset, stale (slot, text_id) and
+    // (slot, kind) dedup entries from prior battles silenced legitimate
+    // events in the new battle. Reset clears all four dedup tables
+    // (sub_483400, sub_4877F0, sub_48D200, kind=4 screenshot state).
+    ResetSpriteSpawnState();
     
     // Reset EWM cap state for new battle
     s_ewmFreezing = false;
@@ -343,14 +432,6 @@ static void OnBattleEnter()
         s_gfFirePatched = false;
     }
     EWM_LoadConfig();
-
-    // v0.13.59: Reset per-slot turn counter on battle entry. This must happen
-    // before any ATB is sampled so the first battle's turns aren't skipped.
-    EWM_ResetTurnCount();
-
-    // v0.13.62: Capture status baseline so pre-existing buffs (Regen from
-    // equipment, etc.) don't spam as "just applied" on battle start.
-    InitStatusBaseline();
     
     if (!s_pBattleMenuState) {
         ResolveBattleMenuAddresses();
@@ -364,12 +445,46 @@ static void OnBattleEnter()
     if (!s_battleEffectHookInstalled) {
         EWM_InstallBattleEffectHook();
     }
+
+    // v0.14.32: Install the v0.14.x damage-popup hooks. Each install function
+    // self-guards on its own *Installed flag so calling every battle is safe.
+    // The popup-create hook (sub_48EF80) is currently diagnostic-only — its
+    // signal is not wired into PollHPChanges as of v0.14.10 (see comment in
+    // hp.inl about why v0.14.4 reverted it). The render hook (sub_5068B0) IS
+    // the production impact-time trigger. Both are still installed because the
+    // diagnostic from the popup-create hook helps us cross-reference timing.
+    DmgPopupHook_Install();
+    DmgRenderHook_Install();
+
+    // v0.14.33: Install the sub_48E830 action-announce hook. Required by
+    // battle_tts_noeffect.inl to start its no-effect watchdog when the
+    // player casts a status spell (retaddr=0x0048594E, actionId=0x16).
+    // Self-guards on s_sub48E830HookInstalled so calling every battle is safe.
+    InstallSub48E830Hook();
+
+    // v0.14.34: Install the three battle_tts_sprite.inl event hooks —
+    // critical for spell-miss / no-effect / Miss announcements:
+    //
+    //   sub_483400 (InstallSpriteSpawnHook)   — item event sprite spawner;
+    //                                            diagnostic only as of v0.13.66.
+    //   sub_4877F0 (InstallSpellResultHook)   — spell result dispatcher;
+    //                                            kind=4 a3=0x9 path fires
+    //                                            'No effect on X' via
+    //                                            NoEffect_QueueAnnouncement.
+    //                                            THIS is the missing piece
+    //                                            for status-spell miss/no-effect.
+    //   sub_48D200 (InstallPopupSpriteHook)   — central popup dispatcher;
+    //                                            text_id=0xED fires 'Miss on X'
+    //                                            for physical attack misses.
+    //
+    // Same regression class — the v0.14.24 build recovery never re-added
+    // these install calls. Each Install function self-guards on its own
+    // *Installed flag so calling every battle is safe.
+    InstallSpriteSpawnHook();
+    InstallSpellResultHook();
+    InstallPopupSpriteHook();
     
     memset((void*)s_gfAnimFired, 0, sizeof(s_gfAnimFired));
-    memset(s_prevSlotSummoning, 0, sizeof(s_prevSlotSummoning));
-    memset(s_gfHpPrev, 0, sizeof(s_gfHpPrev));
-    memset(s_gfHpTracking, 0, sizeof(s_gfHpTracking));
-    memset(s_gfSummonedIdx, 0xFF, sizeof(s_gfSummonedIdx));
     s_prevBattleMagicId = -1;
 
     // Reset victory screen diagnostic state
@@ -432,12 +547,6 @@ static void OnBattleEnter()
 static void OnBattleExit()
 {
     Log::Battle("BattleTTS: === BATTLE EXITED ===");
-    
-    // v0.13.59: Log per-slot turn-count summary before clearing s_inBattle.
-    // Runs regardless of EWM state so EWM-on and EWM-off battles are directly
-    // comparable. Safe to call on battles that ended without victory (flee,
-    // game over, etc.) — just reports whatever turns were observed.
-    EWM_LogTurnCountSummary();
     
     s_inBattle = false;
     s_battleJustStarted = false;
@@ -535,8 +644,6 @@ void Initialize()
     
     EWM_InstallHook();
     EWM_InstallGFHook();
-    EWM_InstallProcessReadyHook();  // v0.13.55: turn dispatch hook
-    EWM_InstallActionExecuteHook(); // v0.13.56: action execute hook (sub_482F80)
 
     s_gfVEHHandle = AddVectoredExceptionHandler(1, GF_BP_VectoredHandler);
     Log::Battle("BattleTTS: [GF-BP] VEH registered: handle=0x%08X", (uint32_t)(uintptr_t)s_gfVEHHandle);
@@ -549,11 +656,6 @@ void Initialize()
                s_ffnxGFHookInstalled ? "OK" : "FAIL",
                s_gfFirePatchReady ? "OK" : "FAIL",
                s_battleTextHooksInstalled ? "OK" : "deferred");
-
-    Log::Battle("BattleTTS: [DISPATCH] sub_483470 hook: %s",
-               s_processReadyHookInstalled ? "OK" : "FAIL");
-    Log::Battle("BattleTTS: [DISPATCH] sub_482F80 hook: %s",
-               s_actionExecuteHookInstalled ? "OK" : "FAIL");
 
     // Initialize GDI+ for PNG screenshots
     Gdiplus::GdiplusStartupInput gdiplusStartupInput;
@@ -589,11 +691,6 @@ void Update()
     }
 
     if (!s_inBattle) return;
-
-    // v0.13.59: Per-slot turn counter — runs unconditionally inside a battle,
-    // independent of EWM state or init-announce progress. Gives apples-to-apples
-    // turn counts between EWM-on and EWM-off battles.
-    EWM_TrackTurnCount();
 
     if (s_battleJustStarted) {
         s_battleJustStarted = false;
@@ -632,6 +729,11 @@ void Update()
         }
     }
 
+    // v0.13.46: Mid-battle enemy detection (e.g. Elvoret after Biggs/Wedge die)
+    if (s_initAnnounceDone && s_enemyAnnounceDone) {
+        RefreshEnemyNameCache();
+    }
+
     if (s_initAnnounceDone && s_enemyAnnounceDone) {
         PollMenuDiagnostic();
     }
@@ -646,6 +748,11 @@ void Update()
 
     if (s_initAnnounceDone && s_enemyAnnounceDone) {
         PollLimitToggle();
+    }
+
+    // v0.14.x: Limit Break submenu diagnostic (Quistis Blue Magic spell list)
+    if (s_initAnnounceDone && s_enemyAnnounceDone) {
+        PollLimitDiag();
     }
 
     if (s_inBattle && s_initAnnounceDone) {
@@ -675,7 +782,6 @@ void Update()
         GF_LogHookStats();
         GF_PollStateChanges();
         PollBattleMagicId();
-        EWM_LogDispatchStats();  // v0.13.55: dispatch hook stats
     }
 
     if (s_inBattle) {
@@ -695,7 +801,7 @@ void Update()
             s_victoryEntryTime = GetTickCount();
             s_victoryStepCount = 0;
             s_victoryF12WasDown = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
-            Log::Battle("BattleTTS: [VICTORY] All enemies dead — victory capture enabled");
+            Log::Battle("BattleTTS: [VICTORY] All enemies dead -- victory capture enabled");
             DumpVictoryStep(0);
         }
         if (s_victoryScreenActive) {
@@ -704,7 +810,7 @@ void Update()
             s_victoryF12WasDown = f12Down;
             if (f12Pressed) {
                 s_victoryStepCount++;
-                Log::Battle("BattleTTS: [VICTORY] F12 — step %d", s_victoryStepCount);
+                Log::Battle("BattleTTS: [VICTORY] F12 -- step %d", s_victoryStepCount);
                 DumpVictoryStep(s_victoryStepCount);
                 char buf[64];
                 snprintf(buf, sizeof(buf), "Step %d captured.", s_victoryStepCount);
@@ -717,28 +823,28 @@ void Update()
         PollHPChanges();
     }
 
-    // v0.13.62: Per-frame status ailment / buff transition detection.
-    // Runs after PollHPChanges so KO (bit 0 of persist) is already announced
-    // via the HP tracker before we'd redundantly announce "knocked out".
+    // v0.13.62-63: Status ailment/buff transition TTS (must come after PollHPChanges)
     if (s_inBattle && s_initAnnounceDone && s_enemyAnnounceDone) {
         PollStatusChanges();
     }
 
-    // v0.13.52: Fire any deferred turn announcement once damage TTS clears.
-    // Must run AFTER PollHPChanges so this frame's HP deltas and s_ewmHold
-    // flag are already accounted for before we decide whether to release.
+    // v0.13.83: No-effect detection watchdog. Per noeffect.inl comment, this
+    // must run AFTER PollHPChanges and PollStatus so any transient signals
+    // they observe are visible to the watchdog this frame.
     if (s_inBattle && s_initAnnounceDone && s_enemyAnnounceDone) {
-        PollDeferredTurnAnnounce();
+        PollPendingSpellNoEffect();
+        PollPendingNoEffectAnnouncements();
     }
 
-    // v0.13.47: Track GF summon start (repeated summon fix) and GF HP damage
+    // v0.14.34: kind=4 auto-screenshot capture. Diagnostic subsystem from
+    // v0.13.69 — schedules a screenshot ~400ms after each kind=4 event
+    // (HookedSpellResultDispatch in battle_tts_sprite.inl) so we can visually
+    // verify what the engine renders for resist/no-effect cases. Capped at
+    // 10 captures per battle. Was missing from Update() since the v0.14.24
+    // build recovery; restoring it lets us audit the new sub_4877F0 hook's
+    // a3 patterns visually.
     if (s_inBattle && s_initAnnounceDone && s_enemyAnnounceDone) {
-        PollGFSummonState();
-    }
-
-    // v0.13.46: Refresh enemy name cache for mid-battle spawns
-    if (s_inBattle && s_initAnnounceDone && s_enemyNameCacheBuilt) {
-        RefreshEnemyNameCache();
+        PollKind4Capture();
     }
 
     if (s_inBattle && s_initAnnounceDone) {

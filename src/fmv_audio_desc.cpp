@@ -23,6 +23,10 @@
 #include <vector>
 #include <string>
 #include <map>
+
+// Forward declarations for cross-module namespaces (restored in v0.14.29 build recovery).
+namespace Log { void Mod(const char* format, ...); }
+namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); }
 #include <sstream>
 #include <algorithm>
 #include <cctype>

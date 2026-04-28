@@ -8,6 +8,8 @@
 //         memory sweep. No more keyboard tracking or guessing.
 
 #include "ff8_accessibility.h"
+#include "ff8_addresses.h"
+#include "mod_forward_decls.h"
 
 namespace TitleScreen {
 

@@ -9,188 +9,47 @@
 // FF8 Original PC Accessibility Mod version
 // Increment on every build change
 // ================================================================
-#define FF8OPC_VERSION "0.13.63"  // Session 77 item 2 fixes — enemy target status + animation-hold gating
-#define FF8OPC_VERSION_DATE "2026-04-17"
+#define FF8OPC_VERSION "0.14.43"  // v0.14.43: Diagnostic cleanup post-Bug-A resolution. Stripped DumpItemMenuState (the [ITEM-DUMP] block) from src/battle_tts_menu.inl — v0.14.42 BAT verified the disassembly model so the dump is no longer needed. Stripped [BATTLESPEAK-DIAG] log preamble/postamble from BattleSpeak in src/battle_tts.cpp — added in v0.14.37 to investigate items audio purge, no longer needed. Stripped [SPEAK-DIAG] log statements from ScreenReader::Speak in src/screen_reader.cpp — same provenance. Net: ~150 lines of diagnostic code removed; F12 stays free for next investigation. The [ITEM-LIST] block is retained (low overhead, one shot per submenu open, useful for future regression checks). No functional changes; behavior identical to v0.14.42 with cleaner logs.
+
+// v0.14.40: Items submenu — visual page/slot fix + comprehensive diagnostic dump. v0.14.39 BAT showed (a) FindItemControllerNode() returns NULL on every cursor read (40/40) — the v0.10.104 handler signature 0x4F81F0 isn't where expected in this build, OR FFNx replaced it, OR the pool layout shifted; (b) Aaron's saved arrangement has gaps between items ("Elixir was page 1 slot 4 when really it was on page 3 following a bunch of empty slots"). Fix part 1 (visual position): added boIdx field to BattleItemEntry tracking the original battle_order position. BuildItemList now records boIdx for each item. New GetItemVisualPos() helper computes page/slot from boIdx (so saved-arrangement gaps are reflected). Both items announce paths (main + SUBMENU-DELAYED) use it. Theory: BATTLE_SUBMENU_CURSOR is a compacted item-index cursor; engine renders items at their battle_order POSITIONS with empties preserved. Fix part 2 (diagnostic): added DumpItemMenuState() that runs once per items submenu open. Logs raw 32 bytes of battle_order, inv lookup for each non-FF entry, hex dump of all 10 pool slots first 0x40 bytes, every code-pointer DWORD found in pool memory (0x004XXXXX or 0x6E70XXXX range), explicit search for ITEM_HANDLER (0x4F81F0) at every offset, and 32 bytes around BATTLE_SUBMENU_CURSOR for cursor-neighborhood inspection.
+
+// v0.14.39: Bug A items-ordering attempted fix via pool-node helper. BAT proved helper returns NULL across the entire battle — handler offset/address don't match this build.
+
+// v0.14.38: Bug B fully FIXED (every damage event fired via sub_5068B0 / Flag #2). Bug A items-not-heard FIXED (false-exit suppression extended to Item submenu). Bug A new variant discovered: items announce in wrong order. Three flags codified: Flag #1 (sub_48EF80) = action-launch, NOT a trigger. Flag #2 (sub_5068B0) = damage sprite, PRIMARY. Flag #3 (anim flag 1->0) = catch-all fallback.
+
+// v0.14.37: Bug B revert + Bug A diagnostic. v0.14.36 BAT FAILED — popup-create primary fired 1-5s before render-hook. Reverted to render-hook primary, popup-create as fallback. Added [BATTLESPEAK-DIAG] in BattleSpeak and [SPEAK-DIAG] in ScreenReader::Speak for items submenu investigation. Diagnostic logs remain in v0.14.38 and will be removed in v0.14.39.
+
+// v0.14.36: Bug B FAILED FIX — inverted primary/fallback ordering. Made sub_48EF80 primary, sub_5068B0 fallback, both with 500ms freshness gate. BAT 22:09-22:11 showed popup-create fires 1-5s before dmg-render, every event ANIM-UP-timed. Reverted in v0.14.37.
+
+// v0.14.35: Two-bug fix from v0.14.34 long-battle BAT. Bug A item-submenu fix retained.
+
+// v0.14.34: Restore sprite/spell event hooks (bug 2 of 4 from v0.14.31 BAT — the actual fix).
+//
+// v0.14.33: Restore status-spell no-effect ALLY-already-status fallback (sub_48E830 watchdog hook — still required for cases where engine short-circuits before sub_4877F0)
+//
+// v0.14.32: REGRESSION FIX (bug 1 — damage announcement timing)
+//
+// v0.14.31: BUILD RECOVERY (linker errors)
+//
+// v0.14.30: BUILD RECOVERY (architectural fix — mod_forward_decls.h)
+//
+// v0.14.28: BUILD RECOVERY (name_bypass Mod, field_dialog/archive/navigation namespace decls)
+//
+// v0.14.27: BUILD RECOVERY (name_bypass forward decls — wrong function name)
+//
+// v0.14.26: BUILD RECOVERY (s_gdiplusToken, PollStatusChanges, menu_tts ff8_addresses include, game_audio namespace decls)
+//
+// v0.14.25: BUILD RECOVERY attempt 2 — restored battle_tts.cpp from GitHub HEAD + .inl includes (got most of the way; 4 errors left)
+//
+// v0.14.24: BUILD RECOVERY attempt 1 (failed — helpers + s_ewmEnabled fixes weren't enough)
+//
+// v0.14.22: Fixed spell ordering attempt (still backwards)
+// v0.14.21: Auto-building scanner (worked but backwards)  
+// v0.14.20: Manual spell collection proof-of-concept
+#define FF8OPC_VERSION_DATE "2026-04-27"
 
 // ============================================================================
 // FF8 Runtime Address Resolution
 // See ff8_addresses.h / ff8_addresses.cpp for the resolver that computes
 // addresses at runtime using the same offset-chain technique as FFNx.
 // ============================================================================
-
-#include "ff8_addresses.h"
-
-// ============================================================================
-// Persistent settings (v0.13.51)
-// Back-end for SAPI voice/rate/volume, EWM toggle, BGM volume, etc.
-// ============================================================================
-
-#include "config.h"
-
-// ============================================================================
-// Screen Reader Interface (NVDA direct + SAPI fallback)
-// nvdaControllerClient.dll is embedded as a resource and extracted at runtime.
-// No external Tolk.dll or screen reader DLLs needed.
-// ============================================================================
-
-namespace ScreenReader {
-
-bool Initialize(HMODULE hModule);
-void Shutdown();
-bool IsAvailable();
-
-// Speak text, optionally interrupting current speech
-bool Speak(const wchar_t* text, bool interrupt = true);
-
-// Speak text (narrow string convenience wrapper)
-bool Speak(const char* text, bool interrupt = true);
-
-// Output to both speech and braille
-bool Output(const wchar_t* text, bool interrupt = true);
-bool Output(const char* text, bool interrupt = true);
-
-// Silence current speech
-bool Silence();
-
-// v0.13.51: Returns true while SAPI (voice 1 or voice 2) is actively rendering
-// audio. Used by BattleTTS EWM to hold ATB until damage TTS finishes.
-bool IsSpeaking();
-
-// Get detected screen reader name (empty if none)
-std::string GetScreenReaderName();
-
-// v04.25: SAPI voice cycling and rate control
-void CycleVoice();      // Switch to next available SAPI voice (F1)
-void IncreaseRate();    // Increase SAPI speech rate (F8)
-void DecreaseRate();    // Decrease SAPI speech rate (F7)
-void SetRate(long rate); // Set rate silently, no announcement (startup default)
-void RepeatLast();      // Repeat last spoken dialog
-
-// v05.13: SAPI volume control
-void IncreaseVolume();  // Increase SAPI speech volume by 10% (F12)
-void DecreaseVolume();  // Decrease SAPI speech volume by 10% (F11)
-
-// v0.10.32: Channel 2 — independent SAPI voice for battle events/damage
-// Plays on a separate ISpVoice instance so it overlaps with menu speech.
-bool SpeakChannel2(const wchar_t* text, bool interrupt = false);
-bool SpeakChannel2(const char* text, bool interrupt = false);
-
-}  // namespace ScreenReader
-
-// ============================================================================
-// Title Screen Module
-// ============================================================================
-
-namespace TitleScreen {
-
-void Initialize();
-void Activate();    // Call when title screen is entered
-void Deactivate();  // Call when title screen is exited
-void Update();      // Called each frame/tick
-void Shutdown();
-
-}  // namespace TitleScreen
-
-// ============================================================================
-// FMV Audio Description Module
-// ============================================================================
-
-#include "fmv_audio_desc.h"
-
-// ============================================================================
-// FMV Skip Module
-// ============================================================================
-
-#include "fmv_skip.h"
-
-// ============================================================================
-// Field Dialog Module (v04.00)
-// ============================================================================
-
-#include "field_dialog.h"
-
-// ============================================================================
-// Field Navigation Module (v05.00)
-// ============================================================================
-
-#include "field_archive.h"
-#include "field_navigation.h"
-
-// ============================================================================
-// Game Audio Module (v0.09.22)
-// ============================================================================
-
-#include "game_audio.h"
-
-// ============================================================================
-// World Map Module (v0.11.03)
-// ============================================================================
-
-#include "world_map.h"
-
-// ============================================================================
-// FF8 Text Decoder (v04.00)
-// ============================================================================
-
-#include "ff8_text_decode.h"
-
-// ============================================================================
-// Logging
-// ============================================================================
-
-namespace Log {
-
-void Init(const char* gameLogFilename);
-void Close();
-
-// Backward-compatible general write — goes to ff8_mod.log without channel prefix.
-// Use domain-specific functions below for new code.
-void Write(const char* fmt, ...);
-
-// Domain-specific log channels — each writes to its own file.
-// Use these in new/refactored code.
-void Mod(const char* fmt, ...);     // ff8_mod.log     — core init, modules, errors
-void Battle(const char* fmt, ...);  // ff8_battle.log  — battle TTS, EWM, GF
-void Field(const char* fmt, ...);   // ff8_field.log   — field nav, catalog, GPS
-void World(const char* fmt, ...);   // ff8_world.log   — world map navigation
-void Menu(const char* fmt, ...);    // ff8_menu.log    — menu TTS, junction, items
-void Dialog(const char* fmt, ...);  // ff8_dialog.log  — field dialog hooks
-
-}  // namespace Log
-
-// ============================================================================
-// Navigation Data Log (persistent, append-mode)
-// Accumulates structured navigation data across game sessions for analysis.
-// Separate from the debug log — this file is never truncated.
-// ============================================================================
-
-namespace NavLog {
-
-void Init();                        // Open/create nav log in append mode
-void Close();                       // Flush and close
-
-// Session/field events
-void SessionStart();                // Log session header with version + timestamp
-void FieldLoad(const char* fieldName, int fieldId, int numTris, int numEntities,
-               int numExits, int numEvents);
-
-// Auto-drive lifecycle
-void DriveStart(const char* fieldName, const char* targetName, const char* targetType,
-                int startTri, float startX, float startY,
-                int goalTri, float goalX, float goalY, float talkRadius,
-                int astarTris, int waypointCount, bool usedFunnel);
-void DriveWaypoint(int wpIndex, int wpTotal, float playerX, float playerY,
-                   float distToTarget, int tick);
-void DriveSample(float playerX, float playerY, int playerTri,
-                 float distToTarget, int wpIndex, int wpTotal, int tick);
-void DriveRecovery(int phase, int playerTri, float playerX, float playerY,
-                   float distToTarget);
-void DriveEnd(const char* result, int totalTicks, float finalDist,
-              int recoveryPhases, float startDist);
-
-// Coordinate mapping: logs a known 3D↔2D correspondence for camera research
-void CoordSample(const char* fieldName, int triIdx,
-                 float posX, float posY,   // entity 2D coords
-                 float wx, float wy, float wz);  // walkmesh 3D coords (if available)
-
-}  // namespace NavLog

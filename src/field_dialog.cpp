@@ -74,10 +74,18 @@
 //   Total size: 0x3C bytes per window (NOT 0x38!)
 
 #include "ff8_accessibility.h"
+#include "ff8_addresses.h"
 #include "ff8_text_decode.h"
 #include "battle_tts.h"       // v0.10.112: GetLastDrawerName() for draw result announcements
 #include "minhook/include/MinHook.h"
 #include <vector>
+
+// Forward declarations for cross-module namespaces (restored in v0.14.28 build recovery).
+namespace Log {
+    void Dialog(const char* format, ...);
+    void Write(const char* format, ...);
+}
+namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); }
 
 namespace FieldDialog {
 
