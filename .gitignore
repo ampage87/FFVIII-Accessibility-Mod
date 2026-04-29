@@ -27,6 +27,11 @@ git_push_initial.bat
 # Anything Aaron uses for his personal workflow that shouldn't ship.
 /Utilities/
 
+# Personal-workflow shortcut at project root that points into /Utilities/
+# (the .vbs that runs the GitHub push). Excluded for the same reason as
+# /Utilities/ itself.
+/GitHub Push.lnk
+
 # Transient debug dumps written to project root (e.g. `git status --porcelain > porcelain.txt`).
 /porcelain.txt
 

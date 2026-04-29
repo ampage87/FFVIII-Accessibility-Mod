@@ -141,6 +141,29 @@ IDR_VTT_OPENING_CREDITS RCDATA "..\\Audio Descriptions\\ff8_opening_credits_ad.v
 5000 RCDATA "..\\Audio Descriptions\\disc04_00h_ad.vtt"
 
 // ============================================================
+// GF SUMMON AUDIO DESCRIPTIONS (v0.14.44)
+// IDs follow IDR_VTT_GF_BASE + per-GF index defined in gf_audio_desc.cpp
+// ============================================================
+6000 RCDATA "..\\Audio Descriptions\\gf_quezacotl.vtt"
+6001 RCDATA "..\\Audio Descriptions\\gf_shiva.vtt"
+6002 RCDATA "..\\Audio Descriptions\\gf_ifrit.vtt"
+6003 RCDATA "..\\Audio Descriptions\\gf_siren.vtt"
+6004 RCDATA "..\\Audio Descriptions\\gf_brothers.vtt"
+6005 RCDATA "..\\Audio Descriptions\\gf_diablos.vtt"
+6006 RCDATA "..\\Audio Descriptions\\gf_carbuncle.vtt"
+6007 RCDATA "..\\Audio Descriptions\\gf_leviathan.vtt"
+6008 RCDATA "..\\Audio Descriptions\\gf_pandemona.vtt"
+6009 RCDATA "..\\Audio Descriptions\\gf_cerberus.vtt"
+6010 RCDATA "..\\Audio Descriptions\\gf_alexander.vtt"
+6011 RCDATA "..\\Audio Descriptions\\gf_doomtrain.vtt"
+6012 RCDATA "..\\Audio Descriptions\\gf_bahamut.vtt"
+6013 RCDATA "..\\Audio Descriptions\\gf_cactuar.vtt"
+6014 RCDATA "..\\Audio Descriptions\\gf_tonberry.vtt"
+6015 RCDATA "..\\Audio Descriptions\\gf_eden.vtt"
+6016 RCDATA "..\\Audio Descriptions\\gf_phoenix.vtt"
+6017 RCDATA "..\\Audio Descriptions\\gf_odin.vtt"
+
+// ============================================================
 // Mapping file (kept for special-case overrides like intro/credits)
 // ============================================================
 IDR_AD_MAPPING          RCDATA "..\\Audio Descriptions\\mapping.txt"

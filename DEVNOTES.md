@@ -17,31 +17,29 @@ Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` inj
 - Multi-channel logging system (6 domain logs); `.inl` file splitting
 - Full FF8_EN.exe disassembly reference at `Game Files/disassembly/`
 
-**Current build: v0.14.42 — BAT SUCCESS ✅ (15:26:14, session 72)**
+**Current build: v0.14.44 — GF summon audio descriptions, BAT PASSED (session 74)**
 
-Aaron confirmed: "It worked! I heard all items in the slots as expected, and those items I used the item used matched what had been announced by TTS."
+Aaron triggered Ifrit and Shiva in-game; both audio descriptions announced correctly. Trigger fires from `PollBattleMagicId()` in `battle_tts_ewm.inl` on the rising edge of `battle_magic_id` matching a known GF effect ID, cues stream on Channel 2, and playback stops cleanly when `battle_magic_id` reverts (covers natural end + R1+L1 skip). 18 VTTs cover the 16 junctioned GFs plus Phoenix and Odin.
 
-Log excerpt confirming the disassembly model is correct:
+Usability issue surfaced during BAT: GF SFX (Ifrit roar, Shiva ice shatter, etc.) is loud enough to mask the TTS. Aaron flagged this as the next priority — see NEXT_SESSION_PROMPT for the SFX volume + auto-duck plan.
 
-```
-[ITEM-LIST] battle_buffer @ 0x01D28E78: 4 populated of 32 positions
-  [0] id=1 qty=10 -> Potion
-  [1] id=7 qty=1  -> Phoenix Down
-  [2] id=16 qty=2 -> Remedy
-  [9] id=9 qty=2  -> Elixir
+Ready to push v0.14.44 to GitHub via Utilities/push_to_github.vbs whenever Aaron is ready.
 
-[ITEM] cursor=9 -> Elixir x2 page3 item2 (id=9 src=battle_buffer)
-```
+**v0.14.43.1: GitHub catch-up complete.** Two commits behind us:
+- `6d28211c` (v0.14.43): items submenu architectural fix + cumulative cleanup of ~50 backlog builds + diagnostic removal + Utilities/ folder.
+- `af841fef` (v0.14.43.1): structural cleanup — removed stale `FF8_OriginalPC_mod/` subdirectory.
 
-Buffer matches Aaron's saved arrangement perfectly: Potion at top, Phoenix Down next, Remedy third, Elixir at page 3 slot 2 with empties between. **Bug A (items submenu ordering) is RESOLVED** after a 9-version journey from v0.14.34 through v0.14.42.
+**Tooling: GitHub push utility built (session 73)** in `Utilities/` (gitignored): `push_to_github.bat` (worker with token-embedded URL auth, add → commit → pull --rebase → push → tag), `push_to_github.ps1` (Windows Forms GUI), `push_to_github.vbs` (silent launcher), `README.md` (setup notes). Token scrubbed from `Logs/git_latest.log` after every run. Two successful pushes this session validated the tool. Future pushes are one-click.
 
-**v0.14.43 cleanup (next priority):**
+Non-trivial bug fixed during session: cmd.exe quote-stripping rule mangled the original `Start-Process -ArgumentList` invocation so the .bat never ran (no log was created, hence no error visibility). Fixed by switching to `[System.Diagnostics.ProcessStartInfo]` with explicit outer wrapping quotes around the `/c` command, plus pre-creating the log file in PowerShell so View Log always has something to show even on early failures.
 
-- Strip `[ITEM-DUMP]` block in `src/battle_tts_menu.inl` — mission complete.
-- Strip `[BATTLESPEAK-DIAG]` from `src/battle_tts.cpp` and `[SPEAK-DIAG]` from `src/screen_reader.cpp`.
-- Keep `[ITEM-LIST]` (low overhead, one shot per submenu open, useful for future regression checks).
+**v0.14.43 cleanup (DONE in session 73):**
+
+- ~~Strip `[ITEM-DUMP]` block in `src/battle_tts_menu.inl`~~ — done.
+- ~~Strip `[BATTLESPEAK-DIAG]` from `src/battle_tts.cpp` and `[SPEAK-DIAG]` from `src/screen_reader.cpp`~~ — done.
+- `[ITEM-LIST]` retained (low overhead, one shot per submenu open, useful for future regression checks).
 - F12 stays free for the next diagnostic.
-- Cancel deep research prompt at `Plan & Research Documents/deep_research_battle_items_arrangement.md` — no longer needed.
+- Cancel deep research prompt at `Plan & Research Documents/deep_research_battle_items_arrangement.md` — no longer needed (Aaron may keep for archival).
 
 ---
 
@@ -200,6 +198,8 @@ Bugs 3 and 4 from the v0.14.31 BAT may still be wiring issues that this audit mi
 ---
 
 **Key learnings & principles**
+
+**CRITICAL — bash vs filesystem MCP view mismatch:** When working on this project, bash sees `/C:/...` paths that look like the OneDrive folder but are actually a separate container-local filesystem. The `create_file` system tool writes there too. Files Aaron's build will see ONLY come from filesystem MCP `write_file` / `edit_file` at `C:/...` (no leading slash). DO NOT use `create_file` for project files. DO NOT use bash for project files. Use filesystem MCP exclusively. Diagnosed v0.14.44 session 74.
 
 **CRITICAL — SET3 hook permanently disabled:** NEVER re-enable the SET3 opcode hook (opcode 0x1E). ANY interception — MinHook, dispatch table patch, or minimal passthrough wrapper — hangs the infirmary scene (Dr. Kadowaki walk freeze). GitHub Actions CI check in `.github/workflows/safety-checks.yml` guards against accidental re-enablement. Diagnosed v0.09.32–v0.09.40 via binary search.
 

@@ -307,6 +307,12 @@ static void PollBattleMagicId(void)
                     Log::Battle("BattleTTS: [GF-EFFECT] Animation detected: effectId=%d gfIdx=%d slot=%d",
                                magicId, gfIdx, slot);
                 }
+                // v0.14.44: kick off GF summon audio description playback.
+                // GfAudioDesc handles its own re-entrancy guard and looks up
+                // the matching VTT by effectId. Safe to call regardless of
+                // whether the GF is junctioned to a party slot (e.g. Phoenix
+                // from a Phoenix Pinion item, Odin auto-summon, Boko Choco).
+                GfAudioDesc::OnGFAnimationStart(magicId);
             }
             s_prevBattleMagicId = magicId;
         }

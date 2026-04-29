@@ -21,6 +21,7 @@
 #include "field_navigation.h"
 #include "fmv_audio_desc.h"
 #include "fmv_skip.h"
+#include "gf_audio_desc.h"
 #include "game_audio.h"
 #include "world_map.h"
 
@@ -104,6 +105,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     TitleScreen::Initialize();
     FmvSkip::Initialize();       // Creates kernel32 hooks (CreateFile/CloseHandle/ReadFile)
     FmvAudioDesc::Initialize(hOurModule);  // Loads VTT files from Audio Descriptions folder
+    GfAudioDesc::Initialize(hOurModule);   // v0.14.44: GF summon audio descriptions
     FieldDialog::Initialize();   // v04.00: Hooks opcode dispatch table for dialog text capture
     FieldNavigation::Initialize(); // v05.00: Field navigation assistance
     NameBypass::Initialize();    // v04.26: Auto-bypass character/GF naming screens
@@ -155,6 +157,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
         // FMV modules (active in all game states)
         FmvSkip::OnFrame();
         FmvAudioDesc::OnFrame();
+        GfAudioDesc::OnFrame();  // v0.14.44: poll for GF summon end + fire cues
         
         FieldNavigation::Update();
 
@@ -237,6 +240,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     FieldNavigation::Shutdown(); // v05.00: Field navigation cleanup
     FieldDialog::Shutdown();     // v04.00: Restore opcode table entries
     FmvAudioDesc::Shutdown();
+    GfAudioDesc::Shutdown();  // v0.14.44
     FmvSkip::Shutdown();
     MH_DisableHook(MH_ALL_HOOKS);
     MH_Uninitialize();

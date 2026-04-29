@@ -43,6 +43,8 @@
 namespace Log { void Battle(const char* format, ...); }
 namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); bool SpeakChannel2(const char* text, bool interrupt = false); bool IsSpeaking(); }
 namespace Config { void Load(); int GetInt(const char* key, int defaultValue); void SetInt(const char* key, int value); const char* GetPath(); }
+// v0.14.44: GF summon AD trigger fired from PollBattleMagicId in battle_tts_ewm.inl.
+namespace GfAudioDesc { void OnGFAnimationStart(int effectId); }
 
 namespace BattleTTS {
 

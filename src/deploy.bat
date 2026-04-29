@@ -140,6 +140,7 @@ cl /nologo /W3 /EHsc /O2 /MD /LD ^
     "%SRC_DIR%\title_screen.cpp" ^
     "%SRC_DIR%\fmv_audio_desc.cpp" ^
     "%SRC_DIR%\fmv_skip.cpp" ^
+    "%SRC_DIR%\gf_audio_desc.cpp" ^
     "%SRC_DIR%\field_dialog.cpp" ^
     "%SRC_DIR%\field_archive.cpp" ^
     "%SRC_DIR%\field_navigation.cpp" ^
