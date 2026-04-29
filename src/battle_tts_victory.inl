@@ -1179,25 +1179,21 @@ static void VictoryAutoCapture(const char* label)
 static DWORD WINAPI VictoryScreenThreadFunc(LPVOID)
 {
     uint16_t prevMode = 0;
-    bool f12WasDown = false;
-    int stepCount = 0;
-    
+
     Log::Battle("BattleTTS: [VICTORY-THREAD] Started");
-    
+
     while (!s_victoryThreadStop) {
         Sleep(33);  // ~30Hz polling
-        
+
         if (!FF8Addresses::pGameMode) continue;
-        
+
         uint16_t mode = 0;
         __try { mode = *FF8Addresses::pGameMode; } __except(EXCEPTION_EXECUTE_HANDLER) { continue; }
-        
+
         // Log mode transitions
         if (mode != prevMode) {
             Log::Battle("BattleTTS: [VICTORY-THREAD] Mode: %u -> %u", prevMode, mode);
             if (mode == 3 && prevMode != 3) {
-                stepCount = 0;
-                f12WasDown = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
                 ResetVictoryTTS();
             }
             if (mode == 4 && prevMode != 4) {
@@ -1301,9 +1297,8 @@ static DWORD WINAPI VictoryScreenThreadFunc(LPVOID)
             }
         }
         
-        // F12 capture
-        bool f12Down = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
-        
+        // v0.14.45: F12 victory step capture removed (diagnostic complete).
+
         // v0.13.46: Naming bypass via CODE PATCH.
         // Change the immediate value in the ONLY instruction that writes mode=11:
         //   0x00470AB2: mov word ptr [0x1cd8fc6], 0xb
@@ -1367,19 +1362,8 @@ static DWORD WINAPI VictoryScreenThreadFunc(LPVOID)
                 }
             }
         }
-        bool f12Pressed = f12Down && !f12WasDown;
-        f12WasDown = f12Down;
-        
-        if (f12Pressed) {
-            stepCount++;
-            Log::Battle("BattleTTS: [VICTORY-THREAD] F12 pressed (mode %u) — step %d", mode, stepCount);
-            DumpVictoryStep(stepCount);
-            
-            char buf[64];
-            snprintf(buf, sizeof(buf), "Step %d captured.", stepCount);
-            ScreenReader::Speak(buf, true);
-        }
-        
+        // v0.14.45: F12 step-capture polling removed.
+
         // Phase-based victory TTS (driven by BTXT hook phase detection)
         if (mode == 4) {
             int curPhase = s_victoryPhase;

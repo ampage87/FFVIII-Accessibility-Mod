@@ -147,6 +147,7 @@ cl /nologo /W3 /EHsc /O2 /MD /LD ^
     "%SRC_DIR%\name_bypass.cpp" ^
     "%SRC_DIR%\nav_log.cpp" ^
     "%SRC_DIR%\game_audio.cpp" ^
+    "%SRC_DIR%\audio_ducker.cpp" ^
     "%SRC_DIR%\menu_tts.cpp" ^
     "%SRC_DIR%\battle_tts.cpp" ^
     "%SRC_DIR%\world_map.cpp" ^

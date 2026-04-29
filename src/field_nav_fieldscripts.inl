@@ -89,12 +89,7 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
     s_pshmCaptureStartTime = GetTickCount();
     s_pshmSummaryLogged = false;
 
-    // v0.12.22: Reset POPM varblock write capture.
-    s_varWriteCount = 0;
-    s_capturingVarWrites = true;
-    s_varWriteCaptureStart = GetTickCount();
-    s_varWriteSummaryLogged = false;
-    memset(s_varWrites, 0, sizeof(s_varWrites));
+    // v0.14.45: POPM varblock write capture reset block removed (F12 diagnostic retired).
 
     int ret = s_originalFieldScriptsInit(unk1, unk2, unk3, unk4);
 

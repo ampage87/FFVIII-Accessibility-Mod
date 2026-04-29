@@ -239,13 +239,11 @@ static void NoEffect_RecordSnapshot(uint32_t targetMask);
 // Shared victory state -- used by both screenshot.inl and victory.inl
 // ============================================================================
 
-// v0.12.85: Victory screen state (forward declarations, used by OnBattleEnter)
-static bool s_victoryDumpDone = false;
-static bool s_victoryScreenActive = false;
-static DWORD s_victoryEntryTime = 0;
+// v0.14.45: F12 victory step-capture diagnostic state removed. The shared
+// section previously held s_victoryDumpDone, s_victoryScreenActive,
+// s_victoryEntryTime, s_victoryStepCount, s_victoryF12WasDown — all of which
+// were only used by the F12 step capture path that has been retired.
 static uint16_t s_prevGameMode = 0;
-static int s_victoryStepCount = 0;
-static bool s_victoryF12WasDown = false;
 
 // v0.13.36: Pre-battle GF struct snapshots for FindChangedGF fallback.
 static uint8_t s_preBattleGFStructs[16][0x44] = {};
@@ -489,13 +487,7 @@ static void OnBattleEnter()
     memset((void*)s_gfAnimFired, 0, sizeof(s_gfAnimFired));
     s_prevBattleMagicId = -1;
 
-    // Reset victory screen diagnostic state
-    s_victoryDumpDone = false;
-    s_victoryScreenActive = false;
-    s_victoryEntryTime = 0;
-    s_victoryStepCount = 0;
-    s_victoryF12WasDown = false;
-    s_diffSnapValid = false;
+    // v0.14.45: F12 victory diagnostic state resets removed.
     ResetVictoryTTS();
 
     // Snapshot savemap EXP for all 11 characters at battle entry
@@ -790,36 +782,7 @@ void Update()
         GF_BP_AutoArm();
     }
 
-    if (s_inBattle && s_initAnnounceDone && s_enemyAnnounceDone) {
-        bool allEnemiesDead = true;
-        for (int i = BATTLE_ALLY_SLOTS; i < BATTLE_TOTAL_SLOTS; i++) {
-            if (GetEntityMaxHP(i) > 0 && GetEntityHP(i) > 0) {
-                allEnemiesDead = false;
-                break;
-            }
-        }
-        if (allEnemiesDead && !s_victoryScreenActive) {
-            s_victoryScreenActive = true;
-            s_victoryEntryTime = GetTickCount();
-            s_victoryStepCount = 0;
-            s_victoryF12WasDown = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
-            Log::Battle("BattleTTS: [VICTORY] All enemies dead -- victory capture enabled");
-            DumpVictoryStep(0);
-        }
-        if (s_victoryScreenActive) {
-            bool f12Down = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
-            bool f12Pressed = f12Down && !s_victoryF12WasDown;
-            s_victoryF12WasDown = f12Down;
-            if (f12Pressed) {
-                s_victoryStepCount++;
-                Log::Battle("BattleTTS: [VICTORY] F12 -- step %d", s_victoryStepCount);
-                DumpVictoryStep(s_victoryStepCount);
-                char buf[64];
-                snprintf(buf, sizeof(buf), "Step %d captured.", s_victoryStepCount);
-                ScreenReader::Speak(buf, true);
-            }
-        }
-    }
+    // v0.14.45: F12 victory step-capture polling removed (diagnostic complete).
 
     if (s_inBattle && s_initAnnounceDone && s_enemyAnnounceDone) {
         PollHPChanges();

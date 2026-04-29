@@ -2,6 +2,21 @@
 //
 // v0.09.22: Extracted from dinput8.cpp.
 // v0.09.24: Direct nxAudioEngine.setMusicVolume call — bypasses FFNx hold flag.
+// v0.14.45: Added SFX volume hook + audio-ducking toggle (F2 Phase 1).
+// v0.14.46: SFX hook rewritten. v0.14.45 BAT showed F5/F6 had no audible
+//   effect because TryInstallSfxHook returned silently every frame at the
+//   `if (pFunc[0] != 0xE9) return;` check. FFNx only patches
+//   sfx_set_master_volume when use_external_sfx=true in FFNx.toml; Aaron has
+//   it false, so FFNx never replaces the function and the 0xE9 check failed
+//   forever. Disassembly of sfx_set_master_volume at 0x0046A390 also showed
+//   the function expects volume 0-100 (cmp eax, 0x64; jbe), NOT 0-127.
+//   Fix: hook the game function directly with MinHook regardless of FFNx
+//   state. Works for both use_external_sfx modes — MinHook trampolines the
+//   first 5 bytes whether they're a normal prologue (FFNx didn't patch) or
+//   a JMP (FFNx did patch). Either way we call the original via trampoline
+//   with our scaled 0-100 value, and the original function stores to
+//   *pMasterSfxVolume@0x01CD1794 then loops over channels to propagate the
+//   new volume to in-flight SFX. No direct nxAudioEngine call needed.
 //
 // BGM Volume Architecture (v0.09.24):
 //   The game's set_midi_volume is replaced by FFNx with set_music_volume_for_channel.
@@ -19,22 +34,41 @@
 //   We extract nxAudioEngine ptr from: MOV ECX, imm32 (B9 xx xx xx xx)
 //   We extract setMusicVolume addr from: CALL rel32 (E8 xx xx xx xx)
 //   Then call it directly via __fastcall thiscall shim.
+//
+// SFX Volume Architecture (v0.14.46):
+//   Hook game-side sfx_set_master_volume at 0x0046A390 directly with MinHook,
+//   regardless of FFNx config. Volume range is 0-100. The function itself
+//   stores to *pMasterSfxVolume@0x01CD1794 (verified at +0x46) then iterates
+//   the channel array at 0x01cd0b00 (stride 0x24) calling per-channel update
+//   functions to propagate the new master to currently-playing SFX. We call
+//   the original via MinHook trampoline with our user-scaled value (0-100),
+//   and rely on the function to do everything else.
+//
+//   Why not direct write to *pMasterSfxVolume? It would only affect NEW SFX;
+//   in-flight ones (e.g. GF roar) keep their original mix-down volume until
+//   they restart. The function call updates both.
+//
+//   Why not the v0.14.45 nxAudioEngine direct-call path? It only existed
+//   when FFNx replaces the function (use_external_sfx=true). Hooking the
+//   game function works for both true and false because MinHook trampolines
+//   the first 5 bytes whether normal prologue or FFNx's E9 JMP.
 
 #include "ff8_accessibility.h"
 #include "ff8_addresses.h"
 #include "game_audio.h"
+#include "audio_ducker.h"
 #include "minhook/include/MinHook.h"
 
 // Forward declarations for cross-module namespaces (deleted from earlier and
 // restored in v0.14.26 build recovery).
 namespace Log { void Mod(const char* format, ...); }
-namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); }
+namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); bool IsSpeaking(); }
 namespace Config { void Load(); int GetInt(const char* key, int defaultValue); void SetInt(const char* key, int value); }
 
 namespace GameAudio {
 
 // ============================================================================
-// Internal state
+// Internal state — BGM
 // ============================================================================
 
 typedef uint32_t (__cdecl *FF8SetMusicVolumeForChannel_t)(int32_t channel, uint32_t volume);
@@ -50,6 +84,33 @@ static uint32_t s_lastGameVolume[2] = { 127, 127 };
 // Periodic re-application timer
 static DWORD s_lastReapplyTick = 0;
 static const DWORD REAPPLY_INTERVAL_MS = 500;
+
+// ============================================================================
+// Internal state — SFX (v0.14.45)
+// ============================================================================
+
+// FFNx's replacement (when use_external_sfx=true) and game's native function
+// (when use_external_sfx=false) both take a single uint32_t volume in 0-100
+// range. Verified via FFNx ff8_sfx_set_master_volume source and game
+// disassembly at 0x0046A390 (cmp eax, 0x64; jbe).
+typedef void (__cdecl *FF8SfxSetMasterVolume_t)(uint32_t volume);
+static FF8SfxSetMasterVolume_t s_originalSfxSetMasterVolume = nullptr;
+static void* s_sfxHookedFuncAddr = nullptr;
+static bool  s_sfxHookInstalled = false;
+
+static float s_sfxVolume = 1.0f;  // User's desired SFX volume (0.0-1.0). Default 100%.
+static uint32_t s_lastGameSfxVolume = 100;
+
+// v0.14.46: nxAudioEngine direct-call path retired for SFX. The MinHook
+// trampoline path works whether FFNx patched the function or not, and
+// updates in-flight SFX via the game function's channel-iteration loop.
+
+// ============================================================================
+// Internal state — audio ducking (v0.14.45 Phase 1)
+// ============================================================================
+
+static bool s_duckEnabled = true;     // F2 toggle, persisted as `tts_duck_enabled`
+static int  s_duckRatioPct = 30;      // 0-100 percent, persisted as `sfx_duck_ratio`
 
 // ============================================================================
 // Direct nxAudioEngine access (bypasses FFNx hold_volume_for_channel)
@@ -364,6 +425,15 @@ static void ScanAllNxAudioEngineMethods(uint32_t knownFuncAddr)
 }
 
 // ============================================================================
+// v0.14.46: SFX hook — install MinHook on game-native sfx_set_master_volume
+// ============================================================================
+//
+// (v0.14.45 had ExtractNxAudioEngineSfxAddresses to scan for FFNx's bridge
+// bytes. Removed in v0.14.46 because we now hook the game function directly
+// rather than FFNx's replacement, so we don't need nxAudioEngine ptr or
+// setSFXMasterVolume method addr.)
+
+// ============================================================================
 // Hook: intercept ALL calls to set_music_volume_for_channel
 // ============================================================================
 
@@ -398,6 +468,35 @@ static uint32_t __cdecl HookedSetMusicVolumeForChannel(int32_t channel, uint32_t
     if (s_originalSetMusicVolumeForChannel)
         return s_originalSetMusicVolumeForChannel(channel, scaled);
     return 1;
+}
+
+// ============================================================================
+// Hook: intercept ALL calls to sfx_set_master_volume (v0.14.46)
+// ============================================================================
+//
+// volume is 0-100 (game function rejects >100). When game calls this we
+// remember the requested value as the game's intent and re-apply our
+// user-scaled volume via the original. The original game function then
+// stores to *pMasterSfxVolume and propagates to in-flight channels.
+
+static void __cdecl HookedSfxSetMasterVolume(uint32_t volume)
+{
+    s_lastGameSfxVolume = volume;
+
+    // If the game wants silence (volume==0), respect it.
+    if (volume == 0) {
+        if (s_originalSfxSetMasterVolume)
+            s_originalSfxSetMasterVolume(0);
+        return;
+    }
+
+    // Non-zero: scale the game's value by our user volume (both 0-100).
+    // The game function compares against 0x64 (100) and rejects higher
+    // values into a non-update error path, so cap at 100.
+    uint32_t scaled = (uint32_t)(volume * s_sfxVolume + 0.5f);
+    if (scaled > 100) scaled = 100;
+    if (s_originalSfxSetMasterVolume)
+        s_originalSfxSetMasterVolume(scaled);
 }
 
 // ============================================================================
@@ -445,8 +544,70 @@ static void ReapplyVolume()
     }
 }
 
+// v0.14.47: SFX reapply at user level. Periodic enforcement when ducker
+// is NOT active. When ducking, AudioDucker calls ApplySfxVolume directly
+// from its Tick.
+static void ReapplySfxVolume()
+{
+    if (!s_sfxHookInstalled || !s_originalSfxSetMasterVolume) return;
+
+    uint32_t scaled = (uint32_t)(100.0f * s_sfxVolume + 0.5f);
+    if (scaled > 100) scaled = 100;
+    s_originalSfxSetMasterVolume(scaled);
+}
+
 // ============================================================================
-// Deferred hook installation
+// v0.14.47: AudioDucker accessor functions
+// ============================================================================
+//
+// Get callbacks return the user's intended volume (untouched by duck math).
+// Apply callbacks write effective volume (user * envelope) to the audio
+// backend via the same paths used by ReapplyVolume / ReapplySfxVolume,
+// but with the gain as a parameter instead of reading s_bgmVolume / s_sfxVolume.
+// Apply* are no-ops when their hook isn't installed yet (matches Reapply*).
+
+float GetUserBgmVolume() { return s_bgmVolume; }
+float GetUserSfxVolume() { return s_sfxVolume; }
+
+void ApplyBgmVolume(float linearGain)
+{
+    if (!s_hookInstalled) return;
+    if (linearGain < 0.0f) linearGain = 0.0f;
+    if (linearGain > 1.0f) linearGain = 1.0f;
+
+    for (int ch = 0; ch < 2; ch++) {
+        if (s_directCallAvailable) {
+            s_fnSetMusicVolume(s_nxAudioEngine, NULL, linearGain, ch, 0.0);
+        } else if (s_originalSetMusicVolumeForChannel) {
+            uint32_t scaled = (uint32_t)(127.0f * linearGain + 0.5f);
+            if (scaled > 127) scaled = 127;
+            s_originalSetMusicVolumeForChannel(ch, scaled);
+        }
+    }
+
+    if (s_fmvVolumeAvailable) {
+        uint8_t* nxBase = (uint8_t*)s_nxAudioEngine;
+        uint32_t streamHandle = *(uint32_t*)(nxBase + s_streamHandleOffset);
+        if (streamHandle != 0xfffff000 && streamHandle != 0) {
+            void* engine = (void*)(nxBase + s_engineOffset);
+            s_fnSoLoudFadeVolume(engine, NULL, streamHandle, linearGain, 0.0);
+        }
+    }
+}
+
+void ApplySfxVolume(float linearGain)
+{
+    if (!s_sfxHookInstalled || !s_originalSfxSetMasterVolume) return;
+    if (linearGain < 0.0f) linearGain = 0.0f;
+    if (linearGain > 1.0f) linearGain = 1.0f;
+
+    uint32_t scaled = (uint32_t)(100.0f * linearGain + 0.5f);
+    if (scaled > 100) scaled = 100;
+    s_originalSfxSetMasterVolume(scaled);
+}
+
+// ============================================================================
+// Deferred hook installation — BGM
 // ============================================================================
 
 static void TryInstallHook()
@@ -503,6 +664,55 @@ static void TryInstallHook()
 }
 
 // ============================================================================
+// v0.14.45: Deferred hook installation — SFX
+// ============================================================================
+
+static void TryInstallSfxHook()
+{
+    if (s_sfxHookInstalled) return;
+
+    uint32_t funcAddr = FF8Addresses::pSfxSetMasterVolume;
+    if (funcAddr == 0) return;
+
+    void* hookTarget = (void*)(uintptr_t)funcAddr;
+
+    __try {
+        // v0.14.46: Hook the game function at 0x0046A390 directly, regardless
+        // of FFNx state. Works whether FFNx patched the prologue with E9 JMP
+        // (use_external_sfx=true) or left the original prologue intact
+        // (use_external_sfx=false) — MinHook trampolines either way. Calls
+        // through the trampoline reach FFNx's wrapper if it patched, or the
+        // game-native function if it didn't, and both store master volume
+        // and propagate to in-flight channels.
+        s_sfxHookedFuncAddr = hookTarget;
+        uint8_t* pFunc = (uint8_t*)hookTarget;
+        Log::Mod("GameAudio: SFX hooking 0x%08X (first bytes %02X %02X %02X %02X %02X, FFNx-patched=%s)",
+                   funcAddr, pFunc[0], pFunc[1], pFunc[2], pFunc[3], pFunc[4],
+                   pFunc[0] == 0xE9 ? "YES" : "no");
+
+        MH_STATUS st = MH_CreateHook(hookTarget, (LPVOID)HookedSfxSetMasterVolume,
+                                      (LPVOID*)&s_originalSfxSetMasterVolume);
+        Log::Mod("GameAudio: SFX MH_CreateHook(0x%08X) = %s",
+                   funcAddr, MH_StatusToString(st));
+
+        if (st == MH_OK) {
+            MH_STATUS en = MH_EnableHook(hookTarget);
+            Log::Mod("GameAudio: SFX MH_EnableHook = %s", MH_StatusToString(en));
+            if (en == MH_OK) {
+                s_sfxHookInstalled = true;
+                Log::Mod("GameAudio: SFX hook installed. SFX volume %.0f%%.",
+                           s_sfxVolume * 100.0f);
+
+                // Immediately apply current user volume.
+                ReapplySfxVolume();
+            }
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log::Mod("GameAudio: Exception installing SFX hook at 0x%08X", funcAddr);
+    }
+}
+
+// ============================================================================
 // Public interface
 // ============================================================================
 
@@ -518,37 +728,109 @@ void Initialize()
     s_streamHandleOffset = 0;
     s_directCallAvailable = false;
     s_fmvVolumeAvailable = false;
-    // v0.13.51: Load persistent BGM volume from INI (percent 0-100, default 10).
-    // Stored as integer so the INI is easy to hand-edit.
+
+    // SFX hook state (v0.14.46)
+    s_sfxHookInstalled = false;
+    s_originalSfxSetMasterVolume = nullptr;
+    s_sfxHookedFuncAddr = nullptr;
+    s_lastGameSfxVolume = 100;
+
+    // v0.13.51: Default speech rate is now loaded from ff8_accessibility.ini
+    // inside ScreenReader::Initialize. Same pattern here for volumes.
     Config::Load();
+
+    // BGM volume — stored as integer percent for hand-editability.
     int pct = Config::GetInt("game_volume", 10);
     if (pct < 0) pct = 0;
     if (pct > 100) pct = 100;
     s_bgmVolume = (float)pct / 100.0f;
+
+    // v0.14.45: SFX volume — also stored as integer percent.
+    int sfxPct = Config::GetInt("sfx_volume", 100);
+    if (sfxPct < 0) sfxPct = 0;
+    if (sfxPct > 100) sfxPct = 100;
+    s_sfxVolume = (float)sfxPct / 100.0f;
+
+    // v0.14.45: Audio ducking toggle and ratio.
+    s_duckEnabled = Config::GetInt("tts_duck_enabled", 1) != 0;
+    s_duckRatioPct = Config::GetInt("sfx_duck_ratio", 30);
+    if (s_duckRatioPct < 0)   s_duckRatioPct = 0;
+    if (s_duckRatioPct > 100) s_duckRatioPct = 100;
+
     s_lastGameVolume[0] = 127;
     s_lastGameVolume[1] = 127;
     s_lastReapplyTick = GetTickCount();
     s_reapplyCount = 0;
-    Log::Mod("GameAudio: Initialized. BGM volume %.0f%% (loaded from config).",
-               s_bgmVolume * 100.0f);
+    Log::Mod("GameAudio: Initialized. BGM=%.0f%%, SFX=%.0f%%, duck=%s, duckRatio=%d%% (loaded from config).",
+               s_bgmVolume * 100.0f,
+               s_sfxVolume * 100.0f,
+               s_duckEnabled ? "ON" : "OFF",
+               s_duckRatioPct);
+
+    // v0.14.47: Hand off the volume hooks to AudioDucker. Depths and times
+    // are hardcoded constants for v0.14.47 — to tune, change these and
+    // rebuild. (Config::GetInt uses GetPrivateProfileInt which clamps to
+    // unsigned for negative defaults, so we can't trivially expose dB
+    // depths via the existing Config layer. Promote to dedicated INI keys
+    // when tuning becomes a frequent activity.)
+    AudioDucker::BusConfig bgmCfg;
+    bgmCfg.depthDb   = -10.0f;   // BGM ducks moderately (v0.14.48 tuning, was -15)
+    bgmCfg.attackMs  = 100.0f;
+    bgmCfg.releaseMs = 600.0f;
+    bgmCfg.holdMs    = 800.0f;   // bridge menu-nav gaps (v0.14.48, was 200)
+
+    AudioDucker::BusConfig sfxCfg;
+    sfxCfg.depthDb   = -15.0f;   // SFX ducks deep — attack anim SFX masks TTS (v0.14.48, was -6)
+    sfxCfg.attackMs  = 100.0f;
+    sfxCfg.releaseMs = 600.0f;
+    sfxCfg.holdMs    = 800.0f;   // bridge menu-nav gaps (v0.14.48, was 200)
+
+    AudioDucker::Initialize(
+        GetUserBgmVolume, ApplyBgmVolume, bgmCfg,
+        GetUserSfxVolume, ApplySfxVolume, sfxCfg);
+    AudioDucker::SetEnabled(s_duckEnabled);
 }
 
 void Update()
 {
     TryInstallHook();
+    TryInstallSfxHook();
 
-    if (s_hookInstalled) {
+    // v0.14.47: AudioDucker drive. Poll IsSpeaking() once per tick; on
+    // false->true call BeginDuck, on true->false call EndDuck. Then Tick
+    // the envelope. The periodic reapply below is gated on !IsActive
+    // so the ducker owns volume writes while ducking.
+    static bool s_wasSpeaking = false;
+    static DWORD s_lastDuckTick = 0;
+    DWORD nowDuck = GetTickCount();
+    float dtMs;
+    if (s_lastDuckTick == 0) dtMs = 16.0f;
+    else                     dtMs = (float)(nowDuck - s_lastDuckTick);
+    s_lastDuckTick = nowDuck;
+
+    bool speaking = ScreenReader::IsSpeaking();
+    if ( speaking && !s_wasSpeaking) AudioDucker::BeginDuck();
+    if (!speaking &&  s_wasSpeaking) AudioDucker::EndDuck();
+    s_wasSpeaking = speaking;
+
+    AudioDucker::Tick(dtMs);
+
+    if ((s_hookInstalled || s_sfxHookInstalled) && !AudioDucker::IsActive()) {
         DWORD now = GetTickCount();
         if (now - s_lastReapplyTick >= REAPPLY_INTERVAL_MS) {
             s_lastReapplyTick = now;
-            ReapplyVolume();
+            if (s_hookInstalled) ReapplyVolume();
+            if (s_sfxHookInstalled) ReapplySfxVolume();
         }
     }
 }
 
 void Shutdown()
 {
-    // Restore full volume before unhooking so music doesn't stay quiet
+    // v0.14.47: Stop ducker first so it doesn't write while we restore.
+    AudioDucker::Shutdown();
+
+    // Restore full volume before unhooking so audio doesn't stay quiet
     if (s_directCallAvailable) {
         for (int ch = 0; ch < 2; ch++) {
             s_fnSetMusicVolume(s_nxAudioEngine, NULL, 1.0f, ch, 0.0);
@@ -562,16 +844,27 @@ void Shutdown()
             s_fnSoLoudFadeVolume(engine, NULL, streamHandle, 1.0f, 0.0);
         }
     }
+    if (s_sfxHookInstalled && s_originalSfxSetMasterVolume) {
+        // Restore SFX master to 100 (max) before unhooking.
+        s_originalSfxSetMasterVolume(100);
+    }
 
     if (s_hookInstalled && s_hookedFuncAddr) {
         MH_DisableHook(s_hookedFuncAddr);
-        Log::Mod("GameAudio: Hook disabled.");
+        Log::Mod("GameAudio: BGM hook disabled.");
+    }
+    if (s_sfxHookInstalled && s_sfxHookedFuncAddr) {
+        MH_DisableHook(s_sfxHookedFuncAddr);
+        Log::Mod("GameAudio: SFX hook disabled.");
     }
     s_hookInstalled = false;
     s_originalSetMusicVolumeForChannel = nullptr;
     s_hookedFuncAddr = nullptr;
     s_directCallAvailable = false;
     s_fmvVolumeAvailable = false;
+    s_sfxHookInstalled = false;
+    s_originalSfxSetMasterVolume = nullptr;
+    s_sfxHookedFuncAddr = nullptr;
     Log::Mod("GameAudio: Shutdown complete.");
 }
 
@@ -583,9 +876,10 @@ void VolumeDown()
 
     Log::Mod("GameAudio: BGM volume -> %.0f%%", s_bgmVolume * 100.0f);
 
-    if (s_hookInstalled) ReapplyVolume();
+    if (s_hookInstalled) {
+        if (!AudioDucker::IsActive()) ReapplyVolume();
+    }
 
-    // v0.13.51: Persist BGM volume as integer percent.
     Config::SetInt("game_volume", (int)(s_bgmVolume * 100.0f + 0.5f));
 
     char msg[48];
@@ -601,14 +895,79 @@ void VolumeUp()
 
     Log::Mod("GameAudio: BGM volume -> %.0f%%", s_bgmVolume * 100.0f);
 
-    if (s_hookInstalled) ReapplyVolume();
+    if (s_hookInstalled) {
+        if (!AudioDucker::IsActive()) ReapplyVolume();
+    }
 
-    // v0.13.51: Persist BGM volume as integer percent.
     Config::SetInt("game_volume", (int)(s_bgmVolume * 100.0f + 0.5f));
 
     char msg[48];
     snprintf(msg, sizeof(msg), "Music volume %d percent", (int)(s_bgmVolume * 100.0f + 0.5f));
     ScreenReader::Speak(msg, true);
+}
+
+// ============================================================================
+// v0.14.45: Public SFX volume controls (F5/F6)
+// ============================================================================
+
+void SfxVolumeDown()
+{
+    float newVol = s_sfxVolume - 0.1f;
+    if (newVol < 0.0f) newVol = 0.0f;
+    s_sfxVolume = newVol;
+
+    Log::Mod("GameAudio: SFX volume -> %.0f%%", s_sfxVolume * 100.0f);
+
+    if (s_sfxHookInstalled) {
+        if (!AudioDucker::IsActive()) ReapplySfxVolume();
+    }
+
+    Config::SetInt("sfx_volume", (int)(s_sfxVolume * 100.0f + 0.5f));
+
+    char msg[48];
+    snprintf(msg, sizeof(msg), "SFX volume %d percent", (int)(s_sfxVolume * 100.0f + 0.5f));
+    ScreenReader::Speak(msg, true);
+}
+
+void SfxVolumeUp()
+{
+    float newVol = s_sfxVolume + 0.1f;
+    if (newVol > 1.0f) newVol = 1.0f;
+    s_sfxVolume = newVol;
+
+    Log::Mod("GameAudio: SFX volume -> %.0f%%", s_sfxVolume * 100.0f);
+
+    if (s_sfxHookInstalled) {
+        if (!AudioDucker::IsActive()) ReapplySfxVolume();
+    }
+
+    Config::SetInt("sfx_volume", (int)(s_sfxVolume * 100.0f + 0.5f));
+
+    char msg[48];
+    snprintf(msg, sizeof(msg), "SFX volume %d percent", (int)(s_sfxVolume * 100.0f + 0.5f));
+    ScreenReader::Speak(msg, true);
+}
+
+// ============================================================================
+// v0.14.45: Audio ducking toggle (F2)
+// Phase 1 — persists the bool and announces. Phase 2 (v0.14.46) wires the
+// IsSpeaking() polling that actually drops SFX volume during TTS.
+// ============================================================================
+
+void ToggleDucking()
+{
+    s_duckEnabled = !s_duckEnabled;
+    AudioDucker::SetEnabled(s_duckEnabled);
+    Log::Mod("GameAudio: Audio ducking -> %s", s_duckEnabled ? "ON" : "OFF");
+
+    Config::SetInt("tts_duck_enabled", s_duckEnabled ? 1 : 0);
+
+    ScreenReader::Speak(s_duckEnabled ? "Audio ducking on" : "Audio ducking off", true);
+}
+
+bool IsDuckingEnabled()
+{
+    return s_duckEnabled;
 }
 
 }  // namespace GameAudio

@@ -440,37 +440,15 @@ static DWORD s_pshmCaptureStartTime = 0;  // GetTickCount() when capture started
 static const DWORD PSHM_CAPTURE_DURATION_MS = 5000;  // capture window after field load
 static bool s_pshmSummaryLogged = false;  // true once end-of-window summary is logged
 
-// v0.12.22: POPM_W shared memory write capture hook.
-// Hooks the engine's POPM_W handler (writes uint16 to varblock at byte offset).
-// Captures all writes to the temp memory block during the first 10s after field
-// load. This reveals which varblock addresses hold interaction zone coordinates
-// — written by Director entities' per-frame scripts when they're active.
-// Varblock base confirmed at 0x01CFE9B8 by exe disassembly (session 42).
-// Handler signature: int __cdecl PopmWSharedMem(int entityPtr, int byteOffset)
-static const uint32_t POPM_W_SHARED_ADDR = 0x0051CCD0;  // vanilla handler VA
-static const uint32_t POPM_B_SHARED_ADDR = 0x0051CCA0;  // byte variant
-static const uint32_t POPM_L_SHARED_ADDR = 0x0051CD00;  // dword variant
-static const uint32_t VARBLOCK_BASE      = 0x01CFE9B8;  // field temp memory base
-
-typedef int (__cdecl *PopmSharedHandler_t)(int entityPtr, int byteOffset);
-static PopmSharedHandler_t s_originalPopmW = nullptr;  // trampoline
-static PopmSharedHandler_t s_originalPopmB = nullptr;
-static PopmSharedHandler_t s_originalPopmL = nullptr;
-
-struct CapturedVarWrite {
-    int32_t  byteOffset;    // varblock byte offset (POPM param)
-    int32_t  value;         // value written (from VM stack before write)
-    uint32_t entityAddr;    // entity struct address (for entity identification)
-    uint8_t  writeSize;     // 1=byte, 2=word, 4=dword
-    bool     logged;        // true once logged in summary
-};
-static const int MAX_VAR_WRITES = 512;
-static CapturedVarWrite s_varWrites[MAX_VAR_WRITES] = {};
-static int  s_varWriteCount = 0;
-static bool s_capturingVarWrites = false;
-static DWORD s_varWriteCaptureStart = 0;
-static const DWORD VAR_WRITE_CAPTURE_DURATION_MS = 10000;  // 10s window
-static bool s_varWriteSummaryLogged = false;
+// v0.14.45: POPM_W/B/L shared memory write capture (F12 diagnostic) removed.
+// Was used in v0.12.22 for Director varblock investigation (resolved session 43:
+// SETLINE triggers are definitive, Director entities are dead code). Removed:
+// - POPM_*_SHARED_ADDR constants, VARBLOCK_BASE, PopmSharedHandler_t typedef,
+//   s_originalPopm[WBL] trampolines
+// - CapturedVarWrite struct + s_varWrites[] + counters + capture window state
+// - HookedPopm[WBL]Shared handlers in field_nav_opcode_hooks.inl
+// - MH hook install/remove in Initialize()/Shutdown()
+// - F12 trigger in field_nav_handlekeys.inl + Update() summary block
 
 // v0.08.23: Descriptor table polling probe — check if PSHM_W entity-scope descriptors
 // populate after field load. Table at 0x01DCB340 holds one 4-byte pointer per flat
@@ -743,39 +721,7 @@ void Initialize()
                    FF8Addresses::opcode_pshm_w);
     }
 
-    // v0.12.22: POPM_W/B/L shared memory write capture hooks.
-    // Hook the three varblock write handlers directly via MinHook.
-    // These are internal functions (not dispatch table entries) at fixed VAs.
-    {
-        MH_STATUS st = MH_CreateHook(
-            (LPVOID)POPM_W_SHARED_ADDR,
-            (LPVOID)HookedPopmWShared,
-            (LPVOID*)&s_originalPopmW);
-        if (st == MH_OK)
-            st = MH_EnableHook((LPVOID)POPM_W_SHARED_ADDR);
-        Log::Field("FieldNavigation: POPM_W shared mem hook @ 0x%08X — %s",
-                   POPM_W_SHARED_ADDR, MH_StatusToString(st));
-    }
-    {
-        MH_STATUS st = MH_CreateHook(
-            (LPVOID)POPM_B_SHARED_ADDR,
-            (LPVOID)HookedPopmBShared,
-            (LPVOID*)&s_originalPopmB);
-        if (st == MH_OK)
-            st = MH_EnableHook((LPVOID)POPM_B_SHARED_ADDR);
-        Log::Field("FieldNavigation: POPM_B shared mem hook @ 0x%08X — %s",
-                   POPM_B_SHARED_ADDR, MH_StatusToString(st));
-    }
-    {
-        MH_STATUS st = MH_CreateHook(
-            (LPVOID)POPM_L_SHARED_ADDR,
-            (LPVOID)HookedPopmLShared,
-            (LPVOID*)&s_originalPopmL);
-        if (st == MH_OK)
-            st = MH_EnableHook((LPVOID)POPM_L_SHARED_ADDR);
-        Log::Field("FieldNavigation: POPM_L shared mem hook @ 0x%08X — %s",
-                   POPM_L_SHARED_ADDR, MH_StatusToString(st));
-    }
+    // v0.14.45: POPM_W/B/L shared memory write capture hooks removed (F12 diagnostic retired).
 
     // v05.84: Hook dinput_update_gamepad_status to intercept gamepad polling.
     if (FF8Addresses::dinput_update_gamepad_status_addr != 0) {
@@ -922,22 +868,7 @@ void Update()
     UpdateAutoDrive();
     UpdateGPS();  // v0.12.02: GPS guided navigation polling
 
-    // v0.12.22: POPM varblock write capture summary — log once after 10s window.
-    if (s_capturingVarWrites && !s_varWriteSummaryLogged) {
-        DWORD elapsed = GetTickCount() - s_varWriteCaptureStart;
-        if (elapsed > VAR_WRITE_CAPTURE_DURATION_MS) {
-            s_capturingVarWrites = false;
-            s_varWriteSummaryLogged = true;
-            Log::Field("FieldNavigation: [POPM-CAPTURE] Window closed: %d unique writes in %ums",
-                       s_varWriteCount, elapsed);
-            // Log all captured writes grouped by byte offset.
-            for (int w = 0; w < s_varWriteCount; w++) {
-                Log::Field("FieldNavigation: [POPM-CAPTURE]   offset=%d value=%d size=%d ent=0x%08X",
-                           s_varWrites[w].byteOffset, s_varWrites[w].value,
-                           (int)s_varWrites[w].writeSize, s_varWrites[w].entityAddr);
-            }
-        }
-    }
+    // v0.14.45: POPM varblock write capture summary block removed (F12 diagnostic retired).
 
     // v0.08.23: Descriptor table polling probe — DISABLED v0.12.05.
     // Served its purpose: confirmed descriptor table is party-slot-only,
@@ -1047,22 +978,7 @@ void Shutdown()
         }
         s_originalPshmW = nullptr;
     }
-    // v0.12.22: Remove POPM shared memory hooks.
-    if (s_originalPopmW) {
-        MH_DisableHook((LPVOID)POPM_W_SHARED_ADDR);
-        MH_RemoveHook((LPVOID)POPM_W_SHARED_ADDR);
-        s_originalPopmW = nullptr;
-    }
-    if (s_originalPopmB) {
-        MH_DisableHook((LPVOID)POPM_B_SHARED_ADDR);
-        MH_RemoveHook((LPVOID)POPM_B_SHARED_ADDR);
-        s_originalPopmB = nullptr;
-    }
-    if (s_originalPopmL) {
-        MH_DisableHook((LPVOID)POPM_L_SHARED_ADDR);
-        MH_RemoveHook((LPVOID)POPM_L_SHARED_ADDR);
-        s_originalPopmL = nullptr;
-    }
+    // v0.14.45: POPM_W/B/L shared memory write hook removal block removed (F12 diagnostic retired).
     // Ensure fake gamepad is removed even if StopAutoDrive wasn't called.
     if (s_fakeGamepadInstalled && FF8Addresses::HasDinputGamepadPtrs()) {
         *FF8Addresses::pDinputGamepadDevicePtr = s_savedDevicePtr;

@@ -177,23 +177,28 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
         // World map navigation TTS (v0.11.03)
         WorldMap::Update();
         
-        // --- Accessibility keyboard shortcuts ---
+        // --- Accessibility keyboard shortcuts (v0.14.45 layout) ---
         // `  = Repeat last dialog
         // V  = Announce mod version
         // F1 = Cycle SAPI voice
-        // F3 = Game vol down,  F4 = Game vol up
-        // F5 = Speech vol down, F6 = Speech vol up
-        // F7 = Speech rate down, F8 = Speech rate up
+        // F2 = Toggle audio ducking
+        // F3 / F4              = Speech rate down / up
+        // Shift+F3 / Shift+F4  = Speech volume down / up
+        // F5 / F6              = SFX volume down / up
+        // F7 / F8              = BGM volume down / up
         // Navigation (-/+/Backspace) handled inside FieldNavigation::Update()
         {
             static bool s_graveWas = false;
             static bool s_f1was = false;
+            static bool s_f2was = false;
             static bool s_f3was = false, s_f4was = false;
             static bool s_f5was = false, s_f6was = false;
             static bool s_f7was = false, s_f8was = false;
             static bool s_vWas = false;
+
             bool grave = (GetAsyncKeyState(VK_OEM_3) & 0x8000) != 0; // ` key
             bool f1 = (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
+            bool f2 = (GetAsyncKeyState(VK_F2) & 0x8000) != 0;
             bool f3 = (GetAsyncKeyState(VK_F3) & 0x8000) != 0;
             bool f4 = (GetAsyncKeyState(VK_F4) & 0x8000) != 0;
             bool f5 = (GetAsyncKeyState(VK_F5) & 0x8000) != 0;
@@ -201,15 +206,23 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
             bool f7 = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
             bool f8 = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
             bool vkey = (GetAsyncKeyState('V') & 0x8000) != 0;
+            bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
 
             if (grave && !s_graveWas) FieldDialog::RepeatLastDialog();
-            if (f1 && !s_f1was) ScreenReader::CycleVoice();
-            if (f3 && !s_f3was) GameAudio::VolumeDown();
-            if (f4 && !s_f4was) GameAudio::VolumeUp();
-            if (f5 && !s_f5was) ScreenReader::DecreaseVolume();
-            if (f6 && !s_f6was) ScreenReader::IncreaseVolume();
-            if (f7 && !s_f7was) ScreenReader::DecreaseRate();
-            if (f8 && !s_f8was) ScreenReader::IncreaseRate();
+            if (f1 && !s_f1was)       ScreenReader::CycleVoice();
+            if (f2 && !s_f2was)       GameAudio::ToggleDucking();
+            if (f3 && !s_f3was) {
+                if (shift) ScreenReader::DecreaseVolume();
+                else       ScreenReader::DecreaseRate();
+            }
+            if (f4 && !s_f4was) {
+                if (shift) ScreenReader::IncreaseVolume();
+                else       ScreenReader::IncreaseRate();
+            }
+            if (f5 && !s_f5was) GameAudio::SfxVolumeDown();
+            if (f6 && !s_f6was) GameAudio::SfxVolumeUp();
+            if (f7 && !s_f7was) GameAudio::VolumeDown();   // BGM
+            if (f8 && !s_f8was) GameAudio::VolumeUp();     // BGM
             if (vkey && !s_vWas) {
                 wchar_t verMsg[128];
                 wsprintfW(verMsg, L"Version %hs", FF8OPC_VERSION);
@@ -218,6 +231,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
 
             s_graveWas = grave;
             s_f1was = f1;
+            s_f2was = f2;
             s_f3was = f3; s_f4was = f4;
             s_f5was = f5; s_f6was = f6;
             s_f7was = f7; s_f8was = f8;

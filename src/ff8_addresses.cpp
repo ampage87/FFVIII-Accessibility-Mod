@@ -129,6 +129,11 @@ uint32_t  set_current_triangle_addr = 0;
 // v0.07.24: Music volume function (set_midi_volume / set_music_volume_for_channel)
 uint32_t  pSetMidiVolume = 0;
 
+// v0.14.45: SFX volume function addresses (for hooking)
+uint32_t  pSfxSetMasterVolume = 0;
+uint32_t  pSfxSetVolume       = 0;
+uint32_t* pMasterSfxVolume    = nullptr;
+
 // v0.07.25: Save file read function
 uint32_t  sm_pc_read_addr = 0;
 
@@ -1118,6 +1123,45 @@ bool Resolve()
                        sm_battle_sound, sm_battle_sound_offset);
             Log::Mod("FF8Addresses:   set_midi_volume = 0x%08X (from sm_battle_sound+0x173)",
                        pSetMidiVolume);
+        }
+
+        // ---- v0.14.45: Resolve sfx_set_master_volume (SFX volume function for hooking) ----
+        // Chain: opcode_effectplay2 -> +0x5F sfx_play_to_current_playing_channel
+        //        -> +0x35 play_sfx_on_channel -> +0xA1 sfx_set_volume
+        //        sfx_get_master_volume = sfx_set_volume - 0x10
+        //        sfx_set_master_volume = sfx_get_master_volume - 0xE0
+        //        master_sfx_volume     = absolute @ sfx_get_master_volume + 0x1
+        // Mirrors the FFNx ff8_data.cpp "// SFX" block. FFNx replaces
+        // sfx_set_master_volume with a JMP to its own bridge that calls
+        // nxAudioEngine.setSFXMasterVolume.
+        Log::Mod("FF8Addresses: --- Resolving sfx_set_master_volume (v0.14.45) ---");
+        if (pExecuteOpcodeTable != nullptr) {
+            __try {
+                uint32_t opcode_effectplay2          = pExecuteOpcodeTable[0x21];
+                uint32_t sfx_play_to_current_playing = get_relative_call(opcode_effectplay2, 0x5F);
+                uint32_t play_sfx_on_channel         = get_relative_call(sfx_play_to_current_playing, 0x35);
+                pSfxSetVolume                        = get_relative_call(play_sfx_on_channel, 0xA1);
+                uint32_t sfx_get_master_volume       = pSfxSetVolume - 0x10;
+                pSfxSetMasterVolume                  = sfx_get_master_volume - 0xE0;
+                pMasterSfxVolume = (uint32_t*)get_absolute_value(sfx_get_master_volume, 0x1);
+                Log::Mod("FF8Addresses:   opcode_effectplay2          = 0x%08X", opcode_effectplay2);
+                Log::Mod("FF8Addresses:   sfx_play_to_current_playing = 0x%08X", sfx_play_to_current_playing);
+                Log::Mod("FF8Addresses:   play_sfx_on_channel         = 0x%08X", play_sfx_on_channel);
+                Log::Mod("FF8Addresses:   sfx_set_volume              = 0x%08X", pSfxSetVolume);
+                Log::Mod("FF8Addresses:   sfx_get_master_volume       = 0x%08X", sfx_get_master_volume);
+                Log::Mod("FF8Addresses:   sfx_set_master_volume       = 0x%08X", pSfxSetMasterVolume);
+                Log::Mod("FF8Addresses:   pMasterSfxVolume            = 0x%08X (val=0x%08X)",
+                           (uint32_t)(uintptr_t)pMasterSfxVolume,
+                           pMasterSfxVolume ? *pMasterSfxVolume : 0);
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                Log::Mod("FF8Addresses:   EXCEPTION resolving SFX volume chain. Code=0x%08X",
+                           GetExceptionCode());
+                pSfxSetMasterVolume = 0;
+                pSfxSetVolume = 0;
+                pMasterSfxVolume = nullptr;
+            }
+        } else {
+            Log::Mod("FF8Addresses:   SKIP - pExecuteOpcodeTable not yet resolved.");
         }
 
         // ---- v0.07.25: Resolve sm_pc_read (save file read function for hooking) ----

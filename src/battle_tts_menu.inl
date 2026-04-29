@@ -1477,58 +1477,6 @@ static void PollDeferredTurnAnnounce()
 }
 
 // ============================================================================
-// v0.12.74: F12 battle glitch marker — press when something sounds wrong.
-// Dumps full battle menu/submenu/target state to ff8_battle.log tagged [GLITCH-MARK].
-// ============================================================================
-static bool s_glitchKeyWasDown = false;
-
-static void PollGlitchMarker()
-{
-    bool f12 = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
-    bool pressed = f12 && !s_glitchKeyWasDown;
-    s_glitchKeyWasDown = f12;
-    if (!pressed) return;
-
-    ScreenReader::Speak("Marked", true);
-
-    uint8_t menuPhase = 0xFF, submenuMode = 0xFF, tgtActive = 0xFF;
-    uint8_t cmdCursor = 0xFF, subCursor = 0xFF, activeChar = 0xFF;
-    uint8_t tgtMask = 0, tgtScope = 0;
-    __try { menuPhase = *(uint8_t*)BATTLE_MENU_PHASE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    __try { submenuMode = *(uint8_t*)0x01D768EB; } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    __try { tgtActive = *(uint8_t*)0x01D7689D; } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    __try { cmdCursor = *(uint8_t*)BATTLE_CMD_CURSOR; } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    __try { subCursor = *(uint8_t*)BATTLE_SUBMENU_CURSOR; } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    __try { activeChar = *s_pActiveCharId; } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    __try { tgtMask = *(uint8_t*)BATTLE_TARGET_BITMASK; } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    __try { tgtScope = *(uint8_t*)BATTLE_TARGET_SCOPE; } __except(EXCEPTION_EXECUTE_HANDLER) {}
-
-    Log::Battle("BattleTTS: [GLITCH-MARK] ========== F12 GLITCH MARKER ==========");
-    Log::Battle("BattleTTS: [GLITCH-MARK] Engine: activeChar=%u menuPhase=%u submenuMode=0x%02X",
-               (unsigned)activeChar, (unsigned)menuPhase, (unsigned)submenuMode);
-    Log::Battle("BattleTTS: [GLITCH-MARK] Engine: cmdCursor=%u subCursor=%u tgtActive=%u tgtMask=0x%02X tgtScope=%u",
-               (unsigned)cmdCursor, (unsigned)subCursor, (unsigned)tgtActive,
-               (unsigned)tgtMask, (unsigned)tgtScope);
-    Log::Battle("BattleTTS: [GLITCH-MARK] Mod: s_turnActiveCharId=%u s_turnCmdCursor=%u s_inSubmenu=%d",
-               (unsigned)s_turnActiveCharId, (unsigned)s_turnCmdCursor, (int)s_inSubmenu);
-    Log::Battle("BattleTTS: [GLITCH-MARK] Mod: s_submenuCommandId=0x%02X (%s) s_inTargetSelect=%d",
-               (unsigned)s_submenuCommandId, GetCommandName(s_submenuCommandId), (int)s_inTargetSelect);
-    Log::Battle("BattleTTS: [GLITCH-MARK] Mod: s_wasInTargetPhase=%d s_prevTargetActive=%u s_pendingGFCancel=%d",
-               (int)s_wasInTargetPhase, (unsigned)s_prevTargetActive, (int)s_pendingGFCancel);
-    Log::Battle("BattleTTS: [GLITCH-MARK] Mod: s_submenuDebouncing=%d s_magicListBuilt=%d s_gfListBuilt=%d",
-               (int)s_submenuDebouncing, (int)s_magicListBuilt, (int)s_gfListBuilt);
-    if (s_turnCmdCursor < 4) {
-        Log::Battle("BattleTTS: [GLITCH-MARK] Cmds: [%s, %s, %s, %s] current=%s",
-                   GetCommandName(s_turnCharCommands[0]),
-                   GetCommandName(s_turnCharCommands[1]),
-                   GetCommandName(s_turnCharCommands[2]),
-                   GetCommandName(s_turnCharCommands[3]),
-                   GetCommandName(s_turnCharCommands[s_turnCmdCursor]));
-    }
-    Log::Battle("BattleTTS: [GLITCH-MARK] ========================================");
-}
-
-// ============================================================================
 // Battle entry/exit detection
 // ============================================================================
 

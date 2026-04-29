@@ -2,97 +2,154 @@
 
 ## Current state at session start
 
-Build: **v0.14.44 — BAT PASSED.** GF summon audio descriptions are working in-game.
+Build: **v0.14.48 — audio ducking BAT PASSED. Audio mixing chapter complete.**
 
-Aaron's BAT report (session 74): triggered Ifrit and Shiva — both audio descriptions announced correctly. Trigger fires from `PollBattleMagicId()` in `battle_tts_ewm.inl`, cues stream on Channel 2 (event voice), playback stops cleanly when `battle_magic_id` reverts.
+The full audio mixing system shipped over v0.14.45 → v0.14.48: SFX volume control, full keyboard layout reshuffle (F1 voice / F2 ducking-toggle / F3+F4 speech rate / Shift+F3+F4 speech vol / F5+F6 SFX vol / F7+F8 BGM vol), reusable AudioDucker module with per-bus depth/attack/release/hold config, reference-counted BeginDuck/EndDuck, smoothed one-pole envelope, dB-based config. Aaron BAT'd v0.14.48 with BGM -10 dB / SFX -15 dB / 800 ms hold and confirmed GF audio descriptions are now clearly audible during summon animations.
 
-**One usability issue surfaced during BAT:** the game's SFX (the GF animation sounds — Ifrit's roar, Shiva's ice shatter, etc.) are loud enough to mask the TTS narration. Aaron flagged this as the next priority.
+50+ builds remain unpushed to GitHub. Last push was `7845f0c` = v0.14.43.1. This session's priority is consolidating the backlog into a single comprehensive push.
 
-## Top priority — SFX volume control + duck during TTS
+---
 
-### Background
+## Top priority — GitHub push consolidation
 
-The existing `GameAudio` module (`src/game_audio.cpp`) hooks FFNx's `set_music_volume_for_channel` and bypasses FFNx's `hold_volume_for_channel` flag by calling `nxAudioEngine.setMusicVolume` directly via a `__fastcall` thiscall shim. F3/F4 are the BGM volume keys. This is BGM only — SFX is on a parallel path.
+Tag: `v0.14.48`. Use `Utilities/push_to_github.vbs` (the GUI wrapper). Commit message draft is at the end of this file in the **Push package** section.
 
-FFNx uses **SoLoud** as the underlying audio engine (visible in `game_audio.cpp` references to `SoLoud::Soloud::fadeVolume`). SoLoud handles SFX through a separate volume bus or per-handle volume.
+After the push lands, close **GitHub issue #8** (independent SFX volume) — resolved by v0.14.45/v0.14.46.
 
-### Phase 1 — SFX volume keyboard shortcut (do this first, scoped narrowly)
+---
 
-Goal: a persistent SFX volume Aaron sets once via hotkeys, stored in `ff8_accessibility.ini` like BGM volume.
+## Tuning playbook (cheat sheet for future audio tweaks)
 
-Implementation sketch:
-1. **Identify FFNx's SFX-volume entry point.** Likely candidates: `set_sfx_volume`, `set_sfx_volume_trans`, or a SoLoud bus volume call. Search FFNx canary source at `FFNx-Steam-v1.23.0.182/Source Code/FFNx-canary/src/` — `ff8_data.cpp` and `audio.cpp` are the likely files. The pattern from `set_music_volume_for_channel` should give a template for finding the SFX equivalent (look for `nxAudioEngine.setSfxVolume` or direct SoLoud bus calls).
-2. **Hook it the same way.** Extract the nxAudioEngine pointer + setSfxVolume address by scanning the function bytes (the existing `ExtractNxAudioEngineAddresses` in `game_audio.cpp` is the template).
-3. **Add `SfxVolumeUp` / `SfxVolumeDown` to the `GameAudio` namespace.** Step by 10% per press, announce via TTS, persist to config.
-4. **Wire keys** in `dinput8.cpp` keyboard block. Shift+F3 / Shift+F4 (mirroring the BGM controls) is the natural choice. Verify the field nav and other modules don't already use Shift+F3/F4. Update the keyboard shortcut map in DEVNOTES.
+All four knobs live in `GameAudio::Initialize` in `src/game_audio.cpp`, in the `bgmCfg` and `sfxCfg` blocks:
 
-### Phase 2 — Auto-duck during TTS (do this after Phase 1 lands)
+```cpp
+bgmCfg.depthDb   = -10.0f;   // depth: less negative = lighter duck
+bgmCfg.attackMs  = 100.0f;   // higher = slower duck-down (gentler entry)
+bgmCfg.releaseMs = 600.0f;   // higher = slower recovery (smoother exit)
+bgmCfg.holdMs    = 800.0f;   // higher = bridges longer gaps in TTS
+```
 
-Goal: while TTS is actively speaking on Channel 1 or Channel 2, drop SFX to ~30% of Aaron's set volume; restore on speech end.
+dB → linear cheat: -3 dB ≈ 70%, -6 dB ≈ 50%, -10 dB ≈ 32%, -12 dB ≈ 25%, -15 dB ≈ 18%, -18 dB ≈ 13%, -20 dB ≈ 10%.
 
-Implementation sketch:
-1. **Detection:** `ScreenReader::IsSpeaking()` already exists (used by `EWM_UpdateBattle` for damage TTS hold).
-2. **In `GameAudio::Update()`** (already runs every frame), poll `IsSpeaking()`. On rising edge, drop SFX volume to `userSfxVolume * 0.3`. On falling edge, restore to `userSfxVolume`. Add a small grace period (~250ms) before restoring to avoid rapid up/down dipping during sentence boundaries.
-3. **Make the duck ratio configurable** in `ff8_accessibility.ini` (`sfx_duck_ratio`, default 0.3). Some users may want stronger/weaker ducking.
-4. **Make the auto-duck togglable.** A config key (`sfx_autoduck_enabled`, default 1) lets Aaron disable it if it interferes with normal play. No keyboard shortcut for the toggle in v1 — just the config file.
+**If a specific scene exposes a long in-flight SFX sample (GF roar etc.) masking TTS:** escalate to per-channel SFX ducking. The single master only updates new SFX cleanly; in-flight samples ride out the duck. The escalation path:
 
-### Open questions for Phase 2
+- `FF8Addresses::pSfxSetVolume` is already resolved (per-channel setter, game-side).
+- Channel array at `0x01cd0b00` with stride `0x24` (verified in v0.14.46 disassembly walk).
+- Implementation: inside `ApplySfxVolume(float)` in `src/game_audio.cpp`, after the existing master write, iterate active channels and call `pSfxSetVolume(channel, scaledVolume)` for each. The ducker doesn't need to know.
 
-- **Should auto-duck apply to ALL TTS, or only certain channels?** Channel 2 (event voice — used for FMV AD, GF AD, dialog) is where the SFX-mask problem is worst. Channel 1 (menu nav) speech is typically over quieter UI sound. Could start with "all TTS" simplicity and split later if it feels off.
-- **GF AD specifically might want a stronger duck** (~10-15% rather than 30%) since the GF SFX is the loudest in the game. Might be worth a per-context override.
+If future tuning becomes a frequent activity, promote depth/attack/release/hold to dedicated INI keys. The current obstacle is `Config::GetInt` uses `GetPrivateProfileInt` which doesn't handle negative values cleanly — a small wrapper that treats the int as a signed dB value (-30..0 range) would unblock that.
 
-## After SFX work
+---
 
-Backlog from earlier sessions:
-1. Persistent accessibility settings across play sessions (general — beyond just the SFX/BGM volumes)
-2. Verify GF naming bypass — Siren failed in earlier testing
-3. Remove party members from entity catalog
-4. X-ATMO92 chase scene accessibility
-5. Bug 3 (Magic/GF auto-announce inconsistent)
-6. Bug 4 (key 2 announced GF Shiva instead of Squall HP)
-7. Quistis Blue Magic ordering, Draw "???" reveal
-8. World map: vehicle-aware BFS, guided GPS mode, auto-announce location names
-9. Boko Choco / Minimog / Moomba / Gilgamesh VTTs (extension of v0.14.44)
-10. Per-GF AD timing tuning based on continued in-game listening
+## After GitHub push lands
 
-## GitHub push for v0.14.44
+Carried backlog:
 
-GF AD is BAT-passed. Push to GitHub via `Utilities/push_to_github.vbs` whenever you want — recommend doing it before the SFX work starts so the GF AD lands as its own clean commit, separate from the audio mixing changes.
+1. Persistent accessibility settings across play sessions (general — beyond the volume/duck keys, which already persist via `ff8_accessibility.ini`).
+2. Verify GF naming bypass — Siren failed in earlier testing.
+3. Remove party members from entity catalog.
+4. X-ATMO92 chase scene accessibility.
+5. Boko Choco / Minimog / Moomba / Gilgamesh VTTs (extension of v0.14.44 GF AD).
+6. Per-GF AD timing tuning based on continued in-game listening.
+7. Bug 3 from v0.14.31 BAT — Magic/GF submenu auto-announce inconsistent (may already self-resolve from v0.14.32+ timing fixes; retest first).
+8. Bug 4 from v0.14.31 BAT — number key 2 announced GF Shiva instead of Squall HP (edge case, lower urgency).
+9. Quistis Blue Magic spell-list ordering investigation.
+10. Draw menu "???" spell reveal issue.
+11. World map: vehicle-aware BFS, guided GPS mode, auto-announce location names, TERRAIN-DIAG cleanup.
+12. Battle command menu architecture (tabbed detection), cancel/back re-announce, Magic sub-menu scroll offset for >4 spells.
+
+---
 
 ## Required reading at session start
 
 1. `DEVNOTES.md` (project root)
 2. This file
 3. `Logs/build_latest.log` tail — confirm any new build is clean
-4. `src/game_audio.cpp` — read the `ExtractNxAudioEngineAddresses` block to understand the hook pattern before mirroring it for SFX
-5. `FFNx-Steam-v1.23.0.182/Source Code/FFNx-canary/src/audio.cpp` (or equivalent) — to find SFX volume entry points
+4. `src/audio_ducker.h` / `.cpp` for the module API if any audio work is on deck
+5. `src/game_audio.cpp` `Initialize` block for current ducker constants
 
 ## Workflow rules in effect
 
 - **Filesystem MCP tools only** — never bash for project files. Bash sees `/C:/...` which is a separate container-local filesystem; the system `create_file` tool writes there. Real Windows files must use `filesystem:write_file` / `filesystem:edit_file` at `C:/...` (no leading slash).
-- **Update DEVNOTES + NEXT_SESSION_PROMPT** at every version bump and BAT
-- **"BAT" = Built and Tested.** Check `Logs/build_latest.log` tail first, then domain log
-- **Version bump in 1 location** — `FF8OPC_VERSION` in `src/ff8_accessibility.h`
-- **Aaron is blind** — every response starts with `## Claude Says`
-- **Don't declare a fix successful from log markers alone** — verify against Aaron's user-facing experience
-- **NEVER re-enable the SET3 opcode hook (0x1E)** — hangs infirmary scene. CI guard active
-- **F12 reserved for diagnostics** — search/remove old VK_F12 refs before adding new
+- **Update DEVNOTES + NEXT_SESSION_PROMPT** at every version bump and BAT.
+- **"BAT" = Built and Tested.** Check `Logs/build_latest.log` tail first, then domain log.
+- **Version bump in 1 location** — `FF8OPC_VERSION` in `src/ff8_accessibility.h`.
+- **Aaron is blind** — every response starts with `## Claude Says`.
+- **Don't declare a fix successful from log markers alone** — verify against Aaron's user-facing experience.
+- **NEVER re-enable the SET3 opcode hook (0x1E)** — hangs infirmary scene. CI guard active.
+- **F12 reserved for diagnostics** — search/remove old VK_F12 refs before adding new. Search for supporting state variables too, not just the literal `VK_F{n}`.
+- **When hooking a game-side audio/render function**, prefer MinHook on the game address directly rather than detecting an FFNx JMP — sidesteps the FFNx-config dependency that broke v0.14.45 SFX (see DEVNOTES "FFNx-replacement detection is NOT universal").
+- **Default to writing code** once an approach is decided. Avoid re-reading transcripts and re-summarizing instead of implementing. If torn between two approaches, pick simpler, commit, iterate from BAT results.
 
-## v0.14.44 file inventory (BAT-passed)
+---
 
-New files:
-- `src/gf_audio_desc.h`
-- `src/gf_audio_desc.cpp`
-- `Audio Descriptions/gf_quezacotl.vtt` ... `gf_odin.vtt` (18 files)
+## Push package (drafted end of session 78)
 
-Modified files:
-- `src/ff8_accessibility.h` (version + comment)
-- `src/resources.h` (IDR_VTT_GF_BASE = 6000)
-- `src/resources.rc` (18 RCDATA entries)
-- `src/dinput8.cpp` (Initialize/OnFrame/Shutdown)
-- `src/battle_tts.cpp` (forward decl of GfAudioDesc::OnGFAnimationStart)
-- `src/battle_tts_ewm.inl` (trigger from PollBattleMagicId)
-- `src/deploy.bat` (added gf_audio_desc.cpp to build)
-- `.gitignore` (added GitHub Push.lnk shortcut)
+**Tag:** `v0.14.48`
 
-GF AD timing tuning is a slow rolling task — Aaron will hear cues land too early/late as he plays through the game and trigger more summons. Edits to the .vtt files in `Audio Descriptions/` are picked up at the next rebuild (they're embedded as RCDATA resources).
+**Commit title:** `v0.14.48 — Audio mixing system, GF audio descriptions, battle/items submenu fixes, damage timing fix`
+
+**Commit body:**
+
+```
+Comprehensive backlog push covering v0.13.63 → v0.14.48 (~50 internal builds).
+
+AUDIO MIXING (v0.14.45 → v0.14.48)
+- New AudioDucker module (src/audio_ducker.{h,cpp}): domain-agnostic, per-bus
+  configurable depth/attack/release/hold, reference-counted BeginDuck/EndDuck,
+  smoothed one-pole envelope with frame-rate-independent coefficient, dB-based
+  config converted to linear gain internally.
+- F2 toggles ducking on/off (persisted to ff8_accessibility.ini).
+- BGM ducks -10 dB, SFX ducks -15 dB during TTS, with 800 ms hold to bridge
+  menu-nav gaps. GF audio descriptions are now clearly audible during summon
+  animations.
+- F5/F6 SFX volume control (new); F7/F8 BGM volume control (moved from F3/F4).
+- F3/F4 speech rate; Shift+F3/F4 speech volume (full keyboard layout reshuffle).
+- SFX volume hook installs game-side at 0x0046A390 directly with MinHook,
+  works regardless of FFNx use_external_sfx config.
+- Resolves issue #8 (independent SFX volume).
+
+GF AUDIO DESCRIPTIONS (v0.14.44)
+- New module gf_audio_desc.{cpp,h} mirroring fmv_audio_desc architecture.
+- 18 VTTs covering all 16 junctioned GFs (Quezacotl, Shiva, Ifrit, Siren,
+  Brothers, Diablos, Carbuncle, Leviathan, Pandemona, Cerberus, Alexander,
+  Doomtrain, Bahamut, Cactuar, Tonberry, Eden) plus Phoenix and Odin.
+- Trigger fires from PollBattleMagicId() rising edge on battle_magic_id.
+- Channel 2 playback, stops cleanly on revert (covers natural end + R1+L1
+  skip).
+
+BATTLE ITEMS SUBMENU (v0.14.35 → v0.14.42)
+- Fixed filtered-mode data lookup: FF8 has separate inventory orderings for
+  the all-items menu vs. the battle items menu, configured independently in
+  the field menu. Reads from s_turnItemList[] for battle.
+- Fixed visual page/slot announcement via boIdx tracking.
+- Comprehensive items submenu architecture documented after deep research.
+
+DAMAGE TIMING (v0.14.10 → v0.14.37)
+- Production trigger restored to sub_5068B0 render hook (impact-time, ~62 ms
+  after anim-up). Announces sync with visible damage sprite paint.
+- Popup-create hook (sub_48EF80) demoted to diagnostic only — fires 1–5
+  seconds before visible damage in v0.14.36 BAT.
+- Anim-flag-fall trigger remains as catch-all fallback.
+
+BUILD RECOVERY (v0.14.24 → v0.14.34)
+- Comprehensive hook-install audit codified: every Install/Reset/Poll
+  function in newly-wired .inl files needs explicit lifecycle wiring in
+  OnBattleEnter/Update.
+- 7 dev-only diagnostic functions identified as orphaned (dead code, no
+  user impact).
+- New mod_forward_decls.h to unify cross-module namespace declarations
+  (MSVC name-mangling lesson).
+
+OTHER
+- Removed v0.12.21 stale F2 "Director Varblock" diagnostic from
+  field_nav_handlekeys.inl during keyboard rebind.
+- Removed v0.12.22 F12 POPM_W diagnostic state from field_navigation.cpp
+  and field_nav_fieldscripts.inl.
+- Generalized "Function key repurposing rule": before remapping any F-key,
+  search ALL source files for VK_F{n} references AND supporting state
+  variables. Stale diagnostics hide in .inl files.
+- DEVNOTES + NEXT_SESSION_PROMPT trimmed; obsolete content moved to
+  DEVNOTES_HISTORY.md as needed.
+- GitHub push utility added at Utilities/push_to_github.vbs (session 73).
+```

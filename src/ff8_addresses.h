@@ -459,6 +459,21 @@ extern uint8_t** pFieldStateBackgrounds;
 // set_music_volume_for_channel. Resolved from main_loop -> sm_battle_sound.
 extern uint32_t pSetMidiVolume;  // game address of set_midi_volume
 
+// --- v0.14.45: SFX volume function addresses (for hooking) ---
+// FFNx replaces sfx_set_master_volume with a JMP to its own bridge that calls
+// nxAudioEngine.setSFXMasterVolume. Same pattern as the BGM hook.
+// Chain (mirrors FFNx ff8_data.cpp `// SFX` block):
+//   opcode_effectplay2          = pExecuteOpcodeTable[0x21]
+//   sfx_play_to_current_playing = get_relative_call(opcode_effectplay2, 0x5F)
+//   play_sfx_on_channel         = get_relative_call(sfx_play_to_current_playing, 0x35)
+//   sfx_set_volume              = get_relative_call(play_sfx_on_channel, 0xA1)
+//   sfx_get_master_volume       = sfx_set_volume - 0x10  (function entry)
+//   sfx_set_master_volume       = sfx_get_master_volume - 0xE0  (function entry)
+//   master_sfx_volume (uint32*) = get_absolute_value(sfx_get_master_volume, 0x1)
+extern uint32_t pSfxSetMasterVolume;   // game address of sfx_set_master_volume (FFNx replaces with JMP)
+extern uint32_t pSfxSetVolume;         // game address of per-channel sfx_set_volume
+extern uint32_t* pMasterSfxVolume;     // pointer to game-side master SFX volume DWORD
+
 // --- v0.07.25: Save file read function address (for hooking) ---
 // Signature: uint32_t sm_pc_read(char* filename, void* buffer)
 // Resolved from main_loop + 0x9C. Called by the game when loading save files
