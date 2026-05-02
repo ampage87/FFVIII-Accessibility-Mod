@@ -2,175 +2,424 @@
 
 ## Current state at session start
 
-Build: **v0.14.65.3 — frame-delay counter on async screenshots. AWAITING BAT.** Five files touched: `battle_tts_screenshot.inl` (added `s_captureFrameDelay` state + `HookedSwapBuffers` counter check + `CaptureScreenshot` reset to 0), `battle_tts.h` (added `frameDelay=0` default parameter to `RequestScreenshotAsync`), `battle_tts.cpp` (updated impl with negative-clamp), `scan_tts.cpp` (call site passes 90 frames ≈ 1.5 s), `ff8_accessibility.h` version bumped to 0.14.65.3.
+Build: **v0.14.72 — sub_47EC70 hook conflict resolved. BAT PASSED ✅ — ready for v0.14.73 chapter (elemental affinity).**
 
-### v0.14.65.2 BAT result: PASS
+## What v0.14.72 fixed (now confirmed by BAT)
 
-- Path fix worked perfectly. Battle log line at 23:42:09 shows the absolute path: `[SCAN-CAPTURE] Auto-screenshot requested at fire #1 slot=3 path='C:\Users\ampag\...\Logs\screenshots\scan_234209_596_slot3_Fastitocalon.png'` paired with `[VICTORY-SCREENSHOT] Saved 640x480`. Claude reads the PNG directly from `Logs\screenshots\` — no manual copying.
-- Stats announce: "Strength 20. Vitality 132. Magic 56. Spirit 180. Speed 5. Luck 0. Evasion 6. Hit 0." for Lv14 Fastitocalon, matching `[SCAN-CACHE]` log exactly.
-- Image content same too-early render as v0.14.65.1 (labels visible, no values, typewriter partial). That's the issue v0.14.65.3 addresses.
+v0.14.71 BAT log exposed a silent init-time hook conflict that had been broken since v0.14.68-diag. Two modules were racing to install MinHook on `sub_47EC70`:
+- `battle_tts_victory.inl::InstallBattleTextHooks()` (`HookedBtCandidate1`, owner since v0.13.14)
+- `scan_tts.cpp::InstallGetBattleTextHook()` (added v0.14.68-diag)
 
-### v0.14.65.3 root cause + fix
+Whichever installed second silently failed with `MH_ERROR_ALREADY_CREATED`. Victory's hook was the loser, so victory phase routing (text_id 22/23 → EXP, 21 → ITEMS, 28 → no items, 109 → GF_AP, 121 → GF_LEVELUP, 127 → ABILITY) hadn't run since v0.14.68-diag.
 
-The async screenshot fires on the very next `SwapBuffers` after the request — ~16 ms at 60 fps. FF8's typewriter takes ~1–1.5 s to draw the description (~95 chars at ~1.5 chars/frame) plus another ~10–15 frames for stat values. So the captured framebuffer reliably catches stat labels (drawn instantly as a static layout) but only the first 4–8 chars of typewriter content.
+Resolution = Option C: SCAN-TTS removed its installer entirely and became a passive observer called from the victory hook. v0.14.72 BAT log confirms:
 
-**Fix:** add a frame-delay counter `s_captureFrameDelay` next to the existing `s_captureRequested` flag. `HookedSwapBuffers` decrements it each frame and only calls `DoGLCapture()` when it hits 0. `RequestScreenshotAsync` gains an optional `frameDelay` parameter (default 0 preserves prior behavior). `scan_tts.cpp` passes 90 frames ≈ 1.5 s, comfortably above the ~63–80 frames needed for full content. The synchronous `CaptureScreenshot()` path explicitly resets the counter to 0 so its existing 160 ms Sleep-and-poll contract is preserved.
-
-### v0.14.65.3 BAT plan
-
-1. Cast Scan on Bite Bug or any common enemy. Hear auto-announce + stats key 5 (unchanged).
-2. Screenshot lands at `Logs\screenshots\scan_<HHMMSS>_<MS>_slot<N>_<EnemyName>.{bmp,png}` ~1.5 s after fire #1.
-3. Battle log shows `[SCAN-CAPTURE]` line with `(90-frame delay ≈ 1.5 s)` suffix at fire #1, paired with `[VICTORY-SCREENSHOT] Saved` ~90 frames later.
-4. **Captured image shows the FULL scan UI: labels + all 6 numeric stat values + complete enemy name + complete description text.** This is the validation we need — confirms LCK/EVA/HIT positioning and the stat-name mapping (STR→Strength, VIT→DEF, MAG→INT, SPR→SPI, SPD→DEX).
-
-### Path through next priorities
-
-1. v0.14.65.3 BAT → if PASS, GitHub push the v0.13.83→v0.14.65.3 backlog.
-2. **v0.14.66** — Elemental affinity (keys 6/7/8). 8×u16 at `entity+0x3C`. 6=Weaknesses (`<800`), 7=Absorbs (`≥1000`), 8=Nullifies (`=900`).
-3. **v0.14.67** — Status resist (key 9). 20 bytes at `entity+0x4C`. Threshold `≥100` = "Strong vs."
-4. **v0.14.68** — Active statuses (key 0). Status bitfield at `entity+0x78`.
-
-### What changed in scan_tts.cpp (Part A: stats)
-
-All three changes are localized to existing patterns:
-
-```cpp
-// New helper near other ReadSlot* helpers:
-static bool ReadSlotStats(int slot, uint8_t outStats[8]) {
-    // ... SEH-guarded memcpy(outStats, base + BENT_STR, 8) ...
-}
-
-// In CaptureSnapshot, after monster_id/description block:
-ReadSlotStats(slot, snap.stats);
-// ... and [SCAN-CACHE] log line extended with all 8 stat values
-
-// New helper near FormatHP:
-static void FormatStats(const ScanSnapshot& snap, char* out, int outSize) {
-    // ... 'Strength X. Vitality Y. Magic Z. ...' or 'Stats unavailable.'
-}
-
-// In SpeakField switch:
-case 5: FormatStats(snap, msg, sizeof(msg)); break;
+```
+[BT-HOOK] sub_47EC70 @ 0x0047EC70: 8B 44 24 04 66 8B 04 45  (original prologue, NOT E9 ...)
+[BT-HOOK] sub_47EC70 hooked OK
+[BT-HOOK] 8/8 hooks installed                              (was 7/8 since v0.14.68-diag)
 ```
 
-### What changed (Part B: auto-screenshot)
+Aaron BAT'd: Scan still captures 'Fly Monster' for Fly-types and falls back correctly for type-less monsters; victory TTS phase announcements (EXP, Items, GF, Ability) are functioning post-Scan again.
 
-**battle_tts.cpp** — new public wrapper next to `CancelNoEffectWatchdogForSlot`:
-```cpp
-void RequestScreenshotAsync(const char* basePath) {
-    if (!basePath || !basePath[0]) return;
-    strncpy(s_captureBasePath, basePath, sizeof(s_captureBasePath) - 1);
-    s_captureBasePath[sizeof(s_captureBasePath) - 1] = '\0';
-    s_captureRequested = true;
-    // No Sleep loop — caller doesn't wait. HookedSwapBuffers picks it up.
-}
-```
+## Architectural lesson recorded
 
-**battle_tts.h** — declaration in `namespace BattleTTS`:
-```cpp
-void RequestScreenshotAsync(const char* basePath);
-```
+MinHook silently fails when two installers race for the same address — only the failure log line distinguishes the loser. Cross-module hooks must use a single canonical installer per address with forward-declared handler functions for cooperating modules. v0.14.72's `HandleBattleText` forward-call pattern is the template: any future module wanting to observe `sub_47EC70` / `sub_4B7210` / `sub_4A3EE0` / `sub_5348E0` / `sub_47EA30` / `sub_47EA90` / `sub_47E970` / `sub_47E710` (the 8 victory-text addresses in `battle_tts_victory.inl`) should add a public function called from the existing victory hook, NOT install its own MinHook.
 
-**scan_tts.cpp HookedScanGetText** — new `else if (count == 30)` branch builds the path with sanitized name and calls `BattleTTS::RequestScreenshotAsync(path)`. One capture per scan event.
+## Decision point at start of next session
 
-### RAM order note (critical)
+Two natural paths forward:
 
-The validated `BENT_*` constants in `battle_tts.h` give the runtime-RAM order as **STR / VIT / MAG / SPR / SPD / LCK / EVA / HIT** — LCK at index 5 between SPD and EVA. Differs from FFRTT Section-7 .dat-file order (LUCK last). `battle_tts.h` is authoritative since these defines have been used for HP/level reads throughout the codebase. Reading 8 bytes from base+0xB5 gives `stats[]` in `[STR, VIT, MAG, SPR, SPD, LCK, EVA, HIT]` order; FormatStats prints in that same order so the indices match. If the screenshot reveals this is wrong, fix as v0.14.65.1 by reordering `FormatStats`.
+**A) v0.14.73 elemental affinity (continue scan UI chapter).** Wires keys 6 / 7 / 8 to speak Weak / Absorb / Nullify based on the entity struct's `entity+0x3C` (8 × u16 covering Fire, Ice, Thunder, Earth, Poison, Wind, Water, Holy per the existing `ScanSnapshot::elem[8]` field). Map u16 affinity values to weak/absorb/null per the FF8 affinity scale. Speak as e.g. "Weak against Fire and Ice. Absorbs Water. Nullifies Wind.". From v0.14.70-diag's BATTLE-TEXT-LITE captures we have direct evidence: text_id=38 returns `Weak against` header, text_id=40 returns `has no effect` header, text_id=101 / 102 / 106 return 3-byte sequences (control-code-prefixed glyph indices for element symbols). No new hook needed — entity-struct reads already work. Pure data-formatting.
 
-### v0.14.60-64 chapter recap (the Scan duplicate-announce hunt is closed)
+**B) GitHub push.** v0.14.72 is a stable architectural point. main HEAD is **v0.14.65.3**; local is **v0.14.72**. The actual gap is **~7 versions** (v0.14.66-diag, v0.14.67, v0.14.68-diag, v0.14.69, v0.14.70-diag, v0.14.71, v0.14.72) — verified via `github:list_commits` on 2026-05-02. (Earlier session notes that called this an "~85-build backlog" were wrong.) Pushing now would lock in v0.14.72's hook-conflict fix in the public history before feature work resumes.
 
-- **v0.14.60** moved the announce trigger from popup-spawn (action-commit time) to sub_B687C0 first-fire (window-render time). Scan-text-displayed = announce. Aaron BAT: still heard duplicate, simultaneous, disjointed.
-- **v0.14.61** disabled dual-channel SAPI (`s_pVoice2 = nullptr` in InitSAPI) and added SC1-PROBE to Speak() to find what was speaking on Voice 1 alongside the SC2 auto-announce. Aaron BAT: duplicate became serialized instead of simultaneous (single-channel works), and SC1-PROBE caught three Voice 1 calls speaking the rendered scan text section-by-section.
-- **v0.14.62** identified `Hook_show_dialog` in `field_dialog.cpp` as the source (it was decoding any new window text and calling Speak; for the Scan UI it fired three times — name, description, stats). Gated speak path on `currentMode != 3` (suppressed all battle text). Aaron BAT: scan duplicate fixed, but "Cast Fire" / "Cast <spell>" banner stopped announcing.
-- **v0.14.63** narrowed the gate to `currentMode == 3 && ScanTTS::IsScreenActive()`. ScanTTS::IsScreenActive() is true only between OnScanPopupSpawn (window opens) and OnScanPopupDespawn (window closes). Aaron BAT: ALL FIXES CONFIRMED — *"Battle dialogs are reading again and Scan worked as expected with no duplication."*
-- **v0.14.64 (this build)** strips the SC1-PROBE / SC2-PROBE diagnostics now that the chapter is closed.
+Aaron's call.
 
-### What's in place from the chapter (do not touch)
+## Files of interest at session start
 
-- **Single-channel SAPI mode** (v0.14.61) — `s_pVoice2 = nullptr` in `InitSAPI()`. Aaron prefers it; eliminates the simultaneous-overlap class of bugs entirely. SpeakChannel2 falls back to s_pVoice and SAPI's per-voice queue serializes everything.
-- **sub_B687C0 first-fire announce trigger** (v0.14.60) — `HookedScanGetText` count==1 calls `OnScanPopupSpawn`, which speaks the auto-announce. Per-scan reset of `s_scanHookFireCount` in `OnScanCast(_, true)` so 'first fire' means 'first fire of THIS scan event.'
-- **screenshot.inl SPRITE-POLL DESPAWN** kept for OnScanPopupDespawn close-edge detection. NEW path no longer triggers announce.
-- **IsScreenActive()-gated Hook_show_dialog suppression** (v0.14.63) — in `field_dialog.cpp`'s show_dialog hook speak path, when `currentMode == 3 && ScanTTS::IsScreenActive()`, log `[SHOW_DIALOG-SUPPRESS]` and don't speak. Otherwise speak normally. The v0.10.112 "Received <item>" rewrite still applies above the gate.
-- **`namespace ScanTTS { bool IsScreenActive(); }` forward decl** in `field_dialog.cpp` near the top, alongside the other namespace forward decls.
+- `src/scan_tts.h` — Scan TTS public API including v0.14.72's `HandleBattleText`
+- `src/scan_tts.cpp` — ScanSnapshot struct, all field formatters (FormatLevel, FormatHP, FormatStats), `HandleBattleText`. New element formatter for v0.14.73 goes near `FormatStats`.
+- `src/battle_tts_victory.inl` — owns sub_47EC70 hook (HookedBtCandidate1), forwards into ScanTTS::HandleBattleText
+- `src/battle_tts_hp.inl` — PollHPCheckKeys, where number-key routing for keys 6/7/8 will go for v0.14.73
+- `DEVNOTES.md` — full chapter history through v0.14.72 BAT PASSED
 
-### Sanity-check BAT plan for v0.14.64
+## Remaining backlog
 
-This is a no-behavior-change build — only stripping diagnostic log lines. Aaron should:
-
-1. Cast Scan on an enemy. Hear the auto-announce ONCE: `<Name>. <Description>. Press number keys 1 through 0 for details.`
-2. Cast Fire (or any spell). Hear the "Cast Fire" banner announce.
-3. Confirm `Logs/ff8_mod.log` has NO `[SC1-PROBE]` or `[SC2-PROBE]` lines anymore.
-4. Confirm `Logs/build_latest.log` shows clean build with no warnings about removed `<intrin.h>`.
-
-If all four check out, v0.14.64 lands and we proceed to v0.14.65.
+1. Persistent accessibility settings
+2. GF naming bypass (Siren)
+3. Remove party-member NPCs from field entity catalog
+4. X-ATMO92 chase
+5. v0.14.73 elemental affinity (keys 6/7/8) — ready to start
+6. v0.14.74 status resistances (key 9)
+7. v0.14.75 active statuses (key 0)
+8. `kernel.bin` parsing for Blue Magic
+9. GitHub push — main HEAD is **v0.14.65.3**, local is **v0.14.72**; gap is **~7 versions** (verified 2026-05-02 via github:list_commits). Earlier notes claiming an "~85-build backlog" were wrong.
 
 ---
 
-## Next chapter — Scan field queries 5..0
+## Previous build: v0.14.71 — PRODUCTION promotion of v0.14.70-diag. Type-label capture chapter closed.
 
-With the duplicate-announce hunt closed, finish wiring the remaining number-key queries during the open Scan window. Keys 1..4 (Name/Description/Level/HP) work; keys 5..0 currently say `"Not implemented yet."` Plan:
+The Fastitocalon scan's auto-capture screenshot showed the on-screen Scan UI has no type label — just "LEVEL 6 HP ?????/?????" at the bottom. Diagnostic log confirmed the engine never calls `sub_47EC70(99)` followed by `sub_47EC70(36)` for Fastitocalon. Not every FF8 enemy has a type label. Fly-types display "Fly Monster"; Fastitocalon and many others have no type classification. The mod's "Level 6." readout for type-less monsters is the correct mirror of the on-screen UI.
 
-### v0.14.65 — Stats (key 5)
+v0.14.71 stripped diagnostic logs from v0.14.70-diag, kept the wider gate via `GetScanFlightSlot()` and per-scan reset in `OnScanCast`. v0.14.71 BAT showed Bite Bug captured "Fly Monster" perfectly, Fastitocalon correctly silent, zero `BATTLE-TEXT-LITE` lines (strip confirmed). But the BAT also surfaced the BT-HOOK conflict that v0.14.72 now resolves.
 
-**What:** When the Scan UI is open and the player presses 5, speak the enemy's stat block.
+### v0.14.70-diag BAT result: mystery solved
 
-**Where the data lives:** `entity_base + 0xB5..0xBC` for STR/VIT/MAG/SPR/SPD/EVA/HIT/LUCK (deep research mentions STR=0xB5; remaining offsets follow FFRTT Section-7 order — needs in-RAM validation against a known enemy). The `ScanSnapshot` struct in `scan_tts.cpp` already reserves `uint8_t stats[8]` for this; just wire `CaptureSnapshot` to read those 8 bytes and add a `FormatStats` helper for the SpeakField case 5 branch.
+The Fastitocalon scan's auto-capture screenshot at `Logs/screenshots/scan_111219_884_slot3_Fastitocalon.png` shows the on-screen Scan UI has **no type label** — just "LEVEL 6 HP ?????/?????" stretched across the bottom, with no "Fish Monster" text rendered anywhere. The diagnostic log confirmed the engine never calls `sub_47EC70(99)` followed by `sub_47EC70(36)` for Fastitocalon — the call sequence stops at text_id=33 (LEVEL).
 
-**Suggested format:** Match FF8's display naming — the game shows STR as Strength, VIT as Defense, MAG as Magic, SPR as Magic Defense, SPD as Speed, EVA as Evasion, HIT as Hit rate, LUCK as Luck. Aaron's call on whether to read all 8 or just the most useful subset (e.g. "Strength X. Defense Y. Magic Z. Speed W."). Default suggestion: read all 8 in a structured sentence.
+Not every FF8 enemy has a type label. Fly-types display "Fly Monster"; Fastitocalon and many other enemies have no type classification. The mod's "Level 6." readout for type-less monsters is the correct mirror of the on-screen UI.
 
-**Implementation steps:**
-1. In `CaptureSnapshot` in `scan_tts.cpp`, after the existing field reads, add an SEH-guarded `memcpy(snap.stats, base + 0xB5, 8)` (or 8 individual byte reads to be safe).
-2. Log the captured stats in the `[SCAN-CACHE]` line for diagnostic verification.
-3. In `SpeakField`, replace the case 5 stub with a `FormatStats(snap, msg, sizeof(msg))` call that builds the announce string.
-4. BAT: cast Scan on Bite Bug, press 5, verify the stats match the in-game scan window display.
+### v0.14.71 changes from v0.14.70-diag
 
-### v0.14.66 — Elemental affinity (keys 6/7/8)
+**Stripped** (~30 lines removed):
+- `[BATTLE-TEXT-LITE]` per-call hex+ASCII log block
+- Four explicit "why didn't we capture" failure-reason logs (slot OOB, prefixLen=0, composed empty, already populated). For type-less monsters those would have been false alarms.
 
-**Where the data lives:** 8×u16 at `entity_base + 0x3C`. Order: Fire, Ice, Thunder, Earth, Poison, Wind, Water, Holy.
+**Kept**:
+- `GetScanFlightSlot()` helper and the wider gate (covers both action-layer and visible-UI phases). Strict superset of v0.14.69's narrow gate.
+- Per-scan reset of `s_lastTypePrefixBytes`/`Len` in `OnScanCast`.
+- Core capture logic with single-write per scan event.
+- `[SCAN-TTS] Type label captured slot=N typeLabel='...'` success log line.
 
-**Bucket boundaries:** `< 800` Weak (key 6), `= 900` Nullify (key 8), `≥ 1000` Absorb (key 7). Halves and Normal not announced.
+### Files touched (v0.14.71)
 
-**Suggested format:**
-- Key 6: "Weak to Fire and Ice." / "No elemental weaknesses."
-- Key 7: "Absorbs Holy." / "No elemental absorbs."
-- Key 8: "Nullifies Wind." / "No elemental nullifications."
+- `src/scan_tts.cpp` — `HookedGetBattleText` body collapsed from ~80 lines back to ~25 lines, doc comment rewritten to reflect the v0.14.71 understanding, install log message updated.
+- `src/ff8_accessibility.h` — version bump.
 
-### v0.14.67 — Status resist (key 9)
+### Expected v0.14.71 BAT outcome
 
-**Where the data lives:** 20 bytes at `entity_base + 0x4C`. Status order from deep research (Death/Poison/Petrify/Darkness/Silence/Berserk/Zombie/Sleep/Slow/Stop/Curse/Doom/Confuse/Drain/Eject/Float/Mini/Petrifying/Vit0/...). Threshold `≥ 100 (0x64)` = "Strong vs". Validate via Cactuar (Death-resistant) and Malboro.
+- **Fly-type** scans (Bite Bug, Glacial Eye, Buel): `Type label captured slot=N typeLabel='Fly Monster'` fires once per scan; key 3 says "Level N, Fly Monster.".
+- **Type-less** scans (Fastitocalon, T-Rexaur, Iguion, likely Caterchipillar): no type-label log line, key 3 says plain "Level N.". This is correct behavior, not a bug.
+- Log volume drops back to ~3 lines per scan (vs. v0.14.70-diag's 15–40 LITE lines per scan).
+- Other Scan UI features unchanged: key 1 name, key 2 description, key 4 HP, key 5 stats.
 
-**Suggested format:** "Strong against Sleep, Confuse, and Petrify." / "No notable status resistances."
+### After v0.14.71 BAT lands
 
-### v0.14.68 — Active statuses (key 0)
+Move to **v0.14.72 elemental affinity** (keys 6 / 7 / 8 for Weak / Absorb / Nullify).
 
-**Where the data lives:** Status bitfield at `entity_base + 0x78` (and possibly 0x7C for the persistent bits — check `BENT_PERSIST_STATUS` in battle_tts.h for the existing offset). Reuse the target-announce status decoder if possible (the `[TARGET] Entry announce: Bite Bug 1, Float` log line shows a working decoder is already in `battle_tts_helpers.inl` somewhere).
+From v0.14.70-diag's BATTLE-TEXT-LITE captures during Fly-type scans:
+- `text_id=38` returns `Weak against` header
+- `text_id=40` returns `has no effect` header (seen in Glacial Eye scan)
+- `text_id=101 / 102 / 106` return 3-byte sequences `<\x05>Y` / `<\x05>Z` / `<\x05>b` — control-code-prefixed glyph indices for the element symbols
 
-**Suggested format:** "Currently affected by Poison and Slow." / "No active statuses."
+Approach: read the elemental affinity bytes directly from the entity struct (`entity+0x3C`, 8 × u16 covering Fire, Ice, Thunder, Earth, Poison, Wind, Water, Holy per the existing `ScanSnapshot::elem[8]` field). Map u16 affinity values to weak/absorb/null per the FF8 affinity scale. Speak as e.g. "Weak against Fire and Ice. Absorbs Water. Nullifies Wind.".
 
-### v0.14.69 — Polish
+No new hook needed — entity-struct reads already work. Pure data-formatting work.
 
-- Hidden-HP whitelist (replace `HIDDEN_HP_SOFT_THRESHOLD` of 99,999 with the authoritative whitelist read from sub_84F860's cmp-chain: Fastitocalon-F, Adel, Sorceress A/B/C, Griever, Helix, Ultimecia).
-- Repeat-spam suppression on the auto-announce (if Aaron re-scans the same target within N seconds).
-- Ally formatting tweaks based on continued listening.
-- Strip remaining diagnostic logs (`[SCAN-HOOK]` / `[SCAN-CACHE]` / `[SCAN-DEDUP]`) once stable.
-- Resolve TARGET-ACTIVE redundant announce (carried bug — see below). Could fold here or stand alone as v0.14.70.
+### Remaining backlog (carried)
+
+1. Persistent accessibility settings
+2. GF naming bypass (Siren)
+3. Remove party-member NPCs from field entity catalog
+4. X-ATMO92 chase
+5. v0.14.72 elemental affinity (keys 6/7/8)
+6. v0.14.73 status resistances (key 9)
+7. v0.14.74 active statuses (key 0)
+8. `kernel.bin` parsing for Blue Magic
+9. **GitHub push** of ~85-build backlog (still unpushed)
+
+---
+
+## v0.14.71 verification points for the BAT
+
+When Aaron sends "BAT" after deploying v0.14.71, look in `ff8_battle.log` for:
+
+1. **Hook install confirmed**: `[SCAN-TTS] sub_47EC70 (get_battle_text) hook @ 0x0047EC70 — OK ... [v0.14.71: type-label capture]`
+2. **Fly-type scan** (if Aaron encounters Bite Bug / Glacial Eye / Buel and casts Scan): one `Type label captured slot=N typeLabel='Fly Monster'` line per scan, no `BATTLE-TEXT-LITE` lines.
+3. **Type-less scan** (Fastitocalon, etc.): no type-label log line at all, key 3 falls back to plain "Level N." — this is correct.
+4. **No regressions**: Auto-announce still fires at fire #1, screenshot still captures at fire #1+90 frames, key 1/2/4/5 still work as before.
+
+If the BAT shows clean Fly-type captures + clean type-less silence, v0.14.71 ships. Then close the type-label chapter and start v0.14.72 elemental affinity in the next session.
+
+---
+
+## Detailed approach for v0.14.71 (already implemented)
+
+Minimal surgical strip. The hook still does the same fundamental work — snapshot the previous call's bytes when a non-36 text_id fires, decode and compose when text_id=36 fires — but with the diagnostic log scaffolding removed. Specifically:
+
+1. **Removed the BATTLE-TEXT-LITE block** (~25 lines) that ran inside the gate before the text_id branching. With it gone, the hook is back to a fast hot-path passthrough for unrelated calls and a focused capture path for scan-flight calls.
+
+2. **Collapsed the four-way failure-reason if/else** back into a single guarded `if`. The pre-conditions (slot in range, prefixLen > 0, typeLabel empty) are now combined into one boolean, and only the success path logs.
+
+3. **Preserved the wider gate** (`GetScanFlightSlot()`) and **per-scan reset** in `OnScanCast`. These are not diagnostic — they're sound architecture worth keeping.
+
+4. **Updated the doc comment** above `HookedGetBattleText` to explain both the type-labeled and type-less monster behaviors so future sessions don't re-discover the Fastitocalon question.
+
+5. **Updated install log messages** to say `v0.14.71` instead of `v0.14.70-diag`.
+
+The code now reflects the production understanding: the engine renders type labels for some monsters and not others, and the mod's job is to mirror what's on screen — not to invent type information for monsters that don't display one.
+
+### v0.14.69 BAT result: PARTIAL WIN
+
+- ✅ **Bite Bug**: `[SCAN-TTS] Type label captured slot=3 typeLabel='Fly Monster'` fired at the same second as the Auto-announce. Key 3 said "Level 8, Fly Monster." — perfect.
+- ❌ **Fastitocalon**: 18-second open Scan UI, `Type label captured` line never fired. Key 3 said just "Level 8." with no type.
+- ⚠️ **Caterchipillar**: encountered in battle, never actually Scanned (no action-layer fire in the log).
+
+### Hypothesis the v0.14.70-diag tests
+
+The Scan UI's render-order varies by monster type. For Fly-type, the engine fetches the type label AFTER `sub_B687C0` fire #1, so v0.14.69's `IsScreenActive()` gate caught it. For Fish-type, the type label probably gets fetched BEFORE fire #1 (during the cast animation), when `IsScreenActive()` is still false — the hook silently skipped the bytes.
+
+The v0.14.70-diag fix:
+1. **Broaden the gate** to cover BOTH action-layer phase AND visible-UI phase via new `GetScanFlightSlot()` helper.
+2. **Per-scan reset** in `OnScanCast` so stale prefix bytes from a previous scan can't leak.
+3. **Lightweight diagnostic** — log every `sub_47EC70` call during scan flight, plus explicit "why didn't we capture" logging when text_id=36 fires inside the gate but skips.
+
+If the gate broadening is the fix, Fastitocalon will capture 'Fish Monster' and Caterchipillar will capture whatever its type is. If they still fail, the diagnostic log will tell us exactly what the engine's call pattern is for those types.
+
+### Files touched (v0.14.70-diag)
+
+- `src/scan_tts.cpp` (~70 net lines added):
+  - New `GetScanFlightSlot()` helper at file scope inside `ScanTTS` namespace.
+  - `HookedGetBattleText` rewritten: wider gate via `GetScanFlightSlot()` instead of `IsScreenActive()`, lightweight `[BATTLE-TEXT-LITE]` log line per call, explicit failure-reason logging when text_id=36 doesn't capture.
+  - `OnScanCast` adds per-scan reset of `s_lastTypePrefixBytes`/`Len` after the existing `CaptureSnapshot` + `s_pendingScanSlot` writes.
+  - Hook install log message updated to mention v0.14.70-diag.
+- `src/ff8_accessibility.h` — version bump.
+
+### Expected v0.14.70-diag BAT outcome
+
+Cast Scan on enemies of varied types. The log will contain:
+
+- One `[BATTLE-TEXT-LITE]` line per `sub_47EC70` call during scan flight — typically 8–12 calls per scan.
+- Either a `[SCAN-TTS] Type label captured slot=X typeLabel='X Monster'` (success) or one of the new explicit failure lines:
+  - `text_id=36 fired but flight slot OOB (-1)` — shouldn't happen given the gate ensures slot >= 0
+  - `text_id=36 fired but s_lastTypePrefixLen=0` — means the engine called text_id=36 first thing, before any other call snapshotted a prefix
+  - `text_id=36 fired but composed label is empty` — means the prefix decoded to nothing useful
+  - `text_id=36 fired but typeLabel already captured` — means we caught it but the engine refetched
+
+Key 3 verifies: "Level N, X Monster." if captured, plain "Level N." if not.
+
+### Branches after BAT lands
+
+- **Both Fastitocalon and Caterchipillar work**: wider gate was the fix. Strip the BATTLE-TEXT-LITE log + explicit failure-reason logs (preserve the broader gate + per-scan reset), bump to v0.14.71 production. Move on to elemental affinity (keys 6/7/8).
+- **Fastitocalon works, Caterchipillar still fails (or vice versa)**: third condition we haven't found. Examine differing BATTLE-TEXT-LITE sequences.
+- **Both still fail**: architectural rethink needed (different hook target, or screenshot-OCR fallback, or static monster_id → type-id table).
+
+### After v0.14.70-diag BAT lands and the production fix is in (v0.14.71)
+
+- v0.14.71 starts elemental affinity (keys 6/7/8 for Weak / Absorb / Nullify). Element symbols rendered via text_id=101/102 (returned `<\x05>Y` and `<\x05>Z` in v0.14.68-diag), suggesting control-code-prefixed glyph indices.
+- v0.14.72 status resistances (key 9), v0.14.73 active statuses (key 0).
+- Then carried backlog: persistent accessibility settings, GF naming bypass (Siren), party member NPC catalog cleanup, X-ATMO92 chase, kernel.bin parsing for Blue Magic.
+
+---
+
+## v0.14.69 BAT log evidence summary
+
+From `Logs/ff8_battle.log` (10:28:02–10:36:03):
+
+**Bite Bug scan @ 10:29:09 (success):**
+```
+[SCAN-HOOK] sub_B687C0 fire #1 slot=3 (window-open trigger — announcing now)
+[SCAN-TTS] Auto-announce slot=3 msg='Bite Bug. A bug monster that flies. ...'
+[SCAN-TTS] Type label captured slot=3 typeLabel='Fly Monster'
+[SCAN-TTS] SpeakField slot=3 fieldId=3 msg='Level 8, Fly Monster.'  (key 3 press)
+```
+
+**Fastitocalon scan @ 10:30:38 (failure):**
+```
+[SCAN-HOOK] sub_B687C0 fire #1 slot=3 (window-open trigger — announcing now)
+[SCAN-TTS] Auto-announce slot=3 msg='Fastitocalon. A fish that swims in the ground. ...'
+(no Type label captured line during the 18-second scan window)
+[SCAN-TTS] SpeakField slot=3 fieldId=3 msg='Level 8.'  (key 3 press, fallback)
+[SCAN-TTS] Screen closed (slot=3); number keys revert to ally HP
+```
+
+The missing `Type label captured` line for Fastitocalon is the bug we're chasing.
+
+---
+
+## Detailed approach for v0.14.70-diag
+
+The code change is minimal and surgical. The hook still does the same fundamental work — snapshot the previous call's bytes when a non-36 text_id fires, decode and compose when text_id=36 fires. The only differences from v0.14.69:
+
+1. **Gate.** Instead of `if (IsScreenActive() && result != nullptr)`, we do `int slot = GetScanFlightSlot(); if (slot < 0 || result == nullptr) return result;` — wider, with the slot pre-resolved so we don't re-read it inside the text_id=36 branch.
+
+2. **Diagnostic.** Inside the gate, before the text_id=36 vs other branching, we always log `[BATTLE-TEXT-LITE] text_id=N bytes=B hex=[...] ascii=|...| flight_slot=N`. SEH-guarded around the byte read so a bogus pointer logs `<SEH>` rather than crashing. 16-byte max read, stops at null.
+
+3. **Failure-reason logs.** When `text_id=36` fires inside the gate, the original four-condition check (`slot in range && prefixLen > 0 && composed non-empty && typeLabel empty`) is split into four explicit `else if` branches each with its own log line. Silent skip becomes visible.
+
+4. **Per-scan reset.** In `OnScanCast`, after the existing `CaptureSnapshot(targetSlot)` call (which already memsets the slot's typeLabel via `memset(&snap, 0, sizeof(snap))`) and after setting `s_pendingScanSlot`, we add `memset(s_lastTypePrefixBytes, 0, ...); s_lastTypePrefixLen = 0;`. Per-scan freshness.
+
+Correctness invariants preserved: hook still SEH-guarded, the actual capture logic is unchanged, the production behavior for Bite Bug / Glacial Eye / any working case continues to work (wider gate is a strict superset of the narrower v0.14.69 gate).
+
+### v0.14.68-diag BAT result: DECISIVE WIN
+
+Glacial Eye scan during BAT produced 10 unique `[BATTLE-TEXT-DIAG]` entries during the open Scan window. Decoded via FF8 text encoding (uppercase encoded = decoded + 4, lowercase encoded = decoded - 2):
+
+- `text_id=99 (0x63)` returns `'Fly'` — the type prefix for Fly-type monsters
+- `text_id=36 (0x24)` returns `'Monster'` — the universal type suffix
+- These two text_ids are fetched in IMMEDIATE succession during the Scan UI's render of the bottom-left type label
+- Visually confirmed in `scan_001352_348_slot3_Glacial_Eye.png` — bottom-left renders 'Fly Monster' exactly
+
+Other captured text_ids:
+- 33 = `LEVEL`, 34 = `HP` (header labels)
+- 38 = `Weak against`, 40 = `has no effect` (element headers)
+- 113 = `/////` (underline glyph)
+- 11 = UI position list, 101/102 = element symbol prefixes
+
+### v0.14.69 architecture
+
+Monster-type-agnostic capture via the existing `sub_47EC70` hook. We don't need to enumerate the prefix-text_id-to-name mapping — the engine itself does the lookup; we just observe the result.
+
+Algorithm in `HookedGetBattleText`:
+1. While `IsScreenActive()` is true (a Scan UI session is open), every `sub_47EC70` call's returned bytes are snapshotted into `s_lastTypePrefixBytes` (32-byte buffer, SEH-guarded)
+2. When `text_id == 36` ('Monster' suffix) fires, decode the snapshotted prior bytes via `FF8TextDecode::Decode`, compose `'{prefix} Monster'`, store in `s_scanCache[active_slot].typeLabel`. Single-write per scan event.
+3. `FormatLevel()` checks `snap.typeLabel` and appends if populated: "Level 14, Fly Monster." instead of "Level 14.".
+
+Auto-announce timing unchanged — still fires at `sub_B687C0` fire #1. The type label hasn't been fetched yet at that exact moment, but by the time the user presses key 3 (typically several seconds later) the type label is captured and ready.
+
+### v0.14.69 what's new
+
+- New `typeLabel[64]` field on `ScanSnapshot` (cleared via existing `memset` in `CaptureSnapshot`).
+- New `s_lastTypePrefixBytes`/`s_lastTypePrefixLen` tracking state (32-byte buffer + length counter).
+- New helpers: `SnapshotPrefixBytesSafe` (SEH-guarded byte snapshot), `ComposeTypeLabelToBuf` (decodes via `FF8TextDecode::Decode`, trims, composes "{prefix} Monster").
+- `HookedGetBattleText` body replaced: logging → type-label tracking. Hook still installed at the same address (`0x0047EC70`), still gated on `IsScreenActive()`.
+- `FormatLevel` updated to include typeLabel when populated.
+- `OnBattleEnter` resets the prefix tracking buffer.
+- Stripped: `PollDiagnosticKey`, `DumpHexWindow`, all 10 candidate-base probes, `BATTLE-TEXT-DIAG` log line, `s_diagF12WasDown` static, the forward decl in `scan_tts.h`, the call site in `battle_tts_hp.inl`. F12 returns to 'reserved for diagnostic builds only' status.
+
+Files touched: `src/scan_tts.cpp` (~80 net lines after strip+add), `src/scan_tts.h` (forward decl removed), `src/battle_tts_hp.inl` (call site removed), `src/ff8_accessibility.h` (version bump).
+
+### Expected v0.14.69 BAT outcome
+
+- Cast Scan on any enemy (Glacial Eye, Bite Bug, Fastitocalon, anything works — mod is type-agnostic).
+- Auto-announce fires as before: "<Name>. <Description>. Press number keys 1 through 0 for details."
+- During the open window, look for one log line in `ff8_battle.log`: `[SCAN-TTS] Type label captured slot=N typeLabel='Fly Monster'` (or 'Fish Monster' / 'Earth Monster' / etc. depending on the enemy).
+- Press key 3 — should hear "Level 14, Fly Monster." (or whatever the captured type label is) instead of just "Level 14.".
+- For ally targets, no type label gets captured; key 3 falls back to plain "Level N." — verify this still works.
+- HP key (4), Stats key (5), Name key (1), Description key (2) should all behave exactly as before — v0.14.69 only touches FormatLevel.
+
+### After v0.14.69 BAT lands
+
+- v0.14.70 starts elemental affinity (keys 6/7/8 for Weak / Absorb / Nullify). The Scan UI shows element symbols at specific positions — we already know element symbols are rendered via `text_id=101`/`102` calls (returned `<\x05>Y` and `<\x05>Z` in the v0.14.68-diag BAT, suggesting control-code-prefixed glyph indices). Need to figure out the mapping from element symbol → ASCII element name.
+- v0.14.71 status resistances (key 9)
+- v0.14.72 active statuses (key 0)
+- Then move on to other backlog: persistent accessibility settings, GF naming bypass (Siren), party member NPC catalog cleanup, X-ATMO92 chase, kernel.bin parsing.
+
+---
+
+## Detailed approach for v0.14.69
+
+Stateful hook — the type label requires observing TWO consecutive `sub_47EC70` calls (prefix then 'Monster'), so we need a small piece of state between calls. The state is a 32-byte buffer holding the most recent call's returned bytes. When `text_id=36` fires, those bytes ARE the prefix — we decode and compose.
+
+The gate condition is `IsScreenActive()` so the tracking work only happens during the narrow Scan UI window. Outside that window the hook is essentially a passthrough — just `s_originalGetBattleText(textId)` and return.
+
+One-write-per-scan invariant: we only write to `s_scanCache[slot].typeLabel` if it's currently empty. This protects against the engine refetching `text_id=36` later in the Scan UI session for some other UI element — the type label captured the FIRST time text_id=36 fires is preserved.
+
+Also important: `s_lastTypePrefixBytes` is reset on `OnBattleEnter` so a stale prefix from a previous battle can't leak into the first scan of a new battle. Within a battle, the buffer is overwritten with every non-`text_id=36` call so there's no cross-scan staleness concern within a battle.
+
+### v0.14.67-diag BAT result: HYPOTHESIS DISPROVEN, but with useful narrowing
+
+F12 dumps captured cleanly (3x for Bite Bug + 3x for Fastitocalon). Key findings:
+
+- **The static table at `0x015D0B40` is NOT a 16-entry type-info table.** All 16 entries (256 bytes) are byte-for-byte identical (`00 EE 00 02 80 FD 80 02 01 00 00 00 01 01 01 00`) across BOTH monsters. The first dword `0x0200EE00` dereferences to UV-coordinate-style data, identical for both. So `[edi+0xD] = 0x01` always for entries 0–15 — confirming `[edi+0xD]` is a static UI-layout flag, NOT a per-monster type byte.
+- **The `cmp al, bl` checks in `sub_84FD90` are layout switches**, not type lookups. The first ~150 instructions are pure UI flag-checking against `[0x269aac8..0x269aade]`.
+- **The 156-byte `monster-info entry` at `0x01D972C4 + monster_id*156`** differs strongly between Bite Bug (full structured data starting `A7 90 A9 88...`) and Fastitocalon (mostly zeros for first 64 bytes), but probably because we're reading well past the valid table extent (monster_ids 0x25 and 0x2C are far beyond a typical 7-slot battle entity array).
+- **`sub_84D410` input bytes** for the two monsters: 0x00 (Fast) vs 0xA7 (Bite). They differ but the contextual evidence suggests this isn't the canonical type byte either.
+
+### Disassembly walk progress (sub_84FD90, ~250 of 540 instructions covered)
+
+First ~150 instructions are pure UI flag-checking. Around 0x00850150-0x008502E0 there's a function-call cluster that initially looked promising (4 calls to `sub_49F0A0` with arg2=2/3/?/1, results stored in static "UI element width" array `[0x269aaac..0x269aab2]`, then `cmp ax, 0x60`). But peeking into `sub_49F0A0` reveals it's NOT a text fetcher — it does cascading 196-byte-stride table lookups at `0x01D2B110/+0x18/+0xC2` followed by `(value - arg2) & 7` modular-7 arithmetic, which looks like geometric/positioning math, not text fetching. The actual type-label render is either deeper in `sub_84FD90` (~290 more instructions) or in a different scan-UI phase function (`sub_850650`/`sub_850690`/`sub_8506B0`).
+
+### v0.14.68-diag pivot: hook `sub_47EC70` (`get_battle_text`) directly
+
+Per Aaron's user memory, `sub_47EC70` is FF8's canonical battle-text fetch. First instructions confirm signature: `const char* __cdecl get_battle_text(int text_id)` with positions table at `0x01CF8B50` (u16 stride 2) and fallback string ptr `0x01CFF84C`. **Every battle-context string — including the type label — should pass through this function.**
+
+### v0.14.68-diag what's new
+
+- New constant `BATTLE_GET_TEXT_ADDR = 0x0047EC70` in `scan_tts.cpp` near existing `SCAN_GET_TEXT_ADDR`.
+- New typedef `GetBattleTextFn`, fn ptr `s_originalGetBattleText`, install flag.
+- New `HookedGetBattleText(int textId)` callback: calls original, then if `IsScreenActive()` is true, builds a hex+ASCII dump of the first 32 bytes of the returned string (SEH-guarded, stops at null terminator) and logs:
+  ```
+  BattleTTS: [BATTLE-TEXT-DIAG] text_id=N (0xX) ptr=0x... bytes=N hex=[XX XX ...] ascii=|...|
+  ```
+- New `InstallGetBattleTextHook()` paralleling `InstallScanGetTextHook()`. MinHook trampoline.
+- Called from `Initialize()` alongside the existing scan hook.
+- All v0.14.66/67 F12 probes RETAINED — harmless when F12 not pressed and may produce supplementary info.
+
+Files touched: `src/scan_tts.cpp` (~90 lines added), `src/ff8_accessibility.h` (version bump). No other modules affected.
+
+### Expected v0.14.68-diag BAT outcome
+
+- Aaron casts Scan on Bite Bug + Fastitocalon (no F12 needed — the new hook auto-logs every text fetch during the Scan UI window).
+- For each scan, `ff8_battle.log` accumulates a sequence of `[BATTLE-TEXT-DIAG]` lines covering monster name, description, type label, and any other battle UI strings drawn during the open window. Probably 5–30 lines per scan.
+- We post-process the hex bytes to find the entry whose decoded text is "Fly Monster" (Bite Bug) or "Fish Monster" (Fastitocalon). FF8 text encoding: lowercase = ASCII - 2, uppercase = ASCII + 4, space stays 0x20, 0x02 = section separator, 0x00 = terminator.
+- That entry's `text_id` is the canonical type-label ID. Then we identify the engine path that maps `monster_id → type_text_id` (probably a lookup table somewhere).
+
+### After v0.14.68-diag BAT lands
+
+- v0.14.69 implements the type-label fetch using the discovered text_id and wires it into Level announcement: "Level 14 Fly Monster". Production build, all diag stripped.
+- Then v0.14.70+ continues the Scan-data chapter: elemental affinity (keys 6/7/8), status resist (key 9), active statuses (key 0).
+
+---
+
+## Detailed approach
+
+MinHook on `sub_47EC70` with passthrough. The hook callback is gated on `ScanTTS::IsScreenActive()` (returns true while a Scan UI window is open), so the diagnostic only fires during the narrow Scan window — outside that window `sub_47EC70` is also called for victory text, command menus, and status popups, and we don't want spam.
+
+Hex dump format: 32 bytes max, stops at null terminator. SEH-guarded against bogus pointer returns. We don't decode FF8 text in-mod (the decoder lives in `ff8_text_decode.cpp` and calling it from inside the hook risks reentrancy if it ever logs); decoding happens in post-processing on Aaron's hex output.
+
+### v0.14.66-diag BAT plan
+
+1. Start a battle with **2-3 enemies of varied types**:
+   - Bite Bug = "Fly Monster" (already validated in v0.14.65.3 BAT)
+   - A Geezard or Caterchipillar of a different type (these are common Lv 1-10 area encounters, e.g. Balamb Garden surroundings)
+2. Cast Scan on the first enemy. Wait for the auto-announce and the screenshot.
+3. **Press F12 while the Scan window is still open.** Confirm `ff8_battle.log` gets a `[SCAN-TYPE-DIAG]` block.
+4. Close the Scan window.
+5. Cast Scan on a different enemy (different type). Press F12 again. Get a second dump.
+6. Optional: a third enemy of yet another type.
+7. Upload `ff8_battle.log` for analysis. Claude diffs the dumps to find the type field.
+
+**Important**: F12 must be pressed *during* the Scan window's open period (after the auto-announce, before pressing Esc to close it). The dump is gated on `IsScreenActive()` returning true — if F12 fires outside that window, you'll see `[SCAN-TYPE-DIAG] F12 pressed but scan UI not active — ignoring`.
+
+### Files touched (v0.14.66-diag)
+
+- `src/scan_tts.h` — added `PollDiagnosticKey()` to public API with full doc comment.
+- `src/scan_tts.cpp` — added `s_diagF12WasDown`, static helper `DumpHexWindow()`, public `PollDiagnosticKey()` at end of file before namespace closer (~190 lines).
+- `src/battle_tts.cpp` — added forward decl in `namespace ScanTTS { ... }` block.
+- `src/battle_tts_hp.inl` — added one-line `::ScanTTS::PollDiagnosticKey()` call at top of `PollHPCheckKeys()`.
+- `src/ff8_accessibility.h` — version bump.
+
+**F12 verified free** across all source files (no existing `VK_F12` / `0x7B` handlers). No behavior change for normal play — F12 is silent unless the Scan window is open.
+
+### Path through next priorities
+
+1. v0.14.66-diag BAT → analyze the dumps, identify the type field location.
+2. **v0.14.66** (production) — Wire the discovered type field into the Level announcement (key 3): "Level 14 Fly Monster" instead of just "Level 14." Strip the diagnostic.
+3. GitHub push the v0.13.83→v0.14.66 backlog (~80 builds).
+4. **v0.14.67** — Elemental affinity (keys 6/7/8). 8×u16 at `entity+0x3C`. 6=Weaknesses (`<800`), 7=Absorbs (`≥1000`), 8=Nullifies (`=900`).
+5. **v0.14.68** — Status resist (key 9). 20 bytes at `entity+0x4C`. Threshold `≥100` = "Strong vs."
+6. **v0.14.69** — Active statuses (key 0). Status bitfield at `entity+0x78`.
 
 ---
 
 ## Required reading at session start
 
-1. `DEVNOTES.md` (project root) — Current Build block has v0.14.64 status.
+1. `DEVNOTES.md` (project root) — Current Build block has v0.14.66-diag status.
 2. This file (top section).
-3. `src/scan_tts.cpp` — ScanSnapshot struct, CaptureSnapshot, SpeakField, OnScanPopupSpawn.
+3. `src/scan_tts.cpp` — ScanSnapshot struct, CaptureSnapshot, SpeakField, OnScanPopupSpawn, PollDiagnosticKey.
 4. `src/scan_tts.h` — public API surface.
 5. `Plan & Research Documents/Scan spell deep research results.md` for offsets and bucket boundaries (remember: subtract 0x14 from any post-header offsets in the research — SAVEMAP header is 76 bytes / 0x4C, not 96 bytes / 0x60).
 
 ---
 
-## Other items to consider for an upcoming session
+## Workflow rules in effect
 
-- **Push to GitHub.** The repo at `ampage87/FFVIII-Accessibility-Mod` is at v0.13.63; everything from v0.13.83 onward is local only. ~80 builds unpushed. Worth a clean commit + push between chapters — maybe after v0.14.64 BAT lands as a clean stopping point, or after v0.14.65 once the next chapter is in motion.
-- **Carried bug — TARGET-ACTIVE redundant announce.** See section below. Plausible to fold into v0.14.69 polish.
+- **Filesystem MCP tools only** — never bash for project files. Bash sees `/C:/...` which is a separate container-local filesystem; the system `create_file` tool writes there. Real Windows files must use `filesystem:write_file` / `filesystem:edit_file` at `C:/...` (no leading slash).
+- **Update DEVNOTES + NEXT_SESSION_PROMPT** at every version bump and BAT.
+- **"BAT" = Built and Tested.** Check `Logs/build_latest.log` tail first, then domain log.
+- **Version bump in 1 location** — `FF8OPC_VERSION` in `src/ff8_accessibility.h`.
+- **Aaron is blind** — every response starts with `## Claude Says`.
+- **Don't declare a fix successful from log markers alone** — verify against Aaron's user-facing experience.
+- **NEVER re-enable the SET3 opcode hook (0x1E)** — hangs infirmary scene. CI guard active.
+- **F12 reserved for diagnostics** — search/remove old VK_F12 refs before adding new. Search for supporting state variables too, not just the literal `VK_F{n}`.
+- **When hooking a game-side audio/render function**, prefer MinHook on the game address directly rather than detecting an FFNx JMP — sidesteps the FFNx-config dependency that broke v0.14.45 SFX.
+- **`.inl` files are included INSIDE `namespace BattleTTS {`.** Cross-namespace forward declarations (e.g. `namespace ScanTTS { ... }`) must be placed in the parent `.cpp` BEFORE the namespace opens, not inside the `.inl`. Putting them inside the `.inl` creates `BattleTTS::ScanTTS::Foo` — a different symbol than the global `::ScanTTS::Foo`.
+- **Default arguments can appear in only ONE declaration per translation unit.** When an in-file forward decl coexists with a header decl that already provides the default, the in-file decl must OMIT the default. C2572.
+- **Engine functions that take a `byte` arg via `push ecx` after `mov cl, ...`** leave the upper 24 bits of ECX as garbage. MinHook callbacks declared `int slotIndex` see the full dword. Always mask `& 0xFF` before using as a slot index.
+- **Default to writing code** once an approach is decided. Avoid re-reading transcripts and re-summarizing instead of implementing. If torn between two approaches, pick simpler, commit, iterate from BAT results.
+- **Action ID at 0x01D27AE3 is NOT 0x16 for player magic.** It's 0x01. The 0x16 value seen in `[CMD] cmds=[...]` is the Draw command-menu index, not the action staging byte.
 
 ---
 

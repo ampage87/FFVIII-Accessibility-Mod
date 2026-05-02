@@ -142,4 +142,20 @@ void SpeakField(int fieldId);
 // battle_tts.cpp on the mode 999 transition).
 void OnBattleEnter();
 
+// v0.14.72: Public hook-forward entry point for sub_47EC70
+// (get_battle_text) called from HookedBtCandidate1 in
+// battle_tts_victory.inl. Replaces the standalone scan_tts.cpp hook
+// installed in v0.14.68-diag through v0.14.71, which conflicted with
+// the pre-existing victory hook on the same address (MinHook returned
+// MH_ERROR_ALREADY_CREATED for whichever installer ran second, silently
+// breaking victory phase detection since v0.14.68-diag).
+//
+// Now sub_47EC70 has a single canonical owner — the victory hook —
+// which forwards every call into HandleBattleText. Internally we gate
+// on GetScanFlightSlot() so this is a near-no-op outside an active
+// scan event. result is the value returned by the original engine
+// function (cast from uint32_t in the victory hook); textId is the
+// engine's text ID parameter.
+void HandleBattleText(int textId, const char* result);
+
 }  // namespace ScanTTS

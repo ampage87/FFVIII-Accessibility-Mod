@@ -148,6 +148,17 @@ struct ScanSnapshot {
     char     description[256];
     bool     hasDescription;
 
+    // v0.14.69: Type label rendered at bottom-left of Scan UI (e.g.
+    // 'Fly Monster', 'Earth Monster'). Captured asynchronously from
+    // sub_47EC70 calls during the open Scan window — see
+    // HandleBattleText below for the capture mechanism (v0.14.72: was
+    // HookedGetBattleText prior to the hook-conflict resolution; the
+    // capture logic itself is unchanged). Empty string means "not yet
+    // captured" (will be filled within ~50ms of the Scan UI opening
+    // visually). FormatLevel() appends to "Level N" announcement when
+    // populated.
+    char     typeLabel[64];
+
     // v0.14.60..v0.14.63 fields (declared but not populated by v0.14.59)
     uint8_t  stats[8];        // STR..HIT at 0xB5..0xBC
     uint16_t elem[8];         // Fire..Holy at 0x3C..0x4B (8 x u16)
@@ -199,6 +210,56 @@ typedef const char* (__cdecl *ScanGetTextFn)(int slotIndex);
 static ScanGetTextFn s_originalScanGetText = nullptr;
 static bool s_scanGetTextHookInstalled = false;
 static volatile LONG s_scanHookFireCount = 0;
+
+// ============================================================================
+// v0.14.72: HandleBattleText — hook-forward entry point for sub_47EC70
+// ============================================================================
+//
+// sub_47EC70 is FF8's canonical "fetch battle text by text_id" function
+// per Aaron's user memory (used for victory text and other in-battle
+// strings). First instructions confirm the signature is
+//   const char* __cdecl get_battle_text(int text_id)
+// with internal lookup `pos = u16 at [0x01CF8B50 + text_id*2]` and
+// fallback ptr 0x01CFF84C if pos == 0xFFFF (not-present sentinel).
+//
+// HOOK ARCHITECTURE (v0.14.72):
+//
+// sub_47EC70 has exactly ONE hook installer in this codebase —
+// InstallBattleTextHooks() in battle_tts_victory.inl, which has been
+// installing the victory text hook since v0.13.14. v0.14.68-diag added
+// a SECOND installer here in scan_tts.cpp for the type-label capture
+// work; that second installer silently lost the MinHook race
+// (MH_ERROR_ALREADY_CREATED for whichever ran second) and broke
+// victory phase detection. v0.14.72 removes that second installer
+// entirely — the victory hook now forwards every sub_47EC70 call into
+// this HandleBattleText function via a one-line call after s_origBt1.
+//
+// Internally we gate on GetScanFlightSlot() so this is a near-no-op
+// outside an active scan event (the victory hook itself runs on every
+// sub_47EC70 call, ~hundreds per battle frame, so we have to be cheap
+// in the hot path).
+static const uint32_t TYPE_LABEL_MONSTER_TEXT_ID = 36;  // 0x24, returns 'Monster'
+
+// v0.14.69: Type-label tracking state. The Scan UI renders the
+// 'Fly Monster' / 'Earth Monster' / etc. label at the bottom-left
+// via TWO consecutive sub_47EC70 calls: first the type prefix (e.g.
+// text_id=99 returns 'Fly' for Glacial Eye), then text_id=36 which
+// returns the universal 'Monster' suffix.
+//
+// We capture the type label by tracking the most recent NON-Monster
+// call's returned bytes in s_lastTypePrefixBytes. When text_id=36
+// fires during a Scan UI session, we decode the prior bytes via
+// FF8TextDecode::Decode and compose '{prefix} Monster' into the
+// active slot's typeLabel cache field.
+//
+// We snapshot the encoded bytes (not a decoded string) because the
+// engine reuses its scan_text_data buffer between calls — by the
+// time text_id=36 fires, the previous returned pointer may already
+// be invalidated. The byte snapshot is stable for as long as we hold
+// it, and the FF8 decoder is fast enough to run on the call edge.
+static constexpr int  TYPE_PREFIX_MAX_BYTES = 32;
+static uint8_t        s_lastTypePrefixBytes[TYPE_PREFIX_MAX_BYTES] = {};
+static int            s_lastTypePrefixLen = 0;
 
 // ============================================================================
 // Memory read helpers (SEH-guarded)
@@ -485,10 +546,27 @@ static void BuildAutoAnnounce(const ScanSnapshot& snap, char* out, int outSize)
 // readable.
 static void FormatLevel(const ScanSnapshot& snap, char* out, int outSize)
 {
+    // v0.14.69: If the type label was captured during the Scan UI
+    // session (e.g. 'Fly Monster'), append it to the level announce
+    // so key 3 says 'Level 14, Fly Monster.' instead of just
+    // 'Level 14.'. Type label may be empty if the user pressed key 3
+    // before the Scan UI fully opened, or for ally targets where the
+    // engine doesn't fetch a type prefix — in those cases we fall
+    // back to the plain level announce.
+    bool hasType = (snap.typeLabel[0] != '\0');
     if (snap.level > 0) {
-        snprintf(out, outSize, "Level %u.", (unsigned)snap.level);
+        if (hasType) {
+            snprintf(out, outSize, "Level %u, %s.",
+                     (unsigned)snap.level, snap.typeLabel);
+        } else {
+            snprintf(out, outSize, "Level %u.", (unsigned)snap.level);
+        }
     } else {
-        snprintf(out, outSize, "Level unknown.");
+        if (hasType) {
+            snprintf(out, outSize, "Level unknown, %s.", snap.typeLabel);
+        } else {
+            snprintf(out, outSize, "Level unknown.");
+        }
     }
 }
 
@@ -558,6 +636,18 @@ void OnScanCast(int targetSlot, bool fromActionLayer)
     // Scan event will pick this up and announce.
     CaptureSnapshot(targetSlot);
     InterlockedExchange(&s_pendingScanSlot, (LONG)targetSlot);
+
+    // v0.14.70-diag: Per-scan reset of the type-label prefix tracking
+    // buffer. v0.14.69 only reset on OnBattleEnter — if a prior scan in
+    // the same battle left stale prefix bytes (e.g. last call was the
+    // 'Fly' for the previous scan), the next scan's text_id=36 fire
+    // could compose a wrong label using the stale bytes. By clearing
+    // here we guarantee each scan starts with a clean buffer.
+    // (CaptureSnapshot above already memset the slot's typeLabel via
+    // its own memset(&snap, 0, sizeof(snap)) so we don't need to clear
+    // that here.)
+    memset(s_lastTypePrefixBytes, 0, sizeof(s_lastTypePrefixBytes));
+    s_lastTypePrefixLen = 0;
 
     // v0.14.60: Reset the sub_B687C0 fire counter so the next fire is
     // counted as #1 of THIS scan, not the cumulative count across all
@@ -688,6 +778,10 @@ void OnBattleEnter()
     // first scan in this battle starts clean. Subsequent scans within the
     // same battle reset it again via OnScanCast(_, true).
     InterlockedExchange(&s_scanHookFireCount, 0);
+    // v0.14.69: Reset the type-label prefix tracking buffer so a stale
+    // prefix from a prior battle can't leak into this battle's first scan.
+    memset(s_lastTypePrefixBytes, 0, sizeof(s_lastTypePrefixBytes));
+    s_lastTypePrefixLen = 0;
     Log::Battle("BattleTTS: [SCAN-TTS] OnBattleEnter — cache + screen state + hook count reset");
 }
 
@@ -806,10 +900,161 @@ static void InstallScanGetTextHook()
              (uint32_t)(uintptr_t)s_originalScanGetText);
 }
 
+// v0.14.70-diag: Returns the slot whose Scan event is currently in
+// flight, covering BOTH the action-layer phase (s_pendingScanSlot >= 0,
+// set by OnScanCast at action-commit) AND the visible Scan UI phase
+// (s_scanScreenActiveSlot >= 0, set by OnScanPopupSpawn at fire #1).
+// Returns -1 if no scan is in flight.
+//
+// The active slot takes priority over pending: in normal flow, fire #1
+// consumes s_pendingScanSlot (clears to -1) and sets
+// s_scanScreenActiveSlot in the same OnScanPopupSpawn call, so they're
+// not both >= 0 simultaneously. But in the brief window between those
+// two writes (single function, ~microseconds), reading the active slot
+// first is safe.
+//
+// This widens the v0.14.69 capture gate. v0.14.69 only captured during
+// the visible Scan UI phase (IsScreenActive()); for some monster types
+// the engine renders the type label DURING the cast animation, before
+// fire #1, so v0.14.69 silently skipped those bytes. The wider gate
+// covers the entire action-layer-through-screen-close window so the
+// engine's render-order timing doesn't matter.
+static int GetScanFlightSlot()
+{
+    int active = (int)InterlockedCompareExchange(&s_scanScreenActiveSlot, -1, -1);
+    if (active >= 0) return active;
+    int pending = (int)InterlockedCompareExchange(&s_pendingScanSlot, -1, -1);
+    return pending;
+}
+
+// v0.14.71: HandleBattleText — captures the Scan UI's type label
+// (e.g. 'Fly Monster') by observing two consecutive sub_47EC70 calls
+// during scan flight. See the s_lastTypePrefixBytes comment above for
+// the capture mechanism.
+//
+// v0.14.72: Converted from a standalone MinHook callback
+// (HookedGetBattleText) into a public function called from the victory
+// module's existing hook on sub_47EC70 (HookedBtCandidate1 in
+// battle_tts_victory.inl). The caller has already invoked the original
+// engine function; we receive the textId and the returned char* and
+// process them. See the architecture comment above the
+// TYPE_LABEL_MONSTER_TEXT_ID constant for why the dual-hook design was
+// abandoned.
+//
+// For monsters with a type label (Fly-type Bite Bug / Glacial Eye /
+// Buel etc.), the engine fetches the type prefix string via
+// sub_47EC70(prefixId) where prefixId varies per monster type (e.g.
+// text_id=99 returns 'Fly'), then immediately fetches sub_47EC70(36)
+// which returns 'Monster'. We snapshot the previous call's bytes and
+// compose '{prefix} Monster' when text_id=36 fires.
+//
+// For monsters without a type label (Fastitocalon and many others),
+// the engine never calls sub_47EC70(36) at all during the scan UI
+// render — confirmed via v0.14.70-diag's BATTLE-TEXT-LITE log + visual
+// screenshot proof. In that case we silently leave typeLabel empty and
+// FormatLevel falls back to plain 'Level N.' on key 3, which correctly
+// mirrors the on-screen UI.
+//
+// Gate (v0.14.70-diag onward): GetScanFlightSlot() covers BOTH the
+// action-layer phase (s_pendingScanSlot >= 0) AND the visible Scan UI
+// phase (s_scanScreenActiveSlot >= 0). Strict superset of v0.14.69's
+// IsScreenActive()-only gate — robustness improvement against any
+// future case where the engine might fetch the type label during cast
+// animation. Outside scan flight this function is a passthrough
+// no-op — critical because the victory hook calls us on every
+// sub_47EC70 invocation (~hundreds per battle frame).
+
+static int SnapshotPrefixBytesSafe(const char* result, uint8_t* outBuf, int outBufSize)
+{
+    if (!result || outBufSize <= 0) return 0;
+    int copied = 0;
+    __try {
+        for (int i = 0; i < outBufSize; i++) {
+            uint8_t bv = *(const uint8_t*)(result + i);
+            outBuf[i] = bv;
+            copied++;
+            if (bv == 0) break;  // null terminator — stop
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        copied = 0;
+    }
+    return copied;
+}
+
+static void ComposeTypeLabelToBuf(const uint8_t* prefixBytes, int prefixLen,
+                                  char* outBuf, int outBufSize)
+{
+    if (!outBuf || outBufSize <= 0) return;
+    outBuf[0] = '\0';
+    if (!prefixBytes || prefixLen <= 0) return;
+
+    // FF8TextDecode::Decode handles the encoding rules (uppercase
+    // encoded = decoded + 4, lowercase encoded = decoded - 2, 0x20 =
+    // space, 0x02 = section separator, 0x00 = terminator).
+    std::string prefix = FF8TextDecode::Decode(prefixBytes, prefixLen);
+    if (prefix.empty()) return;
+
+    // Trim any trailing nulls / whitespace the decoder might emit.
+    while (!prefix.empty() &&
+           (prefix.back() == ' ' || prefix.back() == '\t' ||
+            prefix.back() == '\n' || prefix.back() == '\0')) {
+        prefix.pop_back();
+    }
+    if (prefix.empty()) return;
+
+    snprintf(outBuf, outBufSize, "%s Monster", prefix.c_str());
+}
+
+void HandleBattleText(int textId, const char* result)
+{
+    // Hot path: outside any scan flight, do nothing. The victory hook
+    // calls us on every sub_47EC70 invocation (~hundreds per battle
+    // frame), so this early-return matters for performance.
+    int slot = GetScanFlightSlot();
+    if (slot < 0 || result == nullptr) {
+        return;
+    }
+
+    if ((uint32_t)textId == TYPE_LABEL_MONSTER_TEXT_ID) {
+        // text_id=36 ('Monster' suffix) just fired during scan flight.
+        // The previous call's bytes (held in s_lastTypePrefixBytes) are
+        // the type prefix — decode and compose the full label. Single-
+        // write per scan event (we don't overwrite if text_id=36 ever
+        // refetches for some other UI element).
+        if (slot >= 0 && slot < BATTLE_TOTAL_SLOTS &&
+            s_lastTypePrefixLen > 0 &&
+            s_scanCache[slot].typeLabel[0] == '\0') {
+            char composed[64] = {};
+            ComposeTypeLabelToBuf(s_lastTypePrefixBytes,
+                                   s_lastTypePrefixLen,
+                                   composed, sizeof(composed));
+            if (composed[0] != '\0') {
+                strncpy(s_scanCache[slot].typeLabel, composed,
+                        sizeof(s_scanCache[slot].typeLabel) - 1);
+                s_scanCache[slot].typeLabel[
+                    sizeof(s_scanCache[slot].typeLabel) - 1] = '\0';
+                Log::Battle("BattleTTS: [SCAN-TTS] Type label captured slot=%d typeLabel='%s'",
+                            slot, s_scanCache[slot].typeLabel);
+            }
+        }
+    } else {
+        // Any other text_id during scan flight — snapshot its bytes as
+        // a candidate prefix. The next text_id=36 will use whichever
+        // bytes are most recent.
+        s_lastTypePrefixLen = SnapshotPrefixBytesSafe(
+            result, s_lastTypePrefixBytes, TYPE_PREFIX_MAX_BYTES);
+    }
+}
+
 void Initialize()
 {
-    Log::Mod("[SCAN-TTS] Initialized (v0.14.60: action-layer captures snapshot, sub_B687C0 first-fire announces; keys 1..4).");
+    Log::Mod("[SCAN-TTS] Initialized (v0.14.72: sub_47EC70 forwarded from victory hook, sub_B687C0 owned here).");
     InstallScanGetTextHook();
+    // v0.14.72: No InstallGetBattleTextHook() call — sub_47EC70 is now
+    // owned by InstallBattleTextHooks() in battle_tts_victory.inl and
+    // forwards into HandleBattleText. See architecture comment above
+    // HandleBattleText for why the v0.14.68-diag dual-hook design was
+    // abandoned.
     InterlockedExchange(&s_pendingScanSlot, -1);
     InterlockedExchange(&s_scanScreenActiveSlot, -1);
     InterlockedExchange(&s_scanHookFireCount, 0);
@@ -817,3 +1062,4 @@ void Initialize()
 }
 
 }  // namespace ScanTTS
+

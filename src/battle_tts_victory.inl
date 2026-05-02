@@ -215,6 +215,16 @@ static uint32_t __cdecl HookedBtCandidate1(uint32_t a1, uint32_t a2, uint32_t a3
     // Call original first to get the returned text pointer
     uint32_t result = s_origBt1(a1, a2, a3, a4, a5, a6, a7, a8);
     
+    // v0.14.72: Forward to ScanTTS so it can observe sub_47EC70 calls
+    // during a Scan UI session and capture the on-screen type label
+    // (e.g. 'Fly Monster'). This restores unified ownership of
+    // sub_47EC70 — v0.14.68-diag through v0.14.71 had a separate hook
+    // installed from scan_tts.cpp that won the address and silently
+    // broke this victory hook (MH_CreateHook FAILED: 3 =
+    // MH_ERROR_ALREADY_CREATED). HandleBattleText is internally gated
+    // on scan-flight state so it's a near-no-op outside an active scan.
+    ::ScanTTS::HandleBattleText((int)a1, (const char*)result);
+    
     // Smart logging during victory (mode 4/5/100)
     {
         uint16_t mode = 0;

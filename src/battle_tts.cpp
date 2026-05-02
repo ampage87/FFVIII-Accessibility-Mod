@@ -69,6 +69,18 @@ namespace ScanTTS {
     int  GetActiveSlot();
     void SpeakField(int fieldId);
     void OnBattleEnter();
+    // v0.14.66-diag: Forward decl for the F12-gated diagnostic dump.
+    // Wired into PollHPCheckKeys (battle_tts_hp.inl) so it polls every
+    // frame the battle loop runs. Internally edge-detects F12 and gates
+    // on IsScreenActive() so it's a cheap no-op outside its narrow
+    // active window.
+    void PollDiagnosticKey();
+    // v0.14.72: Forward decl for the sub_47EC70 hook-forward handler
+    // called from HookedBtCandidate1 in battle_tts_victory.inl. See
+    // scan_tts.h for the architecture rationale (single canonical owner
+    // of sub_47EC70, replacing the conflicting scan_tts.cpp hook from
+    // v0.14.68-diag through v0.14.71).
+    void HandleBattleText(int textId, const char* result);
 }
 
 namespace BattleTTS {
