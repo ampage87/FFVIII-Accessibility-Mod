@@ -313,6 +313,35 @@ static void PollBattleMagicId(void)
                 // whether the GF is junctioned to a party slot (e.g. Phoenix
                 // from a Phoenix Pinion item, Odin auto-summon, Boko Choco).
                 GfAudioDesc::OnGFAnimationStart(magicId);
+            } else if (magicId == 39) {
+                // v0.14.50: Scan spell. Effect ID 39 (FF8BattleEffect::Scan,
+                // confirmed via FFNx canary ff8/battle/effects.h). Resolve the
+                // current target from the standard battle target bitmask at
+                // 0x01D76884 (the same source the target-selection TTS reads).
+                // Single-bit -> single target; multi-bit / zero -> -1, which
+                // ScanTTS::OnScanCast logs and skips. The bitmask is set
+                // during target selection and committed before the action
+                // dispatches, so by the time battle_magic_id transitions to
+                // 39 it should still hold the chosen target.
+                uint8_t mask = 0;
+                __try { mask = *(uint8_t*)0x01D76884; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                int slot = -1;
+                if (mask != 0) {
+                    // Reject multi-bit (all-target) bitmasks so we don't
+                    // announce against an arbitrary slot. Scan only ever
+                    // targets a single entity in normal play; a multi-bit
+                    // mask here suggests we're catching the bitmask in a
+                    // transient state and should defer to a future slice's
+                    // tighter signal.
+                    bool singleBit = ((mask & (mask - 1)) == 0);
+                    if (singleBit) slot = BitmaskToSlot(mask);
+                }
+                Log::Battle("BattleTTS: [SCAN-TTS] Detected effect 39 (Scan), targetMask=0x%02X resolvedSlot=%d",
+                           (unsigned)mask, slot);
+                // v0.14.57: action-layer cue — owns the 30 s hook-suppression
+                // window so the Scan UI's sub_84F860 / sub_B687C0 hooks (which
+                // fire 5-15 s later when the window opens) don't re-announce.
+                ScanTTS::OnScanCast(slot, /*fromActionLayer=*/true);
             }
             s_prevBattleMagicId = magicId;
         }

@@ -242,11 +242,20 @@ static const char* GetSlotName(int slot, char* nameBuf, int bufSize)
 
 // ============================================================================
 // v0.10.35: Party HP & Status check keys (1/2/3 = individual, H = full party)
+// v0.14.59: Number keys 1..0 now route to ScanTTS::SpeakField when a Scan
+//           window is open on screen. See PollHPCheckKeys below.
 // ============================================================================
 
 static bool s_hpKey1WasDown = false;
 static bool s_hpKey2WasDown = false;
 static bool s_hpKey3WasDown = false;
+static bool s_hpKey4WasDown = false;
+static bool s_hpKey5WasDown = false;
+static bool s_hpKey6WasDown = false;
+static bool s_hpKey7WasDown = false;
+static bool s_hpKey8WasDown = false;
+static bool s_hpKey9WasDown = false;
+static bool s_hpKey0WasDown = false;
 static bool s_hpKeyHWasDown = false;
 
 // Build a status effect string from the entity's persistent + timed status bytes.
@@ -521,16 +530,56 @@ static void PollHPCheckKeys()
     bool key1 = (GetAsyncKeyState('1') & 0x8000) != 0;
     bool key2 = (GetAsyncKeyState('2') & 0x8000) != 0;
     bool key3 = (GetAsyncKeyState('3') & 0x8000) != 0;
+    bool key4 = (GetAsyncKeyState('4') & 0x8000) != 0;
+    bool key5 = (GetAsyncKeyState('5') & 0x8000) != 0;
+    bool key6 = (GetAsyncKeyState('6') & 0x8000) != 0;
+    bool key7 = (GetAsyncKeyState('7') & 0x8000) != 0;
+    bool key8 = (GetAsyncKeyState('8') & 0x8000) != 0;
+    bool key9 = (GetAsyncKeyState('9') & 0x8000) != 0;
+    bool key0 = (GetAsyncKeyState('0') & 0x8000) != 0;
     bool keyH = (GetAsyncKeyState('H') & 0x8000) != 0;
-    
-    if (key1 && !s_hpKey1WasDown) AnnouncePartyMemberHP(0);
-    if (key2 && !s_hpKey2WasDown) AnnouncePartyMemberHP(1);
-    if (key3 && !s_hpKey3WasDown) AnnouncePartyMemberHP(2);
+
+    // v0.14.59: When a Scan window is open on screen, number keys 1..0
+    // query that target's cached snapshot via ScanTTS::SpeakField. The
+    // bindings (per NEXT_SESSION_PROMPT.md):
+    //   1=Name 2=Description 3=Level 4=HP 5=Stats 6=Weak 7=Absorb
+    //   8=Nullify 9=StatusRes 0=ActiveStatus.
+    // Outside the Scan window (the common case), 1/2/3 retain their
+    // historical ally-HP behavior; 4..0 do nothing.
+    // ScanTTS::IsScreenActive() reads s_scanScreenActiveSlot via an
+    // atomic compare-exchange so it's safe to call here on every poll.
+    if (::ScanTTS::IsScreenActive()) {
+        if (key1 && !s_hpKey1WasDown) ::ScanTTS::SpeakField(1);
+        if (key2 && !s_hpKey2WasDown) ::ScanTTS::SpeakField(2);
+        if (key3 && !s_hpKey3WasDown) ::ScanTTS::SpeakField(3);
+        if (key4 && !s_hpKey4WasDown) ::ScanTTS::SpeakField(4);
+        if (key5 && !s_hpKey5WasDown) ::ScanTTS::SpeakField(5);
+        if (key6 && !s_hpKey6WasDown) ::ScanTTS::SpeakField(6);
+        if (key7 && !s_hpKey7WasDown) ::ScanTTS::SpeakField(7);
+        if (key8 && !s_hpKey8WasDown) ::ScanTTS::SpeakField(8);
+        if (key9 && !s_hpKey9WasDown) ::ScanTTS::SpeakField(9);
+        if (key0 && !s_hpKey0WasDown) ::ScanTTS::SpeakField(0);
+    } else {
+        if (key1 && !s_hpKey1WasDown) AnnouncePartyMemberHP(0);
+        if (key2 && !s_hpKey2WasDown) AnnouncePartyMemberHP(1);
+        if (key3 && !s_hpKey3WasDown) AnnouncePartyMemberHP(2);
+        // 4..0 unbound outside the Scan window (the v0.14.x chapter
+        // plan reserves them for the full Scan UX). Pressing them
+        // outside a Scan window is a silent no-op.
+    }
+
     if (keyH && !s_hpKeyHWasDown) AnnounceFullPartyHP();
-    
+
     s_hpKey1WasDown = key1;
     s_hpKey2WasDown = key2;
     s_hpKey3WasDown = key3;
+    s_hpKey4WasDown = key4;
+    s_hpKey5WasDown = key5;
+    s_hpKey6WasDown = key6;
+    s_hpKey7WasDown = key7;
+    s_hpKey8WasDown = key8;
+    s_hpKey9WasDown = key9;
+    s_hpKey0WasDown = key0;
     s_hpKeyHWasDown = keyH;
 }
 

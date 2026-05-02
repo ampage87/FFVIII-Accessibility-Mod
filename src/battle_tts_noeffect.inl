@@ -71,8 +71,32 @@
 //   * GetSlotName — battle_tts_hp.inl
 //   * s_statusQueueCount — battle_status.inl
 //   * s_lastSpellMissAnnounceTick — battle_tts_sprite.inl
+//   * s_lastScanCastTick (v0.14.55) — battle_tts_sprite.inl
 //   * Validate_AnnounceEvent — forward declared in battle_tts.cpp
 //   * BattleSpeakEvent — battle_tts.cpp body
+//   * ScanTTS::OnScanCast (v0.14.55) — forward declared at file scope
+//     in battle_tts.cpp BEFORE `namespace BattleTTS {` opens, which puts
+//     the declaration in the GLOBAL ::ScanTTS namespace where the linker
+//     can find the definition in scan_tts.cpp. We do NOT redeclare it
+//     inside this .inl, because this .inl is included inside
+//     `namespace BattleTTS {` — a `namespace ScanTTS { ... }` block here
+//     would create `BattleTTS::ScanTTS::OnScanCast`, which is a
+//     different symbol that the linker can't find. (v0.14.55 BAT FAIL
+//     LNK2019 was caused by exactly this mistake.)
+
+// v0.14.55: ScanTTS::OnScanCast is already forward-declared at file
+// scope in battle_tts.cpp (line ~220, BEFORE `namespace BattleTTS {`).
+// That declaration is in the global `::ScanTTS` namespace where the
+// linker can find scan_tts.cpp's definition. We must NOT add a local
+// `namespace ScanTTS { void OnScanCast(int); }` here — doing so creates
+// a different symbol `BattleTTS::ScanTTS::OnScanCast` (because this
+// .inl is included inside `namespace BattleTTS`) and the linker fails
+// with LNK2019 (which is exactly what happened in v0.14.55).
+//
+// The call site below uses unqualified `ScanTTS::OnScanCast(...)`. C++
+// name lookup from inside `namespace BattleTTS` first checks for
+// `BattleTTS::ScanTTS::OnScanCast` (none) and falls through to the
+// global `::ScanTTS::OnScanCast` declared in battle_tts.cpp.
 
 // ============================================================================
 // Tunables
@@ -265,6 +289,93 @@ static void PollPendingNoEffectAnnouncements()
 // (turns are sequential under EWM, and even non-EWM casts take >100ms).
 static void NoEffect_RecordSnapshot(uint32_t targetMask)
 {
+    // v0.14.55: Scan suppression and announcement at the action layer.
+    // The Scan-name popup fires from sub_48D200 just before sub_48E830
+    // calls this snapshot recorder, so s_lastScanCastTick is always
+    // fresh by the time we get here. Scan never produces a HP / status
+    // / display change — the watchdog has nothing to observe and would
+    // queue 'No effect on <target>' ~6 s later. Same idea as v0.14.51's
+    // CancelNoEffectWatchdogForSlot, but earlier in the pipeline so we
+    // never record the snapshot in the first place. Critically, this
+    // also catches the compacted view shown on repeat Scans of the same
+    // target in a battle — v0.14.54 BAT proved that view skips both
+    // sub_B687C0 and sub_84F860 hooks, so the action-layer detection
+    // here is the only path that fires for repeat Scans. We resolve the
+    // target slot from targetMask and call ScanTTS::OnScanCast directly
+    // so the player gets the genuine Scan announcement; OnScanCast's
+    // own dedup makes a no-op out of any subsequent dispatcher / text
+    // hook fires for the same Scan UI session.
+    {
+        // Read-and-clear atomically so the tick is consumed by exactly
+        // one call to NoEffect_RecordSnapshot. Without this, a fast
+        // follow-up cast on a different target within SCAN_CAST_RECENT_MS
+        // would also be suppressed (e.g. Scan Bite Bug 1, then Sleep on
+        // Bite Bug 2 a half-second later — the second call would see
+        // the same Scan tick and skip the legitimate Sleep watchdog).
+        DWORD scanCastTick = (DWORD)InterlockedExchange(
+            &s_lastScanCastTick, 0);
+        if (scanCastTick != 0 &&
+            (GetTickCount() - scanCastTick) <= SCAN_CAST_RECENT_MS) {
+            // Resolve target slot for the announcement.
+            int scanSlot = -1;
+            if (targetMask != 0 && (targetMask & (targetMask - 1)) == 0) {
+                scanSlot = BitmaskToSlot((uint8_t)(targetMask & 0xFF));
+            }
+            Log::Battle("BattleTTS: [NOEFFECT-WATCH] Scan detected "
+                        "(scanCastTick=%u age=%ums, mask=0x%X resolvedSlot=%d), "
+                        "skipping snapshot and announcing directly",
+                        (unsigned)scanCastTick,
+                        (unsigned)(GetTickCount() - scanCastTick),
+                        (unsigned)targetMask, scanSlot);
+            if (scanSlot >= 0 && scanSlot < BATTLE_TOTAL_SLOTS) {
+                // v0.14.57: action-layer cue — owns the 30 s hook-suppression
+                // window so the Scan UI's sub_84F860 / sub_B687C0 hooks
+                // (which fire 5-15 s later when the window opens) don't
+                // re-announce. Without this flag the player heard the
+                // 'Bite Bug. Level 9. HP 162 of 162.' announcement TWICE
+                // per Scan in v0.14.56 BAT (once at cast-commit, once at
+                // UI-open).
+                ScanTTS::OnScanCast(scanSlot, /*fromActionLayer=*/true);
+            }
+            // Don't record the snapshot. The watchdog stays inactive; no
+            // 'No effect on <target>' will be queued.
+            return;
+        }
+    }
+
+    // v0.14.49: Draw-Stock suppression. When the player chose
+    // Draw > Target > Spell > Stock, the action transfers a spell to
+    // inventory and does NOT touch the enemy. The watchdog has no
+    // HP / status / flush signal to observe and would announce
+    // 'No effect on <enemy>' ~6 s later. Skip the snapshot in this case.
+    //
+    // IMPORTANT: only suppress for Stock. Draw > Cast (D9 == 1) DOES
+    // affect the target -- a Fire cast on a Fire-absorbing enemy
+    // genuinely has no effect and SHOULD announce. So we gate strictly on
+    // (Draw command was selected this turn) AND (live Stock/Cast byte == 0).
+    //
+    // s_submenuCommandId persists across the turn-end -> action-execute
+    // transition: PollTurnAndCommands sets it inside EnterSubmenu during
+    // Draw nav (= 0x16), and only resets it to 0 on the NEXT turn's start.
+    // So at sub_48E830 fire time it's still 0x16 for the just-confirmed
+    // Draw action. We do NOT add s_inSubmenu to the gate because that
+    // flag IS cleared on activeChar -> 0xFF before sub_48E830 fires.
+    //
+    // We read the live byte at 0x01D768D9 every time (not s_drawStockCastPrev)
+    // because the latter stays 0xFF when the player confirms Stock at the
+    // default cursor without ever moving it. The live byte is the engine's
+    // authoritative selection at the moment the action commits.
+    if (s_submenuCommandId == 0x16) {
+        uint8_t stockCastNow = 0xFF;
+        __try { stockCastNow = *(uint8_t*)0x01D768D9; } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        if (stockCastNow == 0) {
+            Log::Battle("BattleTTS: [NOEFFECT-WATCH] Draw-Stock detected "
+                        "(D9=0, cmd=0x16, mask=0x%X), skipping snapshot",
+                        (unsigned)targetMask);
+            return;
+        }
+    }
+
     if (targetMask == 0) return;
     // Single-target only for v1. (mask & (mask-1)) == 0 detects power-of-two.
     if ((targetMask & (targetMask - 1)) != 0) return;
@@ -459,6 +570,47 @@ static void PollPendingSpellNoEffect()
     NoEffect_QueueAnnouncement(slot, 0, buf, "no-effect");
     Log::Battle("BattleTTS: [SPELL-NOEFFECT] %s queued (slot=%d, watchdog %ums)",
                 buf, slot, (unsigned)elapsed);
+}
+
+// ============================================================================
+// External cancellation API (v0.14.51)
+// ============================================================================
+//
+// Called by other modules (currently ScanTTS::OnScanCast) when they have
+// already produced an authoritative TTS announcement for a given slot,
+// and the no-effect watchdog should NOT fire its fallback for that slot.
+//
+// The Scan case is the motivating example: a Scan cast goes through the
+// same sub_48E830 player-magic action-announce path that records the
+// watchdog snapshot, but Scan deals no HP / status / display change
+// because it only opens an info window. Without cancellation the
+// watchdog would queue 'No effect on <target>' ~6 s after the cast,
+// stepping on or contradicting the genuine Scan announcement.
+//
+// Cancellation clears BOTH the snapshot stage (s_pendingSpellNoEffect,
+// not yet expired) AND any already-queued announcement
+// (s_pendingNoEffectAnnounce, watchdog already fired but anim-flush has
+// not yet flushed). In normal Scan timing only the snapshot stage is
+// active; the queued-announcement clear is defensive.
+static void NoEffect_CancelForSlot(int slot)
+{
+    if (slot < 0 || slot >= BATTLE_TOTAL_SLOTS) return;
+
+    if (s_pendingSpellNoEffect.active &&
+        s_pendingSpellNoEffect.targetSlot == slot) {
+        Log::Battle("BattleTTS: [NOEFFECT-CANCEL] watchdog snapshot cleared "
+                    "for slot=%d (external authoritative announcement)",
+                    slot);
+        s_pendingSpellNoEffect.active = false;
+    }
+
+    if (s_pendingNoEffectAnnounce.active &&
+        s_pendingNoEffectAnnounce.slot == slot) {
+        Log::Battle("BattleTTS: [NOEFFECT-CANCEL] queued announcement '%s' "
+                    "cleared for slot=%d (external authoritative announcement)",
+                    s_pendingNoEffectAnnounce.text, slot);
+        s_pendingNoEffectAnnounce.active = false;
+    }
 }
 
 // ============================================================================

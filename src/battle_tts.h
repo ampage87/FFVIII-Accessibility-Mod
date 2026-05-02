@@ -25,6 +25,43 @@ uint8_t GetDrawExecutingSlot();
 // v0.12.52: Validate Draw character by diffing magic inventories.
 void ValidateDrawCharacter(uint8_t claimedSlot);
 
+// v0.14.51: Cancel any in-flight no-effect watchdog (and any already-queued
+// no-effect announcement) for the given slot. Called by modules that have
+// produced an authoritative TTS announcement which superseeds the watchdog's
+// fallback. Currently used by ScanTTS::OnScanCast — Scan goes through the
+// same sub_48E830 player-magic action-announce path that records the
+// watchdog snapshot, but Scan deals no HP / status / display change, so
+// without cancellation the watchdog would queue a spurious 'No effect on
+// <target>' ~6 s after the cast.
+void CancelNoEffectWatchdogForSlot(int slot);
+
+// v0.14.65: Non-blocking screenshot request. Sets the GL capture flag and
+// returns immediately; the next SwapBuffers call writes basePath.bmp +
+// basePath.png. Unlike the internal CaptureScreenshot() which blocks for up
+// to 160 ms waiting for the render thread, this variant is safe to call
+// from inside MinHook callbacks running on the game thread (e.g. the
+// sub_B687C0 hook in scan_tts.cpp) without freezing the game. Used by
+// ScanTTS to auto-capture the rendered Scan UI window for visual
+// validation against the in-memory entity stats.
+//
+// v0.14.65.3: optional frameDelay parameter defers the capture by N swap
+// frames so the caller can wait for FF8's typewriter text rendering to
+// finish drawing all values before the framebuffer is read. 0 (default)
+// preserves the v0.14.65 behavior — capture fires on the next swap.
+// Typical scan-UI value: 90 (≈1.5 s at 60 fps), enough to let the
+// description and stat-value typewriter complete.
+void RequestScreenshotAsync(const char* basePath, int frameDelay = 0);
+
+// v0.14.65.2: Return the absolute path to the diagnostic screenshots
+// directory. Lets other modules (currently ScanTTS) compose paths that
+// land alongside the existing kind4_*, poll_NEW_*, popup_time_* etc.
+// diagnostic captures rather than getting scattered across the FS based
+// on whatever the current working directory happens to be. The directory
+// itself is created on demand by the existing capture mechanisms (the
+// first SpriteScreenshot or KIND4 capture per battle calls
+// CreateDirectoryA on this path), so callers don't need to.
+const char* GetScreenshotDir();
+
 }  // namespace BattleTTS
 
 // ============================================================================

@@ -86,6 +86,12 @@ namespace Log {
     void Write(const char* format, ...);
 }
 namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); }
+// v0.14.63: ScanTTS::IsScreenActive() lets us know when the Scan UI window
+// is currently open. We suppress the show_dialog speak path during that window
+// (and only that window) because the rendered scan text duplicates the
+// scan_tts.cpp auto-announce. All other battle UI (Cast Fire, mid-battle
+// dialog, etc.) speaks normally through this hook.
+namespace ScanTTS { bool IsScreenActive(); }
 
 namespace FieldDialog {
 
@@ -1062,10 +1068,34 @@ static char __cdecl Hook_show_dialog(int32_t window_id, uint32_t state, int16_t 
             }
         }
 
-        Log::Dialog("FieldDialog: [SHOW_DIALOG-SPEAK] win[%d] mode=%u Speaking: \"%s\"",
-                   window_id, currentMode, speakText.c_str());
-        s_lastDialogSpoken = speakText;  // v04.25: track for F5 repeat
-        ScreenReader::Speak(speakText.c_str(), false);  // Queue mode
+        // v0.14.63: In battle mode, suppress only when the Scan UI window is
+        // currently open. ScanTTS::IsScreenActive() returns true between
+        // OnScanPopupSpawn (first sub_B687C0 fire — the moment the scan window
+        // renders on screen) and OnScanPopupDespawn (when the player dismisses
+        // it). During that window, the rendered scan text (name, description,
+        // "LEVEL X HP cur/max") would duplicate the scan_tts.cpp auto-announce
+        // — ScanTTS owns the announce, this hook stays silent. Outside the
+        // scan window (and outside battle entirely), all battle UI text speaks
+        // normally: "Cast Fire" spell-cast banners, mid-battle cutscene dialog,
+        // and any other window text the engine renders via show_dialog.
+        //
+        // Sequencing note: HookedScanGetText sets s_scanScreenActiveSlot BEFORE
+        // returning the text to the engine, and our show_dialog hook reads the
+        // window text AFTER calling the original. So by the time we check
+        // IsScreenActive() here, the flag is already set on the first scan
+        // render. v0.14.62's blanket battle-mode suppression silenced too much;
+        // v0.14.63 narrows the gate to only the scan-active period.
+        bool suppressForScan = (currentMode == 3 && ScanTTS::IsScreenActive());
+        if (suppressForScan) {
+            Log::Dialog("FieldDialog: [SHOW_DIALOG-SUPPRESS] win[%d] mode=3 scan-active text=\"%s\" "
+                       "— ScanTTS owns the announce while scan window is open",
+                       window_id, decoded.c_str());
+        } else {
+            Log::Dialog("FieldDialog: [SHOW_DIALOG-SPEAK] win[%d] mode=%u Speaking: \"%s\"",
+                       window_id, currentMode, speakText.c_str());
+            s_lastDialogSpoken = speakText;  // v04.25: track for F5 repeat
+            ScreenReader::Speak(speakText.c_str(), false);  // Queue mode
+        }
     } else {
         Log::Dialog("FieldDialog: [SHOW_DIALOG-TEXT] win[%d] (already spoken by opcode hook)",
                    window_id);

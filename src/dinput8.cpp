@@ -22,6 +22,7 @@
 #include "fmv_audio_desc.h"
 #include "fmv_skip.h"
 #include "gf_audio_desc.h"
+#include "scan_tts.h"
 #include "game_audio.h"
 #include "world_map.h"
 
@@ -106,6 +107,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     FmvSkip::Initialize();       // Creates kernel32 hooks (CreateFile/CloseHandle/ReadFile)
     FmvAudioDesc::Initialize(hOurModule);  // Loads VTT files from Audio Descriptions folder
     GfAudioDesc::Initialize(hOurModule);   // v0.14.44: GF summon audio descriptions
+    ScanTTS::Initialize();                  // v0.14.50: Scan spell TTS first slice
     FieldDialog::Initialize();   // v04.00: Hooks opcode dispatch table for dialog text capture
     FieldNavigation::Initialize(); // v05.00: Field navigation assistance
     NameBypass::Initialize();    // v04.26: Auto-bypass character/GF naming screens

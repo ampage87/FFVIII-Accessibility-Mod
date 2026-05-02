@@ -59,6 +59,23 @@ static const uint32_t SPRITE_SPAWN_ADDR = 0x00483400;
 static DWORD s_lastMissAnnounceTick[BATTLE_TOTAL_SLOTS] = {};
 static const DWORD MISS_ANNOUNCE_DEDUP_MS = 500;
 
+// v0.14.55: Scan-cast detection at the action layer. The popup hook
+// (HookedPopupSprite, sub_48D200) fires for every battle popup sprite,
+// including the spell-name popup that spawns at action-commit time. For
+// Scan specifically, the popup arrives with text_id=0x06 and value=0x32
+// (the latter is the spell ID 50 = Scan). This fires for ALL Scan casts
+// regardless of view path — critically, including the compacted view
+// shown on repeat Scans of the same target in a battle, which v0.14.54
+// BAT proved skips both sub_B687C0 AND sub_84F860 entirely. We capture
+// the tick when the Scan-name popup fires; battle_tts_noeffect.inl reads
+// this in NoEffect_RecordSnapshot to short-circuit the watchdog (Scan
+// produces no observable change) and invoke ScanTTS::OnScanCast directly
+// for the announcement. Because the popup hook fires BEFORE sub_48E830
+// (the action staging that records the watchdog snapshot), the tick is
+// always fresh by the time NoEffect_RecordSnapshot reads it.
+static volatile LONG s_lastScanCastTick = 0;
+static const DWORD   SCAN_CAST_RECENT_MS = 1000;
+
 // Per-battle diagnostic dedup — log each distinct (slot, text_id) pair
 // only the first time it fires. Keeps the log readable while still
 // revealing every new ID as it appears.
@@ -501,6 +518,18 @@ static uint32_t __cdecl HookedPopupSprite(uint32_t slot, uint32_t text_id,
         // Only the low byte of text_id is the actual sprite type; callers
         // sometimes pack other bits into the upper bytes.
         uint32_t tid = text_id & 0xFF;
+
+        // v0.14.55: Capture Scan-cast moment for the action-layer
+        // detection path. text_id=0x06 is the spell-name popup that
+        // appears above the caster as the action commits; value carries
+        // the spell ID. Spell ID 50 (0x32) is Scan. Updates every fire,
+        // BEFORE the dedup-for-logging check below — logging is
+        // throttled per-battle but the timestamp must update on every
+        // Scan cast, including repeats. Atomic to be safe even though
+        // hook is on game thread (mod thread polls reads it).
+        if (tid == 0x06 && (value & 0xFF) == 0x32) {
+            InterlockedExchange(&s_lastScanCastTick, (LONG)GetTickCount());
+        }
 
         // --- Diagnostic: log first occurrence of each (retaddr, slot, text_id) triple ---
         // v0.13.71: dedup now keyed on retaddr too so we see EVERY distinct

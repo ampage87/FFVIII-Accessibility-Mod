@@ -19,6 +19,17 @@ typedef BOOL (WINAPI *SwapBuffers_t)(HDC);
 static SwapBuffers_t s_origSwapBuffers = nullptr;
 static bool s_swapHookInstalled = false;
 static volatile bool s_captureRequested = false;
+// v0.14.65.3: optional frame-count delay between request and capture. The
+// existing scan capture path needs ~1-2 s for FF8's typewriter text
+// rendering to finish drawing all stat values — v0.14.65.2 BAT showed the
+// scan UI capture catching only labels ("STR DEF INT SPI DEX EVA") with
+// numeric values still un-rendered, plus the description column showing
+// only "Fast" / "A fi" partial typewriter chars. Delay is decremented
+// once per HookedSwapBuffers call and capture fires when it reaches 0.
+// 0 (default) preserves the v0.14.65 behavior — capture fires on the next
+// swap. Synchronous CaptureScreenshot() resets this to 0 so its 160 ms
+// poll-with-Sleep contract is unchanged.
+static volatile int s_captureFrameDelay = 0;
 static char s_captureBasePath[512] = {};
 
 // v0.13.75: forward-declare the sprite-record frame poller. The body is
@@ -835,6 +846,17 @@ static void PollPopupRecords()
                         cur.lifetime, cur.style, cur.secondary, cur.entity_ptr,
                         (unsigned)damageDisplay, s_pollFrameCounter);
 
+            // v0.14.60: Scan-window-spawn detection MOVED OUT of this
+            // function. The kind=0x06 val=50 popup spawns at action-commit
+            // time — about 9 seconds before the actual Scan UI window
+            // opens visually. v0.14.59 BAT proved the announce-on-spawn
+            // architecture fired too early; v0.14.60 moves the trigger
+            // to the first fire of the sub_B687C0 hook in scan_tts.cpp,
+            // which matches the on-screen render. The DESPAWN edge below
+            // remains the right "window closed" signal because the popup
+            // record stays alive for the full UI session and only goes
+            // away when the player dismisses the window.
+
             // v0.13.81: popup-signal screenshots are now the primary
             // validation artifact for non-damage events (action-announces,
             // spell-cast labels, miss text, status popups). Cap raised to 60
@@ -874,6 +896,18 @@ static void PollPopupRecords()
             Log::Battle("BattleTTS: [SPRITE-POLL] DESPAWN i=%d slot=%u kind=0x%02X val=%u (f=%u)",
                         i, prev.slot, prev.text_id, prev.value,
                         s_pollFrameCounter);
+
+            // v0.14.59: Scan-window-close detector. Falling edge of the
+            // same kind=0x06 val=50 popup that OnScanPopupSpawn observed
+            // above. Clears s_scanScreenActiveSlot so the keyboard
+            // router reverts number keys 1..0 to default ally-HP
+            // behavior. The snapshot cache is intentionally retained
+            // so re-scanning the same target later in the battle
+            // re-uses the cached data without going through the
+            // action-layer again.
+            if (prev.text_id == 0x06 && prev.value == 50) {
+                ::ScanTTS::OnScanPopupDespawn();
+            }
             // v0.13.92: end damage popup tracking, log summary.
             PopupLifeDiag_OnDespawn(i, prev, s_pollFrameCounter);
         } else {
@@ -1140,8 +1174,17 @@ static void PollSpritePool()
 static BOOL WINAPI HookedSwapBuffers(HDC hdc)
 {
     if (s_captureRequested) {
-        s_captureRequested = false;
-        DoGLCapture();
+        // v0.14.65.3: optional N-frame delay between request and capture.
+        // When s_captureFrameDelay > 0, decrement it and skip this swap;
+        // capture fires on the swap where the counter has reached 0. The
+        // synchronous CaptureScreenshot() path always passes 0 so its
+        // 160 ms Sleep-and-poll contract is preserved.
+        if (s_captureFrameDelay > 0) {
+            s_captureFrameDelay--;
+        } else {
+            s_captureRequested = false;
+            DoGLCapture();
+        }
     }
 
     // v0.14.0: sprite pool poll FIRST (before any other path can perturb
@@ -1204,6 +1247,11 @@ static void CaptureScreenshot(const char* basePath)
     // Set capture path and flag — actual capture happens in HookedSwapBuffers
     strncpy(s_captureBasePath, basePath, sizeof(s_captureBasePath) - 1);
     s_captureBasePath[sizeof(s_captureBasePath) - 1] = '\0';
+    // v0.14.65.3: reset the frame-delay counter so synchronous capture
+    // still fires on the very next swap (the 160 ms Sleep-poll loop below
+    // depends on this). Async paths set the counter explicitly via the
+    // RequestScreenshotAsync(basePath, frameDelay) overload.
+    s_captureFrameDelay = 0;
     s_captureRequested = true;
     // Wait briefly for the render thread to process it
     for (int i = 0; i < 10 && s_captureRequested; i++) {

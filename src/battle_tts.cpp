@@ -45,6 +45,31 @@ namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); b
 namespace Config { void Load(); int GetInt(const char* key, int defaultValue); void SetInt(const char* key, int value); const char* GetPath(); }
 // v0.14.44: GF summon AD trigger fired from PollBattleMagicId in battle_tts_ewm.inl.
 namespace GfAudioDesc { void OnGFAnimationStart(int effectId); }
+// v0.14.50: Scan spell TTS trigger fired from the same PollBattleMagicId. Scan
+// has its own effect ID (39) but reuses the GF detection plumbing.
+// v0.14.57: fromActionLayer parameter added — defaults to false; the
+// magicId==39 polling path in ewm.inl and the popup path in noeffect.inl
+// pass true to mark the call as the authoritative cast-time signal that
+// owns the 30 s hook-suppression window.
+// v0.14.59: Public API extended for the UX redesign — OnScanPopupSpawn /
+// OnScanPopupDespawn fire from the [SPRITE-POLL] emitter in screenshot.inl;
+// IsScreenActive / GetActiveSlot / SpeakField are consumed by the keyboard
+// router in PollHPCheckKeys (battle_tts_hp.inl); OnBattleEnter resets the
+// per-battle snapshot cache and screen state. Forward-declared HERE at
+// file scope (BEFORE `namespace BattleTTS {` opens) so the declarations
+// land in the GLOBAL `::ScanTTS` namespace where the linker can find
+// scan_tts.cpp's definitions. Repeating any of these inside an .inl file
+// would create `BattleTTS::ScanTTS::Foo` (a different symbol) and trigger
+// LNK2019 — see the v0.14.55 BAT FAIL note in DEVNOTES.md.
+namespace ScanTTS {
+    void OnScanCast(int targetSlot, bool fromActionLayer = false);
+    void OnScanPopupSpawn();
+    void OnScanPopupDespawn();
+    bool IsScreenActive();
+    int  GetActiveSlot();
+    void SpeakField(int fieldId);
+    void OnBattleEnter();
+}
 
 namespace BattleTTS {
 
@@ -350,6 +375,13 @@ static void OnBattleEnter()
     s_hpKey1WasDown = false;
     s_hpKey2WasDown = false;
     s_hpKey3WasDown = false;
+    s_hpKey4WasDown = false;
+    s_hpKey5WasDown = false;
+    s_hpKey6WasDown = false;
+    s_hpKey7WasDown = false;
+    s_hpKey8WasDown = false;
+    s_hpKey9WasDown = false;
+    s_hpKey0WasDown = false;
     s_hpKeyHWasDown = false;
 
     // Reset enemy name cache for new battle
@@ -399,6 +431,12 @@ static void OnBattleEnter()
     // events in the new battle. Reset clears all four dedup tables
     // (sub_483400, sub_4877F0, sub_48D200, kind=4 screenshot state).
     ResetSpriteSpawnState();
+
+    // v0.14.59: Reset Scan snapshot cache + screen-state flags. Cache
+    // entries from a previous battle are stale (different entity-array
+    // contents) and would speak garbage if the player pressed a number
+    // key during a Scan window in the new battle.
+    ::ScanTTS::OnBattleEnter();
     
     // Reset EWM cap state for new battle
     s_ewmFreezing = false;
@@ -847,6 +885,56 @@ uint8_t GetDrawExecutingSlot()
 void ValidateDrawCharacter(uint8_t claimedSlot)
 {
     s_lastValidatedDrawSlot = DiffMagicInventories(claimedSlot);
+}
+
+// v0.14.51: Public wrapper around the noeffect.inl static helper. Allows
+// other modules (currently ScanTTS) to suppress the spurious 'No effect
+// on <target>' watchdog announcement after they've produced their own
+// authoritative TTS for the same target.
+void CancelNoEffectWatchdogForSlot(int slot)
+{
+    NoEffect_CancelForSlot(slot);
+}
+
+// v0.14.65: Public non-blocking wrapper around the screenshot.inl static
+// flag pair (s_captureBasePath + s_captureRequested). The internal
+// CaptureScreenshot() in screenshot.inl polls for up to 160 ms via Sleep,
+// which would freeze the game thread if called from a MinHook callback.
+// This variant just sets the flag and returns; the next SwapBuffers tick
+// (within ~16 ms at 60 fps) picks it up and writes the .bmp/.png pair.
+// Aaron uploads the PNG to validate against in-memory state we just read.
+void RequestScreenshotAsync(const char* basePath, int frameDelay)
+{
+    if (!basePath || !basePath[0]) return;
+    strncpy(s_captureBasePath, basePath, sizeof(s_captureBasePath) - 1);
+    s_captureBasePath[sizeof(s_captureBasePath) - 1] = '\0';
+    // v0.14.65.3: capture deferred by frameDelay swap frames. 0 = next swap
+    // (preserves v0.14.65 behavior). HookedSwapBuffers decrements this each
+    // call and only fires DoGLCapture when it reaches 0.
+    s_captureFrameDelay = frameDelay < 0 ? 0 : frameDelay;
+    s_captureRequested = true;
+    // Caller does NOT wait — HookedSwapBuffers picks up the flag on the
+    // next frame (or after frameDelay frames) and runs DoGLCapture()
+    // inline (GL context current). If multiple requests stack up between
+    // SwapBuffers calls, the last one wins (s_captureBasePath +
+    // s_captureFrameDelay both get overwritten); that's fine for our
+    // throughput needs.
+}
+
+// v0.14.65.2: Public accessor for KIND4_SCREENSHOT_DIR. The constant lives
+// inside battle_tts_sprite.inl as a file-static, so it's only visible
+// within this translation unit (battle_tts.cpp + its included .inl files).
+// Other compilation units (scan_tts.cpp, etc.) need this accessor to
+// compose absolute paths that land in the same diagnostic directory as
+// the kind4_*, poll_NEW_*, popup_time_* captures. Without this, modules
+// using relative paths like 'Screenshots\\foo.png' resolve against
+// FF8.exe's CWD (the Steam install dir), scattering captures outside the
+// project tree. v0.14.65.1 hit exactly this issue — the scan_*.png file
+// landed in the FF8 install dir's Screenshots folder, where Claude has
+// no read access.
+const char* GetScreenshotDir()
+{
+    return KIND4_SCREENSHOT_DIR;
 }
 
 void Shutdown()
