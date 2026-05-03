@@ -196,6 +196,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
             static bool s_f3was = false, s_f4was = false;
             static bool s_f5was = false, s_f6was = false;
             static bool s_f7was = false, s_f8was = false;
+            static bool s_f11was = false;
             static bool s_vWas = false;
 
             bool grave = (GetAsyncKeyState(VK_OEM_3) & 0x8000) != 0; // ` key
@@ -207,6 +208,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
             bool f6 = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
             bool f7 = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
             bool f8 = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
+            bool f11 = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
             bool vkey = (GetAsyncKeyState('V') & 0x8000) != 0;
             bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
 
@@ -225,6 +227,37 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
             if (f6 && !s_f6was) GameAudio::SfxVolumeUp();
             if (f7 && !s_f7was) GameAudio::VolumeDown();   // BGM
             if (f8 && !s_f8was) GameAudio::VolumeUp();     // BGM
+            // v0.14.75: F11 = on-demand screenshot capture (was F12 in
+            // v0.14.74.4-diag). Promoted to a permanent feature after the
+            // diagnostic build proved its value (capturing the FF8 Config
+            // menu to find the Scan: Once/Always toggle, which closed the
+            // compacted-view chapter without writing fallback code). Moved
+            // off F12 so F12 stays free as the per-session diagnostic key
+            // per the F12 rule in userMemories. The previous F11 owners
+            // (FieldNavigation VISDIAG dump, MenuTTS Shift+F11
+            // StartMemoryMonitor, MenuTTS Ctrl+F11 DumpMenuScreenData)
+            // were research diagnostics for closed investigations — all
+            // removed in v0.14.75. The MenuTTS plain F11 user feature
+            // (AnnounceMenuSummary) was relocated to the M key. Builds
+            // an absolute path under the project's diagnostic screenshots
+            // dir, calls BattleTTS::RequestScreenshotAsync (sets the GL
+            // capture flag, returns immediately; the next SwapBuffers
+            // writes <path>.bmp + <path>.png), logs the path, speaks
+            // 'Screenshot captured.' so Aaron knows the keypress
+            // registered. Works in any game state because the SwapBuffers
+            // hook installed by BattleTTS::Initialize is global.
+            if (f11 && !s_f11was) {
+                SYSTEMTIME wt;
+                GetLocalTime(&wt);
+                char path[512];
+                snprintf(path, sizeof(path),
+                         "%s\\f11_%02d%02d%02d_%03d",
+                         BattleTTS::GetScreenshotDir(),
+                         wt.wHour, wt.wMinute, wt.wSecond, wt.wMilliseconds);
+                BattleTTS::RequestScreenshotAsync(path);
+                Log::Mod("[F11-SCREENSHOT] Capture requested: '%s.png'", path);
+                ScreenReader::Speak(L"Screenshot captured.", true);
+            }
             if (vkey && !s_vWas) {
                 wchar_t verMsg[128];
                 wsprintfW(verMsg, L"Version %hs", FF8OPC_VERSION);
@@ -237,10 +270,14 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
             s_f3was = f3; s_f4was = f4;
             s_f5was = f5; s_f6was = f6;
             s_f7was = f7; s_f8was = f8;
+            s_f11was = f11;
             s_vWas = vkey;
         }
 
-        // F12 is handled by FieldNavigation::HandleKeys() in field_nav_handlekeys.inl.
+        // v0.14.75: F12 has no consumer in this build. Reserved exclusively
+        // for per-session diagnostic builds per the F12 rule in userMemories.
+        // The v0.14.74.4-diag F12 = screenshot binding was promoted to F11
+        // permanently in this build (see the F11 handler above).
         // ENT-MON code removed in v0.12.23.
         
         // --- Sleep to avoid burning CPU ---

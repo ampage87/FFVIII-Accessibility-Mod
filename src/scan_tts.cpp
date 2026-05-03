@@ -400,6 +400,129 @@ static bool ReadSlotStats(int slot, uint8_t outStats[8])
     }
 }
 
+// v0.14.73: Read the 8-element affinity block at `entity_base + 0x3C..0x4B`
+// (BENT_ELEM_RESIST_BASE in battle_tts.h). 8 x u16 in element order:
+//   elem[0]=Fire, [1]=Ice, [2]=Thunder, [3]=Earth,
+//   [4]=Poison, [5]=Wind, [6]=Water, [7]=Holy.
+// FF8 community-standard interpretation treats each value as i16:
+//   v <  0  -> absorbs (heals)
+//   v == 0  -> immune / nullifies
+//   0 < v < 100 -> resists (partial reduction; not currently announced)
+//   v == 100 -> normal damage (not announced)
+//   v >  100 -> weak (extra damage)
+// CaptureSnapshot logs the raw bytes under [SCAN-ELEM] so a BAT against
+// a known-affinity monster (Glacial Eye absorbs Ice / weak to Fire,
+// Bite Bug weak to Wind, etc.) can verify or correct this scale.
+static bool ReadSlotElements(int slot, uint16_t outElem[8])
+{
+    if (slot < 0 || slot >= BATTLE_TOTAL_SLOTS) return false;
+    if (!outElem) return false;
+
+    uint8_t* base = (uint8_t*)(BATTLE_ENTITY_ARRAY_BASE + slot * BATTLE_ENTITY_STRIDE);
+    __try {
+        // BENT_ELEM_RESIST_BASE is offset 0x3C, 16 bytes wide (8 u16),
+        // safely inside the 0xD0-byte entity struct.
+        memcpy(outElem, base + BENT_ELEM_RESIST_BASE, 16);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        memset(outElem, 0, 16);
+        return false;
+    }
+}
+
+// v0.14.74: Read the 20-byte status resistance block at
+// `entity_base + 0x4C` (BENT_STATUS_RESIST_BASE). Order per the deep
+// research:
+//   [0]=Death [1]=Poison [2]=Petrify [3]=Darkness [4]=Silence
+//   [5]=Berserk [6]=Zombie [7]=Sleep [8]=Haste [9]=Slow
+//   [10]=Stop [11]=Regen [12]=Reflect [13]=Doom [14]=Slow Petrify
+//   [15]=Float [16]=Confuse [17]=Drain [18]=Expulsion [19]=???
+// Each byte adds to a 100 baseline to form the StatusDefense value
+// used in the inflict formula. `byte == 0` is the "Weak to" threshold
+// per the Scan UI; `byte >= 100` is the "Strong vs" threshold per the
+// deep research. SEH-guarded; mirrors ReadSlotElements pattern.
+static bool ReadSlotStatusRes(int slot, uint8_t outStatusRes[20])
+{
+    if (slot < 0 || slot >= BATTLE_TOTAL_SLOTS) return false;
+    if (!outStatusRes) return false;
+
+    uint8_t* base = (uint8_t*)(BATTLE_ENTITY_ARRAY_BASE + slot * BATTLE_ENTITY_STRIDE);
+    __try {
+        memcpy(outStatusRes, base + BENT_STATUS_RESIST_BASE, 20);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        memset(outStatusRes, 0, 20);
+        return false;
+    }
+}
+
+// v0.14.74.1: Diagnostic dump of the entity struct from +0x3C through
+// +0xB4 (121 bytes) to locate the actual runtime offset of the 20-byte
+// status resistance block. v0.14.74 BAT proved BENT_STATUS_RESIST_BASE
+// = 0x4C is wrong — Grat's read produced an alternating 169 / 251
+// pattern that's clearly not status data. The deep research predicted
+// that offset but explicitly flagged it as needing runtime validation;
+// this diagnostic provides the validation.
+//
+// Range covers:
+//   +0x3C..+0x4B  elements (16 bytes, CONFIRMED ANCHOR — must match
+//                 the same u16 values [SCAN-ELEM] dumps so we can
+//                 verify base+offset arithmetic is correct)
+//   +0x4C..+0xB3  unknown gap (104 bytes — the 20-byte status block
+//                 lives somewhere in here; PC port presumably inserted
+//                 padding / other fields that broke the .dat-relative
+//                 spacing assumption the deep research used)
+//   +0xB4         level (CONFIRMED ANCHOR — should equal snap.level
+//                 in [SCAN-CACHE] so we know dump alignment held all
+//                 the way to the bottom)
+//
+// 121 bytes split across 8 log lines for greppability and visual
+// alignment in the log diff. Test plan: BAT against three enemies
+// with known status profiles (Grat, T-Rexaur, Tonberry) and diff the
+// three [SCAN-STRUCT] sections. The 20-byte run where Grat shows 0x00
+// at indices 4 (Silence), 5 (Berserk), 7 (Sleep) but Tonberry shows
+// high values everywhere is the answer.
+//
+// Why a separate helper for the row body: MSVC /EHsc forbids non-
+// trivial destructors inside __try (C2712). snprintf and Log::Battle
+// are plain C-style calls so they compile fine inside __try, but
+// keeping the row body in its own function is clearer and matches
+// the Decode*ToBuf / Decode*Safe pattern used elsewhere in this
+// module. SEH propagates from DumpRow up into LogStructDump's
+// __except handler, so a faulting base[off] read still gets caught.
+
+static void DumpRow(int slot, const uint8_t* base, int from, int to,
+                    const char* tag)
+{
+    char hex[80];
+    int pos = 0;
+    for (int off = from; off <= to; off++) {
+        pos += snprintf(hex + pos, sizeof(hex) - pos,
+                        (off == from ? "%02X" : " %02X"),
+                        (unsigned)base[off]);
+        if (pos >= (int)sizeof(hex)) break;
+    }
+    Log::Battle("BattleTTS: [SCAN-STRUCT] slot=%d +0x%02X..+0x%02X %s: %s",
+                slot, from, to, tag, hex);
+}
+
+static void LogStructDump(int slot, const uint8_t* base)
+{
+    __try {
+        DumpRow(slot, base, 0x3C, 0x4B, "(elements anchor)");
+        DumpRow(slot, base, 0x4C, 0x5B, "                 ");
+        DumpRow(slot, base, 0x5C, 0x6B, "                 ");
+        DumpRow(slot, base, 0x6C, 0x7B, "                 ");
+        DumpRow(slot, base, 0x7C, 0x8B, "                 ");
+        DumpRow(slot, base, 0x8C, 0x9B, "                 ");
+        DumpRow(slot, base, 0x9C, 0xAB, "                 ");
+        DumpRow(slot, base, 0xAC, 0xB4, "(level anchor)   ");
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log::Battle("BattleTTS: [SCAN-STRUCT] slot=%d SEH fault during dump",
+                    slot);
+    }
+}
+
 // ============================================================================
 // Description lookup
 // ============================================================================
@@ -488,6 +611,18 @@ static void CaptureSnapshot(int slot)
     // v0.14.59..v0.14.64.
     ReadSlotStats(slot, snap.stats);
 
+    // v0.14.73: 8-element affinity block at 0x3C..0x4B (8 x u16). Same
+    // dual-side rationale — the engine populates this for both allies
+    // and enemies during battle setup. v0.14.73.1 corrected the
+    // interpretation in FormatWeak / FormatResistances to the
+    // 800-anchored u16 scale documented in the deep research.
+    ReadSlotElements(slot, snap.elem);
+
+    // v0.14.74: 20-byte status resistance block at 0x4C..0x5F. Used by
+    // FormatStatusResistances (key 9) and FormatStatusWeaknesses
+    // (key 0); both filter to 13 offensive ailments for the announce.
+    ReadSlotStatusRes(slot, snap.statusRes);
+
     snap.valid = true;
 
     Log::Battle("BattleTTS: [SCAN-CACHE] Captured slot=%d name='%s' level=%u "
@@ -501,6 +636,57 @@ static void CaptureSnapshot(int slot)
                 (unsigned)snap.stats[2], (unsigned)snap.stats[3],
                 (unsigned)snap.stats[4], (unsigned)snap.stats[5],
                 (unsigned)snap.stats[6], (unsigned)snap.stats[7]);
+
+    // v0.14.73: Raw element-affinity bytes log line. If FormatWeak /
+    // FormatAbsorb / FormatNullify announce surprising results in BAT,
+    // these values reveal whether the i16 interpretation is correct.
+    // Order: Fire, Ice, Thunder, Earth, Poison, Wind, Water, Holy.
+    Log::Battle("BattleTTS: [SCAN-ELEM] slot=%d raw u16=[Fi=%u Ic=%u Th=%u Ea=%u "
+                "Po=%u Wi=%u Wa=%u Ho=%u] as i16=[Fi=%d Ic=%d Th=%d Ea=%d "
+                "Po=%d Wi=%d Wa=%d Ho=%d]",
+                slot,
+                (unsigned)snap.elem[0], (unsigned)snap.elem[1],
+                (unsigned)snap.elem[2], (unsigned)snap.elem[3],
+                (unsigned)snap.elem[4], (unsigned)snap.elem[5],
+                (unsigned)snap.elem[6], (unsigned)snap.elem[7],
+                (int)(int16_t)snap.elem[0], (int)(int16_t)snap.elem[1],
+                (int)(int16_t)snap.elem[2], (int)(int16_t)snap.elem[3],
+                (int)(int16_t)snap.elem[4], (int)(int16_t)snap.elem[5],
+                (int)(int16_t)snap.elem[6], (int)(int16_t)snap.elem[7]);
+
+    // v0.14.74: Raw status resistance bytes per the 20-byte block at
+    // entity+0x4C, in deep research order. Threshold reference:
+    // byte == 0 -> "Weak to" candidate; byte >= 100 -> "Strong vs" /
+    // immune. T-Rexaur is the canonical anchor for calibration
+    // (famously vulnerable to Sleep, Darkness, Death, Poison).
+    Log::Battle("BattleTTS: [SCAN-STAT] slot=%d raw u8=[Death=%u Poison=%u Petrify=%u "
+                "Darkness=%u Silence=%u Berserk=%u Zombie=%u Sleep=%u Haste=%u Slow=%u "
+                "Stop=%u Regen=%u Reflect=%u Doom=%u SlowPetrify=%u Float=%u Confuse=%u "
+                "Drain=%u Expulsion=%u Unknown=%u]",
+                slot,
+                (unsigned)snap.statusRes[0],  (unsigned)snap.statusRes[1],
+                (unsigned)snap.statusRes[2],  (unsigned)snap.statusRes[3],
+                (unsigned)snap.statusRes[4],  (unsigned)snap.statusRes[5],
+                (unsigned)snap.statusRes[6],  (unsigned)snap.statusRes[7],
+                (unsigned)snap.statusRes[8],  (unsigned)snap.statusRes[9],
+                (unsigned)snap.statusRes[10], (unsigned)snap.statusRes[11],
+                (unsigned)snap.statusRes[12], (unsigned)snap.statusRes[13],
+                (unsigned)snap.statusRes[14], (unsigned)snap.statusRes[15],
+                (unsigned)snap.statusRes[16], (unsigned)snap.statusRes[17],
+                (unsigned)snap.statusRes[18], (unsigned)snap.statusRes[19]);
+
+    // v0.14.74.1: 121-byte hex dump of the entity struct from +0x3C
+    // through +0xB4. v0.14.74 BAT proved BENT_STATUS_RESIST_BASE = 0x4C
+    // is wrong; the alternating 169/251 [SCAN-STAT] pattern is clearly
+    // not status data and contradicts canon (Grat reportedly fully
+    // resisted Sleep, but Grat is the in-game source of Sleep). Range
+    // covers element-block anchor, unknown gap, and level anchor; see
+    // LogStructDump for the full diagnostic plan.
+    {
+        const uint8_t* base = (const uint8_t*)(BATTLE_ENTITY_ARRAY_BASE +
+                                               slot * BATTLE_ENTITY_STRIDE);
+        LogStructDump(slot, base);
+    }
 }
 
 // ============================================================================
@@ -508,9 +694,17 @@ static void CaptureSnapshot(int slot)
 // ============================================================================
 //
 // Build the auto-announce line. Format:
-//   Enemy: "<Name>. <Description>. Press number keys 1 through 0 for details."
-//   Enemy without description: "<Name>. Press number keys 1 through 0 for details."
-//   Ally:  "<Name>. Press number keys 1 through 0 for details."
+//   Enemy: "<Name>. <Description>. Press numbers 0 through 9 for details."
+//   Enemy without description: "<Name>. Press numbers 0 through 9 for details."
+//   Ally:  "<Name>. Press numbers 0 through 9 for details."
+//
+// v0.14.73: phrasing changed from "Press number keys 1 through 0" to
+// "Press numbers 0 through 9". v0.14.74: keys 5..0 reorganized — see
+// the SpeakField switch below for the bindings (1=Name, 2=Description,
+// 3=Level, 4=HP, 5=Offensive Stats, 6=Defensive Stats, 7=Elemental
+// Resistances, 8=Elemental Weaknesses, 9=Status Resistances, 0=Status
+// Weaknesses). The spoken phrase is unchanged in v0.14.74 — still says
+// "Press numbers 0 through 9 for details."
 static void BuildAutoAnnounce(const ScanSnapshot& snap, char* out, int outSize)
 {
     int pos = 0;
@@ -538,7 +732,7 @@ static void BuildAutoAnnounce(const ScanSnapshot& snap, char* out, int outSize)
         }
     }
     pos += snprintf(out + pos, outSize - pos,
-                    " Press number keys 1 through 0 for details.");
+                    " Press numbers 0 through 9 for details.");
     (void)pos;
 }
 
@@ -582,34 +776,309 @@ static void FormatHP(const ScanSnapshot& snap, char* out, int outSize)
     }
 }
 
-// v0.14.65: Format the 8-stat block for SpeakField(5). Speaks all 8 stats
-// in RAM order using familiar FF8 stat names. Order: Strength, Vitality,
-// Magic, Spirit, Speed, Luck, Evasion, Hit — matches the BENT_* offset
-// constants in battle_tts.h. If all 8 read as zero (likely an empty slot
-// or read failure), fall back to a neutral message instead of speaking
-// 'Strength 0. Vitality 0...'
-static void FormatStats(const ScanSnapshot& snap, char* out, int outSize)
+// v0.14.74: 8 stats split into two announcements (was a single 8-stat
+// readout in v0.14.65..v0.14.73.1). Hearing all 8 numbers in one breath
+// was overwhelming; splitting into 4-and-4 by combat role makes each
+// readout digestible.
+//
+// snap.stats[8] RAM order (validated; matches BENT_* in battle_tts.h):
+//   stats[0] = STR (0xB5)   stats[4] = SPD (0xB9)
+//   stats[1] = VIT (0xB6)   stats[5] = LCK (0xBA)
+//   stats[2] = MAG (0xB7)   stats[6] = EVA (0xBB)
+//   stats[3] = SPR (0xB8)   stats[7] = HIT (0xBC)
+//
+// Aaron's grouping (v0.14.74 keys 5 / 6):
+//   key 5 (offensive): Strength, Magic, Speed, Hit
+//   key 6 (defensive): Vitality, Spirit, Evasion, Luck
+//
+// Luck is grouped defensive even though it affects critical-hit rate
+// (offensive) too. The 4-and-4 balance and the fact that Luck applies
+// to both sides motivated putting it on defensive. The all-zero
+// fallback message changes per stat type so neither readout silently
+// disappears on empty slots.
+
+static void FormatOffensiveStats(const ScanSnapshot& snap, char* out, int outSize)
 {
-    bool anyNonZero = false;
-    for (int i = 0; i < 8; i++) {
-        if (snap.stats[i] != 0) { anyNonZero = true; break; }
-    }
+    bool anyNonZero = (snap.stats[0] != 0) || (snap.stats[2] != 0) ||
+                      (snap.stats[4] != 0) || (snap.stats[7] != 0);
     if (!anyNonZero) {
-        snprintf(out, outSize, "Stats unavailable.");
+        snprintf(out, outSize, "Offensive stats unavailable.");
+        return;
+    }
+    snprintf(out, outSize,
+             "Strength %u. Magic %u. Speed %u. Hit %u.",
+             (unsigned)snap.stats[0],   // STR
+             (unsigned)snap.stats[2],   // MAG
+             (unsigned)snap.stats[4],   // SPD
+             (unsigned)snap.stats[7]);  // HIT
+}
+
+static void FormatDefensiveStats(const ScanSnapshot& snap, char* out, int outSize)
+{
+    bool anyNonZero = (snap.stats[1] != 0) || (snap.stats[3] != 0) ||
+                      (snap.stats[5] != 0) || (snap.stats[6] != 0);
+    if (!anyNonZero) {
+        snprintf(out, outSize, "Defensive stats unavailable.");
+        return;
+    }
+    snprintf(out, outSize,
+             "Vitality %u. Spirit %u. Evasion %u. Luck %u.",
+             (unsigned)snap.stats[1],   // VIT
+             (unsigned)snap.stats[3],   // SPR
+             (unsigned)snap.stats[6],   // EVA
+             (unsigned)snap.stats[5]);  // LCK
+}
+
+// ============================================================================
+// v0.14.74: Element affinity + status resistance formatters
+// (keys 7 / 8 elemental, keys 9 / 0 status)
+// ============================================================================
+//
+// snap.elem[8] holds the 8 elemental affinity values populated from
+// `entity_base + 0x3C` (BENT_ELEM_RESIST_BASE). Element order:
+//   [0]=Fire [1]=Ice [2]=Thunder [3]=Earth
+//   [4]=Poison [5]=Wind [6]=Water [7]=Holy
+//
+// snap.statusRes[20] holds the 20 status resistance bytes populated
+// from `entity_base + 0x4C` (BENT_STATUS_RESIST_BASE). Status order
+// per the deep research:
+//   [0]=Death [1]=Poison [2]=Petrify [3]=Darkness [4]=Silence
+//   [5]=Berserk [6]=Zombie [7]=Sleep [8]=Haste [9]=Slow
+//   [10]=Stop [11]=Regen [12]=Reflect [13]=Doom [14]=Slow Petrify
+//   [15]=Float [16]=Confuse [17]=Drain [18]=Expulsion [19]=???
+//
+// v0.14.74 KEY LAYOUT (matches the SpeakField switch below):
+//   key 7 (Resistances) = combined Halves / Strongly resists / Nullifies / Absorbs
+//   key 8 (Weaknesses)  = elements where v < 800
+//   key 9 (Status Resistances) = statusRes byte >= 100, filtered to ailments
+//   key 0 (Status Weaknesses)  = statusRes byte == 0, filtered to ailments
+//
+// ELEMENT SCALE (from v0.14.73.1 deep research; 800-anchored u16):
+//   v <  800            -> Weak to                  (FormatWeak, key 8)
+//   v == 800            -> Normal damage (silent)
+//   800 <  v <  900     -> Halves                   (key 7 -> "Halves X")
+//   v == 900            -> Nullifies                (key 7 -> "Nullifies X")
+//   900 <  v <  1000    -> Strongly resists         (key 7 -> "Strongly resists X")
+//   v >= 1000           -> Absorbs                  (key 7 -> "Absorbs X")
+//
+// STATUS SCALE (from deep research + Final Fantasy Wiki StatusDefense
+// formula; byte adds to 100 baseline to form StatusDefense):
+//   byte == 0  -> Weak to (fully vulnerable)        (FormatStatusWeaknesses, key 0)
+//   1..99      -> Partial resistance (silent in UI; not announced)
+//   byte >= 100 -> Strongly resists / immune         (FormatStatusResistances, key 9)
+//
+// The status "Weak to" threshold (byte == 0) is conservative and
+// inferred from the Wiki StatusDefense formula. T-Rexaur is the
+// canonical anchor for calibration: famously vulnerable to Sleep,
+// Darkness, Death, Poison — v0.14.74 should announce those as
+// weaknesses if the standard FF8 data has them at 0. The [SCAN-STAT]
+// diagnostic log line in CaptureSnapshot dumps all 20 raw bytes per
+// scan so any threshold adjustment is data-driven, not guessed.
+//
+// STATUS FILTER (keys 9 + 0 — same filter applied to both):
+// We announce only the 13 offensive ailments players cast or junction.
+// Buffs (Haste, Regen, Reflect, Float) and non-offensive effects
+// (Drain, Expulsion, ???) are excluded — knowing an enemy "resists
+// Haste" or "is weak to Reflect" is rarely actionable. If desired in
+// a future build, a separate verbose mode could include all 20.
+//
+// HISTORY:
+// - v0.14.73: shipped wrong i16 element interpretation (100-anchored).
+//   The [SCAN-ELEM] diagnostic log saved us; deep research had the
+//   correct 800-anchored u16 scale documented since 2026-04-29.
+// - v0.14.73.1: corrected element scale.
+// - v0.14.74: split stats key 5 -> 5 (offensive) + 6 (defensive);
+//   consolidated key 7 into four-bucket Resistances (was Absorbs);
+//   moved Weak from 6 to 8 (was Nullify); added Status Resistances on
+//   9 and Status Weaknesses on 0 (both were 'Not implemented yet.'
+//   previously). The active-statuses readout that used to live on
+//   key 0 is removed because the same info is announced via the
+//   target-cursor flow in BuildStatusString already. Memory edit #30
+//   records: deep research docs first, guess second.
+
+static const char* const ELEMENT_NAMES[8] = {
+    "Fire", "Ice", "Thunder", "Earth",
+    "Poison", "Wind", "Water", "Holy"
+};
+
+// All 20 status names in deep-research order. The diagnostic log in
+// CaptureSnapshot uses these via STATUS_NAMES_20[idx]; the offensive
+// ailment table below selects the 13 we announce on keys 9 / 0.
+static const char* const STATUS_NAMES_20[20] = {
+    "Death",        "Poison",       "Petrify",      "Darkness",
+    "Silence",      "Berserk",      "Zombie",       "Sleep",
+    "Haste",        "Slow",         "Stop",         "Regen",
+    "Reflect",      "Doom",         "Slow Petrify", "Float",
+    "Confuse",      "Drain",        "Expulsion",    "Unknown"
+};
+
+// Indices (into snap.statusRes[20]) of the 13 offensive ailments we
+// announce on keys 9 (resistances) and 0 (weaknesses). Buffs and
+// non-offensive effects are excluded — see comment above.
+static const int OFFENSIVE_AILMENT_INDICES[13] = {
+    0,   // Death
+    1,   // Poison
+    2,   // Petrify
+    3,   // Darkness
+    4,   // Silence
+    5,   // Berserk
+    6,   // Zombie
+    7,   // Sleep
+    9,   // Slow
+    10,  // Stop
+    13,  // Doom
+    14,  // Slow Petrify
+    16   // Confuse
+};
+static const int OFFENSIVE_AILMENT_COUNT =
+    (int)(sizeof(OFFENSIVE_AILMENT_INDICES) / sizeof(OFFENSIVE_AILMENT_INDICES[0]));
+
+// Build a natural-language list with Oxford commas: "Fire", "Fire and
+// Ice", "Fire, Ice, and Thunder". Generic over a name table so the
+// element and status formatters share the same join logic.
+static void JoinNameList(const int* indices, int count,
+                         const char* const* names,
+                         char* out, int outSize)
+{
+    if (!out || outSize <= 0) return;
+    out[0] = '\0';
+    if (count <= 0 || !indices || !names) return;
+
+    if (count == 1) {
+        snprintf(out, outSize, "%s", names[indices[0]]);
+        return;
+    }
+    if (count == 2) {
+        snprintf(out, outSize, "%s and %s",
+                 names[indices[0]], names[indices[1]]);
+        return;
+    }
+    int pos = 0;
+    for (int i = 0; i < count; i++) {
+        const char* name = names[indices[i]];
+        if (i == 0) {
+            pos += snprintf(out + pos, outSize - pos, "%s", name);
+        } else if (i == count - 1) {
+            pos += snprintf(out + pos, outSize - pos, ", and %s", name);
+        } else {
+            pos += snprintf(out + pos, outSize - pos, ", %s", name);
+        }
+    }
+}
+
+static void FormatWeak(const ScanSnapshot& snap, char* out, int outSize)
+{
+    int matches[8];
+    int count = 0;
+    for (int i = 0; i < 8; i++) {
+        // v0.14.73.1: u16 < 800 means weak (the .dat-file negative
+        // bytes were widened to u16 and added to the 800 anchor).
+        if (snap.elem[i] < 800) matches[count++] = i;
+    }
+    if (count == 0) {
+        snprintf(out, outSize, "No elemental weaknesses.");
+        return;
+    }
+    char list[256];
+    JoinNameList(matches, count, ELEMENT_NAMES, list, sizeof(list));
+    snprintf(out, outSize, "Weak against %s.", list);
+}
+
+// v0.14.74: Combined elemental resistances on key 7. Replaces the
+// separate FormatAbsorb (key 7 in v0.14.73.1) and FormatNullify
+// (key 8 in v0.14.73.1), and folds in Halves and Strongly resists
+// which were silent in v0.14.73.1. Each non-empty bucket announces
+// as its own sentence so the categories stay clear:
+//   "Halves Fire and Earth. Strongly resists Ice. Nullifies Thunder.
+//    Absorbs Water and Holy."
+// Empty case: "No elemental resistances."
+static void FormatResistances(const ScanSnapshot& snap, char* out, int outSize)
+{
+    int halves[8];        int hCount = 0;
+    int strongResist[8];  int sCount = 0;
+    int nullifies[8];     int nCount = 0;
+    int absorbs[8];       int aCount = 0;
+
+    for (int i = 0; i < 8; i++) {
+        uint16_t v = snap.elem[i];
+        if      (v >= 1000) absorbs[aCount++] = i;
+        else if (v == 900)  nullifies[nCount++] = i;
+        else if (v > 900)   strongResist[sCount++] = i;
+        else if (v > 800)   halves[hCount++] = i;
+        // v == 800 normal (silent), v < 800 weak (handled by FormatWeak)
+    }
+
+    if (hCount + sCount + nCount + aCount == 0) {
+        snprintf(out, outSize, "No elemental resistances.");
         return;
     }
 
-    snprintf(out, outSize,
-             "Strength %u. Vitality %u. Magic %u. Spirit %u. "
-             "Speed %u. Luck %u. Evasion %u. Hit %u.",
-             (unsigned)snap.stats[0],   // STR
-             (unsigned)snap.stats[1],   // VIT
-             (unsigned)snap.stats[2],   // MAG
-             (unsigned)snap.stats[3],   // SPR
-             (unsigned)snap.stats[4],   // SPD
-             (unsigned)snap.stats[5],   // LCK
-             (unsigned)snap.stats[6],   // EVA
-             (unsigned)snap.stats[7]);  // HIT
+    int pos = 0;
+    char list[256];
+
+    if (hCount > 0) {
+        JoinNameList(halves, hCount, ELEMENT_NAMES, list, sizeof(list));
+        pos += snprintf(out + pos, outSize - pos, "Halves %s.", list);
+    }
+    if (sCount > 0) {
+        JoinNameList(strongResist, sCount, ELEMENT_NAMES, list, sizeof(list));
+        pos += snprintf(out + pos, outSize - pos, "%sStrongly resists %s.",
+                        (pos > 0 ? " " : ""), list);
+    }
+    if (nCount > 0) {
+        JoinNameList(nullifies, nCount, ELEMENT_NAMES, list, sizeof(list));
+        pos += snprintf(out + pos, outSize - pos, "%sNullifies %s.",
+                        (pos > 0 ? " " : ""), list);
+    }
+    if (aCount > 0) {
+        JoinNameList(absorbs, aCount, ELEMENT_NAMES, list, sizeof(list));
+        pos += snprintf(out + pos, outSize - pos, "%sAbsorbs %s.",
+                        (pos > 0 ? " " : ""), list);
+    }
+}
+
+// v0.14.74: Status resistances on key 9. Iterates the 13 offensive
+// ailments (per OFFENSIVE_AILMENT_INDICES) and announces those whose
+// statusRes byte >= 100 (the deep research's "Strong vs" threshold).
+// Empty case: "No status resistances."
+static void FormatStatusResistances(const ScanSnapshot& snap, char* out, int outSize)
+{
+    int matches[20];
+    int count = 0;
+    for (int i = 0; i < OFFENSIVE_AILMENT_COUNT; i++) {
+        int idx = OFFENSIVE_AILMENT_INDICES[i];
+        if (snap.statusRes[idx] >= 100) matches[count++] = idx;
+    }
+    if (count == 0) {
+        snprintf(out, outSize, "No status resistances.");
+        return;
+    }
+    char list[384];
+    JoinNameList(matches, count, STATUS_NAMES_20, list, sizeof(list));
+    snprintf(out, outSize, "Resists %s.", list);
+}
+
+// v0.14.74: Status weaknesses on key 0. Iterates the 13 offensive
+// ailments and announces those whose statusRes byte == 0 (fully
+// vulnerable per the FF Wiki StatusDefense formula). Empty case:
+// "No status weaknesses." T-Rexaur is the canonical calibration
+// anchor — should announce Death, Poison, Darkness, Sleep based on
+// the standard FF8 data.
+static void FormatStatusWeaknesses(const ScanSnapshot& snap, char* out, int outSize)
+{
+    int matches[20];
+    int count = 0;
+    for (int i = 0; i < OFFENSIVE_AILMENT_COUNT; i++) {
+        int idx = OFFENSIVE_AILMENT_INDICES[i];
+        if (snap.statusRes[idx] == 0) matches[count++] = idx;
+    }
+    if (count == 0) {
+        snprintf(out, outSize, "No status weaknesses.");
+        return;
+    }
+    char list[384];
+    JoinNameList(matches, count, STATUS_NAMES_20, list, sizeof(list));
+    snprintf(out, outSize, "Weak to %s.", list);
 }
 
 // ============================================================================
@@ -749,14 +1218,32 @@ void SpeakField(int fieldId)
     case 4:  // HP
         FormatHP(snap, msg, sizeof(msg));
         break;
-    case 5:  // Stats (v0.14.65)
-        FormatStats(snap, msg, sizeof(msg));
+    case 5:  // Offensive stats (v0.14.74; was full 8-stat readout in v0.14.65..v0.14.73.1)
+        FormatOffensiveStats(snap, msg, sizeof(msg));
         break;
-    case 6:  // Weaknesses (v0.14.66)
-    case 7:  // Absorbs (v0.14.66)
-    case 8:  // Nullifies (v0.14.66)
-    case 9:  // Status Resistances (v0.14.67)
-    case 0:  // Active Statuses (v0.14.68)
+    case 6:  // Defensive stats (v0.14.74; was Weak in v0.14.73)
+        FormatDefensiveStats(snap, msg, sizeof(msg));
+        break;
+    case 7:  // Elemental Resistances — combined halves/strong/nullify/absorb (v0.14.74)
+        FormatResistances(snap, msg, sizeof(msg));
+        break;
+    case 8:  // Elemental Weaknesses (v0.14.74; was Nullify in v0.14.73)
+        FormatWeak(snap, msg, sizeof(msg));
+        break;
+    case 9:  // Status Resistances — reverted to stub in v0.14.74.1
+        // v0.14.74 shipped this as FormatStatusResistances reading from
+        // entity+0x4C, but the BAT proved that offset is not the status
+        // resistance block (Grat announced as resisting all 13 ailments
+        // due to alternating 169/251 byte pattern at +0x4C). Reverting
+        // to the stub so misleading status info doesn't ship to Aaron
+        // during play. The [SCAN-STRUCT] diagnostic in CaptureSnapshot
+        // dumps 121 bytes per scan; one BAT round across Grat /
+        // T-Rexaur / Tonberry will reveal the actual offset, after
+        // which v0.14.74.2 re-enables this case with the corrected
+        // BENT_STATUS_RESIST_BASE.
+        snprintf(msg, sizeof(msg), "Not implemented yet.");
+        break;
+    case 0:  // Status Weaknesses — reverted to stub in v0.14.74.1 (same reason)
         snprintf(msg, sizeof(msg), "Not implemented yet.");
         break;
     default:

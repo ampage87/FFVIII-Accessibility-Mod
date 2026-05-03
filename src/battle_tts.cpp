@@ -69,12 +69,6 @@ namespace ScanTTS {
     int  GetActiveSlot();
     void SpeakField(int fieldId);
     void OnBattleEnter();
-    // v0.14.66-diag: Forward decl for the F12-gated diagnostic dump.
-    // Wired into PollHPCheckKeys (battle_tts_hp.inl) so it polls every
-    // frame the battle loop runs. Internally edge-detects F12 and gates
-    // on IsScreenActive() so it's a cheap no-op outside its narrow
-    // active window.
-    void PollDiagnosticKey();
     // v0.14.72: Forward decl for the sub_47EC70 hook-forward handler
     // called from HookedBtCandidate1 in battle_tts_victory.inl. See
     // scan_tts.h for the architecture rationale (single canonical owner
@@ -99,9 +93,45 @@ static DWORD s_battleEntryTime  = 0;      // GetTickCount() when battle was ente
 // We enforce a 2s minimum delay, then poll until ally slot 0 maxHP > 0.
 // Enemies may populate later than allies -- second-pass catches them.
 static const DWORD BATTLE_INIT_MIN_DELAY_MS = 2000;   // minimum wait before checking (swirl animation)
-static const DWORD BATTLE_INIT_TIMEOUT_MS   = 10000;  // max wait before giving up
+static const DWORD BATTLE_INIT_TIMEOUT_MS   = 15000;  // max wait before giving up (v0.14.74.3: bumped from 10000ms — engine takes ~8-10s to repopulate enemy slot data on quick re-encounter after escape; see ff8_battle.log 19:47:48 → 19:47:58 evidence)
 static bool s_initAnnounceDone = false;
 static bool s_enemyAnnounceDone = false;  // second-pass: announce enemies when they appear
+
+// v0.14.74.3: Per-battle enemy slot fingerprint snapshot. Captured at
+// OnBattleExit, consulted at AnnounceBattleStart and the Update() second-pass
+// loop to detect cross-battle stale enemy data — specifically the
+// quick-re-encounter-after-escape case where the engine does NOT zero enemy
+// slots on battle exit and does NOT immediately repopulate them on the next
+// battle entry. In that path slots 3..6 still hold the previous battle's
+// enemy data (e.g. Grat HP=587/MaxHP=587/Lv=21) for ~8 seconds before the
+// engine writes the new formation's data. allyMaxHP>0 fires immediately
+// because Squall's stats survive the transition, so the existing
+// readiness gate cannot distinguish stale-but-nonzero from fresh.
+//
+// Mechanism: at OnBattleExit, we snapshot HP+MaxHP+Lv+status for every
+// enemy slot. At AnnounceBattleStart and the second-pass loop, we compare
+// the live slots against the snapshot. If ALL enemy slots match the
+// snapshot bit-for-bit, the engine has not yet refreshed enemy data —
+// announce "Battle!" generically and defer the enemy name announce to
+// the second-pass, which will retry every frame until the fingerprint
+// differs (engine wrote new data) or BATTLE_INIT_TIMEOUT_MS elapses
+// (legitimate same-formation re-encounter — fall back to current
+// behavior).
+//
+// First-battle-of-session: snapValid=false → check returns false →
+// existing behavior preserved.
+// Victory exit: enemy slots end with HP=0/status=0x01 (dead). Next battle
+// has live enemies (HP>0) → fingerprints differ → no false delay.
+// Escape exit (the bug case): slots may retain alive HP from the moment
+// of escape. New battle reuses same memory → fingerprints match → defer.
+struct EnemySlotSnap {
+    uint32_t hp;
+    uint32_t maxHp;
+    uint8_t  lvl;
+    uint8_t  status;
+};
+static EnemySlotSnap s_lastBattleEnemySnap[BATTLE_TOTAL_SLOTS - BATTLE_ALLY_SLOTS] = {};
+static bool s_lastBattleEnemySnapValid = false;
 
 // ============================================================================
 // Speech priority system
@@ -199,6 +229,35 @@ static int CountActiveEnemies()
         if (GetEntityHP(i) > 0) count++;
     }
     return count;
+}
+
+// v0.14.74.3: Returns true iff (a) we have a valid snapshot from a prior
+// OnBattleExit AND (b) every enemy slot's live HP+MaxHP+Lv+status matches
+// the snapshot bit-for-bit. When true, the engine has not yet repopulated
+// enemy slot memory after a battle transition — the live data is stale
+// and any name lookup against it will yield the previous battle's enemy.
+// Returns false on the first battle of a session (snap invalid), after a
+// victorious exit (snap holds HP=0/status=0x01 — fresh battle has HP>0
+// so fingerprints differ), or whenever the engine has refreshed at least
+// one slot. SEH-guarded so a faulting read can't crash the readiness path.
+static bool EnemySlotsMatchLastBattleSnap()
+{
+    if (!s_lastBattleEnemySnapValid) return false;
+    __try {
+        for (int i = BATTLE_ALLY_SLOTS; i < BATTLE_TOTAL_SLOTS; i++) {
+            const EnemySlotSnap& s = s_lastBattleEnemySnap[i - BATTLE_ALLY_SLOTS];
+            if (GetEntityHP(i)    != s.hp)    return false;
+            if (GetEntityMaxHP(i) != s.maxHp) return false;
+            uint8_t* blk = GetEntityBlock(i);
+            uint8_t lvl    = blk ? *(blk + BENT_LEVEL)          : 0;
+            uint8_t status = blk ? *(blk + BENT_PERSIST_STATUS) : 0;
+            if (lvl    != s.lvl)    return false;
+            if (status != s.status) return false;
+        }
+        return true;  // All slots match → stale
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;  // On fault, treat as fresh and let normal flow proceed
+    }
 }
 
 // ============================================================================
@@ -535,7 +594,37 @@ static void OnBattleEnter()
     InstallPopupSpriteHook();
     
     memset((void*)s_gfAnimFired, 0, sizeof(s_gfAnimFired));
-    s_prevBattleMagicId = -1;
+
+    // v0.14.74.2: Initialize s_prevBattleMagicId from the live engine
+    // value rather than to -1. Setting to -1 was the cause of stale
+    // Scan / GF announces firing on the first frame of a new battle
+    // when the player escaped a previous battle: if *battle_magic_id
+    // retained a value from the previous battle (39 = Scan, or any GF
+    // effect ID like 200 = Ifrit), PollBattleMagicId would see
+    // prev=-1, cur=stale, treat it as a fresh transition, and fire
+    // ScanTTS::OnScanCast / GfAudioDesc::OnGFAnimationStart against
+    // whatever target bitmask was also still in memory. By caching
+    // the current live value, the next poll detects no transition;
+    // the engine's eventual reset to a fresh value (typically 0)
+    // shows up as a non-actionable transition (neither GF effect ID
+    // nor 39).
+    //
+    // EWM_InstallBattleEffectHook earlier in this function has
+    // already populated s_battleMagicIdAddr by the time we reach this
+    // line, so the read is safe. SEH-guarded for paranoia. The
+    // address-zero fallback preserves the v0.14.50..v0.14.74.1
+    // behavior on the unlikely path where install hasn't run yet.
+    __try {
+        if (s_battleMagicIdAddr != 0) {
+            s_prevBattleMagicId = *(int*)s_battleMagicIdAddr;
+            Log::Battle("BattleTTS: [SCAN-TTS] Battle entry: cached current magicId=%d as prev (suppresses stale transition fires)",
+                       s_prevBattleMagicId);
+        } else {
+            s_prevBattleMagicId = -1;
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        s_prevBattleMagicId = -1;
+    }
 
     // v0.14.45: F12 victory diagnostic state resets removed.
     ResetVictoryTTS();
@@ -591,7 +680,37 @@ static void OnBattleEnter()
 static void OnBattleExit()
 {
     Log::Battle("BattleTTS: === BATTLE EXITED ===");
-    
+
+    // v0.14.74.3: Capture enemy slot fingerprint BEFORE clearing s_inBattle.
+    // The snapshot is consulted by EnemySlotsMatchLastBattleSnap() at the
+    // next OnBattleEnter to detect stale enemy memory in the
+    // quick-re-encounter-after-escape path. SEH-guarded so a fault leaves
+    // the previous (or zeroed) snapshot intact rather than crashing exit.
+    __try {
+        for (int i = BATTLE_ALLY_SLOTS; i < BATTLE_TOTAL_SLOTS; i++) {
+            EnemySlotSnap& s = s_lastBattleEnemySnap[i - BATTLE_ALLY_SLOTS];
+            s.hp     = GetEntityHP(i);
+            s.maxHp  = GetEntityMaxHP(i);
+            uint8_t* blk = GetEntityBlock(i);
+            s.lvl    = blk ? *(blk + BENT_LEVEL)          : 0;
+            s.status = blk ? *(blk + BENT_PERSIST_STATUS) : 0;
+        }
+        s_lastBattleEnemySnapValid = true;
+        Log::Battle("BattleTTS: [EXIT-SNAP] Captured enemy fingerprint: "
+                    "s3=hp%u/max%u/lv%u/st0x%02X s4=hp%u/max%u/lv%u/st0x%02X "
+                    "s5=hp%u/max%u/lv%u/st0x%02X s6=hp%u/max%u/lv%u/st0x%02X",
+                    s_lastBattleEnemySnap[0].hp, s_lastBattleEnemySnap[0].maxHp,
+                    (unsigned)s_lastBattleEnemySnap[0].lvl, (unsigned)s_lastBattleEnemySnap[0].status,
+                    s_lastBattleEnemySnap[1].hp, s_lastBattleEnemySnap[1].maxHp,
+                    (unsigned)s_lastBattleEnemySnap[1].lvl, (unsigned)s_lastBattleEnemySnap[1].status,
+                    s_lastBattleEnemySnap[2].hp, s_lastBattleEnemySnap[2].maxHp,
+                    (unsigned)s_lastBattleEnemySnap[2].lvl, (unsigned)s_lastBattleEnemySnap[2].status,
+                    s_lastBattleEnemySnap[3].hp, s_lastBattleEnemySnap[3].maxHp,
+                    (unsigned)s_lastBattleEnemySnap[3].lvl, (unsigned)s_lastBattleEnemySnap[3].status);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log::Battle("BattleTTS: [EXIT-SNAP] Capture FAILED — next entry will treat enemies as fresh");
+    }
+
     s_inBattle = false;
     s_battleJustStarted = false;
     s_initAnnounceDone = false;
@@ -636,9 +755,25 @@ static void AnnounceBattleStart()
 
     int enemyCount = CountActiveEnemies();
 
+    // v0.14.74.3: Even if enemyCount > 0, the engine may not have refreshed
+    // enemy slot data yet — specifically in the quick-re-encounter-after-
+    // escape path where slots 3..6 still hold the previous battle's data.
+    // If the live fingerprint matches the OnBattleExit snapshot, treat as
+    // "enemies not ready": announce "Battle!" generically and leave
+    // s_enemyAnnounceDone = false so the second-pass loop in Update() will
+    // retry until the engine writes new data (or BATTLE_INIT_TIMEOUT_MS
+    // elapses, at which point we fall back to announcing whatever's there
+    // — the legitimate "same formation again" case).
+    bool enemyDataStale = false;
+    if (enemyCount > 0 && EnemySlotsMatchLastBattleSnap()) {
+        enemyDataStale = true;
+        Log::Battle("BattleTTS: [STALE-ENEMY] Enemy fingerprint matches last battle exit — deferring enemy announce to second-pass");
+    }
+
     char buf[256];
-    if (enemyCount == 0) {
+    if (enemyCount == 0 || enemyDataStale) {
         snprintf(buf, sizeof(buf), "Battle!");
+        // s_enemyAnnounceDone stays false — second-pass will catch fresh data
     } else {
         char enemyStr[200];
         BuildEnemyNameString(enemyStr, sizeof(enemyStr));
@@ -746,7 +881,21 @@ void Update()
 
     if (s_initAnnounceDone && !s_enemyAnnounceDone) {
         int enemyCount = CountActiveEnemies();
-        if (enemyCount > 0) {
+        DWORD elapsed = GetTickCount() - s_battleEntryTime;
+
+        // v0.14.74.3: Same stale-fingerprint protection as the first-pass.
+        // The engine may take up to ~10s to repopulate enemy slot memory
+        // after a quick re-encounter; until then enemyCount > 0 returns
+        // true against stale data and BuildEnemyNameString would yield the
+        // previous battle's names. Defer the announce while the fingerprint
+        // still matches and we're inside the timeout window. Beyond the
+        // timeout, fall through to the legitimate-same-formation path —
+        // we can't distinguish that from "engine never refreshed".
+        bool enemyDataStale = (enemyCount > 0
+                               && EnemySlotsMatchLastBattleSnap()
+                               && elapsed < BATTLE_INIT_TIMEOUT_MS);
+
+        if (enemyCount > 0 && !enemyDataStale) {
             s_enemyAnnounceDone = true;
             if (!s_enemyNameCacheBuilt) BuildEnemyNameCache();
             char enemyStr[200];
@@ -767,7 +916,7 @@ void Update()
                     Log::Battle("BattleTTS: Enemy slot %d \"%s\": HP %u/%u Lv=%u", i, name, hp, maxHp, (unsigned)lvl);
                 }
             }
-        } else if (GetTickCount() - s_battleEntryTime > BATTLE_INIT_TIMEOUT_MS) {
+        } else if (elapsed > BATTLE_INIT_TIMEOUT_MS) {
             s_enemyAnnounceDone = true;
             Log::Battle("BattleTTS: No enemies detected after %ums timeout", BATTLE_INIT_TIMEOUT_MS);
         }

@@ -21,7 +21,756 @@ Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` inj
 
 ---
 
-**Current build: v0.14.72 — sub_47EC70 hook conflict resolved. BAT PASSED ✅**
+**Current build: v0.14.75 — Keybinding refactor. BAT PASSED. Production build ready for GitHub push.**
+
+## v0.14.75 BAT result: PASS
+
+Aaron deployed and tested all keyboard shortcuts — every binding behaves as expected:
+- F11 fires the on-demand screenshot capture in any game state.
+- M while the in-game menu is open speaks the party / Gil / time / location combined readout.
+- F12 produces no output (reservation confirmed).
+- All other hotkeys (V/G/T/L/R/`/F1–F10/etc.) work unchanged.
+
+During testing Aaron flagged a separate latent bug: pressing **R** in the in-game menu always announces "No SeeD rank yet" even after he's earned a SeeD rank. This is unrelated to v0.14.75's changes — the keybinding works correctly, the savemap-read function is the issue. Filed as GitHub issue **#27** (https://github.com/ampage87/FFVIII-Accessibility-Mod/issues/27, labels: `bug`, `menu-tts`, `savemap-offsets`, `low-priority`). Hypothesis in the issue: `FIELD_H_OFFSET = 0xF94` in `src/menu_tts_hotkeys.inl::AnnounceSeedRank()` is computed by stacking section sizes (header + GFs + chars + shops + limit_breaks + items) and one of the section sizes is likely wrong, mirroring the SAVEMAP OFFSET CORRECTION lesson from earlier deep research work. Fix is deferred to a future session via runtime offset hunt or fresh deep research.
+
+## v0.14.75 — keybinding ownership settled
+
+Aaron asked which F11 functions could go and proposed moving the screenshot to F11 with F12 returning to its reserved-for-diag role. Source audit found four bindings on F11 in three files; three were research diagnostics for closed investigations, one was a user feature.
+
+### REMOVED (3 diagnostics for closed investigations)
+
+1. **`field_nav_handlekeys.inl` F11 — VISDIAG dump.** v05.69 research diagnostic that dumped candidate visibility-flag bytes (+0x188 / +0x1A0 / +0x21A / +0x240) for every model-bearing field entity. Used during the entity catalog build to find the SHOW/HIDE flag offset. Catalog is built and works — dump is dormant. ~50 lines of body deleted plus the `s_f11WasDown` static in `field_navigation.cpp`.
+
+2. **`menu_tts.cpp` Shift+F11 — `StartMemoryMonitor`.** v0.08.22 research diagnostic that snapshotted 2 KB around `pMenuStateA` every 200 ms for 15 seconds, logging byte changes. Used to discover submenu cursor offsets (`SUBMENU_LIST_CURSOR_OFFSET=0x272`, `ITEM_FOCUS_STATE_OFFSET=0x22E`, `JUNC_FOCUS_OFFSET=0x22E`, etc.). All offsets now hardcoded — monitor is dormant. Call site removed; orphaned `PollMemoryMonitor()` polling call also removed (no caller of `StartMemoryMonitor` left, polling was a permanent no-op).
+
+3. **`menu_tts.cpp` Ctrl+F11 — `DumpMenuScreenData`.** v0.08.17 research diagnostic that hex-dumped the savemap header / character structs / post-character region. Used to find the savemap base address (`SAVEMAP_BASE=0x1CFDC5C`) and verify offsets. All offsets now hardcoded — dump is dormant. Call site removed.
+
+Function definitions for all three (`StartMemoryMonitor` / `PollMemoryMonitor` / `DumpMenuScreenData` / `LogSaveSubsystemChanges` etc.) remain in `menu_tts_diagnostics.inl` as harmless dead code in case a future investigation needs them. Only the call sites were removed.
+
+### MOVED (1 user feature relocated)
+
+4. **`menu_tts.cpp` plain F11 — `AnnounceMenuSummary`.** v0.08.20 USER FEATURE despite living in `_diagnostics.inl`. Speaks party composition + per-character HP and level + Gil + play time + location, the "where am I, what's my state" combined readout when the in-game menu is open. Complements the per-fact `G` / `T` / `L` / `R` hotkeys with a one-shot all-in-one. Aaron had not flagged it for removal — he expected to lose only diagnostics. **Moved to the `M` key**, gated on `isMenuMode` (game mode 6) so it only fires when the in-game menu is actually open. M was confirmed free across `dinput8.cpp` / `menu_tts.cpp` / `world_map.cpp` / `field_navigation.cpp` / `battle_tts.cpp` via dryRun probes before binding.
+
+### MOVED (screenshot trigger to its permanent home)
+
+5. **`dinput8.cpp` global F11 — on-demand screenshot capture.** Was F12 in v0.14.74.4-diag; now F11. Same `RequestScreenshotAsync` mechanism, same `BattleTTS::GetScreenshotDir()` path, same "Screenshot captured." speech confirmation. Only the keybinding and file-name prefix changed (`f12_<HHMMSS>_<MS>` → `f11_<HHMMSS>_<MS>`) plus the log tag (`[F12-SCREENSHOT]` → `[F11-SCREENSHOT]`). Works in any game state because the `SwapBuffers` hook installed by `BattleTTS::Initialize` is global.
+
+### F12 RESERVED
+
+F12 has no consumer in this build. Pressing it does nothing (correct). Per the F12 rule in userMemories: F12 is reserved exclusively for per-session diagnostic builds. Before adding ANY F12 handler in the future, search ALL source files for `VK_F12` / `F12` / `0x7B` references and remove old diagnostic code first. Only one F12 diagnostic active at a time. v0.14.75 brings F12 back to the clean state the rule requires.
+
+### Files modified
+
+- `src/dinput8.cpp` (~30 lines: F12 → F11 rename, comment block updated, closing comment now "F12 has no consumer in this build; reserved exclusively for per-session diagnostic builds.")
+- `src/menu_tts.cpp` (~15 lines: F11 hotkey block replaced with simple M handler, `PollMemoryMonitor()` call removed)
+- `src/field_nav_handlekeys.inl` (~50 lines deleted: VISDIAG dump body)
+- `src/field_navigation.cpp` (1 line deleted: `s_f11WasDown` static + comment swap)
+- `src/ff8_accessibility.h` (this version with full changelog)
+
+### Behavior expectation
+
+NO behavior regressions. Every user-facing feature still has a binding (just reshuffled); only diagnostic dead code was deleted. Aaron's BAT next session will verify:
+
+- F11 in any game state (title / field / menu / battle / world map) → "Screenshot captured." + PNG appears at `Logs/screenshots/f11_<HHMMSS>_<MS>.png`.
+- M while in the in-game menu (mode 6) → menu summary announces party / HP / Gil / time / location.
+- F12 → nothing happens (reservation confirmed).
+- All other hotkeys (G/T/L/R/V/F1-F10/`/O/1-9/0/H/`/`+/-/Backspace/`\`) unchanged from v0.14.74.x.
+
+### After BAT — GitHub push
+
+v0.14.75 ships ~6–7 builds to GitHub depending on what was already pushed (verify with `github:list_commits` first per the recent_updates lesson — "never quote a backlog size from memory"). The build chain since GitHub HEAD as of 2026-05-02 19:31 UTC commit 337cf97a (v0.14.72): v0.14.73, v0.14.73.1, v0.14.74, v0.14.74.1, v0.14.74.2, v0.14.74.3, v0.14.74.4-diag, v0.14.75.
+
+---
+
+**Previous build: v0.14.74.4-diag — F12 = on-demand screenshot. BAT PASSED. Compacted-view problem solved by config setting (no fallback code needed).**
+
+## v0.14.74.4-diag BAT result: COMPACTED-VIEW SOLVED VIA IN-GAME CONFIG
+
+Aaron BAT'd v0.14.74.4-diag at 23:04:16. F12 hotkey worked first try — captured the Config menu cleanly via the SwapBuffers hook + glReadPixels machinery, lands at `Logs/screenshots/f12_<HHMMSS>_<MS>.{bmp,png}`, no behavior regressions elsewhere.
+
+**The screenshots revealed something I'd given up on prematurely earlier in the session: FF8's Config menu DOES have a Scan toggle.** Fourth row from top, between ATB and Camera Movement: `Scan: Once / Always`. I had said "vanilla FF8 PC config menu options known from project knowledge" listed Cursor / ATB / Battle Speed / Battle Message Speed / Sound / Music / Magic Order / Window Color and there's no Scan toggle — that was wrong. The Steam 2013 PC port's Config menu has different options than the original PC release I was remembering. The actual menu has: Controller / Cursor / ATB / **Scan** / Camera Movement / Battle speed / Battle message / Field message / Sound / Vibration function.
+
+Aaron flipped Scan from "Once" to "Always" by pressing Down 3 times from the menu top + Right to toggle, then exited (auto-saved). Verified via second F12 capture: the values are now `Once` greyed / `Always` white — exact inverse of the pre-change capture. Setting persists on save.
+
+With Scan: Always, the engine renders the FULL Scan UI on every cast regardless of how many times that monster_id has been scanned previously. sub_B687C0 fires every time. The v0.14.60 architecture (announce on first sub_B687C0 fire, activate s_scanScreenActiveSlot for number-key routing) works for every scan Aaron casts. The compacted-view skip path simply isn't triggered.
+
+## Decision: NO mod-side compacted-view fallback code
+
+v0.14.74.5 was pre-planned as `ScanTTS::OnScanCast(_, true)` ~800 ms timeout fallback for compacted view. **Cancelled.** Aaron has Scan: Always set in the in-game config; the compacted-view path is dead from his perspective. Writing fallback code we don't need adds maintenance surface for no user benefit.
+
+If a future Aaron save somehow loses the Config setting (savemap corruption, fresh install, etc.), the worst case is he opens Config and re-enables Always. That's a one-time 30-second fix vs. permanent ~150 LOC of mod code with its own edge cases. Easy call.
+
+## Lesson: ALWAYS check the in-game Config menu before writing workaround code
+
+I should have asked Aaron to check the Config menu earlier in the v0.14.74 session, before committing to v0.14.60's sub_B687C0-gated architecture as the only path. The Config menu is the engine's own user-facing knob for this exact behavior; any time the engine has a behavior the mod wants to neutralize, the Config menu is the first place to look. Adding to memory: "Before writing engine-behavior workarounds, check FF8's Config menu for an existing toggle."
+
+## F12 hotkey: keep or remove?
+
+The F12 = on-demand screenshot capture has clear ongoing diagnostic value (any time Aaron sees something visually that I need to verify, F12 + read the PNG works), and it's zero cost when not pressed. But the F12 rule in userMemories says "F12 reserved exclusively for per-session diagnostic builds." Two options:
+
+1. **Keep as permanent feature.** Move F12 = screenshot to the keyboard shortcut map in userMemories. F12 is no longer reserved-for-diag.
+2. **Rip out for next non-diag build.** F12 stays free for future per-session diagnostics; if we need on-demand screenshots again, re-add the handler temporarily.
+
+Deferring this decision to Aaron — see NEXT_SESSION_PROMPT.
+
+## v0.14.74.3 BAT result: PRIMARY FIX VALIDATED (with new sub-issue)
+
+Aaron tested twice. Both tests confirmed the cross-battle stale ENEMY NAME fix works as designed:
+
+**Test 1 — World map outside Garden (full pass):** Bite Bug → escape → Fastitocalon. The Fastitocalon was correctly announced (no stale Bite Bug name leaked across the escape transition). Scan-cast on the Fastitocalon worked end-to-end: auto-announce fired with name + description, number-key prompt worked, all detail keys responded.
+
+**Test 2 — Balamb Garden Training Center (mixed result):** Grat → escape → T-Rexaur. The T-Rexaur was correctly announced after the Grat-fight escape — same situation as the v0.14.74.3 root-cause BAT, but now the fingerprint-based defer-and-retry path worked exactly as designed. So the v0.14.74.2/3 chapter on cross-battle stale-data is closed.
+
+BUT: the T-Rexaur Scan exposed a separate, previously-known issue. Scan only spoke the description, then auto-advanced without prompting for number keys and without waiting for confirm. The Bite Bug → Fastitocalon path (test 1) didn't trip this — only test 2's T-Rexaur did.
+
+## Hypothesis: T-Rexaur Scan rendered in FF8's compacted view
+
+FF8's Scan UI has two render paths the engine selects between based on whether the target's monster_id has been scanned in the current save/session:
+
+1. **Full Scan UI** — full window opens, sub_B687C0 fires when the engine fetches text to render the window, the window stays open until the player dismisses it with a button press.
+2. **Compacted view** — a brief description popup appears (no full window), engine auto-advances to the next turn after a short delay, sub_B687C0 does NOT fire.
+
+The v0.14.60 architecture (current production) gates the user-facing auto-announce and number-key activation on sub_B687C0's first fire. Compacted view skips sub_B687C0 entirely. So in compacted view: action-layer (sub_48D200 popup hook) silently captures snapshot to s_scanCache[slot], but nothing speaks and number keys don't activate. Aaron hears engine TTS for the brief description blip (via show_dialog hook) and then the turn advances.
+
+v0.14.54 BAT proved both sub_B687C0 and sub_84F860 skip compacted view. v0.14.55 moved to action-layer detection. v0.14.59+ UX redesign re-coupled the user-facing announce to sub_B687C0 because action-layer was firing 9 seconds before the visual window opened. So the compacted view fallback regressed during the v0.14.59+ redesign.
+
+## Why test 1 didn't trip it but test 2 did
+
+World-map encounters at the start of a save typically render full Scan view because monsters there haven't been scanned yet. Balamb Garden Training Center is reachable from a save where Aaron has likely already scanned T-Rexaurs (most-traveled save spot in early game). Compacted view triggers when the monster_id has already been scanned → stored in some session-local cache or savemap field.
+
+Aaron asked whether FF8's Config menu has an option to disable compacted Scan view. He sent a screenshot of the menu but FF8's OpenGL framebuffer can't be captured by standard Windows tools (PrintScreen / GDI / snipping tool all return solid black for FF8 because the framebuffer isn't in the Windows compositor pipeline). The mod's own glReadPixels-via-SwapBuffers-hook capture mechanism IS the only way to capture FF8 frames, but until v0.14.74.4-diag it only fired at hard-coded triggers (kind4 sprite spawns, scan UI fire #1, etc.).
+
+## v0.14.74.4-diag: F12 = on-demand screenshot capture
+
+Added an F12 hotkey in `src/dinput8.cpp`'s AccessibilityThread main hotkey block. On press edge:
+
+1. Builds an absolute path: `<BattleTTS::GetScreenshotDir()>/f12_<HHMMSS>_<MS>` (no extension).
+2. Calls `BattleTTS::RequestScreenshotAsync(path)` with default 0 frame delay → sets the GL capture flag, returns immediately.
+3. Logs `[F12-SCREENSHOT] Capture requested: '<path>.png'` to ff8_mod.log.
+4. Speaks `"Screenshot captured."` via ScreenReader::Speak so Aaron knows the keypress registered.
+
+The SwapBuffers hook installed by `BattleTTS::Initialize` is GLOBAL — it captures every present, not just battle ones. So F12 works in any game state: title, field, menus, Config menu, world map, battle.
+
+### F12 rule compliance
+
+Per userMemories: "F12 reserved exclusively for per-session diagnostic builds. Before hooking ANY new diagnostic to F12, search ALL source files for existing VK_F12 / F12 / 0x7B keycode references and REMOVE old diagnostic code first."
+
+Searched all source files. Existing F12 state before this build:
+
+- `src/scan_tts.cpp` — no F12 handler (already removed in some earlier cleanup; v0.14.66-diag's `PollDiagnosticKey` impl gone).
+- `src/scan_tts.h` — no `PollDiagnosticKey` forward decl.
+- `src/battle_tts_hp.inl` — no F12 / `PollDiagnosticKey` reference.
+- `src/battle_tts.cpp` — HAD an orphaned `void PollDiagnosticKey();` forward decl + 5-line comment block in the ScanTTS namespace forward-decl block. Dead code. **REMOVED in this build.**
+- `src/field_nav_handlekeys.inl` — single F12 reference is just a comment ("F12 reserved for future per-session diagnostic builds"). Left as-is.
+
+Only hex literal `0x7B` in scan_tts.cpp was a `DumpRow(slot, base, 0x6C, 0x7B, ...)` offset in the SCAN-STRUCT diagnostic — not an F12 keycode reference. Confirmed via dryRun probe.
+
+The "F12 is handled by FieldNavigation::HandleKeys()" comment in dinput8.cpp was updated to reflect F12's new ownership.
+
+### Files touched
+
+- `src/dinput8.cpp` — added F12 edge handler in AccessibilityThread main hotkey block (~30 lines including the long architectural comment)
+- `src/battle_tts.cpp` — removed orphaned `void PollDiagnosticKey();` forward decl + comment block (~6 lines deleted)
+- `src/ff8_accessibility.h` — bumped `FF8OPC_VERSION` to `"0.14.74.4-diag"` with comprehensive changelog comment
+- `DEVNOTES.md` — this entry
+- `NEXT_SESSION_PROMPT.md` — BAT plan
+
+No behavior change for normal Aaron play — just adds the F12 hotkey.
+
+### BAT plan
+
+1. Aaron deploys `deploy.vbs` and launches the game.
+2. Navigates to the Config menu (main menu → Config).
+3. Presses F12. Hears "Screenshot captured." Confirms `[F12-SCREENSHOT]` line appears in `Logs/ff8_mod.log`.
+4. Reports back. Claude reads the captured PNG via filesystem MCP tools to confirm or deny whether the Config menu has a Scan compacted-view toggle.
+
+### Expected outcome
+
+Vanilla FF8 PC Config menu options known from project knowledge: Cursor (Initial/Memory), ATB (Active/Wait), Battle Speed, Battle Message Speed, Sound (Stereo/Mono), Music, Magic Order, Window Color. None of those are a Scan toggle. FFNx doesn't add one either. So I expect the screenshot to confirm there's no toggle.
+
+### After Config menu confirmation: SOLVED BY CONFIG
+
+The Config menu has a `Scan: Once / Always` toggle. Aaron flipped to Always. Compacted view is no longer triggered. v0.14.74.5 compacted-view fallback CANCELLED — see top of DEVNOTES for the full reasoning.
+
+---
+
+**Current build: v0.14.74.3 — cross-battle stale enemy NAME bug fix. AWAITING BAT.**
+
+## v0.14.74.3 closes the second stale-data vector exposed by v0.14.74.2 BAT
+
+v0.14.74.2 BAT result was a partial win and partial discovery. **The primary magicId fix worked exactly as designed** — `[SCAN-TTS] Battle entry: cached current magicId=39 as prev` fired correctly on Battle 2's entry after Aaron escaped a Scan-cast Battle 1, suppressing what would otherwise have been a stale Scan announce. But during the same BAT, Aaron observed a NEW symptom: the T-Rexaur battle that followed his Grat-battle escape was announced as **"Battle! 2 Grats."** while the audible T-Rexaur roar made it obvious the announce was wrong.
+
+### Root cause: enemy slot memory persists across escape transitions
+
+`AnnounceBattleStart()` in `src/battle_tts.cpp` has a readiness gate that's just:
+
+```cpp
+uint16_t allyMaxHP = *(uint16_t*)(BATTLE_ENTITY_ARRAY_BASE + BENT_MAX_HP);
+if (allyMaxHP == 0) { /* keep waiting */ }
+else                { /* declare ready, build name string from live memory */ }
+```
+
+When Aaron escaped the Grats and immediately entered the T-Rexaur battle, the engine left battle 1's enemy data sitting in slots 3..6 (`HP=587/MaxHP=587/Lv=21 status=0x00` for both Grats) and didn't repopulate the slots until **~10 seconds later** when it finally wrote T-Rexaur stats. Squall's `allyMaxHP=901` survived the transition, so the readiness gate fired immediately at the 2-second min delay; `CountActiveEnemies()` returned 2 (stale Grat HP > 0); `BuildEnemyNameString` read stale memory and announced "2 Grats". Worse, `s_enemyAnnounceDone = true` was set, **disabling the second-pass safety net** that would have caught the late population.
+
+Log evidence (1677-line ff8_battle.log uploaded by Aaron):
+
+```
+[19:47:48] === BATTLE ENTERED === (encounter ID: 59)
+[19:47:48] [SCAN-TTS] Battle entry: cached current magicId=39 as prev   ← v0.14.74.2 fix WORKED
+[19:47:50] Entity array ready after 2000ms (ally0 maxHP=901)
+[19:47:50] slot3 ENEMY HP=587/587 Lv=21 status=0x00                   ← STALE GRAT DATA
+[19:47:50] slot4 ENEMY HP=587/587 Lv=21 status=0x00                   ← STALE GRAT DATA
+[19:47:50] [NAME-CACHE]   slot3 = "Grat 1" (base="Grat")
+[19:47:50] [NAME-CACHE]   slot4 = "Grat 2" (base="Grat")
+[19:47:50] Battle! 2 Grats.                                            ← ANNOUNCED WRONG
+[19:47:58] s3=4240/12000(hp18883)                                      ← T-Rexaur HP finally appears (+10 s)
+```
+
+Same antipattern class as v0.14.74.2: trusting engine memory at battle entry before the engine has refreshed it. The v0.14.74.2 fix addressed the `*battle_magic_id` byte; this fix addresses the enemy slot HP/MaxHP/Lv/status block.
+
+### Fix
+
+**Snapshot enemy slot fingerprint at exit, require it to differ before declaring fresh.**
+
+1. New struct `EnemySlotSnap { hp, maxHp, lvl, status }` and state `s_lastBattleEnemySnap[BATTLE_TOTAL_SLOTS - BATTLE_ALLY_SLOTS] + s_lastBattleEnemySnapValid` declared near the top of `namespace BattleTTS`.
+
+2. New helper `EnemySlotsMatchLastBattleSnap()` returns true iff a snapshot exists AND every enemy slot's live HP+MaxHP+Lv+status matches the snapshot bit-for-bit. SEH-guarded.
+
+3. `OnBattleExit()` captures the snapshot before clearing `s_inBattle`. New `[EXIT-SNAP]` diagnostic log line dumps the captured fingerprint per exit.
+
+4. `AnnounceBattleStart()` — if `enemyCount > 0` AND fingerprint matches snapshot, treat as "enemies not ready": announce "Battle!" generically, **leave `s_enemyAnnounceDone = false`** so the second-pass loop will retry. New `[STALE-ENEMY]` diagnostic log line fires when this path is taken.
+
+5. `Update()` second-pass loop — same protection. While `enemyCount > 0` AND fingerprint matches AND elapsed < `BATTLE_INIT_TIMEOUT_MS`, defer. Beyond timeout, fall through and announce (legitimate same-formation re-encounter case).
+
+6. `BATTLE_INIT_TIMEOUT_MS` bumped from 10000 to 15000 ms because the engine took ~10 s to repopulate T-Rexaur data — right at the old timeout boundary, and we want comfortable slack for the fingerprint-mismatch detection to fire before timeout fallback kicks in.
+
+### Why the design choices
+
+- **Why fingerprint, not just "any slot has HP > 0"?** The bug case has `HP > 0` from stale data. We need to distinguish "engine repopulated" from "engine left old values in place."
+- **Why HP+MaxHP+Lv+status and not monsterId?** The four fields are read via existing helpers and cover the most identifying memory. monsterId is at a different offset and would need a separate read; if all four of HP, MaxHP, Lv, status match exactly across a battle transition, the slot has not been touched.
+- **Why not raise BATTLE_INIT_MIN_DELAY_MS instead?** Because for the normal case (engine zeroes slots and repopulates within 2 s), waiting longer would slow every battle's first announce. Fingerprint detection is zero-cost in the normal case (fingerprints differ immediately on first poll).
+- **Why a 15 s timeout fallback?** Same-formation re-encounter is legitimate — walk into 2 Grats, kill them, walk into 2 Grats again. Without the fallback, that battle would silently never announce. 15 s is long enough for the engine to repopulate after even quick-re-encounter, short enough that the fallback doesn't make legitimate same-formation feel broken.
+
+### Edge cases handled
+
+- **First battle of session:** `s_lastBattleEnemySnapValid = false` → helper returns false → existing behavior preserved.
+- **Victory exit:** Slots end with HP=0, status=0x01 (dead). Next battle has live enemies (HP>0) → fingerprints differ → no false delay.
+- **Escape exit (the bug case):** Slots retain alive HP. New battle reuses same memory → fingerprints match → defer to second-pass.
+- **Same-formation re-encounter:** Fingerprints match for the full 15 s, fallback announces (worst case: slight delay on legit same-formation).
+- **SEH faults:** Snapshot capture and comparison both SEH-guarded so a fault doesn't crash; on fault, treat as fresh and let normal flow proceed.
+
+### Downstream effect on other Battle 2 issues
+
+Aaron's BAT also reported "No effect on Grat 1" being announced when Aaron Scanned the T-Rexaur (watchdog timed out at 19:48:18). This is a **downstream symptom** of the same root cause: at the time of the Scan cast, slot 3 had real T-Rexaur memory but the cached enemy name was "Grat 1" from stale memory. With v0.14.74.3, by the time the Scan window opens enemy data is fresh, name resolution is correct, and the watchdog cancel can fire on the right (slot, name) pair. Should self-heal.
+
+### Files
+
+- `src/battle_tts.cpp` — 5 edits totaling ~140 lines, all comment-heavy:
+  - State declarations after `s_enemyAnnounceDone` (~50 lines including doc comment)
+  - `EnemySlotsMatchLastBattleSnap()` helper after `CountActiveEnemies()` (~30 lines)
+  - Snapshot capture in `OnBattleExit()` (~30 lines)
+  - Stale-aware first-pass announce in `AnnounceBattleStart()` (~15 lines)
+  - Stale-aware second-pass loop in `Update()` (~15 lines)
+- `src/ff8_accessibility.h` — version bump.
+
+### Test plan for BAT
+
+Most reliable repro:
+
+1. Walk into a random encounter in an area that has multiple formation types (e.g., near Balamb Garden's trabia field has Grats / Bite Bugs / T-Rexaurs / Caterchipillars).
+2. (Optional) Cast Scan on an enemy in battle 1.
+3. Escape battle 1.
+4. Walk a few more steps until the next encounter.
+
+Expected v0.14.74.3 behavior:
+
+- At ~2 s into battle 2: "Battle!" generic announce (no enemy names).
+- Up to ~15 s later: second-pass fires with the actual enemy name. Log: `[second-pass] T-Rexaur. (enemies appeared after initial announce)`.
+- If you happen to re-encounter the same formation, expect a 10-15 s wait before the announce — the fingerprint-match fallback kicks in at timeout.
+
+If you Scan the new battle's enemy after the second-pass fires, the Scan announce should now use the correct name (no more "Scanning Grat" for a T-Rexaur) and the watchdog "No effect" should NOT fire.
+
+Diagnostic log lines to verify:
+
+- `[EXIT-SNAP] Captured enemy fingerprint: ...` — should appear at every battle exit, dumping the slots' final state.
+- `[STALE-ENEMY] Enemy fingerprint matches last battle exit — deferring enemy announce to second-pass` — should fire on the post-escape Battle 2 entry.
+- `[second-pass] T-Rexaur. (enemies appeared after initial announce)` — should appear within ~10 s after the deferred first-pass.
+
+If instead you see `[STALE-ENEMY]` fire and then `No enemies detected after 15000ms timeout`, that's the engine genuinely never refreshing — a different bug we'd need to investigate, but I don't expect that case from the BAT log evidence.
+
+### Previous build:
+
+## v0.14.74.2 closes the cross-battle stale-data leak
+
+Aaron reported (last session, before context limit) that escaping from a battle could cause stale Scan data to appear in the subsequent battle. This session traced the root cause and shipped a two-line fix paired with one defensive line.
+
+### Root cause
+
+`PollBattleMagicId` in `battle_tts_ewm.inl` detects Scan / GF effect dispatches by watching `*battle_magic_id` for transitions:
+
+```cpp
+if (magicId != s_prevBattleMagicId) {
+    if (IsGFEffectId(magicId)) { ... GfAudioDesc::OnGFAnimationStart(magicId); }
+    else if (magicId == 39)    { ... ScanTTS::OnScanCast(slot, true); }
+    s_prevBattleMagicId = magicId;
+}
+```
+
+On battle entry, `OnBattleEnter` reset `s_prevBattleMagicId = -1`. But the engine's `*battle_magic_id` byte at `s_battleMagicIdAddr` (resolved once at hook install via `*(uint32_t*)(0x50AF20 + 0x3E)`) is NOT cleared by the engine on battle escape — the engine just exits to the world map / field with the byte holding whatever the last spell dispatched in the previous battle wrote. Common residual values:
+
+| Previous-battle action | Residual `*battle_magic_id` |
+|---|---|
+| Player cast Scan | 39 |
+| Player summoned Ifrit | 200 |
+| Player summoned Shiva | 184 |
+| ...etc., any GF | the GF's effect ID |
+
+So the very next call to `PollBattleMagicId` in the new battle saw `prev=-1, cur=39` (or 200, etc.), interpreted it as a fresh transition, and fired the corresponding handler against the new battle's slot 0 entity — or against whatever target bitmask happened to be left over at `0x01D76884`. Most visible failure mode: Aaron casts Scan in Battle 1, escapes, enters Battle 2, hears a stale Scan announce in the first ~16 ms of Battle 2 against whatever entity the previous battle's bitmask resolved to. Same class for GF audio descriptions: summon Ifrit, escape, hear Ifrit's audio description replayed at the next battle's entry.
+
+### Primary fix
+
+`src/battle_tts.cpp::OnBattleEnter` — replaced `s_prevBattleMagicId = -1;` with a SEH-guarded read of `*s_battleMagicIdAddr` to cache the engine's current value at battle entry. With prev cached to the live value, `PollBattleMagicId` sees `prev == cur` and detects no transition. Once the engine eventually clears `*battle_magic_id` to a fresh value (typically 0) during battle setup, that transition is non-actionable (neither a GF effect ID nor 39).
+
+The hook-install fallback path (`s_battleMagicIdAddr == 0`) preserves the v0.14.50..v0.14.74.1 behavior of resetting to -1; this only matters if `EWM_InstallBattleEffectHook` somehow hasn't run by the time of the first `OnBattleEnter`, which the existing install order in `OnBattleEnter` already guarantees.
+
+New log line per battle entry: `[SCAN-TTS] Battle entry: cached current magicId=N as prev (suppresses stale transition fires)`. If N is non-zero on the first encounter after escape, that's exactly the value that would have caused a bogus announce pre-fix.
+
+### Defense-in-depth fix
+
+`src/battle_tts_sprite.inl::ResetSpriteSpawnState` — added `InterlockedExchange(&s_lastScanCastTick, 0)` to clear the popup-hook tick per battle. Without this, escaping within `SCAN_CAST_RECENT_MS` (1 sec) of casting Scan could leak the tick across the battle boundary and trigger a bogus action-layer Scan announce on the very first `sub_48E830` fire of the next battle. `NoEffect_RecordSnapshot`'s `InterlockedExchange` normally consumes the tick within the same frame the popup hook sets it, so the race window is microscopic, but the fix is one line and correctness > bytes. Pairs with the primary fix.
+
+### Files
+
+- `src/battle_tts.cpp` — ~30 lines added at the `s_prevBattleMagicId` reset site (one `__try` block + comment-heavy explanation since the bug is subtle).
+- `src/battle_tts_sprite.inl` — 1 line of code + ~10 lines of comment in `ResetSpriteSpawnState`.
+- `src/ff8_accessibility.h` — version bump.
+
+### Test plan for BAT
+
+1. Cast Scan on an enemy in any random encounter (e.g., a Bite Bug or Fastitocalon).
+2. Escape immediately (no need to wait for victory).
+3. Walk a few steps until the next random encounter triggers.
+4. Listen for any unsolicited speech in the first ~1 second of Battle 2's entry. Pre-fix: occasional stale Scan/GF announce. Post-fix: silence (battle-start announce only).
+5. Repeat with a GF summon in Battle 1 (Ifrit, Shiva, anything junctioned). Pre-fix: GF audio description plays at Battle 2 entry. Post-fix: silence.
+6. Verify legitimate Scan in Battle 2 still works — cast Scan on an enemy, hear the auto-announce, press number keys 0-9, all keys still respond as expected.
+7. Check `Logs/ff8_battle.log` for `[SCAN-TTS] Battle entry: cached current magicId=N as prev` per battle entry. N should usually be 0 at clean battle starts but may be 39 / 200 / etc. immediately after escaping a Scan / summon.
+
+### Architectural notes from this session
+
+- **`-1` sentinel + first-poll-fires-handlers is a recurring antipattern.** Whenever an edge-detect comparator is reset to a sentinel and the first read after reset can be ANY value (including handler-firing values), the handlers fire on phantom transitions. Same class as v0.13.51 `0x01D768D0` dword-vs-byte where reading a function pointer's low byte coincidentally matched an executing-phase value. Fix pattern: cache the live value at reset time so `prev == cur` yields no transition.
+- **Engine memory persistence across battle escape vs victory.** This is the second time this session that engine state carrying across the battle boundary has been a bug source. Worth keeping in mind as a class of bugs going forward: any address that the mod observes via per-frame polling AND that the engine doesn't clear on mode 3 → mode 1/2/etc. transition is a candidate for stale-state bugs. Audit the field of similar pollers (HP / status / draw inventory / etc.) might surface more.
+- **Why I had this half-wrong in the prior session.** My last message before context limit said `s_prevBattleMagicId is only ever initialized at hook install time — there's no per-battle reset.` That was wrong: `OnBattleEnter` does reset it (the `s_prevBattleMagicId = -1;` line). The actual bug is that the reset to -1 MAKES the bogus transition look real; the right fix is to reset to the live value, not to keep prev across battles.
+
+## Remaining backlog
+
+1. Persistent accessibility settings
+2. GF naming bypass (Siren)
+3. Remove party-member NPCs from field entity catalog
+4. X-ATMO92 chase
+5. ⚠️ v0.14.74.2 stale-data fix — SHIPPED, awaiting BAT
+6. v0.14.74.1 [SCAN-STRUCT] diagnostic still pending its BAT against Grat / T-Rexaur / Tonberry. Aaron can BAT both at the same time — v0.14.74.2 doesn't touch the [SCAN-STRUCT] mechanism.
+7. v0.14.74.3 (after offset confirmed): update BENT_STATUS_RESIST_BASE in battle_tts.h + re-enable keys 9/0
+8. Optional polish after status keys land: 'Halves' verbose mode, status threshold refinement if `byte == 0` proves too strict
+9. `kernel.bin` parsing for Blue Magic
+10. ✅ GitHub push at v0.14.72 — will lag local by 5 builds (v0.14.73 + v0.14.73.1 + v0.14.74 + v0.14.74.1 + v0.14.74.2) until next push
+
+---
+
+**Previous build: v0.14.74.1 — diagnostic build for the broken keys 9/0 from v0.14.74. Adds [SCAN-STRUCT] log dumping 121 bytes of the entity struct per scan. Reverts keys 9/0 to 'Not implemented yet.' AWAITING BAT.**
+
+## v0.14.74.1 ships the [SCAN-STRUCT] diagnostic
+
+Two changes scoped to `src/scan_tts.cpp`:
+
+1. **NEW `[SCAN-STRUCT]` diagnostic log** in `CaptureSnapshot`. Dumps 121 bytes of the entity struct from `+0x3C` through `+0xB4` every scan, split across 8 log lines (16 bytes per row except the last 9-byte row) for greppability. Range covers the elemental block anchor (`+0x3C..+0x4B`, validates dump alignment against the existing `[SCAN-ELEM]` u16 values), the unknown gap (`+0x4C..+0xB3`, contains the actual 20-byte status block somewhere), and the level anchor (`+0xB4`, validates alignment held all the way down). New helpers `DumpRow` (one row, 16 bytes max) and `LogStructDump` (8 calls under SEH guard).
+
+2. **Keys 9 / 0 reverted to `"Not implemented yet."`** in the `SpeakField` switch so misleading status info doesn't reach Aaron during play. `FormatStatusResistances` and `FormatStatusWeaknesses` are still defined and unchanged — just unwired for now. v0.14.74.2 will rewire them after the offset is found.
+
+Keys 1-8 are completely untouched and stay exactly as v0.14.74 (offensive/defensive stats, elemental resistances + weaknesses).
+
+## How the BAT will pin down the offset
+
+Scan three enemies with deliberately different status profiles in one battle (or three battles — the cache resets on `OnBattleEnter` but the diagnostic fires per scan), then diff the `[SCAN-STRUCT]` lines for each scan in `Logs/ff8_battle.log`. The offset is the position of a 20-byte run that satisfies all three of these patterns simultaneously:
+
+| Enemy | Profile | Expected pattern in the 20-byte block |
+|---|---|---|
+| Grat | Vulnerable to Sleep / Silence / Berserk (Quistis Training Center tutorial canon) | 0x00 at indices 4 (Silence), 5 (Berserk), 7 (Sleep); high values elsewhere |
+| T-Rexaur | Vulnerable to Sleep / Darkness / Death / Poison (FF8 wiki) | 0x00 at indices 0 (Death), 1 (Poison), 3 (Darkness), 7 (Sleep); high values elsewhere |
+| Tonberry | No documented status weaknesses | High values across the entire 20-byte block, no zeros |
+
+The offset where the 20-byte run satisfies ALL three patterns is the actual `BENT_STATUS_RESIST_BASE`. v0.14.74.2 will update the constant in `src/battle_tts.h` and re-enable keys 9/0 by removing the v0.14.74.1 stub comments.
+
+## Why diagnostic-driven and not disassembly-driven
+
+Plan B as originally formulated (find `cmp al, 0x64` in sub_84F860 phase handlers paired with `[esi+offset]`) didn't pan out:
+
+1. **No `cmp al, 0x64` in any of the six phase handlers.** Searched `Game Files/disassembly/FF8_EN_.text_0x00801000.asm` lines 107601–108760 covering 0x84F8D0 through 0x850740 — the only constants compared in those handlers are 0x60, 0x9F, 0x800, 0x2000, and various memory addresses.
+2. **The scan UI handlers don't read entity offsets in the suspect range at all.** The only register-relative offsets accessed in the phase handlers are `[esi+0x29]` (the phase counter), `[esi+0x50/54/58/60/70]` (a UI-internal scratch struct at global address `0x269aa78`, not the entity struct).
+3. **The threshold check lives in the status APPLICATION path, not the scan UI rendering path.** When a status spell is cast, the inflict formula reads the resistance byte and rolls against it; the scan UI just displays pre-formatted strings via `sub_47EC70`. So the 'cmp 0x64' wouldn't appear inside the scan UI code even if FF8 used that exact threshold.
+
+A disassembly hunt could still find it via a much wider search (status application code is in the magic-effect dispatcher, somewhere in the 0x47B000–0x49F000 range), but that's exploratory work without a clear target. The diagnostic-driven path lands the answer in one BAT round.
+
+## Architectural lesson, captured
+
+- **Even when the deep research has been validated for some claims, predictions it explicitly flags as needing runtime confirmation should be wrapped in diagnostic logs from day one.** The deep research called `+0x4C` a 'best-supported hypothesis' and recommended a debugger watchpoint to confirm. v0.14.74 added the `[SCAN-STAT]` log defensively for exactly this reason — same defensive pattern that saved v0.14.73.1's element scale. The combo (read the doc + log alongside the feature) caught the wrong offset in one BAT instead of shipping a confidently-broken status readout for a multi-build cycle. Memory edit #30 ('deep research docs first') still applies; this is a corollary: **predictions, not just published facts, get diagnostics**.
+- **Disassembly Plan B's specific formulation was wrong but wasn't a wasted hunt.** We confirmed the scan UI doesn't read the entity struct directly in the suspect range — useful to know for any future investigation that needs to disambiguate scan-UI display logic from underlying engine data. Documented for posterity in this DEVNOTES entry.
+
+## Remaining backlog
+
+1. Persistent accessibility settings
+2. GF naming bypass (Siren)
+3. Remove party-member NPCs from field entity catalog
+4. X-ATMO92 chase
+5. ⚠️ v0.14.74.1 [SCAN-STRUCT] diagnostic — SHIPPED, awaiting BAT against Grat / T-Rexaur / Tonberry
+6. v0.14.74.2 (after offset confirmed): update BENT_STATUS_RESIST_BASE in battle_tts.h + re-enable keys 9/0
+7. Optional polish after status keys land: 'Halves' verbose mode, status threshold refinement if `byte == 0` proves too strict
+8. `kernel.bin` parsing for Blue Magic
+9. ✅ GitHub push at v0.14.72 — will lag local by 4 builds (v0.14.73 + v0.14.73.1 + v0.14.74 + v0.14.74.1) until next push
+
+---
+
+**Previous build: v0.14.74 — keys 5/6/7/8 PASSED BAT ✅, keys 9/0 FAILED ❌ (offset +0x4C is not status resistances). v0.14.74.1 plan ready, awaiting Aaron's choice of path.**
+
+## v0.14.74 BAT result — partial PASS
+
+### What worked (4/6 new things — keys 5/6/7/8) ✅
+
+- **Key 5 Offensive Stats**: Strength/Magic/Speed/Hit readout. Concise.
+- **Key 6 Defensive Stats**: Vitality/Spirit/Evasion/Luck readout. Concise.
+- **Key 7 Resistances**: works (Grat had no resistances, announced "No elemental resistances." — correct)
+- **Key 8 Weaknesses**: `"Weak against Fire and Ice."` for Grat — matches canonical FF8 Grat data
+- `[SCAN-STAT]` diagnostic log line emits as designed
+- The split-stats UX is the success Aaron wanted — one announce per role group instead of all 8 at once
+
+### What failed (keys 9/0) ❌
+
+The deep research's predicted offset `+0x4C` for the 20-byte status resistance block is **wrong**. The Grat scan revealed:
+
+```
+[SCAN-STAT] slot=3 raw u8=[Death=169 Poison=251 Petrify=169 Darkness=251 
+   Silence=169 Berserk=251 Zombie=169 Sleep=251 Haste=169 Slow=251 
+   Stop=169 Regen=251 Reflect=169 Doom=251 SlowPetrify=169 Float=251 
+   Confuse=169 Drain=251 Expulsion=169 Unknown=251]
+```
+
+The alternating `169 / 251 / 169 / 251` pattern is too structural to be real game data, and it's inconsistent with canon: Grat's Sleep byte = 251 would mean fully immune, but Grat is the in-game source of Sleep magic and the Quistis Training Center tutorial puts Grats to sleep. The data at `+0x4C` is something else entirely — possibly sprite display flags, animation timer/frame counters, position data, or some other 16-byte-stride engine state.
+
+Aaron's actual BAT announcements:
+- Key 9: `"Resists Death, Poison, Petrify, Darkness, Silence, Berserk, Zombie, Sleep, Slow, Stop, Doom, Slow Petrify, and Confuse."` (every byte was ≥ 100, so every ailment triggered as resistance)
+- Key 0: `"No status weaknesses."` (no byte was 0, so no weakness triggered)
+
+The deep research itself flagged this as a runtime-validation requirement — it called `+0x4C` a "Most likely exact runtime offset" and explicitly recommended a debugger watchpoint to confirm. Our `[SCAN-STAT]` diagnostic just gave us that validation; the offset is wrong.
+
+The actual 20-byte status block must live somewhere between `+0x4C` and `+0xB4` in the entity struct (since elements end at `+0x4B` and stats begin at `+0xB5`). PC port presumably inserted padding or other fields between elemental and status blocks, breaking the .dat-file relative-spacing assumption the deep research used.
+
+## v0.14.74.1 plan (ready to ship next session, awaiting path choice)
+
+All changes scoped to `src/scan_tts.cpp`:
+
+1. **Revert keys 9/0 to `"Not implemented yet."`** so misleading status info doesn't ship to Aaron during play. Keys 1-8 stay exactly as v0.14.74.
+2. **Keep `[SCAN-STAT]` log** for the `+0x4C` window (proven that offset is wrong, but the log mechanism is sound).
+3. **TBD per Aaron's choice** — add a wider `[SCAN-STRUCT]` diagnostic dumping `entity+0x40..entity+0xB4` (116 bytes) for cross-enemy comparison, OR dig into the disassembly to find the actual offset directly.
+
+### Path choice for next session
+
+**Path A: Diagnostic-driven (faster).** Add `[SCAN-STRUCT]` log dumping 116 bytes per scan. Aaron BATs Grat (vulnerable to Sleep/Silence/Berserk), T-Rexaur (vulnerable to Sleep/Darkness/Death), and Tonberry (no documented status weaknesses). We diff the dumps to find where Grat and T-Rexaur have `0x00` bytes for their known weaknesses but Tonberry has high values — that reveals the actual block offset. One BAT round to confirm.
+
+**Path B: Disassembly-driven (more authoritative).** Examine sub_84F8D0 (the phase-1 handler dispatched from sub_84F860) and its siblings (0x84FD70, 0x850650, 0x850690, 0x8506B0, 0x850740) to find a `cmp al, 0x64` pattern combined with a byte read from the entity struct. That pinpoints the offset directly, no BAT needed but takes more analysis time. sub_84F860 is at `Game Files/disassembly/FF8_EN_.text_0x00801000.asm`.
+
+## Architectural notes from this session
+
+- **The `[SCAN-STAT]` diagnostic log was the right call.** Same defensive pattern that saved us on v0.14.73.1's element scale — added the diagnostic alongside the feature, didn't have to ship a separate diagnostic build to investigate. Memory edit #30 ("deep research docs first") still applies, but a corollary: deep research predictions still need runtime validation when the doc itself flags uncertainty.
+- **The deep research was right about everything ELSE.** The 20-byte order (Death/Poison/Petrify/.../Unknown) is the FF8 canonical order. The `byte == 0` weakness threshold and `byte >= 100` resistance threshold from the StatusDefense formula are likely correct — we just need to find where those 20 bytes actually live in the runtime entity struct.
+- **Layout overhaul is solid.** Aaron's UX feedback drove the right changes: splitting stats by combat role, consolidating element resistances into one announce, removing the redundant active-statuses readout (already covered by target-cursor flow). Keep this as the v0.14.74.1 baseline; only the status data lookup is broken.
+
+## Remaining backlog
+
+1. Persistent accessibility settings
+2. GF naming bypass (Siren)
+3. Remove party-member NPCs from field entity catalog
+4. X-ATMO92 chase
+5. ⚠️ v0.14.74.1: revert keys 9/0 to "Not implemented yet." + diagnostic OR disasm-driven offset hunt (NEXT SESSION)
+6. v0.14.74.2 (after offset confirmed): re-enable keys 9/0 with correct offset
+7. Optional polish after status keys land: "Halves" verbose mode, status threshold refinement if `byte == 0` proves too strict
+8. `kernel.bin` parsing for Blue Magic
+9. ✅ GitHub push at v0.14.72 — will lag local by 3 builds (v0.14.73 + v0.14.73.1 + v0.14.74) until next push; v0.14.74.1 will add a 4th
+
+---
+
+**Previous build: v0.14.74 — Scan UI keyboard layout overhaul. AWAITING BAT.**
+
+## v0.14.74 ships the keyboard redesign
+
+Aaron requested a layout overhaul to break up the overwhelming 8-stat readout, consolidate the three element-resistance keys into one combined readout, and add Status Resistances + Status Weaknesses. New layout matches the in-game Scan UI's organization more naturally:
+
+| Key | v0.14.73.1 | v0.14.74 |
+|---|---|---|
+| 1 | Name | Name (unchanged) |
+| 2 | Description | Description (unchanged) |
+| 3 | Level & Type | Level & Type (unchanged) |
+| 4 | HP | HP (unchanged) |
+| 5 | All 8 stats | **Offensive stats** (STR/MAG/SPD/HIT) |
+| 6 | Weaknesses | **Defensive stats** (VIT/SPR/EVA/LCK) |
+| 7 | Absorbs | **Resistances** (Halves/Strong/Nullify/Absorb combined) |
+| 8 | Nullifies | **Weaknesses** (moved from key 6) |
+| 9 | Status Res ("Not implemented yet.") | **Status Resistances** (offensive ailments only) |
+| 0 | Active Statuses ("Not implemented yet.") | **Status Weaknesses** (offensive ailments only) |
+
+Luck stays defensive (4-and-4 balance, applies to both sides). The active-statuses readout that used to live on key 0 is removed because the same info is announced via the target-cursor flow in `BuildStatusString` already — so 10 useful keys instead of 9 useful + 1 redundant.
+
+## Element scale (preserved from v0.14.73.1)
+
+| u16 range | Bucket | Key |
+|---|---|---|
+| `< 800` | Weak | 8 |
+| `== 800` | Normal | (silent) |
+| `> 800 && < 900` | Halves | 7 |
+| `== 900` | Nullifies | 7 |
+| `> 900 && < 1000` | Strongly resists | 7 |
+| `>= 1000` | Absorbs | 7 |
+
+The 901..999 "Strongly resists" range — left ambiguous and silent in v0.14.73.1 — is now folded into key 7 alongside the other resistance categories per Aaron's decision ("all of these represent varying levels of resistance").
+
+Key 7 announces categories as separate sentences: "Halves Fire and Earth. Strongly resists Ice. Nullifies Thunder. Absorbs Water and Holy." Empty case: "No elemental resistances."
+
+## Status scale (new in v0.14.74)
+
+Reads 20 u8 bytes from `entity+0x4C` (BENT_STATUS_RESIST_BASE in `battle_tts.h`). Per the deep research's Question 1 + the FF Wiki StatusDefense formula:
+
+| byte value | Bucket | Key |
+|---|---|---|
+| `== 0` | Weak to (fully vulnerable) | 0 |
+| `1..99` | Partial resistance (silent) | — |
+| `>= 100` | Strongly resists / immune | 9 |
+
+**13-ailment filter** applied to BOTH keys 9 and 0:
+- **Include:** Death, Poison, Petrify, Darkness, Silence, Berserk, Zombie, Sleep, Slow, Stop, Doom, Slow Petrify, Confuse
+- **Exclude:** Haste, Regen, Reflect, Float (buffs), Drain, Expulsion, ??? (non-actionable)
+
+Knowing an enemy "resists Haste" or "is weak to Reflect" isn't actionable for the player.
+
+## Calibration anchor: T-Rexaur
+
+T-Rexaur is famously vulnerable to Sleep, Darkness, Death, and Poison (canonical FF8 strategy: junction 100 Sleeps to ST-Atk-J in Training Center). Expected v0.14.74 BAT announcement: "Weak to Death, Poison, Darkness, and Sleep." if the standard FF8 data has those bytes at 0.
+
+If T-Rexaur's Sleep byte is non-zero but small (50, 30, etc.), the `[SCAN-STAT]` log reveals it and we adjust the threshold to `byte < N`. The diagnostic is the same defensive pattern that saved us on element affinity — we get the right answer even if the threshold guess is wrong.
+
+## What v0.14.74 changes (file-by-file)
+
+**`src/battle_tts.h`**: New `BENT_STATUS_RESIST_BASE = 0x4C` constant with full encoding documentation in the comment.
+
+**`src/scan_tts.cpp`** (~280 lines):
+- New `ReadSlotStatusRes()` helper (SEH-guarded memcpy of 20 bytes from `entity_base + BENT_STATUS_RESIST_BASE`)
+- `CaptureSnapshot` now calls `ReadSlotStatusRes` after `ReadSlotElements`
+- New `[SCAN-STAT]` log line dumping all 20 raw status bytes per scan in deep-research order
+- `FormatStats` replaced with `FormatOffensiveStats` (STR/MAG/SPD/HIT) and `FormatDefensiveStats` (VIT/SPR/EVA/LCK), each with its own "unavailable" fallback message
+- `JoinElementList` refactored to `JoinNameList` parameterized over a name table (now used by both element and status formatters)
+- `FormatAbsorb` + `FormatNullify` replaced by unified `FormatResistances` (4-bucket, sentence-separated)
+- New `FormatStatusResistances` (key 9) and `FormatStatusWeaknesses` (key 0)
+- New data: `STATUS_NAMES_20`, `OFFENSIVE_AILMENT_INDICES`, `OFFENSIVE_AILMENT_COUNT`
+- `SpeakField` switch updated for new bindings (cases 5..0 all rewired)
+- `BuildAutoAnnounce` comment block updated (spoken phrase unchanged)
+- Element formatters comment block rewritten as v0.14.74 architecture doc
+
+**`src/ff8_accessibility.h`**: `FF8OPC_VERSION` bumped to `0.14.74` with full changelog.
+
+## What's preserved (working correctly)
+
+- `[SCAN-ELEM]` log line (still emits; no change)
+- ReadSlotElements, ReadSlotStats, ReadSlotName, ReadSlotHP, ReadSlotLevel, ReadSlotMonsterId (unchanged)
+- BuildAutoAnnounce phrasing ("Press numbers 0 through 9 for details.")
+- FormatLevel (key 3 type-label append from v0.14.69)
+- FormatHP, all hidden-HP logic
+- Type-label capture pipeline (HandleBattleText, sub_47EC70 forward from victory hook)
+- Auto-announce on Scan UI open
+- Cache lifecycle (OnBattleEnter clears, OnScanCast captures, OnScanPopupSpawn announces, OnScanPopupDespawn deactivates)
+- Sub_B687C0 fire #1 trigger + 90-frame screenshot capture
+
+## What to look for in BAT
+
+1. **Fastitocalon** (already validated raw bytes) should announce on key 7: "Halves Fire. Absorbs Water."; on key 8: "Weak against Thunder and Earth."; on keys 9/0: depends on its actual statusRes bytes (Fastitocalon isn't documented as having specific status weaknesses, so possibly "No status weaknesses." / some immunities on key 9).
+2. **T-Rexaur** is the calibration anchor for status weakness threshold. Expected key 0: "Weak to Death, Poison, Darkness, and Sleep." — if all four announce, the `byte == 0` threshold is right. If only some announce or if extras appear, the `[SCAN-STAT]` log reveals the actual byte values for refinement.
+3. **Tonberry** (no documented status weaknesses) should announce on key 0: "No status weaknesses." — good null test.
+4. **Stats split** — key 5 should now be ~half the length of v0.14.73.1's all-stats announce; key 6 the other half.
+5. **No regressions** on keys 1-4 — Name, Description, Level (with type), HP all unchanged.
+6. **`[SCAN-STAT]` log line** emits per scan with all 20 raw bytes for cross-validation.
+
+## Architectural notes
+
+- **Memory edit #30** ("deep research docs first") consulted for both the element scale (Question 2) and status resistance threshold (Question 1) before coding. The deep research doc had already documented `entity+0x4C`, the 20-byte order, and the `>= 100` threshold; v0.14.74 builds on those findings rather than guessing.
+- **JoinNameList parameterization** lets the same Oxford-comma list builder serve both element and status formatters — saves ~30 lines of duplicate code.
+- **`activeStatus` field** in ScanSnapshot remains declared but unused (was for the old key 0 active-statuses readout). Leaving it for now to avoid struct-layout ripple effects; can be removed in a future cleanup.
+
+## Remaining backlog
+
+1. Persistent accessibility settings
+2. GF naming bypass (Siren)
+3. Remove party-member NPCs from field entity catalog
+4. X-ATMO92 chase
+5. ⚠️ v0.14.74 keyboard layout overhaul — SHIPPED, awaiting BAT
+6. Optional polish after BAT: status threshold refinement (if `byte == 0` is too strict), "Halves" verbose mode
+7. `kernel.bin` parsing for Blue Magic
+8. ✅ GitHub push at v0.14.72 — will lag local by 3 builds (v0.14.73 + v0.14.73.1 + v0.14.74) until next push
+
+---
+
+**Previous build: v0.14.73.1 — elemental affinity bucket scale corrected. AWAITING BAT.**
+
+## v0.14.73 BAT FAILED ❌, v0.14.73.1 fixes the scale
+
+v0.14.73 BAT against Fastitocalon (slot 3) announced "Weak against Fire, Ice, Thunder, Earth, Poison, Wind, Water, and Holy." — every element triggered the weak bucket. The `[SCAN-ELEM]` diagnostic log line revealed why:
+
+```
+[SCAN-ELEM] slot=3 raw u16=[Fi=820 Ic=800 Th=700 Ea=650 Po=800 Wi=800 Wa=1000 Ho=800]
+              as i16=[Fi=820 Ic=800 Th=700 Ea=650 Po=800 Wi=800 Wa=1000 Ho=800]
+```
+
+Under v0.14.73's interpretation (`v > 100` = weak), every value was > 100 so every element triggered. v0.14.73's interpretation was a **guess** — a 100-anchored signed scale (`< 0` absorb, `== 0` nullify, `> 100` weak) based on FF7-style affinity conventions.
+
+**The correct format was already documented** in `Plan & Research Documents/Scan spell deep research results.md` (2026-04-29). I should have read that BEFORE shipping v0.14.73, but didn't — the lesson is now recorded in the comment block above the formatters: when a Plan & Research Documents/ entry exists for a feature, consult it first.
+
+## Correct FF8 elemental defense scale (8 × u16 at +0x3C, anchored at 800)
+
+The PC engine pre-computes the .dat-file signed-byte affinity into a u16 anchored at 800:
+- `.dat 0`     → `800` (normal)
+- `.dat +100`  → `900` (nullify)
+- `.dat +200`  → `1000` (absorb)
+- `.dat -100`  → `700` (weak)
+- `.dat -200`  → `600` (very weak)
+
+The Scan UI renders five buckets:
+
+| u16 range | Bucket | v0.14.73.1 announce key |
+|---|---|---|
+| `< 800` | Weak | Key 6 (FormatWeak) |
+| `== 800` | Normal | (silent) |
+| `> 800 && < 900` | Halves | (silent — no key assigned) |
+| `== 900` | Nullifies | Key 8 (FormatNullify) |
+| `> 900 && < 1000` | Strong resist | (silent) |
+| `>= 1000` | Absorbs | Key 7 (FormatAbsorb) |
+
+Fastitocalon's bytes decoded under this scale:
+- Fire (820) → Halves (silent)
+- Ice (800) → Normal (silent)
+- Thunder (700) → **Weak**
+- Earth (650) → **Weak**
+- Poison (800) → Normal (silent)
+- Wind (800) → Normal (silent)
+- Water (1000) → **Absorbs** (water creature — makes perfect sense)
+- Holy (800) → Normal (silent)
+
+Expected v0.14.73.1 announcements for Fastitocalon: "Weak against Thunder and Earth." / "Absorbs Water." / "Nullifies no elements." — matching the canonical FF8 Fastitocalon profile.
+
+## What v0.14.73.1 changes
+
+Only the three formatters in `src/scan_tts.cpp`:
+
+- `FormatWeak`: `uint16_t v = snap.elem[i]; if (v < 800)` (was `int16_t v; if (v > 100)`)
+- `FormatAbsorb`: `if (v >= 1000)` (was `if (v < 0)`)
+- `FormatNullify`: `if (v == 900)` (was `if (v == 0)`)
+
+All three read u16 directly without the i16 cast — the actual values are always positive in the typical game range.
+
+Comment block above the formatters rewritten to document the correct scale, the v0.14.73 mistake, and the deep-research-first lesson.
+
+## What's preserved from v0.14.73 (working correctly)
+
+- `ReadSlotElements()` helper — read 16 bytes from `entity_base + 0x3C` correctly.
+- `[SCAN-ELEM]` diagnostic log line — worked exactly as designed; revealed the real format on first BAT.
+- `JoinElementList` — Oxford comma list builder works correctly.
+- `BuildAutoAnnounce` phrasing change ("Press numbers 0 through 9 for details.") — still in place, working.
+- `SpeakField` switch routing for keys 6/7/8.
+- `ELEMENT_NAMES[8]` array.
+
+## What's intentionally silent (for now)
+
+- **Halves** (800 < v < 900): no key assigned. Could add `FormatHalves` on a future key, OR merge into FormatWeak's announce as "Halves Fire" alongside the "Weak against" list.
+- **Strong resist** (900 < v < 1000): the deep research left this 901..999 range slightly ambiguous. Treated as silent rather than mis-bucket.
+
+If Aaron wants Halves announced, that's a polish pass after v0.14.73.1's BAT confirms the corrected scale.
+
+## Architectural lesson recorded
+
+**Always consult `Plan & Research Documents/` BEFORE picking an interpretation when one exists.** v0.14.73 shipped a guess when a deep research document with the correct answer was sitting in the project. The diagnostic log saved us — we got the right answer in one BAT instead of multiple — but we shouldn't have needed it. The fix: search Plan & Research Documents/ at the start of any feature work that touches a documented engine field.
+
+## Remaining backlog
+
+1. Persistent accessibility settings
+2. GF naming bypass (Siren)
+3. Remove party-member NPCs from field entity catalog
+4. X-ATMO92 chase
+5. ⚠️ v0.14.73.1 elemental affinity (corrected scale) — SHIPPED, awaiting BAT
+6. v0.14.74 status resistances (key 9) — the SAME deep research doc above also documents this at `entity+0x4C`, 20 u8 bytes with threshold `< 100` for "Strong vs". Read THAT doc carefully before shipping v0.14.74.
+7. v0.14.75 active statuses (key 0)
+8. `kernel.bin` parsing for Blue Magic
+9. ✅ GitHub push — DONE 2026-05-02 19:31 UTC at v0.14.72 (commit 337cf97a). Local will lag GitHub by 2 builds (v0.14.73 + v0.14.73.1) until the next push.
+
+---
+
+**Previous build: v0.14.73 — element affinity (keys 6/7/8) + auto-announce phrasing fix. BAT FAILED ❌ (wrong scale; corrected in v0.14.73.1).**
+
+## What v0.14.73 ships
+
+Three changes, all in `src/scan_tts.cpp`:
+
+### 1. Element affinity feature (keys 6 / 7 / 8)
+
+`ScanSnapshot::elem[8]` has been a declared-but-unpopulated field since v0.14.59. v0.14.73 finally wires it up. New `ReadSlotElements()` helper memcpys the 16-byte block at `entity_base + 0x3C` (BENT_ELEM_RESIST_BASE) into `snap.elem[8]`. SEH-guarded, mirrors the existing `ReadSlotStats()` pattern. CaptureSnapshot calls it alongside ReadSlotStats so every slot's affinity is cached at scan time.
+
+Three new formatters — `FormatWeak`, `FormatAbsorb`, `FormatNullify` — each iterate `snap.elem[8]` cast as `int16_t` and pick out values per the FF8 community-standard scale:
+- `v < 0` → absorb (heals when hit by this element)
+- `v == 0` → immune / nullify
+- `0 < v < 100` → resist (partial reduction — NOT announced; can be added later if Aaron wants)
+- `v == 100` → normal damage (silent default)
+- `v > 100` → weak
+
+`JoinElementList` helper builds natural-language lists with Oxford commas: "Fire", "Fire and Ice", "Fire, Ice, and Thunder". Empty results say "No elemental weaknesses." / "Absorbs no elements." / "Nullifies no elements." so the response is never silent.
+
+`SpeakField` switch cases 6/7/8 now call the new formatters (were 'Not implemented yet.'). Cases 9/0 still say 'Not implemented yet.' pending v0.14.74 (status resistances at +0x4C, 20 bytes) and v0.14.75 (active statuses at +0x78). Key routing in `PollHPCheckKeys` was already in place from v0.14.59 — no `battle_tts_hp.inl` change needed.
+
+### 2. Diagnostic [SCAN-ELEM] log line
+
+CaptureSnapshot now emits a `[SCAN-ELEM]` log line per scan dumping both raw u16 and i16-cast values for all 8 elements (Fire/Ice/Thunder/Earth/Poison/Wind/Water/Holy). If FormatWeak/Absorb/Nullify announce surprising results in BAT, the raw bytes reveal whether the i16 interpretation is wrong without another diagnostic round.
+
+### 3. Auto-announce phrasing
+
+`BuildAutoAnnounce` now says "Press numbers 0 through 9 for details." instead of "Press number keys 1 through 0 for details.". Same key bindings (1=Name, 2=Description, 3=Level, 4=HP, 5=Stats, 6=Weak, 7=Absorb, 8=Nullify, 9=StatusRes, 0=ActiveStatus). The phrase "1 through 0" is technically correct on a physical number row but reads awkwardly through SAPI; "0 through 9" is the natural ascending range.
+
+## Expected v0.14.73 BAT outcomes
+
+1. **Auto-announce phrasing fixed.** New scans should announce "Press numbers 0 through 9 for details." instead of the old phrase.
+2. **Keys 6/7/8 produce real announcements.** Test enemies with known affinities:
+   - Bite Bug (Fly Monster) → should announce "Weak against Wind." on key 6 (canonical Fly-type weakness)
+   - Glacial Eye → should announce "Absorbs Ice." on key 7, "Weak against Fire." on key 6
+   - Caterchipillar → "Weak against Fire." on key 6
+   - Many enemies will have no entries (e.g. "No elemental weaknesses.") — that's normal for non-elemental monsters.
+3. **`[SCAN-ELEM]` log line present** in `Logs/ff8_battle.log` for every scan, showing raw bytes for cross-validation.
+4. **Cases 9/0 still say "Not implemented yet."** — those are v0.14.74 and v0.14.75 territory.
+
+## If the BAT shows wrong announcements
+
+The interpretation may need adjustment. The `[SCAN-ELEM]` log line will reveal the actual byte format — e.g., if all values are u8 packed into u16 slots, or if the scale differs from i16 percentage. Adjust `FormatWeak/Absorb/Nullify` interpretation in v0.14.73.1 based on observation.
+
+## Next chapters
+
+- v0.14.74: status resistances (key 9) — read 20 u8 at `entity+0x4C`
+- v0.14.75: active statuses (key 0) — composite of TIMED_STATUS_0..3 + PERSIST_STATUS bitfields
+
+## Remaining backlog
+
+1. Persistent accessibility settings
+2. GF naming bypass (Siren)
+3. Remove party-member NPCs from field entity catalog
+4. X-ATMO92 chase
+5. ✅ v0.14.73 elemental affinity (keys 6/7/8) — SHIPPED, awaiting BAT
+6. v0.14.74 status resistances (key 9)
+7. v0.14.75 active statuses (key 0)
+8. `kernel.bin` parsing for Blue Magic
+9. ✅ GitHub push — DONE 2026-05-02 19:31 UTC. main HEAD is v0.14.72 (commit 337cf97a). Will lag local by 1 build until v0.14.73 BAT lands and a follow-up push.
+
+---
+
+**Previous build: v0.14.72 — sub_47EC70 hook conflict resolved. BAT PASSED ✅**
 
 **v0.14.72 BAT log evidence (from 12:55:15 module init):**
 
@@ -94,7 +843,7 @@ No new hook needed — entity-struct reads already work. Pure data-formatting wo
 6. v0.14.74 status resistances (key 9)
 7. v0.14.75 active statuses (key 0)
 8. `kernel.bin` parsing for Blue Magic
-9. **GitHub push** — main HEAD is v0.14.65.3, local is v0.14.72; the gap is **~7 versions**: v0.14.66-diag, v0.14.67, v0.14.68-diag, v0.14.69, v0.14.70-diag, v0.14.71, v0.14.72. (Earlier notes that called this an "~85-build backlog" were wrong. Verified via github:list_commits on 2026-05-02.) v0.14.72 is a stable architectural point if Aaron wants to push before more feature work.
+9. ✅ **GitHub push** — DONE 2026-05-02 19:31 UTC. main HEAD is now v0.14.72 (commit 337cf97a), in sync with local. Six versions consolidated into one cumulative commit. (Earlier notes that called this an "~85-build backlog" were wrong; actual gap was 6 versions: v0.14.66-diag, v0.14.68-diag, v0.14.69, v0.14.70-diag, v0.14.71, v0.14.72.)
 
 ---
 

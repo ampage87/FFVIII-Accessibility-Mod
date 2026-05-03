@@ -14,55 +14,14 @@ static void HandleKeys()
                  (GetAsyncKeyState(VK_BACK) & 0x8000) != 0;
     // \ (backslash) toggles auto-drive to selected entity.
     bool drive = (GetAsyncKeyState(VK_OEM_5) & 0x8000) != 0;
-    // v05.69: F11 = VISDIAG dump
-    bool f11 = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
 
-    if (f11 && !s_f11WasDown) {
-        // Dump candidate visibility bytes for all model-bearing entities.
-        __try {
-            uint8_t entCount = *FF8Addresses::pFieldStateOtherCount;
-            uint8_t* base = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
-            if (base && entCount > 0) {
-                uint8_t lim = (entCount < MAX_ENTITIES) ? entCount : (uint8_t)MAX_ENTITIES;
-                Log::Field("FieldNavigation: [VISDIAG] === Visibility flag dump ===");
-                for (int i = 0; i < (int)lim; i++) {
-                    uint8_t* blk = base + ENTITY_STRIDE * i;
-                    int16_t  mdl = *(int16_t*)(blk + 0x218);
-                    // Dump a wide range of candidate offsets as hex.
-                    // Flags area: 0x240-0x25F covers talk/push/through/setpc
-                    // and likely the SHOW/HIDE visibility flag.
-                    // Also dump 0x00-0x0F (early control bytes) and 0x160-0x16F (exec flags).
-                    // Dump regions covering the gaps in ff8_field_state_other:
-                    // gap1 (0x188-0x1F9): 114 bytes after ff8_field_state_common
-                    // gap2 (0x21A-0x248): 47 bytes after model_id
-                    // flags area (0x240-0x25F): talkon/pushon/throughon/setpc
-                    char hexGap1a[80] = {}; // 0x188..0x19F (24 bytes, needs 24*3+1=73)
-                    char hexGap1b[80] = {}; // 0x1A0..0x1B7 (24 bytes)
-                    char hexGap2[80] = {};  // 0x21A..0x231 (24 bytes)
-                    char hexFlags[80] = {}; // 0x240..0x257 (24 bytes)
-                    for (int b = 0; b < 24; b++)
-                        snprintf(hexGap1a + b*3, 4, "%02X ", blk[0x188 + b]);
-                    for (int b = 0; b < 24; b++)
-                        snprintf(hexGap1b + b*3, 4, "%02X ", blk[0x1A0 + b]);
-                    for (int b = 0; b < 24; b++)
-                        snprintf(hexGap2 + b*3, 4, "%02X ", blk[0x21A + b]);
-                    for (int b = 0; b < 24; b++)
-                        snprintf(hexFlags + b*3, 4, "%02X ", blk[0x240 + b]);
-                    Log::Field("FieldNavigation: [VISDIAG] ent%d model=%d %s",
-                               i, (int)mdl, (i == s_playerEntityIdx) ? "[PLAYER]" : "");
-                    Log::Field("FieldNavigation: [VISDIAG]   @0x188: %s", hexGap1a);
-                    Log::Field("FieldNavigation: [VISDIAG]   @0x1A0: %s", hexGap1b);
-                    Log::Field("FieldNavigation: [VISDIAG]   @0x21A: %s", hexGap2);
-                    Log::Field("FieldNavigation: [VISDIAG]   @0x240: %s", hexFlags);
-                }
-                Log::Field("FieldNavigation: [VISDIAG] === End dump ===");
-                ScreenReader::Speak("Visibility diagnostic logged.");
-            }
-        } __except(EXCEPTION_EXECUTE_HANDLER) {
-            Log::Field("FieldNavigation: [VISDIAG] Exception");
-        }
-    }
-    s_f11WasDown = f11;
+    // v0.14.75: F11 VISDIAG dump removed. Was a v05.69 research diagnostic
+    // for finding the entity SHOW/HIDE visibility-flag offset by dumping
+    // candidate byte ranges (0x188, 0x1A0, 0x21A, 0x240) for every
+    // model-bearing field entity. The investigation closed once the
+    // catalog was built; F11 is now reserved globally in dinput8.cpp for
+    // on-demand screenshot capture. The s_f11WasDown static and any
+    // related state are no longer needed here.
 
     // v0.14.45: Removed v0.12.21 F2 = Director Varblock + Entity Struct Diagnostic.
     // F2 is now bound to GameAudio::ToggleDucking in dinput8.cpp. The Director

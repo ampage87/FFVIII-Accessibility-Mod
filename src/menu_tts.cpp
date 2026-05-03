@@ -560,22 +560,23 @@ void MenuTTS::Update()
 
     // v0.08.21: Menu mode hotkeys
     if (isMenuMode) {
-        // F11 = full menu summary
-        // Shift+F11 = start memory monitor (15s, tracks left-panel cursor)
-        // Ctrl+F11 = diagnostic dump
-        if (GetAsyncKeyState(VK_F11) & 1) {
-            if (GetAsyncKeyState(VK_SHIFT) & 0x8000) {
-                StartMemoryMonitor();
-            } else if (GetAsyncKeyState(VK_CONTROL) & 0x8000) {
-                ScreenReader::Speak("Menu data scan", true);
-                DumpMenuScreenData();
-                ScreenReader::Speak("Done, check log", true);
-            } else {
-                AnnounceMenuSummary();
-            }
+        // v0.14.75: M = full menu summary (party / Gil / play time / location).
+        // Moved from F11 to free F11 for the global on-demand screenshot trigger
+        // in dinput8.cpp. The Shift+F11 (StartMemoryMonitor) and Ctrl+F11
+        // (DumpMenuScreenData) bindings were research diagnostics for cursor /
+        // savemap-offset discovery; both investigations are closed and the
+        // diagnostics are dormant. Removed in v0.14.75 along with the F11
+        // reassignment. The PollMemoryMonitor() call that paired with
+        // StartMemoryMonitor was also removed here — with no caller of
+        // StartMemoryMonitor left, the monitor can never activate, so polling
+        // it every frame was just a no-op. The Start/Poll/StartMemoryMonitor
+        // function definitions in menu_tts_diagnostics.inl remain in place
+        // (harmless dead code) in case a future investigation needs them.
+        // M was confirmed free across all source files via dryRun probes
+        // before binding here.
+        if (GetAsyncKeyState('M') & 1) {
+            AnnounceMenuSummary();
         }
-        // Poll memory monitor if active
-        PollMemoryMonitor();
         // G = Gil
         if (GetAsyncKeyState('G') & 1) {
             AnnounceGil();

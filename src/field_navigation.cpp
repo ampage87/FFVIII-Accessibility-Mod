@@ -544,8 +544,8 @@ static int32_t   s_projDiagPrevFpY = 0;
 static int       s_projDiagCount = 0;
 static const int PROJ_DIAG_MAX = 10;
 
-// v05.69: VISDIAG — dump entity visibility candidate bytes on F11.
-static bool s_f11WasDown = false;
+// v0.14.75: VISDIAG removed; F11 reassigned to global screenshot in
+// dinput8.cpp. s_f11WasDown declaration deleted along with the handler.
 
 // v05.39: Track which entities have logged the struct-position fallback.
 static uint16_t  s_structFallbackLogged = 0;

@@ -730,6 +730,16 @@ static void ResetSpriteSpawnState()
     memset(s_lastPopupMissAnnounceTick, 0, sizeof(s_lastPopupMissAnnounceTick));
     // v0.13.67: sub_4877F0 kind=4 Miss dedup
     memset(s_lastSpellMissAnnounceTick, 0, sizeof(s_lastSpellMissAnnounceTick));
+    // v0.14.74.2: Scan-cast popup tick. Defense-in-depth — without this
+    // reset, escaping from a battle within SCAN_CAST_RECENT_MS (1 sec)
+    // of casting Scan could leak the tick across the battle boundary
+    // and trigger a bogus action-layer Scan announce on the very first
+    // sub_48E830 fire of the next battle. NoEffect_RecordSnapshot's
+    // InterlockedExchange normally consumes this tick within the same
+    // frame the popup hook sets it, but the fix is one line and the
+    // race window is real, so we clear it per battle. Pairs with the
+    // primary v0.14.74.2 fix in OnBattleEnter for s_prevBattleMagicId.
+    InterlockedExchange(&s_lastScanCastTick, 0);
     // v0.13.69: kind=4 screenshot state — reset per battle so the 10-capture
     // cap refreshes each encounter.
     s_kind4CapturePending = false;

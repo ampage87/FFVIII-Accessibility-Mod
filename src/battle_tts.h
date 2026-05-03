@@ -85,8 +85,16 @@ static const uint32_t BENT_MAX_ATB          = 0x08;  // uint16 (ally) / uint32 (
 static const uint32_t BENT_CUR_ATB          = 0x0C;  // uint16 (ally) / uint32 (enemy)
 static const uint32_t BENT_CUR_HP           = 0x10;  // uint16 (ally) / uint32 (enemy)
 static const uint32_t BENT_MAX_HP           = 0x14;  // uint16 (ally) / uint32 (enemy)
-static const uint32_t BENT_ELEM_RESIST_BASE = 0x3C;  // 8 x uint16 (Fire/Ice/Thunder/Earth/Poison/Wind/Water/Holy)
-static const uint32_t BENT_PERSIST_STATUS   = 0x78;  // bitfield: KO/Poison/Petrify/Blind/Silence/Berserk/Zombie
+static const uint32_t BENT_ELEM_RESIST_BASE   = 0x3C;  // 8 x uint16 (Fire/Ice/Thunder/Earth/Poison/Wind/Water/Holy)
+// v0.14.74: Status resistance block per `Plan & Research Documents/Scan spell deep research results.md`.
+// 20 contiguous unsigned bytes immediately after the 8 x u16 elemental block (which ends at 0x4B).
+// Order: Death, Poison, Petrify, Darkness, Silence, Berserk, Zombie, Sleep, Haste, Slow, Stop, Regen,
+//        Reflect, Doom, Slow Petrify, Float, Confuse, Drain, Expulsion, ???
+// Encoding: each byte adds to a 100 baseline to form StatusDefense in the inflict formula.
+//   byte == 0   -> baseline (most vulnerable; "Weak to" candidate per the Scan UI)
+//   byte >= 100 -> fully immune ("Strong vs" displayed by the Scan UI per the deep research's threshold)
+static const uint32_t BENT_STATUS_RESIST_BASE = 0x4C;  // 20 x uint8 status resistances (see comment above)
+static const uint32_t BENT_PERSIST_STATUS     = 0x78;  // bitfield: KO/Poison/Petrify/Blind/Silence/Berserk/Zombie
 static const uint32_t BENT_LEVEL            = 0xB4;  // uint8
 static const uint32_t BENT_STR              = 0xB5;  // uint8
 static const uint32_t BENT_VIT              = 0xB6;  // uint8
