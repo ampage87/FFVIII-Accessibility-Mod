@@ -21,7 +21,430 @@ Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` inj
 
 ---
 
-**Current build: v0.14.82 — Vulnerable threshold relaxed 60% → 50%. PASSED BAT (Bite Bug Spirit=3, Glacial Eye Spirit=101, Caterchipillar Spirit=18 — all three announces matched predictions exactly; Bite Bug + Caterchipillar gained "Vulnerable to Sleep." second sentence as expected; Glacial Eye unchanged as Sleep at 32% still drops). The Scan TTS announce design is now fully stable. Pending: push v0.14.76 through v0.14.82 to GitHub (verify exact backlog via `github:list_commits` first).**
+**Current build: v0.14.85.3 — Chapter 1 hotfix #3. Aaron clarified after the v0.14.85.2 build sketch: he doesn't have access to Ragnarok, Chocobo, or flying B-Garden in his current save — only foot and car. That means the mode 4 read in the v0.14.85.1 BAT log was NOT a Ragnarok mount, it was a transient locomotion-byte read at a field-transition moment. The 'mode 4 = Ragnarok' tag in v0.14.83 was Claude's assumption from an earlier BAT log labeled 'Ragnarok session', never confirmed against actual gameplay. Per the research doc, Ragnarok is mode 50 — we should trust the doc. v0.14.85.3 changes: (1) `GetVehicleType` no longer maps mode 4 to Ragnarok — defaults to ON_FOOT for any non-canonical mode, the safest BFS choice when the byte is uncertain; (2) `GetVehicleName` no longer claims mode 4 is Ragnarok — reports 'Unknown vehicle' for unrecognized modes; (3) the v0.14.83 `vehicle > 4` whitelist is replaced by `IsCanonicalLocomotion` which whitelists only the explicit canonical set {0, 3, 6, 31, 32-40, 48, 50} from the research doc — transient bytes outside this set never trigger announcements or rebuilds; (4) v0.14.85.2's type-change rebuild trigger refined to compare BFS RULE CLASS (land-only / ocean-allowed / no-filter) instead of full VehicleType, so foot↔car transitions don't trigger gratuitous rebuilds (both are land-only). AWAITING BAT — Aaron's test surface is foot + car + field transitions only.**
+
+## v0.14.85.3 — Chapter 1 hotfix #3 (drop unvalidated mode 4 = Ragnarok)
+
+### Why this exists
+
+The v0.14.85.1 BAT log showed:
+
+- 21:48:25: bearing on Balamb Garden, on foot, 4-entry filtered catalog ✅
+- 21:48:29: `Vehicle change: Ragnarok (mode 4)` — announced "Ragnarok."
+- 21:48:30: `Exited world map`
+- 21:49:14: `Entered world map`. Vehicle byte still 4. `Ragnarok mode — catalog unfiltered (38 entries).`
+
+v0.14.85.2 was drafted assuming that read was a real Ragnarok mount and adding a rebuild trigger to recover when the byte settled back to 0. But Aaron clarified he doesn't have Ragnarok in this save — so mode 4 was something else entirely:
+
+- A transient byte read at the Fire Cavern field-transition moment (animation phase counter, state-machine value, etc.), OR
+- Some other unidentified state.
+
+The v0.14.83 'mode 4 = Ragnarok' empirical tag came from a v0.14.82 BAT log Claude characterized as a 'Ragnarok session' — but that label was Claude's assumption from observing flight-like byte values 0→4→8→12→...→60, never Aaron's confirmation. Per `Plan & Research Documents/World Map Terrain and Locomotion Reference.md` the canonical Ragnarok value is mode **50**, not 4. We've been carrying an unvalidated mapping for 3 builds; v0.14.85.3 removes it.
+
+### What changed
+
+**1. `GetVehicleType` — conservative fallback.** Mode 4 (and any other non-canonical value) now defaults to `VEH_ON_FOOT`. This is the safest classification for BFS purposes: if the byte is uncertain, treat the player as on foot (land-only filtering). Real vehicles still get correct types when their canonical byte values are read.
+
+```c
+static VehicleType GetVehicleType(uint8_t mode)
+{
+    if (mode == 0 || mode == 6) return VEH_ON_FOOT;
+    if (mode == 3)               return VEH_GARDEN;       // Ship: ocean access
+    if (mode == 31)              return VEH_CHOCOBO;
+    if (mode >= 32 && mode <= 40) return VEH_CAR;
+    if (mode == 48)              return VEH_GARDEN;       // Garden mobile
+    if (mode == 50)              return VEH_RAGNAROK;     // No filter
+    return VEH_ON_FOOT;                                    // safe default for unknown
+}
+```
+
+**2. `GetVehicleName` — no false claims.** Removed mode 4 = Ragnarok. Cars (32-40) now share a single 'Car' name regardless of which specific car. Anything outside the canonical set returns 'Unknown vehicle'.
+
+**3. `IsCanonicalLocomotion` whitelist replaces `vehicle > 4`.** The old whitelist included mode 4 (since it was tagged as Ragnarok) and excluded modes 31, 32-40, 48, 50 (the actual canonical values per research). The new whitelist is the explicit set `{0, 3, 6, 31, 32-40, 48, 50}` and is consulted by `CheckVehicleChange` before any announcement or rebuild fires. Transient bytes (animation phase counters, field-transition state, etc.) are silently ignored — `s_lastVehicle` not updated, no announce, no rebuild.
+
+**4. Rebuild trigger refined to BFS rule class.** v0.14.85.2 used `oldType != newType` which would force a rebuild on every VehicleType change including foot↔car. But foot, chocobo, and car all share the same land-only BFS rule — the BFS result is identical. New helper `GetBfsRuleClass(VehicleType)` returns 0 for land-only (foot/chocobo/car), 1 for ocean-allowed (Ship/Garden), 2 for no-filter (Ragnarok). Rebuild only fires when the class changes — i.e., when crossing a reachability-rule boundary. Foot↔car → same class → no rebuild. Foot↔Ragnarok → class crosses → rebuild. Better UX (no gratuitous catalog index resets when getting in/out of a car).
+
+### Files
+
+- `src/world_map.cpp` — `GetVehicleType`, `GetVehicleName`, `CheckVehicleChange` rewritten; new `GetBfsRuleClass` and `IsCanonicalLocomotion` helpers added (~50 lines net), file header updated.
+- `src/ff8_accessibility.h` — `FF8OPC_VERSION` 0.14.85.2 → 0.14.85.3.
+- No new addresses, no new hooks, no schema changes, no build script changes.
+
+### v0.14.85.3 BAT plan (foot + car only)
+
+Aaron's test surface is limited to foot and car. The fix should make the filter behave correctly for those:
+
+1. **Confirm v0.14.85.1 wins still preserved.** At game load on Balamb on foot, you should still hear the same 4-entry filtered list (Balamb Garden, Fire Cavern, Balamb Town, Chocobo Forest 1). Terrain grid log line should show `195 land, 573 ocean (of 768)`.
+
+2. **The actual fix — field transition shouldn't unfilter.** Walk into Fire Cavern (or Balamb Town entrance) and walk back out to the world map. Filter should remain on the 4-entry Balamb-island list throughout. Crucially: NO 'Ragnarok.' announcement should fire on the field transition. NO `[BFS] Ragnarok mode — catalog unfiltered` line in the log on world-map re-entry.
+
+3. **Watch the log for unexpected events.** If the locomotion byte does something weird at a field boundary, the log should be quiet about it because `IsCanonicalLocomotion` filters non-canonical values. If you see `Vehicle change:` lines you didn't expect, send the log — some byte is reading a canonical value we didn't anticipate.
+
+4. **(If you can find a car)** Drive a car. Should hear 'Car.' announce when entering. Catalog should NOT rebuild (foot → car stays in rule class 0 = land-only). Cycle list stays the same.
+
+### Risks
+
+- **Nothing should break.** All v0.14.85.1 wins (terrain grid, catalog data, coordinate system) are unchanged. Only the vehicle handling logic moved.
+- **If field transitions still unfilter the catalog**: the byte is reading a canonical value we don't expect at the transition. Send the log; the `Vehicle change:` line will tell us which byte value, and we can decide whether to add it to the whitelist as a known transient or investigate further.
+- **Untested vehicle modes (Chocobo 31, Ragnarok 50, Garden 48, Ship 3)**: when you eventually have access, they should announce correctly via the new `GetVehicleName` mapping. If they don't, we'll learn the canonical bytes and update.
+
+---
+
+## v0.14.85.2 — Chapter 1 hotfix #2 (vehicle-change filter rebuild)
+
+### v0.14.85.1 BAT result
+
+Mostly PASSED, with a UX gap on vehicle change.
+
+**What worked:**
+
+- Terrain grid loaded successfully: `[TERRAIN] Grid built: 195 land, 573 ocean (of 768). Total real polys=473193 (oceans=315777).` Numbers match the v0.11.16 BAT exactly. Visual grid (24 rows of `# / ~`) shows recognizable FF8 continents — Balamb Island a small isolated cluster around row 20 col 19-20, Galbadia continent a long horizontal mass rows 4-12 leftish, Trabia / Esthar / Centra all visible. Block-aware parser is correct.
+- Catalog filter at startup: 4 entries on Balamb (Balamb Garden, Fire Cavern, Balamb Town, Chocobo Forest 1). Cycling, bearing, all worked.
+- Coordinate system match: player position (29941, -30093) maps to seg(19,20); Balamb Garden catalog entry (24576, -29406) maps to seg(19,20); same segment, ~5km apart, distance announce correct.
+
+**What didn't work (and why):**
+
+Aaron reported "after entering/exiting Fire Cavern, the filter was gone" — catalog showed all 38 entries on world-map return. Log shows what actually happened was a Ragnarok mount, not Fire Cavern entry:
+
+- 21:48:25: bearing on Balamb Garden, on foot, 4-entry filtered catalog
+- 21:48:29: `Vehicle change: Ragnarok (mode 4)` — the locomotion byte transitioned 0→4, triggering the v0.14.83 mount-moment detection.
+- 21:48:30: `Exited world map` (mounting cinematic / cockpit field).
+- 21:49:14: `Entered world map`. Position (30126, -29317) (within 200 units of pre-mount position). Vehicle byte still 4. `[BFS] Ragnarok mode — catalog unfiltered (38 entries).`
+
+This is correct behavior given the inputs: Ragnarok flies anywhere, so its filter is no-filter. Aaron either mounted Ragnarok intentionally and missed the "Ragnarok." announce, or the locomotion byte read 4 transiently at the field-transition moment and the catalog was stuck at no-filter from then on.
+
+Either way, the gap is real: **catalog only rebuilt on world-map enter/exit, never on vehicle change mid-session**. So once a no-filter state was set (correctly or transiently), the filter never re-engaged for the rest of the world-map session, even after subsequent dismount.
+
+### Fix
+
+`CheckVehicleChange()` now triggers a catalog rebuild when the vehicle TYPE (BFS reachability class) changes:
+
+```c
+VehicleType oldType = GetVehicleType((uint8_t)s_lastVehicle);
+VehicleType newType = GetVehicleType(vehicle);
+if (oldType != newType && s_onWorldMap) {
+    s_catalogBuilt = false;
+    Log::World("[BFS] Vehicle type changed (%d -> %d), forcing catalog rebuild", ...);
+}
+```
+
+Vehicle TYPE granularity (not raw byte): Foot, Chocobo, Car all share land-only BFS rules, so cycling among those doesn't trigger a rebuild — only when the vehicle crosses a BFS-rule boundary (foot↔Ragnarok, foot↔Garden, etc.) does the catalog refilter. This avoids gratuitous rebuilds while ensuring the filter always tracks the current vehicle's reachability rules.
+
+### Files
+
+- `src/world_map.cpp` — `CheckVehicleChange()` adds the type-change rebuild block (~20 lines), file header updated.
+- `src/ff8_accessibility.h` — `FF8OPC_VERSION` 0.14.85.1 → 0.14.85.2.
+- No new addresses, no new hooks, no schema changes.
+
+### v0.14.85.2 BAT plan
+
+1. **Confirm v0.14.85.1 wins are preserved**: terrain grid still loads with 195/573 split, recognizable continent visual, 4-entry filter on Balamb on foot.
+2. **Test the rebuild path**: Ride Ragnarok (heard "Ragnarok." announce, catalog should expand to 38). Land somewhere far from start (e.g., Esthar continent). Dismount. Should hear "On foot." announce, AND the log should show `[BFS] Vehicle type changed (4 -> 0), forcing catalog rebuild` immediately after, AND the next `-` `=` cycle should be a SHORT filtered list of locations on the Esthar continent (not the full 38).
+3. **Test the transient case**: just walk around without mounting anything, enter and exit a field (e.g., Balamb Town entrance and exit). The filter should remain on the Balamb-island filtered list both before and after the field transition. If the locomotion byte reads anything weird at the transition moment, the rebuild will fire and re-filter.
+4. **Watch for unexpected rebuilds**: the rebuild log line should fire only at meaningful vehicle changes. If it fires while you're walking around (foot=foot), something else has gone sideways.
+
+### Risks
+
+- **`s_lastVehicle` initialized to -1.** First vehicle change after Initialize compares `(uint8_t)(-1)` = 255 to the new value. `GetVehicleType(255)` falls through to the default `return VEH_ON_FOOT`. New value at startup (e.g., on foot 0) returns VEH_ON_FOOT too, so types match, no rebuild forced. Catalog builds normally on the first world-map entry as before. Edge case is benign.
+- **Repeated mount/dismount**: each transition rebuilds the catalog, which involves another BFS pass. BFS over 768 cells is microseconds; not a performance concern. But the rebuild does reset `s_catalogIndex = 0`, so if Aaron is mid-cycling when he mounts, the cycle position resets. Acceptable tradeoff for correctness.
+- **Vehicle byte transient at world-map ENTRY** (the original suspected bug): if the byte transitions 0 → 4 → 0 within the first frames of world-map entry, we'd see two rebuilds (filter on → off → on). User experience: brief flash of unfiltered list before refiltering. Acceptable; better than persistent wrong filter.
+
+---
+
+## v0.14.85.1 — Chapter 1 hotfix
+
+### v0.14.85 BAT result
+
+FAILED. Two separate problems surfaced:
+
+1. **Terrain parser was structurally wrong.** Log showed `[TERRAIN] Grid built: 768 land, 0 ocean (of 768)` and `[BFS] From seg(19,20) veh=0: 768/768 segments reachable` — zero filtering. The parser scanned a flat 2304-polygon stride from segment offset 0, but wmx.obj segments are NOT flat polygon arrays. Per `wmx.obj polygon format deep research findings.md`, each segment has a 68-byte header (4-byte group_id + 16 × 4-byte block offsets), then 16 variable-length blocks each with a 4-byte header (poly_count, vert_count, norm_count, pad), then padding. Polygons live INSIDE blocks at offsets specified by the segment header. The flat scan read garbage bytes between block boundaries that almost never happened to land in 32-34 (the ocean range), so every segment classified as land. The past-chat code I extracted in v0.14.85 had this bug; the v0.11.16 BAT 'wmx.obj loaded' message claiming 195/573 split is unreliable as a contemporaneous validation — it may have come from a later parser version not preserved in chat history.
+
+2. **Catalog used wrong coordinate system + had interior-only entries.** Aaron BAT'd at Balamb Garden, where the player position address read (29941, -30093) (negative Y!), but our 'Balamb Garden' catalog entry was at (70784, 152832) (positive Y, ~50000 units off). The two coordinate systems were unrelated. Plus catalog included 'Timber Maniacs Building' (interior of Timber, not a world-map entry), 'SeeD Graduation Ball' (event location inside Balamb Garden), 'SeeD on Train' (event), 'Balamb Garden MD Level' (interior), 'Dr. Odines Lab' (interior of Esthar), 'Crystal Pillar' (Disc 4 endgame, not in canonical list), etc. The correct list per `World Map Location Coordinates Research Findings.md` is the 26-entry FinalFantasyKingdom set + 7 chocobo forests + 4 alien sites = 37, all sourced from the ff8-speedruns/ff8-memory dataset which uses the SAME coordinate system as the player-position address (`FF8_EN.exe+1C3EE80`).
+
+Log evidence:
+- `[BFS] Player at (29941,-30093) -> seg(19,20), vehicle type 0` (with the v0.11.16 +131072 X-offset fix, this maps correctly to Balamb-area segment)
+- `[BFS] From seg(19,20) veh=0: 768/768 segments reachable` (the terrain bug — every segment marked traversable)
+- Catalog cycle showed 'Timber Maniacs Building. 40 kilometers away.', 'SeeD Graduation Ball. 47 kilometers away.', etc. — confirming both flaws.
+
+### What v0.14.85.1 ships
+
+**Fix 1 — Proper wmx.obj parser.** `LoadTerrainGrid()`'s segment-classification loop now walks the actual structure:
+
+```
+for each segment 0..767:
+  for each block_idx 0..15:
+    block_offset = uint32_le(segData + 4 + block_idx*4)
+    if block_offset out-of-range: skip
+    block_base = segData + block_offset
+    poly_count = block_base[0]
+    if poly_array_end out-of-range: skip
+    for each polygon 0..poly_count-1:
+      terrain = block_base[4 + p*16 + 13]
+      if 32..34: ocean_count++
+      total_count++
+  classify segment LAND or OCEAN by majority
+```
+
+With bounds-guards on every offset/count read so a malformed segment can't read past the 36864-byte boundary.
+
+Log now also reports total real-polygon and ocean-polygon counts across all 768 playable segments. The visual grid dump (24 rows of `# / ~`) is unchanged — it's the primary diagnostic for parser correctness.
+
+**Fix 2 — Canonical 38-entry catalog.** `s_locations[]` rebuilt from `Plan & Research Documents/World Map Location Coordinates Research Findings.md`:
+
+- 26 numbered FinalFantasyKingdom markers (Balamb Garden, Balamb Town, Dollet, Timber, Galbadia Garden, Deling City, Tomb of the Unknown King, D-District Prison, Galbadia Missile Base, Fisherman's Horizon, Trabia Garden, Edea's House, White SeeD Ship, Great Salt Lake, Esthar City, Lunatic Pandora Lab, Lunar Gate, Sorceress Memorial, Shumi Village, Winhill, Centra Ruins, Deep Sea Research Center, Cactuar Island, Tears' Point, Island Closest to Hell, Island Closest to Heaven)
+- 7 chocobo forests (numbered 1-7 with geographic-hint comments since the in-game forests don't have canonical names)
+- 4 alien encounter sites (numbered 1-4)
+- Fire Cavern (kept from v0.11.11 wmx.obj analysis — it's a real world-map entry point that's missing from the FinalFantasyKingdom set because that set is Ragnarok-era)
+
+**REMOVED** from the prior catalog: Timber Maniacs Building, SeeD Graduation Ball, SeeD on Train, Balamb Garden MD Level, Dr. Odines Lab, Crystal Pillar, Sanctuary, Sorc Forest, Pockets Forest (replaced with the canonical numbered chocobo forests). 'Missile Base' renamed 'Galbadia Missile Base', 'Edea House' → 'Edea\'s House', 'Fishermans Horizon' → 'Fisherman\'s Horizon', 'Research Center' → 'Deep Sea Research Center'.
+
+**ADDED** (canonical entries that were missing): Dollet, White SeeD Ship, Lunatic Pandora Lab, Tears' Point, Island Closest to Hell, Island Closest to Heaven, Deep Sea Research Center.
+
+All coordinates now match the runtime player-position-address coordinate system, so distance/bearing calculations and BFS segment-mapping work without conversion.
+
+**Files:**
+
+- `src/world_map.cpp` — LoadTerrainGrid segment-classification loop rewritten (~50 lines), constants block updated (8 new lines explaining segment/block structure, removed `WMX_POLYS_PER_SEG`, added `WMX_TOTAL_SEGS`, `WMX_BLOCKS_PER_SEG`, `WMX_SEG_HEADER_SIZE`, `WMX_BLOCK_HDR_SIZE`), `s_locations[]` replaced wholesale (38 entries with extensive provenance comment), file header updated.
+- `src/ff8_accessibility.h` — `FF8OPC_VERSION` 0.14.85 → 0.14.85.1.
+- No new addresses, no new hooks, no schema changes, no build script changes.
+
+### v0.14.85.1 BAT plan
+
+Same as v0.14.85 but with sharper expectations because we now know what success looks like:
+
+1. **Startup log validation (most important).** First Initialize call should produce: `[INIT] Terrain grid loaded successfully` → `[TERRAIN] wmx.obj FI entry: uncomp=30781440 offset=3040099 comp=0` → `[TERRAIN] wmx.obj loaded (30781440 bytes), classifying 768 segments...` → `[TERRAIN] Grid built: N land, M ocean (of 768). Total real polys=X (oceans=Y).` Critical numbers to check:
+   - **Land count should be small** (probably 100-300 of 768) and ocean count should be the majority.
+   - **Visual grid (24 rows) should look like FF8.** Balamb Island is a small isolated land cluster around row 20, col 19-20. Galbadia Continent is a larger land mass roughly rows 14-22, cols 0-13. Trabia / Esthar / Centra are similarly recognizable. If the grid is mostly `#` (all-land) again, the parser is still wrong. If it's mostly `~` (all-ocean), block-walking went too far the other way.
+2. **On Balamb Garden on foot:** press `-` `=` to cycle. Should NOT cycle through Galbadia/Esthar/Trabia places — only Balamb-island places (Balamb Garden, Balamb Town, possibly Fire Cavern). The list should be very short (3-5 entries depending on what's on the same connected land).
+3. **Bearing on Balamb Town:** Backspace → should announce a small distance (a few kilometers), not 40+.
+4. **Mount Ragnarok / board Ship:** filter relaxes (Ragnarok = unfiltered, Ship = ocean-allowed). Catalog should expand. May require world-map enter/exit cycle for the rebuild to fire — known limitation, addressed in Chapter 2.
+5. **Press `\`:** still placeholder.
+
+### Risks / what to watch
+
+- **If terrain still shows 768 land / 0 ocean:** the block-walking parser has a different bug — maybe the block offsets aren't where I think they are, or the byte order is off. Visual grid dump will be a sea of `#`. Send the log and we'll diagnose from the per-segment poly counts.
+- **If terrain shows 0 land / 768 ocean:** opposite extreme — maybe the terrain-byte offset within polygons is wrong, or the ocean range (32-34) is wrong. Visual will be a sea of `~`.
+- **If terrain looks reasonable but BFS is still 768/768:** terrain grid is right but `IsSegmentTraversable` or `ComputeReachability` is broken. Check `[BFS] From seg(C,R) veh=N: M/768 segments reachable` for unexpected M.
+- **If catalog is empty (`[BFS] WARNING — no reachable locations`):** filter ran but compaction kept zero entries. Rare but possible if the player's segment is land but no catalog location is on the connected land mass.
+
+---
+
+**v0.14.85 — FAILED BAT. Hotfixed by v0.14.85.1 above.** Symptoms: terrain parser saw 0 oceans (768/768 reachable), catalog had wrong coordinate system + interior-only entries (Timber Maniacs Building, SeeD Graduation Ball, etc.). Lessons captured: don't trust past-chat code fragments without cross-referencing to authoritative docs (the parser bug came from a flat-iteration code fragment that was never the right approach but may have produced acceptable-looking numbers in some past BAT by sheer byte-distribution luck); coordinate systems need explicit validation against the runtime player-position address before trusting any catalog data.
+
+## v0.14.85 — Chapter 1: catalog reachability filter
+
+### Scope
+
+First chapter of the world-map restoration roadmap from v0.14.84 DEVNOTES. Aaron picked option 1 (reachability filter — only show locations walkable/sailable from current position given current locomotion); this build implements exactly that, no more. Auto-drive (`\` key) remains the v0.14.84 placeholder — Chapter 2 (v0.14.86) will wire it up.
+
+### What v0.14.85 ships
+
+All changes are in `src/world_map.cpp` plus the version macro bump.
+
+New code (~265 lines, before the existing `Catalog management` section):
+
+- WMX constants block: `WMX_FL_INDEX = 9`, `WMX_SEG_COLS = 32`, `WMX_SEG_ROWS = 24`, `WMX_PLAYABLE_SEGS = 768`, `WMX_SEGMENT_SIZE = 36864`, `WMX_POLYS_PER_SEG = 2304`, `WMX_POLY_SIZE = 16`, `WMX_TERRAIN_OFFSET = 0x0D`.
+- `enum VehicleType { VEH_ON_FOOT, VEH_CHOCOBO, VEH_CAR, VEH_GARDEN, VEH_RAGNAROK }`.
+- Static state: `s_terrainGrid[24][32]` (0=land, 1=ocean), `s_reachable[24][32]`, `s_terrainLoaded`, `s_catalogCount`.
+- `WM_ReadFileToBuffer` / `WM_ReadFileChunk`: malloc-based file I/O, mirrors field_archive.cpp pattern.
+- `WM_DecompressLZSS`: standard FF8/FF7 LZSS variant, 4096-byte ring buffer, ringPos starts 0xFEE, flag-byte LSB-first (1=literal, 0=12-bit-offset/4-bit-length+3 back-reference). Duplicated inline rather than refactored from field_archive.cpp's static version — matches v0.11.12 pattern, refactor deferred.
+- `WorldXToSegCol(x)` with the v0.11.16 fix: `((x + 131072) % 262144 + 262144) % 262144 / 8192 % 32`. The +131072 offset is critical — without it BFS starts in ocean and filters everything as unreachable. `WorldYToSegRow(y)` is the same minus the offset (Y aligns naturally because the torus wrap absorbs constant offsets).
+- `GetVehicleType(mode)`: maps locomotion byte to `VehicleType`. Authoritative per research doc + v0.11.16 chat: 0/6 = on foot, 31 = Chocobo, 32-40 = cars, 48 = Garden, 50 = Ragnarok. Plus our empirical-and-BAT-validated 3 = Ship (→ Garden behavior, ocean access) and 4 = Ragnarok. Distinct from the announce-layer `GetVehicleName` to keep that layer's empirical 0/1/2/3/4 vocabulary unchanged — reconciliation deferred.
+- `IsSegmentTraversable(row, col, veh)`: foot/chocobo/car require land (s_terrainGrid==0), Garden/Ragnarok allow any cell. Garden+Ragnarok callers in practice should skip BFS entirely; the function is permissive there as a safety net.
+- `LoadTerrainGrid()`: opens `Data\lang-en\world.fi` (12-byte FI entries), parses entry 9 (wmx.obj) for uncompSize/fsOffset/compression, opens `Data\lang-en\world.fs`, reads the segment, decompresses if needed (skip the 4-byte uncompressed-size header before LZSS), classifies each of 768 segments as LAND or OCEAN by majority polygon terrain type (32-34 = ocean). Logs the full 24-row visual grid (# = land, ~ = ocean) once per process for diagnostic value.
+- `ComputeReachability(startCol, startRow, veh)`: BFS flood-fill, 4-connected with torus wrapping, queue size 768, dx[]={0,0,-1,1} dy[]={-1,1,0,0}, player's starting cell always reachable (handles transition-frame coastline-snap), traversal rule via `IsSegmentTraversable`. Logs reach count.
+
+Modified existing:
+
+- `BuildDistanceCatalog` — added (0,0) deferral guard at top (matches v0.11.15 pattern); after the existing distance-sort + coord-restore, applies reachability filter. If terrain not loaded → no-filter mode (`s_catalogCount = LOCATION_COUNT`). If Ragnarok → no-filter (can fly anywhere). Else BFS from player segment, compact-in-place keep only reachable entries, set `s_catalogCount = kept`. Pathological-case warning if `s_catalogCount == 0`.
+- `AnnounceLocation` / `AnnounceBearing` — bounds checks now use `s_catalogCount` instead of `LOCATION_COUNT`.
+- `PollKeys` — cycle math uses `s_catalogCount` instead of `LOCATION_COUNT`. Also gates on `s_catalogCount > 0` to avoid divide-by-zero on the modulo if filter returned empty.
+- `Initialize` — calls `LoadTerrainGrid()` once at module init; logs success or graceful-degradation message. Also resets `s_catalogCount`.
+- `Shutdown` — resets `s_catalogCount`. (s_terrainLoaded stays true — grid is process-lifetime data.)
+- `Fire Cavern` location entry coords changed from (81152, 146176) (Ragnarok-marker style) to (36864, -28672) (wmx.obj-derived on-foot entrance, seg(20,20)) per past-chat v0.11.11 finding. Total catalog still 37 entries.
+- `#include <cstdlib>` added for malloc/free.
+- File header comment updated.
+
+Separately:
+
+- `src/ff8_accessibility.h`: `FF8OPC_VERSION` 0.14.84 → 0.14.85.
+- No new addresses, no new hooks, no schema changes, no build script changes.
+- v0.14.83 + v0.14.84 + v0.14.85 still unpushed; will go to GitHub as a combined commit after Chapter 2 (v0.14.86) lands per the original plan.
+
+### v0.14.85 BAT plan
+
+Aaron walks on Balamb island on foot (e.g. starting from Balamb Garden):
+
+1. Press `-` `=` to cycle through the catalog. Should cycle ONLY among Balamb-island places. Expected reachable on foot from Balamb Garden: Balamb Garden, Balamb Town, SeeD Graduation Ball, Balamb Garden MD Level, plus possibly Beginner Forest if it's classified land on Balamb island and possibly Fire Cavern (depending on whether the wmx.obj-derived Fire Cavern coord is on the Balamb continent). Off-island places (Galbadia Garden, Deling City, Trabia Garden, Esthar, etc.) should be ABSENT from the cycle.
+2. Press Backspace to confirm bearing announces work for the filtered-down list.
+3. Mount Ragnarok (or board Ship). Cycle should expand to ALL 37 entries because Ragnarok bypasses BFS and Ship/Garden allows ocean. Cycling should reach previously-filtered places like Esthar.
+4. Press `\`. Should still hear the placeholder ('World map auto-drive is not yet implemented in this build.') — Chapter 2 will replace it.
+
+Log evidence to verify in `Logs/ff8_world.log`:
+
+- One-time at startup: `[INIT] Terrain grid loaded successfully` followed by `[TERRAIN] wmx.obj loaded ... classifying 768 segments...` followed by `[TERRAIN] Grid built: ~195 land, ~573 ocean (of 768). Expected ~195/573 per v0.11.16 BAT.` followed by 24 `[TERRAIN] row00..row23: ###~~~...` visual rows.
+- On world-map entry: a few `[DEFER] Position is (0,0)` lines, then `[BFS] Player at (X,Y) -> seg(C,R), vehicle type N`, then `[BFS] From seg(C,R) veh=N: M/768 segments reachable`, then `[BFS] Filtered to K reachable locations` and `Catalog built (K entries), nearest: ...`.
+- When Ragnarok is boarded mid-session: catalog won't rebuild automatically until the next world-map enter/exit cycle (current Poll() only rebuilds on entry). Aaron may need to enter/exit world map to see the unfiltered list. **Note this design limitation in the BAT report** — Chapter 2 may need to add vehicle-change-triggered rebuild.
+
+### Risks / things to watch in BAT
+
+- **Terrain-load failure path**: if `Data\lang-en\world.fi` or `world.fs` are unreadable (e.g. mod installed in non-standard location), the load fails and we fall back to no-filter mode. Aaron will hear all 37 entries on foot, which is the v0.14.84 behavior. Log will say `[INIT] Terrain grid load failed`.
+- **Wrong segment classification**: if the polygon terrain-byte interpretation is off by even a small amount, the land/ocean breakdown will not match the v0.11.16 expected ~195/573. The visual grid dump in the log will reveal it visually — if continents look unfamiliar (e.g. Balamb in the wrong corner, all-ocean, all-land), the parsing is wrong. v0.11.16 grid was confirmed to look like recognizable FF8 continents.
+- **Coordinate offset wrong**: if the +131072 X offset is misapplied (sign flipped, magnitude wrong), BFS will start in ocean and `kept` will land at 0 — the catalog will be empty and we'll see `[BFS] WARNING — no reachable locations from current position`. The log line `[BFS] Player at (X,Y) -> seg(C,R)` will show the computed segment; cross-reference X/Y to expected segment.
+- **Empty catalog crash protection**: PollKeys gates on `s_catalogCount > 0` so cycling does nothing if filter returned empty rather than dividing by zero. Test by intentionally being on a single-segment island if any exist; should be silent rather than crashing.
+- **Static buffer reentrancy**: BFS queue uses `static int qCol/qRow[768]` for stack-budget reasons. Module is single-threaded (called only from accessibility thread's Poll), so static is safe.
+
+BAT and report log highlights.
+
+---
+
+**v0.14.84 — `\` placeholder. PASSED BAT.** Aaron confirmed: pressing `\` on world map produces 'World map auto-drive is not yet implemented in this build.' announcement and `[KEY] backslash placeholder` log line; v0.14.83 nav behavior unchanged. Dropped into background now — the placeholder will be replaced in Chapter 2 (v0.14.86).
+
+---
+
+**v0.14.83 — World Map navigation regression fix. PASSED BAT.** Two-bug repair (vehicle-change spam + dead nav keys). Confirmed in v0.14.83 BAT log via `[KEY]` entries on each keypress and exactly one 'Ship (mode 3)' line on boarding with no spurious 'Unknown vehicle' entries. Will go to GitHub combined with v0.14.84 + v0.14.85 + v0.14.86 once Chapter 2 lands.
+
+## v0.14.84 — `\` placeholder + restoration roadmap (UPDATED)
+
+### v0.14.83 BAT result
+
+PASSED. Aaron confirmed:
+
+- Nav keys (`-` `=` Backspace) respond on first press; `[KEY]` log entries fire for every press in `ff8_world.log`.
+- Vehicle change announced exactly once on Ship boarding ('Ship (mode 3)') with no spurious 'Unknown vehicle' entries during steady locomotion. The whitelist guard works as designed.
+- Cycle-and-bearing flow works end-to-end (e.g. log shows 'Fire Cavern. East, 55 kilometers.' on Backspace press after cycling).
+
+### v0.14.84 changes (small, intentional)
+
+- `src/world_map.cpp::PollKeys` adds `VK_OEM_5` (`\`) handler that speaks 'World map auto-drive is not yet implemented in this build.' and logs `[KEY] backslash placeholder`. Edge-detected. Gives Aaron audible feedback that the keypress is registered.
+- `WM_LOCOMOTION` constant comment updated to flag the disagreement between our `GetVehicleName` (Chocobo=2) and the research-doc enum (Chocobo=31). Empirical reconciliation deferred.
+
+### Investigation breakthrough: BFS + auto-drive WERE real
+
+Aaron reported he specifically remembered auto-drive working: walking from Fire Cavern to Balamb on foot, and driving from B-Garden to Balamb. Pressed harder via `conversation_search` and `DEVNOTES_HISTORY.md`:
+
+**`DEVNOTES_HISTORY.md`** session 65 (2026-04-26) entry confirms the v0.14.24 build damage. The recovery 'rebuilt `battle_tts.cpp` from GitHub HEAD v0.13.61.' For `world_map.cpp` specifically, the v0.14.31 entry says only that 'WorldMap::Update + Shutdown bodies were deleted from `world_map.cpp` by Sonnet — restored as thin wrappers' — implying broader code may have been deleted too but NOT restored, since only Update/Shutdown triggered linker errors. The DEVNOTES_HISTORY does NOT cover v0.11.x explicitly (the file doesn't have a `v0.11` substring anywhere).
+
+**`conversation_search` for 'world map auto-drive BFS implementation'** found three chats with the actual implementation, dated 2026-04-04 (sessions 32-33):
+
+1. https://claude.ai/chat/91996041-f041-448a-94b7-da30ea01a91a — 'World map navigation implementation planning' (sessions covering v0.11.01-v0.11.11 — auto-drive design, fake gamepad failure analysis, switch to keyboard injection, location catalog, sweep search, battle persistence)
+2. https://claude.ai/chat/fbcf02c5-f762-4400-bbd8-194aba6d8a0b — 'Continuing world map development' (covering v0.11.12-v0.11.14 — terrain grid infrastructure, LZSS decompression, ReadFileToBuffer/ReadFileChunk, LoadTerrainGrid reading wmx.obj from world.fs, ComputeReachability BFS flood-fill, integration into BuildSortedCatalog)
+3. https://claude.ai/chat/2c72c890-58ea-41c1-b612-0b477c90d500 — 'World map accessibility continuation' (v0.11.15-v0.11.16 — deferred catalog build for position-validity polling, WorldXToSegCol +131072 offset coordinate fix that finally made BFS work)
+
+Final v0.11.16 BAT (in chat 3): *'Driving worked as expected! Auto-Drive took me from Garden to the town of Balamb as expected.'* That matches Aaron's memory exactly.
+
+**Summary of what's missing from current `world_map.cpp` vs v0.11.16:**
+
+- ~220 lines of feature code (current ~480 lines vs v0.11.16 ~700 lines)
+- 38th catalog entry: Fire Cavern at seg(20,20), coords approximately (36864, -28672) (extracted from wmx.obj)
+- LZSS decompression + game-file I/O (`world.fi` entry 9 → wmx.obj from `world.fs`)
+- Terrain classification: 32×24 land/ocean grid, 195 land + 573 ocean per the v0.11.16 BAT log; terrain types 0-29=land, 32=shallow ocean, 33-34=deep ocean
+- Coordinate conversion: `WorldXToSegCol(x)` with `(x + 131072) / 8192` math; `WorldYToSegRow(y)` with similar formula (Y mapping naturally aligns due to torus wrapping)
+- BFS flood-fill from player segment with 4-connected neighbors and torus wrapping
+- Deferred catalog build: skip when player position reads (0,0); poll each frame in Update() until position is valid
+- Auto-drive infrastructure: `s_keyUpHeld` / `s_keyLeftHeld` / `s_keyRightHeld` plus `keybd_event(vk, scan, KEYEVENTF_EXTENDEDKEY [| KEYEVENTF_KEYUP], 0)` injection. Scan codes: VK_UP=0x48, VK_LEFT=0x4B, VK_RIGHT=0x4D.
+- `StartAutoDrive(catIdx)` — reads target, computes initial distance, announces 'Driving to X. Y units.', sets s_driveActive
+- `UpdateAutoDrive()` per-frame steering: reads heading from WM_HEADING, computes relative bearing to target, within 18° ahead = forward only, 18-45° = turn+forward, >90° = turn only (spin to face)
+- Final approach: when distance <1000 units, stop steering and walk forward to sweep through the trigger zone
+- Sweep search on stuck: try 6 different headings (alternating right/left, increasing duration) before giving up; announces 'Searching.'
+- Periodic distance announcement every ~5 seconds
+- Approach announce one-shot when crossing DRIVE_APPROACH_DIST threshold
+- Battle persistence: pause auto-drive on battle, resume after victory with re-announce of remaining distance
+- Stuck detection with DRIVE_STUCK_THRESHOLD movement check over DRIVE_STUCK_CHECK_INTERVAL windows
+- Vehicle-type detection scaffolding (`GetVehicleType()` mapping locomotion byte → ON_FOOT / CHOCOBO / GARDEN / RAGNAROK enum)
+
+**Locomotion enum from research doc + v0.11.16 chat (the AUTHORITATIVE values):**
+- 0/6 = on foot (Squall=0, Selphie=6)
+- 31 = Chocobo
+- 32-40 = cars (32 = invisible Missile Base car)
+- 48 = Garden (Balamb Garden in mobile state)
+- 50 = Ragnarok
+
+Our current `GetVehicleName` (1=Car, 2=Chocobo, 3=Ship, 4=Ragnarok) is wrong. Replace with the authoritative enum on restoration.
+
+### Files changed (v0.14.84)
+
+- `src/world_map.cpp` — ~10 lines: VK_OEM_5 edge-detected handler, comment updates.
+- `src/ff8_accessibility.h` — version 0.14.83 → 0.14.84.
+
+No new addresses, no new hooks, no schema changes, no build script changes. v0.14.83 changes preserved as-is.
+
+### v0.14.84 BAT plan
+
+Minimal validation, ~30 seconds:
+
+1. Walk on world map, press `\`. Should hear 'World map auto-drive is not yet implemented in this build.' and `ff8_world.log` should show `[KEY] backslash placeholder` line.
+2. Confirm v0.14.83 behavior unchanged: `-` `=` Backspace nav still works, vehicle changes still announce cleanly without spam.
+
+### After BAT pass: dedicated restoration session (v0.14.85+)
+
+Aaron answered Priority 2: option 1 (reachability filter — only show locations walkable/sailable from current position). This matches the v0.11.16 BFS implementation exactly. Restoration is from-chats reconstruction guided by the three URLs above; see NEXT_SESSION_PROMPT Priority 3 for the staged plan.
+
+---
+
+**v0.14.83 — World Map navigation regression fix. PASSED BAT.** Two-bug repair (vehicle-change spam + dead nav keys). Confirmed in v0.14.83 BAT log via `[KEY]` entries on each keypress and exactly one 'Ship (mode 3)' line on boarding with no spurious 'Unknown vehicle' entries. Will go to GitHub combined with v0.14.84 once v0.14.84 BAT passes.
+
+## v0.14.83 — World Map nav regression fix
+
+### Investigation summary
+
+Aaron reported at end of v0.14.82 session: while walking the world map, TTS keeps announcing the same thing on repeat, and none of the nav keys (`-` `=` Backspace) work. Suspected to stem from 'the Sonnet fiasco a while back'.
+
+`Logs/ff8_world.log` from v0.14.82 session was the smoking gun. Two distinct symptoms with one shared root cause class (incomplete v0.14.31 recovery from v0.14.24 build damage):
+
+**Bug 1 — vehicle-change spam loop.** Log showed locomotion-mode byte at WM_LOCOMOTION = 0x02040A5E behaving as a *counter*, not a vehicle enum. Ragnarok session: 0 → 4 → 8 → 12 → 16 → 20 → 24 → 28 → 32 → 36 → 40 → 44 → 48 → 52 → 56 → 60 over ~15 seconds. Ship session: 0 → 3 → 6 → 9 → 12 → 16 → 19. Each non-canonical value triggered `Vehicle change: Unknown vehicle (mode N)` because `CheckVehicleChange` only compared `vehicle != s_lastVehicle`. The address reads correctly *at the instant of mounting/dismounting* (initial 0 = On foot, then 3 = Ship or 4 = Ragnarok), then drifts through animation-phase / state-machine residue.
+
+**Bug 2 — dead nav keys.** Zero `[KEY]`-style log entries despite Aaron presumably pressing keys. `WorldMap::HandleKeyPress` was defined inside namespace WorldMap in `src/world_map.cpp` but never declared in `src/world_map.h` and never invoked from anywhere. `WorldMap::Update()` / `WorldMap::Shutdown()` were restored in v0.14.31 after v0.14.24 build damage (per the source comment); `HandleKeyPress` was orphaned in the same recovery and has been silently dead since then. World map nav keys have not worked for ~50 builds.
+
+### What shipped
+
+**Bug 1 fix — whitelist guard in `src/world_map.cpp::CheckVehicleChange`:**
+```c
+if (vehicle > 4) return;
+```
+Values outside the known mode set {0=On foot, 1=Car, 2=Chocobo, 3=Ship, 4=Ragnarok} are treated as 'no change' — do not update `s_lastVehicle`, do not announce. Real vehicle changes still register because the byte does pass through a canonical value at the mount/dismount moment. Per the `NEXT_SESSION_PROMPT` v0.14.82 guardrail, this is a root-cause fix for broken change detection rather than a blanket announce throttle. The deeper question of where the canonical current-vehicle byte lives if 0x02040A5E is genuinely a state-machine field is deferred — the whitelist captures every legitimate transition.
+
+**Bug 2 fix — new `static void PollKeys()` in `src/world_map.cpp`, called from end of `Poll()`:**
+- Edge-detected `GetAsyncKeyState` for `VK_OEM_MINUS` (cycle previous), `VK_OEM_PLUS` (cycle next), `VK_BACK` (announce bearing).
+- Function-local statics (`s_minusWas` / `s_plusWas` / `s_bkspWas`) for edge detection.
+- Implicitly gated on `s_onWorldMap` because `Poll()` early-returns when off world map.
+- New `[KEY]` log lines per handler so future regressions are obvious in `ff8_world.log`.
+- Old orphaned `HandleKeyPress` deleted.
+
+**No collision** with `FieldNavigation::HandleKeys` which uses the same `-` `=` Backspace key set: FieldNavigation gates on `FF8Addresses::IsOnField()` which is mutually exclusive with the world-map scene flag (`0x0203ED2C == 0`).
+
+**Also:** Initialize() log fixed to use `FF8OPC_VERSION` via `%s` instead of hard-coded `'v0.11.16'`, per the one-version-source convention from v0.13.45.
+
+### Files changed
+
+- `src/world_map.cpp` — PollKeys added, orphaned HandleKeyPress removed, CheckVehicleChange whitelisted, Initialize log uses FF8OPC_VERSION, file header / WM_LOCOMOTION comment updated. ~50 lines net.
+- `src/ff8_accessibility.h` — version 0.14.82 → 0.14.83.
+
+No new addresses, no schema changes, no new hooks. `deploy.bat` already references `world_map.cpp` so build script unchanged.
+
+### v0.14.83 BAT plan
+
+Aaron deploys via `deploy.vbs`, walks the world map in his most-recent save:
+
+1. **Nav keys.** Press `-` and `=` to cycle through locations — each press should produce one location announce ('Balamb Garden. 5 kilometers away.'). Press Backspace and confirm bearing announce ('Balamb Garden. Northeast, 5 kilometers.'). Check `Logs/ff8_world.log` for `[KEY] minus`, `[KEY] plus`, `[KEY] backspace bearing` lines.
+2. **Vehicle silence under steady locomotion.** Mount Ragnarok and confirm exactly one 'Ragnarok.' announce. Fly for 30+ seconds and confirm complete silence between mount and dismount. Dismount and confirm exactly one 'On foot.' announce. The log should show exactly two `Vehicle change:` lines (Ragnarok then On foot), not 15+ Unknown vehicle entries.
+3. **Edge cases.** If Aaron has time: board the Ship, ride for 30 s, disembark. Same expected pattern. Walk on foot through different terrain, confirm no spurious vehicle announces.
+
+### Pass criteria
+
+- All three nav keys produce their expected announce on first press.
+- Each nav keypress shows a `[KEY]` line in `ff8_world.log`.
+- Vehicle changes produce exactly one announce per real transition.
+- No `Unknown vehicle (mode N)` log lines.
+
+### After BAT pass
+
+1. Push v0.14.83 to GitHub (single commit on top of v0.14.82's `7c7afdf3`).
+2. Resume deferred priorities (persistent settings, party-member catalog removal, X-ATM092, walk-and-talk).
+
+---
+
+**v0.14.82 — Vulnerable threshold relaxed 60% → 50%. PASSED BAT and PUSHED to GitHub (commit 7c7afdf3 on `main`). Seven-build saga (v0.14.76 through v0.14.82) shipped as a single consolidated commit. Local and GitHub in sync. Scan TTS announce design fully stable.**
 
 ## v0.14.82 — 50% Vulnerable threshold (relaxed from 60%)
 
