@@ -62,7 +62,7 @@ static const DWORD MISS_ANNOUNCE_DEDUP_MS = 500;
 // v0.14.55: Scan-cast detection at the action layer. The popup hook
 // (HookedPopupSprite, sub_48D200) fires for every battle popup sprite,
 // including the spell-name popup that spawns at action-commit time. For
-// Scan specifically, the popup arrives with text_id=0x06 and value=0x32
+// Scan specifically, the popup arrives with text_id=0x02 and value=0x32
 // (the latter is the spell ID 50 = Scan). This fires for ALL Scan casts
 // regardless of view path — critically, including the compacted view
 // shown on repeat Scans of the same target in a battle, which v0.14.54
@@ -73,6 +73,25 @@ static const DWORD MISS_ANNOUNCE_DEDUP_MS = 500;
 // for the announcement. Because the popup hook fires BEFORE sub_48E830
 // (the action staging that records the watchdog snapshot), the tick is
 // always fresh by the time NoEffect_RecordSnapshot reads it.
+//
+// v0.14.76: text_id constant CORRECTED from 0x06 to 0x02. v0.14.55's
+// 0x06 was a transcription error (likely confused with the kind=0x06
+// reference in screenshot.inl's old screen-close comment). Empirical
+// evidence from v0.14.75 BAT log: every Scan cast produces a sub_48D200
+// popup with text_id=0x02 and value=0x32; text_id=0x06 NEVER fires for
+// any popup (zero matches across the entire log). The wrong constant
+// meant s_lastScanCastTick was never set, NoEffect_RecordSnapshot's
+// scan-detection branch never fired, and the action-layer ScanTTS
+// detection path was completely dead. PollBattleMagicId's transition-
+// based fallback caught FIRST scans in a battle (when battle_magic_id
+// transitioned 0→39) but missed REPEAT scans (battle_magic_id stays at
+// 39 across multiple casts in the same battle, no transition to detect).
+// Result: a repeat Scan in a battle produced NO Scan announcement AND
+// a spurious 'No effect on <target>' from the watchdog 10 seconds later.
+// With the correct text_id, the popup hook reliably catches every Scan
+// cast (first or repeat) and the action-layer path becomes the primary
+// detection mechanism — PollBattleMagicId's Scan branch becomes a
+// no-op fallback for first-scans only.
 static volatile LONG s_lastScanCastTick = 0;
 static const DWORD   SCAN_CAST_RECENT_MS = 1000;
 
@@ -519,15 +538,40 @@ static uint32_t __cdecl HookedPopupSprite(uint32_t slot, uint32_t text_id,
         // sometimes pack other bits into the upper bytes.
         uint32_t tid = text_id & 0xFF;
 
-        // v0.14.55: Capture Scan-cast moment for the action-layer
-        // detection path. text_id=0x06 is the spell-name popup that
+        // v0.14.55 / v0.14.76: Capture Scan-cast moment for the action-layer
+        // detection path. text_id=0x02 is the spell-name popup that
         // appears above the caster as the action commits; value carries
         // the spell ID. Spell ID 50 (0x32) is Scan. Updates every fire,
         // BEFORE the dedup-for-logging check below — logging is
         // throttled per-battle but the timestamp must update on every
         // Scan cast, including repeats. Atomic to be safe even though
-        // hook is on game thread (mod thread polls reads it).
-        if (tid == 0x06 && (value & 0xFF) == 0x32) {
+        // hook is on game thread (mod thread polls reads it). v0.14.76
+        // corrected the text_id from 0x06 (never fires) to 0x02 (the
+        // actual spell-name popup) — see the long comment block at
+        // s_lastScanCastTick declaration above for the full context.
+        // v0.14.79: Defensive match on BOTH text_id 0x02 AND 0x06 with
+        // value=0x32. v0.14.55 used 0x06 and worked for first-of-battle
+        // scans only (PollBattleMagicId's 0->39 transition caught those
+        // even when the popup hook didn't, masking the bug). v0.14.76
+        // changed to 0x02 based on a misread of the v0.14.75 BAT log
+        // (claimed "0x06 never fires" but the v0.14.78 BAT direct
+        // evidence shows the Bite Bug Scan-cast popup is exactly
+        // text_id=0x06 value=0x32 at retaddr=0x00485938). v0.14.78 BAT
+        // showed that with `tid == 0x02`, NO scan was caught by this
+        // hook — only the first scan got announced (via the EWM
+        // PollBattleMagicId fallback's 0->39 transition); subsequent
+        // scans in the same battle had magic_id stuck at 39, no
+        // transition, no detection, and a spurious "No effect" 10s
+        // later from the watchdog. The screen-close detection in
+        // screenshot.inl had the same bug, leaving s_scanScreenActiveSlot
+        // stuck after every Scan UI close. v0.14.79 matches both values
+        // so we're robust to whichever text_id the engine uses across
+        // contexts (Magic-cast, Draw-cast, different monsters, etc.).
+        // If both 0x02 and 0x06 turn out to fire frequently for non-
+        // Scan popups, we may need a tighter retaddr-based filter, but
+        // value=0x32 (decimal 50, the spell-name display duration) is
+        // already a strong filter on its own.
+        if ((tid == 0x02 || tid == 0x06) && (value & 0xFF) == 0x32) {
             InterlockedExchange(&s_lastScanCastTick, (LONG)GetTickCount());
         }
 

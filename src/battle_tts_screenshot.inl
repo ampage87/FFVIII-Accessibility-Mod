@@ -897,15 +897,32 @@ static void PollPopupRecords()
                         i, prev.slot, prev.text_id, prev.value,
                         s_pollFrameCounter);
 
-            // v0.14.59: Scan-window-close detector. Falling edge of the
-            // same kind=0x06 val=50 popup that OnScanPopupSpawn observed
+            // v0.14.59 / v0.14.76: Scan-window-close detector. Falling edge of the
+            // same kind=0x02 val=50 popup that OnScanPopupSpawn observed
             // above. Clears s_scanScreenActiveSlot so the keyboard
             // router reverts number keys 1..0 to default ally-HP
             // behavior. The snapshot cache is intentionally retained
             // so re-scanning the same target later in the battle
             // re-uses the cached data without going through the
-            // action-layer again.
-            if (prev.text_id == 0x06 && prev.value == 50) {
+            // action-layer again. v0.14.76: kind constant corrected
+            // from 0x06 (never fires — see battle_tts_sprite.inl's
+            // s_lastScanCastTick comment for the full story) to 0x02
+            // (the actual Scan-cast spell-name popup). Without this
+            // fix, OnScanPopupDespawn never fired, leaving
+            // s_scanScreenActiveSlot stuck after every Scan UI close
+            // and causing number keys 1..0 to keep routing to scan
+            // detail queries instead of ally HP.
+            // v0.14.79: Match BOTH 0x02 and 0x06 (defensive). Same
+            // root-cause fix as in battle_tts_sprite.inl — the v0.14.78
+            // BAT proved the Scan-cast popup is text_id=0x06, not 0x02
+            // as v0.14.76 incorrectly claimed. Without this fix,
+            // OnScanPopupDespawn never fires, leaving
+            // s_scanScreenActiveSlot stuck after every Scan UI close
+            // and causing number keys 1..0 to keep routing to scan
+            // detail queries instead of ally HP. See the long comment
+            // block in battle_tts_sprite.inl above s_lastScanCastTick
+            // for the full root-cause analysis.
+            if ((prev.text_id == 0x02 || prev.text_id == 0x06) && prev.value == 50) {
                 ::ScanTTS::OnScanPopupDespawn();
             }
             // v0.13.92: end damage popup tracking, log summary.

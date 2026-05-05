@@ -456,73 +456,6 @@ static bool ReadSlotStatusRes(int slot, uint8_t outStatusRes[20])
     }
 }
 
-// v0.14.74.1: Diagnostic dump of the entity struct from +0x3C through
-// +0xB4 (121 bytes) to locate the actual runtime offset of the 20-byte
-// status resistance block. v0.14.74 BAT proved BENT_STATUS_RESIST_BASE
-// = 0x4C is wrong — Grat's read produced an alternating 169 / 251
-// pattern that's clearly not status data. The deep research predicted
-// that offset but explicitly flagged it as needing runtime validation;
-// this diagnostic provides the validation.
-//
-// Range covers:
-//   +0x3C..+0x4B  elements (16 bytes, CONFIRMED ANCHOR — must match
-//                 the same u16 values [SCAN-ELEM] dumps so we can
-//                 verify base+offset arithmetic is correct)
-//   +0x4C..+0xB3  unknown gap (104 bytes — the 20-byte status block
-//                 lives somewhere in here; PC port presumably inserted
-//                 padding / other fields that broke the .dat-relative
-//                 spacing assumption the deep research used)
-//   +0xB4         level (CONFIRMED ANCHOR — should equal snap.level
-//                 in [SCAN-CACHE] so we know dump alignment held all
-//                 the way to the bottom)
-//
-// 121 bytes split across 8 log lines for greppability and visual
-// alignment in the log diff. Test plan: BAT against three enemies
-// with known status profiles (Grat, T-Rexaur, Tonberry) and diff the
-// three [SCAN-STRUCT] sections. The 20-byte run where Grat shows 0x00
-// at indices 4 (Silence), 5 (Berserk), 7 (Sleep) but Tonberry shows
-// high values everywhere is the answer.
-//
-// Why a separate helper for the row body: MSVC /EHsc forbids non-
-// trivial destructors inside __try (C2712). snprintf and Log::Battle
-// are plain C-style calls so they compile fine inside __try, but
-// keeping the row body in its own function is clearer and matches
-// the Decode*ToBuf / Decode*Safe pattern used elsewhere in this
-// module. SEH propagates from DumpRow up into LogStructDump's
-// __except handler, so a faulting base[off] read still gets caught.
-
-static void DumpRow(int slot, const uint8_t* base, int from, int to,
-                    const char* tag)
-{
-    char hex[80];
-    int pos = 0;
-    for (int off = from; off <= to; off++) {
-        pos += snprintf(hex + pos, sizeof(hex) - pos,
-                        (off == from ? "%02X" : " %02X"),
-                        (unsigned)base[off]);
-        if (pos >= (int)sizeof(hex)) break;
-    }
-    Log::Battle("BattleTTS: [SCAN-STRUCT] slot=%d +0x%02X..+0x%02X %s: %s",
-                slot, from, to, tag, hex);
-}
-
-static void LogStructDump(int slot, const uint8_t* base)
-{
-    __try {
-        DumpRow(slot, base, 0x3C, 0x4B, "(elements anchor)");
-        DumpRow(slot, base, 0x4C, 0x5B, "                 ");
-        DumpRow(slot, base, 0x5C, 0x6B, "                 ");
-        DumpRow(slot, base, 0x6C, 0x7B, "                 ");
-        DumpRow(slot, base, 0x7C, 0x8B, "                 ");
-        DumpRow(slot, base, 0x8C, 0x9B, "                 ");
-        DumpRow(slot, base, 0x9C, 0xAB, "                 ");
-        DumpRow(slot, base, 0xAC, 0xB4, "(level anchor)   ");
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        Log::Battle("BattleTTS: [SCAN-STRUCT] slot=%d SEH fault during dump",
-                    slot);
-    }
-}
-
 // ============================================================================
 // Description lookup
 // ============================================================================
@@ -674,19 +607,6 @@ static void CaptureSnapshot(int slot)
                 (unsigned)snap.statusRes[14], (unsigned)snap.statusRes[15],
                 (unsigned)snap.statusRes[16], (unsigned)snap.statusRes[17],
                 (unsigned)snap.statusRes[18], (unsigned)snap.statusRes[19]);
-
-    // v0.14.74.1: 121-byte hex dump of the entity struct from +0x3C
-    // through +0xB4. v0.14.74 BAT proved BENT_STATUS_RESIST_BASE = 0x4C
-    // is wrong; the alternating 169/251 [SCAN-STAT] pattern is clearly
-    // not status data and contradicts canon (Grat reportedly fully
-    // resisted Sleep, but Grat is the in-game source of Sleep). Range
-    // covers element-block anchor, unknown gap, and level anchor; see
-    // LogStructDump for the full diagnostic plan.
-    {
-        const uint8_t* base = (const uint8_t*)(BATTLE_ENTITY_ARRAY_BASE +
-                                               slot * BATTLE_ENTITY_STRIDE);
-        LogStructDump(slot, base);
-    }
 }
 
 // ============================================================================
@@ -1037,48 +957,169 @@ static void FormatResistances(const ScanSnapshot& snap, char* out, int outSize)
     }
 }
 
-// v0.14.74: Status resistances on key 9. Iterates the 13 offensive
-// ailments (per OFFENSIVE_AILMENT_INDICES) and announces those whose
-// statusRes byte >= 100 (the deep research's "Strong vs" threshold).
-// Empty case: "No status resistances."
+// v0.14.80: Status resistances on key 9 — TIERED to mirror weakness
+// announce structure (symmetry with FormatStatusWeaknesses). Splits
+// the 13 offensive ailments by raw resistance byte:
+//   byte 100-199 -> 'Resists ...'   (won't land via direct cast;
+//                                    becomes inflictable with full
+//                                    junction stacking)
+//   byte 200+    -> 'Immune to ...' (cannot be inflicted at all,
+//                                    even with 100 spells junctioned
+//                                    to ST-Atk-J)
+//
+// Rationale: matches the FF8 inflict formula. Direct cast is roughly
+// `100 - byte = inflict %`, junction-stacked cast is roughly
+// `200 - byte = inflict %`. byte=100 is the boundary where direct
+// casts stop landing entirely; byte=200 is the boundary where even
+// junction stacking can't help (StatusAttack max = 200). The 'Immune'
+// tier surfaces the rare hard-immunity case (e.g. Fastitocalon's
+// Confuse=255 from the v0.14.79 BAT) which is tactically very
+// different from a junction-defeatable resistance at byte=120.
+//
+// Wording uses two separate sentences when both tiers populate:
+// 'Resists Slow, Stop, Doom, and Slow Petrify. Immune to Confuse.'
+// Empty case: 'No status resistances.' Single-tier cases use just
+// the relevant sentence. Mirrors the v0.14.78 FormatStatusWeaknesses
+// two-tier output structure, so the player gets a predictable mental
+// model: keys 0 and 9 both announce in two graduated tiers.
+//
+// Aaron's casting-focused use case settled the design: bytes 100-150
+// look 'partially resistible' but in practice are 0% inflict for
+// direct casting (the use case players actually have). Calling them
+// 'Mildly vulnerable' would mislead a casual player into wasting MP.
+// Calling them 'Resists' correctly tells the player 'don't bother
+// casting this directly, junction it instead.' The byte 200+ split
+// adds the only case where 'Resists' is too soft — hard immunity.
 static void FormatStatusResistances(const ScanSnapshot& snap, char* out, int outSize)
 {
-    int matches[20];
-    int count = 0;
+    int resists[20];   int rCount = 0;
+    int immune[20];    int iCount = 0;
     for (int i = 0; i < OFFENSIVE_AILMENT_COUNT; i++) {
         int idx = OFFENSIVE_AILMENT_INDICES[i];
-        if (snap.statusRes[idx] >= 100) matches[count++] = idx;
+        uint8_t b = snap.statusRes[idx];
+        if      (b >= 200) immune[iCount++]  = idx;
+        else if (b >= 100) resists[rCount++] = idx;
     }
-    if (count == 0) {
+    if (rCount == 0 && iCount == 0) {
         snprintf(out, outSize, "No status resistances.");
         return;
     }
+    int pos = 0;
     char list[384];
-    JoinNameList(matches, count, STATUS_NAMES_20, list, sizeof(list));
-    snprintf(out, outSize, "Resists %s.", list);
+    if (rCount > 0) {
+        JoinNameList(resists, rCount, STATUS_NAMES_20, list, sizeof(list));
+        pos += snprintf(out + pos, outSize - pos, "Resists %s.", list);
+    }
+    if (iCount > 0) {
+        JoinNameList(immune, iCount, STATUS_NAMES_20, list, sizeof(list));
+        pos += snprintf(out + pos, outSize - pos, "%sImmune to %s.",
+                        (pos > 0 ? " " : ""), list);
+    }
 }
 
-// v0.14.74: Status weaknesses on key 0. Iterates the 13 offensive
-// ailments and announces those whose statusRes byte == 0 (fully
-// vulnerable per the FF Wiki StatusDefense formula). Empty case:
-// "No status weaknesses." T-Rexaur is the canonical calibration
-// anchor — should announce Death, Poison, Darkness, Sleep based on
-// the standard FF8 data.
+// v0.14.81: Helper for direct magic-cast inflict chance estimation.
+// Per the FF Wiki Magic page, direct status spell casts use:
+//   if (StatusDefense >= 200) target is immune (byte >= 100 case)
+//   else: Inflict% = Magic/4 - Spirit/4 - StatusDefense + StatusAttack
+// where StatusDefense = 100 + byte and StatusAttack = 200 (fixed for
+// direct casts). Simplified:
+//   chance = Magic/4 - Spirit/4 + 100 - byte
+// We use a fixed assumed Magic = 30 representing a typical low-mid
+// game caster (Quistis at level 6-15 with light junction). This gives
+// a stable, reproducible tier classification independent of who's
+// casting at the moment of scan. High-level players with Magic 100+
+// will see actual inflict rates higher than the announce suggests
+// (false negative direction — better than misleading false positives).
+//
+// v0.14.80 used byte alone to tier: byte 0..5 'Highly vulnerable',
+// byte 6..50 'Vulnerable'. That ignored target Spirit. v0.14.80 BAT
+// revealed the gap: Fastitocalon Sleep byte=50 was announced as
+// 'Vulnerable' but landed 0/12 casts in actual play because
+// Fastitocalon's Spirit=177 makes the chance only ~13%.
+//
+// v0.14.82 thresholds (chance-based, 50% Vulnerable cutoff):
+//   chance >= 95%     -> 'Highly vulnerable'
+//   chance 50..94%    -> 'Vulnerable'
+//   chance 1..49%     -> silent (partial vulnerability, not announced
+//                        as a weakness; player can experiment)
+//   chance == 0       -> not announced as weakness (the FormatStatusResistances
+//                        path on key 9 handles byte 100+ via 'Resists' /
+//                        'Immune to' tiers)
+//
+// v0.14.81 shipped with a 60% Vulnerable cutoff. v0.14.81 BAT showed
+// the cutoff was too conservative — it correctly fixed Fastitocalon
+// Sleep (chance 12% → silent) but also dropped three canon-correct
+// vulnerabilities that landed just below 60%: Bite Bug Sleep (~56%),
+// Caterchipillar Sleep (~53%), Fastitocalon Darkness (~56%). All
+// three are listed as vulnerabilities in the nightsolo community
+// canon table and would land more often than not in actual play.
+// Lowering to 50% re-includes them while still correctly dropping
+// Fastitocalon Sleep (12%) and Glacial Eye Sleep (32%) — the high-
+// Spirit cases that motivated the chance-based model in the first
+// place. 'Vulnerable' still has clear meaning: chance >= 50% means
+// the status will land on average more than half the time.
+static int ComputeMagicCastChance(uint8_t byte, uint8_t spirit)
+{
+    const int kAssumedMagic = 30;
+    int chance = (kAssumedMagic / 4) - (spirit / 4) + 100 - byte;
+    if (chance < 0)   chance = 0;
+    if (chance > 100) chance = 100;
+    return chance;
+}
+
+// v0.14.82: Status weaknesses on key 0 — CHANCE-BASED tiering with
+// 50% Vulnerable cutoff (relaxed from v0.14.81's 60%). See
+// ComputeMagicCastChance comment above for cutoff history. Tiers:
+//   chance >= 95%   -> 'Highly vulnerable'
+//   chance 50..94%  -> 'Vulnerable'
+//   chance < 50%    -> silent (drops out)
+//
+// Why chance-based instead of byte-only: enemies with abnormally
+// high Spirit (Fastitocalon SPR=177-183 is the canonical example)
+// make magic-cast statuses unreliable even at low byte values.
+// v0.14.80 announced Fastitocalon as 'Vulnerable to Sleep' (byte=50)
+// but in practice Sleep landed 0/12 casts. By computing the actual
+// estimated chance and tiering on that, we avoid misleading the
+// player into wasting MP on direct casts that won't land.
+//
+// Wording uses two separate sentences when both tiers populate:
+// 'Highly vulnerable to A, B, and C. Vulnerable to D.' Single-tier
+// cases use one sentence. Empty case: 'No status weaknesses.'
 static void FormatStatusWeaknesses(const ScanSnapshot& snap, char* out, int outSize)
 {
-    int matches[20];
-    int count = 0;
+    // snap.stats[3] is SPR per the validated RAM ordering documented
+    // in ReadSlotStats (STR=0, VIT=1, MAG=2, SPR=3, SPD=4, LCK=5,
+    // EVA=6, HIT=7).
+    uint8_t spirit = snap.stats[3];
+
+    int highly[20];   int hCount = 0;
+    int regular[20];  int rCount = 0;
     for (int i = 0; i < OFFENSIVE_AILMENT_COUNT; i++) {
         int idx = OFFENSIVE_AILMENT_INDICES[i];
-        if (snap.statusRes[idx] == 0) matches[count++] = idx;
+        uint8_t b = snap.statusRes[idx];
+        // Skip statuses that are fully resistant or immune at the
+        // game level — they're handled by FormatStatusResistances.
+        if (b >= 100) continue;
+        int chance = ComputeMagicCastChance(b, spirit);
+        if      (chance >= 95) highly[hCount++]  = idx;
+        else if (chance >= 50) regular[rCount++] = idx;
+        // chance 1..49 falls through silently; chance == 0 also silent
     }
-    if (count == 0) {
+    if (hCount == 0 && rCount == 0) {
         snprintf(out, outSize, "No status weaknesses.");
         return;
     }
+    int pos = 0;
     char list[384];
-    JoinNameList(matches, count, STATUS_NAMES_20, list, sizeof(list));
-    snprintf(out, outSize, "Weak to %s.", list);
+    if (hCount > 0) {
+        JoinNameList(highly, hCount, STATUS_NAMES_20, list, sizeof(list));
+        pos += snprintf(out + pos, outSize - pos, "Highly vulnerable to %s.", list);
+    }
+    if (rCount > 0) {
+        JoinNameList(regular, rCount, STATUS_NAMES_20, list, sizeof(list));
+        pos += snprintf(out + pos, outSize - pos, "%sVulnerable to %s.",
+                        (pos > 0 ? " " : ""), list);
+    }
 }
 
 // ============================================================================
@@ -1230,21 +1271,30 @@ void SpeakField(int fieldId)
     case 8:  // Elemental Weaknesses (v0.14.74; was Nullify in v0.14.73)
         FormatWeak(snap, msg, sizeof(msg));
         break;
-    case 9:  // Status Resistances — reverted to stub in v0.14.74.1
-        // v0.14.74 shipped this as FormatStatusResistances reading from
-        // entity+0x4C, but the BAT proved that offset is not the status
-        // resistance block (Grat announced as resisting all 13 ailments
-        // due to alternating 169/251 byte pattern at +0x4C). Reverting
-        // to the stub so misleading status info doesn't ship to Aaron
-        // during play. The [SCAN-STRUCT] diagnostic in CaptureSnapshot
-        // dumps 121 bytes per scan; one BAT round across Grat /
-        // T-Rexaur / Tonberry will reveal the actual offset, after
-        // which v0.14.74.2 re-enables this case with the corrected
-        // BENT_STATUS_RESIST_BASE.
-        snprintf(msg, sizeof(msg), "Not implemented yet.");
+    case 9:  // Status Resistances (v0.14.77 — re-enabled with corrected +0x80 offset)
+        // v0.14.74 wired this initially but used BENT_STATUS_RESIST_BASE = 0x4C
+        // per the deep research's best-supported hypothesis, which v0.14.74 BAT
+        // immediately invalidated (Grat showed alternating 169/251 byte pattern).
+        // v0.14.74.1 reverted to a stub while [SCAN-STRUCT] hex dumps were
+        // collected; v0.14.76 BAT delivered the diagnostic data and v0.14.77
+        // confirmed +0x80 by canon validation across two monster samples.
+        // FormatStatusResistances reads from snap.statusRes[20] (now sourced
+        // from entity+0x80 per battle_tts.h) and announces offensive ailments
+        // whose byte >= 100 (the deep research's 'Strong vs' threshold).
+        FormatStatusResistances(snap, msg, sizeof(msg));
         break;
-    case 0:  // Status Weaknesses — reverted to stub in v0.14.74.1 (same reason)
-        snprintf(msg, sizeof(msg), "Not implemented yet.");
+    case 0:  // Status Weaknesses (v0.14.77 — re-enabled with corrected +0x80 offset)
+        // FormatStatusWeaknesses announces offensive ailments whose byte == 0
+        // (the conservative 'fully vulnerable' threshold from the FF Wiki
+        // StatusDefense formula). T-Rexaur is the canonical anchor — its
+        // +0x80..+0x87 sample from v0.14.76 BAT shows Death=0, Petrify=0,
+        // Silence=0, so this announce should produce 'Weak to Death,
+        // Petrify, and Silence.' If Aaron expects more entries (T-Rex is
+        // famously also weak to Sleep / Darkness / Poison per FF Wiki),
+        // the [SCAN-STAT] log line in CaptureSnapshot reveals the exact
+        // bytes and we can relax the threshold to byte < N for some N in
+        // a follow-up build.
+        FormatStatusWeaknesses(snap, msg, sizeof(msg));
         break;
     default:
         snprintf(msg, sizeof(msg), "Unknown field.");

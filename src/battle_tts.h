@@ -93,7 +93,12 @@ static const uint32_t BENT_ELEM_RESIST_BASE   = 0x3C;  // 8 x uint16 (Fire/Ice/T
 // Encoding: each byte adds to a 100 baseline to form StatusDefense in the inflict formula.
 //   byte == 0   -> baseline (most vulnerable; "Weak to" candidate per the Scan UI)
 //   byte >= 100 -> fully immune ("Strong vs" displayed by the Scan UI per the deep research's threshold)
-static const uint32_t BENT_STATUS_RESIST_BASE = 0x4C;  // 20 x uint8 status resistances (see comment above)
+// v0.14.77 BAT-validation pivot: 0x4C is u16 UI scratch (write confirmed at 0x008XXXXX:
+//   `mov word ptr [edx + 0x4c], ax`). +0x80 confirmed by canon validation across two BAT
+//   samples (Grat Lv15 monsterId 0x1F, T-Rexaur Lv21 monsterId 0x43): every status
+//   matches FF Wiki / Quistis tutorial canon. Sleep=0x32 (50%) at idx 7 in BOTH monsters
+//   is the structural smoking gun. See DEVNOTES.md "v0.14.77 decision: ship with +0x80".
+static const uint32_t BENT_STATUS_RESIST_BASE = 0x80;  // 20 x uint8 status resistances (see comment above)
 static const uint32_t BENT_PERSIST_STATUS     = 0x78;  // bitfield: KO/Poison/Petrify/Blind/Silence/Berserk/Zombie
 static const uint32_t BENT_LEVEL            = 0xB4;  // uint8
 static const uint32_t BENT_STR              = 0xB5;  // uint8

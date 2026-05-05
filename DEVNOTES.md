@@ -21,7 +21,617 @@ Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` inj
 
 ---
 
-**Current build: v0.14.75 — Keybinding refactor. BAT PASSED. Production build ready for GitHub push.**
+**Current build: v0.14.82 — Vulnerable threshold relaxed 60% → 50%. PASSED BAT (Bite Bug Spirit=3, Glacial Eye Spirit=101, Caterchipillar Spirit=18 — all three announces matched predictions exactly; Bite Bug + Caterchipillar gained "Vulnerable to Sleep." second sentence as expected; Glacial Eye unchanged as Sleep at 32% still drops). The Scan TTS announce design is now fully stable. Pending: push v0.14.76 through v0.14.82 to GitHub (verify exact backlog via `github:list_commits` first).**
+
+## v0.14.82 — 50% Vulnerable threshold (relaxed from 60%)
+
+### What shipped
+
+Single-line constant change in `src/scan_tts.cpp::FormatStatusWeaknesses`: `chance >= 60` → `chance >= 50`. Comment block updated to record the lesson. New tier boundaries:
+
+- chance ≥ 95% → Highly vulnerable
+- chance 50–94% → Vulnerable
+- chance < 50% → silent
+
+Version bumped 0.14.81 → 0.14.82 in `src/ff8_accessibility.h`.
+
+### Why
+
+v0.14.81 BAT validated the chance-based model perfectly (all five scans matched predictions exactly), but cross-reference against nightsolo canon revealed the 60% cutoff was too conservative. Three canon vulnerabilities were being dropped because they landed just below 60%:
+
+- Bite Bug Sleep: chance ~56%
+- Caterchipillar Sleep: chance ~53%
+- Fastitocalon Darkness: chance ~56%
+
+All three are listed as nightsolo canon vulnerabilities. They land on average more than half the time, so dropping them caused information loss.
+
+Lowering threshold to 50% re-includes them while still correctly dropping the high-Spirit cases that motivated the chance-based model:
+
+- Fastitocalon Sleep: chance 12% → still silent ✓ (the v0.14.80 bug that started this whole chain)
+- Glacial Eye Sleep: chance 32% → still silent ✓
+
+"Vulnerable" still has clear meaning: chance ≥ 50% means the status will land on average more than half the time. The boundary is now at the natural "more likely than not" line.
+
+### v0.14.82 BAT plan
+
+Aaron deploys via `deploy.vbs`, scans the same enemies as v0.14.81 BAT (or any subset). Press key 0 to verify the new tier boundaries.
+
+### Predicted announcement changes from v0.14.81
+
+Using same byte/Spirit data from v0.14.81 BAT log:
+
+- **Fastitocalon** (Spirit=183): "Vulnerable to Death, Poison, Petrify, Darkness, Silence, Berserk, and Zombie." (Darkness added at chance 56%; Sleep at 12% stays silent.)
+- **Glacial Eye** (Spirit=100): unchanged — "Vulnerable to Death, Poison, Petrify, Darkness, Silence, Berserk, and Zombie." (Sleep at 32% still silent.)
+- **Caterchipillar** (Spirit=18): "Highly vulnerable to Death, Poison, Petrify, Darkness, Silence, Berserk, and Zombie. Vulnerable to Sleep." (Sleep added at chance 53%.)
+- **Bite Bug** (Spirit=3 or 4): "Highly vulnerable to Death, Poison, Petrify, Darkness, Silence, Berserk, and Zombie. Vulnerable to Sleep." (Sleep added at chance 56–57%.)
+
+Key 9 announcements unchanged from v0.14.80.
+
+### Pass criteria
+
+- Bite Bug and Caterchipillar both gain a "Vulnerable to Sleep." sentence.
+- Fastitocalon adds Darkness to its list.
+- Glacial Eye announce unchanged.
+- Fastitocalon Sleep still does NOT announce.
+
+### After BAT pass
+
+1. Push v0.14.76 + v0.14.77 + v0.14.78 + v0.14.79 + v0.14.80 + v0.14.81 + v0.14.82 to GitHub (verify exact backlog via `github:list_commits` first).
+2. Resume deferred priorities.
+3. Optional polish per `NEXT_SESSION_PROMPT.md` Priority 2.
+
+### If BAT fails
+
+- Bite Bug Sleep doesn't announce: chance computation regression, or build cache stale. Verify `[SCAN-STAT]` log shows Sleep=50, `[SCAN-CACHE]` shows SPR=3 or 4, then check the version banner in the logs.
+- Fastitocalon Sleep DOES announce: threshold not actually applied. Verify the `chance >= 50` constant in `FormatStatusWeaknesses`.
+- Other discrepancies: cross-reference against the nightsolo table at https://www.nightsolo.net/games/ff8/part13.html
+
+---
+
+**Previous build: v0.14.81 — Status weakness tiering switched to chance-based (accounts for target Spirit). PASSED BAT (5 scans, all predictions matched log output exactly; cross-reference vs nightsolo canon revealed the 60% threshold was too conservative; fix shipped as v0.14.82).**
+
+## v0.14.81 — chance-based weakness tiering accounting for Spirit
+
+### Root cause
+
+The v0.14.80 BAT exposed a real gap in our model. Aaron cast Sleep on Fastitocalon ~12 times after the announce said "Vulnerable to Sleep" (byte=50). Zero landed. Investigation: Fastitocalon's Spirit stat is **177** (one of the highest in the game by design — it's a magic-resistant fish enemy). Per the FF Wiki Magic page, direct status spell casts use:
+
+```
+Inflict % ≈ Magic/4 - Spirit/4 + 100 - byte
+```
+
+For Quistis at low level (Magic ~30) casting Sleep on Fastitocalon: `30/4 - 177/4 + 100 - 50 ≈ 13%`. So 12 attempts at 13% = (0.87)^12 ≈ 19% chance of zero lands. Bad luck but not impossible. The mod's announce was misleading: byte=50 alone implies ~50% inflict, but high target Spirit cuts that drastically.
+
+### What shipped
+
+`src/scan_tts.cpp::FormatStatusWeaknesses` rewritten to compute estimated direct-magic-cast inflict chance per status, then tier on chance instead of byte:
+
+- chance ≥ 95% → "Highly vulnerable"
+- chance 60–94% → "Vulnerable"
+- chance < 60% → silent (drops out of weakness announce)
+
+New helper `ComputeMagicCastChance(byte, spirit)` implements `max(0, min(100, 30/4 - spirit/4 + 100 - byte))` with `kAssumedMagic = 30` representing a typical low-mid game caster. High-level players with Magic 100+ will see actual inflict rates *higher* than the announce suggests — false-negative direction, which is safer than misleading false-positives.
+
+Statuses with byte ≥ 100 still skip to `FormatStatusResistances` (key 9, Resists/Immune to tiers from v0.14.80) — unchanged.
+
+Version bumped 0.14.80 → 0.14.81 in `src/ff8_accessibility.h`.
+
+### Predicted announcement changes per v0.14.79 BAT bytes
+
+Using integer arithmetic (C semantics: `30/4 = 7`, `spirit/4` floored):
+
+**Bite Bug** (Spirit=3, `spirit/4=0`): chance = 107 − byte
+- Death=0 → 107→100 → Highly vulnerable
+- Poison=1 → 106→100 → Highly vulnerable
+- Petrify=0 → 100 → Highly vulnerable
+- Darkness=6 → 101→100 → Highly vulnerable
+- Silence=0 → 100 → Highly vulnerable
+- Berserk=3 → 104→100 → Highly vulnerable
+- Zombie=1 → 100 → Highly vulnerable
+- Sleep=50 → 57 → **silent** (just below 60%)
+
+Announce: "Highly vulnerable to Death, Poison, Petrify, Darkness, Silence, Berserk, and Zombie." Sleep drops out at 57%. Note: this is the threshold-tuning trade-off — if BAT shows Sleep on Bite Bug actually lands frequently in practice, we lower to 50% in v0.14.82.
+
+**Glacial Eye** (Spirit=100, `spirit/4=25`): chance = 82 − byte
+- Death=1 → 81 → Vulnerable
+- Poison=1 → 81 → Vulnerable
+- Petrify=0 → 82 → Vulnerable
+- Darkness=6 → 76 → Vulnerable
+- Silence=0 → 82 → Vulnerable
+- Berserk=0 → 82 → Vulnerable
+- Zombie=1 → 81 → Vulnerable
+- Sleep=50 → 32 → silent
+
+Announce: "Vulnerable to Death, Poison, Petrify, Darkness, Silence, Berserk, and Zombie." (No Highly vulnerable tier; Sleep drops at 32%.)
+
+**Fastitocalon** (Spirit=177, `spirit/4=44`): chance = 63 − byte
+- Death=1 → 62 → Vulnerable
+- Poison=1 → 62 → Vulnerable
+- Petrify=1 → 62 → Vulnerable
+- Darkness=6 → 57 → **silent** (just below 60%)
+- Silence=0 → 63 → Vulnerable
+- Berserk=0 → 63 → Vulnerable
+- Zombie=1 → 62 → Vulnerable
+- Sleep=50 → 13 → silent (this is the bug fix)
+
+Announce: "Vulnerable to Death, Poison, Petrify, Silence, Berserk, and Zombie." Sleep correctly drops out (matches Aaron's experience).
+
+Key 9 announcements unchanged from v0.14.80.
+
+### v0.14.81 BAT plan
+
+Aaron deploys via `deploy.vbs`, scans Fastitocalon. Press key 0 to verify the new chance-based tiering.
+
+**Pass criteria:**
+
+- Fastitocalon key 0 no longer mentions Sleep.
+- Bite Bug and Glacial Eye announces match the predictions above (or are close enough that any deviation is explainable from the bytes).
+- Optional bonus: cast Sleep on Bite Bug a handful of times. Should land ~57% of the time per our model. If it lands frequently, the 60% threshold is too strict and we lower to 50% in v0.14.82.
+
+### After BAT pass
+
+1. Push v0.14.76 + v0.14.77 + v0.14.78 + v0.14.79 + v0.14.80 + v0.14.81 to GitHub (verify exact backlog via `github:list_commits` first).
+2. Resume deferred priorities.
+3. Optional polish per `NEXT_SESSION_PROMPT.md` Priority 2.
+
+### If BAT fails
+
+- If Fastitocalon Sleep still announces: `ComputeMagicCastChance` not actually being called. Check `[SCAN-CACHE]` log shows Spirit=177, then verify the `if (b >= 100) continue;` early-skip didn't accidentally skip everything.
+- If announce is empty ("No status weaknesses") for a monster that should have several: chance threshold is too aggressive. Lower from 60% → 50% (one-line edit).
+- If announce includes Sleep on Fastitocalon despite our prediction: the math is wrong somewhere. Check `[SCAN-STAT]` shows Sleep=50 and `[SCAN-CACHE]` shows SPR=177 (snap.stats[3]).
+
+### Implementation notes
+
+- Helper uses `int` arithmetic; `30/4 = 7` (truncated), not 7.5. This makes the actual thresholds slightly tighter than my earlier verbal math suggested.
+- The 60% "Vulnerable" cutoff was chosen conservatively at Aaron's request: "Vulnerable" should mean "will land most casts," not "might land sometimes." Bite Bug Sleep at 57% sits just below the cutoff. If BAT shows that's too strict, lowering to 50% would catch it.
+
+---
+
+**Previous build: v0.14.80 — Status resistances tiered (Resists / Immune to). PASSED BAT (Fastitocalon "Resists Slow, Stop, Doom, and Slow Petrify. Immune to Confuse." announced exactly as predicted). Aaron noted Fastitocalon Sleep didn't land in 12 casts despite "Vulnerable to Sleep" announce; root cause = high enemy Spirit, fixed in v0.14.81.**
+
+## v0.14.80 — symmetric two-tier resistance announce
+
+### What shipped
+
+`src/scan_tts.cpp::FormatStatusResistances` now splits the 13 offensive ailments into two tiers based on raw resistance byte, mirroring the v0.14.78 weakness announce structure:
+
+- `byte 100-199` → "Resists ..." (won't land via direct cast; defeatable with full junction stacking)
+- `byte 200+` → "Immune to ..." (cannot be inflicted at all, even with 100 spells junctioned to ST-Atk-J)
+
+Wording uses two separate sentences when both tiers populate: `"Resists Slow, Stop, Doom, and Slow Petrify. Immune to Confuse."` Single-tier cases use just the relevant sentence. Empty case unchanged: `"No status resistances."` `JoinNameList` helper unchanged.
+
+Version bumped 0.14.79 → 0.14.80 in `src/ff8_accessibility.h`.
+
+### Why tiered resistances
+
+Driven by Aaron's design discussion after v0.14.79 BAT: weaknesses already use the "Highly vulnerable / Vulnerable" two-tier structure; resistances should match for a predictable mental model. Aaron's casting-focused use case (players will apply Scan findings to spell casts, not just junctioning) settled the threshold choice.
+
+The FF8 inflict formula gives:
+- Direct cast: `inflict % ≈ 100 - byte`
+- Junction-stacked: `inflict % ≈ 200 - byte`
+
+So byte=100 is the hard boundary where direct casts stop landing entirely (current "Resists" tier handles that correctly), and byte=200 is the hard boundary where even max junction stacking fails (new "Immune" tier handles that). The byte 100-199 range stays "Resists" because adding a "Mildly vulnerable" middle tier would mislead a casual player into wasting MP on direct casts that can't land.
+
+### v0.14.80 BAT plan
+
+Aaron deploys via `deploy.vbs`, scans Fastitocalon (or any monster with a known byte=200+ status), presses key 9 for resistances. Pass criteria:
+
+- Key 9 announces both tiers in distinct sentences when both populate.
+- Key 0 (weakness) announcement unchanged from v0.14.79.
+- `[SCAN-STAT]` log line still present per scan.
+
+Predicted announcements per the v0.14.79 BAT bytes:
+
+- **Bite Bug** (no 200+ bytes): key 9 → "Resists Slow, Stop, Doom, Slow Petrify, and Confuse." *(unchanged from v0.14.79)*
+- **Fastitocalon** (Confuse=255): key 9 → "Resists Slow, Stop, Doom, and Slow Petrify. Immune to Confuse." *(test case for the new tier)*
+- **Glacial Eye** (no 200+ bytes): key 9 → "Resists Slow, Stop, Doom, Slow Petrify, and Confuse." *(unchanged)*
+
+Fastitocalon is the meaningful BAT target — it's the only one of the three v0.14.79 enemies that has a byte≥200 to exercise the new tier.
+
+### After BAT pass
+
+1. Push v0.14.76 + v0.14.77 + v0.14.78 + v0.14.79 + v0.14.80 to GitHub. **Verify backlog size via `github:list_commits` before quoting.**
+2. Move to deferred priorities (persistent settings, GF naming bypass verify, party-member field cleanup, X-ATM092 chase scene, etc.).
+3. Optional polish per `NEXT_SESSION_PROMPT.md` Priority 2.
+
+### If BAT fails
+
+- If Fastitocalon Confuse still shows in "Resists" instead of "Immune to": the `b >= 200` check isn't matching. Verify `[SCAN-STAT]` log shows Confuse=255 and the order check `if (b >= 200)` runs before `else if (b >= 100)`.
+- If both buckets show empty for a monster that previously announced "Resists": loop logic regression. Check `OFFENSIVE_AILMENT_COUNT` and the `OFFENSIVE_AILMENT_INDICES` iteration are unchanged.
+- If announce reverts to v0.14.79 single-sentence wording: build cache stale. Check `Logs/build_latest.log` and the `[SCAN-TTS]` banner for version string.
+
+---
+
+**Previous build: v0.14.79 — Repeat-scan detection bug fix. PASSED BAT (Fastitocalon + Bite Bug + Glacial Eye in same play session, all detected with `[NOEFFECT-WATCH] Scan detected` and proper `[SCAN-CACHE]` capture). Cross-referenced status data against nightsolo canon walkthrough; data correct.**
+
+## v0.14.79 — popup-hook condition relaxed to match BOTH text_id 0x02 and 0x06
+
+### Root cause
+
+The v0.14.78 BAT log showed Aaron's reported symptom: only the first scan in a battle was announced; subsequent scans were silent. Direct evidence in the log at 22:01:38:
+
+```
+[POPUP] retaddr=0x00485938 slot=0 text_id=0x06(6) value=0x32 extra1=0x9 extra2=0x8
+```
+
+The Scan-cast popup arrives with **text_id=0x06**, not 0x02. My v0.14.76 fix was based on a misread of the v0.14.75 BAT log — the changelog claimed "every Scan-cast popup arrives with text_id=0x02, NOT 0x06; text_id=0x06 never fires for any popup" — the v0.14.78 BAT log directly contradicts this.
+
+With v0.14.78's `tid == 0x02` condition, the popup hook never fires for Scan casts. That broke the entire action-layer detection chain:
+
+1. `s_lastScanCastTick` never gets set → `NoEffect_RecordSnapshot`'s scan branch never fires (zero `[NOEFFECT-WATCH] Scan detected` entries in log).
+2. The only working detection is `PollBattleMagicId`'s 0→39 transition fallback — catches the FIRST scan in a battle but not subsequent ones because `magic_id` stays at 39.
+3. Same bug on the screen-close side: `OnScanPopupDespawn` never fires (zero matches in log), leaving `s_scanScreenActiveSlot` stuck after every Scan UI close.
+
+### What shipped
+
+Defensive OR rather than just reverting to 0x06, because the v0.14.77 BAT (Grat + T-Rex) DID produce `[NOEFFECT-WATCH] Scan detected` entries, which means at least one of those casts had text_id=0x02. Different cast contexts (Magic-cast vs Draw-cast, full vs compacted view, different monsters, different battle states) may use different text_ids and we should be robust to all of them.
+
+- `src/battle_tts_sprite.inl` popup-hook condition: `tid == 0x02` → `(tid == 0x02 || tid == 0x06)`.
+- `src/battle_tts_screenshot.inl` screen-close condition: `prev.text_id == 0x02` → `(prev.text_id == 0x02 || prev.text_id == 0x06)`.
+- Comment blocks in both files extended to record the v0.14.76 misread and the v0.14.78 BAT direct evidence so future-Claude doesn't re-introduce this.
+- Version bumped to 0.14.79.
+
+`value=0x32` (decimal 50, the spell-name display duration) plus the surrounding context (`sub_48E830` fires within milliseconds in `NoEffect_RecordSnapshot`'s window) provides enough specificity that false-positive Scan detection from non-Scan popups is unlikely. If we ever do see false positives, we can add a tighter retaddr-based filter (the Scan popup specifically came from `retaddr=0x00485938`).
+
+### v0.14.79 BAT plan
+
+Aaron deploys via `deploy.vbs`, scans any monster, then scans a SECOND monster in the same battle (or scans the same monster twice if multi-target unavailable).
+
+**Pass criteria:**
+
+- Both scans produce a `[NOEFFECT-WATCH] Scan detected` log line.
+- Both scans produce a `[SCAN-CACHE]` capture log line.
+- Both Scan UI windows produce an auto-announce when they open.
+- Pressing key 0 in each Scan window fires the v0.14.78 tiered weakness announce correctly (the announce logic itself was correct in v0.14.78, but the second scan never reached it because the second scan was never detected at all).
+- After Scan UI closes, number keys 1/2/3 revert to default ally HP behavior — confirms `OnScanPopupDespawn` fires.
+
+### If BAT fails
+
+- If second scan still silent, with no `[NOEFFECT-WATCH] Scan detected` in log: text_id is something other than 0x02 or 0x06. Look at the `[POPUP]` entries in the log to find the actual value. The popup hook's diagnostic logger is dedup'd by `(retaddr, slot, text_id)`, so we'll see exactly one `[POPUP]` entry per distinct popup signature.
+- If both scans get caught but the second's announce sounds wrong: the issue is in the announce path (`OnScanCast` → `CaptureSnapshot` → `OnScanPopupSpawn`), not in detection. Check whether `s_pendingScanSlot` is being properly consumed and reset between scans.
+- If `OnScanPopupDespawn` still doesn't fire: the screenshot.inl `prev.value == 50` part may also need adjustment. Check `[SPRITE-POLL] DESPAWN` log entries to see what `prev.value` actually is at close time.
+
+### After BAT pass
+
+1. Push v0.14.76 + v0.14.77 + v0.14.78 + v0.14.79 to GitHub. Verify exact backlog via `github:list_commits` before quoting (don't repeat the v0.14.72 "~80-build backlog" guess).
+2. Resume deferred priorities (persistent settings, GF naming bypass verify, party-member field cleanup, X-ATM092 chase scene).
+3. Optional polish: remove redundant Scan branch from `battle_tts_ewm.inl::PollBattleMagicId` (now genuinely redundant once popup hook reliably catches both first and repeat scans — it produces duplicate `[SCAN-CACHE]` log lines on the first scan in each battle).
+
+---
+
+**Previous build: v0.14.78 — Status weaknesses tiered. PARTIAL PASS: weakness tiering announces correctly on first scan; second scan in same battle was silent (root cause now known and fixed in v0.14.79).**
+
+## v0.14.78 — tiered weakness threshold
+
+### What shipped
+
+`src/scan_tts.cpp::FormatStatusWeaknesses` now splits the 13 offensive ailments into two tiers based on raw resistance byte:
+
+- `byte <= 5` → "Highly vulnerable to ..." (effectively guaranteed inflict, 95%+ before junction; the FF8 designers' filler-low values for auto-land ailments)
+- `byte 6..50` → "Vulnerable to ..." (junction-amplifiable; 100 spells stacked to ST-Atk-J brings StatusAttack to 200, beating StatusDefense 100+50=150 by 50% per swing for the byte=50 "tutorial midpoint" ailments)
+- `byte 51..99` → silent (partial resistance, not a meaningful weakness)
+- `byte >= 100` → unchanged, still flows through `FormatStatusResistances` on key 9
+
+Wording uses two separate sentences when both tiers populate: `"Highly vulnerable to A, B, and C. Vulnerable to D."` Single-tier cases use just the relevant sentence. Empty case unchanged: `"No status weaknesses."` `JoinNameList` helper unchanged — same Oxford-comma natural-language formatter shared with `FormatWeak` / `FormatResistances` / `FormatStatusResistances`.
+
+Version bumped 0.14.77 → 0.14.78 in `src/ff8_accessibility.h` with full rationale comment.
+
+### Why this is a deliberate design choice
+
+Investigation of the FF8 Scan UI rendering chain in disassembly (sub_84F860 → sub_84F8D0 → sub_84FD90 → sub_49F0A0) confirmed that the **vanilla Scan UI does not display status weakness or resistance at all** — only stats and elemental affinities. The 20 status bytes exist solely for the inflict probability formula `% chance to inflict before junction = 100 - byte`. There is no game-side threshold to mirror because the game never displays this information. We are surfacing tactical data vanilla FF8 hides; the threshold is entirely our design choice.
+
+The v0.14.77 BAT proved `byte == 0` was too strict. T-Rex's wiki-documented Sleep / Darkness / Death weaknesses sit at bytes 50 / 2 / 1 respectively, not 0, so v0.14.77 announced only the byte==0 ailments (Petrify / Silence / Berserk for both Grat and T-Rex) and missed the canonical FF8 vulnerabilities every player learns about from the Quistis tutorial.
+
+The two-tier split surfaces the canon weaknesses while preserving the magnitude distinction that matters tactically. Death at byte=1 lands on every cast unaided; Sleep at byte=50 needs junction stacking. A blind player making junction decisions wants to know that difference — it's the difference between "cast Death directly" and "junction 100 Sleeps to ST-Atk-J first."
+
+### v0.14.78 BAT plan
+
+Aaron deploys via `deploy.vbs` and re-scans Grat / T-Rexaur (or any monster). On each Scan UI open, presses key 0 for weaknesses. Pass criteria:
+
+- Key 0 announces both tiers in distinct sentences when both populate.
+- `[SCAN-STAT]` log line still present (unchanged) so threshold tuning beyond v0.14.78 stays data-driven.
+- Key 9 announcement unchanged from v0.14.77.
+
+Predicted announcements per the v0.14.77 BAT bytes:
+
+- **Grat** (Death=1 Poison=1 Petrify=1 Darkness=2 Silence=0 Berserk=0 Zombie=1 Sleep=50): key 0 → "Highly vulnerable to Death, Poison, Petrify, Darkness, Silence, Berserk, and Zombie. Vulnerable to Sleep."
+- **T-Rexaur** (Death=1 Poison=1 Petrify=0 Darkness=2 Silence=0 Berserk=0 Zombie=1 Sleep=50): key 0 → "Highly vulnerable to Death, Poison, Petrify, Darkness, Silence, Berserk, and Zombie. Vulnerable to Sleep."
+
+(Same shape because both monsters are wide-open offensively per FF8 design — the wiki's "Sleep / Darkness / Death" curated list is a strategic-value subset, not the raw resistance data. Surfacing the raw data with magnitude tiers gives the player better info than the wiki's curated subset.)
+
+### After BAT pass
+
+1. Push v0.14.76 + v0.14.77 + v0.14.78 to GitHub. **Verify backlog size via `github:list_commits` before quoting** — don't repeat the v0.14.72 mistake of guessing.
+2. Move to deferred priorities (persistent settings, GF naming bypass verify, party-member field cleanup, X-ATM092 chase scene, etc.).
+3. Optional polish: remove redundant Scan branch from `battle_tts_ewm.inl::PollBattleMagicId` (cosmetic log noise), update stale comment at top of `scan_tts.cpp` line 26 ("Fields 5..0 reply Not implemented yet." — obsolete since v0.14.74).
+
+### If BAT fails
+
+- If both Grat and T-Rex still announce only "Highly vulnerable" without the "Vulnerable" Sleep sentence: the byte=50 case isn't matching `b <= 50`. Check `else if (b <= 50)` clause didn't get mangled; verify `snap.statusRes[7]` actually reads 50 in the `[SCAN-STAT]` log.
+- If announce contains only Sleep without the seven "Highly vulnerable" entries: tiers got swapped. Check ordering in the `if (hCount > 0)` / `if (rCount > 0)` blocks.
+- If announce reverts to v0.14.77's flat "Weak to ..." wording: build cache stale, deployed dll is older. Check `Logs/build_latest.log` and the `[SCAN-TTS]` banner in the battle log.
+
+---
+
+**Previous build: v0.14.77 — Status resist offset corrected to +0x80; keys 9/0 wired. AWAITING BAT.**
+
+## v0.14.77 — ship the +0x80 offset fix
+
+Applied per the v0.14.76 BAT analysis below. Three changes total:
+
+1. `BENT_STATUS_RESIST_BASE` already updated to `0x80` in `src/battle_tts.h` (BAT-validation comment block in place).
+2. `src/scan_tts.cpp::SpeakField` case 9 re-enabled to call `FormatStatusResistances` (was 'Not implemented yet.' stub from v0.14.74.1).
+3. `src/scan_tts.cpp::SpeakField` case 0 re-enabled to call `FormatStatusWeaknesses` (was 'Not implemented yet.' stub from v0.14.74.1).
+4. `[SCAN-STRUCT]` 121-byte hex dump stripped from `CaptureSnapshot` (purpose served — actual offset found via the v0.14.76 BAT). `DumpRow` and `LogStructDump` helper functions also removed since they're now unreferenced. `[SCAN-CACHE]`, `[SCAN-ELEM]`, and `[SCAN-STAT]` log lines preserved — those remain useful for ongoing canon validation.
+5. Version bumped to 0.14.77.
+
+No new addresses, no schema changes, no new hooks. Pure wiring + cleanup.
+
+### v0.14.77 BAT plan
+
+Aaron deploys via `deploy.vbs` and casts Scan against any monster, then presses keys 9 and 0 while the Scan window is open.
+
+**Pass criteria:**
+
+- Key 9 (Status Resistances): announces 'Resists ...' or 'No status resistances' — should NOT mis-announce (no garbled status names; should be coherent given the +0x80 BAT-validated bytes).
+- Key 0 (Status Weaknesses): announces 'Weak to ...' or 'No status weaknesses' — again should be coherent.
+- `Logs/ff8_battle.log` should contain a `[SCAN-STAT]` line for each scan with the 20 raw byte values — this gives data-driven calibration if either announce sounds wrong.
+- No `[SCAN-STRUCT]` lines in the log (those are stripped).
+
+**Predicted outcomes per the v0.14.76 BAT samples (+0x80 = first byte of resist block):**
+
+- **Grat** (Lv15, monsterId 0x1F): +0x80..+0x87 = `01 01 01 02 00 00 01 32`. Offensive-ailment indices [Death=0, Poison=1, Petrify=2, Darkness=3, Silence=4, Berserk=5, Zombie=6, Sleep=7]. Byte == 0 hits at idx 4 (Silence) and idx 5 (Berserk). Key 0 expected announce: 'Weak to Silence and Berserk.' Key 9 expected announce: 'No status resistances.' (all 13 offensive ailments are < 100 in this sample.)
+- **T-Rexaur** (Lv21, monsterId 0x43): +0x80..+0x87 = `00 01 00 02 00 03 01 32`. Byte == 0 hits at idx 0 (Death), idx 2 (Petrify), idx 4 (Silence). Key 0 expected announce: 'Weak to Death, Petrify, and Silence.' Key 9 expected announce: 'No status resistances.'
+
+**Calibration consideration:** T-Rex is famously also weak to Sleep, Darkness, and Poison per FF Wiki, but those bytes are 0x32/0x02/0x01 in the sample (small but non-zero). The current `byte == 0` threshold won't catch those. If Aaron wants the announce to match canon more closely we can relax the threshold to `byte < N` (e.g. N=10 or N=50) in v0.14.78+. The `[SCAN-STAT]` log line gives the data needed to pick the right N.
+
+### If BAT fails
+
+- If keys 9/0 announce nonsense statuses (random list): the +0x80 hypothesis is wrong despite the canon validation. Resume the disassembly hunt at `sub_84FD90` (phase 1 handler of `sub_84F860`).
+- If keys 9/0 announce nothing at all ("No status..." for everything): formatters may not be wired correctly — verify `FormatStatusResistances` and `FormatStatusWeaknesses` are still calling `OFFENSIVE_AILMENT_INDICES` indexing into `snap.statusRes`.
+- If announce still says 'Not implemented yet.': version didn't bump or build didn't pick up the case-body changes — check `Logs/build_latest.log` and the deployed dll's banner.
+
+### After BAT pass
+
+1. Push v0.14.76 + v0.14.77 to GitHub. Verify backlog size via `github:list_commits` before quoting.
+2. Optional polish (v0.14.78+):
+   - Threshold calibration for key 0 (relax `byte == 0` to `byte < N` based on T-Rex / Tonberry data).
+   - Remove redundant Scan branch from `battle_tts_ewm.inl::PollBattleMagicId` (cosmetic log-noise cleanup).
+   - Update stale comment at top of scan_tts.cpp line 26 ('Fields 5..0 reply Not implemented yet.') to reflect v0.14.74+ field bindings.
+3. Move to deferred priorities (persistent settings, GF naming bypass verify, party-member field cleanup, etc.).
+
+---
+
+**Previous build: v0.14.76 — Scan-cast detection fix. BAT PASSED 2026-05-03 12:18.**
+
+## v0.14.76 BAT result: clean PASS
+
+Log: `Logs/ff8_battle.log` (433 KB, 2026-05-03 12:19:22 → 12:23:07). 2-Grat encounter, T-Rexaur action target. Confirmed signals:
+
+- Action-layer fire @ 12:20:33 (Grat) and 12:22:23 (T-Rexaur) — popup-hook path now fires, no longer silent
+- `sub_B687C0 fire #1` auto-announce @ 12:20:46 (Grat) and 12:22:31 (T-Rexaur)
+- All 9 number keys exercised on T-Rexaur — fields 1–8 returned correct data, field 9 returned `'Not implemented yet.'` (correct stub per v0.14.74.1)
+- Screen close @ 12:23:04: `[SCAN-TTS] Screen closed (slot=3); number keys revert to ally HP` — `OnScanPopupDespawn` fires correctly via the parallel `prev.text_id == 0x02` fix
+- No `[SPELL-NOEFFECT]` watchdog spam this time
+
+Duplicate `[SCAN-CACHE]/[SCAN-STRUCT]` block @ 12:20:34 from `PollBattleMagicId` fallback is the expected harmless cosmetic noise. Scheduled for v0.14.78+ cleanup (remove redundant Scan branch from `battle_tts_ewm.inl::PollBattleMagicId`), not blocking.
+
+## v0.14.77 status-resist offset hunt — DEEP RESEARCH HYPOTHESIS INVALIDATED
+
+The v0.14.76 BAT log included full `[SCAN-STRUCT]` dumps from both Grat (Lv15, monsterId 0x1F) and T-Rexaur (Lv21, monsterId 0x43). Comparing the two:
+
+| Offset range | Grat | T-Rexaur | Verdict |
+|---|---|---|---|
+| +0x3C..+0x4B | `02 03 02 03 20 03 ...` | `20 03 8A 02 20 03 52 03 20 03 ...` | Element u16 — CORRECT (matches SCAN-ELEM) |
+| **+0x4C..+0x6B** (32 bytes) | `A9 FB A9 FB ...` | `A9 FB A9 FB ...` | **IDENTICAL garbage — NOT status resist** |
+| +0x6C..+0x73 | `18 FC 00 00 30 F8 00 00` | `00 00 00 00 3C F6 00 00` | differs (reward bytes?) |
+| +0x80..+0x93 (20 bytes) | `01 01 01 02 00 00 01 32 FF 96 A0 FF FF FF FF 64 82 FF FF FF` | `00 01 00 02 00 03 01 32 AA 78 A0 78 78 8C 82 64 96 64 6E B4` | **PLAUSIBLE status resist** |
+| +0xB3 / +0xB4 | 0x1F / 0x0F | 0x43 / 0x15 | monsterId / level — CORRECT |
+
+The deep research doc (`Plan & Research Documents/Scan spell deep research results.md`) hypothesized `entity_base + 0x4C` as the status resist offset, BUT explicitly flagged this as needing live validation: "The single biggest unknown that requires your live debugger to settle definitively is the exact threshold immediate in the Scan-UI status loop." The two BAT samples now invalidate the 0x4C hypothesis — both monsters return identical alternating `A9 FB` bytes, which is uninitialized memory or a junction-defense scratch buffer that's the same for all enemies.
+
+### Best candidate: +0x80 (20 bytes ending at +0x93)
+
+Walking the +0x80..+0x93 window against the deep-research-confirmed status order [Death, Poison, Petrify, Darkness, Silence, Berserk, Zombie, Sleep, Haste, Slow, Stop, Regen, Reflect, Doom, SlowPetrify, Float, Confuse, Drain, Expulsion, ???]:
+
+- **Sleep (idx 7) at +0x87**: BOTH = 0x32 (50). Per FF formula `100 - byte = chance to inflict`, Sleep is 50% chance on both — matches Quistis tutorial ("put Grats to sleep") and FF Wiki canon (T-Rexaur weak to Sleep). ✓
+- **Death (idx 0) at +0x80**: Grat=0x01, T-Rex=0x00 — both highly vulnerable. Matches T-Rex canon. ✓
+- **Berserk (idx 5) at +0x85**: Grat=0x00 (highly vulnerable), T-Rex=0x03. Matches Grat-vulnerable-to-Berserk canon. ✓
+- **Haste (idx 8) at +0x88**: Grat=0xFF, T-Rex=0xAA. Both immune (positive status, expected). ✓
+- **Pattern**: low values for negative statuses (idx 0-7), high values for positive statuses (idx 8-19). This is the canonical FF8 enemy resist profile.
+
+Alternative window +0x88..+0x9B was considered but Grat shows Sleep=0x64 (100, exactly at immune threshold), inconsistent with Grat's known Sleep vulnerability.
+
+### v0.14.77 decision: ship with +0x80, BAT-validate
+
+Pivoted away from continuing the disassembly hunt. Rationale:
+
+- The deep research's predicted threshold `cmp al, 0x64` does NOT exist anywhere in `0x00801000.asm` — so the deep research's threshold model is wrong, which weakens the case that its broader instruction predictions are reliable enough to find quickly.
+- `mov word ptr [edx + 0x4c], ax` confirms +0x4C is u16 UI scratch (writing 2 bytes per frame), independent confirmation that 0x4C is wrong.
+- The +0x88 alternative fails canon for both monsters (Grat Death=255 immune contradicts canon; Grat Sleep=100 immune contradicts Quistis tutorial).
+- The +0x80 hypothesis matches FF Wiki canon for **every** validated status across **both** monsters: T-Rex weak to Death/Poison/Darkness/Sleep, Grat weak to Sleep/Silence/Berserk, both immune to all 12 positive statuses.
+- Sleep=0x32 (50) appearing at the exact same byte position in two completely different monsters is structurally telling — engine writing 50 to status idx 7 of both, not coincidence. The 8-low-then-12-high distribution shape is the canonical FF8 monster resist profile.
+
+Reading `sub_84FD90` exhaustively to find the loop would take 30+ more probe cycles. ROI is poor versus running 1 BAT.
+
+### v0.14.77 actions
+
+1. Update `BENT_STATUS_RESIST_BASE` from `0x4C` to `0x80` in `src/battle_tts.h`
+2. Re-enable keys 9 (resist) and 0 (active statuses) in `src/scan_tts.cpp::SpeakField` — call `FormatStatusResistances` / `FormatStatusWeaknesses` (formatters already exist, just unwired per v0.14.74.1 stubs)
+3. Strip the `[SCAN-STRUCT]` diagnostic dump from scan_tts.cpp (no longer needed)
+4. Bump version to 0.14.77
+5. BAT: Grat key 9 should announce something sensible (mostly positive statuses listed as resists; no canonical vulnerabilities listed as immune). If garbage, +0x80 is wrong and we resume disassembly at `sub_84FD90`.
+
+### Disassembly findings — sub_84F860 is a phase DISPATCHER, not the loop home
+
+Read `sub_84F860` directly from `Game Files/disassembly/FF8_EN_.text_0x00801000.asm`. Key finding: the deep research mis-described the function's role. `sub_84F860` is a 6-entry phase dispatcher, not a render function:
+
+```
+0x0084F860:  sub  esp, 0x18
+             push esi
+             mov  esi, [esp+0x20]   ; arg = scan_state struct
+             push esi
+0x0084F869:  mov  [esp+0x08], 0x84F8D0   ; phase 0
+0x0084F871:  movsx eax, byte [esi+0x29] ; phase index byte
+0x0084F875:  mov  [esp+0x0C], 0x84FD70   ; phase 1
+0x0084F87D:  mov  [esp+0x10], 0x850650   ; phase 2
+0x0084F885:  mov  [esp+0x14], 0x850690   ; phase 3
+0x0084F88D:  mov  [esp+0x18], 0x8506B0   ; phase 4
+0x0084F895:  mov  [esp+0x1C], 0x850740   ; phase 5
+0x0084F89D:  call [esp + eax*4 + 8]      ; dispatch
+0x0084F8A1:  mov  al, byte [esi+0x26]    ; flag check
+0x0084F8A7:  inc  word [esi+0x24]        ; advance frame counter
+0x0084F8CF:  ret
+```
+
+Function is only 0x70 bytes (~30 instructions). The status loop must be in one of the 6 phase subroutines:
+- Phase 0 = `sub_84F8D0` — already read; uses `[ebx+0x2d]` as small dispatch byte; calls `scan_get_text_sub_B687C0` once. Looks like a category-by-category text-render dispatch.
+- Phase 1 = `0x84FD70` (thin wrapper that just calls `sub_84FD90`) — `sub_84FD90` allocates 0x68 stack, substantial body. **Most likely status-loop home.**
+- Phase 2 = `0x850650` — small (next function at 0x850690 means it's 0x40 bytes max)
+- Phase 3 = `0x850690` — small (0x20 bytes)
+- Phase 4 = `0x8506B0` — moderate (0x90 bytes)
+- Phase 5 = `0x850740` — moderate
+
+Note: `sub_84F8D0` is one of the FFNx-named functions per deep research, but it's the phase 0 handler, not the umbrella that contains the loop.
+
+### Search patterns RULED OUT in `0x00801000.asm`
+
+- `cmp al, 0x64` — **does not exist anywhere in this .asm file**. Deep research's predicted threshold (100 = immune) is wrong.
+- `cmp al, 0x63` — does not exist.
+- `cmp al, 0x65` — does not exist.
+- `byte ptr [ebx + 0x4c]` — does not exist.
+- `byte ptr [esi + 0x4c]` — only at `0x820DE5` (write, not read; in unrelated function). Not in scan UI region.
+
+This CONFIRMS the BAT-data finding that 0x4C is wrong. The actual offset has not been located yet.
+
+- `byte ptr [esi + 0x80]` first hit at `0x8C369A` (write of `0x36`, unrelated function). Need to check inside `sub_84FD90` and other phase functions specifically.
+- `byte ptr [esi + 0x88]` — does not exist anywhere in this .asm file.
+- `byte ptr [ebp + 0x4c]`, `byte ptr [edi + 0x4c]` — do not exist.
+
+### Next session priorities
+
+1. **Read `sub_84FD90` body** (starts at line 108039 of `FF8_EN_.text_0x00801000.asm`, allocates 0x68 stack so substantial). Use multi-anchor `edit_file` dryRun probes to map the function — anchors every ~50 lines covering 0x84FD90 to 0x850650.
+2. Search inside it for: 20-iteration loop (`cmp REG, 0x14`), per-byte read with offset (`movsx`/`movzx`/`mov al`), and the threshold compare (NOT 0x64).
+3. **Fallback**: check FFNx source `ff8_data.cpp` for any `scan_state` struct definitions or named field offsets that would tell us where the per-monster data is loaded from. FFNx may name the entity-struct fields explicitly even if the `cmp` immediate isn't symbolized.
+4. **Fallback 2**: search inside `scan_get_text_sub_B687C0` (0x00B687C0, in `FF8_EN_.text_0x00B01000.asm`) — the per-status filter may live inside the text-fetch helper rather than the caller.
+5. Once offset found: update `BENT_STATUS_RESIST_BASE` in `src/battle_tts.h`, re-enable keys 9/0 in `scan_tts.cpp::SpeakField`, strip `[SCAN-STRUCT]` diagnostic, bump to v0.14.77.
+
+### Lesson for next pruning pass
+
+The deep research's `cmp al, 0x64` threshold prediction was as confidently stated as the `0x4C` offset prediction, and both turned out to be wrong. **When deep research describes a low-level instruction sequence (not just an offset), every named immediate is also a hypothesis that needs disasm confirmation.** Don't grep for the predicted bytes and panic when they don't appear — that's evidence the encoding is different, not that the disassembly is corrupt.
+
+## v0.14.76 GitHub push pending
+
+Main HEAD is currently at v0.14.72 per recent_updates memory note (commit 337cf97a) OR at v0.14.75 per pre-compaction summary (commit a2bfc253). One is stale. Verify with `github:list_commits` BEFORE quoting backlog size — that's exactly the lesson from the recent_updates note that triggered this caution.
+
+---
+
+# v0.14.76 root cause and fix (kept for reference) — Scan-cast detection silent text_id mismatch
+
+
+
+## v0.14.76 root cause: silent text_id mismatch dating to v0.14.55
+
+v0.14.75 BAT log (`1777827377893_ff8_battle.log`, 4796 lines) reported as “T-Rexaur scan triggered in compacted view despite the config setting being changed.” That diagnosis was wrong — the log shows `[SCAN-HOOK] sub_B687C0 fire #1` firing for the T-Rexaur scan at line 4588, which compacted view skips entirely. The Config `Scan: Always` setting is working correctly. The actual bug is a separate code regression introduced in v0.14.55 and undetected for ~21 builds.
+
+### Smoking gun
+
+`battle_tts_sprite.inl::HookedPopupSprite` (the central popup-sprite dispatcher hook on `sub_48D200`) had this condition for capturing the Scan-cast moment:
+
+```c
+if (tid == 0x06 && (value & 0xFF) == 0x32) {
+    InterlockedExchange(&s_lastScanCastTick, (LONG)GetTickCount());
+}
+```
+
+**`text_id == 0x06` never matches any popup.** Empirical evidence from the v0.14.75 BAT log via `grep "text_id=0x"`: every Scan cast produces a popup with **`text_id=0x02`**, not 0x06. Across 4796 lines of battle log, `text_id=0x06` has zero matches anywhere. The popup-hook detection has been silently dead since v0.14.55.
+
+Matching bug at `battle_tts_screenshot.inl::PollPopupRecords` line ~909:
+
+```c
+if (prev.text_id == 0x06 && prev.value == 50) {
+    ::ScanTTS::OnScanPopupDespawn();
+}
+```
+
+Same wrong constant. `OnScanPopupDespawn` has never fired since v0.14.59 — latent bug masked because Aaron hadn't pressed number keys 1–0 after closing a Scan UI in any past BAT.
+
+### Why the bug was masked for 21 builds
+
+`battle_tts_ewm.inl::PollBattleMagicId` has a parallel detection path: when `*battle_magic_id` transitions from non-39 to 39, it calls `ScanTTS::OnScanCast(slot, true)`. For first-of-battle scans this works — magic_id is typically 0 at battle entry, transitions 0→39 on the cast, the poll detects, OnScanCast fires with proper [SCAN-CACHE]/[SCAN-STRUCT] logging. That made every Grat/Bite Bug/Fastitocalon scan in informal testing look fine.
+
+For REPEAT scans in the same battle the polling path is dead. Once magic_id is 39, it stays at 39 (the engine doesn't reset it between casts in the same battle). No transition = no fire. With the popup-hook primary path also broken, neither detection path fires for the second+ Scan in a battle.
+
+T-Rexaur scan attempt at v0.14.75 BAT line 4480–4630 is the canonical bad case:
+
+- 10:36:34 line 4481: `[POPUP] retaddr=0x00485938 slot=0 text_id=0x02(2) value=0x32` — popup fires (text_id 0x02 not 0x06, hook does nothing)
+- 10:36:34 line 4485: `[NOEFFECT-WATCH] start slot=3 hp=16075` — sub_48E830 fires `NoEffect_RecordSnapshot`; reads `s_lastScanCastTick == 0`; skips Scan-detection branch; records normal watchdog
+- 10:36:40 line 4566: `[NOEFFECT-Q] slot=3 kind=no-effect queued: No effect on T-Rexaur.`
+- 10:36:43 line 4588: `[SCAN-HOOK] sub_B687C0 fire #1 slot=3 (window-open trigger — announcing now)`
+- 10:36:43 line 4589: `[SCAN-TTS] OnScanPopupSpawn: no pending slot (action-layer didn't fire; possible Doomtrain edge case)`
+- 10:36:50 line 4630: `[NOEFFECT-FLUSH] No effect on T-Rexaur.` — Aaron HEARS this announcement
+
+From Aaron's POV: cast Scan on T-Rexaur, hear nothing for 16 seconds, then hear "No effect on T-Rexaur." Looks like compacted view ate the announcement; actually the popup hook ate it.
+
+## v0.14.76 fix
+
+Two one-token changes plus expanded comments documenting the v0.14.55 transcription error:
+
+1. `src/battle_tts_sprite.inl::HookedPopupSprite` — `tid == 0x06` → `tid == 0x02`
+2. `src/battle_tts_screenshot.inl::PollPopupRecords` — `prev.text_id == 0x06` → `prev.text_id == 0x02`
+3. `src/ff8_accessibility.h` — version bumped to 0.14.76 with full changelog
+
+File of every popup in the v0.14.75 BAT log, sorted by retaddr:
+
+```
+[POPUP] retaddr=0x00485938 ... text_id=0x01 value=0x0   — player physical attack
+[POPUP] retaddr=0x00485938 ... text_id=0x02 value=0x32  — player magic cast (Scan, value=spell_id)
+[POPUP] retaddr=0x00485938 ... text_id=0x03 value=0x41  — player limit-break / item
+[POPUP] retaddr=0x00489FBA ... text_id=0x08 value=0x6C  — enemy/spell damage popup
+```
+
+The `tid == 0x02 && (value & 0xFF) == 0x32` filter uniquely identifies Scan casts because Scan is the only spell with ID 50 (0x32) in vanilla FF8.
+
+## v0.14.76 BAT plan
+
+Aaron deploys via `deploy.vbs`, then in Balamb Garden Training Center forces a multi-enemy battle that allows two Scan casts. Two practical scenarios:
+
+- **2-Grat encounter**: Scan Grat 1 (verifies first-scan path still works), then Scan Grat 2 (verifies the popup-hook fix — same battle_magic_id=39 already set so polling fallback is dead, popup hook is the only path).
+- **Grat → T-Rexaur**: scan Grat first, escape if needed, then re-engage to find T-Rexaur. Less reliable encounter-wise; the 2-Grat path is preferred.
+
+Expected log evidence on success:
+- Grat scan (first): `[NOEFFECT-WATCH] Scan detected (scanCastTick=...)` AND `[SCAN-CACHE]/[SCAN-ELEM]/[SCAN-STAT]/[SCAN-STRUCT]` lines fire from the popup-hook path. PollBattleMagicId may also detect transition 0→39 and produce a duplicate [SCAN-CACHE] block ~1 second later — this is harmless cosmetic noise (OnScanCast's per-slot 30 s lock from v0.14.57 prevents duplicate user-facing announcements).
+- Grat 2 scan (repeat): `[NOEFFECT-WATCH] Scan detected` fires, [SCAN-CACHE] etc. fire ONCE (no PollBattleMagicId duplicate because no transition). NO `[SPELL-NOEFFECT]` queued. NO `[NOEFFECT-FLUSH] No effect on Grat`.
+- After closing each Scan UI: `[SPRITE-POLL] DESPAWN ... kind=0x02 val=50` should be followed by an `OnScanPopupDespawn` call (no log line for that one but s_scanScreenActiveSlot will be cleared, observable by Aaron pressing number keys after Scan UI close — they should announce ally HP, not stale scan data).
+
+If the BAT shows a duplicate [SCAN-CACHE] block on first-of-battle scans the noise is acceptable and we can clean it up in a future build by removing the Scan branch from PollBattleMagicId. Don't block on that.
+
+## What this UNBLOCKS
+
+The top priority from `NEXT_SESSION_PROMPT.md` was the BENT_STATUS_RESIST_BASE three-enemy diagnostic (Grat / T-Rexaur / Tonberry), blocked because we couldn't reliably get [SCAN-STRUCT] dumps for repeat-scan enemies in the same battle. v0.14.76 fixes that. After BAT pass, v0.14.77+ collects the three reference dumps and diffs them to find the correct status resist offset; re-enables keys 9/0 (FormatStatusResistances/FormatStatusWeaknesses currently stubbed to "Not implemented yet." per v0.14.74.1).
+
+## Lessons identified (defer to memory pruning — memory is at 30/30)
+
+1. **One detection path can silently mask another path's bugs.** v0.14.55's popup-hook code was wrong from day one; PollBattleMagicId's transition-based path caught first-of-battle scans, which is what informal testing happened to exercise. The bug went 21 builds without detection. Rule of thumb: when the architecture has multiple detection paths, every path needs its own test scenario that exercises that path alone.
+2. **Trust log evidence over user theory when diagnosing.** Aaron's report mentioned compacted view; the log clearly showed sub_B687C0 firing (which compacted view skips), so the bug had to be elsewhere. Symptom report and root cause can diverge — always verify the user's diagnosis against the log before acting on it.
+
+## Files modified
+
+- `src/battle_tts_sprite.inl` (~25 lines: condition flipped + 19-line comment block extension explaining the v0.14.55 transcription error)
+- `src/battle_tts_screenshot.inl` (~10 lines: condition flipped + 6-line comment block extension)
+- `src/ff8_accessibility.h` (this version with full changelog)
+
+## DEVNOTES rotation overdue
+
+DEVNOTES.md is at ~156 KB, well over the 10 KB target from the session ritual rule. Multiple completed investigations (v0.14.45 ducking, v0.14.50–62 Scan TTS chapter, v0.14.65–70 scan UI render hooks, v0.14.71–72 BT-HOOK conflict, v0.14.74.x stale-data fixes) should be moved to `DEVNOTES_HISTORY.md`. Tracked in NEXT_SESSION_PROMPT.
+
+---
+
+**Previous build: v0.14.75 — Keybinding refactor. BAT PASSED. PUSHED to GitHub as commit `a2bfc253` (2026-05-03 16:12 UTC).**
+
+## v0.14.75 GitHub push: COMPLETE
+
+`main` HEAD advanced from `337cf97a` (v0.14.72) to `a2bfc253` (v0.14.75) in a single squashed commit covering the v0.14.73 → v0.14.75 range. Per-version detail (v0.14.73 / v0.14.73.1 / v0.14.74 / v0.14.74.1 / v0.14.74.2 / v0.14.74.3 / v0.14.74.4-diag / v0.14.75) preserved in `src/ff8_accessibility.h`'s changelog comments. Local and remote are in sync.
 
 ## v0.14.75 BAT result: PASS
 

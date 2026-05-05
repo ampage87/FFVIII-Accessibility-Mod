@@ -1,84 +1,81 @@
-# Next Session Prompt — v0.14.75 BAT'd. Push backlog + carry deferred work.
+# Next Session Prompt — v0.14.82 PASSED BAT. Ready to push backlog to GitHub.
 
-## Status
+## Where we are
 
-**v0.14.75 BAT PASSED.** Aaron deployed and verified all keyboard shortcuts work as expected:
-- F11 → on-demand screenshot capture in any game state.
-- M (in mode 6) → menu summary (party / HP / Gil / time / location).
-- F12 → silent (reservation confirmed).
-- All other hotkeys unchanged from v0.14.74.x.
+**v0.14.82 PASSED BAT cleanly.** Aaron scanned three enemies (Bite Bug Spirit=3, Glacial Eye Spirit=101, Caterchipillar Spirit=18) and all three announces matched predictions exactly:
 
-Production build ready. F11/F12 keybinding ownership is settled.
+- Bite Bug: "Highly vulnerable to Death, Poison, Petrify, Darkness, Silence, Berserk, and Zombie. **Vulnerable to Sleep.**"
+- Caterchipillar: "Highly vulnerable to Death, Poison, Petrify, Darkness, Silence, Berserk, and Zombie. **Vulnerable to Sleep.**"
+- Glacial Eye: "Vulnerable to Death, Poison, Petrify, Darkness, Silence, Berserk, and Zombie." (Sleep at 32% correctly silent)
 
-## Priority 1: GitHub push of unpushed build chain
+Fastitocalon wasn't re-scanned this round but isn't affected by the threshold change — Sleep at 12% stays silent under both 60% and 50% cutoffs, and that case was already validated in v0.14.81 BAT.
 
-Per userMemories recent_updates: ALWAYS verify GitHub state with `github:list_commits` BEFORE quoting a backlog size. Do NOT trust earlier session claims.
+**The Scan TTS announce design is now fully stable.** Five-build saga (v0.14.78 → v0.14.82) closed cleanly. The full progression:
 
-Last known reference point: GitHub `main` HEAD was commit `337cf97a` = v0.14.72 (2026-05-02 19:31 UTC). Builds shipped since then (all BAT'd):
+- v0.14.78 introduced byte-only weakness tiering. PARTIAL pass (popup-detection bug exposed).
+- v0.14.79 fixed popup-hook detection (defensive OR on text_id 0x02 || 0x06). PASSED.
+- v0.14.80 added symmetric Resists / Immune to tiers on key 9. PASSED, but exposed Sleep-on-Fastitocalon design gap.
+- v0.14.81 switched from byte-only to chance-based weakness tiering using `Magic/4 - Spirit/4 + 100 - byte` formula. PASSED, but 60% cutoff dropped three canon vulnerabilities.
+- v0.14.82 relaxed cutoff 60% → 50% to capture them. PASSED. Done.
 
-- v0.14.73 (element affinity scale fix attempt — wrong)
-- v0.14.73.1 (corrected to FF8 800-anchored u16)
-- v0.14.74 (8-key Scan layout overhaul)
-- v0.14.74.1 (SCAN-STRUCT diagnostic; keys 9/0 reverted to stub)
-- v0.14.74.2 (cross-battle stale magicId fix)
-- v0.14.74.3 (cross-battle stale enemy NAME fix)
-- v0.14.74.4-diag (F12 = on-demand screenshot)
-- v0.14.75 (keybinding refactor: F11 = screenshot, M = menu summary, F12 freed)
+GitHub `main` HEAD is still v0.14.75 (`a2bfc253`). v0.14.76 + v0.14.77 + v0.14.78 + v0.14.79 + v0.14.80 + v0.14.81 + v0.14.82 are unpushed. **Verify exact backlog via `github:list_commits` before quoting.**
 
-After verifying the gap, push the chain. Commit messages should reference the corresponding DEVNOTES section entries for traceability.
+## Priority 1: Push v0.14.76 through v0.14.82 to GitHub
 
-## Priority 2: GitHub issue #27 — SeeD Rank misreads as "No rank yet"
+Use `github:list_commits` to confirm the exact unpushed backlog before quoting numbers (don't repeat the v0.14.72 "~80-build backlog" guess error). Then push the seven local builds with their full changelog comment blocks (already embedded in `src/ff8_accessibility.h` history).
 
-Filed during the v0.14.75 BAT session. Pressing **R** in the in-game menu always announces "No SeeD rank yet" even after Aaron has earned a rank.
+## Priority 2: Resume deferred priorities
 
-**URL:** https://github.com/ampage87/FFVIII-Accessibility-Mod/issues/27
-**Labels:** `bug`, `menu-tts`, `savemap-offsets`, `low-priority`
+In order from session memory:
 
-Suspected cause: `FIELD_H_OFFSET = 0xF94` in `src/menu_tts_hotkeys.inl::AnnounceSeedRank()` is computed by stacking section sizes — likely one is off (similar to the SAVEMAP OFFSET CORRECTION lesson where ChatGPT's deep research repeatedly assumed a 96-byte header instead of the actual 76-byte one).
+1. **Persistent accessibility settings across play sessions** — TTS rate, volumes, EWM toggle, audio-ducking toggle, etc. This is the longest-running deferred priority. Likely the next major feature.
+2. **Remove party members from field entity catalog**
+3. **X-ATM092 chase scene accessibility**
+4. **Walk-and-talk dialog gap** (hardcoded engine path)
 
-Fix approaches in the issue:
-1. Add a temporary diagnostic that scans the savemap for a uint16 matching Aaron's known SeeD EXP value (he reads it off the in-game SeeD menu, we hunt for that exact value). Once located, hardcode.
-2. ChatGPT deep research targeted at FF8 Steam 2013 savemap SeeD rank EXP offset, with the SAVEMAP OFFSET CORRECTION note in the prompt.
-3. Verify the level-from-EXP table — `seedExp / 100` clamped 1-31 may not match the engine's actual rank curve (which uses a lookup).
+## Priority 3: Optional polish (low priority)
 
-Low priority — does not block any core gameplay system.
+- Remove redundant Scan branch from `battle_tts_ewm.inl::PollBattleMagicId` (genuinely redundant now that v0.14.79 popup hook reliably catches both first and repeat scans — produces duplicate `[SCAN-CACHE]` log noise on first scan in each battle).
+- Update stale comment at top of scan_tts.cpp line 26 ("Fields 5..0 reply Not implemented yet.") to reflect v0.14.74+ field bindings.
 
-## Priority 3: v0.14.74.1 [SCAN-STRUCT] three-enemy BAT — longest-pending Scan task
+## Priority 4: GitHub issue #27 — SeeD Rank misreads as "No rank yet"
 
-Aaron scans Grat / T-Rexaur / Tonberry (canonical status profile differences) and uploads `Logs/ff8_battle.log`. Diff the `[SCAN-STRUCT]` log sections to find the 20-byte run where the patterns line up. Currently `BENT_STATUS_RESIST_BASE = 0x4C` is wrong (alternating 169/251 byte pattern proved it). Once correct offset is found, next build re-enables Scan keys 9 (Status Resistances) and 0 (Status Weaknesses).
+Filed during the v0.14.75 BAT. https://github.com/ampage87/FFVIII-Accessibility-Mod/issues/27 — labels `bug` / `menu-tts` / `savemap-offsets` / `low-priority`. Suspect: `FIELD_H_OFFSET = 0xF94` in `AnnounceSeedRank()` is a stacked-section-size computation; likely off by 0x14 per the SAVEMAP OFFSET CORRECTION lesson.
 
-After this lands, the Scan UX chapter is functionally complete (compacted-view solved by Config setting in v0.14.74.4-diag; auto-announce + 8 keys working; only status keys 9/0 remain).
+## Priority 5: DEVNOTES rotation (overdue maintenance)
 
-## Other deferred priorities
+DEVNOTES.md continues to grow. Multiple completed investigations should be moved to `DEVNOTES_HISTORY.md`:
 
-1. Persistent accessibility settings across play sessions (TTS rate, volumes, EWM toggle, audio-ducking toggle, etc.).
-2. Verify GF naming bypass (Siren failed in earlier testing).
-3. Remove party members from field entity catalog.
-4. X-ATMO92 chase scene accessibility.
-5. Walk-and-talk dialog gap (hardcoded engine path).
+- v0.14.45 audio-ducking implementation
+- v0.14.50–62 Scan TTS architecture chapter
+- v0.14.65–70 scan UI render hooks + frame-delay screenshot machinery
+- v0.14.71–72 BT-HOOK conflict resolution
+- v0.14.74.x stale-data fingerprint fixes
+- v0.14.75 keybinding refactor
+- **v0.14.76–82 popup-hook + threshold-tiering saga** — NOW STABLE. Collapse the seven-build sequence into one summary paragraph: "Closed multi-build investigation into Scan status weakness/resistance announces. v0.14.76–79 fixed popup-hook detection (text_id 0x02 || 0x06 defensive OR). v0.14.80 added symmetric Resists/Immune to tiers on key 9. v0.14.81 switched weakness tiering from byte-only to chance-based using `Magic/4 - Spirit/4 + 100 - byte` (assumed Magic=30); thresholds 95% Highly vulnerable / 60% Vulnerable / silent. v0.14.82 relaxed Vulnerable to 50% after canon cross-reference. All five PASSED BAT. Lesson 4 in this file documents the Spirit-dependent inflict formula; Lesson 7 documents the 'natural more-likely-than-not boundary' threshold-tuning principle."
 
-## Mandatory session-start ritual
-
-Read `DEVNOTES.md` and this file before doing any work. `DEVNOTES_HISTORY.md` only when tracing past decisions. Keep DEVNOTES under 10 KB; move completed investigations to HISTORY when they age out.
-
-## Lessons accumulated this chapter (for next memory-pruning pass)
-
-userMemories is at 30/30 capacity. Next time we have a slot:
-
-1. **"Before writing engine-behavior workarounds, check FF8's Config menu for an existing toggle."** v0.14.74.4-diag's first F12 capture revealed a `Scan: Once / Always` toggle that closed the entire compacted-view chapter without writing fallback code. The Config menu is the engine's own user-facing knob for behavior toggles; it's the FIRST place to check before writing mod code to neutralize an engine behavior.
-
-2. **"Verify backlog sizes via `github:list_commits` before quoting."** Earlier session notes stated "~80-build backlog" which was wildly wrong (actual gap was 6). Always check GitHub state live, never quote from memory.
-
-3. **`menu_tts_diagnostics.inl` contains a USER FEATURE despite the filename** — `AnnounceMenuSummary` is the menu open summary, not a diagnostic. When auditing files for cleanup, don't trust filenames as authority; read the function purposes.
-
-4. **Computed offsets that stack section sizes are fragile.** `AnnounceSeedRank`'s `FIELD_H_OFFSET = 0xF94` was built by adding header + GFs + chars + shops + limit_breaks + items. A miscount in any section produces a plausible-looking offset that reads from the wrong region. For any savemap field beyond the header, prefer offsets verified at runtime against a known live value rather than computed from section-size constants.
+Rotation is a focused 30-minute task best done when not blocked. Recommended for the start of a quieter session.
 
 ## Files in current state
 
-- `src/dinput8.cpp` — F11 = on-demand screenshot.
-- `src/menu_tts.cpp` — M = menu summary (in mode 6).
-- `src/field_nav_handlekeys.inl` — VISDIAG body deleted.
-- `src/field_navigation.cpp` — `s_f11WasDown` deleted.
-- `src/ff8_accessibility.h` — version `0.14.75` with comprehensive changelog.
-- `DEVNOTES.md` — top sections: v0.14.75 BAT result + v0.14.75 keybinding refactor; v0.14.74.4-diag below it.
+- `src/scan_tts.cpp` — `FormatStatusWeaknesses` is the v0.14.82 chance-based version with 50% Vulnerable cutoff and `ComputeMagicCastChance` helper. `FormatStatusResistances` is the v0.14.80 two-tier (Resists / Immune to). All BAT-validated.
+- `src/battle_tts_sprite.inl`, `src/battle_tts_screenshot.inl` — v0.14.79 popup-hook fixes (defensive OR on text_id 0x02 || 0x06) intact.
+- `src/battle_tts.h` — `BENT_STATUS_RESIST_BASE = 0x80` (BAT-validated since v0.14.77).
+- `src/ff8_accessibility.h` — version `0.14.82` with full root-cause comment.
+- `DEVNOTES.md` — top section: v0.14.82 PASSED summary. Below: v0.14.81 PASSED, v0.14.80 PASSED, v0.14.79 PASSED, etc. **Rotation overdue.**
 - `NEXT_SESSION_PROMPT.md` — this file.
+- GitHub: `main` HEAD = `a2bfc253` (v0.14.75); v0.14.76 through v0.14.82 unpushed.
+
+## Lessons accumulated for next memory pruning pass
+
+1. **Always verify popup signatures directly from a [POPUP] log entry** before changing popup-hook conditions (v0.14.79).
+2. **The FF8 vanilla Scan UI does NOT display status weakness/resistance** — only stats and elemental affinities. Threshold tiering is entirely our design choice.
+3. **Sleep=50 universal across early enemies is REAL FF8 design** — the Quistis junction tutorial baseline.
+4. **Status inflict % depends on BOTH byte AND target Spirit (for magic casts) or Vitality (for ST-Atk-J).** Direct cast: `Magic/4 - Spirit/4 + 100 - byte` (StatusAttack fixed at 200, StatusDefense = 100 + byte).
+5. **Trust direct log evidence over prior changelog claims** when they conflict.
+6. **Test design assumptions in actual gameplay AND against community canon.** v0.14.81 log output matched predictions perfectly, but canon cross-reference exposed the threshold gap that v0.14.82 fixed.
+7. **Conservative thresholds lose information.** When in doubt about a threshold for a player-facing classification, the natural "more likely than not" boundary (50%) is usually the right default.
+
+## Mandatory session-start ritual
+
+Read `DEVNOTES.md` and this file before doing any work. `DEVNOTES_HISTORY.md` only when tracing past decisions. Update both files at every version bump and after every BAT result.
