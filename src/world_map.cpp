@@ -1,64 +1,201 @@
 // world_map.cpp - World map navigation TTS for blind players
 //
 // ============================================================================
-// CURRENT STATE: v0.14.92 — Chapter 3 Stage 4 diagnostic build: hex-dump
-//                wmsetus.obj Sections 7 and 8 to surface the FIELD
-//                ENTRY trigger bytecode. v0.14.91 BAT'd cleanly and
-//                proved the deep research's leading hypothesis wrong:
-//                Sections 17/18 contain wm2field-style destination
-//                data (field-walkmesh coords ±10000 range, 32-byte
-//                records keyed on wmField IDs 0x07-0x10), not world-
-//                map trigger geometry. A subsequent disassembly hunt
-//                of FF8_EN.exe identified the real architecture:
+// CURRENT STATE: v0.14.96 — Chapter 3 Stage 5.2: false-positive arrival
+//                fix after v0.14.95 BAT. Aaron BAT'd v0.14.95 and reported
+//                drives to Balamb Town and Balamb Garden announced 'Arrived'
+//                when a random encounter triggered as the player neared
+//                each destination — the v0.14.95 BAT log shows two clear
+//                cases (12:43:36 'Arrival via exit-distance (fallback)'
+//                for Balamb Garden at lastPos=(25405,-30324) dist=1215,
+//                where the player had drifted 1100 units southward in 3
+//                seconds; 12:51:26 same pattern for Balamb Town). Both
+//                are encounters, NOT arrivals. The v0.14.95 distance
+//                heuristic can't distinguish them because both signals
+//                say 'yes': scene flag flips, player IS near target.
 //
-//                The world-map tick at sub_53FAC0 calls sub_545EA0
-//                each frame on foot. sub_545EA0 reads from Section 8
-//                of wmsetus.obj (resolved at runtime as [0x2040070],
-//                set up by sub_542DA0's 8th iteration). Section 8 is
-//                a BYTECODE PROGRAM with ~56 different opcodes (range
-//                0xFF02..0xFF38) dispatched via a jump table at
-//                sub_546100. Opcodes include rectangle-bounds checks,
-//                savemap story-flag comparisons, AND/OR combinators,
-//                multi-stage matching states (modes 1-6), and a
-//                follow-link instruction (0xFF0E) that lets locations
-//                share sub-programs. When a program path evaluates to
-//                'match', the wmField ID it carries gets written and
-//                the field-entry transition fires. (sub_541C80 is the
-//                separate ENCOUNTER trigger using Section 1 + Section
-//                2's terrain map; not relevant for AD steering.)
+//                Aaron's diagnosis (and the cure): use the game's settled
+//                game mode AFTER the world-map exit. The mode register at
+//                FF8Addresses::pGameMode (already resolved at startup,
+//                used by IsOnField etc.) takes 1-3 polls to transition
+//                from MODE_WORLDMAP (2) to its destination mode after
+//                IsOnWorldMap flips false. The v0.14.90.2 changelog noted
+//                this and abandoned the approach as 'fragile' — but the
+//                fragility was about reading mode INSTANTLY at exit (which
+//                always reads MODE_WORLDMAP). Reading mode AFTER a brief
+//                wait IS robust.
 //
-//                Why this matters for AD: B-Garden's bytecode is a
-//                wide-rectangle bounds check (entrable from any
-//                direction). Balamb Town's bytecode is a tight
-//                rectangle just covering the gate (entrable only from
-//                the south). Catalog-center steering misses Balamb
-//                Town because the catalog X/Y is the town center, not
-//                the gate. Once we decode Section 8, we know each
-//                location's exact entry rectangle and AD targets the
-//                rectangle center directly.
+//                NEW deferred-arrival state machine. When world map exits
+//                while a drive is active: capture the exit tick, release
+//                drive keys, set s_driveAwaitingArrivalDecision=true (drive
+//                stays active so cancel still works). New ResolveDeferred-
+//                Arrival() runs each Poll() tick (Poll restructured so it
+//                does NOT early-return when waiting). Decision table:
+//                  MODE_FIELD (1)        : entered a field — ARRIVAL
+//                  MODE_SWIRL (3)        : pre-battle swirl — ENCOUNTER
+//                  MODE_BATTLE (999)     : in battle      — ENCOUNTER
+//                  MODE_AFTER_BATTLE (4) : post-battle    — ENCOUNTER
+//                  anything else (incl. MODE_WORLDMAP=2) : keep waiting
+//                Wait timeout: ARRIVAL_DECISION_TIMEOUT_MS = 2000ms. On
+//                timeout, fall back to v0.14.95 segment-membership /
+//                distance heuristic with 'timeout-fallback' suffix in logs.
 //
-//                THIS BUILD just hex-dumps Sections 7 (56 bytes) and
-//                8 (2652 bytes) to ff8_world.log under [TRIGGER-DUMP]
-//                — about 170 log rows total, trivial cost. Section 7
-//                is the small adjacent section (set up next to 8 by
-//                sub_542DA0); likely auxiliary metadata for the
-//                bytecode walker. Sections 17/18 are no longer dumped
-//                (we now know they're not relevant). After BAT, Claude
-//                writes a Python disassembler in the bash sandbox
-//                using the opcode dispatch table mapped from
-//                sub_546100 + sub_545F10, runs it against the dumped
-//                bytes, and emits per-location entry geometry. v0.14.93
-//                hardcodes the decoded data as a static s_triggerData[]
-//                array; v0.14.94 wires it into StartAutoDrive's
-//                targeting + arrival check, demoting sweep-search to
-//                fallback only for locations whose programs use
-//                opcodes not yet decoded.
+//                Arrival path also reads pCurrentFieldId + pCurrentField-
+//                Name and includes both in the log line:
+//                  'Arrival via game-mode (mode=1 MODE_FIELD,
+//                   fieldId=0x002F, fieldName='balamb_town_entrance',
+//                   target=Balamb Town, ...)'
+//                Encounter path identifies which mode triggered the pause:
+//                  'Paused via game-mode (mode=3 MODE_SWIRL, ...)'
+//                  'Paused via game-mode (mode=999 MODE_BATTLE, ...)'
+//                These give post-BAT diagnostic clarity that v0.14.95
+//                lacked.
+//
+//                v0.14.95 closest-active-region planner UNCHANGED.
+//                v0.14.94 vehicle-noise hotfix and Section 2 loader
+//                UNCHANGED. v0.14.93 trigger-program data UNCHANGED.
+//                NO new addresses (pGameMode, pCurrentFieldId,
+//                pCurrentFieldName all already exposed by ff8_addresses.h
+//                since v04.00 / v01.13). NO new hooks. NO build script
+//                changes.
+//
+//                ALSO from v0.14.95 BAT: Sections 9 and 19 are NOT region
+//                maps — still 16 active regions in MatchProgramForCatalog
+//                after their dump. Multi-section region-map hypothesis
+//                wrong. v0.14.96 doesn't extend the dump list further;
+//                resolving the missing 26 region IDs is deferred to
+//                v0.14.97+. The deferred-arrival fix in v0.14.96 makes
+//                the existing closest-active-region planner correctly
+//                identify arrivals at Balamb Garden / Balamb Town anyway
+//                via the game-mode branch when pGameMode says MODE_FIELD,
+//                even when the planner declines (which it currently does
+//                for those two locations because their trigger regions
+//                aren't in Section 2).
+//
+//                v0.14.96 BAT plan: drive Garden → Balamb-Town → Fire-
+//                Cavern again. Verify ff8_world.log shows: new
+//                [DRIVE] Awaiting arrival decision (target=..., ...) lines
+//                on every world-map exit during drive; new [DRIVE] Arrival
+//                via game-mode (mode=1 MODE_FIELD, fieldId=0x..., field-
+//                Name='...', ...) lines for real arrivals; new [DRIVE]
+//                Paused via game-mode (mode=3 MODE_SWIRL, ...) or
+//                (mode=999 MODE_BATTLE, ...) lines for encounters; NO
+//                false-positive arrivals when random encounters fire near
+//                Balamb / B-Garden. Drive should correctly resume after
+//                each battle, eventually arriving at the actual location.
+//
+//   Prior baseline:
+//   v0.14.95 — Chapter 3 Stage 5.1: planner correctness fix after v0.14.94
+//                BAT. Rewrote MatchProgramForCatalog with closest-active-
+//                region search (5-segment cap), extended dump list to
+//                {2,7,8,9,19} (later disproved — not region maps),
+//                enhanced [DRIVE] Paused log with seg+region.
+//
+//   v0.14.94 — Chapter 3 Stage 5: auto-drive refactor from
+//                linear-direction-with-nudge steering to A* path
+//                planning on the 32x24 segment grid. Three integrated
+//                changes addressing v0.14.93 BAT findings:
+//
+//                (1) VEHICLE-NOISE HOTFIX in CheckVehicleChange —
+//                early-return when s_driveActive prevents AD's
+//                keybd_event arrow-key injection from polluting
+//                s_lastVehicle via the locomotion byte at 0x02040A5E
+//                (which cycles through canonical Car/Garden/Ragnarok
+//                values during AD operation, each held >64ms past
+//                the v0.14.90 4-poll debounce). Resolves Issues 1+2
+//                from the BAT: 'Car' announcements during drives +
+//                sweep search not firing when stuck in final approach
+//                (s_lastVehicle stays at its pre-drive foot value,
+//                so isOnFoot stays true, so the sweep guard fires).
+//
+//                (2) SECTION 2 LOADER captures the 32x24 segment-
+//                region byte map from wmsetus.obj into
+//                s_segmentRegionMap[24][32] at module init. Loader
+//                folds into existing LoadTriggerZones (which already
+//                reads the same archive for diagnostic dumping) — no
+//                duplicate I/O. Indexing: byte at file offset
+//                row*32+col with no header (the 4-byte trailer at
+//                offset 768 was previously misdocumented as a header
+//                in v0.14.93's comment; corrected). Loader logs
+//                [REGION-MAP] populated-cell count + unique region
+//                IDs at init for sanity check.
+//
+//                (3) A* PATH PLANNER replaces v0.14.86's linear-
+//                direction steering. PlanPath(start, vehicle) runs
+//                A* on the 32x24 grid with 4-neighbor edges (foot/
+//                Chocobo/Car: land-only via existing s_terrainGrid;
+//                Ship/Garden: any segment; Ragnarok skips the
+//                planner entirely — it can fly anywhere so segment
+//                routing is moot), wrap-aware Manhattan heuristic,
+//                uniform edge cost. Goal-set construction:
+//                MatchProgramForCatalog walks s_triggerPrograms[]
+//                looking for any clause satisfiable from current
+//                state (vehicle predicate matches AND story window
+//                contains the savemap word at 0x2036BDE);
+//                CollectGoalSegments collects every cell in
+//                s_segmentRegionMap whose byte equals that clause's
+//                region operand. Multi-target A* terminates at the
+//                first goal segment popped from the priority queue,
+//                provably the closest reachable goal.
+//
+//                StartAutoDrive runs the planner once; UpdateAutoDrive
+//                steers toward s_drivePath[s_drivePathIdx]'s segment
+//                center and advances when the player crosses into
+//                it. ARRIVAL: replaces v0.14.90.2's distance heuristic
+//                with segment-membership — when the world map exits,
+//                the player's last segment is checked against the
+//                goal set; in-set = arrival, out-of-set = paused
+//                (battle/encounter). Fixes Issue 3 from BAT (Fire
+//                Cavern entry at seg(19,20) was 6807 units from
+//                catalog seg(20,20); 1500-unit threshold misclassified
+//                it as 'Paused'; now any region-matching segment
+//                counts as arrival).
+//
+//                REPLAN on world-map re-entry from a battle pause
+//                (random encounters drift the player off the planned
+//                path; replanning from post-battle position keeps
+//                the drive efficient). Sweep search and stuck
+//                detection STAY as fallbacks for sub-segment failures
+//                (planner says traversable but a sub-segment obstacle
+//                blocks the player). UNCHANGED: keybd_event injection,
+//                camera-axis projection, pause/resume, BFS catalog
+//                reachability filter, refined-coord capture (still
+//                records the player's actual entry position for
+//                future sessions on a per-location basis).
+//
+//                Cars treated as foot for clause matching: cars
+//                travel the same land segments as foot, and to cross
+//                a trigger the player will dismount and walk the
+//                last few steps — the goal-segment region defines
+//                the trigger zone either way.
 //
 //                Pressing `\` while a drive is in progress cancels.
 //
-//   Prior baseline:
-//   v0.11.16 — Deferred catalog build (position validity check)
-//   v0.14.31 — Update()/Shutdown() restored after v0.14.24 build damage
+//                BAT plan: drive Garden→Garden short test, then
+//                Garden→Balamb-Town long drive, then Balamb-Town→
+//                Fire-Cavern (the v0.14.93 Issue 3 case). Verify
+//                ff8_world.log shows: [REGION-MAP] Section 2 loaded
+//                (768 populated cells, ~70 unique region IDs) at
+//                init; [TRIGGER-PROGRAMS] dump unchanged from v0.14.93;
+//                no spurious 'Vehicle change: Car' lines during
+//                drives; [PLAN] Matched program / Path found / Reached
+//                waypoint lines per drive; [DRIVE] Arrival via
+//                segment-membership at Fire Cavern (NOT 'Paused
+//                dist=6807'); refined entry coords captured for all
+//                three destinations.
+//
+//   v0.14.93 — 38 decoded field-entry trigger programs embedded as
+//              static s_triggerPrograms[] C++ array; Section 2
+//              capture in dump list. v0.14.94 wires this data into
+//              AD targeting.
+//   v0.14.92 — Section 8 hex dump that drove the decode (replaced
+//              by v0.14.93's data embedding; dump infrastructure
+//              stays).
+//   v0.14.86 — Auto-drive restored from v0.11.08 baseline. Linear
+//              direction-with-nudge steering toward catalog center;
+//              v0.14.94 replaces this with A* path planning.
+//   v0.11.16 — Deferred catalog build (position validity check).
+//   v0.14.31 — Update()/Shutdown() restored after v0.14.24 build damage.
 // ============================================================================
 //
 // Architecture mirrors FieldNavigation but simpler:
@@ -100,6 +237,7 @@ static const uint32_t WM_POS_Z      = 0x0203EE88;  // DWORD - player Z
 static const uint32_t WM_HEADING    = 0x0203ED02;   // WORD  - 0=North, 0-4095 CW
 static const uint32_t WM_LOCOMOTION = 0x02040A5E;   // BYTE  - locomotion / vehicle mode. v0.14.83 whitelisted to canonical {0..4}; per `Plan & Research Documents/World Map Terrain and Locomotion Reference.md` legitimate values include 0=Squall foot, 6=Selphie foot, 10=train, 31=Chocobo, 32=invisible-car — our GetVehicleName uses 0/1/2/3/4 for foot/Car/Chocobo/Ship/Ragnarok which DISAGREES with the research-doc enum (research says Chocobo=31, we say 2). Empirical reconciliation needed; see v0.14.84 changelog.
 static const uint32_t WM_SCENE_FLAG = 0x0203ED2C;   // WORD  - 0=worldmap, 1=field
+static const uint32_t WM_STORY_FLAG = 0x02036BDE;   // WORD  - savemap story-flag word read by sub_545F10's 0xFF02 (GTE) / 0xFF03 (LT) opcodes; v0.14.94 reads this for s_triggerPrograms[] gate evaluation. Range observed in artifact: 0..5000 across the 38 programs.
 
 // World map dimensions (wrapping torus)
 static const double WM_WIDTH  = 262144.0;
@@ -184,8 +322,341 @@ static const uint32_t WMSETUS_DUMP_CAP_BYTES      = 16384; // safety cap per sec
 // Order is dump-order in the log; the table sanity-check log line lists all
 // 48 sections regardless. Adding more sections to this list is a one-line
 // change for any future build that needs a different slice of wmsetus.obj.
-static const int      WMSETUS_DUMP_SECTIONS_1IDX[] = { 7, 8 };
+// v0.14.93 added Section 2 (the 32x24 segment-region byte map): each byte
+// is the region ID for one segment, addressed at file offset row * 32 + col.
+// (A 4-byte trailer '00 00 00 00' lives at file offset 768 — not a header.)
+// The 0xFF08 region operands in Section 8's bytecode reference these bytes.
+// AD steering (v0.14.94+) uses Section 2 to translate catalog (X, Y) into
+// a region byte and then matches that against s_triggerPrograms[]'s clauses.
+static const int      WMSETUS_DUMP_SECTIONS_1IDX[] = { 2, 7, 8, 9, 19 };  // v0.14.95: +9,19 (also 772b each — hypothesis: per-area region maps; Section 2 alone has only 19 of the 45 region IDs s_triggerPrograms[] references, so the world is split across multiple 32x24 maps)
 static const int      WMSETUS_DUMP_COUNT           = sizeof(WMSETUS_DUMP_SECTIONS_1IDX) / sizeof(WMSETUS_DUMP_SECTIONS_1IDX[0]);
+
+// ============================================================================
+// Field-entry trigger programs (v0.14.93 — decoded from wmsetus.obj Section 8)
+// ============================================================================
+// Section 8 of wmsetus.obj is a bytecode program walked each frame on foot
+// by sub_545EA0 to determine whether the player has crossed a field-entry
+// trigger. The program list was decoded from the v0.14.92 BAT [TRIGGER-DUMP]
+// of Section 8 (2652 bytes, 38 programs, full opcode table mapped via the
+// Python disassembler in the bash sandbox). Authoritative reference:
+// `Plan & Research Documents/wmsetus Section 8 decoded.md`.
+//
+// Each program is identified by a wmField/location ID (0xFF06 operand,
+// range 0x0031..0x02C1). The program may carry top-level gates: a story-
+// flag window applied to the savemap word at [0x2036bde/0x2036bdf], and/or
+// a vehicle-state restriction. Inside, it has zero or more clauses; each
+// clause is a (vehicle, region) test the player's segment+state must
+// satisfy, optionally with its own narrower story window. Clauses are
+// OR'd at the top level (any one matches → program fires).
+//
+// Region operands (0xFF08) are bytes referenced into Section 2's 32x24
+// segment-region map (which v0.14.93 also captures via the extended dump
+// list). For each catalog (X, Y), AD computes the segment, reads Section
+// 2's region byte for that segment, then finds all programs+clauses where
+// the byte matches AND the player's vehicle / story state satisfy the
+// gates. The set of segments sharing that region byte is the equivalent
+// trigger-zone for that location; AD steers toward the closest such
+// segment. v0.14.94 wires this into StartAutoDrive's targeting; v0.14.93
+// only embeds the data and dumps a sanity-check log block at module init.
+//
+// ENCODING:
+//   vehicle operands per the artifact's "Vehicle ID encoding" table:
+//     0x80 = Squall foot       (most common operand)
+//     0x84 = Selphie foot      (alt-party-leader foot, treated as foot for AD)
+//     0x30 = Garden            (mobile B-Garden)
+//     0x31 = Chocobo
+//     0x32 = Ragnarok
+//     0    = no restriction    (used in clauses for top-level-vehicle programs)
+//
+//   story-flag bounds: gte=0 means "no lower bound", lt=0 means "no upper
+//   bound" (treated as +infinity). Both fields refer to the same savemap
+//   word that sub_545F10 reads via the 0xFF02/0xFF03 opcodes.
+//
+//   unk_flags: bit-encoded record of which 0xFF0F/10/11/12/13/20/21 opcodes
+//   appeared in the original clause. Operand values themselves are preserved
+//   verbatim in the decoded-artifact MD file. v0.14.94+ may decode these by
+//   instrumenting sub_545EA0's return path and observing which clauses fire
+//   under what conditions; until then, treat any non-zero unk_flags as
+//   "this clause may have additional conditions we don't yet model" and
+//   prefer simpler clauses for AD steering.
+static const uint16_t TRIG_VEH_ANY        = 0x0000;
+static const uint16_t TRIG_VEH_FOOT       = 0x0080;
+static const uint16_t TRIG_VEH_FOOT_ALT   = 0x0084;
+static const uint16_t TRIG_VEH_GARDEN     = 0x0030;
+static const uint16_t TRIG_VEH_CHOCOBO    = 0x0031;
+static const uint16_t TRIG_VEH_RAGNAROK   = 0x0032;
+
+static const uint16_t TRIG_UNK_0F = 0x0001;
+static const uint16_t TRIG_UNK_10 = 0x0002;
+static const uint16_t TRIG_UNK_11 = 0x0004;
+static const uint16_t TRIG_UNK_12 = 0x0008;
+static const uint16_t TRIG_UNK_13 = 0x0010;
+static const uint16_t TRIG_UNK_20 = 0x0020;
+static const uint16_t TRIG_UNK_21 = 0x0040;
+
+struct TriggerClause {
+    uint16_t vehicle;     // TRIG_VEH_* constant; 0 = any (used when top-level vehicle is set)
+    uint16_t region;      // segment region-byte to match against Section 2
+    uint16_t story_gte;   // savemap-word lower bound (0 = none)
+    uint16_t story_lt;    // savemap-word upper bound (0 = +inf)
+    uint16_t unk_flags;   // bitmask of UNK opcodes present in original clause (TRIG_UNK_*)
+};
+
+struct TriggerProgram {
+    uint16_t loc_id;          // wmField/location ID from 0xFF06
+    uint16_t top_story_gte;   // top-level story gate lower bound (0 = none)
+    uint16_t top_story_lt;    // top-level story gate upper bound (0 = +inf)
+    uint16_t top_vehicle;     // top-level vehicle restriction (TRIG_VEH_*; 0 = none)
+    uint8_t  num_clauses;     // count of entries in clauses[]
+    const TriggerClause* clauses;
+};
+
+// 38 per-program clause arrays. The array index matches s_triggerPrograms[]
+// index for cross-reference to the decoded artifact (which uses the same
+// idx column). s_clNN means "clauses for program NN." When num_clauses == 0
+// (program 18, the late-game Chocobo-only mobile destination with top-level
+// vehicle restriction and no inner-clause requirements), the pointer is
+// nullptr and there is no s_cl18 array.
+static const TriggerClause s_cl00[] = {
+    { TRIG_VEH_FOOT,    0x14, 0,    0,    0 },
+    { TRIG_VEH_CHOCOBO, 0x14, 0,    0,    0 },
+};
+static const TriggerClause s_cl01[] = {
+    { TRIG_VEH_FOOT,    0x21, 0,    0,    0 },
+    { TRIG_VEH_CHOCOBO, 0x21, 0,    0,    0 },
+};
+static const TriggerClause s_cl02[] = {
+    { TRIG_VEH_FOOT,    0x22, 0,    0,    0 },
+    { TRIG_VEH_CHOCOBO, 0x22, 0,    0,    0 },
+};
+static const TriggerClause s_cl03[] = {
+    { TRIG_VEH_FOOT,    0x13, 0,    0,    0 },
+    { TRIG_VEH_CHOCOBO, 0x13, 0,    0,    0 },
+};
+static const TriggerClause s_cl04[] = {
+    { TRIG_VEH_FOOT,    0x13, 0,    0,    TRIG_UNK_12 },
+    { TRIG_VEH_CHOCOBO, 0x13, 0,    0,    TRIG_UNK_12 },
+    { TRIG_VEH_FOOT,    0x23, 0,    0,    TRIG_UNK_10 },
+    { TRIG_VEH_CHOCOBO, 0x23, 0,    0,    TRIG_UNK_10 },
+};
+static const TriggerClause s_cl05[] = {
+    { TRIG_VEH_FOOT,    0x24, 0,    0,    0 },
+    { TRIG_VEH_CHOCOBO, 0x24, 0,    0,    0 },
+};
+static const TriggerClause s_cl06[] = {
+    { TRIG_VEH_FOOT,    0x09, 0,    0,    0 },
+};
+static const TriggerClause s_cl07[] = {
+    { TRIG_VEH_FOOT,     0x03, 0,    0,    0 },
+    { TRIG_VEH_FOOT_ALT, 0x03, 0,    0,    0 },
+};
+static const TriggerClause s_cl08[] = {
+    { TRIG_VEH_FOOT,     0x08, 0,    0,    0 },
+    { TRIG_VEH_FOOT_ALT, 0x08, 0,    0,    0 },
+};
+static const TriggerClause s_cl09[] = {
+    // Heavy UNK flags on r=0x06; cleaner path on r=0x07.
+    { TRIG_VEH_FOOT, 0x06, 0,    490,  TRIG_UNK_11 | TRIG_UNK_0F | TRIG_UNK_12 | TRIG_UNK_10 },
+    { TRIG_VEH_FOOT, 0x07, 0,    3900, TRIG_UNK_12 },
+};
+static const TriggerClause s_cl10[] = {
+    { TRIG_VEH_FOOT, 0x05, 290,  315,  0 },
+};
+static const TriggerClause s_cl11[] = {
+    { TRIG_VEH_FOOT,     0x01, 0,    0,    0 },
+    { TRIG_VEH_FOOT_ALT, 0x01, 0,    0,    0 },
+};
+static const TriggerClause s_cl12[] = {
+    { TRIG_VEH_FOOT, 0x00, 0,    0,    0 },
+};
+static const TriggerClause s_cl13[] = {
+    { TRIG_VEH_FOOT, 0x02, 0,    0,    TRIG_UNK_11 },
+    { TRIG_VEH_FOOT, 0x00, 0,    570,  TRIG_UNK_0F },
+};
+static const TriggerClause s_cl14[] = {
+    { TRIG_VEH_FOOT,    0x16, 0,    0,    TRIG_UNK_0F },
+    { TRIG_VEH_CHOCOBO, 0x16, 0,    0,    TRIG_UNK_0F },
+    { TRIG_VEH_FOOT,    0x17, 0,    0,    TRIG_UNK_11 },
+    { TRIG_VEH_CHOCOBO, 0x17, 0,    0,    TRIG_UNK_11 },
+};
+static const TriggerClause s_cl15[] = {
+    { TRIG_VEH_FOOT,     0x0B, 0,    0,    TRIG_UNK_12 },
+    { TRIG_VEH_FOOT_ALT, 0x0B, 0,    0,    TRIG_UNK_12 },
+};
+static const TriggerClause s_cl16[] = {
+    { TRIG_VEH_FOOT,     0x0A, 0,    0,    0 },
+    { TRIG_VEH_FOOT_ALT, 0x0A, 0,    0,    0 },
+};
+static const TriggerClause s_cl17[] = {
+    { TRIG_VEH_FOOT, 0x04, 0,    0,    0 },
+};
+// program 18 (locID 0x0172, story>=3900, topVeh=Chocobo): no inner clauses
+// — the top-level vehicle restriction alone defines the trigger.
+static const TriggerClause s_cl19[] = {
+    { TRIG_VEH_ANY, 0x0D, 0,    3900, TRIG_UNK_20 },
+};
+static const TriggerClause s_cl20[] = {
+    { TRIG_VEH_ANY, 0x0C, 0,    3900, 0 },
+};
+static const TriggerClause s_cl21[] = {
+    { TRIG_VEH_FOOT, 0x18, 0,    3000, 0 },
+    { TRIG_VEH_FOOT, 0x2E, 3000, 3900, 0 },
+};
+static const TriggerClause s_cl22[] = {
+    { TRIG_VEH_FOOT, 0x19, 0,    0,    0 },
+};
+static const TriggerClause s_cl23[] = {
+    { TRIG_VEH_FOOT, 0x1C, 0,    3000, 0 },
+    { TRIG_VEH_FOOT, 0x39, 3000, 5000, 0 },
+};
+static const TriggerClause s_cl24[] = {
+    { TRIG_VEH_FOOT, 0x0E, 0,    0,    TRIG_UNK_11 },
+    { TRIG_VEH_FOOT, 0x0F, 0,    0,    TRIG_UNK_0F },
+};
+static const TriggerClause s_cl25[] = {
+    // Multi-vehicle late-game evolution; most complex program in Section 8.
+    { TRIG_VEH_RAGNAROK, 0x1B, 0,    3000, TRIG_UNK_0F | TRIG_UNK_20 },
+    { TRIG_VEH_RAGNAROK, 0x44, 3000, 3900, TRIG_UNK_0F | TRIG_UNK_20 },
+    { TRIG_VEH_CHOCOBO,  0x44, 3900, 0,    TRIG_UNK_0F },
+    { TRIG_VEH_FOOT,     0x1A, 0,    3900, TRIG_UNK_11 },
+    { TRIG_VEH_FOOT_ALT, 0x1A, 0,    3900, TRIG_UNK_11 },
+};
+static const TriggerClause s_cl26[] = {
+    { TRIG_VEH_FOOT,     0x1A, 0,    3900, 0 },
+    { TRIG_VEH_FOOT_ALT, 0x1A, 0,    3900, 0 },
+};
+static const TriggerClause s_cl27[] = {
+    { TRIG_VEH_FOOT,     0x1A, 0,    3900, 0 },
+    { TRIG_VEH_FOOT_ALT, 0x1A, 0,    3900, 0 },
+};
+static const TriggerClause s_cl28[] = {
+    { TRIG_VEH_FOOT,     0x1A, 0,    3900, 0 },
+    { TRIG_VEH_FOOT_ALT, 0x1A, 0,    3900, 0 },
+};
+static const TriggerClause s_cl29[] = {
+    { TRIG_VEH_FOOT, 0x1E, 0,    3000, 0 },
+    { TRIG_VEH_FOOT, 0x45, 3000, 0,    0 },
+};
+static const TriggerClause s_cl30[] = {
+    { TRIG_VEH_FOOT, 0x1D, 0,    3000, 0 },
+    { TRIG_VEH_FOOT, 0x2F, 0,    0,    0 },
+};
+static const TriggerClause s_cl31[] = {
+    { TRIG_VEH_FOOT,    0x27, 0,    0,    0 },
+    { TRIG_VEH_CHOCOBO, 0x27, 0,    0,    0 },
+};
+static const TriggerClause s_cl32[] = {
+    // Esthar-candidate locID 0x01FA: 4 story-windowed regions
+    // (region cycles 0x1F -> 0x30 -> 0x31 -> 0x1F across story 0..5000).
+    { TRIG_VEH_FOOT, 0x1F, 0,    2500, 0 },
+    { TRIG_VEH_FOOT, 0x30, 2500, 3000, 0 },
+    { TRIG_VEH_FOOT, 0x31, 3000, 3900, 0 },
+    { TRIG_VEH_FOOT, 0x1F, 3900, 5000, 0 },
+};
+static const TriggerClause s_cl33[] = {
+    { TRIG_VEH_FOOT,    0x10, 0,    0,    0 },
+    { TRIG_VEH_CHOCOBO, 0x10, 0,    0,    0 },
+};
+static const TriggerClause s_cl34[] = {
+    { TRIG_VEH_FOOT,    0x12, 0,    0,    0 },
+    { TRIG_VEH_CHOCOBO, 0x12, 0,    0,    0 },
+};
+static const TriggerClause s_cl35[] = {
+    { TRIG_VEH_FOOT,    0x26, 0,    0,    0 },
+    { TRIG_VEH_CHOCOBO, 0x26, 0,    0,    0 },
+};
+static const TriggerClause s_cl36[] = {
+    { TRIG_VEH_FOOT,    0x25, 0,    0,    0 },
+    { TRIG_VEH_CHOCOBO, 0x25, 0,    0,    0 },
+};
+static const TriggerClause s_cl37[] = {
+    { TRIG_VEH_ANY, 0x15, 0,    0,    TRIG_UNK_20 },
+};
+
+// Helper macro keeps the program table compact while letting the compiler
+// derive num_clauses from the array's actual length — no risk of the
+// hand-written count getting out of sync with the array size.
+#define WMS_NCLS(arr)  ((uint8_t)(sizeof(arr) / sizeof(arr[0])))
+
+static const TriggerProgram s_triggerPrograms[] = {
+    // [00] locID=0x0031 story>=750 — foot/Choco region 0x14
+    { 0x0031,  750,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl00), s_cl00 },
+    // [01] locID=0x0051 — foot/Choco region 0x21
+    { 0x0051,    0,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl01), s_cl01 },
+    // [02] locID=0x0091 — foot/Choco region 0x22
+    { 0x0091,    0,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl02), s_cl02 },
+    // [03] locID=0x0095 story>=750 — foot/Choco region 0x13
+    { 0x0095,  750,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl03), s_cl03 },
+    // [04] locID=0x0096 story>=750 — 4 clauses with UNK flags (regions 0x13/0x23)
+    { 0x0096,  750,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl04), s_cl04 },
+    // [05] locID=0x00DB — foot/Choco region 0x24
+    { 0x00DB,    0,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl05), s_cl05 },
+    // [06] locID=0x00EA — foot region 0x09
+    { 0x00EA,    0,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl06), s_cl06 },
+    // [07] locID=0x00EE story>=36 — foot/footAlt region 0x03
+    { 0x00EE,   36,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl07), s_cl07 },
+    // [08] locID=0x0108 story>=333 — foot/footAlt region 0x08
+    { 0x0108,  333,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl08), s_cl08 },
+    // [09] locID=0x010B story>=290 — heavy UNK on r=0x06; cleaner path on r=0x07
+    { 0x010B,  290,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl09), s_cl09 },
+    // [10] locID=0x010C — foot region 0x05 [story 290..315]
+    { 0x010C,    0,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl10), s_cl10 },
+    // [11] locID=0x0111 — foot/footAlt region 0x01
+    { 0x0111,    0,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl11), s_cl11 },
+    // [12] locID=0x0112 story<570 — foot region 0x00
+    { 0x0112,    0,  570, TRIG_VEH_ANY,      WMS_NCLS(s_cl12), s_cl12 },
+    // [13] locID=0x0113 — foot region 0x02 (UNK_11) OR foot region 0x00 [<570] (UNK_0F)
+    { 0x0113,    0,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl13), s_cl13 },
+    // [14] locID=0x0117 — 4 clauses regions 0x16/0x17 with UNK flags
+    { 0x0117,    0,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl14), s_cl14 },
+    // [15] locID=0x0147 story 350..490 — foot/footAlt region 0x0B (UNK_12)
+    { 0x0147,  350,  490, TRIG_VEH_ANY,      WMS_NCLS(s_cl15), s_cl15 },
+    // [16] locID=0x0169 story>=350 — foot/footAlt region 0x0A
+    { 0x0169,  350,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl16), s_cl16 },
+    // [17] locID=0x016D story>=205 — foot region 0x04
+    { 0x016D,  205,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl17), s_cl17 },
+    // [18] locID=0x0172 story>=3900 topVeh=Chocobo — NO inner clauses (mobile destination)
+    { 0x0172, 3900,    0, TRIG_VEH_CHOCOBO,  0,                 nullptr },
+    // [19] locID=0x0172 story>=636 topVeh=Ragnarok — region 0x0D [<3900] +UNK_20
+    { 0x0172,  636,    0, TRIG_VEH_RAGNAROK, WMS_NCLS(s_cl19), s_cl19 },
+    // [20] locID=0x0172 story>=636 topVeh=Garden — region 0x0C [<3900]
+    { 0x0172,  636,    0, TRIG_VEH_GARDEN,   WMS_NCLS(s_cl20), s_cl20 },
+    // [21] locID=0x0175 story>=1600 — foot region 0x18 [<3000] OR 0x2E [3000..3900]
+    { 0x0175, 1600,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl21), s_cl21 },
+    // [22] locID=0x0176 — foot region 0x19
+    { 0x0176,    0,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl22), s_cl22 },
+    // [23] locID=0x017A story>=1750 — foot region 0x1C [<3000] OR 0x39 [3000..5000]
+    { 0x017A, 1750,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl23), s_cl23 },
+    // [24] locID=0x0189 story>=750 — foot regions 0x0E (UNK_11) / 0x0F (UNK_0F)
+    { 0x0189,  750,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl24), s_cl24 },
+    // [25] locID=0x0196 story>=1750 — 5 clauses, multi-vehicle late-game evolution
+    { 0x0196, 1750,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl25), s_cl25 },
+    // [26] locID=0x0197 story>=1750 — foot/footAlt region 0x1A [<3900]
+    { 0x0197, 1750,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl26), s_cl26 },
+    // [27] locID=0x01B6 story>=1750 — foot/footAlt region 0x1A [<3900]
+    { 0x01B6, 1750,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl27), s_cl27 },
+    // [28] locID=0x01B7 story>=1750 — foot/footAlt region 0x1A [<3900]
+    { 0x01B7, 1750,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl28), s_cl28 },
+    // [29] locID=0x01B9 story>=1750 — foot region 0x1E [<3000] OR 0x45 [3000..]
+    { 0x01B9, 1750,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl29), s_cl29 },
+    // [30] locID=0x01BB story>=1750 — foot region 0x1D [<3000] OR 0x2F
+    { 0x01BB, 1750,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl30), s_cl30 },
+    // [31] locID=0x01D2 — foot/Choco region 0x27
+    { 0x01D2,    0,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl31), s_cl31 },
+    // [32] locID=0x01FA story>=1750 — 4 story-windowed regions (Esthar candidate)
+    { 0x01FA, 1750,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl32), s_cl32 },
+    // [33] locID=0x0250 — foot/Choco region 0x10
+    { 0x0250,    0,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl33), s_cl33 },
+    // [34] locID=0x028C story>=900 — foot/Choco region 0x12
+    { 0x028C,  900,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl34), s_cl34 },
+    // [35] locID=0x028D — foot/Choco region 0x26
+    { 0x028D,    0,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl35), s_cl35 },
+    // [36] locID=0x02B5 — foot/Choco region 0x25
+    { 0x02B5,    0,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl36), s_cl36 },
+    // [37] locID=0x02C1 topVeh=Ragnarok — region 0x15 (UNK_20)
+    { 0x02C1,    0,    0, TRIG_VEH_RAGNAROK, WMS_NCLS(s_cl37), s_cl37 },
+};
+static const int TRIGGER_PROGRAM_COUNT = sizeof(s_triggerPrograms) / sizeof(s_triggerPrograms[0]);
 
 // Vehicle classification used by the BFS reachability rules.
 // Locomotion enum values per `Plan & Research Documents/World Map Terrain
@@ -408,6 +879,35 @@ static bool     s_driveApproachAnnounced = false;  // one-shot guard
 static bool     s_driveOnFootAtStart     = true;   // v0.14.87: captured at StartAutoDrive; arrival semantics differ
 static DWORD    s_finalApproachEnterTick = 0;      // v0.14.87: when player crossed below FINAL_APPROACH_DIST (0 = not yet)
 
+// v0.14.96: deferred arrival decision state. v0.14.95's instant-decision
+// approach (segment-membership when planner active, distance fallback
+// otherwise) gave false-positive arrivals when random encounters fired near
+// a destination — both signals say 'yes' because the player IS near the
+// target, but the actual game state is a battle, not a field entry. The
+// v0.14.95 BAT log showed two clear cases: 12:43:36 declared arrival at
+// Balamb Garden lastPos=(25405,-30324) dist=1215 (encounter ~1100 units
+// south of the refined entry, NOT arrival); 12:51:26 same pattern for
+// Balamb Town. Aaron's diagnosis (and the cure): use the game's settled
+// game mode AFTER the world-map exit to disambiguate. The v0.14.90.2
+// changelog noted reading pGameMode AT the moment of exit always reads
+// MODE_WORLDMAP because the register hasn't transitioned yet — but reading
+// it after a brief wait is robust. Decision table:
+//   MODE_FIELD (1)        : entered a field — REAL ARRIVAL
+//   MODE_SWIRL (3)        : pre-battle swirl — ENCOUNTER (paused)
+//   MODE_BATTLE (999)     : in battle — ENCOUNTER (paused)
+//   MODE_AFTER_BATTLE (4) : post-battle return — ENCOUNTER (paused)
+//   anything else (incl. lingering MODE_WORLDMAP=2) : keep waiting
+// Wait timeout: ARRIVAL_DECISION_TIMEOUT_MS. On timeout, fall back to the
+// v0.14.95 segment-membership / distance heuristic as safety net.
+//
+// While awaiting decision: drive keys are released (no arrow-key injection
+// during field/battle), s_driveActive stays true (so cancel works), Poll()
+// runs ResolveDeferredArrival() each tick before its !s_onWorldMap early
+// return so the decision can resolve.
+static const DWORD ARRIVAL_DECISION_TIMEOUT_MS = 2000;
+static bool  s_driveAwaitingArrivalDecision = false;
+static DWORD s_driveExitTick                = 0;
+
 // v0.14.87 sweep search state. Sweep alternates between TURNING and WALKING
 // sub-states. Each phase: turn for SWEEP_TURN_BASE_MS + (phase-1)*200ms,
 // then walk forward SWEEP_WALK_DURATION_MS. Odd phases turn right, even left.
@@ -432,6 +932,29 @@ static bool s_keyRightHeld = false;
 static uint8_t s_terrainGrid[WMX_SEG_ROWS][WMX_SEG_COLS];
 static uint8_t s_reachable  [WMX_SEG_ROWS][WMX_SEG_COLS];
 static bool    s_terrainLoaded = false;
+
+// ============================================================================
+// Segment-region byte map (v0.14.94)
+// ============================================================================
+// 32x24 byte map from wmsetus.obj Section 2. Each byte is the region ID for
+// one segment; the 0xFF08 region operands in s_triggerPrograms[]'s clauses
+// reference these bytes. Loaded once at module init by LoadTriggerZones
+// (which already reads the archive for diagnostic dumping — we extract
+// Section 2's bytes into s_segmentRegionMap[] in the same pass to avoid
+// duplicate I/O). Index as s_segmentRegionMap[row][col] where row=0..23 and
+// col=0..31. The byte at file offset (row*32 + col) is the region for that
+// segment; 0xFF means 'no region' (typically deep ocean cells); non-FF bytes
+// are region IDs in the 0x00..0x45 range observed in the v0.14.93 BAT dump.
+// (The 4-byte trailer at file offset 768, '00 00 00 00', is a section
+// terminator and is not part of the data.)
+//
+// AD path planner uses this to construct goal sets: for a catalog target
+// (X, Y), find the matching s_triggerPrograms[] entry, collect every cell
+// in s_segmentRegionMap whose byte equals any matching clause's region
+// operand — that's the equivalent trigger zone. Multi-target A* then runs
+// from the player's current segment to the closest goal cell.
+static uint8_t s_segmentRegionMap[WMX_SEG_ROWS][WMX_SEG_COLS];
+static bool    s_segmentRegionLoaded = false;
 
 // ============================================================================
 // Coordinate utility functions
@@ -467,6 +990,24 @@ static uint8_t GetLocomotionMode()
         mode = 0;
     }
     return mode;
+}
+
+// v0.14.94: read the savemap story-flag word at WM_STORY_FLAG. Used by the
+// AD path planner's clause-evaluation logic to filter which s_triggerPrograms[]
+// entries are currently satisfiable (each clause carries an optional
+// [story_gte, story_lt) window; the program is gated only when the live
+// story value falls inside that window). Returning 0 on access fault is safe
+// — a story value of 0 satisfies any 'no lower bound' gate (story_gte=0)
+// and fails any 'must be >=N' gate, which is the correct early-game behavior.
+static uint16_t GetCurrentStoryFlag()
+{
+    uint16_t story = 0;
+    __try {
+        story = *(uint16_t*)WM_STORY_FLAG;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        story = 0;
+    }
+    return story;
 }
 
 static bool IsOnWorldMap()
@@ -1010,6 +1551,51 @@ static bool LoadTriggerZones()
                    i + 1, sectStart, sectSize);
     }
 
+    // ---- v0.14.94: extract Section 2 (the 32x24 segment-region byte map)
+    // into s_segmentRegionMap[][] for AD path planning. Same buffer / same
+    // header parse as the dump above — no duplicate I/O. Section 2 is at
+    // 1-indexed position 2 (array index 1). Layout: 768 bytes of region
+    // IDs (byte at offset row*32+col is the region ID for segment (col, row))
+    // followed by a 4-byte '00 00 00 00' trailer. We bounds-check and skip
+    // gracefully on size mismatch; AD's catalog-center fallback path still
+    // works without the region map (just less precise arrival detection).
+    {
+        const int s2idx = 1;   // Section 2 = 1-indexed 2 = array index 1
+        if (s2idx < WMSETUS_SECTION_COUNT) {
+            uint32_t s2start = hdr[s2idx];
+            uint32_t s2end   = (s2idx + 1 < WMSETUS_SECTION_COUNT)
+                                ? hdr[s2idx + 1]
+                                : uncompSize;
+            uint32_t s2size  = (s2end >= s2start) ? (s2end - s2start) : 0;
+            const uint32_t needed = (uint32_t)(WMX_SEG_ROWS * WMX_SEG_COLS);   // 768
+            if (s2start < uncompSize && s2end <= uncompSize && s2size >= needed) {
+                const uint8_t* s2 = wmsData + s2start;
+                bool seenRegion[256] = {};
+                int  uniqueRegions = 0;
+                int  populatedCells = 0;
+                for (int row = 0; row < WMX_SEG_ROWS; row++) {
+                    for (int col = 0; col < WMX_SEG_COLS; col++) {
+                        uint8_t b = s2[row * WMX_SEG_COLS + col];
+                        s_segmentRegionMap[row][col] = b;
+                        if (b != 0xFF) {
+                            populatedCells++;
+                            if (!seenRegion[b]) {
+                                seenRegion[b] = true;
+                                uniqueRegions++;
+                            }
+                        }
+                    }
+                }
+                s_segmentRegionLoaded = true;
+                Log::World("WorldMap: [REGION-MAP] Section 2 loaded into s_segmentRegionMap: %d populated cells (of %d), %d unique region IDs",
+                           populatedCells, WMX_SEG_ROWS * WMX_SEG_COLS, uniqueRegions);
+            } else {
+                Log::World("WorldMap: [REGION-MAP] Section 2 size mismatch (start=0x%08X end=0x%08X size=%u, needed >=%u) \u2014 not loading",
+                           s2start, s2end, s2size, needed);
+            }
+        }
+    }
+
     // ---- Hex-dump each section in WMSETUS_DUMP_SECTIONS_1IDX (1-indexed).
     // Bounds-check before dumping; if any section's offset/end pair looks
     // out of range, log and skip rather than reading past the buffer.
@@ -1035,6 +1621,96 @@ static bool LoadTriggerZones()
 
     free(wmsData);
     return true;
+}
+
+// ============================================================================
+// LogTriggerPrograms — walks s_triggerPrograms[] at module init and emits one
+// log line per program for runtime sanity-check that the embedded v0.14.93
+// trigger data compiled correctly into the binary. Format per line:
+//   [TRIGGER-PROGRAMS] [NN] loc=0xLLLL storyGate=... topVeh=0xVV clauses=K: [(v=...,r=...,...) ...]
+// where the storyGate is the top-level story window (or 'any'), topVeh is
+// the top-level vehicle restriction (or 0x00 for none), and the clauses
+// list is the inline (vehicle,region) tests with optional ',s=[lo,hi)' for
+// per-clause story windows and ',unk=0x...' for UNK opcode flags.
+// 38 lines total, plus a header summary line. Diagnostic-only — zero
+// game-side state captured.
+// ============================================================================
+static void LogTriggerPrograms()
+{
+    int totalClauses = 0;
+    for (int i = 0; i < TRIGGER_PROGRAM_COUNT; i++) {
+        totalClauses += s_triggerPrograms[i].num_clauses;
+    }
+    Log::World("WorldMap: [TRIGGER-PROGRAMS] count=%d totalClauses=%d (sanity check that embedded data compiled)",
+               TRIGGER_PROGRAM_COUNT, totalClauses);
+
+    for (int i = 0; i < TRIGGER_PROGRAM_COUNT; i++) {
+        const TriggerProgram& p = s_triggerPrograms[i];
+
+        // Top-level story window.
+        char gateBuf[40];
+        if (p.top_story_gte == 0 && p.top_story_lt == 0) {
+            snprintf(gateBuf, sizeof(gateBuf), "any");
+        } else if (p.top_story_lt == 0) {
+            snprintf(gateBuf, sizeof(gateBuf), "[%u,inf)", (unsigned)p.top_story_gte);
+        } else if (p.top_story_gte == 0) {
+            snprintf(gateBuf, sizeof(gateBuf), "[0,%u)", (unsigned)p.top_story_lt);
+        } else {
+            snprintf(gateBuf, sizeof(gateBuf), "[%u,%u)",
+                     (unsigned)p.top_story_gte, (unsigned)p.top_story_lt);
+        }
+
+        // Build inline clauses list. Worst case (program 25, 5 clauses with
+        // story windows + UNK flags) fits comfortably under 400 chars; 768
+        // bytes is generous.
+        char clausesBuf[768];
+        clausesBuf[0] = '\0';
+        size_t cpos = 0;
+
+        if (p.num_clauses == 0 || p.clauses == nullptr) {
+            snprintf(clausesBuf, sizeof(clausesBuf), "(none)");
+        } else {
+            for (uint8_t k = 0; k < p.num_clauses; k++) {
+                const TriggerClause& c = p.clauses[k];
+
+                char storyB[40];
+                if (c.story_gte == 0 && c.story_lt == 0) {
+                    storyB[0] = '\0';   // omit story field entirely when both bounds are 0
+                } else if (c.story_lt == 0) {
+                    snprintf(storyB, sizeof(storyB), ",s=[%u,inf)", (unsigned)c.story_gte);
+                } else if (c.story_gte == 0) {
+                    snprintf(storyB, sizeof(storyB), ",s=[0,%u)", (unsigned)c.story_lt);
+                } else {
+                    snprintf(storyB, sizeof(storyB), ",s=[%u,%u)",
+                             (unsigned)c.story_gte, (unsigned)c.story_lt);
+                }
+
+                char unkB[20];
+                if (c.unk_flags == 0) {
+                    unkB[0] = '\0';
+                } else {
+                    snprintf(unkB, sizeof(unkB), ",unk=0x%04X", (unsigned)c.unk_flags);
+                }
+
+                int written = snprintf(clausesBuf + cpos,
+                                       sizeof(clausesBuf) - cpos,
+                                       "%s(v=0x%02X,r=0x%02X%s%s)",
+                                       (k == 0) ? "" : ",",
+                                       (unsigned)c.vehicle, (unsigned)c.region,
+                                       storyB, unkB);
+                if (written < 0 || (size_t)written >= sizeof(clausesBuf) - cpos) {
+                    // Buffer full — stop appending. Defensive; won't happen
+                    // for the 5-max-clause programs we have.
+                    break;
+                }
+                cpos += (size_t)written;
+            }
+        }
+
+        Log::World("WorldMap: [TRIGGER-PROGRAMS] [%02d] loc=0x%04X storyGate=%s topVeh=0x%02X clauses=%u: [%s]",
+                   i, (unsigned)p.loc_id, gateBuf, (unsigned)p.top_vehicle,
+                   (unsigned)p.num_clauses, clausesBuf);
+    }
 }
 
 // ============================================================================
@@ -1335,6 +2011,27 @@ static DWORD s_wmEntryTick = 0;   // tick when world map was entered (0 = past t
 
 static void CheckVehicleChange()
 {
+    // v0.14.94: while a drive is active, ignore the locomotion byte entirely.
+    // The byte at WM_LOCOMOTION cycles through canonical vehicle values
+    // (32-40 Car range, 48 Garden, 50 Ragnarok) during AD's keybd_event
+    // arrow-key injection — each value held long enough (>4 polls / >64ms)
+    // to pass v0.14.90's debounce. Real vehicle mounts/dismounts during a
+    // drive are ruled out: AD only injects arrow keys, and mounting Garden/
+    // Ragnarok or boarding Ship requires action keys the player isn't
+    // pressing. Side benefit: s_lastVehicle stays at its pre-drive value,
+    // so isOnFoot in UpdateAutoDrive's stuck-handling sweep guard stays
+    // truthful (the v0.14.93 BAT showed sweep failed to fire because a
+    // spurious 'Ship (mode 3)' announcement set s_lastVehicle = 3, making
+    // isOnFoot false even though Aaron was on foot the entire time).
+    // After the drive ends (arrival / cancel / stuck-give-up), the next
+    // CheckVehicleChange tick reads the byte normally with the existing
+    // debounce + WM_ENTRY_DEBOUNCE logic intact.
+    if (s_driveActive) {
+        s_pendingVehicle      = -1;
+        s_pendingVehicleCount = 0;
+        return;
+    }
+
     uint8_t vehicle = GetLocomotionMode();
 
     // v0.14.90.3: suppress all vehicle-change processing during the world-map
@@ -1456,6 +2153,482 @@ static void CheckVehicleChange()
 }
 
 // ============================================================================
+// Path planner state (v0.14.94)
+// ============================================================================
+// A* on the 32x24 segment grid produces a sequence of segment cells from
+// the player's start segment to a goal segment. The drive then follows the
+// path one waypoint at a time, advancing the index when the player crosses
+// into the current waypoint's segment. Replanned on world-map re-entry
+// after a battle pause (random encounters drift the player off the path).
+//
+// Encoding: each waypoint is packed as (row << 8) | col into a uint16_t.
+// 768 waypoints is a hard upper bound (visiting every segment exactly once);
+// real paths are typically <40 waypoints across the longest reachable
+// diagonal. s_drivePathPlanned distinguishes 'planner produced a path'
+// (segment-membership arrival, waypoint steering) from 'planner declined or
+// failed' (catalog-center steering, distance-based arrival fallback).
+static const int DRIVE_PATH_MAX = WMX_PLAYABLE_SEGS;   // 768
+
+static uint16_t s_drivePath[DRIVE_PATH_MAX];           // packed (row<<8)|col waypoints
+static int      s_drivePathLen      = 0;
+static int      s_drivePathIdx      = 0;
+static bool     s_drivePathPlanned  = false;
+
+// Goal-segment set for arrival detection. Populated when the planner picks
+// a destination program: every cell in s_segmentRegionMap whose byte equals
+// any matching clause's region operand. The player entering ANY of these
+// via world-map exit counts as arrival. Stored as packed (row<<8)|col, max
+// 768 entries (entire grid in the degenerate case).
+static uint16_t s_driveGoalSegs[DRIVE_PATH_MAX];
+static int      s_driveGoalSegCount = 0;
+
+static inline uint16_t PackSeg(int row, int col)
+{
+    return (uint16_t)(((row & 0xFF) << 8) | (col & 0xFF));
+}
+static inline int UnpackRow(uint16_t s) { return (s >> 8) & 0xFF; }
+static inline int UnpackCol(uint16_t s) { return  s       & 0xFF; }
+
+// ============================================================================
+// Path planner (v0.14.94)
+// ============================================================================
+
+// Story window predicate. A clause's [story_gte, story_lt) gates pass when
+// the live story value is in that half-open range. Conventions from the
+// decoded artifact: gte=0 means 'no lower bound' (always passes the lower
+// check), lt=0 means '+infinity' (always passes the upper check).
+static bool StoryWindowMatches(uint16_t gte, uint16_t lt, uint16_t story)
+{
+    bool lowerOk = (gte == 0) || (story >= gte);
+    bool upperOk = (lt  == 0) || (story <  lt);
+    return lowerOk && upperOk;
+}
+
+// Vehicle predicate. Clause vehicle codes: 0x80=Squall foot, 0x84=alt-leader
+// foot (treated as foot for AD), 0x30=Garden, 0x31=Chocobo, 0x32=Ragnarok,
+// 0x00=any (used in clauses when the program's top-level vehicle is set).
+// Player VehicleType enum: VEH_ON_FOOT/VEH_CHOCOBO/VEH_CAR/VEH_GARDEN/
+// VEH_RAGNAROK. Cars are treated as foot for clause matching: cars travel
+// the same land segments as foot, and to actually cross a trigger the
+// player will dismount and walk the last few steps — the goal-segment
+// region defines the trigger zone either way.
+static bool VehicleClauseMatches(uint16_t clauseVeh, VehicleType playerVeh)
+{
+    if (clauseVeh == TRIG_VEH_ANY) return true;
+    if (clauseVeh == TRIG_VEH_FOOT || clauseVeh == TRIG_VEH_FOOT_ALT)
+        return playerVeh == VEH_ON_FOOT || playerVeh == VEH_CAR;
+    if (clauseVeh == TRIG_VEH_CHOCOBO)  return playerVeh == VEH_CHOCOBO;
+    if (clauseVeh == TRIG_VEH_GARDEN)   return playerVeh == VEH_GARDEN;
+    if (clauseVeh == TRIG_VEH_RAGNAROK) return playerVeh == VEH_RAGNAROK;
+    return false;
+}
+
+// Whole-clause match: vehicle predicate + story window. unk_flags is logged
+// but not gated — clauses with non-zero UNK flags are accepted with caution
+// (we don't model the additional conditions, but the clause's reachable
+// region is still a valid-by-evidence trigger zone the engine sometimes
+// uses in this state). Only used as fallback when no UNK-free clauses match.
+static bool ClauseMatches(const TriggerClause& c, VehicleType veh, uint16_t story)
+{
+    return VehicleClauseMatches(c.vehicle, veh) &&
+           StoryWindowMatches(c.story_gte, c.story_lt, story);
+}
+
+// Find the closest segment to catalog (X, Y) whose region byte is
+// referenced by ANY clause currently satisfiable from the player's
+// vehicle and story state. v0.14.95 superseded the v0.14.94 "match the
+// catalog segment's region directly" approach: catalog (X, Y) points at
+// each location's polygon center on the world map (e.g. Balamb Garden's
+// catalog seg(19,20) maps to region 0x0C, Balamb Town's seg(17,20) maps
+// to region 0x07), but those are OPEN LAND regions — NOT trigger zones.
+// The actual field-entry trigger zones sit in adjacent segments with
+// different region bytes. v0.14.94 therefore failed to match any program
+// for any catalog target; drives all fell back to v0.14.93 distance-based
+// arrival, which can't detect Fire Cavern (catalog ~6800 units off).
+//
+// New algorithm: build the active region set first (regions referenced
+// by clauses currently satisfiable from veh + story), then walk the
+// 32x24 grid for any segment whose region is in that set, taking the
+// one closest to (catRow, catCol). A 5-segment distance cap avoids
+// steering toward some other location's trigger when nothing nearby
+// matches — in that case decline and fall back to catalog-center.
+//
+// Returns the chosen program index (for log identification) or -1 on
+// failure. Writes the matched region byte to *outRegion. Two-pass clean/
+// UNK preference is kept: a clean active region beats a UNK-flagged one
+// for the same region byte.
+static int WrapManhattan(int r1, int c1, int r2, int c2);   // v0.14.95: forward decl for MatchProgramForCatalog's distance-cap logic
+
+static int MatchProgramForCatalog(int32_t catX, int32_t catY,
+                                  VehicleType veh, uint16_t story,
+                                  uint8_t* outRegion)
+{
+    if (!s_segmentRegionLoaded) return -1;
+    int catCol = WorldXToSegCol(catX);
+    int catRow = WorldYToSegRow(catY);
+    if (catCol < 0 || catCol >= WMX_SEG_COLS ||
+        catRow < 0 || catRow >= WMX_SEG_ROWS) return -1;
+
+    // Build the active region set. Each entry records (region byte, owning
+    // program index, isClean flag).
+    static uint8_t activeRegions[64];
+    static int     activeProgIdx[64];
+    static bool    activeIsClean[64];
+    int activeCount = 0;
+
+    auto addActive = [&](uint8_t region, int progIdx, bool isClean) {
+        for (int j = 0; j < activeCount; j++) {
+            if (activeRegions[j] == region) {
+                if (isClean && !activeIsClean[j]) {
+                    activeProgIdx[j] = progIdx;
+                    activeIsClean[j] = true;
+                }
+                return;
+            }
+        }
+        if (activeCount < (int)(sizeof(activeRegions)/sizeof(activeRegions[0]))) {
+            activeRegions[activeCount] = region;
+            activeProgIdx[activeCount] = progIdx;
+            activeIsClean[activeCount] = isClean;
+            activeCount++;
+        }
+    };
+
+    for (int i = 0; i < TRIGGER_PROGRAM_COUNT; i++) {
+        const TriggerProgram& p = s_triggerPrograms[i];
+        if (p.top_vehicle != TRIG_VEH_ANY &&
+            !VehicleClauseMatches(p.top_vehicle, veh)) continue;
+        if (!StoryWindowMatches(p.top_story_gte, p.top_story_lt, story)) continue;
+        if (p.num_clauses == 0 || p.clauses == nullptr) continue;
+        for (uint8_t k = 0; k < p.num_clauses; k++) {
+            const TriggerClause& c = p.clauses[k];
+            if (!ClauseMatches(c, veh, story)) continue;
+            addActive(c.region, i, c.unk_flags == 0);
+        }
+    }
+
+    if (activeCount == 0) {
+        Log::World("WorldMap: [PLAN] No active regions for veh=%d story=%u \u2014 fallback",
+                   (int)veh, (unsigned)story);
+        return -1;
+    }
+
+    // Walk all segments looking for one whose region is active; pick the
+    // closest to catalog (catCol, catRow). 5-segment cap avoids accidentally
+    // routing to some other location's trigger when no nearby region is
+    // active for the player's state.
+    static const int SEGMENT_DISTANCE_CAP = 5;
+    int bestDist = SEGMENT_DISTANCE_CAP + 1;
+    int bestRow = -1, bestCol = -1;
+    int bestActiveIdx = -1;
+    for (int row = 0; row < WMX_SEG_ROWS; row++) {
+        for (int col = 0; col < WMX_SEG_COLS; col++) {
+            uint8_t r = s_segmentRegionMap[row][col];
+            if (r == 0xFF) continue;
+            int activeIdx = -1;
+            for (int j = 0; j < activeCount; j++) {
+                if (activeRegions[j] == r) { activeIdx = j; break; }
+            }
+            if (activeIdx < 0) continue;
+            int d = WrapManhattan(row, col, catRow, catCol);
+            if (d < bestDist) {
+                bestDist  = d;
+                bestRow   = row;
+                bestCol   = col;
+                bestActiveIdx = activeIdx;
+            }
+        }
+    }
+
+    if (bestActiveIdx < 0) {
+        Log::World("WorldMap: [PLAN] %d active regions but none within %d segs of catalog (%d,%d) seg(%d,%d) catRegion=0x%02X \u2014 fallback",
+                   activeCount, SEGMENT_DISTANCE_CAP, catX, catY, catCol, catRow,
+                   (unsigned)s_segmentRegionMap[catRow][catCol]);
+        return -1;
+    }
+
+    *outRegion = activeRegions[bestActiveIdx];
+    int progIdx = activeProgIdx[bestActiveIdx];
+    Log::World("WorldMap: [PLAN] Catalog (%d,%d) seg(%d,%d) \u2192 closest active region 0x%02X at seg(%d,%d) segDist=%d (program [%02d] locID=0x%04X, %s, %d active regions for veh=%d story=%u)",
+               catX, catY, catCol, catRow,
+               (unsigned)*outRegion, bestCol, bestRow, bestDist,
+               progIdx, (unsigned)s_triggerPrograms[progIdx].loc_id,
+               activeIsClean[bestActiveIdx] ? "clean" : "UNK-flagged",
+               activeCount, (int)veh, (unsigned)story);
+    return progIdx;
+}
+
+// Collect every segment in s_segmentRegionMap whose byte equals the matched
+// region. This is the equivalent trigger zone for the destination — entering
+// any of these via world-map exit counts as arrival. Writes packed values
+// into s_driveGoalSegs[] up to DRIVE_PATH_MAX, returns the count.
+static int CollectGoalSegments(uint8_t region)
+{
+    int count = 0;
+    for (int row = 0; row < WMX_SEG_ROWS && count < DRIVE_PATH_MAX; row++) {
+        for (int col = 0; col < WMX_SEG_COLS && count < DRIVE_PATH_MAX; col++) {
+            if (s_segmentRegionMap[row][col] == region) {
+                s_driveGoalSegs[count++] = PackSeg(row, col);
+            }
+        }
+    }
+    return count;
+}
+
+// True iff (row, col) is in the current goal set.
+static bool IsGoalSegment(int row, int col)
+{
+    uint16_t target = PackSeg(row, col);
+    for (int i = 0; i < s_driveGoalSegCount; i++) {
+        if (s_driveGoalSegs[i] == target) return true;
+    }
+    return false;
+}
+
+// Wrap-aware Manhattan distance on the 32x24 torus. East-west wrap matters
+// for Esthar approaches from the west side of the map.
+static int WrapManhattan(int r1, int c1, int r2, int c2)
+{
+    int dr = abs(r1 - r2);
+    int dc = abs(c1 - c2);
+    if (dr > WMX_SEG_ROWS / 2) dr = WMX_SEG_ROWS - dr;
+    if (dc > WMX_SEG_COLS / 2) dc = WMX_SEG_COLS - dc;
+    return dr + dc;
+}
+
+// Min wrap-Manhattan from (row, col) to any goal segment. Admissible A*
+// heuristic: 4-neighbor uniform-cost grid + Manhattan never overestimates
+// true path length, so A* is optimal.
+static int HeuristicToGoals(int row, int col)
+{
+    int best = 9999;   // larger than any reachable Manhattan on a 32x24 torus (max 28)
+    for (int i = 0; i < s_driveGoalSegCount; i++) {
+        int gr = UnpackRow(s_driveGoalSegs[i]);
+        int gc = UnpackCol(s_driveGoalSegs[i]);
+        int h = WrapManhattan(row, col, gr, gc);
+        if (h < best) best = h;
+    }
+    return best;
+}
+
+// Convert a segment's center to world coordinates. Inverse of
+// WorldXToSegCol/Row:  world_x = col*8192 + 4096 - 131072,
+//                      world_y = row*8192 + 4096.
+// World map wraps both axes; for steering targets we emit the canonical
+// (un-wrapped) coordinate — TorusBearing handles wrap on its own.
+static void SegmentCenterToWorld(int col, int row, int32_t* outX, int32_t* outY)
+{
+    *outX = (int32_t)(col * 8192 + 4096) - 131072;
+    *outY = (int32_t)(row * 8192 + 4096);
+}
+
+// A* over the 32x24 segment grid. 4-neighbor edges with torus wrap on both
+// axes. Edge validity comes from IsSegmentTraversable() which already handles
+// vehicle class. Ragnarok callers should skip the planner entirely.
+//
+// On success: populates s_drivePath[] with the segment sequence from the
+// step AFTER start to the goal (start segment itself is NOT a waypoint, the
+// player is already there); sets s_drivePathLen, s_drivePathIdx=0,
+// s_drivePathPlanned=true; returns true. On failure: returns false and
+// leaves s_drivePathPlanned=false; caller falls back to catalog-center.
+static bool PlanPath(int startCol, int startRow, VehicleType veh)
+{
+    s_drivePathLen     = 0;
+    s_drivePathIdx     = 0;
+    s_drivePathPlanned = false;
+
+    if (s_driveGoalSegCount == 0) {
+        Log::World("WorldMap: [PLAN] No goal segments \u2014 planner cannot run");
+        return false;
+    }
+    if (startRow < 0 || startRow >= WMX_SEG_ROWS ||
+        startCol < 0 || startCol >= WMX_SEG_COLS) {
+        Log::World("WorldMap: [PLAN] Start segment (%d,%d) out of range", startCol, startRow);
+        return false;
+    }
+
+    static const uint16_t INF_COST = 0xFFFF;
+    static uint16_t gScore [WMX_SEG_ROWS][WMX_SEG_COLS];
+    static uint16_t cameRow[WMX_SEG_ROWS][WMX_SEG_COLS];
+    static uint16_t cameCol[WMX_SEG_ROWS][WMX_SEG_COLS];
+    static uint8_t  closed [WMX_SEG_ROWS][WMX_SEG_COLS];
+    for (int r = 0; r < WMX_SEG_ROWS; r++) {
+        for (int c = 0; c < WMX_SEG_COLS; c++) {
+            gScore[r][c]  = INF_COST;
+            cameRow[r][c] = 0xFFFF;
+            cameCol[r][c] = 0xFFFF;
+            closed[r][c]  = 0;
+        }
+    }
+
+    // Min-heap as the open set. Each entry packs (f-score << 16) | (row<<8)|col
+    // so that uint32_t compare prioritizes by f-score; ties break on packed
+    // segment which gives stable ordering. Capped at 4 * grid size since each
+    // node may be pushed multiple times before being closed.
+    static uint32_t heap[4 * WMX_PLAYABLE_SEGS];
+    int heapSize = 0;
+
+    auto heapPush = [&](int f, int row, int col) {
+        if (heapSize >= (int)(sizeof(heap)/sizeof(heap[0]))) return;
+        uint32_t entry = ((uint32_t)f << 16) | (uint32_t)PackSeg(row, col);
+        heap[heapSize] = entry;
+        int i = heapSize++;
+        while (i > 0) {
+            int parent = (i - 1) / 2;
+            if (heap[parent] <= heap[i]) break;
+            uint32_t tmp = heap[parent]; heap[parent] = heap[i]; heap[i] = tmp;
+            i = parent;
+        }
+    };
+    auto heapPop = [&](int* outF, int* outRow, int* outCol) -> bool {
+        if (heapSize == 0) return false;
+        uint32_t top = heap[0];
+        *outF   = (int)(top >> 16);
+        uint16_t packed = (uint16_t)(top & 0xFFFF);
+        *outRow = UnpackRow(packed);
+        *outCol = UnpackCol(packed);
+        heap[0] = heap[--heapSize];
+        int i = 0;
+        for (;;) {
+            int l = 2*i + 1, r = 2*i + 2, smallest = i;
+            if (l < heapSize && heap[l] < heap[smallest]) smallest = l;
+            if (r < heapSize && heap[r] < heap[smallest]) smallest = r;
+            if (smallest == i) break;
+            uint32_t tmp = heap[i]; heap[i] = heap[smallest]; heap[smallest] = tmp;
+            i = smallest;
+        }
+        return true;
+    };
+
+    gScore[startRow][startCol] = 0;
+    heapPush(HeuristicToGoals(startRow, startCol), startRow, startCol);
+
+    int goalRow = -1, goalCol = -1;
+    int popsExpanded = 0;
+    while (heapSize > 0) {
+        int f, row, col;
+        if (!heapPop(&f, &row, &col)) break;
+        if (closed[row][col]) continue;   // duplicate entry from earlier push
+        closed[row][col] = 1;
+        popsExpanded++;
+
+        if (IsGoalSegment(row, col)) {
+            goalRow = row;
+            goalCol = col;
+            break;
+        }
+
+        const int dx[] = { 0, 0, -1, 1 };
+        const int dy[] = { -1, 1, 0, 0 };
+        for (int d = 0; d < 4; d++) {
+            int nr = (row + dy[d] + WMX_SEG_ROWS) % WMX_SEG_ROWS;
+            int nc = (col + dx[d] + WMX_SEG_COLS) % WMX_SEG_COLS;
+            if (closed[nr][nc]) continue;
+            if (!IsSegmentTraversable(nr, nc, veh)) continue;
+            int tentative = gScore[row][col] + 1;
+            if (tentative < gScore[nr][nc]) {
+                gScore[nr][nc]  = (uint16_t)tentative;
+                cameRow[nr][nc] = (uint16_t)row;
+                cameCol[nr][nc] = (uint16_t)col;
+                int h = HeuristicToGoals(nr, nc);
+                heapPush(tentative + h, nr, nc);
+            }
+        }
+    }
+
+    if (goalRow < 0) {
+        Log::World("WorldMap: [PLAN] No path from seg(%d,%d) to any of %d goal cells (expanded %d nodes, veh=%d)",
+                   startCol, startRow, s_driveGoalSegCount, popsExpanded, (int)veh);
+        return false;
+    }
+
+    // Reconstruct the path by walking cameFrom[] back from goal to start.
+    // Build into a temporary buffer in reverse order then copy to s_drivePath
+    // forward. Skip the start segment itself — the player is already there.
+    static uint16_t reverseBuf[DRIVE_PATH_MAX];
+    int rcount = 0;
+    int cr = goalRow, cc = goalCol;
+    while ((cr != startRow || cc != startCol) && rcount < DRIVE_PATH_MAX) {
+        reverseBuf[rcount++] = PackSeg(cr, cc);
+        uint16_t pr = cameRow[cr][cc];
+        uint16_t pc = cameCol[cr][cc];
+        if (pr == 0xFFFF || pc == 0xFFFF) break;
+        cr = pr;
+        cc = pc;
+    }
+    for (int i = 0; i < rcount; i++) {
+        s_drivePath[i] = reverseBuf[rcount - 1 - i];
+    }
+    s_drivePathLen     = rcount;
+    s_drivePathIdx     = 0;
+    s_drivePathPlanned = true;
+
+    Log::World("WorldMap: [PLAN] Path found: %d waypoints from seg(%d,%d) to goal seg(%d,%d) (%d goal cells in zone, expanded %d nodes, veh=%d)",
+               rcount, startCol, startRow, goalCol, goalRow,
+               s_driveGoalSegCount, popsExpanded, (int)veh);
+    return true;
+}
+
+// Plan a path for the current drive. Reads s_driveTargetX/Y and the live
+// vehicle/story state. On success, populates s_drivePath/Len/Idx/Planned
+// and s_driveGoalSegs/Count. On failure leaves s_drivePathPlanned=false;
+// AD then falls back to catalog-center steering and distance-based arrival.
+static bool PlanDrivePath(int32_t startX, int32_t startY)
+{
+    s_drivePathLen      = 0;
+    s_drivePathIdx      = 0;
+    s_drivePathPlanned  = false;
+    s_driveGoalSegCount = 0;
+
+    if (!s_segmentRegionLoaded) {
+        Log::World("WorldMap: [PLAN] Region map not loaded \u2014 fallback to catalog-center steering");
+        return false;
+    }
+
+    VehicleType veh   = (s_lastVehicle < 0) ? VEH_ON_FOOT
+                                            : GetVehicleType((uint8_t)s_lastVehicle);
+    uint16_t    story = GetCurrentStoryFlag();
+
+    // Ragnarok flies anywhere — skip the planner, catalog-center steering
+    // works fine because Ragnarok lands directly on the catalog coord.
+    if (veh == VEH_RAGNAROK) {
+        Log::World("WorldMap: [PLAN] Ragnarok mode \u2014 skipping planner (catalog-center steering)");
+        return false;
+    }
+
+    uint8_t region = 0;
+    int progIdx = MatchProgramForCatalog(s_driveTargetX, s_driveTargetY,
+                                         veh, story, &region);
+    if (progIdx < 0) {
+        return false;   // no matching program; MatchProgramForCatalog logged why
+    }
+
+    s_driveGoalSegCount = CollectGoalSegments(region);
+    if (s_driveGoalSegCount == 0) {
+        Log::World("WorldMap: [PLAN] Region 0x%02X has zero cells in s_segmentRegionMap \u2014 fallback",
+                   (unsigned)region);
+        return false;
+    }
+
+    int startCol = WorldXToSegCol(startX);
+    int startRow = WorldYToSegRow(startY);
+
+    // Player already in a goal segment: empty path. UpdateAutoDrive will
+    // walk forward (catalog-center final-approach behavior) until the
+    // engine fires the trigger and Poll's exit handler declares arrival.
+    if (IsGoalSegment(startRow, startCol)) {
+        s_drivePathLen     = 0;
+        s_drivePathIdx     = 0;
+        s_drivePathPlanned = true;
+        Log::World("WorldMap: [PLAN] Player already in goal segment seg(%d,%d) region=0x%02X \u2014 empty path",
+                   startCol, startRow, (unsigned)region);
+        return true;
+    }
+
+    return PlanPath(startCol, startRow, veh);
+}
+
+// ============================================================================
 // Auto-drive lifecycle (v0.14.86)
 // ============================================================================
 // StartAutoDrive captures the destination by VALUE (not by index) so the
@@ -1473,6 +2646,21 @@ static void StopAutoDrive(const char* reason)
     s_sweepPhase = 0;
     s_sweepTurning = true;
     s_finalApproachEnterTick = 0;
+    // v0.14.94: clear path-planner state so the next StartAutoDrive begins
+    // with a clean slate. PlanDrivePath also resets these on call, but
+    // clearing here ensures any post-stop log inspection shows the drive
+    // as fully torn down.
+    s_drivePathLen      = 0;
+    s_drivePathIdx      = 0;
+    s_drivePathPlanned  = false;
+    s_driveGoalSegCount = 0;
+    // v0.14.96: clear deferred-arrival state. StopAutoDrive may be called
+    // from inside ResolveDeferredArrival (success path); the deferred-arrival
+    // flag is cleared there before this call, but reset here too for any
+    // path that calls StopAutoDrive without going through the resolver
+    // (cancel, stuck-give-up, sweep-give-up).
+    s_driveAwaitingArrivalDecision = false;
+    s_driveExitTick                = 0;
     if (reason && *reason) {
         ScreenReader::Speak(reason, true);
         Log::World("WorldMap: [DRIVE] Stopped: %s", reason);
@@ -1553,8 +2741,16 @@ static void StartAutoDrive(int catIdx)
         snprintf(buf, sizeof(buf), "Driving to %s. %d kilometers.", s_driveTargetName, distKm);
     }
     ScreenReader::Speak(buf, true);
-    Log::World("WorldMap: [DRIVE] Start → %s at (%d,%d), dist=%.0f units (%d km)",
+    Log::World("WorldMap: [DRIVE] Start \u2192 %s at (%d,%d), dist=%.0f units (%d km)",
                s_driveTargetName, s_driveTargetX, s_driveTargetY, dist, distKm);
+
+    // v0.14.94: run the path planner once. Sets s_drivePath[]/Len/Idx/Planned
+    // and s_driveGoalSegs[]/Count. On failure (Ragnarok, region map not
+    // loaded, no matching trigger program, no path), s_drivePathPlanned
+    // stays false and AD falls back to catalog-center steering with the
+    // v0.14.93 distance-based arrival heuristic. UpdateAutoDrive picks the
+    // active mode from s_drivePathPlanned each tick.
+    PlanDrivePath(px, py);
 }
 
 static void StartSweep(int32_t px, int32_t py, DWORD now)
@@ -1726,8 +2922,36 @@ static void UpdateAutoDrive()
         s_driveStuckCheckTime = now;
     }
 
+    // ---- v0.14.94: waypoint advancement. When the player crosses into the
+    // current waypoint's segment, advance s_drivePathIdx to the next one.
+    // Empty path (s_drivePathLen == 0) means the player started in a goal
+    // segment — nothing to advance, the steering target stays at the catalog
+    // center and Poll's exit handler announces arrival when the trigger fires.
+    if (s_drivePathPlanned && s_drivePathIdx < s_drivePathLen) {
+        int playerRow = WorldYToSegRow(py);
+        int playerCol = WorldXToSegCol(px);
+        int wpRow = UnpackRow(s_drivePath[s_drivePathIdx]);
+        int wpCol = UnpackCol(s_drivePath[s_drivePathIdx]);
+        if (playerRow == wpRow && playerCol == wpCol) {
+            s_drivePathIdx++;
+            Log::World("WorldMap: [PLAN] Reached waypoint %d/%d at seg(%d,%d) \u2014 advancing",
+                       s_drivePathIdx, s_drivePathLen, wpCol, wpRow);
+        }
+    }
+
+    // ---- Steering target selection. Waypoint when planner active and not
+    // yet through the path; catalog target otherwise (initial fallback,
+    // post-path final approach into the goal segment, or planner declined).
+    int32_t steerX = s_driveTargetX;
+    int32_t steerY = s_driveTargetY;
+    if (s_drivePathPlanned && s_drivePathIdx < s_drivePathLen) {
+        int wpRow = UnpackRow(s_drivePath[s_drivePathIdx]);
+        int wpCol = UnpackCol(s_drivePath[s_drivePathIdx]);
+        SegmentCenterToWorld(wpCol, wpRow, &steerX, &steerY);
+    }
+
     // ---- Steering decision. ----
-    int targetBearing = TorusBearing(px, py, s_driveTargetX, s_driveTargetY);
+    int targetBearing = TorusBearing(px, py, steerX, steerY);
     int relBearing    = (targetBearing - (int)heading + 4096) & 0xFFF;
     // relBearing: 0=ahead, 1024=right 90°, 2048=behind, 3072=left 90°.
 
@@ -1844,6 +3068,154 @@ static void PollKeys()
 }
 
 // ============================================================================
+// v0.14.96: Deferred arrival decision
+// ============================================================================
+// Called from Poll() each tick while s_driveAwaitingArrivalDecision is true
+// (world map exited, drive still active, decision not yet resolved). Reads
+// pGameMode and decides arrival vs encounter when the mode has settled.
+// May be called many ticks before resolving. SEH-guarded reads on every
+// FF8Addresses pointer in case the resolver hadn't populated them at startup
+// (defensive — they should all be valid by the time AD is usable).
+static void ResolveDeferredArrival()
+{
+    DWORD now = GetTickCount();
+    DWORD elapsed = now - s_driveExitTick;
+
+    uint16_t mode = 0xFFFF;
+    __try {
+        if (FF8Addresses::pGameMode) mode = *FF8Addresses::pGameMode;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        mode = 0xFFFF;
+    }
+
+    bool isFieldArrival = (mode == FF8Addresses::MODE_FIELD);
+    bool isEncounter   = (mode == FF8Addresses::MODE_SWIRL ||
+                          mode == FF8Addresses::MODE_BATTLE ||
+                          mode == FF8Addresses::MODE_AFTER_BATTLE);
+
+    if (isFieldArrival) {
+        // Read field info for diagnostic logging. Both addresses are
+        // populated when mode==1; SEH guard belt-and-suspenders.
+        uint16_t fieldId = 0xFFFF;
+        const char* fieldName = "<unknown>";
+        __try {
+            if (FF8Addresses::pCurrentFieldId) fieldId = *FF8Addresses::pCurrentFieldId;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        __try {
+            if (FF8Addresses::pCurrentFieldName) fieldName = FF8Addresses::pCurrentFieldName;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+        // Refined-coord capture: same logic as the v0.14.95 arrival path.
+        // The player's last-known world-map (X,Y) before exit is the actual
+        // entry trigger position; subsequent drives steer there directly.
+        int locIdx = FindLocationIndexByTargetCoords(s_driveTargetX, s_driveTargetY);
+        if (locIdx >= 0 && (s_driveLastPosX != 0 || s_driveLastPosY != 0)) {
+            bool wasRefined = s_refinedHas[locIdx];
+            s_refinedX[locIdx]   = s_driveLastPosX;
+            s_refinedY[locIdx]   = s_driveLastPosY;
+            s_refinedHas[locIdx] = true;
+            Log::World("WorldMap: [DRIVE] %s refined entry for %s at (%d,%d) (was target=(%d,%d))",
+                       wasRefined ? "Updated" : "Captured",
+                       s_locations[locIdx].name,
+                       s_driveLastPosX, s_driveLastPosY,
+                       s_driveTargetX, s_driveTargetY);
+        }
+
+        char buf[160];
+        snprintf(buf, sizeof(buf), "Arrived at %s.", s_driveTargetName);
+        Log::World("WorldMap: [DRIVE] Arrival via game-mode (mode=%u MODE_FIELD, fieldId=0x%04X, fieldName='%s', target=%s, dist=%.0f, lastPos=(%d,%d), elapsed=%lums)",
+                   (unsigned)mode, (unsigned)fieldId, fieldName,
+                   s_driveTargetName, s_driveLastDist,
+                   s_driveLastPosX, s_driveLastPosY,
+                   (unsigned long)elapsed);
+        s_driveAwaitingArrivalDecision = false;
+        StopAutoDrive(buf);
+        return;
+    }
+
+    if (isEncounter) {
+        // Battle/encounter — drive stays active and paused; will resume on
+        // world-map re-entry via the existing entry handler in Poll().
+        int pausedCol = WorldXToSegCol(s_driveLastPosX);
+        int pausedRow = WorldYToSegRow(s_driveLastPosY);
+        uint8_t pausedRegion = 0xFF;
+        if (s_segmentRegionLoaded &&
+            pausedRow >= 0 && pausedRow < WMX_SEG_ROWS &&
+            pausedCol >= 0 && pausedCol < WMX_SEG_COLS) {
+            pausedRegion = s_segmentRegionMap[pausedRow][pausedCol];
+        }
+        const char* modeLabel = (mode == FF8Addresses::MODE_SWIRL)        ? "MODE_SWIRL" :
+                                (mode == FF8Addresses::MODE_BATTLE)       ? "MODE_BATTLE" :
+                                                                            "MODE_AFTER_BATTLE";
+        Log::World("WorldMap: [DRIVE] Paused via game-mode (mode=%u %s, target=%s, dist=%.0f, lastPos=(%d,%d), seg=(%d,%d), region=0x%02X, planned=%d, elapsed=%lums) \u2014 will resume on re-entry",
+                   (unsigned)mode, modeLabel,
+                   s_driveTargetName, s_driveLastDist,
+                   s_driveLastPosX, s_driveLastPosY,
+                   pausedCol, pausedRow, (unsigned)pausedRegion,
+                   s_drivePathPlanned ? 1 : 0,
+                   (unsigned long)elapsed);
+        s_driveAwaitingArrivalDecision = false;
+        return;
+    }
+
+    // Mode hasn't settled yet (still MODE_WORLDMAP, or some unknown value).
+    // Keep waiting up to the timeout; ResolveDeferredArrival is called again
+    // next Poll tick.
+    if (elapsed < ARRIVAL_DECISION_TIMEOUT_MS) {
+        return;
+    }
+
+    // Timeout — fall back to v0.14.95 segment-membership / distance heuristic
+    // as safety net. Logged with 'timeout-fallback' suffix so the log makes
+    // it clear this path fired.
+    Log::World("WorldMap: [DRIVE] Arrival decision timeout (mode=%u after %lums) \u2014 falling back to segment/distance heuristic",
+               (unsigned)mode, (unsigned long)elapsed);
+
+    bool arrived = false;
+    const char* arrivalReason = "";
+    int  arrivedSegRow = -1, arrivedSegCol = -1;
+
+    if (s_drivePathPlanned && (s_driveLastPosX != 0 || s_driveLastPosY != 0)) {
+        arrivedSegRow = WorldYToSegRow(s_driveLastPosY);
+        arrivedSegCol = WorldXToSegCol(s_driveLastPosX);
+        arrived       = IsGoalSegment(arrivedSegRow, arrivedSegCol);
+        arrivalReason = arrived ? "segment-membership (timeout-fallback)" : "";
+    } else if (s_driveLastDist > 0 && s_driveLastDist < DRIVE_ARRIVED_ON_EXIT_DIST) {
+        arrived       = true;
+        arrivalReason = "exit-distance (timeout-fallback)";
+    }
+
+    s_driveAwaitingArrivalDecision = false;
+
+    if (arrived) {
+        int locIdx = FindLocationIndexByTargetCoords(s_driveTargetX, s_driveTargetY);
+        if (locIdx >= 0 && (s_driveLastPosX != 0 || s_driveLastPosY != 0)) {
+            bool wasRefined = s_refinedHas[locIdx];
+            s_refinedX[locIdx]   = s_driveLastPosX;
+            s_refinedY[locIdx]   = s_driveLastPosY;
+            s_refinedHas[locIdx] = true;
+            Log::World("WorldMap: [DRIVE] %s refined entry for %s at (%d,%d) (was target=(%d,%d))",
+                       wasRefined ? "Updated" : "Captured",
+                       s_locations[locIdx].name,
+                       s_driveLastPosX, s_driveLastPosY,
+                       s_driveTargetX, s_driveTargetY);
+        }
+        char buf[160];
+        snprintf(buf, sizeof(buf), "Arrived at %s.", s_driveTargetName);
+        Log::World("WorldMap: [DRIVE] Arrival via %s (target=%s, dist=%.0f, lastPos=(%d,%d), seg=(%d,%d))",
+                   arrivalReason, s_driveTargetName, s_driveLastDist,
+                   s_driveLastPosX, s_driveLastPosY,
+                   arrivedSegCol, arrivedSegRow);
+        StopAutoDrive(buf);
+    } else {
+        Log::World("WorldMap: [DRIVE] Paused via timeout-fallback (target=%s, dist=%.0f, lastPos=(%d,%d), planned=%d) \u2014 will resume on re-entry",
+                   s_driveTargetName, s_driveLastDist,
+                   s_driveLastPosX, s_driveLastPosY,
+                   s_drivePathPlanned ? 1 : 0);
+    }
+}
+
+// ============================================================================
 // Main polling loop
 // ============================================================================
 void Poll()
@@ -1876,6 +3248,15 @@ void Poll()
             if (rx != 0 || ry != 0) {
                 s_driveStuckX = rx;
                 s_driveStuckY = ry;
+                // v0.14.94: replan after a battle / random-encounter pause.
+                // Random encounters can drift the player off the previously
+                // planned path; replanning from the post-battle position
+                // keeps the drive efficient. If the planner declines
+                // (region 0xFF, no matching program, no path), s_drivePathPlanned
+                // becomes false and AD finishes the drive with catalog-
+                // center steering.
+                Log::World("WorldMap: [DRIVE] Replanning after world-map re-entry from (%d,%d)", rx, ry);
+                PlanDrivePath(rx, ry);
             }
             char buf[160];
             snprintf(buf, sizeof(buf), "Resuming drive to %s.", s_driveTargetName);
@@ -1901,71 +3282,35 @@ void Poll()
     if (!nowOnWorldMap && s_onWorldMap) {
         s_onWorldMap = false;
         s_catalogBuilt = false;
-
-        // v0.14.90.2: distinguish arrival from battle/encounter by DISTANCE
-        // at exit time, not by post-exit pGameMode. The v0.14.90 design read
-        // pGameMode at exit and branched on MODE_FIELD vs anything-else, but
-        // BAT logs show pGameMode is still MODE_WORLDMAP (2) at the moment
-        // we detect IsOnWorldMap flipped false — the mode register hasn't
-        // transitioned yet, so we always read 2 and never trip the arrival
-        // branch. The post-exit MODE_FIELD read works in a deferred block
-        // (v0.14.88 design) but is fragile because Poll's polling cadence
-        // may miss the brief MODE_FIELD window before MODE_FIELD's own
-        // game loop takes over.
-        //
-        // Simpler signal that works without timing assumptions: distance
-        // to target. Battles and random encounters can fire ANYWHERE,
-        // including far from any catalog destination. Field entries only
-        // happen at a location's trigger zone, which by definition is
-        // close to the target coord. So:
-        //   dist < DRIVE_ARRIVED_ON_EXIT_DIST (1500) at exit → arrival
-        //   dist >= 1500                                  → battle/encounter, pause
-        //
-        // Edge case: random encounter at the doorstep of a target. Would
-        // mis-announce as arrival. In practice rare — random encounter
-        // zones don't typically overlap location entrance triggers — and
-        // the actual battle entry (mode swirl, battle music) is sensorily
-        // unambiguous to the user. After the battle ends and they return
-        // to world map, AD would normally have already terminated, but
-        // since they're standing on the entrance, walking forward one
-        // step enters the location naturally.
-        if (s_driveActive) {
-            char buf[160];
-            if (s_driveLastDist > 0 && s_driveLastDist < DRIVE_ARRIVED_ON_EXIT_DIST) {
-                snprintf(buf, sizeof(buf), "Arrived at %s.", s_driveTargetName);
-                Log::World("WorldMap: [DRIVE] Arrival via exit-distance (target=%s, dist=%.0f)",
-                           s_driveTargetName, s_driveLastDist);
-
-                // v0.14.89 refined-coord capture, retained: the player's
-                // last-known world-map (X, Y) before exit IS the actual
-                // entry trigger position. Subsequent drives to this same
-                // location will steer there directly, skipping sweep.
-                int locIdx = FindLocationIndexByTargetCoords(s_driveTargetX, s_driveTargetY);
-                if (locIdx >= 0 && (s_driveLastPosX != 0 || s_driveLastPosY != 0)) {
-                    bool wasRefined = s_refinedHas[locIdx];
-                    s_refinedX[locIdx]   = s_driveLastPosX;
-                    s_refinedY[locIdx]   = s_driveLastPosY;
-                    s_refinedHas[locIdx] = true;
-                    Log::World("WorldMap: [DRIVE] %s refined entry for %s at (%d,%d) (was target=(%d,%d))",
-                               wasRefined ? "Updated" : "Captured",
-                               s_locations[locIdx].name,
-                               s_driveLastPosX, s_driveLastPosY,
-                               s_driveTargetX, s_driveTargetY);
-                }
-
-                StopAutoDrive(buf);
-            } else {
-                // Far from target → battle / encounter / vehicle dismount
-                // / something else. Pause; drive resumes on world-map
-                // re-entry. AD's resume logic (in the entry handler above)
-                // re-arms the stuck-detection timer so the field/battle
-                // gap doesn't immediately trigger 'Stuck'.
-                ReleaseAllDriveKeys();
-                Log::World("WorldMap: [DRIVE] Paused (target=%s, dist=%.0f) — will resume on re-entry",
-                           s_driveTargetName, s_driveLastDist);
-            }
-        }
         Log::World("WorldMap: Exited world map");
+
+        // v0.14.96: defer the arrival decision instead of deciding instantly.
+        // The instant-decision approaches (v0.14.94 segment-membership +
+        // v0.14.95 distance heuristic) gave false-positive arrivals when
+        // random encounters fired near a destination — both signals say
+        // 'yes' because the player IS near the target, but the actual game
+        // state is a battle, not a field entry. v0.14.96 captures exit
+        // state and lets ResolveDeferredArrival decide based on the settled
+        // game mode (MODE_FIELD = arrival, battle modes = encounter). The
+        // wait is brief (typically 1-3 polls / ~16-50ms) and bounded by
+        // ARRIVAL_DECISION_TIMEOUT_MS = 2000ms.
+        if (s_driveActive) {
+            ReleaseAllDriveKeys();
+            s_driveAwaitingArrivalDecision = true;
+            s_driveExitTick = GetTickCount();
+            Log::World("WorldMap: [DRIVE] Awaiting arrival decision (target=%s, dist=%.0f, lastPos=(%d,%d), planned=%d)",
+                       s_driveTargetName, s_driveLastDist,
+                       s_driveLastPosX, s_driveLastPosY,
+                       s_drivePathPlanned ? 1 : 0);
+        }
+    }
+
+    // v0.14.96: resolve deferred arrival decision while off world map.
+    // Runs BEFORE the early-return below so it gets called every Poll() tick
+    // until the decision settles or times out. ResolveDeferredArrival
+    // self-clears s_driveAwaitingArrivalDecision when the decision resolves.
+    if (!s_onWorldMap && s_driveAwaitingArrivalDecision) {
+        ResolveDeferredArrival();
     }
 
     
@@ -2045,6 +3390,19 @@ void Initialize()
     s_driveLastPosX = 0;
     s_driveLastPosY = 0;
 
+    // v0.14.94: path planner state. Cleared so the first StartAutoDrive
+    // begins with empty path and goal set; PlanDrivePath populates these
+    // when invoked.
+    s_drivePathLen      = 0;
+    s_drivePathIdx      = 0;
+    s_drivePathPlanned  = false;
+    s_driveGoalSegCount = 0;
+
+    // v0.14.96: deferred-arrival state. Reset on every Initialize so a fresh
+    // game session starts without any pending arrival decision.
+    s_driveAwaitingArrivalDecision = false;
+    s_driveExitTick                = 0;
+
     // v0.14.89: refined entry-coord table. Cleared on Initialize because
     // persistence is not yet implemented — a fresh game session starts
     // with the canonical catalog and accumulates refined entries through
@@ -2052,6 +3410,14 @@ void Initialize()
     memset(s_refinedX, 0, sizeof(s_refinedX));
     memset(s_refinedY, 0, sizeof(s_refinedY));
     memset(s_refinedHas, 0, sizeof(s_refinedHas));
+
+    // v0.14.94: clear the segment-region map. Real values get populated
+    // inside LoadTriggerZones below if Section 2 reads cleanly. If the load
+    // fails (missing world.fs, decompression error, size mismatch) the
+    // planner sees s_segmentRegionLoaded = false and AD falls back to
+    // v0.14.93's catalog-center steering.
+    memset(s_segmentRegionMap, 0xFF, sizeof(s_segmentRegionMap));
+    s_segmentRegionLoaded = false;
 
     ReleaseAllDriveKeys();
 
@@ -2073,9 +3439,19 @@ void Initialize()
     // s_triggerData[] from this dump; v0.14.94 wires it into AD targeting.
     if (LoadTriggerZones()) {
         Log::World("WorldMap: [INIT] Trigger-zone hex dump complete (see [TRIGGER-DUMP] entries above)");
+        if (s_segmentRegionLoaded) {
+            Log::World("WorldMap: [INIT] Segment region map loaded for AD path planning");
+        } else {
+            Log::World("WorldMap: [INIT] Segment region map NOT loaded \u2014 AD will fall back to catalog-center steering");
+        }
     } else {
-        Log::World("WorldMap: [INIT] Trigger-zone load failed — see preceding [TRIGGER-DUMP] entries");
+        Log::World("WorldMap: [INIT] Trigger-zone load failed \u2014 see preceding [TRIGGER-DUMP] entries");
     }
+
+    // v0.14.93: dump the embedded s_triggerPrograms[] for runtime sanity-check
+    // that the data compiled correctly. 38 lines under [TRIGGER-PROGRAMS].
+    // Always runs (no failure path) since the data is static-initialized.
+    LogTriggerPrograms();
 
     Log::World("WorldMap: Module initialized (v%s)", FF8OPC_VERSION);
 }
