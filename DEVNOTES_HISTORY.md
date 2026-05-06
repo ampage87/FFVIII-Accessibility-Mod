@@ -6,6 +6,56 @@
 
 ---
 
+## Sessions 66+ (2026-04-27 → 2026-05-05) — Scan TTS chapter (v0.14.50 → v0.14.82) + World Map saga (v0.14.83 → v0.14.90.3)
+
+Two consecutive multi-build sagas, both pushed to GitHub. The detailed version-by-version build narratives live in the GitHub commit messages — see commits below — so this archive entry is a topical index rather than a duplicate of the commit text.
+
+### Scan TTS chapter (v0.14.50 → v0.14.82) — closed at GitHub commit `7c7afdf3`
+
+Auto-announce + interactive number-key UI for the Scan spell. 33 builds. Major beats:
+
+- **v0.14.50–58:** action-layer detection via popup hook (`sub_48D200` text_id=0x06 val=0x32 = ID 50). Watchdog cancel for spurious "no effect" announces (Cure-on-asleep, Sleep-on-immune). 30s action-layer lock + sub_84F860 dispatcher hook (both later retired).
+- **v0.14.59–61:** UX redesign — silent action-layer + auto-announce on `sub_B687C0` first-fire (window-render). Single-channel SAPI mode to eliminate dual-voice overlap.
+- **v0.14.66-diag → v0.14.71:** type-label capture via `sub_47EC70(99)+sub_47EC70(36)` byte-decode (Fly Monster / Earth Monster / etc.). Established that not every FF8 enemy has a type label (Fastitocalon has no rendered type — engine never calls the pair). FF8 text decode rules: uppercase encoded byte = decoded char + 4, lowercase encoded = decoded - 2.
+- **v0.14.72:** **architectural lesson** — sub_47EC70 hook conflict between scan_tts.cpp and battle_tts_victory.inl. MinHook silently fails with `MH_ERROR_ALREADY_CREATED` when two installers race for the same address; the loser is identifiable only via the failure log. Resolution: single canonical hook in victory module, ScanTTS observes via public `HandleBattleText(textId, result)` forward call. Pattern: cooperating modules MUST share one MinHook installer per address.
+- **v0.14.73–v0.14.74:** elemental affinity (keys 6/7/8) + 8-stat split (offensive on key 5 / defensive on key 6). Required reading `Plan & Research Documents/Scan spell deep research results.md` for the FF8 800-anchored u16 elemental scale (NOT FF7-style buckets — v0.14.73 shipped wrong, fixed in v0.14.73.1). **Lesson: always consult `Plan & Research Documents/` BEFORE picking an interpretation when one exists.**
+- **v0.14.74.1–v0.14.76:** BENT_STATUS_RESIST_BASE offset hunt. Deep research's `+0x4C` hypothesis was wrong (v0.14.74 BAT showed alternating 169/251 garbage). [SCAN-STRUCT] 121-byte hex dump diagnostic on Grat + T-Rexaur + Tonberry confirmed the actual offset is `+0x80`. v0.14.74.2/3 fixed cross-battle stale-data leaks (s_prevBattleMagicId reset, enemy slot fingerprint snapshot at battle exit).
+- **v0.14.79:** popup-hook condition relaxed to match BOTH text_id 0x02 AND 0x06 — different cast contexts use different text_ids. Prior v0.14.55-78 only matched 0x06; repeat scans in the same battle were silently dropped.
+- **v0.14.80–82:** chance-based weakness tiering. Used the FF Wiki Magic-cast formula `chance = Magic/4 - Spirit/4 + 100 - byte` with assumed player Magic=30. v0.14.81 shipped 60% threshold; v0.14.82 relaxed to 50% after nightsolo-canon cross-reference revealed three vulnerabilities at 53–57% being incorrectly dropped (Bite Bug Sleep, Caterchipillar Sleep, Fastitocalon Darkness). Symmetric two-tier resistance announce on key 9 (`Resists` 100-199, `Immune to` 200+).
+
+**Architectural lessons captured into DEVNOTES.md "Key learnings & principles":**
+- Two MinHook installers on same address silently fail (v0.14.72 lesson).
+- `cdecl(byte)` engine functions leave garbage in upper bits of ECX — must mask `slotIndex & 0xFF` (v0.14.57 lesson).
+- `.inl` files are included INSIDE `namespace BattleTTS {` — cross-namespace forward decls placed inside `.inl` files resolve as nested (v0.14.55 namespace trap).
+- Default argument values may appear only ONCE per translation unit (v0.14.57 C2572).
+- Popup hook (`sub_48D200`) as action-layer cue: filter by `text_id=0x06 && (value & 0xFF)==spell_id` — reliable across Magic-menu / Draw-Cast / Magic-Stock paths and view modes.
+- Always consult `Plan & Research Documents/` before interpreting any FF8 engine data field.
+
+### World Map saga (v0.14.83 → v0.14.90.3) — closed at GitHub commits `aef75aac` (v0.14.83→85.3), `0b06ab1` (v0.14.86→90.2), `683f1531` (v0.14.90.3)
+
+Restoration of features lost in the v0.14.24 build damage / v0.14.31 partial recovery, then forward into auto-drive. 14 builds across three sub-chapters.
+
+**Sub-chapter 0 — regression fix (v0.14.83 → v0.14.84):** WorldMap::HandleKeyPress was orphaned during the v0.14.31 recovery (defined in .cpp but never declared in .h, never called). Nav keys (-/=/Backspace) silently dead since v0.14.24. Fix: replaced with PollKeys() invoked from end of Poll(). Vehicle-change spam from locomotion-byte transients (Ragnarok 4→8→12→...→60 over ~15s) silenced via canonical-mode whitelist guard. v0.14.84 added `\` placeholder + restoration roadmap.
+
+**Sub-chapter 1 — catalog reachability filter (v0.14.85 → v0.14.85.3):** wmx.obj polygon-format BFS walker. **Lesson: trust authoritative deep-research docs over past-chat code fragments.** v0.14.85's flat-stride parser came from a past-chat fragment but was structurally wrong — wmx.obj segments have a 68-byte header + 16 variable-length blocks at offsets specified in the segment header, polygons inside blocks. Correct walker: 195 land + 573 ocean = 768 segments, recognizable FF8 continents in the [TERRAIN] grid dump. Catalog rewritten with 38 canonical entries from `Plan & Research Documents/World Map Location Coordinates Research Findings.md` (ff8-speedruns coords matching the runtime player-position address). v0.14.85.2 added vehicle-class-change rebuild trigger. v0.14.85.3 dropped the unvalidated mode 4 = Ragnarok mapping (was Claude's guess; Aaron's save has no Ragnarok); IsCanonicalLocomotion whitelist {0, 3, 6, 31, 32-40, 48, 50}; GetBfsRuleClass returns 0/1/2 (land-only / ocean-allowed / no-filter).
+
+**Sub-chapter 2 — auto-drive (v0.14.86 → v0.14.90.2):** `\` key triggers compass-following drive to nearest catalog entry. Reconstructed from past chats v0.11.05–v0.11.10 via `conversation_search`. keybd_event injection (worldmap input pipeline is separate from field input — fake gamepad doesn't reach it). Bearing-relative steering (3 zones: ahead <18°, diagonal 18-45°, side >45°). Sweep search for narrow entrances (alternating turn-walk, 6 phases). Persist-through-battle (target captured by VALUE at StartAutoDrive, survives catalog rebuilds). Refined-coord empirical capture on first arrival (parallel `s_refinedX/Y/Has[]` arrays). v0.14.90 added 4-poll locomotion debounce. **v0.14.90.2 lesson:** distance-based arrival sidesteps mode-register timing races — `s_driveLastDist < 1500 at exit` is robust because battles fire anywhere but field entries only happen near targets.
+
+**Sub-chapter 2 hotfix #6 — animation-byte suppression (v0.14.90.3):** every world-map re-entry post-battle fired three spurious `Vehicle change:` announcements over ~3s. Root cause: locomotion byte cycles through canonical values (0/3/6) during the camera zoom-in animation, each held ~1s — well past the 4-poll debounce. Fix: time-gate `CheckVehicleChange` for `WM_ENTRY_DEBOUNCE_MS = 3000ms` after every world-map entry. **Lesson: animation-residue byte noise can mimic real engine state for hundreds of milliseconds.** Frame-scale debounce is insufficient when the noise values are themselves canonical and held long. The discriminator must be a different signal entirely (in this case, recency of world-map entry). Non-canonical byte at window expiry kept prior `s_lastVehicle` (graceful fallback — doing nothing is safer than committing the unknown). BAT-passed Tue 2026-05-05 18:12 with Chocobo drive Balamb-Garden→Balamb-Town across two pause/resume cycles.
+
+**Architectural lessons captured into DEVNOTES.md "Key learnings & principles":**
+- Even canonical locomotion values can be transient — debounce alone is insufficient when noise values match the real value-set; need a different discriminator (e.g. recency of state transition).
+- Distance-based arrival sidesteps mode-register timing races. Don't read `pGameMode` at the moment of `IsOnWorldMap` flipping false — register hasn't transitioned yet.
+- Refined-coord empirical capture beats pre-deep-research trigger-table investigation when data acquisition is slower than runtime observation.
+- Recovery-from-build-damage gotcha: audit lifecycle wiring (Install/Poll/Reset hook calls) AND feature parity against past BAT logs. The v0.14.31 recovery only restored what triggered linker errors, leaving HandleKeyPress orphaned.
+- GitHub API write tools (`github:create_or_update_file`, `github:push_files`) count as pushes. Using them bypasses the user's local clone, which then diverges from origin without anyone realizing. Always: Claude provides version + commit description; Aaron's utility does the actual push.
+
+### GitHub state at chapter close
+
+`main` HEAD = `683f1531` (v0.14.90.3). Local in sync. Recovery story for the failed first push attempt of v0.14.90.3: a prior Claude session had used `github:create_or_update_file` to put v0.14.90.2 on GitHub directly, leaving Aaron's local clone parented on `aef75aac` instead of `0b06ab1`. Fix was `git fetch origin && git reset origin/main` (mixed reset preserved working tree), then re-run push utility — clean fast-forward.
+
+---
+
 ## Session 65 (2026-04-26) — v0.14.23→v0.14.32 build recovery + damage-timing regression fix
 
 ### Context

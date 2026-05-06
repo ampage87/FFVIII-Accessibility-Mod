@@ -1,23 +1,59 @@
 // world_map.cpp - World map navigation TTS for blind players
 //
 // ============================================================================
-// CURRENT STATE: v0.14.90.3 — Chapter 2 hotfix #6 (suppress locomotion-byte
-//                noise during world-map re-entry animation). v0.14.90.2 BAT
-//                confirmed AD works end-to-end (Garden→Garden short test +
-//                Garden→Balamb-Town long drive with three pause/resume
-//                cycles, distance-based arrival fires correctly, refined-coord
-//                capture works). Chapter 2 functionally complete — BUT every
-//                world-map re-entry post-battle fires THREE consecutive
-//                spurious 'Vehicle change' announcements over ~3 seconds
-//                because the locomotion byte cycles through canonical
-//                values (0→3→6) during the camera zoom-in animation, each
-//                held ~1 second (well past v0.14.90's 4-poll debounce).
-//                Each spurious change also fires a BFS catalog rebuild,
-//                so the catalog briefly contains 38 ocean-allowed entries
-//                the player can't reach. v0.14.90.3 time-gates
-//                CheckVehicleChange for 3 seconds after every world-map
-//                entry; at expiry the byte's settled value is silently
-//                committed as the new s_lastVehicle baseline.
+// CURRENT STATE: v0.14.92 — Chapter 3 Stage 4 diagnostic build: hex-dump
+//                wmsetus.obj Sections 7 and 8 to surface the FIELD
+//                ENTRY trigger bytecode. v0.14.91 BAT'd cleanly and
+//                proved the deep research's leading hypothesis wrong:
+//                Sections 17/18 contain wm2field-style destination
+//                data (field-walkmesh coords ±10000 range, 32-byte
+//                records keyed on wmField IDs 0x07-0x10), not world-
+//                map trigger geometry. A subsequent disassembly hunt
+//                of FF8_EN.exe identified the real architecture:
+//
+//                The world-map tick at sub_53FAC0 calls sub_545EA0
+//                each frame on foot. sub_545EA0 reads from Section 8
+//                of wmsetus.obj (resolved at runtime as [0x2040070],
+//                set up by sub_542DA0's 8th iteration). Section 8 is
+//                a BYTECODE PROGRAM with ~56 different opcodes (range
+//                0xFF02..0xFF38) dispatched via a jump table at
+//                sub_546100. Opcodes include rectangle-bounds checks,
+//                savemap story-flag comparisons, AND/OR combinators,
+//                multi-stage matching states (modes 1-6), and a
+//                follow-link instruction (0xFF0E) that lets locations
+//                share sub-programs. When a program path evaluates to
+//                'match', the wmField ID it carries gets written and
+//                the field-entry transition fires. (sub_541C80 is the
+//                separate ENCOUNTER trigger using Section 1 + Section
+//                2's terrain map; not relevant for AD steering.)
+//
+//                Why this matters for AD: B-Garden's bytecode is a
+//                wide-rectangle bounds check (entrable from any
+//                direction). Balamb Town's bytecode is a tight
+//                rectangle just covering the gate (entrable only from
+//                the south). Catalog-center steering misses Balamb
+//                Town because the catalog X/Y is the town center, not
+//                the gate. Once we decode Section 8, we know each
+//                location's exact entry rectangle and AD targets the
+//                rectangle center directly.
+//
+//                THIS BUILD just hex-dumps Sections 7 (56 bytes) and
+//                8 (2652 bytes) to ff8_world.log under [TRIGGER-DUMP]
+//                — about 170 log rows total, trivial cost. Section 7
+//                is the small adjacent section (set up next to 8 by
+//                sub_542DA0); likely auxiliary metadata for the
+//                bytecode walker. Sections 17/18 are no longer dumped
+//                (we now know they're not relevant). After BAT, Claude
+//                writes a Python disassembler in the bash sandbox
+//                using the opcode dispatch table mapped from
+//                sub_546100 + sub_545F10, runs it against the dumped
+//                bytes, and emits per-location entry geometry. v0.14.93
+//                hardcodes the decoded data as a static s_triggerData[]
+//                array; v0.14.94 wires it into StartAutoDrive's
+//                targeting + arrival check, demoting sweep-search to
+//                fallback only for locations whose programs use
+//                opcodes not yet decoded.
+//
 //                Pressing `\` while a drive is in progress cancels.
 //
 //   Prior baseline:
@@ -107,6 +143,49 @@ static const int      WMX_SEG_HEADER_SIZE = 4 + 16 * 4;   // group_id + 16 block
 static const int      WMX_BLOCK_HDR_SIZE  = 4;            // poly_count + vert_count + norm_count + pad
 static const int      WMX_POLY_SIZE       = 16;
 static const int      WMX_TERRAIN_OFFSET  = 0x0D;
+
+// ============================================================================
+// wmsetus.obj section constants (v0.14.92 — field-entry bytecode decoder)
+// ============================================================================
+// world.fi entry 10 points at wmsetus.obj inside world.fs (the EN-locale
+// wmset; bare wmset.obj is unused leftover per the FF Inside wiki). The file
+// begins with a 48-entry section-offset header: 48 little-endian uint32s
+// (192 bytes total), each holding the byte offset within wmsetus.obj where
+// that section's data starts.
+//
+// Per disassembly of FF8_EN.exe sub_542DA0 (the wmsetus section-pointer
+// setup function, 1-indexed iteration order matches array index +1):
+//   Section 1 (392 bytes)  → [0x2040068]  encounter table, sub_541C80
+//   Section 2 (772 bytes)  → [0x2040330]  region/terrain map (32x24+hdr)
+//   Section 3 (88 bytes)   → [0x2040090]
+//   Section 4 (1348 bytes) → [0x2036be8]  encounter destinations
+//   Section 5 (8 bytes)    → [0x203ed40]
+//   Section 6 (68 bytes)   → [0x2040080]
+//   Section 7 (56 bytes)   → [0x2040074]  adjacent to 8, possibly metadata
+//   Section 8 (2652 bytes) → [0x2040070]  FIELD ENTRY BYTECODE, sub_545EA0
+//   ...
+//   (Section 17/18 turn out to be wm2field-style destination data, not
+//   trigger geometry as the deep research had hypothesized.)
+//
+// THIS BUILD hex-dumps Sections 7 and 8 to ff8_world.log under [TRIGGER-DUMP].
+// Section 8 is the field-entry bytecode (the data we need to decode for AD).
+// Section 7 is small enough (56 bytes) to dump for free in case it turns out
+// to be related metadata (entry-point index, region-to-bytecode-offset map,
+// etc.). Earlier sections (encounters / region map / destinations) are NOT
+// dumped here — they're future work for an 'encounter warning' feature, not
+// needed for the v0.14.92 → v0.14.94 AD-steering plan. The 48-entry section
+// table is still logged in full so we have a layout sanity-check.
+static const int      WMSETUS_FL_INDEX            = 10;
+static const int      WMSETUS_SECTION_COUNT       = 48;
+static const int      WMSETUS_HEADER_BYTES        = WMSETUS_SECTION_COUNT * 4;   // 192
+static const uint32_t WMSETUS_DUMP_CAP_BYTES      = 16384; // safety cap per section in the hex-dump
+
+// Sections to hex-dump (1-indexed in user-facing logs; array index = N-1).
+// Order is dump-order in the log; the table sanity-check log line lists all
+// 48 sections regardless. Adding more sections to this list is a one-line
+// change for any future build that needs a different slice of wmsetus.obj.
+static const int      WMSETUS_DUMP_SECTIONS_1IDX[] = { 7, 8 };
+static const int      WMSETUS_DUMP_COUNT           = sizeof(WMSETUS_DUMP_SECTIONS_1IDX) / sizeof(WMSETUS_DUMP_SECTIONS_1IDX[0]);
 
 // Vehicle classification used by the BFS reachability rules.
 // Locomotion enum values per `Plan & Research Documents/World Map Terrain
@@ -791,6 +870,170 @@ static bool LoadTerrainGrid()
         Log::World("WorldMap: [TERRAIN] row%02d: %s", r, rowStr);
     }
 
+    return true;
+}
+
+// ============================================================================
+// LoadTriggerZones — hex-dumps a configurable list of wmsetus.obj sections
+// (controlled by WMSETUS_DUMP_SECTIONS_1IDX) to ff8_world.log for trigger-
+// system reverse engineering. Mirrors LoadTerrainGrid's archive-reader
+// pattern (world.fi entry lookup + LZSS decompress) but reads world.fi entry
+// 10 (wmsetus.obj) instead of entry 9 (wmx.obj). No game-side state is
+// captured — the function is purely diagnostic; its output drives the
+// decoder design in subsequent builds. v0.14.91 dumped Sections 17 and 18
+// (deep research's leading hypothesis, since disproved). v0.14.92 dumps
+// Sections 7 and 8 (the disassembly-confirmed field-entry bytecode plus
+// its small adjacent section).
+// ============================================================================
+
+// Hex-dump a byte range to ff8_world.log under [TRIGGER-DUMP] with section
+// label and a printable-ASCII gutter. Caller passes already-validated bounds.
+static void DumpTriggerSection(const char* sectLabel, const uint8_t* base, uint32_t bytes)
+{
+    const uint32_t cap = (bytes < WMSETUS_DUMP_CAP_BYTES) ? bytes : WMSETUS_DUMP_CAP_BYTES;
+    Log::World("WorldMap: [TRIGGER-DUMP] %s begin (size=%u, dumping %u)", sectLabel, bytes, cap);
+    for (uint32_t off = 0; off < cap; off += 16) {
+        char hexpart[16 * 3 + 1] = {};
+        char asciipart[17]       = {};
+        uint32_t row = (cap - off >= 16) ? 16 : (cap - off);
+        for (uint32_t i = 0; i < row; i++) {
+            uint8_t b = base[off + i];
+            snprintf(hexpart + i * 3, sizeof(hexpart) - i * 3, "%02X ", b);
+            asciipart[i] = (b >= 0x20 && b < 0x7F) ? (char)b : '.';
+        }
+        // Pad short final row's hex column to keep the gutter aligned.
+        for (uint32_t i = row; i < 16; i++) {
+            snprintf(hexpart + i * 3, sizeof(hexpart) - i * 3, "   ");
+        }
+        asciipart[row] = '\0';
+        Log::World("WorldMap: [TRIGGER-DUMP] %s +%04X: %s %s", sectLabel, off, hexpart, asciipart);
+    }
+    if (cap < bytes) {
+        Log::World("WorldMap: [TRIGGER-DUMP] %s truncated at %u (full size %u)", sectLabel, cap, bytes);
+    }
+    Log::World("WorldMap: [TRIGGER-DUMP] %s end", sectLabel);
+}
+
+static bool LoadTriggerZones()
+{
+    // ---- Build paths exactly the way LoadTerrainGrid does. Auto-detect
+    // game install via FF8_EN.exe location.
+    char exePath[MAX_PATH] = {};
+    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+    char* lastSlash = strrchr(exePath, '\\');
+    if (lastSlash) *(lastSlash + 1) = '\0';
+
+    char fiPath[MAX_PATH], fsPath[MAX_PATH];
+    snprintf(fiPath, MAX_PATH, "%sData\\lang-en\\world.fi", exePath);
+    snprintf(fsPath, MAX_PATH, "%sData\\lang-en\\world.fs", exePath);
+
+    // ---- Read world.fi (12 bytes per entry: uncompSize, fsOffset, compression).
+    uint8_t* fiData = nullptr;
+    uint32_t fiSize = 0;
+    if (!WM_ReadFileToBuffer(fiPath, &fiData, &fiSize)) {
+        Log::World("WorldMap: [TRIGGER-DUMP] Failed to read world.fi at '%s'", fiPath);
+        return false;
+    }
+    if (fiSize < (uint32_t)(WMSETUS_FL_INDEX + 1) * 12) {
+        Log::World("WorldMap: [TRIGGER-DUMP] world.fi too small (%u bytes) for entry %d",
+                   fiSize, WMSETUS_FL_INDEX);
+        free(fiData);
+        return false;
+    }
+
+    const uint8_t* fiEntry = fiData + WMSETUS_FL_INDEX * 12;
+    uint32_t uncompSize  = *(const uint32_t*)(fiEntry + 0);
+    uint32_t fsOffset    = *(const uint32_t*)(fiEntry + 4);
+    uint32_t compression = *(const uint32_t*)(fiEntry + 8);
+    Log::World("WorldMap: [TRIGGER-DUMP] wmsetus.obj FI entry %d: uncomp=%u offset=%u comp=%u",
+               WMSETUS_FL_INDEX, uncompSize, fsOffset, compression);
+
+    // ---- Read wmsetus.obj from world.fs (compressed or raw per FI compression flag).
+    uint8_t* wmsData = nullptr;
+    if (compression == 0) {
+        free(fiData);
+        if (!WM_ReadFileChunk(fsPath, fsOffset, uncompSize, &wmsData)) {
+            Log::World("WorldMap: [TRIGGER-DUMP] Failed to read wmsetus.obj raw");
+            return false;
+        }
+    } else {
+        // Compressed: derive compressed-size by reading the next FI entry's offset.
+        uint32_t compSize = uncompSize;   // fallback if no later entry exists
+        for (int j = WMSETUS_FL_INDEX + 1; (uint32_t)(j + 1) * 12 <= fiSize; j++) {
+            uint32_t nextOff = *(const uint32_t*)(fiData + j * 12 + 4);
+            if (nextOff > fsOffset) { compSize = nextOff - fsOffset; break; }
+        }
+        free(fiData);
+
+        uint8_t* compData = nullptr;
+        if (!WM_ReadFileChunk(fsPath, fsOffset, compSize, &compData)) {
+            Log::World("WorldMap: [TRIGGER-DUMP] Failed to read compressed wmsetus.obj");
+            return false;
+        }
+        // FF8 LZSS storage: 4-byte uncompressed-size header precedes the bitstream.
+        wmsData = (uint8_t*)malloc(uncompSize);
+        if (!wmsData) { free(compData); return false; }
+        bool ok = WM_DecompressLZSS(compData + 4, compSize - 4, wmsData, uncompSize);
+        free(compData);
+        if (!ok) {
+            Log::World("WorldMap: [TRIGGER-DUMP] LZSS decompression failed");
+            free(wmsData);
+            return false;
+        }
+    }
+
+    // ---- Validate file size against the 48-entry header.
+    if (uncompSize < (uint32_t)WMSETUS_HEADER_BYTES) {
+        Log::World("WorldMap: [TRIGGER-DUMP] wmsetus.obj too small (%u bytes) for 48-entry header",
+                   uncompSize);
+        free(wmsData);
+        return false;
+    }
+
+    // ---- Read the 48-entry section-offset table and log every offset for
+    // diagnostic context. v0.14.93's decoder will reuse this header parse;
+    // the full dump here makes the entire wmsetus layout visible at a glance
+    // so we can sanity-check that section sizes match FF Inside wiki
+    // annotations (region map at 2 = 772b, encounters at 1+4 = 392b+1348b,
+    // textures at 38 = 257672b, etc.).
+    uint32_t hdr[WMSETUS_SECTION_COUNT];
+    for (int i = 0; i < WMSETUS_SECTION_COUNT; i++) {
+        hdr[i] = *(const uint32_t*)(wmsData + i * 4);
+    }
+    for (int i = 0; i < WMSETUS_SECTION_COUNT; i++) {
+        // Compute size as next-offset minus this-offset; for the last section,
+        // size is uncompSize - hdr[last].
+        uint32_t sectStart = hdr[i];
+        uint32_t sectEnd   = (i + 1 < WMSETUS_SECTION_COUNT) ? hdr[i + 1] : uncompSize;
+        uint32_t sectSize  = (sectEnd >= sectStart) ? (sectEnd - sectStart) : 0;
+        Log::World("WorldMap: [TRIGGER-DUMP] section %02d (1-indexed): offset=0x%08X size=%u",
+                   i + 1, sectStart, sectSize);
+    }
+
+    // ---- Hex-dump each section in WMSETUS_DUMP_SECTIONS_1IDX (1-indexed).
+    // Bounds-check before dumping; if any section's offset/end pair looks
+    // out of range, log and skip rather than reading past the buffer.
+    auto safeDump = [&](int sectArrayIdx, const char* label) {
+        if (sectArrayIdx < 0 || sectArrayIdx >= WMSETUS_SECTION_COUNT) return;
+        uint32_t sectStart = hdr[sectArrayIdx];
+        uint32_t sectEnd   = (sectArrayIdx + 1 < WMSETUS_SECTION_COUNT)
+                              ? hdr[sectArrayIdx + 1]
+                              : uncompSize;
+        if (sectStart >= uncompSize || sectEnd > uncompSize || sectEnd <= sectStart) {
+            Log::World("WorldMap: [TRIGGER-DUMP] %s out-of-range (start=0x%08X end=0x%08X file=%u) — skipping",
+                       label, sectStart, sectEnd, uncompSize);
+            return;
+        }
+        DumpTriggerSection(label, wmsData + sectStart, sectEnd - sectStart);
+    };
+    for (int k = 0; k < WMSETUS_DUMP_COUNT; k++) {
+        int sect1Idx = WMSETUS_DUMP_SECTIONS_1IDX[k];
+        char label[16];
+        snprintf(label, sizeof(label), "sect%02d", sect1Idx);
+        safeDump(sect1Idx - 1, label);   // 1-indexed in user log, 0-indexed in array
+    }
+
+    free(wmsData);
     return true;
 }
 
@@ -1820,6 +2063,18 @@ void Initialize()
         Log::World("WorldMap: [INIT] Terrain grid loaded successfully");
     } else {
         Log::World("WorldMap: [INIT] Terrain grid load failed — catalog will be unfiltered");
+    }
+
+    // v0.14.92: hex-dump wmsetus.obj Sections 7 and 8 (the field-entry
+    // bytecode + its small adjacent section) to ff8_world.log. Diagnostic-
+    // only (no game-side state captured); failure is non-fatal because
+    // AD's existing catalog-center + sweep-search path continues to work
+    // without the decoded trigger data. v0.14.93 will hardcode the decoded
+    // s_triggerData[] from this dump; v0.14.94 wires it into AD targeting.
+    if (LoadTriggerZones()) {
+        Log::World("WorldMap: [INIT] Trigger-zone hex dump complete (see [TRIGGER-DUMP] entries above)");
+    } else {
+        Log::World("WorldMap: [INIT] Trigger-zone load failed — see preceding [TRIGGER-DUMP] entries");
     }
 
     Log::World("WorldMap: Module initialized (v%s)", FF8OPC_VERSION);
