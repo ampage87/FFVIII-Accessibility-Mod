@@ -1,7 +1,149 @@
 // world_map.cpp - World map navigation TTS for blind players
 //
 // ============================================================================
-// CURRENT STATE: v0.14.96 — Chapter 3 Stage 5.2: false-positive arrival
+// CURRENT STATE: v0.14.98 — Planner-decline FIX. v0.14.97 BAT'd 2026-05-06
+//                17:07:01 with full PLAN-DEBUG trace. Confirmed the v0.14.96
+//                hypothesis exactly: Balamb Town's region 0x07 fell out of
+//                the active set because program 9 (loc_id=0x010B) was
+//                rejected with 'SKIP top_story=[290,0) story=205 out of
+//                window'. The 16-region active set lacked 0x07; closest-
+//                active-region search picked 0x09 at seg(17,1) (wrong side
+//                of the map); planner declined; drive fell back to v0.14.86
+//                catalog-center steering.
+//
+//                The trace also exposed the structural inconsistency that
+//                identifies the disassembler error: program 9's clauses
+//                have story windows [0..490) for region 0x06 and [0..3900)
+//                for region 0x07 — BOTH including stories below the
+//                supposed top-level gate of 290. If "≥290" were truly the
+//                top-level requirement, the clauses targeting pre-290
+//                stories would be unreachable code. The v0.14.92 Python
+//                disassembler put 0xFF02 0x0122 in the wrong scope; that
+//                operand belongs to clause 0 (creating effective window
+//                [290, 490) for region 0x06's disc-2 Balamb-during-Garden-
+//                departure phase), not to the program top.
+//
+//                FIX: change s_triggerPrograms[9].top_story_gte from 290
+//                to 0. With the spurious top-level gate removed, region
+//                0x07 (Balamb Town's actual gate trigger) joins the active
+//                set at any story; closest-active-region search picks it
+//                with segDist=0 from catalog seg(17,20); PlanPath either
+//                produces an actual route (if start segment differs from
+//                goal) or recognizes that the player is already in the
+//                goal segment (empty-path case, normal final-approach
+//                walking takes over). One-line value change plus comment
+//                expansion in src/world_map.cpp documenting the diagnosis.
+//
+//                v0.14.97 PLAN-DEBUG trace logging UNCHANGED — still emits
+//                per-program/per-clause lines so we can confirm the fix
+//                worked AND audit other locations for the same scope-
+//                error pattern. v0.14.97 sweep-abort-on-drift UNCHANGED.
+//                v0.14.96 deferred-arrival flow UNCHANGED. v0.14.95
+//                closest-active-region search algorithm UNCHANGED. NO
+//                new addresses, NO new hooks, NO build script changes.
+//
+//                v0.14.98 BAT plan: drive from current save (story=205,
+//                on foot, near western Balamb coast) toward Balamb Town.
+//                Verify in Logs/ff8_world.log:
+//                  (a) [PLAN-DEBUG] [09] loc=0x010B clause 0/1 lines
+//                      now show PASS for region 0x07.
+//                  (b) Active region set now includes 0x07 (17 regions
+//                      instead of 16).
+//                  (c) [PLAN] line shows 'closest active region 0x07 at
+//                      seg(17,20) segDist=0' — catalog and target are
+//                      both in region 0x07's segment.
+//                  (d) PlanPath either succeeds with a path or logs
+//                      'Player already in goal segment'.
+//                  (e) Drive completes with arrival via game-mode (or
+//                      catalog-center final-approach into the trigger).
+//                If this works, audit other story-gated programs (10,
+//                13, 14 are the candidates with clause-local windows
+//                that may also have mis-scoped top-level gates).
+//
+//   Prior baseline:
+//   v0.14.97 — Planner-decline diagnostic + sweep gating fix.
+//                Post-v0.14.96 push field-test (Aaron's BAT 2026-05-06
+//                evening) showed every drive declines the planner with
+//                [PLAN] No path from seg(X,Y) to any of N goal cells.
+//                Drives still completed sometimes via v0.14.86 catalog-
+//                center fallback steering with v0.14.96 deferred-arrival
+//                detection, but a drive to Balamb Town from the western
+//                coast hit a separate failure mode: sweep search
+//                exhausted all 6 phases at (6354,-27941) — 7000 units
+//                west of the target — declaring 'Could not find entrance'
+//                while the player was nowhere near the entrance. Sweep
+//                state had survived a battle pause/resume, persisted
+//                across re-entry far from final-approach zone, and run
+//                its course at the wrong location.
+//
+//                ROOT CAUSE for the planner decline (hypothesized):
+//                Balamb Town's actual trigger region is 0x07, referenced
+//                only by program 9 with top_story_gte=290. Aaron's story
+//                flag is 205, so program 9 is filtered out by the top-
+//                level story gate, region 0x07 falls out of the active
+//                set, closest-active-region search picks an unrelated
+//                region (0x09 at seg(17,1)) at an unrelated segment,
+//                planner declines. Same pattern for B-Garden (region
+//                0x0C, only program 20, Garden vehicle only) and Fire
+//                Cavern (also 0x0C). v0.14.97 adds [PLAN-DEBUG] trace
+//                logging to confirm or refute this hypothesis.
+//
+//                TWO INTEGRATED CHANGES:
+//
+//                (1) [PLAN-DEBUG] CLAUSE-REJECTION TRACE in
+//                MatchProgramForCatalog. Walks every TriggerProgram and
+//                emits one log line per program. Top-level skips log
+//                their reason (vehicle-mismatch / story-out-of-window /
+//                no-clauses). Per-clause lines include vehicle, region,
+//                story window, unk_flags, and the explicit pass/fail
+//                reason (PASS / FAIL veh / FAIL story / FAIL veh+story).
+//                Followed by an active-region summary: 'Active region
+//                set after walk (N): {0x07, 0x09, ...}'. This dump tells
+//                us exactly which clauses are getting filtered and why,
+//                enabling v0.14.98+ to ship the actual fix (correct
+//                program-9 story bounds, missing program for pre-mobile-
+//                Garden Balamb entry, or operand-decode correction).
+//                Cost: ~50-80 log lines per StartAutoDrive call (38
+//                programs * ~1-3 clauses each); diagnostic only,
+//                strippable when the planner gap is closed.
+//
+//                (2) SWEEP ABORT ON DRIFT in UpdateAutoDrive. When sweep
+//                is active and the player has drifted to dist >
+//                FINAL_APPROACH_DIST * 1.5 (typically because a battle
+//                resumed at a position far from where sweep activated),
+//                clear s_sweepActive and return to normal steering.
+//                Without this, sweep persists across pause/resume cycles
+//                and exhausts at the wrong location — the v0.14.96 BAT
+//                showed exactly this at 7km from Balamb Town. Grace
+//                band of 1.5x final-approach distance prevents disrupting
+//                a legitimate mid-sweep wandering search; only fires when
+//                the player is clearly NOT in the entrance-search zone.
+//                Stuck-far-from-target keeps falling through to the
+//                existing 'Stuck. Cannot reach destination.' path.
+//
+//                NOTE: A third item proposed in NEXT_SESSION_PROMPT —
+//                'use refined coords for the planner goal cell' — was
+//                investigated and found to be ALREADY IN PLACE since
+//                v0.14.94. StartAutoDrive overwrites s_driveTargetX/Y
+//                with refined values when available, then PlanDrivePath
+//                passes them to MatchProgramForCatalog. No change needed.
+//
+//                NO new addresses, NO new hooks, NO build script changes.
+//                v0.14.96 deferred-arrival flow UNCHANGED. v0.14.95
+//                closest-active-region search UNCHANGED — v0.14.97 only
+//                adds visibility into why it's declining. v0.14.94
+//                vehicle-noise hotfix and Section 2 loader UNCHANGED.
+//
+//                v0.14.97 BAT plan: from Aaron's current save (story=205,
+//                on foot, near western Balamb coast), press \\ to start
+//                a drive to Balamb Town. Cancel after a few seconds.
+//                Upload Logs/ff8_world.log. Expect [PLAN-DEBUG] lines to
+//                fire at drive start with full clause-rejection trace.
+//                Diagnostic dump tells us which clauses are filtered out
+//                and why; v0.14.98 ships the actual fix.
+//
+//   Prior baseline:
+//   v0.14.96 — Chapter 3 Stage 5.2: false-positive arrival
 //                fix after v0.14.95 BAT. Aaron BAT'd v0.14.95 and reported
 //                drives to Balamb Town and Balamb Garden announced 'Arrived'
 //                when a random encounter triggered as the player neared
@@ -597,8 +739,26 @@ static const TriggerProgram s_triggerPrograms[] = {
     { 0x00EE,   36,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl07), s_cl07 },
     // [08] locID=0x0108 story>=333 — foot/footAlt region 0x08
     { 0x0108,  333,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl08), s_cl08 },
-    // [09] locID=0x010B story>=290 — heavy UNK on r=0x06; cleaner path on r=0x07
-    { 0x010B,  290,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl09), s_cl09 },
+    // [09] locID=0x010B (Balamb Town) — v0.14.98 fix: top_story_gte changed
+    //      from 290 to 0. The decoded.md artifact recorded "≥290" at the
+    //      top level, but the v0.14.97 PLAN-DEBUG trace exposed an
+    //      internal inconsistency: the program's own clauses have story
+    //      windows [0..490) for region 0x06 and [0..3900) for region
+    //      0x07 — story values BELOW the supposed top-level gate. If
+    //      the gate were really top-level, the clauses targeting
+    //      pre-290 stories would be unreachable. The disassembler put
+    //      0xFF02 0x0122 in the wrong scope; the "≥290" almost
+    //      certainly belongs inside clause 0 (giving region 0x06 the
+    //      effective window [290, 490) for the disc-2-mid Balamb-during-
+    //      Garden-departure phase). Clause 1 (foot, region 0x07,
+    //      story [0, 3900)) is the canonical Balamb Town foot-entry
+    //      gate, which the engine fires at story 205 (confirmed by the
+    //      v0.14.96 BAT log when Aaron entered Balamb Town: fieldName=
+    //      'bcgate_1'). With top_story_gte=0, the clause-local windows
+    //      keep their integrity — region 0x07 becomes active for the
+    //      planner at any story, region 0x06 still opens at story ≥290
+    //      via clause 0's own window when properly modeled.
+    { 0x010B,    0,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl09), s_cl09 },
     // [10] locID=0x010C — foot region 0x05 [story 290..315]
     { 0x010C,    0,    0, TRIG_VEH_ANY,      WMS_NCLS(s_cl10), s_cl10 },
     // [11] locID=0x0111 — foot/footAlt region 0x01
@@ -2294,17 +2454,92 @@ static int MatchProgramForCatalog(int32_t catX, int32_t catY,
         }
     };
 
+    // v0.14.97: PLAN-DEBUG trace logging. Walks every program and emits one
+    // log line per program with explicit pass/fail reason. Per-clause lines
+    // include vehicle/region/story/unk values and the skip reason (vehicle-
+    // mismatch / story-out-of-window / PASS). Followed by an active-region
+    // summary line. This dump tells us exactly why the closest-active-region
+    // search may pick the wrong region for narrow-entrance locations like
+    // Balamb Town (whose actual trigger region is 0x07, referenced only by
+    // program 9 with top_story_gte=290 — at story 205, program 9 is filtered
+    // out and 0x07 falls out of the active set).
+    int catRegByte = (catRow >= 0 && catRow < WMX_SEG_ROWS &&
+                      catCol >= 0 && catCol < WMX_SEG_COLS)
+                     ? s_segmentRegionMap[catRow][catCol] : 0xFF;
+    Log::World("WorldMap: [PLAN-DEBUG] Walking %d programs for veh=%d story=%u catalog=(%d,%d) seg(%d,%d) catRegion=0x%02X",
+               TRIGGER_PROGRAM_COUNT, (int)veh, (unsigned)story, catX, catY, catCol, catRow,
+               (unsigned)catRegByte);
+
     for (int i = 0; i < TRIGGER_PROGRAM_COUNT; i++) {
         const TriggerProgram& p = s_triggerPrograms[i];
-        if (p.top_vehicle != TRIG_VEH_ANY &&
-            !VehicleClauseMatches(p.top_vehicle, veh)) continue;
-        if (!StoryWindowMatches(p.top_story_gte, p.top_story_lt, story)) continue;
-        if (p.num_clauses == 0 || p.clauses == nullptr) continue;
+
+        // Top-level vehicle gate.
+        bool topVehOK = (p.top_vehicle == TRIG_VEH_ANY) ||
+                        VehicleClauseMatches(p.top_vehicle, veh);
+        if (!topVehOK) {
+            Log::World("WorldMap: [PLAN-DEBUG] [%02d] loc=0x%04X SKIP top_vehicle=0x%02X mismatch (player veh=%d)",
+                       i, (unsigned)p.loc_id, (unsigned)p.top_vehicle, (int)veh);
+            continue;
+        }
+
+        // Top-level story gate.
+        if (!StoryWindowMatches(p.top_story_gte, p.top_story_lt, story)) {
+            Log::World("WorldMap: [PLAN-DEBUG] [%02d] loc=0x%04X SKIP top_story=[%u,%u) story=%u out of window",
+                       i, (unsigned)p.loc_id,
+                       (unsigned)p.top_story_gte, (unsigned)p.top_story_lt,
+                       (unsigned)story);
+            continue;
+        }
+
+        if (p.num_clauses == 0 || p.clauses == nullptr) {
+            Log::World("WorldMap: [PLAN-DEBUG] [%02d] loc=0x%04X SKIP no clauses (top-level only)",
+                       i, (unsigned)p.loc_id);
+            continue;
+        }
+
+        // Per-clause walk with explicit reasons.
+        int clausesPassed = 0;
         for (uint8_t k = 0; k < p.num_clauses; k++) {
             const TriggerClause& c = p.clauses[k];
-            if (!ClauseMatches(c, veh, story)) continue;
-            addActive(c.region, i, c.unk_flags == 0);
+            bool vehOK   = VehicleClauseMatches(c.vehicle, veh);
+            bool storyOK = StoryWindowMatches(c.story_gte, c.story_lt, story);
+            const char* reason;
+            if (vehOK && storyOK) {
+                reason = "PASS";
+                addActive(c.region, i, c.unk_flags == 0);
+                clausesPassed++;
+            } else if (!vehOK && !storyOK) {
+                reason = "FAIL veh+story";
+            } else if (!vehOK) {
+                reason = "FAIL veh";
+            } else {
+                reason = "FAIL story";
+            }
+            Log::World("WorldMap: [PLAN-DEBUG] [%02d] loc=0x%04X clause %u: v=0x%02X r=0x%02X s=[%u,%u) unk=0x%04X => %s",
+                       i, (unsigned)p.loc_id, (unsigned)k,
+                       (unsigned)c.vehicle, (unsigned)c.region,
+                       (unsigned)c.story_gte, (unsigned)c.story_lt,
+                       (unsigned)c.unk_flags, reason);
         }
+        if (clausesPassed == 0) {
+            Log::World("WorldMap: [PLAN-DEBUG] [%02d] loc=0x%04X => 0 clauses passed; nothing added",
+                       i, (unsigned)p.loc_id);
+        }
+    }
+
+    // Summary: active region set after the walk completes.
+    {
+        char regBuf[256];
+        int pos = 0;
+        regBuf[0] = '\0';
+        for (int j = 0; j < activeCount && pos < (int)sizeof(regBuf) - 8; j++) {
+            int n = snprintf(regBuf + pos, sizeof(regBuf) - pos, "%s0x%02X",
+                             j == 0 ? "" : ",", (unsigned)activeRegions[j]);
+            if (n < 0) break;
+            pos += n;
+        }
+        Log::World("WorldMap: [PLAN-DEBUG] Active region set after walk (%d): {%s}",
+                   activeCount, regBuf);
     }
 
     if (activeCount == 0) {
@@ -2893,6 +3128,23 @@ static void UpdateAutoDrive()
     } else {
         // Out of final approach — reset so we re-arm next time we cross in.
         s_finalApproachEnterTick = 0;
+
+        // v0.14.97: if sweep was active but the player has drifted far from
+        // the target (typically because a battle resumed at a position far
+        // from where sweep was activated), abort sweep so normal steering
+        // gets us back to final approach. Without this, sweep can persist
+        // across pause/resume cycles and exhaust all 6 phases at the wrong
+        // location — the v0.14.96 post-push BAT showed this happening at
+        // ~7km from Balamb Town. Grace band of 1.5x final-approach distance
+        // before aborting; if the player is just barely outside the zone
+        // (e.g. mid-sweep wandering), don't disrupt the search.
+        if (s_sweepActive && dist > DRIVE_FINAL_APPROACH_DIST * 1.5) {
+            Log::World("WorldMap: [DRIVE-SWEEP] Aborting (drifted out of final approach: dist=%.0f, threshold=%.0f) \u2014 returning to normal steering",
+                       dist, DRIVE_FINAL_APPROACH_DIST * 1.5);
+            s_sweepActive  = false;
+            s_sweepPhase   = 0;
+            s_sweepTurning = true;
+        }
     }
 
     // ---- Stuck detection. ----
