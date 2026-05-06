@@ -1,23 +1,24 @@
 // world_map.cpp - World map navigation TTS for blind players
 //
 // ============================================================================
-// CURRENT STATE: v0.14.85.3 — Chapter 1 hotfix #3. Aaron clarified after the
-//                v0.14.85.2 build: he doesn't have Ragnarok yet — the mode 4
-//                seen in BAT was NOT a Ragnarok mount, it was a transient
-//                locomotion-byte read at a Fire Cavern field-transition
-//                moment. The v0.14.83 'mode 4 = Ragnarok' tag was an
-//                assumption Claude made from an earlier BAT log, never
-//                confirmed against actual gameplay. Per the research doc,
-//                Ragnarok is mode 50. v0.14.85.3 drops the unvalidated mode
-//                4 = Ragnarok mapping (now defaults to ON_FOOT) and tightens
-//                the locomotion whitelist to an explicit list of canonical
-//                modes {0, 3, 6, 31, 32-40, 48, 50} per the research doc.
-//                The v0.14.85.2 type-change-triggered catalog rebuild stays;
-//                its trigger is also refined to compare BFS rule class
-//                (land-only / ocean-allowed / no-filter) instead of full
-//                VehicleType, so foot↔car transitions don't trigger
-//                gratuitous rebuilds.
-//                Auto-drive (Chapter 2) still pending; `\` remains a placeholder.
+// CURRENT STATE: v0.14.90.3 — Chapter 2 hotfix #6 (suppress locomotion-byte
+//                noise during world-map re-entry animation). v0.14.90.2 BAT
+//                confirmed AD works end-to-end (Garden→Garden short test +
+//                Garden→Balamb-Town long drive with three pause/resume
+//                cycles, distance-based arrival fires correctly, refined-coord
+//                capture works). Chapter 2 functionally complete — BUT every
+//                world-map re-entry post-battle fires THREE consecutive
+//                spurious 'Vehicle change' announcements over ~3 seconds
+//                because the locomotion byte cycles through canonical
+//                values (0→3→6) during the camera zoom-in animation, each
+//                held ~1 second (well past v0.14.90's 4-poll debounce).
+//                Each spurious change also fires a BFS catalog rebuild,
+//                so the catalog briefly contains 38 ocean-allowed entries
+//                the player can't reach. v0.14.90.3 time-gates
+//                CheckVehicleChange for 3 seconds after every world-map
+//                entry; at expiry the byte's settled value is silently
+//                committed as the new s_lastVehicle baseline.
+//                Pressing `\` while a drive is in progress cancels.
 //
 //   Prior baseline:
 //   v0.11.16 — Deferred catalog build (position validity check)
@@ -152,6 +153,13 @@ enum VehicleType {
 // This rebuild matches the canonical FF8 world-map entry-point set: every
 // location here is a place you can walk/drive/fly TO from the overworld
 // (not an interior accessed from another field).
+// LocationEntry holds the catalog center coordinate — a stable Ragnarok-
+// autopilot coordinate from `Plan & Research Documents/World Map Location
+// Coordinates Research Findings.md`. v0.14.89 added EMPIRICAL entry-coord
+// refinement in a parallel `s_refinedEntries[]` table (see below) that
+// indexes by LOCATION_COUNT — not stored on this struct because it lives
+// in const data. The s_refinedEntries table is mutable and is what gets
+// updated when an auto-drive completes.
 struct LocationEntry {
     const char* name;
     int32_t x;
@@ -212,6 +220,47 @@ static const LocationEntry s_locations[] = {
 static const int LOCATION_COUNT = sizeof(s_locations) / sizeof(s_locations[0]);
 
 // ============================================================================
+// Refined entry coordinates table (v0.14.89, Option B — empirical capture)
+// ============================================================================
+// Parallel to s_locations[]. When a successful on-foot auto-drive ends with
+// the world map exiting to MODE_FIELD inside the DRIVE_ARRIVED_ON_EXIT_DIST
+// proximity to the catalog target, the field-entry handler captures the
+// player's last-known world-map (X, Y) into this table at the same index.
+// On subsequent drives to the same destination, StartAutoDrive prefers the
+// refined coord over the catalog center for steering — making the second
+// visit to a narrow-entrance location (e.g. Balamb Town, Dollet) direct,
+// no sweep required.
+//
+// PERSISTENCE: this build keeps the table in-memory only. Refined coords
+// are lost on game restart. Persistent storage (a JSON file alongside
+// DEVNOTES, or in %APPDATA%) is queued for v0.14.90 alongside the
+// already-deferred 'persistent accessibility settings' priority.
+//
+// CORRECTNESS: refined coords reflect WHERE THE PLAYER WAS at the moment
+// the trigger fired — i.e. the actual on-the-ground entry point. Not the
+// trigger-zone center, not the catalog center. Distance from this coord
+// to the autopilot center is typically 300-1500 units (matches the prior
+// deep research's 'triggers offset by ~300-800 units' estimate).
+static int32_t s_refinedX[LOCATION_COUNT];
+static int32_t s_refinedY[LOCATION_COUNT];
+static bool    s_refinedHas[LOCATION_COUNT];
+
+// Find the s_locations[] index of a location by its catalog center coords.
+// The drive uses (s_driveTargetX, s_driveTargetY) which were captured from
+// s_catalog[catIdx].(x, y) in StartAutoDrive — those values come from
+// s_locations[] (or from the refined table if has_refined was true), so
+// we need to search both sources to identify which s_locations[] slot a
+// given target coord belongs to. Returns -1 if no match.
+static int FindLocationIndexByTargetCoords(int32_t tx, int32_t ty)
+{
+    for (int i = 0; i < LOCATION_COUNT; i++) {
+        if (s_locations[i].x == tx && s_locations[i].y == ty) return i;
+        if (s_refinedHas[i] && s_refinedX[i] == tx && s_refinedY[i] == ty) return i;
+    }
+    return -1;
+}
+
+// ============================================================================
 // Navigation state
 // ============================================================================
 static struct LocationEntry s_catalog[LOCATION_COUNT];  // distance-sorted working copy
@@ -221,6 +270,79 @@ static int s_catalogIndex = 0;       // current selected location (0 = nearest)
 static int s_lastVehicle = -1;       // last known vehicle state
 static bool s_onWorldMap = false;    // true when on world map
 static DWORD s_lastMovementTick = 0; // last time position changed significantly
+
+// ============================================================================
+// Auto-drive state (v0.14.86, restored from v0.11.08-v0.11.10)
+// ============================================================================
+// World map auto-drive uses keyboard injection rather than the field-nav
+// fake gamepad. Discovered v0.11.05-v0.11.07: the world map's input handler
+// `worldmap_input_update_sub_559240` has its own input pipeline separate
+// from the field's `engine_eval_keyboard_gamepad_input`, so the fake gamepad
+// signal never reaches it. `keybd_event` injection at the OS level reaches
+// both pipelines and works reliably on the world map. v0.11.08 BAT validated.
+//
+// Steering uses heading-relative bearing (0-4095 native units; 0=North CW)
+// computed each tick. Three behaviors based on relative bearing magnitude:
+//   ahead   (within ~18°)  : just walk forward
+//   diag    (~18-45°)      : turn AND walk forward (saves time vs. turn-then-walk)
+//   side    (>45°)         : turn only until aligned, then forward
+// Final approach (<DRIVE_ARRIVE_DIST*2 ≈ 1000 units): just walk forward —
+// most catalog coordinates are not exactly on entrance triggers, and walking
+// straight through the area sweeps reliably onto the trigger zone.
+//
+// State target is captured by VALUE (X/Y/name) at StartAutoDrive time, not
+// as a catalog index. The catalog rebuilds whenever the player crosses a
+// BFS rule-class boundary, which would invalidate any stored index. Stable
+// X/Y/name lets the drive survive arbitrary catalog rebuilds.
+static const double DRIVE_ARRIVE_DIST           = 600.0;   // vehicle arrival proximity (on-foot uses world-map-exit detection)
+static const double DRIVE_APPROACH_DIST         = 3000.0;  // one-shot "Approaching X" threshold
+static const double DRIVE_FINAL_APPROACH_DIST   = 1000.0;  // walk-forward (no steering) below this
+static const double DRIVE_ARRIVED_ON_EXIT_DIST  = 1500.0;  // v0.14.87: world-map exit while closer than this counts as arrival
+static const DWORD  DRIVE_ANNOUNCE_INTERVAL_MS  = 5000;    // periodic distance announce
+static const DWORD  DRIVE_STUCK_CHECK_INTERVAL_MS = 3000;  // stuck-detection sample window
+static const double DRIVE_STUCK_THRESHOLD       = 100.0;   // movement floor in one window
+static const int    DRIVE_STUCK_MAX             = 6;       // 6 windows × 3s = 18s no movement → give up
+
+// v0.14.87 — sweep search constants. Activated when on-foot drive is stuck
+// inside the final-approach zone (target within 1000 units but no entrance
+// trigger has fired). Past chats v0.11.10 validated 6-phase alternating
+// turn-then-walk as effective for narrow entrances like Balamb Town.
+static const int    SWEEP_MAX_PHASES        = 6;     // give up after 6 attempts
+static const DWORD  SWEEP_TURN_BASE_MS      = 800;   // phase 1 turn duration; +200ms per phase
+static const DWORD  SWEEP_WALK_DURATION_MS  = 3000;  // walk forward 3s per phase
+static const DWORD  FINAL_APPROACH_TIMEOUT_MS = 6000;// in final approach >6s without exit → sweep
+
+static bool     s_driveActive            = false;
+static int32_t  s_driveTargetX           = 0;
+static int32_t  s_driveTargetY           = 0;
+static char     s_driveTargetName[64]    = {};
+static DWORD    s_driveStartTime         = 0;
+static DWORD    s_driveLastAnnounce      = 0;
+static double   s_driveLastDist          = 0.0;
+static int32_t  s_driveLastPosX          = 0;     // v0.14.89: last known player X (for refined-entry capture on MODE_FIELD)
+static int32_t  s_driveLastPosY          = 0;
+static int32_t  s_driveStuckX            = 0;
+static int32_t  s_driveStuckY            = 0;
+static DWORD    s_driveStuckCheckTime    = 0;
+static int      s_driveStuckCount        = 0;
+static bool     s_driveApproachAnnounced = false;  // one-shot guard
+static bool     s_driveOnFootAtStart     = true;   // v0.14.87: captured at StartAutoDrive; arrival semantics differ
+static DWORD    s_finalApproachEnterTick = 0;      // v0.14.87: when player crossed below FINAL_APPROACH_DIST (0 = not yet)
+
+// v0.14.87 sweep search state. Sweep alternates between TURNING and WALKING
+// sub-states. Each phase: turn for SWEEP_TURN_BASE_MS + (phase-1)*200ms,
+// then walk forward SWEEP_WALK_DURATION_MS. Odd phases turn right, even left.
+// Field exit during any sub-state → arrival; sweep exhaustion → give up.
+static bool     s_sweepActive  = false;
+static int      s_sweepPhase   = 0;     // 1..SWEEP_MAX_PHASES (0 = not in sweep)
+static bool     s_sweepTurning = true;  // sub-state: true = turn, false = walk
+static DWORD    s_sweepStateEnd = 0;    // tick when current sub-state ends
+
+// Held-key tracking for keybd_event injection. Press/release tracking lets
+// SetDriveKeys() be idempotent — pressing UP twice doesn't double-press.
+static bool s_keyUpHeld    = false;
+static bool s_keyLeftHeld  = false;
+static bool s_keyRightHeld = false;
 
 // ============================================================================
 // Terrain grid + BFS reachability state (v0.14.85)
@@ -392,6 +514,69 @@ static int WorldYToSegRow(int32_t y)
 {
     int32_t ny = ((y % 196608) + 196608) % 196608;
     return (ny / 8192) % WMX_SEG_ROWS;
+}
+
+// ============================================================================
+// Auto-drive helpers (v0.14.86)
+// ============================================================================
+// Bearing in native FF8 heading units (0-4095, 0=North, CW). Wrap-aware on
+// the world torus. Mirrors the math in AnnounceBearing but returns the raw
+// angle for the steering decision; AnnounceBearing converts to compass
+// directions for speech.
+static int TorusBearing(int32_t fromX, int32_t fromY, int32_t toX, int32_t toY)
+{
+    int32_t dx = toX - fromX;
+    int32_t dy = toY - fromY;
+    if (abs(dx) > (int32_t)WM_WIDTH / 2) {
+        if (dx > 0) dx -= (int32_t)WM_WIDTH;
+        else        dx += (int32_t)WM_WIDTH;
+    }
+    if (abs(dy) > (int32_t)WM_HEIGHT / 2) {
+        if (dy > 0) dy -= (int32_t)WM_HEIGHT;
+        else        dy += (int32_t)WM_HEIGHT;
+    }
+    // -dy because FF8 Y axis increases downward; atan2(dx, -dy) gives
+    // angle from +Y (North) clockwise, matching the heading convention.
+    double radians = atan2((double)dx, -(double)dy);
+    if (radians < 0) radians += 2.0 * 3.14159265358979;
+    int bearing = (int)(radians / (2.0 * 3.14159265358979) * 4096.0);
+    return bearing & 0xFFF;  // wrap to 0-4095
+}
+
+// keybd_event-based key injection. Arrow keys use scan codes 0x48 (UP),
+// 0x4B (LEFT), 0x4D (RIGHT), all extended-key scancodes (the high bit of
+// the keyboard scancode set). KEYEVENTF_EXTENDEDKEY is required so the OS
+// (and the game's input handler) treats these as the cursor arrows rather
+// than the numpad equivalents.
+static void PressKey(BYTE vk, BYTE scan)
+{
+    keybd_event(vk, scan, KEYEVENTF_EXTENDEDKEY, 0);
+}
+
+static void ReleaseKey(BYTE vk, BYTE scan)
+{
+    keybd_event(vk, scan, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0);
+}
+
+static void ReleaseAllDriveKeys()
+{
+    if (s_keyUpHeld)    { ReleaseKey(VK_UP,    0x48); s_keyUpHeld    = false; }
+    if (s_keyLeftHeld)  { ReleaseKey(VK_LEFT,  0x4B); s_keyLeftHeld  = false; }
+    if (s_keyRightHeld) { ReleaseKey(VK_RIGHT, 0x4D); s_keyRightHeld = false; }
+}
+
+// Idempotent press/release: only generates events on state changes. Called
+// every Update() tick from UpdateAutoDrive with the desired key state for
+// the next frame; the game sees a continuous press as long as the same key
+// is held across calls.
+static void SetDriveKeys(bool up, bool left, bool right)
+{
+    if (up    && !s_keyUpHeld)    { PressKey(VK_UP,    0x48); s_keyUpHeld    = true; }
+    if (!up   &&  s_keyUpHeld)    { ReleaseKey(VK_UP,  0x48); s_keyUpHeld    = false; }
+    if (left  && !s_keyLeftHeld)  { PressKey(VK_LEFT,  0x4B); s_keyLeftHeld  = true; }
+    if (!left &&  s_keyLeftHeld)  { ReleaseKey(VK_LEFT, 0x4B); s_keyLeftHeld = false; }
+    if (right && !s_keyRightHeld) { PressKey(VK_RIGHT, 0x4D); s_keyRightHeld = true; }
+    if (!right&&  s_keyRightHeld) { ReleaseKey(VK_RIGHT,0x4D); s_keyRightHeld = false; }
 }
 
 // ============================================================================
@@ -857,9 +1042,95 @@ static const char* GetVehicleName(uint8_t mode)
     return "Unknown vehicle";
 }
 
+// v0.14.90: debounce window. The v0.14.89 BAT log demonstrated that even
+// canonical locomotion values (3 = Ship, 32–40 = Car, 50 = Ragnarok) read
+// TRANSIENTLY during normal on-foot travel, especially at coastlines and
+// field-transition boundaries. The previous v0.14.85.3 IsCanonicalLocomotion
+// whitelist passed these values straight through to s_lastVehicle, which
+// then poisoned downstream arrival logic (the BAT log shows 'Arrived near
+// Balamb Garden' firing at 11:24:28 because mode 50 = Ragnarok briefly read,
+// vehicle proximity arrival path fired at <600 units before the player
+// actually entered the Garden field). Real vehicle changes hold the canonical
+// value steady for many frames; transients last 1–2 polls. Debounce: a new
+// canonical value must read consistently across DEBOUNCE_POLLS consecutive
+// polls before s_lastVehicle is updated and the announcement / catalog
+// rebuild fires. Non-canonical values are still ignored at the IsCanonical
+// gate; this debounce specifically targets transient CANONICAL values.
+static const int DEBOUNCE_POLLS = 4;
+static int     s_pendingVehicle      = -1;   // canonical value seen in the last N polls (or -1 if none pending)
+static int     s_pendingVehicleCount = 0;    // consecutive polls reading s_pendingVehicle
+
+// v0.14.90.3: world-map entry suppression window. The v0.14.90 debounce above
+// handles 1–3-poll (~16–64 ms) transient byte excursions, but the v0.14.90.2
+// BAT log exposed a more obstinate noise pattern: during the camera zoom-in
+// animation that plays out for ~3 seconds after every world-map re-entry
+// (post-battle return is the canonical case), the locomotion byte cycles
+// through canonical values — e.g. mode 0 (Squall foot) → mode 3 (Ship) →
+// mode 6 (Selphie foot) — each held for ~1 second. Every value sails through
+// the 4-poll debounce as a 'real' transition and CheckVehicleChange announces
+// each one + fires a BFS catalog rebuild. From the user's POV: three jarring
+// vehicle announcements per battle exit and a catalog that briefly contains
+// 38 ocean-allowed entries the player can't actually reach.
+//
+// The animation residue is indistinguishable from real vehicle changes purely
+// on byte hold-time — they're all canonical values held for hundreds of ms.
+// The only signal we have is 'we just entered the world map.' So time-gate
+// CheckVehicleChange for the first WM_ENTRY_DEBOUNCE_MS after every entry.
+// During the window every byte change is dropped silently. At expiry, snapshot
+// whatever value the byte reads and commit it to s_lastVehicle as the new
+// baseline — silently, no announce, no rebuild — because the player did NOT
+// perform a vehicle action; the byte just settled to its steady state.
+//
+// 3000 ms covers the BAT's observed 3-cycle noise pattern with margin. The
+// camera zoom-in is ~2 seconds and the player can't manually do anything
+// during it, so we don't lose any genuine player-initiated vehicle change
+// to the gate. Scripted story events that mount Garden / Ragnarok exactly
+// at battle-victory return are the theoretical false-negative case; vanishingly
+// rare in practice and the next legitimate transition restores the chain.
+static const DWORD WM_ENTRY_DEBOUNCE_MS = 3000;
+static DWORD s_wmEntryTick = 0;   // tick when world map was entered (0 = past the window or never)
+
 static void CheckVehicleChange()
 {
     uint8_t vehicle = GetLocomotionMode();
+
+    // v0.14.90.3: suppress all vehicle-change processing during the world-map
+    // re-entry animation window. See WM_ENTRY_DEBOUNCE_MS state declaration
+    // above for full rationale.
+    if (s_wmEntryTick != 0) {
+        DWORD now = GetTickCount();
+        DWORD elapsed = now - s_wmEntryTick;
+        if (elapsed < WM_ENTRY_DEBOUNCE_MS) {
+            // Still inside the suppression window. Drop any pending state
+            // and exit. The byte's animation cycling does not commit.
+            s_pendingVehicle      = -1;
+            s_pendingVehicleCount = 0;
+            return;
+        }
+        // Window expired this tick. Snapshot the current byte as the new
+        // baseline, silently. No announce (player didn't perform an action),
+        // no catalog rebuild (the byte's settled value is what reachability
+        // logic should have been using all along; if the rule class differs
+        // from what's currently filtered we'd want a rebuild, but the v0.14.90
+        // debounce on subsequent ticks will detect that on its own).
+        if (IsCanonicalLocomotion(vehicle)) {
+            int prev = s_lastVehicle;
+            s_lastVehicle = vehicle;
+            Log::World("WorldMap: [WM-ENTRY-DEBOUNCE] Snapshot baseline locomotion=%u (was %d, suppressed %lums of byte noise)",
+                       vehicle, prev, (unsigned long)elapsed);
+        } else {
+            // Non-canonical at expiry — unusual but possible at story-script
+            // boundaries. Leave s_lastVehicle untouched; the next tick's normal
+            // CheckVehicleChange flow will start fresh once a canonical value
+            // shows up. Log so we notice if this happens repeatedly.
+            Log::World("WorldMap: [WM-ENTRY-DEBOUNCE] Window expired with non-canonical locomotion=%u; keeping s_lastVehicle=%d",
+                       vehicle, s_lastVehicle);
+        }
+        s_wmEntryTick         = 0;
+        s_pendingVehicle      = -1;
+        s_pendingVehicleCount = 0;
+        return;  // skip the rest of CheckVehicleChange this tick; normal flow resumes next tick
+    }
 
     // v0.14.85.3 whitelist: only canonical locomotion values per the research
     // doc are eligible to trigger vehicle-change announcements or catalog
@@ -869,9 +1140,46 @@ static void CheckVehicleChange()
     // nothing is announced, no rebuild fires. Real vehicle changes still
     // register because the byte passes through a canonical value at the
     // mount/dismount moment, and that is the transition we capture.
-    if (!IsCanonicalLocomotion(vehicle)) return;
+    // v0.14.90 debounce: even canonical values can be transient (BAT showed
+    // mode 50 / mode 3 reading for 1 poll during foot travel near coastlines).
+    // Track a pending value across consecutive polls. Only commit to
+    // s_lastVehicle (and fire the announcement / rebuild side effects) once
+    // the same value has held for DEBOUNCE_POLLS in a row.
+    if (!IsCanonicalLocomotion(vehicle)) {
+        // Non-canonical → reset pending state. The byte's transient excursion
+        // is over; whatever it tries next must build up its count from zero.
+        s_pendingVehicle      = -1;
+        s_pendingVehicleCount = 0;
+        return;
+    }
 
-    if (vehicle != s_lastVehicle) {
+    // Canonical value matches the already-committed s_lastVehicle — nothing
+    // to do, ensure the pending state is also clear.
+    if ((int)vehicle == s_lastVehicle) {
+        s_pendingVehicle      = -1;
+        s_pendingVehicleCount = 0;
+        return;
+    }
+
+    // Canonical value differs from current. Track / advance the pending
+    // count. If it reaches DEBOUNCE_POLLS we commit. Otherwise we wait.
+    if ((int)vehicle == s_pendingVehicle) {
+        s_pendingVehicleCount++;
+    } else {
+        s_pendingVehicle      = vehicle;
+        s_pendingVehicleCount = 1;
+    }
+
+    if (s_pendingVehicleCount < DEBOUNCE_POLLS) {
+        // Not yet stable enough; don't commit, don't announce, don't rebuild.
+        return;
+    }
+
+    // Stable for DEBOUNCE_POLLS polls in a row — treat as a real transition.
+    s_pendingVehicle      = -1;
+    s_pendingVehicleCount = 0;
+
+    {
         if (s_lastVehicle != -1) {  // skip initial announcement
             const char* newVehicle = GetVehicleName(vehicle);
             char buf[128];
@@ -905,6 +1213,307 @@ static void CheckVehicleChange()
 }
 
 // ============================================================================
+// Auto-drive lifecycle (v0.14.86)
+// ============================================================================
+// StartAutoDrive captures the destination by VALUE (not by index) so the
+// drive survives catalog rebuilds. UpdateAutoDrive does the per-tick work.
+// StopAutoDrive is idempotent and centralizes key release. The drive
+// pauses automatically on world-map exit (Poll() handles that path) and
+// resumes on re-entry, allowing random encounters not to abort the route.
+static void StopAutoDrive(const char* reason)
+{
+    if (!s_driveActive) return;
+    ReleaseAllDriveKeys();
+    s_driveActive = false;
+    // v0.14.87: clear sweep + final-approach state so a fresh drive starts clean.
+    s_sweepActive = false;
+    s_sweepPhase = 0;
+    s_sweepTurning = true;
+    s_finalApproachEnterTick = 0;
+    if (reason && *reason) {
+        ScreenReader::Speak(reason, true);
+        Log::World("WorldMap: [DRIVE] Stopped: %s", reason);
+    } else {
+        Log::World("WorldMap: [DRIVE] Stopped (silent)");
+    }
+}
+
+static void StartAutoDrive(int catIdx)
+{
+    if (s_driveActive) return;                       // toggle handler should have called Stop first
+    if (!s_catalogBuilt || s_catalogCount == 0) {
+        ScreenReader::Speak("No locations available.", true);
+        return;
+    }
+    if (catIdx < 0 || catIdx >= s_catalogCount) {
+        ScreenReader::Speak("Invalid destination.", true);
+        return;
+    }
+
+    int32_t px, py, pz;
+    GetWorldMapPosition(&px, &py, &pz);
+    if (px == 0 && py == 0) {
+        ScreenReader::Speak("Position unavailable. Try again.", true);
+        return;
+    }
+
+    const LocationEntry& dest = s_catalog[catIdx];
+
+    // v0.14.89: prefer refined entry coord when available. The s_catalog[]
+    // working copy holds the catalog center (s_locations[].x/y); we look up
+    // the matching s_locations[] index and check the parallel refined table
+    // for an empirical entry coord captured on a prior successful drive.
+    int locIdx = FindLocationIndexByTargetCoords(dest.x, dest.y);
+    if (locIdx >= 0 && s_refinedHas[locIdx]) {
+        s_driveTargetX = s_refinedX[locIdx];
+        s_driveTargetY = s_refinedY[locIdx];
+        Log::World("WorldMap: [DRIVE] Using refined entry for %s: (%d,%d) instead of catalog (%d,%d)",
+                   dest.name, s_refinedX[locIdx], s_refinedY[locIdx], dest.x, dest.y);
+    } else {
+        s_driveTargetX = dest.x;
+        s_driveTargetY = dest.y;
+    }
+    strncpy(s_driveTargetName, dest.name, sizeof(s_driveTargetName) - 1);
+    s_driveTargetName[sizeof(s_driveTargetName) - 1] = '\0';
+
+    double dist = CalculateWrappedDistance(px, py, dest.x, dest.y);
+    DWORD now = GetTickCount();
+
+    s_driveActive            = true;
+    s_driveStartTime         = now;
+    s_driveLastAnnounce      = now;
+    s_driveLastDist          = dist;
+    s_driveStuckX            = px;
+    s_driveStuckY            = py;
+    s_driveStuckCheckTime    = now;
+    s_driveStuckCount        = 0;
+    s_driveApproachAnnounced = (dist < DRIVE_APPROACH_DIST);  // suppress one-shot if already inside
+    s_finalApproachEnterTick = 0;     // v0.14.87: not yet in final approach zone
+    s_sweepActive            = false;
+    s_sweepPhase             = 0;
+    s_sweepTurning           = true;
+
+    // v0.14.87: capture vehicle state at drive start. Arrival semantics differ:
+    // on-foot waits for actual world-map exit (entering the location) to
+    // announce arrival; vehicles announce arrival at proximity since they
+    // can't enter most locations anyway. Re-checked dynamically each tick
+    // via GetVehicleType(s_lastVehicle) so vehicle changes mid-drive are
+    // honored (e.g. dismount car → walk into town).
+    s_driveOnFootAtStart = (s_lastVehicle < 0) ||
+                           (GetVehicleType((uint8_t)s_lastVehicle) == VEH_ON_FOOT);
+
+    int distKm = (int)(dist / 1000.0);
+    char buf[160];
+    if (distKm < 1) {
+        snprintf(buf, sizeof(buf), "Driving to %s. Very close.", s_driveTargetName);
+    } else {
+        snprintf(buf, sizeof(buf), "Driving to %s. %d kilometers.", s_driveTargetName, distKm);
+    }
+    ScreenReader::Speak(buf, true);
+    Log::World("WorldMap: [DRIVE] Start → %s at (%d,%d), dist=%.0f units (%d km)",
+               s_driveTargetName, s_driveTargetX, s_driveTargetY, dist, distKm);
+}
+
+static void StartSweep(int32_t px, int32_t py, DWORD now)
+{
+    s_sweepActive   = true;
+    s_sweepPhase    = 1;
+    s_sweepTurning  = true;
+    s_sweepStateEnd = now + SWEEP_TURN_BASE_MS;
+    // Reset stuck tracking so the sweep itself can't be classified as stuck
+    s_driveStuckX = px;
+    s_driveStuckY = py;
+    s_driveStuckCheckTime = now;
+    s_driveStuckCount = 0;
+    ScreenReader::Speak("Searching for entrance.", true);
+    Log::World("WorldMap: [DRIVE-SWEEP] Started (target=%s, phase 1 turning right %dms)",
+               s_driveTargetName, SWEEP_TURN_BASE_MS);
+}
+
+static void UpdateAutoDrive()
+{
+    if (!s_driveActive) return;
+
+    int32_t px, py, pz;
+    GetWorldMapPosition(&px, &py, &pz);
+    uint16_t heading = GetWorldMapHeading();
+
+    // Position can briefly read (0,0) at world-map re-entry. Skip the tick
+    // rather than treating it as a real location far from target.
+    if (px == 0 && py == 0) return;
+
+    double dist = CalculateWrappedDistance(px, py, s_driveTargetX, s_driveTargetY);
+    DWORD now = GetTickCount();
+
+    // v0.14.87: dynamic on-foot check each tick. If the player dismounts a
+    // car or otherwise switches to foot mid-drive, the arrival semantics
+    // switch immediately. The locomotion byte's transient noise is filtered
+    // by the v0.14.85.3 IsCanonicalLocomotion whitelist before s_lastVehicle
+    // updates, so this is stable.
+    bool isOnFoot = (s_lastVehicle < 0) ||
+                    (GetVehicleType((uint8_t)s_lastVehicle) == VEH_ON_FOOT);
+
+    // ---- v0.14.90: removed vehicle proximity arrival ('Arrived near X').
+    // The original v0.11.06 design announced arrival ONLY when the world
+    // map exits to a field — same code path for foot and vehicle. Adding
+    // a vehicle-only proximity branch in v0.14.87 was wrong because it
+    // relied on s_lastVehicle which gets poisoned by transient locomotion-
+    // byte values. The v0.14.89 BAT log showed 'Arrived near Balamb Garden'
+    // firing at distance ~600 because the locomotion byte transiently read
+    // mode 50 (Ragnarok) for one poll; the player wasn't actually in a
+    // vehicle. Field-entry detection in Poll()'s exit handler is the
+    // single source of truth for arrival; if the engine triggered a field
+    // transition, the player arrived. Vehicles that can enter fields
+    // (Garden → FH dock, Ship → docks) work the same way.
+
+
+    // ---- One-shot approach announcement when crossing DRIVE_APPROACH_DIST. ----
+    // Suppressed during sweep — the user already heard "Searching for entrance."
+    if (!s_driveApproachAnnounced && dist < DRIVE_APPROACH_DIST && !s_sweepActive) {
+        s_driveApproachAnnounced = true;
+        int distKm = (int)(dist / 1000.0);
+        char buf[128];
+        if (distKm < 1) {
+            snprintf(buf, sizeof(buf), "Approaching %s.", s_driveTargetName);
+        } else {
+            snprintf(buf, sizeof(buf), "Approaching %s. %d kilometers.", s_driveTargetName, distKm);
+        }
+        ScreenReader::Speak(buf, true);
+        s_driveLastAnnounce = now;
+    }
+    s_driveLastDist = dist;
+    s_driveLastPosX = px;       // v0.14.89: stash for refined-entry capture
+    s_driveLastPosY = py;
+
+    // ---- Periodic distance announce (suppressed during sweep). ----
+    if (!s_sweepActive && now - s_driveLastAnnounce >= DRIVE_ANNOUNCE_INTERVAL_MS) {
+        s_driveLastAnnounce = now;
+        int distKm = (int)(dist / 1000.0);
+        char buf[64];
+        if (distKm < 1) {
+            snprintf(buf, sizeof(buf), "Less than 1 kilometer.");
+        } else {
+            snprintf(buf, sizeof(buf), "%d kilometers.", distKm);
+        }
+        ScreenReader::Speak(buf, true);
+    }
+
+    // ---- Sweep state machine (on-foot, narrow-entrance recovery). ----
+    // When stuck or timed-out in final approach, sweep alternately turns
+    // and walks to scan the local area for the entrance trigger. Field
+    // exit during any sub-state is detected by Poll()'s exit handler and
+    // counts as arrival. Sweep exhaustion (phase > SWEEP_MAX_PHASES) gives
+    // up with "Could not find entrance."
+    if (s_sweepActive) {
+        if (now >= s_sweepStateEnd) {
+            if (s_sweepTurning) {
+                // Turn done → start walk sub-state.
+                s_sweepTurning = false;
+                s_sweepStateEnd = now + SWEEP_WALK_DURATION_MS;
+                Log::World("WorldMap: [DRIVE-SWEEP] Phase %d walk start (%dms)",
+                           s_sweepPhase, SWEEP_WALK_DURATION_MS);
+            } else {
+                // Walk done → advance to next phase or give up.
+                s_sweepPhase++;
+                if (s_sweepPhase > SWEEP_MAX_PHASES) {
+                    StopAutoDrive("Could not find entrance.");
+                    return;
+                }
+                s_sweepTurning = true;
+                DWORD turnDur = SWEEP_TURN_BASE_MS + (DWORD)(s_sweepPhase - 1) * 200;
+                s_sweepStateEnd = now + turnDur;
+                const char* dir = (s_sweepPhase % 2 == 1) ? "right" : "left";
+                Log::World("WorldMap: [DRIVE-SWEEP] Phase %d turn start (%s, %dms)",
+                           s_sweepPhase, dir, turnDur);
+            }
+        }
+        // Output keys based on current sweep sub-state.
+        bool wantUp    = !s_sweepTurning;
+        bool wantRight = s_sweepTurning && (s_sweepPhase % 2 == 1);
+        bool wantLeft  = s_sweepTurning && (s_sweepPhase % 2 == 0);
+        SetDriveKeys(wantUp, wantLeft, wantRight);
+        return;
+    }
+
+    // ---- Final-approach timeout (on-foot only). ----
+    // Track when the player crossed below FINAL_APPROACH_DIST. If we've been
+    // in final approach for more than FINAL_APPROACH_TIMEOUT_MS without the
+    // world-map exiting, we likely walked past a narrow entrance. Start the
+    // sweep search to scan local area for the trigger.
+    if (isOnFoot && dist < DRIVE_FINAL_APPROACH_DIST) {
+        if (s_finalApproachEnterTick == 0) {
+            s_finalApproachEnterTick = now;
+            Log::World("WorldMap: [DRIVE] Entered final approach zone (dist=%.0f)", dist);
+        }
+        if (now - s_finalApproachEnterTick > FINAL_APPROACH_TIMEOUT_MS) {
+            Log::World("WorldMap: [DRIVE] Final-approach timeout (%dms in zone, no entry)",
+                       (int)(now - s_finalApproachEnterTick));
+            StartSweep(px, py, now);
+            return;
+        }
+    } else {
+        // Out of final approach — reset so we re-arm next time we cross in.
+        s_finalApproachEnterTick = 0;
+    }
+
+    // ---- Stuck detection. ----
+    if (now - s_driveStuckCheckTime >= DRIVE_STUCK_CHECK_INTERVAL_MS) {
+        double moved = CalculateWrappedDistance(s_driveStuckX, s_driveStuckY, px, py);
+        if (moved < DRIVE_STUCK_THRESHOLD) {
+            s_driveStuckCount++;
+            Log::World("WorldMap: [DRIVE] Stuck check %d/%d (moved %.0f units in %dms window)",
+                       s_driveStuckCount, DRIVE_STUCK_MAX, moved, DRIVE_STUCK_CHECK_INTERVAL_MS);
+            // v0.14.87: on-foot stuck inside final approach → sweep instead
+            // of giving up. Catches blocked entrances (e.g. trying to walk
+            // into Balamb at the wrong angle and bumping a wall).
+            if (isOnFoot && dist < DRIVE_FINAL_APPROACH_DIST && s_driveStuckCount >= 2) {
+                Log::World("WorldMap: [DRIVE] Stuck in final approach → sweep");
+                StartSweep(px, py, now);
+                return;
+            }
+            if (s_driveStuckCount >= DRIVE_STUCK_MAX) {
+                StopAutoDrive("Stuck. Cannot reach destination.");
+                return;
+            }
+        } else {
+            s_driveStuckCount = 0;  // any meaningful movement resets the counter
+        }
+        s_driveStuckX         = px;
+        s_driveStuckY         = py;
+        s_driveStuckCheckTime = now;
+    }
+
+    // ---- Steering decision. ----
+    int targetBearing = TorusBearing(px, py, s_driveTargetX, s_driveTargetY);
+    int relBearing    = (targetBearing - (int)heading + 4096) & 0xFFF;
+    // relBearing: 0=ahead, 1024=right 90°, 2048=behind, 3072=left 90°.
+
+    bool wantUp = false, wantLeft = false, wantRight = false;
+
+    if (dist < DRIVE_FINAL_APPROACH_DIST) {
+        // Final approach: catalog coordinates aren't always exactly on the
+        // entrance trigger zone. Walking forward through the area sweeps
+        // through the trigger reliably without micro-corrections that can
+        // overshoot the trigger band entirely. The final-approach timeout
+        // (above) covers the case where this fails for narrow entrances.
+        wantUp = true;
+    } else if (relBearing < 200 || relBearing > 3896) {
+        // Within ~17.6° of dead ahead — just go.
+        wantUp = true;
+    } else if (relBearing < 1800) {
+        // Target is to the right (up to ~158°).
+        wantRight = true;
+        if (relBearing < 512) wantUp = true;  // within ~45°: turn AND walk
+    } else {
+        // Target is to the left (the remaining ~158-360° arc).
+        wantLeft = true;
+        if (relBearing > 3584) wantUp = true;  // within ~45° of ahead-left: turn AND walk
+    }
+
+    SetDriveKeys(wantUp, wantLeft, wantRight);
+}
+
+// ============================================================================
 // Keyboard input polling (v0.14.83)
 // ============================================================================
 // Replaces the orphaned v0.11.x HandleKeyPress dispatch path. HandleKeyPress
@@ -926,6 +1535,21 @@ static void PollKeys()
     static bool s_plusWas  = false;
     static bool s_bkspWas  = false;
     static bool s_bslashWas = false;
+    // v0.14.90.1: input-injection diagnostic. F12 fires a 200ms VK_UP pulse via
+    // keybd_event (the current AD mechanism). F2 fires the same pulse via
+    // SendInput. Aaron presses each while standing still on the world map and
+    // listens for a footstep. If F12 moves the character, keybd_event works
+    // and AD has a different bug (timing, state-machine race, etc.). If F12
+    // does nothing but F2 works, switch AD to SendInput. If neither moves
+    // the character, the world map reads input through a pipeline that
+    // bypasses both — DirectInput direct read, raw input, or memory-mapped
+    // game-pad state. v0.14.89 BAT showed AD said it was "driving" while the
+    // distance-to-target never decreased — character was not moving — which
+    // exposed that the entire keybd_event assumption (carried over from past
+    // chats v0.11.05-v0.11.08 that allegedly BAT-validated it) had not been
+    // re-verified on the current system. v0.14.90.1 verifies it directly.
+    static bool s_diagF12Was = false;
+    static bool s_diagF2Was  = false;
 
     bool minus  = (GetAsyncKeyState(VK_OEM_MINUS) & 0x8000) != 0;
     bool plus   = (GetAsyncKeyState(VK_OEM_PLUS)  & 0x8000) != 0;
@@ -953,14 +1577,21 @@ static void PollKeys()
         Log::World("WorldMap: [KEY] backspace bearing");
     }
     if (bslash && !s_bslashWas) {
-        // v0.14.84: Placeholder. World map auto-drive (and BFS terrain
-        // filtering for the catalog) were lost in the v0.14.24 build damage
-        // and have never been restored or pushed to GitHub. Research is
-        // present in `Plan & Research Documents/`; full restoration is
-        // Priority 1 in NEXT_SESSION_PROMPT. This handler exists so the
-        // keypress is not a silent failure.
-        ScreenReader::Speak("World map auto-drive is not yet implemented in this build.", true);
-        Log::World("WorldMap: [KEY] backslash placeholder (auto-drive not yet implemented)");
+        // v0.14.86: toggle auto-drive. If a drive is already running, cancel it;
+        // otherwise start a drive toward the currently-selected catalog entry.
+        // This replaces the v0.14.84 placeholder. The auto-drive system is
+        // restored from past chats v0.11.05-v0.11.10.
+        if (s_driveActive) {
+            StopAutoDrive("Cancelled.");
+            Log::World("WorldMap: [KEY] backslash → cancel");
+        } else if (s_catalogBuilt && s_catalogCount > 0) {
+            Log::World("WorldMap: [KEY] backslash → start drive to idx %d (%s)",
+                       s_catalogIndex, s_catalog[s_catalogIndex].name);
+            StartAutoDrive(s_catalogIndex);
+        } else {
+            ScreenReader::Speak("No locations available.", true);
+            Log::World("WorldMap: [KEY] backslash → no catalog");
+        }
     }
 
     s_minusWas  = minus;
@@ -979,12 +1610,39 @@ void Poll()
     // Detect world map entry
     if (nowOnWorldMap && !s_onWorldMap) {
         s_onWorldMap = true;
+        s_wmEntryTick = GetTickCount();   // v0.14.90.3: arm the locomotion-byte suppression window
         s_catalogBuilt = false;  // force rebuild on next poll
         Log::World("WorldMap: Entered world map");
-        
-        // Announce entering world map
-        ScreenReader::Speak("World map.", true);
-        
+
+        if (s_driveActive) {
+            // v0.14.88: drive paused during a random encounter / battle, now
+            // resuming. Re-arm timers so the stuck-detection window doesn't
+            // trigger on the field/battle gap, and announce so the user
+            // knows the drive is still going. Stable s_driveTargetX/Y/name
+            // survive arbitrary catalog rebuilds. Note: drives that exited
+            // world map FOR a field (location entry) were already terminated
+            // by the MODE_FIELD detection path below, so reaching this branch
+            // means the off-map state was a battle.
+            DWORD now = GetTickCount();
+            s_driveLastAnnounce      = now;
+            s_driveStuckCheckTime    = now;
+            s_driveStuckCount        = 0;
+            s_finalApproachEnterTick = 0;  // re-arm final-approach timer
+            int32_t rx, ry, rz;
+            GetWorldMapPosition(&rx, &ry, &rz);
+            if (rx != 0 || ry != 0) {
+                s_driveStuckX = rx;
+                s_driveStuckY = ry;
+            }
+            char buf[160];
+            snprintf(buf, sizeof(buf), "Resuming drive to %s.", s_driveTargetName);
+            ScreenReader::Speak(buf, true);
+            Log::World("WorldMap: [DRIVE] Resumed after world-map re-entry → %s",
+                       s_driveTargetName);
+        } else {
+            ScreenReader::Speak("World map.", true);
+        }
+
         // Check if we're in the right game mode for world map functionality
         __try {
             if (FF8Addresses::pGameMode && *FF8Addresses::pGameMode != FF8Addresses::MODE_WORLDMAP) {
@@ -1000,8 +1658,73 @@ void Poll()
     if (!nowOnWorldMap && s_onWorldMap) {
         s_onWorldMap = false;
         s_catalogBuilt = false;
+
+        // v0.14.90.2: distinguish arrival from battle/encounter by DISTANCE
+        // at exit time, not by post-exit pGameMode. The v0.14.90 design read
+        // pGameMode at exit and branched on MODE_FIELD vs anything-else, but
+        // BAT logs show pGameMode is still MODE_WORLDMAP (2) at the moment
+        // we detect IsOnWorldMap flipped false — the mode register hasn't
+        // transitioned yet, so we always read 2 and never trip the arrival
+        // branch. The post-exit MODE_FIELD read works in a deferred block
+        // (v0.14.88 design) but is fragile because Poll's polling cadence
+        // may miss the brief MODE_FIELD window before MODE_FIELD's own
+        // game loop takes over.
+        //
+        // Simpler signal that works without timing assumptions: distance
+        // to target. Battles and random encounters can fire ANYWHERE,
+        // including far from any catalog destination. Field entries only
+        // happen at a location's trigger zone, which by definition is
+        // close to the target coord. So:
+        //   dist < DRIVE_ARRIVED_ON_EXIT_DIST (1500) at exit → arrival
+        //   dist >= 1500                                  → battle/encounter, pause
+        //
+        // Edge case: random encounter at the doorstep of a target. Would
+        // mis-announce as arrival. In practice rare — random encounter
+        // zones don't typically overlap location entrance triggers — and
+        // the actual battle entry (mode swirl, battle music) is sensorily
+        // unambiguous to the user. After the battle ends and they return
+        // to world map, AD would normally have already terminated, but
+        // since they're standing on the entrance, walking forward one
+        // step enters the location naturally.
+        if (s_driveActive) {
+            char buf[160];
+            if (s_driveLastDist > 0 && s_driveLastDist < DRIVE_ARRIVED_ON_EXIT_DIST) {
+                snprintf(buf, sizeof(buf), "Arrived at %s.", s_driveTargetName);
+                Log::World("WorldMap: [DRIVE] Arrival via exit-distance (target=%s, dist=%.0f)",
+                           s_driveTargetName, s_driveLastDist);
+
+                // v0.14.89 refined-coord capture, retained: the player's
+                // last-known world-map (X, Y) before exit IS the actual
+                // entry trigger position. Subsequent drives to this same
+                // location will steer there directly, skipping sweep.
+                int locIdx = FindLocationIndexByTargetCoords(s_driveTargetX, s_driveTargetY);
+                if (locIdx >= 0 && (s_driveLastPosX != 0 || s_driveLastPosY != 0)) {
+                    bool wasRefined = s_refinedHas[locIdx];
+                    s_refinedX[locIdx]   = s_driveLastPosX;
+                    s_refinedY[locIdx]   = s_driveLastPosY;
+                    s_refinedHas[locIdx] = true;
+                    Log::World("WorldMap: [DRIVE] %s refined entry for %s at (%d,%d) (was target=(%d,%d))",
+                               wasRefined ? "Updated" : "Captured",
+                               s_locations[locIdx].name,
+                               s_driveLastPosX, s_driveLastPosY,
+                               s_driveTargetX, s_driveTargetY);
+                }
+
+                StopAutoDrive(buf);
+            } else {
+                // Far from target → battle / encounter / vehicle dismount
+                // / something else. Pause; drive resumes on world-map
+                // re-entry. AD's resume logic (in the entry handler above)
+                // re-arms the stuck-detection timer so the field/battle
+                // gap doesn't immediately trigger 'Stuck'.
+                ReleaseAllDriveKeys();
+                Log::World("WorldMap: [DRIVE] Paused (target=%s, dist=%.0f) — will resume on re-entry",
+                           s_driveTargetName, s_driveLastDist);
+            }
+        }
         Log::World("WorldMap: Exited world map");
     }
+
     
     if (!s_onWorldMap) return;
     
@@ -1012,6 +1735,14 @@ void Poll()
     
     // Check for vehicle changes
     CheckVehicleChange();
+
+    // v0.14.86: per-frame auto-drive update. Internally gated on s_driveActive
+    // so this is a near-no-op when no drive is in progress. Placed AFTER
+    // CheckVehicleChange so that any rule-class rebuild fires first — the
+    // drive's stable target X/Y/name don't depend on the catalog state, but
+    // the order keeps logs in a sensible sequence (vehicle change → catalog
+    // rebuild → drive tick).
+    UpdateAutoDrive();
     
     // Track significant position changes for future auto-drive features
     int32_t px, py, pz;
@@ -1044,6 +1775,43 @@ void Initialize()
     s_lastVehicle = -1;
     s_lastMovementTick = 0;
 
+    // v0.14.90.3: reset entry-debounce state. s_wmEntryTick = 0 means 'not
+    // currently in a suppression window'; the first world-map entry will set
+    // it. s_pendingVehicle/Count are also reset for cleanliness, though the
+    // existing v0.14.90 debounce logic re-initializes them on demand.
+    s_wmEntryTick = 0;
+    s_pendingVehicle = -1;
+    s_pendingVehicleCount = 0;
+
+    // v0.14.86: auto-drive state. Initialized to inactive; no keys held.
+    // ReleaseAllDriveKeys() is a no-op given the bool flags are false, but
+    // calling it makes the intent explicit if module re-init ever happens
+    // mid-session.
+    s_driveActive = false;
+    s_driveTargetX = 0;
+    s_driveTargetY = 0;
+    s_driveTargetName[0] = '\0';
+    s_driveStuckCount = 0;
+    s_driveApproachAnnounced = false;
+    // v0.14.87: sweep + final-approach state
+    s_sweepActive = false;
+    s_sweepPhase = 0;
+    s_sweepTurning = true;
+    s_finalApproachEnterTick = 0;
+    s_driveOnFootAtStart = true;
+    s_driveLastPosX = 0;
+    s_driveLastPosY = 0;
+
+    // v0.14.89: refined entry-coord table. Cleared on Initialize because
+    // persistence is not yet implemented — a fresh game session starts
+    // with the canonical catalog and accumulates refined entries through
+    // gameplay. Persistence is queued for v0.14.90.
+    memset(s_refinedX, 0, sizeof(s_refinedX));
+    memset(s_refinedY, 0, sizeof(s_refinedY));
+    memset(s_refinedHas, 0, sizeof(s_refinedHas));
+
+    ReleaseAllDriveKeys();
+
     // v0.14.85: load terrain grid once at module init. Idempotent
     // (s_terrainLoaded short-circuits subsequent calls). If the load fails
     // — e.g. world.fs missing or corrupt — we log and continue; catalog
@@ -1073,6 +1841,15 @@ void Update()
 // ============================================================================
 void Shutdown()
 {
+    // v0.14.86: cancel any in-flight drive and release injected keys before
+    // module teardown. StopAutoDrive is idempotent and silent when reason
+    // is null, which is correct here — shutdown shouldn't speak.
+    if (s_driveActive) {
+        StopAutoDrive(nullptr);
+    } else {
+        ReleaseAllDriveKeys();  // defensive; flags should already be false
+    }
+
     s_onWorldMap = false;
     s_catalogBuilt = false;
     s_catalogCount = 0;

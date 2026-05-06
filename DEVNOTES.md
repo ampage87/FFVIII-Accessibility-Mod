@@ -21,7 +21,564 @@ Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` inj
 
 ---
 
-**Current build: v0.14.85.3 — Chapter 1 hotfix #3. Aaron clarified after the v0.14.85.2 build sketch: he doesn't have access to Ragnarok, Chocobo, or flying B-Garden in his current save — only foot and car. That means the mode 4 read in the v0.14.85.1 BAT log was NOT a Ragnarok mount, it was a transient locomotion-byte read at a field-transition moment. The 'mode 4 = Ragnarok' tag in v0.14.83 was Claude's assumption from an earlier BAT log labeled 'Ragnarok session', never confirmed against actual gameplay. Per the research doc, Ragnarok is mode 50 — we should trust the doc. v0.14.85.3 changes: (1) `GetVehicleType` no longer maps mode 4 to Ragnarok — defaults to ON_FOOT for any non-canonical mode, the safest BFS choice when the byte is uncertain; (2) `GetVehicleName` no longer claims mode 4 is Ragnarok — reports 'Unknown vehicle' for unrecognized modes; (3) the v0.14.83 `vehicle > 4` whitelist is replaced by `IsCanonicalLocomotion` which whitelists only the explicit canonical set {0, 3, 6, 31, 32-40, 48, 50} from the research doc — transient bytes outside this set never trigger announcements or rebuilds; (4) v0.14.85.2's type-change rebuild trigger refined to compare BFS RULE CLASS (land-only / ocean-allowed / no-filter) instead of full VehicleType, so foot↔car transitions don't trigger gratuitous rebuilds (both are land-only). AWAITING BAT — Aaron's test surface is foot + car + field transitions only.**
+**Current build: v0.14.90.3 — Chapter 2 hotfix #6 (world-map entry animation suppression). BAT PASSED Tue 05/05 18:12. Chocobo drive Balamb-Garden→Balamb-Town across two pause/resume cycles confirmed: zero spurious `Vehicle change:` announcements during post-battle world-map re-entries, `[WM-ENTRY-DEBOUNCE]` log lines fire correctly at initial entry (Snapshot baseline locomotion=0) and at second re-entry (Window expired with non-canonical locomotion=9; keeping s_lastVehicle=31). Real Chocobo mount mid-drive announced correctly (mode 31). AD arrival fired correctly with refined-coord capture (12861,-26829). Chapter 2 functionally complete and BAT-confirmed. ONE NOTE for optional polish: the `Window expired with non-canonical` path triggered on the second re-entry — byte hadn't settled to canonical at 3s — handled gracefully (keep prior s_lastVehicle), but a future deferred re-check (1-2s after window expiry) could capture canonical settlement. Not urgent; current behavior is correct for the user-facing cases.**
+
+Next priority: GitHub push of v0.14.90.3. GitHub `main` is at `0b06ab1` (v0.14.90.2, pushed Tue 2026-05-05 20:56 UTC); only ONE version unpushed (today's WM-ENTRY-DEBOUNCE suppression hotfix). Chapter 2 itself was already pushed as v0.14.90.2. Optional polish items deferred: pre-battle Ship-noise byte (one announcement ~1s before each battle entry), deferred re-check after non-canonical window expiry, vehicle-change-triggered catalog rebuild verification (boarding Ship at FH dock), locomotion enum reconciliation, DEVNOTES rotation. Claude does NOT push; Aaron uses his own utility — Claude provides version + commit description.
+
+**Original v0.14.90.3 design notes (preserved):** v0.14.90.2 BAT confirmed end-to-end auto-drive works — Garden→Garden short test arrived correctly, Garden→Balamb Town 11 km drive with three random encounters / pause-resume cycles arrived correctly, refined-coord capture working for both targets. Chapter 2 functionally complete. BUT every world-map re-entry post-battle fired THREE consecutive spurious `Vehicle change:` announcements (`On foot mode 0` → `Ship mode 3` → `On foot mode 6` over ~3s), each followed by a BFS catalog rebuild. Root cause: the locomotion byte at WM_LOCOMOTION cycles through canonical values during the camera zoom-in animation, each value held ~1s (well past v0.14.90's 4-poll/~64ms debounce). Aaron isn't actually mounting/dismounting Ships — it's engine animation residue. Worse than just audio noise: each spurious change rebuilds the catalog, briefly populating it with 38 ocean-allowed entries the player can't reach. THIS BUILD: time-gate `CheckVehicleChange` for `WM_ENTRY_DEBOUNCE_MS = 3000ms` after every world-map entry. During the window, all byte changes are silently dropped. At window expiry, snapshot whatever value the byte reads as the new `s_lastVehicle` baseline (no announce, no rebuild). Real vehicle actions outside the window still announce normally. AWAITING BAT.**
+
+## v0.14.90.3 — World-map entry animation suppression
+
+### v0.14.90.2 BAT result + the bug it surfaced
+
+v0.14.90.2 BAT (Tue 05/05 14:36) ran a clean test from a save outside Balamb Garden. The log shows auto-drive working flawlessly:
+
+- Drive 1 (Balamb Garden, short — dist=32 → dist=278 at exit): `[DRIVE] Arrival via exit-distance (target=Balamb Garden, dist=278)` + `[DRIVE] Captured refined entry for Balamb Garden at (24647,-29675)`. Distance-based arrival design works.
+- Drive 2 (Balamb Town, 11 km long — three random encounters along the way, three pause/resume cycles, final arrival at dist=364): same pattern, refined coord captured at (12889,-26835). Persist-through-battle works perfectly.
+
+Chapter 2 (auto-drive) is functionally complete. But the same log surfaces a residual issue: every world-map re-entry post-battle produced THREE consecutive `Vehicle change:` log lines over ~3 seconds:
+
+```
+[14:38:06] Entered world map
+[14:38:06] Vehicle change: On foot (mode 0)
+[14:38:07] Vehicle change: Ship (mode 3)
+[14:38:07] [BFS] Vehicle rule class changed (0 -> 1), forcing catalog rebuild
+[14:38:08] Vehicle change: On foot (mode 6)
+[14:38:08] [BFS] Vehicle rule class changed (1 -> 0), forcing catalog rebuild
+```
+
+Same pattern at 14:39:19 onward. Aaron is on foot the entire drive — he never boarded a Ship. The locomotion byte at WM_LOCOMOTION cycles through canonical values (0/3/6) during the post-battle camera zoom-in animation, each held for ~1 second. Every value sails through the v0.14.90 4-poll debounce as a real change, fires the announcement, and triggers a BFS catalog rebuild on rule-class transitions.
+
+For the user: three jarring announcements per battle exit (every random encounter resolution = three vehicle changes). And the catalog briefly populates with 38 ocean-allowed entries the player can't actually walk to. If Aaron pressed `=` during the 1-second 'Ship' window post-battle, he'd cycle through that wrong catalog.
+
+### Why the v0.14.90 debounce isn't sufficient
+
+The v0.14.90 debounce requires DEBOUNCE_POLLS=4 consecutive same-value reads (~64ms at 60Hz polling) before committing to `s_lastVehicle`. It catches genuine 1-frame transients. But the animation-residue values hold for hundreds of milliseconds — the 4-poll threshold is reached for each, so all three announce.
+
+Lengthening the debounce window doesn't help: real player-initiated vehicle actions (boarding Ship at a dock, mounting Ragnarok) also hold their canonical values for hundreds of ms. There's no way to distinguish 'real vehicle change' from 'animation residue' purely on byte hold-time.
+
+The one signal that does distinguish them: **whether we just entered the world map**. The animation residue only happens during the camera zoom-in window after entry; real vehicle actions happen during steady gameplay later.
+
+### The fix
+
+New state vars beside the existing `s_pendingVehicle` debounce state:
+
+- `WM_ENTRY_DEBOUNCE_MS = 3000` constant.
+- `s_wmEntryTick` (DWORD): captured at every world-map entry; 0 means 'past the window or never'.
+
+`CheckVehicleChange` now starts with a suppression check:
+
+```c
+if (s_wmEntryTick != 0) {
+    DWORD elapsed = GetTickCount() - s_wmEntryTick;
+    if (elapsed < WM_ENTRY_DEBOUNCE_MS) {
+        // Inside the window — drop pending state, return.
+        s_pendingVehicle = -1;
+        s_pendingVehicleCount = 0;
+        return;
+    }
+    // Window expired this tick. Silently snapshot the current byte as
+    // the new baseline (no announce, no rebuild) and exit suppression mode.
+    if (IsCanonicalLocomotion(vehicle)) {
+        s_lastVehicle = vehicle;
+        Log::World("[WM-ENTRY-DEBOUNCE] Snapshot baseline locomotion=%u ...");
+    }
+    s_wmEntryTick = 0;
+    s_pendingVehicle = -1;
+    s_pendingVehicleCount = 0;
+    return;
+}
+```
+
+In `Poll()`'s world-map entry handler, `s_wmEntryTick = GetTickCount();` is set right after `s_onWorldMap = true;`. `Initialize()` resets it to 0.
+
+The initial catalog build on world-map entry (`BuildDistanceCatalog`) is NOT gated by the debounce — it reads `GetLocomotionMode()` directly. In the BAT log this read 0 (foot) on entry which was correct. If a future BAT shows the catalog itself building wrong because the byte happened to read transient noise at the very first poll, we'd add a separate fix; for now the catalog build is reliable enough.
+
+### Edge cases
+
+- **Real vehicle change inside the 3s window.** Theoretical false negative: if the engine scripts a Garden / Ragnarok mount immediately after a battle-victory return (e.g. story event), our gate suppresses the announcement. Vanishingly rare in practice (story events typically have post-cutscene field transitions, not direct world-map injections), and the next legitimate transition restores the chain.
+- **Non-canonical byte at window expiry.** If the byte happens to read a non-canonical value at the 3s mark (mid-transient), we leave `s_lastVehicle` untouched and log a warning. Next normal CheckVehicleChange tick handles it once the byte settles.
+- **Pre-battle byte noise.** The BAT log also shows a single spurious `Vehicle change: Ship` ~1s BEFORE every battle entry (e.g. 14:37:13 Ship → 14:37:14 Exit). Our entry-debounce doesn't cover this. Documented for follow-up; smaller magnitude (one announcement, not three) and harder to fix because we'd need to predict an upcoming exit. Most likely fix: suppress vehicle-change announcements while AD is active, since AD-by-definition means the player isn't manually performing vehicle actions.
+
+### Files
+
+- `src/world_map.cpp` — ~70 lines net change: WM_ENTRY_DEBOUNCE_MS constant + `s_wmEntryTick` state declaration with full doc comment (~30 lines), suppression block at top of `CheckVehicleChange` (~40 lines including the snapshot-at-expiry path and a non-canonical-at-expiry safety log), entry-tick capture in `Poll()` world-map entry handler (1 line), reset in `Initialize()` (3 lines), file-header comment block updated to reflect Chapter 2 hotfix #6.
+- `src/ff8_accessibility.h` — `FF8OPC_VERSION` 0.14.90.2 → 0.14.90.3 with full changelog.
+- No new addresses, no new hooks, no schema changes.
+
+### v0.14.90.3 BAT plan
+
+Use the same save-outside-B-Garden test surface as v0.14.90.2.
+
+1. **The actual fix — quiet world-map re-entries.** Drive somewhere with random encounters. When a battle fires, hear normal battle TTS. After winning, world map re-loads. Should hear: `Entered world map`, `Resuming drive to Balamb Town.`, then the AD continues. Should NOT hear: 'On foot. Ship. On foot.' announcements.
+2. **Confirm the diagnostic log line.** `Logs/ff8_world.log` should contain ONE `[WM-ENTRY-DEBOUNCE] Snapshot baseline locomotion=N (was M, suppressed ~3000ms of byte noise)` per world-map re-entry. N is the settled byte value (typically 0 = foot or 6 = Selphie foot for normal walking).
+3. **Confirm no spurious BFS rebuilds during the suppression window.** Look for `Vehicle rule class changed` log lines in the 3 seconds after each `Entered world map`. Should be ZERO of them in that window.
+4. **Real vehicle changes still work.** This save doesn't have Ragnarok, but if Aaron has a Ship somewhere reachable, board/disembark and confirm the announcement still fires (outside any battle-exit window).
+5. **Regression check.** AD itself unchanged from v0.14.90.2. Drive into Balamb Garden / Balamb Town and confirm arrival announcements still fire on field entry (`[DRIVE] Arrival via exit-distance ...`).
+
+### Risks
+
+- **3s might not be enough.** If Aaron's BAT shows the byte still cycling at the 3s mark, the snapshot would commit a non-foot value as baseline. Symptom: a spurious 'Vehicle change' announcement firing several seconds after world-map entry once the byte finally settles. Mitigation: extend WM_ENTRY_DEBOUNCE_MS to 4000 or 5000ms in v0.14.90.4 if observed.
+- **Pre-battle Ship noise still fires.** Documented in 'Edge cases' above. Out of scope for this hotfix; will be addressed in a follow-up if Aaron finds it intrusive in real play.
+
+---
+
+## v0.14.90.2 — Distance-based arrival decision
+
+### What v0.14.90.1 BAT proved + the bug it exposed
+
+Aaron BAT'd v0.14.90.1 with a save right outside Balamb Garden. The log showed AD working perfectly:
+
+- Drive 1 to Balamb Town: 11 km drive, walks across the island, hit by 1 random encounter, paused silently, resumed on world-map re-entry, walked into final-approach zone (dist 999), exited at dist 364, paused (because v0.14.90's pGameMode-based check failed to detect MODE_FIELD), Aaron cancelled.
+- Drive 2 to Balamb Garden: 11 km drive, hit by 3 random encounters, paused/resumed each time, walked into final approach (dist 991), exited at dist 1133. Same pattern.
+
+The steering, key injection, distance announce, persist-through-battle, sweep, and refined-coord capture all worked. The diagnostic [DRIVE-KEY] / [DRIVE-STEER] logs from v0.14.90.1 are no longer needed and were stripped.
+
+BUT every world-map exit logged `Exited world map (mode=2)` — `mode=2` is `MODE_WORLDMAP`, the mode we just exited. The pGameMode register hadn't transitioned yet at the moment we detected IsOnWorldMap flipped false. Result: every exit branched into the 'pause' path, never into the 'arrival' path. v0.14.90's design relied on reading pGameMode in the same tick as the IsOnWorldMap transition; that turns out to be the wrong moment.
+
+No arrival announcements fired in the BAT log because every drive ended in cancellation or battle. But if Aaron had walked all the way into B-Garden, the drive would have paused (silently, no 'Arrived' announce), and on the next world-map entry it would have tried to resume — except by then the AD had already 'arrived' at the destination it was targeting.
+
+### Distance-based arrival design
+
+- **Battles and random encounters fire anywhere.** They're not tied to location entry triggers. The drive's `s_driveLastDist` could be 1, 100, 5000, or 100000 — any value depending on where the player happened to be when the encounter zone tripped.
+- **Field entries only happen near a target.** A location's entry trigger zone is by definition close to the target coord (typically <500 units, definitely <1500 units — the existing `DRIVE_ARRIVED_ON_EXIT_DIST` constant from v0.14.87).
+- **Therefore:** `dist < 1500 at exit` is a strong signal for arrival; `dist >= 1500 at exit` is a strong signal for battle/encounter.
+
+The distance check completely sidesteps the mode-register timing issue and any Poll() scheduling questions about whether MODE_FIELD's window is observable.
+
+### Edge case: random encounter at a target's doorstep
+
+If a random encounter fires within 1500 units of a catalog destination (rare but possible), the exit would be mis-classified as arrival. The user would hear 'Arrived at Balamb Garden' when actually entering battle. The actual battle entry (mode swirl, battle music, EWM announcements) is sensorily unambiguous, so the user immediately understands what happened. After winning the battle and returning to world map, AD has already terminated, but the player is standing on the entrance — walking forward one step enters the location naturally.
+
+This is acceptable; it's a small UI quirk, not a functional break, and only happens for random encounters within 1500 units of a target. The alternative (false negative — drive paused silently when it should have arrived) was strictly worse because it leaves AD in an indeterminate state that survives the field visit.
+
+### Files
+
+- `src/world_map.cpp` — ~30 line net change: exit handler rewritten to use distance check (~40 lines added, ~50 lines deleted including pGameMode read and the comment block explaining v0.14.90's design); v0.14.90.1 [DRIVE-KEY] and [DRIVE-STEER] diagnostic logging removed (~25 lines deleted); file header updated.
+- `src/ff8_accessibility.h` — `FF8OPC_VERSION` 0.14.90.1 → 0.14.90.2.
+- No new addresses, no new hooks, no schema changes.
+
+### v0.14.90.2 BAT plan
+
+Use the same save-outside-B-Garden test surface as v0.14.90.1.
+
+1. **Drive into Balamb Garden — the explicit field-entry-as-arrival test.** From outside, cycle to Balamb Garden, press `\`. AD walks. Walk all the way in. Should hear 'Arrived at Balamb Garden' the moment the world map exits to the Garden field. Log should show `[DRIVE] Arrival via exit-distance (target=Balamb Garden, dist=<small>)` followed by `[DRIVE] Captured refined entry for Balamb Garden at (X,Y)`. NO 'Auto-drive stopped' or 'Paused' message.
+
+2. **Drive into Balamb Town — narrow entrance.** From outside, drive to Balamb Town. AD walks; if walk-forward final approach misses, sweep fires ('Searching for entrance.'); when the player crosses the entrance trigger, exit happens at dist <1500 → 'Arrived at Balamb Town' + refined-coord capture.
+
+3. **Battle persistence (regression check).** Drive somewhere, get hit by a random encounter mid-drive (like in the v0.14.90.1 BAT). Should still pause silently, resume on world-map re-entry. dist at battle entry should be >>1500 so the new check correctly classifies as encounter, not arrival.
+
+4. **Refined-coord re-validation.** After arriving at any location once, walk back out, drive there again. Should hear `[DRIVE] Using refined entry for X` log line, drive walks straight in.
+
+5. **Cancellation.** Press `\` mid-drive. 'Cancelled.' AD stops.
+
+### Risks
+
+- **Random encounter near a target.** If an encounter zone overlaps an entrance trigger geometry, the encounter exit would mis-classify as arrival. Acceptable per the edge case discussion above. If observed in BAT, we can add an additional check (e.g., scene flag value, or pGameMode read after a 100ms delay).
+- **The 1500-unit threshold.** Currently inherited from v0.14.87's `DRIVE_ARRIVED_ON_EXIT_DIST`. If real-world entry triggers extend beyond 1500 units from a target's catalog coord (some open-entry locations might), the threshold may need tuning. v0.14.91 will replace it with per-location radii from the deep-research wmset Section 17/18 decode.
+- **Initial `s_driveLastDist == 0` case.** Guarded by `s_driveLastDist > 0` check. If a drive starts and the player IMMEDIATELY exits the world map before UpdateAutoDrive's per-tick block runs (very fast field entry, or paused-state edge case), the distance might still be 0 from initialization. Falls into the pause branch correctly.
+
+---
+
+## v0.14.90 — Chapter 2 hotfix #4: architectural revert + locomotion debounce
+
+### v0.14.89 BAT result
+
+FAILED. Aaron drove from Balamb Town to Balamb Garden and back; AD said 'Arrived near Balamb Garden' / 'Arrived near Balamb Town' at proximity without ever actually entering, then bounced between the two locations.
+
+Log analysis revealed three compounding problems:
+
+1. **Vehicle proximity arrival firing falsely.** At 11:24:27 the locomotion byte transiently read mode 50 (Ragnarok) for one poll. UpdateAutoDrive's vehicle branch (`if (!isOnFoot && dist < DRIVE_ARRIVE_DIST)`) fired immediately, announced 'Arrived near Balamb Garden' at dist=540, stopped the drive. Player wasn't in Ragnarok — they don't have one.
+
+2. **Field-entry arrival never fired.** The deferred `if (!nowOnWorldMap && s_driveActive)` block I added in v0.14.88 was supposed to detect MODE_FIELD on a subsequent poll, but the log shows it never fired. At 11:25:51 the drive paused at dist=1390 (well within the 1500 threshold for on-foot arrival), and the world map re-entered at 11:27:53 — 4-minute window where the off-map block should have detected MODE_FIELD, captured the refined coord, announced arrival. Didn't happen. Likely Poll() doesn't run during MODE_FIELD because the field has its own poll path.
+
+3. **Locomotion byte noise.** Even canonical values that should mean 'real vehicle change' read transiently. At 11:25:44 the byte read 3 (Ship), 0 (foot), 6 (Selphie foot) within 1 second — each one triggered IsCanonicalLocomotion and committed to s_lastVehicle, firing catalog rebuilds and (worse) poisoning the isOnFoot check that gates the vehicle proximity branch. v0.14.89's whitelist alone wasn't enough; transient values pass it.
+
+### conversation_search of past chats reveals the original working design
+
+Aaron prompted me to revisit the v0.11.05–v0.11.10 chats. The original AD architecture was:
+
+```c
+else if (!isWorldMap && s_onWorldMap) {
+    s_onWorldMap = false;
+    if (s_driveActive) {
+        uint16_t newMode = mode;  // ← captured AT exit time, same poll
+        if (newMode == MODE_FIELD || newMode == MODE_AFTER_BATTLE) {
+            // arrival
+        } else {
+            // battle / interrupt → pause; resume on re-entry
+        }
+    }
+}
+```
+
+Key differences from what I shipped:
+
+- **Arrival decision is made at the moment of exit, not deferred.** The mode is read *before* the exit takes effect on Poll's flow, so the value is whatever the engine just transitioned TO. By the time a deferred block runs on a subsequent poll, the mode has already been overwritten or Poll isn't even running anymore.
+- **Arrival applies to all vehicles uniformly.** Garden → FH dock, Ragnarok → landing pad, foot → town entrance — all use the same field-entry path. The vehicle-vs-foot arrival distinction was Claude's invention in v0.14.87 and was always architecturally wrong; it just happened not to fail until s_lastVehicle got poisoned by transients.
+- **MODE_AFTER_BATTLE counts as arrival.** Original design recognized that the post-battle return path can pass through this mode; it's a successful transition, not an interrupt.
+
+### What v0.14.90 ships
+
+**Fix 1 — Architectural revert.** Poll()'s world-map-exit handler now reads pGameMode immediately (in the same tick as the exit transition), branches on the mode value:
+
+- `MODE_FIELD` (1) or `MODE_AFTER_BATTLE` (4) → announce 'Arrived at <X>', capture refined coord, StopAutoDrive.
+- Anything else (MODE_SWIRL = 3 = battle entry, MODE_BATTLE = 999, others) → release injected keys, log paused state, leave s_driveActive true. Drive will resume in the existing world-map-entry handler when the player returns from battle.
+
+The deferred `!nowOnWorldMap && s_driveActive` block from v0.14.88 is gone.
+
+**Fix 2 — Vehicle proximity arrival removed.** The `if (!isOnFoot && dist < DRIVE_ARRIVE_DIST)` block in UpdateAutoDrive is deleted. Field-entry detection is the single source of truth for arrival. If the player is in a vehicle that can't enter a location, they'll either stay outside indefinitely (Stuck detection eventually fires after 18s of no movement) or dismount and walk in (drive remains active, completes via field-entry). Either way is correct behavior.
+
+**Fix 3 — Locomotion debounce.** New CheckVehicleChange logic: canonical values must read consistently across DEBOUNCE_POLLS = 4 consecutive polls before committing to s_lastVehicle. State machine:
+
+```
+if (!IsCanonicalLocomotion(v))    → reset pending, return
+if (v == s_lastVehicle)            → clear pending, return
+if (v == s_pendingVehicle)         → increment count
+else                                → set pending=v, count=1
+if (count < DEBOUNCE_POLLS)        → return
+→ commit, fire announcement and rebuild
+```
+
+Four polls at the world-map poll rate (~16ms) is ~64ms minimum, which is conservative for a real player action (mounting/dismounting takes hundreds of ms in animation). Transient 1-poll noise gets suppressed completely.
+
+### Files
+
+- `src/world_map.cpp` — ~80 line net change: exit handler rewritten with at-exit pGameMode read (~50 lines), deferred off-map block deleted (~50 lines), vehicle proximity arrival removed (~10 lines), CheckVehicleChange debounce added (~30 lines including new state vars), file header updated.
+- `src/ff8_accessibility.h` — `FF8OPC_VERSION` 0.14.89 → 0.14.90.
+- No new addresses, no new hooks, no schema changes.
+
+### v0.14.90 BAT plan
+
+1. **Sanity — catalog filter at startup.** Same as before: 4 entries on Balamb on foot at game load, terrain grid 195/573, `-`/`=` cycles, Backspace bearing.
+
+2. **The actual fix — drive into Balamb Garden and confirm 'Arrived at Balamb Garden' fires AT the moment of entering the Garden field.** Drive from somewhere outside, walk in, world map exits → expected log: `[DRIVE] Arrival via mode=1 (target=Balamb Garden, dist=<small>)` and speech 'Arrived at Balamb Garden.' followed by `[DRIVE] Captured refined entry for Balamb Garden at (X,Y)`.
+
+3. **Drive into Balamb Town (narrow entrance test).** AD walks toward town center. Walk-forward final approach for 6s without entering → sweep fires ('Searching for entrance.'). When the sweep aligns with the entrance → world map exits to mode 1 → 'Arrived at Balamb Town.' refined coord captured.
+
+4. **Second visit to Balamb Town (the validation that v0.14.89's refinement still works).** Walk back out, cycle to Balamb Town, press `\`. Expected log: `[DRIVE] Using refined entry for Balamb Town: (X,Y) instead of catalog (13249,-26779)`. AD steers directly to the refined coord. NO sweep fires.
+
+5. **Battle persistence.** Drive somewhere with grass. Random encounter mid-drive → expected log: `[DRIVE] Paused (exit mode=3, target=<X>, dist=<N>) — will resume on re-entry`. Win battle → expected log: `Entered world map`, `[DRIVE] Resumed after world-map re-entry → <X>`, speech 'Resuming drive to <X>.'
+
+6. **Locomotion debounce.** During foot travel near coastlines, the log should NOT show spurious 'Vehicle change: Ship' / 'Vehicle change: Car' announcements anymore. The transient 1-poll Ship/Car/Ragnarok reads from the BAT log are now silently dropped at the debounce gate.
+
+### Risks
+
+- **Real vehicle changes are now delayed by ~64ms.** Imperceptible to a human, but worth confirming a real Ship/Garden mount still announces correctly. If the locomotion byte holds the new value steady for hundreds of ms (which is the design assumption), the announce fires at the 4-poll mark and life is good.
+- **MODE_AFTER_BATTLE timing.** If exit mode reads MODE_SWIRL (battle entry), drive pauses; if it reads MODE_AFTER_BATTLE (post-battle return-to-world), the original design treats that as arrival. That's correct for the case where the player won a battle that was triggered by walking onto a field trigger — they DID arrive, just had to fight on the way in. But if MODE_AFTER_BATTLE reads during a normal post-battle return (random encounter on the open world map), we'd falsely announce arrival. Investigation needed during BAT — if log shows 'Arrival via mode=4' immediately after random battles, we revisit.
+- **First-visit refined-coord capture during sweep.** If sweep finds the entrance, the captured coord is the actual entrance trigger position. Subsequent visits steer directly to that. Working as designed.
+
+---
+
+## v0.14.89 — Chapter 2 hotfix #3: empirical entry-coord refinement (Option B)
+
+### v0.14.88 BAT clarification + Option B vs Option A
+
+Aaron's v0.14.88 BAT confirmed persist-through-battle works correctly (random encounters pause AD, world-map re-entry resumes). Aaron then raised the longer-term question: 'Is there a better solution than blindly turning and moving around to try to locate the town entrances? There must be some sort of trigger line at the town location that indicates the entrance, can we find that and use that instead so it is more direct?'
+
+Claude investigated the disassembly directly. Findings:
+
+- The prior `World Map Accessibility deep research results.md` already established that town entry triggers are HARDCODED in `FF8_EN.exe`, NOT in `wmset.obj` or `wm2field.tbl` (`wm2field.tbl` is the post-transition destination table, not the trigger zone table).
+- The function `world_dialog_assign_text_sub_543790` (0x00543790) does proximity comparisons with torus-wrap math (constants 0xFFFE0000 / 0x40000) but reads a 16-byte-stride table at `0xC761A0` which is the location NAME popup table, not the trigger table.
+- `sub_543A40` (called 14 times, near 0x00543790) is a slot management utility for the name table, not trigger logic.
+- The trigger-check function is somewhere else in `FF8_EN.exe`, and the prior deep research DID NOT identify its address. The existing `World Map Entry Trigger Coordinates deep research prompt.md` was prepared for this question but was framed wrong (asked for a flat trigger table, which doesn't exist as a single structure) and was never run.
+
+Claude generated a sharpened v2 prompt at `Plan & Research Documents/World Map Entry Trigger Coordinates deep research prompt v2.md` that:
+
+- Acknowledges the prior research's findings (triggers are hardcoded; not in any data file documented so far).
+- Confirms what's NOT the trigger function (sub_543790 = name popup, sub_543A40 = slot mgmt).
+- Asks the actual question: where is the trigger-check function, what data does it consult, and what's the per-location trigger geometry.
+- Provides 5 specific investigation paths (trace from sub_559240, find writes to field-transition state, undocumented wmset sections, per-region region-list, wm dummy field mapping).
+- Documents all confirmed runtime addresses, coordinate conventions, and known location coordinate samples.
+- Includes the savemap header reminder (76 bytes, NOT 96).
+
+Aaron is running the prompt for next-session ingestion.
+
+### Option B in this build
+
+Meanwhile, Option B is shipped. Empirical entry-coord capture:
+
+1. **Refined-entry parallel table.** Three `static int32_t[LOCATION_COUNT]` arrays (`s_refinedX`, `s_refinedY`, `s_refinedHas`) indexed by `s_locations[]` slot. Cleared on `Initialize()` because persistence isn't implemented yet.
+
+2. **Capture in the field-entry handler.** When `Poll()`'s off-map MODE_FIELD detection fires the arrival branch (`nowOnFoot && s_driveLastDist < DRIVE_ARRIVED_ON_EXIT_DIST`), it now also captures `(s_driveLastPosX, s_driveLastPosY)` — the player's last-known world-map position before the field exit — into `s_refined[X|Y|Has][locIdx]`. The `locIdx` is found via `FindLocationIndexByTargetCoords(s_driveTargetX, s_driveTargetY)` which checks both the canonical `s_locations[]` coords AND the existing `s_refinedXY[]` coords (so re-visits still find their slot for refinement updates).
+
+3. **Steering uses refined coord when present.** `StartAutoDrive` now does: lookup the catalog entry by the user's selected catalog slot, then check the parallel refined table for an entry. If `has_refined`, use the refined coord as the drive target; else use the catalog center. Logged either way.
+
+4. **`s_driveLastPosX/Y` tracking.** New state vars updated alongside `s_driveLastDist` in `UpdateAutoDrive`'s per-tick block. Cheap because we already have `(px, py)` in scope.
+
+First visit to a narrow-entrance town (e.g. Balamb Town) still goes through the catalog center — sweep search may fire, eventually the player walks onto the trigger — and the captured refined coord is set. Second visit steers directly to the refined entry coord, which is by definition on the trigger zone. Sweep should never fire for refined locations.
+
+### Files
+
+- `src/world_map.cpp` — ~80 lines net change: refined-entry table declarations and `FindLocationIndexByTargetCoords` helper (~40 lines), `StartAutoDrive` target-capture refined-coord lookup (~15 lines), `UpdateAutoDrive` last-pos tracking (~3 lines), field-entry handler refined-capture block (~25 lines), `Initialize` clears refined table (~10 lines), file header updated.
+- `src/ff8_accessibility.h` — `FF8OPC_VERSION` 0.14.88 → 0.14.89.
+- `Plan & Research Documents/World Map Entry Trigger Coordinates deep research prompt v2.md` — NEW. Sharpened deep research prompt for the trigger table, supersedes v1. Aaron is running this externally.
+- No new addresses, no new hooks, no schema changes, no build script changes.
+
+### v0.14.89 BAT plan
+
+This build's value is observed across two consecutive drives to a narrow-entrance location. Aaron's test surface is foot + car on Balamb island; Balamb Town is the canonical narrow-entrance test.
+
+1. **Sanity — confirm Chapter 1 + 2 wins still preserved.** At game load on Balamb on foot: terrain grid loads with 195 land / 573 ocean, catalog filter shows 4 entries, `-`/`=` cycles, Backspace announces bearing. `\` starts/cancels auto-drive. Random encounter persist-through-battle works.
+
+2. **First visit to Balamb Town (refined-capture).** From Balamb Garden, drive on foot to Balamb Town. AD walks; sweep search may or may not fire (depends on approach angle). Eventually the player enters Balamb Town. Expected log: `[DRIVE] Field-entry-as-arrival (target=Balamb Town, dist=<small>)` followed by `[DRIVE] Captured refined entry for Balamb Town at (<X>,<Y>) (was target=(13249,-26779))` — the (X, Y) is the actual on-the-ground entry coord, the `was target=` is the catalog center (13249, -26779).
+
+3. **Second visit to Balamb Town (refined-use, the validation).** Walk back out of Balamb Town to the world map. Cycle to Balamb Town again. Press `\`. Expected log: `[DRIVE] Using refined entry for Balamb Town: (<X>,<Y>) instead of catalog (13249,-26779)`. AD steers directly to the refined coord. NO sweep fires (because the refined coord is by definition on the entrance trigger). Speech: 'Driving to Balamb Town. <N> kilometers.' → walks straight in → 'Arrived at Balamb Town.'
+
+4. **Re-refine on subsequent visit.** Third visit (or any visit after the first) re-captures the refined coord with the latest entry position. Log shows `[DRIVE] Updated refined entry for Balamb Town at (<X>,<Y>)`. This is by design — if the player enters from a slightly different angle, the refined coord shifts to match. Over multiple visits the refined coord settles toward the actual trigger zone center.
+
+5. **Open-entry locations (e.g. Balamb Garden).** First visit captures refined entry too. Second visit uses it. Either way, the drive succeeds because B-Garden's entrance is wide — the catalog-center vs refined-coord distinction is small. Just confirms the mechanism doesn't break open-entry behavior.
+
+6. **Cancel test.** During a refined-coord drive, press `\` to cancel. Should hear 'Cancelled.' immediately. Refined coord is unchanged (capture only fires on successful field-entry-as-arrival).
+
+### Risks
+
+- **Refined-coord captured during a misdirected first visit.** If the player approaches Balamb Town from the wrong side and accidentally enters via a different mechanism (e.g. story event, NPC interaction), the captured refined coord might be wrong. Mitigation: subsequent successful visits overwrite the refined coord, so the system self-corrects with use. If a single bad capture causes a persistently broken drive, user can press `\` to cancel and walk in manually — next successful entry corrects.
+- **Multiple entrances per location.** Some locations have multiple field entry points (Esthar likely, when accessible). The refined coord captures whichever one the player most recently used. If they want to use a different entrance, they manually drive partway then take over. v0.14.90+ could store multiple refined coords per location with selection logic.
+- **In-memory only, no persistence.** Game restart loses all refined coords. v0.14.90 will add persistence via `%APPDATA%\FF8AccessibilityMod\refined_entries.json` or similar.
+- **`FindLocationIndexByTargetCoords` lookup failure.** If the drive's target coord doesn't match any catalog or refined entry (shouldn't happen, but defense in depth), capture is skipped with a log line. Drive's arrival announcement still fires correctly.
+
+### Path forward
+
+v0.14.90: persistence + `World Map Entry Trigger Coordinates deep research prompt v2.md` ingestion. Once the trigger table is recovered (deep research success), v0.14.91 will fold it in alongside the empirical refined coords — deep-research data takes precedence (canonical), refined coords supplement (live re-fitting if catalog drifts from real game state). The two are complementary, not competing.
+
+---
+
+## v0.14.88 — Chapter 2 hotfix #2: persist-through-battle, queue trigger-table research
+
+### v0.14.87 BAT result + Aaron's design clarifications
+
+v0.14.87 BAT showed the auto-drive working reasonably well. Two of Aaron's three v0.14.86 asks were satisfied (on-foot doesn't say 'Arrived' until actually entering a location; sweep search exists for narrow entrances). The third — 'world-map exit = AD disengages' — was implemented but Aaron asked to revert it after BAT, with a more nuanced rule:
+
+> 'We do want AD to persist through random encounters. We just want it to stop if cancelled by the user or if the world map is exited and a field is entered.'
+
+So the right rule is: drive persists through battles (because the player wants to continue toward the destination after winning) but terminates when the world map exits to a field (because that means they actually entered a location).
+
+Aaron also asked the design question: 'Is there a better solution than blindly turning and moving around to try and locate the town entrances? There must be some sort of trigger line at the town location that indicates the entrance, can we find that and use that instead so it is more direct?'
+
+Investigation: `Plan & Research Documents/World Map Entry Trigger Coordinates deep research prompt.md` was prepared for exactly this question — a previous deep research established that entry trigger coordinates are hardcoded in `FF8_EN.exe`, not stored in data files. The prompt asks the next-step question: where in the binary is the trigger table, and what are its coordinates. **The prompt has not yet been run.** Found the relevant disassembly at `world_dialog_assign_text_sub_543790` (0x00543790) which does contain the torus-distance math (constants 0xFFFE0000 / 0x40000 = +/-131072 wrap, 262144 full world width) and references a 16-byte-stride structure at `0xC761A0`, but that's the location NAME table not the trigger table. Mapping the full trigger table by hand from disassembly is hours of work; running the existing prompt through ChatGPT is ~10 minutes and produces canonical entry-trigger coordinates. Recommended path: Aaron runs the prompt for next session, v0.14.89 uses the results to replace sweep with direct trigger-zone targeting.
+
+### What v0.14.88 ships
+
+**Fix — split world-map-exit into pause-vs-terminate via `pGameMode`.**
+
+The Poll() world-map-exit path now has two phases:
+
+1. **Exit detected.** When `nowOnWorldMap` flips from true to false, immediately release injected drive keys (so they don't stay pressed across the field/battle transition) and log `[DRIVE] Paused (world-map exit, target=<X>, dist=<N>)`. Drive STATE is preserved — `s_driveActive` stays true. This is the v0.14.86 behavior restored.
+
+2. **Off-map state poll — watch for MODE_FIELD.** New block in `Poll()` that runs while `!s_onWorldMap && s_driveActive`. Reads `*FF8Addresses::pGameMode`. If `== MODE_FIELD`, the off-map state was a field/location entry (not a battle). Branches on distance + on-foot:
+   - On-foot + `s_driveLastDist < 1500` (DRIVE_ARRIVED_ON_EXIT_DIST): announce 'Arrived at <X>.', `StopAutoDrive` for clean termination.
+   - Anything else: announce 'Auto-drive stopped.', `StopAutoDrive`. Catch-all for entering an unrelated field or vehicle drive that hit a transition.
+
+3. **World-map re-entry resume (battle path).** If the drive survives the off-map period (i.e., MODE_FIELD never observed; the off-map state must have been a battle), when the world map re-loads, the entry-detection path resumes the drive: re-arm timers, re-announce 'Resuming drive to <X>.' Drive continues from current position toward the same target.
+
+The `pGameMode` check is a snapshot — if the mode is still MODE_WORLDMAP for one tick after exit (timing race), we just wait. Subsequent ticks see the updated mode and the right branch fires. Doesn't matter if MODE_FIELD lands one tick later than the exit detection, because the off-map state poll runs every tick.
+
+**Sweep retained as fallback.** The v0.14.87 sweep search for narrow entrances is unchanged. It still fires when on-foot drive is stuck or has been in final approach >6s without exit. Once we have the canonical trigger table, sweep will be replaced by direct entrance navigation — but until then, sweep is the only mechanism for narrow towns like Balamb Town.
+
+### Files
+
+- `src/world_map.cpp` — ~50 lines net change: world-map entry handler restored to v0.14.86 resume-on-active-drive shape; world-map exit handler simplified back to pause; new off-map MODE_FIELD detection block added (~25 lines); file header updated.
+- `src/ff8_accessibility.h` — `FF8OPC_VERSION` 0.14.87 → 0.14.88.
+- No new addresses, no new hooks, no schema changes, no build script changes.
+
+### v0.14.88 BAT plan
+
+1. **Sanity — confirm Chapter 1 wins still preserved.** At game load on Balamb on foot: terrain grid loads with 195 land / 573 ocean, catalog filter shows 4 entries, `-`/`=` cycles, Backspace announces bearing.
+
+2. **Battle persistence (the explicit ask).** Drive somewhere with random encounters (Balamb Garden → Chocobo Forest 1 has plenty of grass). Mid-drive, a random encounter fires. Expected log: `[DRIVE] Paused (world-map exit, target=<name>, dist=<N>)`, then `Exited world map`. Speech goes silent on AD (battle TTS announces battle entry). Win the battle. Expected: `Entered world map`, `[DRIVE] Resumed after world-map re-entry → <name>`, speech 'Resuming drive to <name>.' Drive continues toward target.
+
+3. **Field-entry termination (B-Garden, open entrance).** Drive on foot to Balamb Garden. Expected log: `[DRIVE] Field-entry-as-arrival (target=Balamb Garden, dist=<small>)` and speech 'Arrived at Balamb Garden.' on the moment the world map exits to the Garden field.
+
+4. **Field-entry termination (Balamb Town, narrow entrance — sweep test).** Drive on foot to Balamb Town. AD walks. Final approach without exit → sweep fires ('Searching for entrance.'). When sweep happens to align with the entrance → world map exits → 'Arrived at Balamb Town.'
+
+5. **Cancellation.** Press `\` while a drive is in progress. Should hear 'Cancelled.' immediately, all key injection stops. Log: `[KEY] backslash → cancel`.
+
+6. **Vehicle drive (if access to a car).** Drive in the car to Balamb Town. At 600 units the car stops with 'Arrived near Balamb Town.' (the v0.14.87 vehicle-proximity arrival). User can then dismount and walk in.
+
+### Risks
+
+- **MODE_FIELD timing race.** If pGameMode reads MODE_FIELD briefly during a battle entry transition (not expected per FF8 community docs but possible), we'd terminate the drive instead of pausing. User would have to re-press `\` after the battle. Rare; falls back to v0.14.87 behavior in the worst case.
+- **MODE_FIELD detection fires after world-map re-entry from a battle.** If after winning a battle the game briefly transitions through MODE_FIELD before going back to MODE_WORLDMAP, we'd terminate the drive instead of resuming. Watching for `[DRIVE] Field-entry-as-...` log lines during what should be a battle-resume scenario will catch this. If observed, we'd narrow the detection (e.g., require MODE_FIELD to be stable for 500ms before terminating).
+- **Sweep still imperfect.** The 'better solution' for narrow entrances awaits the deep research run — see queue item below.
+
+### Queue: trigger-table deep research for v0.14.89
+
+Aaron should run `Plan & Research Documents/World Map Entry Trigger Coordinates deep research prompt.md` through ChatGPT (or similar deep-research tool) with the `Game Files/disassembly/` files attached. The prompt asks for:
+
+- The hardcoded trigger table location in `FF8_EN.exe` (likely in the .text section near `worldmap_input_update_sub_559240` or referenced from `world_dialog_assign_text_sub_543790`).
+- Per-location: world-map X, Y, trigger radius, destination field ID.
+- Both the 26 Ragnarok markers AND the additional walkable-only locations (Fire Cavern, etc.) that aren't in the Ragnarok set.
+
+Once we have that table, v0.14.89 will:
+
+1. Replace sweep search with direct steering toward the entrance trigger zone (instead of the catalog center).
+2. Use the actual trigger radius for arrival detection.
+3. Possibly also enable smarter arrival-position selection when multiple field entries exist (e.g., Esthar has multiple gates).
+
+Sweep stays as a final fallback in case the trigger-table data is incomplete for some locations.
+
+---
+
+## v0.14.87 — Chapter 2 hotfix: real-arrival, sweep, no-resume
+
+### v0.14.86 BAT result
+
+Auto-drive worked for the steering and basic flow but had three UX problems Aaron called out. The log at `Logs/ff8_world.log` corroborated all three:
+
+1. **'Arrived' announced before actual entry.** At 23:30:18: `[DRIVE] Stopped: Arrived at Balamb Garden.` Then at 23:30:24: `Exited world map`. Six-second gap — Aaron had to manually walk into B-Garden after the proximity-based arrival announce. Same pattern for Balamb Town — 'Arrived' fired but player wasn't actually inside.
+
+2. **Narrow vs open entrances.** Balamb Town has a small westward entrance you have to find; B-Garden's entrance is wide and approachable from any direction; Fire Cavern is somewhere in between. Walk-forward final approach (the v0.14.86 strategy) works for open entrances but misses narrow ones — the player walks past the trigger band entirely.
+
+3. **Auto-resume after battles.** v0.14.86 paused AD on world-map exit and resumed on re-entry. Aaron wants exit = AD disengaged entirely. If they want to resume after a battle, they re-press `\`.
+
+Log also shows phantom 'Ship (mode 3)' transitions at coastal field-transitions even when on foot (e.g., 23:29:21, 23:30:15) — each lasts ~1 second then back to foot. Causes catalog rebuilds (foot rule class 0 → ship rule class 1 → foot rule class 0). Doesn't break AD function but is log noise. Deferred.
+
+### What v0.14.87 ships
+
+**Fix 1 — On-foot arrival via world-map exit, vehicle arrival via proximity.**
+
+`UpdateAutoDrive` now branches on `GetVehicleType(s_lastVehicle) == VEH_ON_FOOT`:
+
+- **On-foot**: NO proximity-based arrival. The drive keeps walking forward in final approach. Arrival is announced by `Poll()`'s world-map exit handler when the world map exits while distance to target was below `DRIVE_ARRIVED_ON_EXIT_DIST = 1500`. The world-map exit IS the arrival event — it means the player walked onto the location's entrance trigger band.
+- **Vehicle (Car / Chocobo / Garden / Ragnarok)**: keeps the v0.14.86 `dist < 600` proximity arrival, announced as 'Arrived near X' (different wording from 'Arrived at X' to make explicit that the vehicle parked, didn't enter). Vehicles can't enter most locations — the player has to dismount and walk in — so this is correct.
+
+Distance heuristic for exit-as-arrival: 1500 units. Random encounters firing within that radius of a target would mis-announce as arrival, but in practice random encounters happen during transit, not in the final-approach zone. Battle-entry speech follows immediately so the user always has clear cues regardless.
+
+**Fix 2 — Sweep search from past chat v0.11.10.**
+
+New sweep state machine triggered when on-foot drive is in final approach (dist < 1000) AND either:
+
+- Stuck for >2 windows (>6s no movement): `s_driveStuckCount >= 2 && dist < FINAL_APPROACH_DIST` → sweep.
+- Has been in final approach >6s without world-map exiting: `now - s_finalApproachEnterTick > FINAL_APPROACH_TIMEOUT_MS` → sweep.
+
+Sweep alternates 6 phases of turn-then-walk:
+
+- Phase 1: turn right 800ms, then walk forward 3000ms.
+- Phase 2: turn left 1000ms, then walk forward 3000ms.
+- Phase 3: turn right 1200ms, then walk forward 3000ms.
+- ...
+- Phase 6: turn left 1800ms, then walk forward 3000ms.
+
+Each turn duration grows by 200ms per phase, scanning progressively wider angles. Total sweep budget ~30s. Field exit during any phase → caught by `Poll()`'s world-map exit handler → arrival. Sweep exhaustion (phase > 6 with no exit) → 'Could not find entrance.' and disengage.
+
+At sweep start, speech says 'Searching for entrance.' and periodic distance announcements are suppressed during sweep (otherwise we'd say 'less than 1 kilometer' every 5s during the search).
+
+**Fix 3 — Exit = full disengage.**
+
+`Poll()`'s world-map exit handler now ends with `StopAutoDrive(...)` instead of preserving state for resume. Two paths:
+
+- On-foot + dist < 1500: `StopAutoDrive("Arrived at <X>.")` — the spec arrival.
+- Anything else: `StopAutoDrive("Auto-drive stopped.")` — catch-all for random encounter, vehicle drive that hit an unexpected boundary, etc.
+
+`Poll()`'s world-map entry handler is simplified to just announce 'World map.' — no resume branch. If the user wants to continue toward the same destination after a battle, they re-press `\` (which is one keypress, very fast).
+
+### Files
+
+- `src/world_map.cpp` — ~150 lines net change: drive constants block (added 4 sweep constants + 2 final-approach state vars, ~15 lines), new `StartSweep()` helper (~15 lines), `UpdateAutoDrive` rewritten with isOnFoot check + sweep state machine + final-approach timeout (~80 lines net), `StopAutoDrive` clears sweep state (~5 lines), `StartAutoDrive` initializes sweep state (~5 lines), `Poll()` exit handler rewritten with arrival-vs-stop branch (~25 lines), `Poll()` entry handler simplified (~10 lines net deletion), `Initialize` adds sweep state init (~5 lines), file header updated.
+- `src/ff8_accessibility.h` — `FF8OPC_VERSION` 0.14.86 → 0.14.87.
+- No new addresses, no new hooks, no schema changes, no build script changes.
+
+### v0.14.87 BAT plan
+
+Aaron's test surface is foot + car on Balamb island. The catalog filter has Balamb Garden (open entrance), Balamb Town (narrow entrance — the canonical sweep test), Fire Cavern (narrow), Chocobo Forest 1.
+
+1. **Sanity — confirm Chapter 1 wins still preserved.** At game load on Balamb on foot: terrain grid loads with 195 land / 573 ocean, catalog filter shows 4 entries, `-`/`=` cycles, Backspace announces bearing.
+
+2. **The B-Garden (open entrance) test.** From a position outside but near B-Garden, press `-`/`=` to select Balamb Garden. Press `\`. Should hear 'Driving to Balamb Garden. <N> kilometers.' AD walks in. Should NOT announce 'Arrived' until you actually enter the Garden (world-map exits to the Garden field). Expected log sequence: `[DRIVE] Start → Balamb Garden`, periodic km announces, `[DRIVE] Entered final approach zone`, eventually `[DRIVE] Exit-as-arrival (target=Balamb Garden, dist=<small>)` and speech 'Arrived at Balamb Garden.'
+
+3. **The Balamb Town (narrow entrance) test — most important.** Drive from B-Garden to Balamb Town. AD should walk. When entering final approach (within 1km), if it walks past the entrance, after 6s in the zone the sweep should fire — should hear 'Searching for entrance.' Sweep should turn-walk-turn-walk through phases. When the sweep happens to align with the entrance, the world map exits to Balamb Town field and speech says 'Arrived at Balamb Town.' If all 6 phases exhaust without entry: 'Could not find entrance.'
+
+4. **Cancellation.** Press `\` while a drive is in progress. Should hear 'Cancelled.' immediately, all key injection stops. Log: `[KEY] backslash → cancel`.
+
+5. **Exit-as-interruption (random encounter).** Drive somewhere (Balamb to Chocobo Forest is good for grass). When a battle starts mid-drive, log should show `[DRIVE] Exit-as-interrupt (target=<name>, dist=<large>, onFoot=1)` and speech 'Auto-drive stopped.' AD should NOT auto-resume after the battle. After winning, world map should announce 'World map.' and the user must re-press `\` to continue toward the same target if desired.
+
+6. **Vehicle drive (if access to a car).** Drive in the car to Balamb Town. Should hear 'Driving to Balamb Town. <N> kilometers.' At 600 units the car stops with 'Arrived near Balamb Town.' (note: 'near', not 'at') and AD ends. The user can then dismount and walk in manually — this is correct because cars can't enter towns anyway.
+
+### Risks
+
+- **Phantom sweep on open-entry locations.** If walking into B-Garden takes >6s because of slow movement or wide approach, the final-approach timeout could fire and start sweep prematurely. The sweep would then likely succeed quickly (B-Garden's entrance is everywhere) so this is at worst a brief 'Searching for entrance.' announce that wasn't strictly needed. Acceptable.
+- **Sweep loops without finding entrance.** If the player approaches Balamb Town from a non-entry side (e.g. north-east instead of west), the 6-phase sweep covers ~30s of turn-walk angles in that local area. If the entrance is actually on the other side of the town, sweep won't find it and gives up with 'Could not find entrance.' User can re-press `\` after walking around to a better angle. v0.14.88 could add per-location entry-direction hints if this becomes a recurring problem.
+- **The 1500-unit exit-as-arrival heuristic.** Battle near a target = mis-announce as arrival. Rare in practice. If it does fire wrong, the immediate battle announce makes it clear what actually happened.
+
+---
+
+## v0.14.86 — Chapter 2: auto-drive
+
+### Scope
+
+Restores the world-map auto-drive system that was originally built in v0.11.05-v0.11.10 (six builds, BAT-validated by Aaron) and lost in the v0.14.24 build damage. Key user flow:
+
+1. Player on world map, on foot or in a car, with a filtered catalog from Chapter 1.
+2. Press `-` or `=` to cycle to the desired destination (announces "Balamb Town. 17 km away.").
+3. Press `\` → "Driving to Balamb Town. 17 kilometers."
+4. Mod injects arrow-key presses to steer toward target. Periodic distance announces every 5s.
+5. Cross 3km → one-shot "Approaching Balamb Town. 3 kilometers." announce.
+6. Below 1000 units → walk-forward sweep (no steering) so the entrance trigger band catches the player.
+7. Cross 600 units → "Arrived at Balamb Town." Drive ends.
+
+If a random encounter fires mid-drive, the world-map exit pauses the drive and releases all injected keys. World-map re-entry resumes with "Resuming drive to Balamb Town." and re-arms the stuck-detection timer so the field/battle gap doesn't immediately trigger "Stuck."
+
+If the drive can't make progress (e.g. blocked by terrain, narrow entrance trigger), 18 seconds of no meaningful movement → "Stuck. Cannot reach destination." Drive ends, all keys released.
+
+Pressing `\` while a drive is in progress cancels the drive ("Cancelled.").
+
+### Why keyboard injection (not fake gamepad)
+
+v0.11.05-v0.11.07 tried the field-nav fake-gamepad mechanism for world-map auto-drive and it failed silently. The world map's input handler `worldmap_input_update_sub_559240` has its own input pipeline separate from the field's `engine_eval_keyboard_gamepad_input` — the fake gamepad signal never reaches it. v0.11.08 switched to OS-level `keybd_event` injection, which both pipelines see, and BAT-validated immediately. Captured in the source comment block at v0.14.86 so future investigations don't re-discover this.
+
+### Steering math
+
+Heading is at `0x0203ED02`, 16-bit, 0=North, 0-4095 native units (4096 = full circle). Bearing to target is computed via `atan2(dx, -dy)` (Y axis inverted because FF8 increases Y downward), normalized to 0-4095. Relative bearing = `(targetBearing - heading + 4096) & 0xFFF`.
+
+Three decision thresholds:
+- **`< 200` or `> 3896`** (within ~17.6° of dead ahead) → forward only.
+- **`< 1800`** (target on right, up to ~158°) → turn right; if `< 512` (~45°) also forward.
+- **`> 1800`** (target on left, the remaining ~158-360° arc) → turn left; if `> 3584` (~315°, i.e. within ~45° of straight ahead from the left side) also forward.
+
+Turn-AND-forward is faster than turn-then-forward when reasonably aligned; pure-turn at wide angles avoids running away from the target while turning.
+
+### State design
+
+Drive target captured by VALUE at `StartAutoDrive` time — stable `(s_driveTargetX, s_driveTargetY, s_driveTargetName)`. Critically NOT a catalog index, because the Chapter 1 catalog rebuilds whenever the player crosses a BFS rule-class boundary. With value-based targets the drive survives arbitrary catalog rebuilds.
+
+Key-held tracking via three booleans (`s_keyUpHeld`, `s_keyLeftHeld`, `s_keyRightHeld`). `SetDriveKeys(up, left, right)` is idempotent — only generates `keybd_event` calls on state changes. Arrow scan codes 0x48/0x4B/0x4D with `KEYEVENTF_EXTENDEDKEY` so the OS treats them as cursor arrows, not numpad equivalents.
+
+### Files
+
+- `src/world_map.cpp` — ~180 lines added: drive state vars + constants block (~50 lines), keyboard injection helpers + `TorusBearing` (~50 lines), `StartAutoDrive` + `StopAutoDrive` + `UpdateAutoDrive` (~120 lines), backslash-handler rewrite (~15 lines), Poll() world-map enter/exit pause/resume + `UpdateAutoDrive` call (~25 lines), Initialize/Shutdown drive-state init/teardown (~10 lines).
+- `src/ff8_accessibility.h` — `FF8OPC_VERSION` 0.14.85.3 → 0.14.86.
+- No new addresses, no new hooks, no schema changes, no build script changes (no new `.cpp` or `.inl` files; `src/deploy.bat` unchanged).
+
+### v0.14.86 BAT plan
+
+Aaron's test surface is Balamb island on foot (or in a car). Filtered catalog from Chapter 1 has Balamb Garden, Balamb Town, Fire Cavern, Chocobo Forest 1.
+
+1. **Sanity — confirm Chapter 1 wins still preserved.** At game load on Balamb on foot: terrain grid loads with 195 land / 573 ocean, catalog filter shows 4 entries, `-`/`=` cycles among them, Backspace announces bearing.
+
+2. **The actual Chapter 2 fix — a complete drive.** From Balamb Garden, press `-`/`=` to select Balamb Town. Press `\`. Should hear:
+   - "Driving to Balamb Town. 17 kilometers." (or whatever the actual distance reads)
+   - Periodic "<N> kilometers." announces every 5s while in transit.
+   - On crossing 3km: "Approaching Balamb Town. 3 kilometers." (one-shot).
+   - On crossing 600 units: "Arrived at Balamb Town." Drive ends.
+   Log should show steady `[KEY] backslash → start drive` then progress, no `[DRIVE] Stuck` lines.
+
+3. **Cancellation.** Start a drive, then press `\` again immediately. Should hear "Cancelled." and all key-injection should stop. Log shows `[KEY] backslash → cancel`.
+
+4. **Battle persistence.** Drive to a destination with high random-encounter rate. When a battle starts mid-drive, the world map exits — log should show `[DRIVE] Paused (world-map exit, target=<name>)`. After winning the battle and returning to the world map, log should show `[DRIVE] Resumed after world-map re-entry → <name>` and the speech should say "Resuming drive to <name>." Drive should continue toward target.
+
+5. **Stuck recovery (give-up case).** Manually drive into a wall by canceling auto-drive and pressing arrow keys yourself toward an unreachable location (or position so terrain blocks progress). Start auto-drive. If it can't make progress for 18s, should hear "Stuck. Cannot reach destination."
+
+6. **(If access to a car)** Drive in the car. `\` should still work; speech should say "Driving to <name>." The drive should proceed normally because Car shares the land-only BFS rule with foot.
+
+### Risks
+
+- **JAWS arrow-key passthrough conflict.** Aaron uses NVDA, not JAWS, so the typical "NVDA-passthrough-required-to-pass-arrows" issue doesn't apply. But the `keybd_event` injection could in theory be intercepted by a screen reader's keyboard hook before reaching the game. If keys don't seem to register in-game, we'd need to investigate via the ff8_world.log: presence of `[KEY]` lines + `[DRIVE]` lines but no movement in the position address would point to injection-not-reaching-game.
+- **Arrow keys getting "stuck pressed" if the mod crashes.** ReleaseAllDriveKeys is called on world-map exit and on Shutdown(), which should cover all clean exit paths. Hard crashes mid-drive could leave a key pressed; user could press the same key once manually to clear it (no real harm, just a UX annoyance).
+- **Position discontinuity after Train trips / cinematics.** The drive uses absolute position, not vehicle ID. If the player is teleported via a Train ride or scripted cutscene mid-drive, the next UpdateAutoDrive would compute a huge distance and stuck detection might fire. Acceptable for v0.14.86; adjustment can be a future enhancement.
+- **Narrow entrance triggers.** Past chat v0.11.10 added the sweep-search recovery specifically for Balamb Town's narrow trigger. v0.14.86 doesn't include sweep search (deferred to v0.14.87). If Aaron's BAT shows the drive arriving "close" to Balamb Town but never tripping the entrance trigger, that's the canonical v0.14.87 trigger.
+
+---
 
 ## v0.14.85.3 — Chapter 1 hotfix #3 (drop unvalidated mode 4 = Ragnarok)
 
