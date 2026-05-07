@@ -1,7 +1,275 @@
 // world_map.cpp - World map navigation TTS for blind players
 //
 // ============================================================================
-// CURRENT STATE: v0.14.98 — Planner-decline FIX. v0.14.97 BAT'd 2026-05-06
+// CURRENT STATE: v0.14.102 — Restore A=gas key injection for car AD.
+//
+//   v0.14.101 BAT (Wed 2026-05-06 18:58-18:59) confirmed diagnosis:
+//   Aaron loaded save next to car, entered car (engine sound), pressed \
+//   to drive to Balamb Garden. The [DIAG-LOCO] trace showed:
+//     - At drive start: locomotion=0x06 (decimal 6), s_lastVehicle=6
+//       (NOT byte 21 from v0.14.100; byte 21 was the rental shop's
+//       transitional state; once Aaron actually got in the car the byte
+//       stayed at 6 = Selphie foot, even though he WAS demonstrably in
+//       the car — confirmed by the game's distinctive engine running
+//       sound and by Aaron's testimony that he heard AD's distance
+//       announcements with distances NEVER changing).
+//     - 5 stuck checks: locomotion=0x06, s_lastVehicle=6, player=
+//       (16031,-26948) frozen across all 5 windows. AD's distance
+//       announcements consistent with frozen position.
+//
+//   Diagnosis (c) confirmed: AD is reading the on-foot character's
+//   position which doesn't update while in a vehicle (the foot
+//   character is hidden inside the car), AND AD's keystrokes don't
+//   actually move the car because the gas pedal isn't being held.
+//   Aaron's reminder ("car AD was working before the whole Sonnet
+//   regression") was the decisive clue. conversation_search recovered
+//   the v0.11.13/v0.11.14 design from past Claude sessions: the
+//   previous Claude session empirically confirmed via F12 key-state
+//   diagnostic that the rental car uses the A KEY (VK=0x41, scan=0x1E)
+//   as the gas pedal that must be HELD continuously, and W (VK=0x57,
+//   scan=0x11) for reverse. ARROW KEYS STEER ONLY — they don't
+//   accelerate the car. The v0.11.14 design always injected A whenever
+//   wantUp=true — harmless on foot (A is unbound for walking; the
+//   engine ignores it) and essential for car. The v0.14.x rewrite
+//   during the "Sonnet regression" lost this entirely, leaving
+//   SetDriveKeys with only UP/LEFT/RIGHT arrows. Cars receive arrow
+//   keys and steer correctly but never accelerate because no gas pedal
+//   is held. Foot AD works because foot uses arrow keys directly.
+//
+//   CRUCIAL DETAIL: A and W are NOT extended keys (per v0.11.14: 'NOT
+//   extended keys (no KEYEVENTF_EXTENDEDKEY)'); arrow keys ARE
+//   extended. The key-injection helpers must handle both flag types.
+//
+//   THIS BUILD ships four small changes:
+//
+//   (1) PressKey/ReleaseKey gain an 'extended' parameter (default true
+//       preserves backward compatibility for all existing arrow-key
+//       call sites). When extended=false, KEYEVENTF_EXTENDEDKEY is
+//       omitted and the OS sends a normal letter-key scan code.
+//
+//   (2) New static bool s_keyGasHeld tracks the A-key press state
+//       alongside the existing s_keyUp/Left/Right flags.
+//
+//   (3) SetDriveKeys: when up=true, also press A (scan 0x1E, NOT
+//       extended) via PressKey('A', 0x1E, false). When up=false,
+//       release A. Always-inject behavior (no car-detection gate)
+//       because the locomotion byte cycles to non-canonical values
+//       while driving (e.g. 21 for the rental car, 6 cycling here)
+//       so reliable car detection isn't available. Always-inject is
+//       harmless on foot (A unbound) and essential for car.
+//
+//   (4) ReleaseAllDriveKeys: also release A when held.
+//
+//   ALSO removed the v0.14.101 [DIAG-LOCO] logging at drive-start and
+//   stuck-check sites, since we now know the answer and don't need
+//   the byte-tracking trace anymore.
+//
+//   NOT shipping W (reverse) yet — forward-only AD doesn't need
+//   reverse for normal navigation, and v0.11.14's forest-stuck
+//   recovery (reverse-turn-forward state machine) is a separate
+//   feature deferred to v0.14.103+ if needed (forest avoidance might
+//   work fine for cars now that gas works).
+//
+//   v0.14.100 hardcoded refined-coord baseline UNCHANGED. v0.14.100
+//   bearing-based final-approach steering UNCHANGED. v0.14.99 sweep-
+//   abort-on-drift UNCHANGED. v0.14.98 program 9 fix UNCHANGED.
+//   v0.14.97 PLAN-DEBUG logging UNCHANGED. NO new addresses (A/W are
+//   keyboard scan codes, not memory addresses). NO new hooks. NO
+//   build script changes.
+//
+//   v0.14.102 BAT plan: from the same save Aaron used for v0.14.101
+//   (foot, next to car), enter car, press + to select Balamb Garden,
+//   press \ to drive. Verify in Logs/ff8_world.log:
+//     (a) Drive starts cleanly with [DRIVE] Start → Balamb Garden line.
+//     (b) Car ACTUALLY MOVES on screen (Aaron's primary signal: the
+//         distance announcements should decrease over time).
+//     (c) Drive arrives at Balamb Garden OR fails with normal stuck
+//         detection (not the previous 'car never moves' failure).
+//     (d) NO 'Stuck. Cannot reach destination' from frozen-position
+//         stuck checks (the car should move at least 100 units in 3s).
+//
+//   If (b) succeeds and the drive arrives, the v0.11.13/v0.11.14 design
+//   has been fully restored and car AD is back online.
+//
+//   If (b) fails again, we'd need to re-verify A is still the gas key
+//   on Aaron's current setup (the v0.11.13/v0.11.14 testing was almost
+//   a year ago in real time — Aaron may have rebound keys since). A
+//   diagnostic build with F12 key-state dump would re-verify it
+//   empirically (same approach the previous Claude session used).
+//
+//   Prior baseline:
+//   v0.14.101 — DIAGNOSTIC build for the v0.14.100 BAT car-AD-no-
+//                movement issue. Added [DIAG-LOCO] log lines at drive
+//                start and stuck check showing locomotion byte +
+//                player position. v0.14.101 BAT confirmed the position
+//                was frozen at (16031,-26948) with locomotion=6 across
+//                5 stuck checks; combined with Aaron's car-engine-sound
+//                confirmation, this nailed down diagnosis (c): the car
+//                never received gas-pedal input. v0.14.102 ships the
+//                fix.
+//
+//   Prior baseline:
+//   v0.14.100 — Balamb Town refined-coord baseline + bearing-
+//                based final-approach steering. v0.14.99 BAT (on foot, save
+//                loads at exact catalog (13249,-26779) for Balamb Town):
+//                drive started with dist=0, planner correctly says 'Player
+//                already in goal segment empty path', AD enters final
+//                approach and emits wantUp=true (walk forward). Player
+//                barely moves (62 units in 3000ms, then 0). Sweep activates
+//                after 2 stuck checks, runs all 6 phases without progress,
+//                declares 'Could not find entrance'. Drive 2 (started 2.4km
+//                away after Aaron repositioned) used bearing-based out-of-
+//                approach steering, got stuck for 6 checks, cleanly stopped
+//                with 'Stuck. Cannot reach destination'. The v0.14.99
+//                sweep-abort-on-drift fix WORKED for the second drive (no
+//                multi-km wandering this time — stuck detection terminated
+//                cleanly). The first drive exposed the deeper architectural
+//                issue I'd noted as deferred.
+//
+//                ROOT CAUSE: Balamb Town's catalog (13249,-26779) is the
+//                world-map ICON CENTER, NOT the actual gate trigger
+//                position. Prior BATs captured refined entry coords that
+//                show the actual gate is ~350 units WEST and ~70 units
+//                NORTH at (12896,-26711). When AD targets the catalog and
+//                the player is sitting AT the catalog with arbitrary save-
+//                induced heading, walk-forward goes some random direction
+//                — not necessarily toward the gate. AND refined coords
+//                aren't persistent across sessions (queued for v0.15.x), so
+//                the empirical (12896,-26711) value captured in v0.14.96/
+//                v0.14.98 is gone on this fresh session.
+//
+//                TWO INTEGRATED CHANGES:
+//
+//                (1) HARDCODE Balamb Town's refined-coord baseline at
+//                (12896, -26711) in Initialize. Sets s_refinedX/Y/Has[1]
+//                to the empirical entry coord captured during v0.14.98
+//                BAT. Bootstraps the refined-coord system on fresh
+//                sessions until persistence ships (v0.15.x). Single
+//                location for now — once v0.14.100 BAT confirms the
+//                approach works, expand to Balamb Garden and Fire Cavern.
+//
+//                (2) BEARING-BASED FINAL-APPROACH STEERING when dist > 200.
+//                Replaces the v0.11-era 'wantUp = true sweeps through the
+//                trigger band' design with proper bearing logic for the
+//                200..1000 unit range. Below 200 units, KEEP walk-forward
+//                (avoids near-target oscillation that the original design
+//                protected against). The original design was correct for
+//                'player walking toward target from 500+ units offset' —
+//                the sweep-through scenario — but breaks for 'player at
+//                catalog center with arbitrary heading'. Bearing-based
+//                steering auto-corrects from any starting orientation.
+//                NEW threshold constant FINAL_APPROACH_FORWARD_DIST = 200
+//                governs the transition.
+//
+//                Together these mean: AD targets refined (12896,-26711)
+//                from player (13249,-26779), dist=360, bearing-based logic
+//                turns the player west-northwest, walks toward refined,
+//                reaches dist<200, walk-forward sweeps through the actual
+//                gate trigger, [DRIVE] Arrival via game-mode fires.
+//
+//                v0.14.99 sweep-abort-on-drift UNCHANGED (still in place;
+//                will fire if a battle ever drifts the player far).
+//                v0.14.97 PLAN-DEBUG logging UNCHANGED. v0.14.98 program 9
+//                fix UNCHANGED. v0.14.96 deferred-arrival flow UNCHANGED.
+//                NO new addresses, NO new hooks, NO build script changes.
+//
+//                v0.14.100 BAT plan: from the same save Aaron used for
+//                v0.14.99 (loads at exact catalog for Balamb Town, on foot,
+//                story 205), press \\ to drive. Verify in ff8_world.log:
+//                  (a) [INIT] Refined entry default: Balamb Town
+//                      (12896,-26711) at module init,
+//                  (b) [DRIVE] Using refined entry for Balamb Town:
+//                      (12896,-26711) at drive start,
+//                  (c) drive starts with dist~360 instead of dist=0,
+//                  (d) bearing-based steering active (no immediate stuck
+//                      checks; player moves toward refined coord),
+//                  (e) drive completes via deferred-arrival OR fails cleanly
+//                      via 6-stuck-check 'Stuck. Cannot reach destination'.
+//                NO more 'Could not find entrance' from sweep exhausting
+//                near the catalog.
+//
+//                RISK: bearing-based steering in 200-1000 range could cause
+//                oscillation around target if engine turning is twitchy.
+//                Mitigated by walk-forward below 200 units. If oscillation
+//                manifests, v0.14.101 would tighten threshold or add
+//                hysteresis.
+//
+//   Prior baseline:
+//   v0.14.99 — Fix unreachable v0.14.97 sweep-abort-on-drift.
+//                v0.14.98 second BAT (Aaron testing car AD from save
+//                outside Balamb Town): drive started near target with dist
+//                oscillating around the FINAL_APPROACH_DIST=1000 boundary.
+//                Stuck-in-final-approach detection fired correctly, sweep
+//                activated. First sweep walk drove the car 4000+ units west
+//                in 3 seconds (cars are fast; locomotion byte read 0 due to
+//                v0.14.94 hotfix blocking vehicle updates during AD, so
+//                isOnFoot=true and 'wantUp=true for 3 seconds' translated to
+//                4km of car travel). Random encounter at dist=4217. Re-entry
+//                replanned correctly (player still in region 0x07 multi-
+//                segment area, empty-path) BUT sweep state persisted across
+//                re-entry. More sweep walks, more drift, more battles —
+//                eventually exhausted at phase 6 declaring 'Could not find
+//                entrance' at dist=6800 from target.
+//
+//                ROOT CAUSE: the v0.14.97 sweep-abort-on-drift check was
+//                placed in the else branch of 'if (isOnFoot && dist <
+//                DRIVE_FINAL_APPROACH_DIST)'. But the sweep state machine
+//                has an early-return at the top of UpdateAutoDrive that
+//                fires BEFORE the final-approach branch is ever evaluated.
+//                So when sweep was active (the only time the abort would
+//                matter), the abort code was unreachable. v0.14.98 first
+//                BAT didn't catch this because sweep didn't activate during
+//                that drive (Aaron started 596 units from target and never
+//                got stuck long enough to trigger sweep).
+//
+//                FIX: move the sweep-abort check to BEFORE the sweep state
+//                machine in UpdateAutoDrive. Same logic, reachable
+//                placement. When player drifts to dist >
+//                FINAL_APPROACH_DIST * 1.5 (1500 units) while sweep is
+//                active, clear sweep state and let normal steering take
+//                over. For cars this means a single sweep walk will trigger
+//                abort on the next tick (one car walk easily covers 1500
+//                units), preventing the cascade. For foot, single walks
+//                stay within the 500-unit grace band so the abort only
+//                fires when a battle has drifted the player.
+//
+//                Also REMOVED the now-unreachable abort copy in the
+//                final-approach else branch. Comment left behind explaining
+//                the move so future readers don't try to re-add it there.
+//
+//                v0.14.97 PLAN-DEBUG logging UNCHANGED. v0.14.98 program 9
+//                fix UNCHANGED. v0.14.96 deferred-arrival flow UNCHANGED.
+//                NO new addresses, NO new hooks, NO build script changes.
+//
+//                v0.14.99 BAT plan: from a save in a car near Balamb Town,
+//                press \\ to drive there. Verify the log shows: drive starts,
+//                possibly enters final approach, possibly sweep activates if
+//                stuck, but if sweep walks drift the car far from target,
+//                [DRIVE-SWEEP] Aborting (drifted out of final approach:
+//                dist=..., threshold=1500.0) line fires within 1-2 ticks,
+//                sweep clears, normal steering resumes, drive either arrives
+//                or hits 'Stuck. Cannot reach destination' from the regular
+//                stuck-detection path.
+//
+//                DEEPER ISSUE SURFACED (deferred to v0.15.x): region 0x07
+//                spans multiple segments — seg(17,20) AND seg(16,21) both
+//                have region byte 0x07. So 'Player already in goal segment'
+//                empty-path detection is too coarse for narrow-gate
+//                locations like Balamb Town. The actual gate trigger is a
+//                sub-segment area within seg(17,20). Drives that drift to
+//                seg(16,21) are in the goal region but not at the gate;
+//                normal steering should aim for refined entry coords in
+//                that case. Future improvement: when planner says 'empty
+//                path' AND a refined coord exists for the destination,
+//                steer toward refined coord rather than catalog or segment
+//                center. ALSO future: the cosmetic 'Entered final approach
+//                zone' log spam from dist oscillating around the 1000
+//                boundary (visible in the v0.14.98 BAT log as ~25 repeated
+//                'Entered final approach zone' lines) needs edge-detection
+//                so the message fires once per crossing.
+//
+//   Prior baseline:
+//   v0.14.98 — Planner-decline FIX. v0.14.97 BAT'd 2026-05-06
 //                17:07:01 with full PLAN-DEBUG trace. Confirmed the v0.14.96
 //                hypothesis exactly: Balamb Town's region 0x07 fell out of
 //                the active set because program 9 (loc_id=0x010B) was
@@ -1007,6 +1275,7 @@ static DWORD s_lastMovementTick = 0; // last time position changed significantly
 static const double DRIVE_ARRIVE_DIST           = 600.0;   // vehicle arrival proximity (on-foot uses world-map-exit detection)
 static const double DRIVE_APPROACH_DIST         = 3000.0;  // one-shot "Approaching X" threshold
 static const double DRIVE_FINAL_APPROACH_DIST   = 1000.0;  // walk-forward (no steering) below this
+static const double FINAL_APPROACH_FORWARD_DIST = 200.0;   // v0.14.100: below this, walk forward; 200..1000 uses bearing
 static const double DRIVE_ARRIVED_ON_EXIT_DIST  = 1500.0;  // v0.14.87: world-map exit while closer than this counts as arrival
 static const DWORD  DRIVE_ANNOUNCE_INTERVAL_MS  = 5000;    // periodic distance announce
 static const DWORD  DRIVE_STUCK_CHECK_INTERVAL_MS = 3000;  // stuck-detection sample window
@@ -1082,6 +1351,16 @@ static DWORD    s_sweepStateEnd = 0;    // tick when current sub-state ends
 static bool s_keyUpHeld    = false;
 static bool s_keyLeftHeld  = false;
 static bool s_keyRightHeld = false;
+// v0.14.102: Restore gas-pedal injection from v0.11.14 design. The car's
+// forward/gas key is A (VK=0x41, scan=0x1E) — must be HELD continuously
+// like a real gas pedal; arrow keys steer only and don't accelerate the
+// car. ALWAYS injected alongside UP arrow because the locomotion byte at
+// 0x02040A5E reads non-canonical values (e.g. 21 for rental car) when in
+// vehicles, making reliable car detection impossible — the always-inject
+// approach is harmless on foot (A is unbound for walking; the engine
+// ignores it) and essential for cars. Critically, A is NOT an extended
+// key, so PressKey/ReleaseKey are called with extended=false.
+static bool s_keyGasHeld   = false;
 
 // ============================================================================
 // Terrain grid + BFS reachability state (v0.14.85)
@@ -1328,14 +1607,21 @@ static int TorusBearing(int32_t fromX, int32_t fromY, int32_t toX, int32_t toY)
 // the keyboard scancode set). KEYEVENTF_EXTENDEDKEY is required so the OS
 // (and the game's input handler) treats these as the cursor arrows rather
 // than the numpad equivalents.
-static void PressKey(BYTE vk, BYTE scan)
+// v0.14.102: 'extended' parameter restored from v0.11.14 design. Arrow keys
+// (UP/LEFT/RIGHT) ARE extended keys (high-byte set in scan code); A and W
+// (gas pedal / reverse) are NOT extended keys. Sending A/W with the
+// EXTENDEDKEY flag set causes the game's input handler to misinterpret the
+// scan code and the gas pedal never engages — which is exactly what the
+// v0.14.x rewrite did wrong (it also dropped A/W entirely). Default true
+// preserves backward compatibility for all existing arrow-key call sites.
+static void PressKey(BYTE vk, BYTE scan, bool extended = true)
 {
-    keybd_event(vk, scan, KEYEVENTF_EXTENDEDKEY, 0);
+    keybd_event(vk, scan, extended ? KEYEVENTF_EXTENDEDKEY : 0, 0);
 }
 
-static void ReleaseKey(BYTE vk, BYTE scan)
+static void ReleaseKey(BYTE vk, BYTE scan, bool extended = true)
 {
-    keybd_event(vk, scan, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0);
+    keybd_event(vk, scan, (extended ? KEYEVENTF_EXTENDEDKEY : 0) | KEYEVENTF_KEYUP, 0);
 }
 
 static void ReleaseAllDriveKeys()
@@ -1343,6 +1629,8 @@ static void ReleaseAllDriveKeys()
     if (s_keyUpHeld)    { ReleaseKey(VK_UP,    0x48); s_keyUpHeld    = false; }
     if (s_keyLeftHeld)  { ReleaseKey(VK_LEFT,  0x4B); s_keyLeftHeld  = false; }
     if (s_keyRightHeld) { ReleaseKey(VK_RIGHT, 0x4D); s_keyRightHeld = false; }
+    // v0.14.102: also release the gas pedal (A key, NOT extended).
+    if (s_keyGasHeld)   { ReleaseKey('A',      0x1E, false); s_keyGasHeld = false; }
 }
 
 // Idempotent press/release: only generates events on state changes. Called
@@ -1357,6 +1645,15 @@ static void SetDriveKeys(bool up, bool left, bool right)
     if (!left &&  s_keyLeftHeld)  { ReleaseKey(VK_LEFT, 0x4B); s_keyLeftHeld = false; }
     if (right && !s_keyRightHeld) { PressKey(VK_RIGHT, 0x4D); s_keyRightHeld = true; }
     if (!right&&  s_keyRightHeld) { ReleaseKey(VK_RIGHT,0x4D); s_keyRightHeld = false; }
+    // v0.14.102: gas pedal mirrors UP arrow. A key (scan 0x1E, NOT extended)
+    // is the car's forward/accelerator — must be held continuously like a
+    // real gas pedal. Always injected alongside UP because the locomotion
+    // byte cycles to non-canonical values while driving (e.g. 21 for the
+    // rental car) so reliable car detection isn't available; always-inject
+    // is harmless on foot (A unbound) and essential for car. Restored from
+    // the v0.11.14 design that the v0.14.x rewrite lost.
+    if (up    && !s_keyGasHeld)   { PressKey('A',      0x1E, false); s_keyGasHeld   = true; }
+    if (!up   &&  s_keyGasHeld)   { ReleaseKey('A',    0x1E, false); s_keyGasHeld   = false; }
 }
 
 // ============================================================================
@@ -3072,6 +3369,34 @@ static void UpdateAutoDrive()
         ScreenReader::Speak(buf, true);
     }
 
+    // ---- v0.14.99: Sweep abort on drift. MUST run BEFORE the sweep state
+    //      machine below, because that block has an early-return that would
+    //      skip a check at the bottom of UpdateAutoDrive. The v0.14.97 patch
+    //      placed the abort in the final-approach else branch which is
+    //      unreachable when sweep is active. Aaron's car-AD BAT showed the
+    //      bug clearly: car got stuck near target, sweep activated, then a
+    //      battle drifted the player 4000+ units away; sweep state persisted
+    //      across re-entry; the car continued sweeping at the wrong location
+    //      for 4 more phases until exhausting at "Could not find entrance"
+    //      7000 units from target.
+    //
+    //      Aborting sweep here returns control to normal steering. If the
+    //      player is genuinely far from target now, normal steering will
+    //      re-navigate; if normal steering then gets stuck again near
+    //      target, sweep will re-activate via the stuck-detection path.
+    //      The 1.5x grace band prevents disrupting a legitimate mid-sweep
+    //      search where the player happens to step just outside
+    //      FINAL_APPROACH_DIST momentarily; for cars (which can cover 1500+
+    //      units in a single sweep walk), this means the abort fires fast.
+    if (s_sweepActive && dist > DRIVE_FINAL_APPROACH_DIST * 1.5) {
+        Log::World("WorldMap: [DRIVE-SWEEP] Aborting (drifted out of final approach: dist=%.0f, threshold=%.0f) \u2014 returning to normal steering",
+                   dist, DRIVE_FINAL_APPROACH_DIST * 1.5);
+        s_sweepActive            = false;
+        s_sweepPhase             = 0;
+        s_sweepTurning           = true;
+        s_finalApproachEnterTick = 0;
+    }
+
     // ---- Sweep state machine (on-foot, narrow-entrance recovery). ----
     // When stuck or timed-out in final approach, sweep alternately turns
     // and walks to scan the local area for the entrance trigger. Field
@@ -3127,24 +3452,11 @@ static void UpdateAutoDrive()
         }
     } else {
         // Out of final approach — reset so we re-arm next time we cross in.
+        // (v0.14.97 placed a sweep-abort-on-drift check here originally,
+        //  but it was unreachable due to the sweep state machine's early-
+        //  return above; v0.14.99 moved it to before the sweep state
+        //  machine where it can actually fire.)
         s_finalApproachEnterTick = 0;
-
-        // v0.14.97: if sweep was active but the player has drifted far from
-        // the target (typically because a battle resumed at a position far
-        // from where sweep was activated), abort sweep so normal steering
-        // gets us back to final approach. Without this, sweep can persist
-        // across pause/resume cycles and exhaust all 6 phases at the wrong
-        // location — the v0.14.96 post-push BAT showed this happening at
-        // ~7km from Balamb Town. Grace band of 1.5x final-approach distance
-        // before aborting; if the player is just barely outside the zone
-        // (e.g. mid-sweep wandering), don't disrupt the search.
-        if (s_sweepActive && dist > DRIVE_FINAL_APPROACH_DIST * 1.5) {
-            Log::World("WorldMap: [DRIVE-SWEEP] Aborting (drifted out of final approach: dist=%.0f, threshold=%.0f) \u2014 returning to normal steering",
-                       dist, DRIVE_FINAL_APPROACH_DIST * 1.5);
-            s_sweepActive  = false;
-            s_sweepPhase   = 0;
-            s_sweepTurning = true;
-        }
     }
 
     // ---- Stuck detection. ----
@@ -3210,12 +3522,42 @@ static void UpdateAutoDrive()
     bool wantUp = false, wantLeft = false, wantRight = false;
 
     if (dist < DRIVE_FINAL_APPROACH_DIST) {
-        // Final approach: catalog coordinates aren't always exactly on the
-        // entrance trigger zone. Walking forward through the area sweeps
-        // through the trigger reliably without micro-corrections that can
-        // overshoot the trigger band entirely. The final-approach timeout
-        // (above) covers the case where this fails for narrow entrances.
-        wantUp = true;
+        // v0.14.100: bearing-based steering even in final approach when
+        // we're not RIGHT on top of the target. The original walk-forward
+        // design assumed walking through the area sweeps through the
+        // trigger band reliably, but that requires the player to be facing
+        // roughly toward the target. When the player is at the catalog
+        // (which can differ from the actual gate by hundreds of units due
+        // to icon-vs-trigger offset) with arbitrary save-induced heading,
+        // walk-forward goes some random direction — not necessarily toward
+        // the gate. The v0.14.99 BAT exposed this exactly: player at exact
+        // catalog (dist=0 with refined coord NOT loaded), wantUp=true did
+        // nothing useful, sweep activated, all 6 phases burned, 'Could not
+        // find entrance' announced. With v0.14.100's hardcoded refined
+        // baseline + this bearing logic, the player turns toward the
+        // refined coord, walks toward it, drops below FINAL_APPROACH_
+        // FORWARD_DIST, then walk-forward sweeps through the trigger
+        // cleanly (which is what the original walk-forward design wanted
+        // to enable).
+        if (dist < FINAL_APPROACH_FORWARD_DIST) {
+            // Very close (<200 units): walk forward to sweep through the
+            // trigger band. Bearing math near zero distance is unreliable
+            // and oscillation can prevent crossing the trigger cleanly.
+            wantUp = true;
+        } else {
+            // 200..1000 units: bearing-based steering, same logic as the
+            // out-of-approach branch below. Auto-corrects for arbitrary
+            // starting heading.
+            if (relBearing < 200 || relBearing > 3896) {
+                wantUp = true;
+            } else if (relBearing < 1800) {
+                wantRight = true;
+                if (relBearing < 512) wantUp = true;
+            } else {
+                wantLeft = true;
+                if (relBearing > 3584) wantUp = true;
+            }
+        }
     } else if (relBearing < 200 || relBearing > 3896) {
         // Within ~17.6° of dead ahead — just go.
         wantUp = true;
@@ -3662,6 +4004,27 @@ void Initialize()
     memset(s_refinedX, 0, sizeof(s_refinedX));
     memset(s_refinedY, 0, sizeof(s_refinedY));
     memset(s_refinedHas, 0, sizeof(s_refinedHas));
+
+    // v0.14.100: hardcoded refined-coord defaults for known-good entry
+    // points. Bootstraps the refined-coord system on fresh sessions until
+    // persistence is implemented (v0.15.x). Captured from prior BAT logs.
+    // Currently only Balamb Town because we have multiple confirmed BATs
+    // (v0.14.96 captured (12889,-26861); v0.14.98 captured (12896,-26711);
+    // averaging gives essentially the same point ~350 units WEST and ~70
+    // units NORTH of the catalog (13249,-26779), which is the world-map
+    // icon center, NOT the actual gate trigger). Without this, drives
+    // started from a save AT the catalog (dist=0) cannot find the gate
+    // because there's no direction information for the steering logic.
+    for (int i = 0; i < (int)(sizeof(s_locations)/sizeof(s_locations[0])); i++) {
+        if (strcmp(s_locations[i].name, "Balamb Town") == 0) {
+            s_refinedX[i]   = 12896;
+            s_refinedY[i]   = -26711;
+            s_refinedHas[i] = true;
+            Log::World("WorldMap: [INIT] Refined entry default: %s (%d,%d)",
+                       s_locations[i].name, s_refinedX[i], s_refinedY[i]);
+            break;
+        }
+    }
 
     // v0.14.94: clear the segment-region map. Real values get populated
     // inside LoadTriggerZones below if Section 2 reads cleanly. If the load
