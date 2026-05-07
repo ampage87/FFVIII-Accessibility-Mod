@@ -211,22 +211,30 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
             bool f11 = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
             bool vkey = (GetAsyncKeyState('V') & 0x8000) != 0;
             bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+            // v0.14.105: Suppress accessibility hotkeys when Alt is held.
+            // Without this, Alt+F4 (close window) fires our IncreaseRate()
+            // on the way out — Aaron's speech rate was creeping up by 1 per
+            // session because of this. Apply the gate uniformly to every
+            // function-key handler (F1-F8, F11) so no Alt+combo accidentally
+            // triggers an accessibility action; if a real Alt+key shortcut
+            // is ever wanted, it will need an explicit "Alt is held" branch.
+            bool alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
 
             if (grave && !s_graveWas) FieldDialog::RepeatLastDialog();
-            if (f1 && !s_f1was)       ScreenReader::CycleVoice();
-            if (f2 && !s_f2was)       GameAudio::ToggleDucking();
-            if (f3 && !s_f3was) {
+            if (f1 && !s_f1was && !alt)       ScreenReader::CycleVoice();
+            if (f2 && !s_f2was && !alt)       GameAudio::ToggleDucking();
+            if (f3 && !s_f3was && !alt) {
                 if (shift) ScreenReader::DecreaseVolume();
                 else       ScreenReader::DecreaseRate();
             }
-            if (f4 && !s_f4was) {
+            if (f4 && !s_f4was && !alt) {
                 if (shift) ScreenReader::IncreaseVolume();
                 else       ScreenReader::IncreaseRate();
             }
-            if (f5 && !s_f5was) GameAudio::SfxVolumeDown();
-            if (f6 && !s_f6was) GameAudio::SfxVolumeUp();
-            if (f7 && !s_f7was) GameAudio::VolumeDown();   // BGM
-            if (f8 && !s_f8was) GameAudio::VolumeUp();     // BGM
+            if (f5 && !s_f5was && !alt) GameAudio::SfxVolumeDown();
+            if (f6 && !s_f6was && !alt) GameAudio::SfxVolumeUp();
+            if (f7 && !s_f7was && !alt) GameAudio::VolumeDown();   // BGM
+            if (f8 && !s_f8was && !alt) GameAudio::VolumeUp();     // BGM
             // v0.14.75: F11 = on-demand screenshot capture (was F12 in
             // v0.14.74.4-diag). Promoted to a permanent feature after the
             // diagnostic build proved its value (capturing the FF8 Config
@@ -246,7 +254,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
             // 'Screenshot captured.' so Aaron knows the keypress
             // registered. Works in any game state because the SwapBuffers
             // hook installed by BattleTTS::Initialize is global.
-            if (f11 && !s_f11was) {
+            if (f11 && !s_f11was && !alt) {
                 SYSTEMTIME wt;
                 GetLocalTime(&wt);
                 char path[512];

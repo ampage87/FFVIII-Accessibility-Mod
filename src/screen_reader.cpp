@@ -359,10 +359,16 @@ bool Initialize(HMODULE hModule)
     bool sapiOk = InitSAPI();
 
     // v0.13.51: After SAPI is up, apply saved voice ID (if any).
+    // v0.14.106: SAPI's documented behavior is that SetVoice() preserves rate
+    // and volume — v0.14.105's diagnostic harness empirically confirmed this
+    // (shadow rate==SAPI rate at every checkpoint), so no defensive re-apply
+    // is needed.
     if (sapiOk) {
         char savedVoiceId[512] = {};
         if (Config::GetString("speech_voice_id", savedVoiceId, sizeof(savedVoiceId), "")) {
             ApplySavedVoiceId(savedVoiceId);
+        } else {
+            Log::Mod("ScreenReader: No saved voice_id; using default voice.");
         }
     }
 
