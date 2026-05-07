@@ -528,6 +528,13 @@ static bool      s_bgDiagDumped    = true;   // true = skip old BGDIAG dump
 // v05.59: Coordinate diagnostic flag (fires once per field).
 static bool      s_coordDiagDumped = false;
 
+// v0.14.107: Party-state diagnostic flag. Set to false on field load by
+// HookedFieldScriptsInit so the [party-state] log fires once per field.
+// Initial value `true` here so we don't double-log on the very first load
+// (HookedFieldScriptsInit will reset to false right before the engine
+// populates the savemap for the new field).
+static bool      s_partyDiagDumped = true;
+
 // v06.13: CoordSample Approach B — track player's previous triangle for
 // shared-edge midpoint computation. Separate from s_hookPrevTri[] because
 // that array is updated inside the entity scan loop before we can read it.

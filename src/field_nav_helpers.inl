@@ -6,6 +6,52 @@
 // Helpers
 // ============================================================================
 
+// v0.14.107: Active party formation lookup.
+//
+// FF8 stores the active party as a 4-byte array at savemap+0xAF0 (= absolute
+// 0x01CFE74C, given the BAT-confirmed savemap base 0x01CFDC5C). Each byte holds
+// a character ID 0-7 (0=Squall, 1=Zell, 2=Irvine, 3=Quistis, 4=Rinoa,
+// 5=Selphie, 6=Seifer, 7=Edea), or 0xFF for an empty slot. The array is NOT
+// compacted: solo Squall reads as [0xFF, 0x00, 0xFF, 0xFF], two-member parties
+// may interleave empty slots with active ones. Same address is used by Junction
+// TTS and save block content TTS — confirmed reliable across many BATs.
+//
+// Returns true if charId appears anywhere in the four formation bytes.
+// SEH-wrapped because the savemap may be transiently uninitialised during
+// load transitions; we treat any read fault as 'no match'.
+static bool IsCharacterInActiveParty(uint8_t charId)
+{
+    __try {
+        const uint8_t* formation = (const uint8_t*)0x01CFE74C;
+        for (int i = 0; i < 4; i++)
+            if (formation[i] == charId) return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return false;
+}
+
+// v0.14.107: Map a field-entity model ID to its FF8 character ID, or -1 if
+// the model isn't a party-character model.
+//
+// BAT-confirmed mapping (from ResolveNameByModelId in field_nav_names.inl,
+// surveyed across many fields): models 0-7 correspond directly to character
+// IDs 0-7. Model 8 is Quistis's uniform variant — same character (charId 3),
+// different model slot. Models 10+ are generic NPCs and aren't covered by
+// this mapping. Model 9 (occasionally Laguna) is excluded for now to avoid
+// overfiltering during early-disc Laguna flashbacks where Laguna IS the
+// player; if a later BAT exposes a Laguna-follower scenario this can be
+// revisited.
+//
+// Returns -1 if modelId isn't a party-character slot. The caller is
+// responsible for cross-referencing the result against IsCharacterInActiveParty
+// before deciding to filter — the engine reuses model slots, so model 7 in an
+// early-game field might be a generic background character, not Edea.
+static int ModelIdToCharId(int16_t modelId)
+{
+    if (modelId < 0 || modelId > 8) return -1;
+    if (modelId == 8) return 3;  // Quistis uniform variant
+    return (int)modelId;
+}
+
 // Look up the current world-space centre for an entity.
 // v05.44: DIAGNOSTIC CONFIRMED that entity world positions are stored as:
 //   0x190: int32 X * 4096  (fixed-point, 12-bit fractional)

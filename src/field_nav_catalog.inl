@@ -110,6 +110,22 @@ static void RefreshCatalog()
             s_bgDiagDumped = true;
         }
 
+        // v0.14.107: Party-state diagnostic — log the active party formation
+        // bytes once per field. Useful for verifying that the party-member
+        // filter (below) is reading the correct savemap state. Resets via
+        // HookedFieldScriptsInit setting s_partyDiagDumped = false on each
+        // field load.
+        if (!s_partyDiagDumped) {
+            __try {
+                const uint8_t* f = (const uint8_t*)0x01CFE74C;
+                Log::Field("FieldNavigation: [party-state] formation = [%u, %u, %u, %u]",
+                           (unsigned)f[0], (unsigned)f[1], (unsigned)f[2], (unsigned)f[3]);
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                Log::Field("FieldNavigation: [party-state] exception reading formation array");
+            }
+            s_partyDiagDumped = true;
+        }
+
         // v05.59: Coordinate diagnostic dump — log ALL coord sources once per field.
         // This helps identify coordinate space mismatches between entities,
         // triggers, and gateways.
@@ -168,6 +184,46 @@ static void RefreshCatalog()
             // v0.12.08 Fix D: Read position for placement validation.
             int32_t  fpX          = *(int32_t*)(block + 0x190);
             int32_t  fpY          = *(int32_t*)(block + 0x194);
+
+            // v0.14.108: Party-member / non-interactive-character filter.
+            //
+            // Earlier (v0.14.107) attempt cross-referenced canonical model→charId
+            // map against the savemap active formation. That failed on bggate_1
+            // because field entity model IDs are field-local slot indices, not
+            // canonical character IDs — the engine reuses model slots per-field.
+            // Followers showed up as model 2 and 4 there even with a Squall +
+            // Zell + Selphie party (formation [1,0,5,255]).
+            //
+            // The behavioral fingerprint is what actually defines a follower:
+            // a visible character that the player walks through with no
+            // interaction. That holds regardless of which model slot the field
+            // assigned them. Same logic catches non-interactive cutscene
+            // characters that walk through scenes — also correctly skipped
+            // since they're not navigation targets either.
+            //
+            //   modelId in [0, 9]   visible character (party-character model range)
+            //   throughonoff  > 0   player walks through them
+            //   talkonoff    == 0   not talkable
+            //   pushonoff    == 0   no collision
+            //
+            // The modelId < 10 guard excludes save points (model 24) and other
+            // non-character interactive objects with throughonoff. Save point
+            // detection runs later in this function (see modelId == 24 check),
+            // so save points qualify and reach the JSM/model-based
+            // reclassification regardless of this filter.
+            //
+            // Race risk: if TALKRADIUS sets talkonoff after this scan but
+            // before the next refresh, a real NPC could be transiently
+            // filtered. Mitigated by the catalog refreshing on every F9 press.
+            if (i != s_playerEntityIdx &&
+                modelId >= 0 && modelId < 10 &&
+                throughonoff > 0 &&
+                talkonoff == 0 &&
+                pushonoff == 0) {
+                Log::Field("FieldNavigation: [party-filter] ent%d model=%d filtered "
+                           "(visible walk-through, no interaction)", i, (int)modelId);
+                continue;
+            }
 
             // v05.52: Classify entity type by interaction flags.
             // setpc==0 means this IS the player; setpc!=0 means it isn't.

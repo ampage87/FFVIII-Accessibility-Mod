@@ -57,6 +57,7 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
     s_entDiagDumped      = true;
     s_bgDiagDumped       = true;
     s_coordDiagDumped    = true;   // v0.12.11: DISABLED — coordinate diagnostic served its purpose
+    s_partyDiagDumped    = false;  // v0.14.107: re-arm the [party-state] dump for this field load
     s_coordPrevPlayerTri = 0;       // v06.13: reset for shared-edge CoordSample
     // v06.14: Reset heading calibration for new field.
     s_camRightX = 1.0f; s_camRightY = 0.0f;
