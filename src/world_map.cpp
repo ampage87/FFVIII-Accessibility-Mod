@@ -647,6 +647,65 @@ static const uint32_t WM_POS_Z      = 0x0203EE88;  // DWORD - player Z
 static const uint32_t WM_HEADING    = 0x0203ED02;   // WORD  - 0=North, 0-4095 CW
 static const uint32_t WM_LOCOMOTION = 0x02040A5E;   // BYTE  - locomotion / vehicle mode. v0.14.83 whitelisted to canonical {0..4}; per `Plan & Research Documents/World Map Terrain and Locomotion Reference.md` legitimate values include 0=Squall foot, 6=Selphie foot, 10=train, 31=Chocobo, 32=invisible-car — our GetVehicleName uses 0/1/2/3/4 for foot/Car/Chocobo/Ship/Ragnarok which DISAGREES with the research-doc enum (research says Chocobo=31, we say 2). Empirical reconciliation needed; see v0.14.84 changelog.
 static const uint32_t WM_SCENE_FLAG = 0x0203ED2C;   // WORD  - 0=worldmap, 1=field
+
+// ============================================================================
+// v0.14.103: Savemap WORLDMAP struct addresses (deep research validated)
+// ============================================================================
+// Per `Plan & Research Documents/Vehicle state and car position deep research
+// results.md`, the savemap WORLDMAP struct IS maintained live in RAM during
+// driving (refuting the prior "PC version may omit positions" caveat from
+// the older deep-research doc). Hyne's WORLDMAP_PC 26-byte struct describes
+// only what gets serialised to disk; the runtime engine keeps the full
+// PSX-format struct in memory because the world-map driving code was ported
+// expecting the position arrays to be there.
+//
+// SAVEMAP base = 0x01CFDC5C (76-byte header, NOT 96-byte — see SAVEMAP
+// OFFSET CORRECTION in userMemories). The deep research recommended +0x125C
+// for the WORLDMAP struct (= prior research's +0x1270 minus 0x14 for the
+// header correction).
+//
+// Layout within the WORLDMAP struct (each *_pos[6] is uint16: X, Z, Y, unk,
+// unk, rotation — 12 bytes total):
+//   +0x00  char_pos[6]      — foot character mirror
+//   +0x18  ragnarok_pos[6]
+//   +0x24  bgu_pos[6]       — mobile Balamb Garden
+//   +0x30  car_pos[6]       — rental car
+//   +0x62  car_rent (1 byte) — boolean: rental car possessed
+//
+// VERIFICATION: addresses below are arithmetic derivations and must be
+// verified by the v0.14.103 [VEH-VERIFY] diagnostic block at module init.
+// Decision tree: char_pos X coord ~ foot DWORD X / 4096 at game start
+// confirms +0x125C; car drive showing car_pos updating confirms address;
+// values looking like ASCII or pointer-shaped (0x004xxxxx) indicate
+// arithmetic is wrong and v0.14.103.1 patches with empirical offsets.
+static const uintptr_t WM_SAVEMAP_BASE     = 0x01CFDC5C;
+static const uint32_t  WM_WORLDMAP_OFFSET  = 0x125C;
+static const uint32_t  WMS_CHAR_POS_OFFSET     = 0x00;   // foot mirror (uint16 x6)
+static const uint32_t  WMS_RAGNAROK_POS_OFFSET = 0x18;
+static const uint32_t  WMS_BGU_POS_OFFSET      = 0x24;
+static const uint32_t  WMS_CAR_POS_OFFSET      = 0x30;   // rental car (uint16 x6)
+static const uint32_t  WMS_CAR_RENT_OFFSET     = 0x62;
+
+// Convenience: absolute runtime addresses derived from the above.
+static const uintptr_t WM_CAR_POS_ADDR      = WM_SAVEMAP_BASE + WM_WORLDMAP_OFFSET + WMS_CAR_POS_OFFSET;       // 0x01CFFEE8
+static const uintptr_t WM_RAGNAROK_POS_ADDR = WM_SAVEMAP_BASE + WM_WORLDMAP_OFFSET + WMS_RAGNAROK_POS_OFFSET;  // 0x01CFFED0
+static const uintptr_t WM_BGU_POS_ADDR      = WM_SAVEMAP_BASE + WM_WORLDMAP_OFFSET + WMS_BGU_POS_OFFSET;       // 0x01CFFEDC
+static const uintptr_t WM_CHAR_POS_ADDR     = WM_SAVEMAP_BASE + WM_WORLDMAP_OFFSET + WMS_CHAR_POS_OFFSET;      // 0x01CFFEB8
+static const uintptr_t WM_CAR_RENT_ADDR     = WM_SAVEMAP_BASE + WM_WORLDMAP_OFFSET + WMS_CAR_RENT_OFFSET;      // 0x01CFFF1A
+
+// Foot DWORDs are 20.12 fixed-point (multiply savemap uint16 X by 4096 to
+// align coordinate spaces). Savemap uint16 coords are signed when interpreted
+// as int16 (the world map coordinate system has a non-zero origin offset
+// per the wmx.obj documentation; the foot DWORDs at WM_POS_X/Y/Z carry that
+// offset already, but the savemap uint16 coords store raw block-relative
+// values that need to be sign-extended and scaled).
+// v0.14.103.3: BAT empirically proved this should be 1, not 4096. The
+// [VEH-VERIFY] dump at 22:11:38 showed: foot DWORDs X=16031, Y=-26948 versus
+// car_pos[0]=16031, car_pos[2]=-26948 (exact 1:1 match). The savemap WORLDMAP
+// struct stores positions at the SAME scale as foot DWORDs, NOT in 20.12
+// fixed-point. The original assumption was wrong; correcting now.
+static const int32_t WM_SAVEMAP_TO_DWORD_SCALE = 1;
+
 static const uint32_t WM_STORY_FLAG = 0x02036BDE;   // WORD  - savemap story-flag word read by sub_545F10's 0xFF02 (GTE) / 0xFF03 (LT) opcodes; v0.14.94 reads this for s_triggerPrograms[] gate evaluation. Range observed in artifact: 0..5000 across the 38 programs.
 
 // World map dimensions (wrapping torus)
@@ -1277,6 +1336,7 @@ static const double DRIVE_APPROACH_DIST         = 3000.0;  // one-shot "Approach
 static const double DRIVE_FINAL_APPROACH_DIST   = 1000.0;  // walk-forward (no steering) below this
 static const double FINAL_APPROACH_FORWARD_DIST = 200.0;   // v0.14.100: below this, walk forward; 200..1000 uses bearing
 static const double DRIVE_ARRIVED_ON_EXIT_DIST  = 1500.0;  // v0.14.87: world-map exit while closer than this counts as arrival
+static const double DRIVE_NEAR_LOCATION_DIST    = 1500.0;  // v0.14.103: bounce-detection radius for non-car-friendly arrivals
 static const DWORD  DRIVE_ANNOUNCE_INTERVAL_MS  = 5000;    // periodic distance announce
 static const DWORD  DRIVE_STUCK_CHECK_INTERVAL_MS = 3000;  // stuck-detection sample window
 static const double DRIVE_STUCK_THRESHOLD       = 100.0;   // movement floor in one window
@@ -1307,6 +1367,47 @@ static int      s_driveStuckCount        = 0;
 static bool     s_driveApproachAnnounced = false;  // one-shot guard
 static bool     s_driveOnFootAtStart     = true;   // v0.14.87: captured at StartAutoDrive; arrival semantics differ
 static DWORD    s_finalApproachEnterTick = 0;      // v0.14.87: when player crossed below FINAL_APPROACH_DIST (0 = not yet)
+
+// v0.14.103: bounce-detection state for non-car-friendly destinations.
+// When the player is in a car with throttle held but the car has been
+// stationary for several samples within DRIVE_NEAR_LOCATION_DIST of the
+// target, the engine is rejecting entry (Garden-style location: car can't
+// auto-dismount through the entry trigger). We announce "Arrived near X.
+// Dismount and walk to enter." and stop AD silently. State resets on AD
+// start, AD stop, and world-map exit.
+// v0.14.103: bounce-detection moved to the sweep-abort hook in v0.14.103.3
+// (the per-frame frozen-position approach was empirically dropped — cars
+// oscillate, they don't freeze). v0.14.103.7 made the threshold dynamic
+// based on s_destFootFriendly. The sweep-abort path is the live mechanism;
+// the per-frame state and constants were removed in v0.14.104 cleanup.
+
+// v0.14.103.5: sweep-abort retry counter for the bounce-arrived hook.
+// v0.14.103.3 introduced 'sweep-abort = bounce-arrived' which broke car
+// entry into car-friendly towns (Balamb): the engine fires MODE_FIELD
+// after the car re-enters the final-approach zone on a subsequent pass,
+// but v0.14.103.3 stopped AD on the first abort before that could happen.
+// Foot AD to Balamb in v0.14.103 BAT showed: cycle 1 sweep-abort → normal
+// steering resumes → cycle 2 re-enters zone → MODE_FIELD fires within 2s.
+// v0.14.103.6 dropped from 3 to 2 (~27s of retries before giving up).
+// v0.14.103.7 makes the threshold dynamic: foot-friendly destinations get
+// the full retry budget; non-foot-friendly destinations bounce-arrive on
+// the first abort.
+// v0.14.103.7: per-destination foot-friendliness flag, computed once at
+// AD start by IsLocationFootFriendly(). When TRUE, a foot trigger exists
+// for the destination's region (engine will auto-dismount cars onto it):
+// keep the standard DRIVE_BOUNCE_ABORT_THRESHOLD=2 retry budget. When
+// FALSE, the destination's region is vehicle-only (Garden-style landing
+// pad like Balamb Garden's region 0x0C, only program 20 = top_vehicle=
+// Garden, no foot clause): cars will never trigger entry, so bounce-
+// arrived fires on the FIRST sweep-abort (~13s instead of ~27s). The
+// sweep-abort hook reads this flag via the inline ternary at the
+// threshold check. Defaults to TRUE so any failure to compute the flag
+// (region map not loaded, destination off-map, etc.) preserves
+// v0.14.103.6 behavior rather than firing bounce-arrived prematurely.
+static bool         s_destFootFriendly            = true;
+
+static const int    DRIVE_BOUNCE_ABORT_THRESHOLD = 2;
+static int          s_sweepAbortCount             = 0;     // increments on each sweep-abort, reset on AD start
 
 // v0.14.96: deferred arrival decision state. v0.14.95's instant-decision
 // approach (segment-membership when planner active, distance fallback
@@ -1363,12 +1464,25 @@ static bool s_keyRightHeld = false;
 static bool s_keyGasHeld   = false;
 
 // ============================================================================
-// Terrain grid + BFS reachability state (v0.14.85)
+// Terrain grid + BFS reachability state (v0.14.85, extended in v0.14.103)
 // ============================================================================
-// s_terrainGrid[row][col]: 0 = LAND, 1 = OCEAN. Loaded once at module init from
-// wmx.obj inside world.fs. s_reachable[row][col] is rebuilt per catalog build
-// via BFS flood-fill from the player's current segment.
-static uint8_t s_terrainGrid[WMX_SEG_ROWS][WMX_SEG_COLS];
+// v0.14.103: extended from binary (0=land, 1=ocean) to 3-state classifier.
+// Forest segments (terrain values 0-5 per `Plan & Research Documents/World
+// Map Terrain and Locomotion Reference.md`) are walkable on foot/Chocobo but
+// IMPASSABLE for cars (the engine's collision system rejects forest entry
+// when the player is in a vehicle from the 32-40 locomotion family). Foot AD
+// retains its existing land-only filter (forest counts as land for foot).
+// Car AD adds forest as an impassable class.
+//
+// Loaded once at module init from wmx.obj inside world.fs. s_reachable[row]
+// [col] is rebuilt per catalog build via BFS flood-fill from the player's
+// current segment.
+enum SegTerrainClass : uint8_t {
+    SEG_LAND   = 0,   // walkable by all locomotion classes (default)
+    SEG_FOREST = 1,   // walkable on foot/Chocobo; impassable for cars
+    SEG_OCEAN  = 2    // walkable only by Garden/Ragnarok
+};
+static uint8_t s_terrainGrid[WMX_SEG_ROWS][WMX_SEG_COLS];   // values from SegTerrainClass
 static uint8_t s_reachable  [WMX_SEG_ROWS][WMX_SEG_COLS];
 static bool    s_terrainLoaded = false;
 
@@ -1429,6 +1543,72 @@ static uint8_t GetLocomotionMode()
         mode = 0;
     }
     return mode;
+}
+
+// Forward declaration: GetVehicleType is defined later in this file (line ~1667)
+// alongside the rest of the vehicle classification helpers; we need it here
+// for GetWorldMapPosition_Active's vehicle dispatch.
+static VehicleType GetVehicleType(uint8_t mode);
+
+// ============================================================================
+// v0.14.103: GetWorldMapPosition_Active
+// ============================================================================
+// Returns the player's active world-map position based on current vehicle.
+// Foot DWORDs at WM_POS_X/Y/Z freeze when the player mounts a vehicle (the
+// engine's per-frame integrator switches from updating foot DWORDs to
+// updating the vehicle's position array in the savemap WORLDMAP struct).
+// AD's distance/bearing/stuck-detection must read the active vehicle's
+// position to track real motion; reading foot DWORDs while in a car gives
+// the v0.14.101 BAT failure mode ("position frozen at (16031,-26948)").
+//
+// The savemap WORLDMAP arrays store positions as 6 uint16 values:
+//   [0]=X, [1]=Z, [2]=Y, [3]=unk, [4]=unk, [5]=rotation
+// per the v0.14.103 deep research. We multiply by WM_SAVEMAP_TO_DWORD_SCALE
+// (4096) to align with the 20.12 fixed-point foot DWORD coordinate space.
+// Sign-extending the uint16 to int32 first preserves negative coordinates
+// (the world map's southern/western hemispheres have negative coords in
+// the foot DWORD frame; whether savemap uint16 stores them as signed int16
+// or as biased unsigned will be verified by the [VEH-VERIFY] block).
+//
+// Vehicle dispatch:
+//   VEH_CAR      → read car_pos at WM_CAR_POS_ADDR
+//   VEH_GARDEN   → read bgu_pos at WM_BGU_POS_ADDR  (mobile Balamb Garden)
+//   VEH_RAGNAROK → read ragnarok_pos at WM_RAGNAROK_POS_ADDR
+//   else (foot/Chocobo/Ship) → fall through to foot DWORDs (Chocobo and
+//                              Ship piggyback on the foot character)
+static void GetWorldMapPosition_Active(int32_t* x, int32_t* y, int32_t* z)
+{
+    // Default to foot DWORDs.
+    GetWorldMapPosition(x, y, z);
+
+    // Determine current vehicle from the debounced state. Use s_lastVehicle
+    // (the committed locomotion byte) rather than a fresh GetLocomotionMode
+    // read, so transient byte cycling during AD doesn't flip us between
+    // sources mid-drive. GetVehicleType maps the byte to VehicleType.
+    if (s_lastVehicle < 0) return;   // not yet sampled → keep foot DWORDs
+    VehicleType veh = GetVehicleType((uint8_t)s_lastVehicle);
+
+    uintptr_t addr = 0;
+    const char* tag = nullptr;
+    if (veh == VEH_CAR)            { addr = WM_CAR_POS_ADDR;      tag = "car_pos"; }
+    else if (veh == VEH_GARDEN)    { addr = WM_BGU_POS_ADDR;      tag = "bgu_pos"; }
+    else if (veh == VEH_RAGNAROK)  { addr = WM_RAGNAROK_POS_ADDR; tag = "ragnarok_pos"; }
+    else                            return;   // foot/Chocobo/Ship use foot DWORDs
+
+    __try {
+        const int16_t* arr = (const int16_t*)addr;
+        int32_t vx = (int32_t)arr[0] * WM_SAVEMAP_TO_DWORD_SCALE;
+        int32_t vz = (int32_t)arr[1] * WM_SAVEMAP_TO_DWORD_SCALE;   // savemap [1] = Z (altitude)
+        int32_t vy = (int32_t)arr[2] * WM_SAVEMAP_TO_DWORD_SCALE;   // savemap [2] = Y (north-south)
+        // Foot DWORD layout uses X/Y for the 2D plane the bearing math runs on,
+        // with Z as altitude. Mirror that mapping.
+        *x = vx;
+        *y = vy;
+        *z = vz;
+        (void)tag;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // Read fault — keep the foot DWORD fallback already in *x/*y/*z.
+    }
 }
 
 // v0.14.94: read the savemap story-flag word at WM_STORY_FLAG. Used by the
@@ -1576,6 +1756,74 @@ static int WorldYToSegRow(int32_t y)
 }
 
 // ============================================================================
+// v0.14.103.7: IsLocationFootFriendly
+// ============================================================================
+// Returns TRUE if the given catalog (X, Y) is in a region where any Section
+// 8 trigger program admits foot entry. The engine auto-dismounts cars onto
+// foot triggers, so foot-friendly regions accept cars; non-foot-friendly
+// regions (vehicle-only landing pads like region 0x0C = mobile B-Garden,
+// vehicle=Garden only) reject cars permanently.
+//
+// Algorithm:
+//   1. Map (X, Y) to (col, row) via the WorldXToSegCol / WorldYToSegRow
+//      helpers.
+//   2. Read the region byte from s_segmentRegionMap[row][col]. 0xFF means
+//      "no region" (deep ocean cells without trigger zones); return false.
+//   3. Walk s_triggerPrograms[]. A program contributes a "foot clause for
+//      this region" when:
+//        - Its top_vehicle is ANY (0x00), FOOT (0x80), or FOOT_ALT (0x84),
+//          AND
+//        - It has at least one clause whose region matches AND whose
+//          vehicle is ANY, FOOT, or FOOT_ALT.
+//      Return TRUE on first match; FALSE if all 38 programs are exhausted
+//      without one.
+//
+// Defensive fallback: if s_segmentRegionLoaded is false (Section 2 didn't
+// load), return TRUE so we keep the existing v0.14.103.6 behavior (longer
+// retry threshold) rather than firing bounce-arrived prematurely. Same
+// fallback for out-of-range segments. The flag default in declaration is
+// also TRUE, but explicit fallback inside the helper documents intent.
+//
+// BAT validation against v0.14.103.5 log:
+//   Balamb Town  catalog (12896,-26711) → seg(17,20) → region 0x07 →
+//                program 9 (top_vehicle=ANY) has foot clauses for r=0x06
+//                and r=0x07 → returns TRUE ✓ (matches engine: car drives
+//                in via auto-dismount).
+//   Balamb Garden catalog (24576,-29406) → seg(19,20) → region 0x0C →
+//                ONLY program 20 (top_vehicle=Garden) targets 0x0C →
+//                top_vehicle is not foot-class, so no foot clauses match
+//                → returns FALSE ✓ (matches engine: car bounces forever).
+static bool IsLocationFootFriendly(int32_t catX, int32_t catY)
+{
+    if (!s_segmentRegionLoaded) return true;   // graceful fallback
+
+    int col = WorldXToSegCol(catX);
+    int row = WorldYToSegRow(catY);
+    if (col < 0 || col >= WMX_SEG_COLS ||
+        row < 0 || row >= WMX_SEG_ROWS) return true;
+
+    uint8_t destRegion = s_segmentRegionMap[row][col];
+    if (destRegion == 0xFF) return false;      // no region → no trigger → not foot-friendly
+
+    auto isFootClass = [](uint16_t v) {
+        return v == TRIG_VEH_ANY || v == TRIG_VEH_FOOT || v == TRIG_VEH_FOOT_ALT;
+    };
+
+    for (int i = 0; i < TRIGGER_PROGRAM_COUNT; i++) {
+        const TriggerProgram& p = s_triggerPrograms[i];
+        if (!isFootClass(p.top_vehicle)) continue;
+        if (p.num_clauses == 0 || p.clauses == nullptr) continue;
+        for (uint8_t k = 0; k < p.num_clauses; k++) {
+            const TriggerClause& c = p.clauses[k];
+            if (c.region == destRegion && isFootClass(c.vehicle)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// ============================================================================
 // Auto-drive helpers (v0.14.86)
 // ============================================================================
 // Bearing in native FF8 heading units (0-4095, 0=North, CW). Wrap-aware on
@@ -1699,16 +1947,18 @@ static bool IsCanonicalLocomotion(uint8_t mode)
            mode == 48 || mode == 50;
 }
 
-// True iff the segment is reachable for the given vehicle. For the binary
-// land/ocean grid we have, foot/chocobo/car require land, Garden allows ocean
-// too (and Ragnarok callers should skip the BFS entirely — it can fly
-// anywhere, so calling this is moot).
+// True iff the segment is reachable for the given vehicle. v0.14.103: 3-state
+// terrain classifier (LAND/FOREST/OCEAN). Foot/Chocobo can cross forest;
+// cars cannot (engine collision rejects forest entry from car locomotion
+// values 32-40). Garden/Ragnarok can cross any terrain.
 static bool IsSegmentTraversable(int row, int col, VehicleType veh)
 {
     if (row < 0 || row >= WMX_SEG_ROWS || col < 0 || col >= WMX_SEG_COLS) return false;
-    uint8_t cell = s_terrainGrid[row][col];   // 0 = land, 1 = ocean
-    if (veh == VEH_GARDEN || veh == VEH_RAGNAROK) return true;   // any segment
-    return (cell == 0);                       // land-only for foot/chocobo/car
+    uint8_t cell = s_terrainGrid[row][col];   // SegTerrainClass: 0=land, 1=forest, 2=ocean
+    if (veh == VEH_GARDEN || veh == VEH_RAGNAROK) return true;          // any segment
+    if (cell == SEG_OCEAN) return false;                                 // ocean blocks all non-Garden/Ragnarok
+    if (cell == SEG_FOREST && veh == VEH_CAR) return false;              // v0.14.103: cars can't enter forest
+    return true;                                                          // foot/chocobo on land or forest; car on land
 }
 
 // ============================================================================
@@ -1801,16 +2051,19 @@ static bool LoadTerrainGrid()
     // v0.14.85.1: rewritten from the v0.14.85 flat-stride bug that read
     // 2304 "polygons" per segment and saw 0 oceans because the garbage
     // bytes between block boundaries rarely landed in 32-34.
+    // v0.14.103: extended to 3-state classification (land/forest/ocean) by
+    // counting forest polygons (terrain values 0-5) alongside ocean polygons
+    // (32-34). Majority-of-polygons rule with priority: ocean > forest > land.
     memset(s_terrainGrid, 0, sizeof(s_terrainGrid));
-    int oceanSegs = 0, landSegs = 0;
-    int totalRealPolys = 0, totalOceanPolys = 0;
+    int oceanSegs = 0, forestSegs = 0, landSegs = 0;
+    int totalRealPolys = 0, totalOceanPolys = 0, totalForestPolys = 0;
 
     for (int seg = 0; seg < WMX_PLAYABLE_SEGS; seg++) {
         int row = seg / WMX_SEG_COLS;
         int col = seg % WMX_SEG_COLS;
         const uint8_t* segData = wmxData + (uint32_t)seg * WMX_SEGMENT_SIZE;
 
-        int segPolyCount = 0, segOceanCount = 0;
+        int segPolyCount = 0, segOceanCount = 0, segForestCount = 0;
 
         // Walk the 16 block offsets in the segment header. Skip the first 4
         // bytes (group_id), then read each uint32 little-endian offset.
@@ -1832,38 +2085,51 @@ static bool LoadTerrainGrid()
             for (int p = 0; p < polyCount; p++) {
                 uint8_t terrain = blockBase[WMX_BLOCK_HDR_SIZE + p * WMX_POLY_SIZE
                                             + WMX_TERRAIN_OFFSET];
-                if (terrain >= 32 && terrain <= 34) segOceanCount++;
+                if (terrain >= 32 && terrain <= 34) {
+                    segOceanCount++;
+                } else if (terrain <= 5) {
+                    // Forest variants: 0=Galbadia, 1=Trabia, 2=Esthar,
+                    // 3=Centra, 4=Balamb, 5=Esthar.
+                    segForestCount++;
+                }
                 segPolyCount++;
             }
         }
 
-        totalRealPolys  += segPolyCount;
-        totalOceanPolys += segOceanCount;
+        totalRealPolys   += segPolyCount;
+        totalOceanPolys  += segOceanCount;
+        totalForestPolys += segForestCount;
 
-        // Majority-ocean polygons => OCEAN segment. Empty/degenerate segments
-        // (segPolyCount == 0) default to LAND — the playable grid shouldn't
-        // contain any, but if one exists, defaulting to land is the
-        // conservative choice for accessibility filtering.
+        // Majority classifier with priority: ocean > forest > land. A segment
+        // is OCEAN if more than half its polygons are ocean. Otherwise, FOREST
+        // if more than half are forest. Otherwise LAND. Empty/degenerate
+        // segments default to LAND — the conservative choice for accessibility.
         if (segPolyCount > 0 && segOceanCount * 2 > segPolyCount) {
-            s_terrainGrid[row][col] = 1;  // OCEAN
+            s_terrainGrid[row][col] = SEG_OCEAN;
             oceanSegs++;
+        } else if (segPolyCount > 0 && segForestCount * 2 > segPolyCount) {
+            s_terrainGrid[row][col] = SEG_FOREST;
+            forestSegs++;
         } else {
-            s_terrainGrid[row][col] = 0;  // LAND
+            s_terrainGrid[row][col] = SEG_LAND;
             landSegs++;
         }
     }
     free(wmxData);
     s_terrainLoaded = true;
 
-    Log::World("WorldMap: [TERRAIN] Grid built: %d land, %d ocean (of %d). Total real polys=%d (oceans=%d).",
-               landSegs, oceanSegs, WMX_PLAYABLE_SEGS, totalRealPolys, totalOceanPolys);
+    Log::World("WorldMap: [TERRAIN] Grid built: %d land, %d forest, %d ocean (of %d). Total polys=%d (ocean=%d, forest=%d).",
+               landSegs, forestSegs, oceanSegs, WMX_PLAYABLE_SEGS,
+               totalRealPolys, totalOceanPolys, totalForestPolys);
 
-    // Visual grid dump (# = land, ~ = ocean) — valuable for diagnosing
-    // coordinate-mapping issues; cheap (24 lines, once per process).
+    // Visual grid dump (# = land, F = forest, ~ = ocean) — valuable for
+    // diagnosing coordinate-mapping issues; cheap (24 lines, once per process).
     for (int r = 0; r < WMX_SEG_ROWS; r++) {
         char rowStr[WMX_SEG_COLS + 1];
-        for (int c = 0; c < WMX_SEG_COLS; c++)
-            rowStr[c] = s_terrainGrid[r][c] ? '~' : '#';
+        for (int c = 0; c < WMX_SEG_COLS; c++) {
+            uint8_t cls = s_terrainGrid[r][c];
+            rowStr[c] = (cls == SEG_OCEAN) ? '~' : (cls == SEG_FOREST) ? 'F' : '#';
+        }
         rowStr[WMX_SEG_COLS] = '\0';
         Log::World("WorldMap: [TERRAIN] row%02d: %s", r, rowStr);
     }
@@ -3193,6 +3459,9 @@ static void StopAutoDrive(const char* reason)
     // (cancel, stuck-give-up, sweep-give-up).
     s_driveAwaitingArrivalDecision = false;
     s_driveExitTick                = 0;
+    // v0.14.103.7: reset foot-friendly flag to its safe default (TRUE).
+    // The next StartAutoDrive will recompute it for the new destination.
+    s_destFootFriendly   = true;
     if (reason && *reason) {
         ScreenReader::Speak(reason, true);
         Log::World("WorldMap: [DRIVE] Stopped: %s", reason);
@@ -3214,11 +3483,17 @@ static void StartAutoDrive(int catIdx)
     }
 
     int32_t px, py, pz;
-    GetWorldMapPosition(&px, &py, &pz);
+    GetWorldMapPosition_Active(&px, &py, &pz);   // v0.14.103: vehicle-aware
     if (px == 0 && py == 0) {
         ScreenReader::Speak("Position unavailable. Try again.", true);
         return;
     }
+
+    // v0.14.103.5: reset sweep-abort retry counter at the start of every
+    // drive so each new drive gets a fresh DRIVE_BOUNCE_ABORT_THRESHOLD
+    // attempts before bounce-arrived fires. Counter increments at the
+    // sweep-abort site in UpdateAutoDrive.
+    s_sweepAbortCount = 0;
 
     const LocationEntry& dest = s_catalog[catIdx];
 
@@ -3276,6 +3551,27 @@ static void StartAutoDrive(int catIdx)
     Log::World("WorldMap: [DRIVE] Start \u2192 %s at (%d,%d), dist=%.0f units (%d km)",
                s_driveTargetName, s_driveTargetX, s_driveTargetY, dist, distKm);
 
+    // v0.14.103.7: classify the destination as foot-friendly (foot trigger
+    // exists for the region; cars enter via engine auto-dismount) or not
+    // (vehicle-only landing pad; cars bounce forever). The flag governs the
+    // sweep-abort retry threshold below: foot-friendly = standard 2 retries,
+    // non-foot-friendly = 1 retry (immediate bounce-arrived). Captured once
+    // here AFTER s_driveTargetX/Y are assigned (refined coords win over
+    // catalog) so the heuristic uses the actual steering target.
+    s_destFootFriendly = IsLocationFootFriendly(s_driveTargetX, s_driveTargetY);
+    {
+        int destCol = WorldXToSegCol(s_driveTargetX);
+        int destRow = WorldYToSegRow(s_driveTargetY);
+        uint8_t destReg = (s_segmentRegionLoaded &&
+                           destCol >= 0 && destCol < WMX_SEG_COLS &&
+                           destRow >= 0 && destRow < WMX_SEG_ROWS)
+                          ? s_segmentRegionMap[destRow][destCol]
+                          : 0xFF;
+        Log::World("WorldMap: [DRIVE] Destination foot-friendly=%s (target seg(%d,%d) region=0x%02X)",
+                   s_destFootFriendly ? "YES" : "NO",
+                   destCol, destRow, (unsigned)destReg);
+    }
+
     // v0.14.94: run the path planner once. Sets s_drivePath[]/Len/Idx/Planned
     // and s_driveGoalSegs[]/Count. On failure (Ragnarok, region map not
     // loaded, no matching trigger program, no path), s_drivePathPlanned
@@ -3306,7 +3602,7 @@ static void UpdateAutoDrive()
     if (!s_driveActive) return;
 
     int32_t px, py, pz;
-    GetWorldMapPosition(&px, &py, &pz);
+    GetWorldMapPosition_Active(&px, &py, &pz);   // v0.14.103: vehicle-aware
     uint16_t heading = GetWorldMapHeading();
 
     // Position can briefly read (0,0) at world-map re-entry. Skip the tick
@@ -3389,8 +3685,37 @@ static void UpdateAutoDrive()
     //      FINAL_APPROACH_DIST momentarily; for cars (which can cover 1500+
     //      units in a single sweep walk), this means the abort fires fast.
     if (s_sweepActive && dist > DRIVE_FINAL_APPROACH_DIST * 1.5) {
-        Log::World("WorldMap: [DRIVE-SWEEP] Aborting (drifted out of final approach: dist=%.0f, threshold=%.0f) \u2014 returning to normal steering",
-                   dist, DRIVE_FINAL_APPROACH_DIST * 1.5);
+        // v0.14.103.5: sweep-abort with retry counter. v0.14.103.3 stopped AD
+        // on the FIRST abort, which broke car entry into car-friendly towns
+        // (Balamb). The engine needs the car to re-enter the final-approach
+        // zone on a subsequent pass for MODE_FIELD to fire (foot AD to Balamb
+        // in v0.14.103 BAT showed exactly this pattern: cycle 1 abort → cycle
+        // 2 entry → MODE_FIELD within 2s). So we now increment a counter and
+        // only declare bounce-arrived after DRIVE_BOUNCE_ABORT_THRESHOLD
+        // consecutive aborts. Below threshold: reset sweep state and resume
+        // normal steering (the v0.14.99 behavior). At threshold: announce
+        // arrived-near and stop AD silently.
+        s_sweepAbortCount++;
+        // v0.14.103.7: dynamic threshold based on whether the destination's
+        // region accepts foot/auto-dismount entry. Foot-friendly regions get
+        // the full retry budget (~27s) because the engine may need 1-2 passes
+        // to find the gate trigger. Non-foot-friendly regions (Garden-style
+        // vehicle-only landing pads) bounce-arrive on the first abort (~13s)
+        // since cars will never trigger entry there.
+        int abortLimit = s_destFootFriendly ? DRIVE_BOUNCE_ABORT_THRESHOLD : 1;
+        if (s_sweepAbortCount >= abortLimit) {
+            char buf[200];
+            snprintf(buf, sizeof(buf),
+                     "Arrived near %s. You may need to enter on foot.",
+                     s_driveTargetName);
+            ScreenReader::Speak(buf, true);
+            Log::World("WorldMap: [DRIVE-BOUNCE] %s (sweep-abort %d/%d, dist=%.0f)",
+                       buf, s_sweepAbortCount, DRIVE_BOUNCE_ABORT_THRESHOLD, dist);
+            StopAutoDrive(nullptr);   // silent stop — we already spoke the announce
+            return;
+        }
+        Log::World("WorldMap: [DRIVE-SWEEP] Aborting (drifted out of final approach: dist=%.0f, threshold=%.0f) \u2014 retry %d/%d, returning to normal steering",
+                   dist, DRIVE_FINAL_APPROACH_DIST * 1.5, s_sweepAbortCount, DRIVE_BOUNCE_ABORT_THRESHOLD);
         s_sweepActive            = false;
         s_sweepPhase             = 0;
         s_sweepTurning           = true;
@@ -3838,7 +4163,7 @@ void Poll()
             s_driveStuckCount        = 0;
             s_finalApproachEnterTick = 0;  // re-arm final-approach timer
             int32_t rx, ry, rz;
-            GetWorldMapPosition(&rx, &ry, &rz);
+            GetWorldMapPosition_Active(&rx, &ry, &rz);   // v0.14.103: vehicle-aware
             if (rx != 0 || ry != 0) {
                 s_driveStuckX = rx;
                 s_driveStuckY = ry;
@@ -4067,6 +4392,10 @@ void Initialize()
     // that the data compiled correctly. 38 lines under [TRIGGER-PROGRAMS].
     // Always runs (no failure path) since the data is static-initialized.
     LogTriggerPrograms();
+
+    // v0.14.103.7: reset foot-friendly flag to its safe default (TRUE).
+    // Each StartAutoDrive recomputes it for the chosen destination.
+    s_destFootFriendly   = true;
 
     Log::World("WorldMap: Module initialized (v%s)", FF8OPC_VERSION);
 }
