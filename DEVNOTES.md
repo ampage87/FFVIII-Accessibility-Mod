@@ -4,11 +4,11 @@ Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` inj
 
 **Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
 
-GitHub: `ampage87/FFVIII-Accessibility-Mod`. `main` HEAD = `560f725b` (v0.14.106 pushed Thu 2026-05-07 evening). v0.14.107 was built locally but its BAT exposed a flaw in the design; v0.14.108 supersedes it and is now built locally, awaiting BAT.
+GitHub: `ampage87/FFVIII-Accessibility-Mod`. `main` HEAD = `e9a60eb4` (v0.14.108 pushed Thu 2026-05-07 evening, 22:39 UTC). Linear history: v0.14.104 → v0.14.106 → v0.14.108. v0.14.107 was BAT-failed and superseded by v0.14.108 — never pushed.
 
 ---
 
-**Current build: v0.14.108 BAT-PASSED, awaiting Aaron's push.**
+**Current build: v0.14.108 SHIPPED.**
 
 Filters party-member followers (Zell, Quistis, etc., when they're following Squall on the field) out of the F9 navigation catalog, using a **behavioral fingerprint** instead of a canonical model→charId map.
 
@@ -148,9 +148,13 @@ If BAT passes, run `Utilities/push_to_github.vbs`. The utility will read `0.14.1
 
 **Recent work block:**
 - v0.14.105 — Alt+F4 fix, all F-key accessibility handlers gated on `!alt`. BAT-passed and pushed.
-- v0.14.106 — Strip diagnostic harness; add commented INI template with auto-upgrade. BAT-passed and pushed (HEAD `560f725b`).
+- v0.14.106 — Strip diagnostic harness; add commented INI template with auto-upgrade. BAT-passed and pushed.
 - v0.14.107 — Party-member filter take 1 (canonical model→charId + savemap formation cross-reference). BUILT, BAT-failed (filter never matched on bggate_1 because the engine reuses model slots per-field). Superseded by v0.14.108 — never pushed.
-- **v0.14.108** — Party-member filter take 2 (behavioral fingerprint). BUILT, BAT-passed Thu 2026-05-07 evening across multiple fields and party compositions. Followers correctly filtered, save points preserved, real NPCs kept, interactive objects kept. Awaiting Aaron's push via `Utilities/push_to_github.vbs`. ← we are here.
+- **v0.14.108** — Party-member filter take 2 (behavioral fingerprint). BUILT, BAT-passed, PUSHED Thu 2026-05-07 evening as commit `e9a60eb4`. Followers correctly filtered, save points preserved, real NPCs kept, interactive objects kept. Linear history maintained on `main`.
+
+**Push utility hardening (this session):**
+- The new auto-flow `push_to_github.ps1` (rewritten earlier this session, finally exercised on v0.14.108) initially failed silently — PowerShell launched hidden by .vbs, hit some pre-`logFile`-write issue, exited with no dialog and no log update. Diagnosed by adding phase-by-phase logging to a new `Logs/push_diagnostic.log` file that writes BEFORE any code that might fail, plus a top-level try/catch that captures unhandled exceptions and shows a fallback MessageBox. Aaron re-ran the .vbs and got a Success dialog — the diagnostic instrumentation either fixed the underlying issue or revealed enough to let it self-correct. The instrumentation is permanent (cheap, useful for any future regression) so further silent failures won't recur.
+
 
 **v0.14.108 BAT evidence (for the record):**
 - bggate_1 with party `[1, 0, 5, 255]` (Squall + Zell + Selphie): followers ent1 model=2 and ent2 model=4 filtered. Catalog dropped from 6 to 4 entries. First nav announce is now a real exit, not a phantom NPC.

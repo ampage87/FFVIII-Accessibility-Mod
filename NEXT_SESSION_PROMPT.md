@@ -2,12 +2,13 @@
 
 ## Status at handoff
 
-**v0.14.108 is BAT-PASSED and awaiting Aaron's push.** Behavioral-fingerprint follower filter works correctly across multiple fields and party compositions. `main` HEAD on GitHub is still `560f725b` (v0.14.106). Aaron should run `Utilities/push_to_github.vbs` to push v0.14.108 — the utility reads the version from `ff8_accessibility.h` and the body from `CHANGELOG.md` automatically.
+**v0.14.108 is SHIPPED.** Commit `e9a60eb4` on `main` (Thu 2026-05-07 22:39 UTC). Behavioral-fingerprint follower filter works correctly across multiple fields and party compositions. Linear history on `main`: v0.14.104 → v0.14.106 → v0.14.108. v0.14.107 was BAT-failed and never pushed.
 
 ## What just happened (last session summary)
 
 1. **v0.14.107 built and BAT-failed.** Filter cross-referenced canonical model→charId map against savemap formation at `0x01CFE74C`. On bggate_1 with party = Zell + Squall + Selphie (formation `[1, 0, 5, 255]`), the followers showed up as `ent1 model=2` and `ent2 model=4` (canonical Irvine/Rinoa, neither in the active party), so the savemap lookup correctly returned false and the filter no-opped. **Lesson: engine reuses model slots per-field**; the canonical map doesn't apply for catalog filtering.
-2. **v0.14.108 designed, built, and BAT-passed.** Replaced the canonical-mapping filter with a behavioral fingerprint check inside the catalog qualification loop (modelId 0–9 + walk-through + no-talk + no-push). Parallel to the existing v0.12.12 push-only-skip. The v0.14.107 helpers (`IsCharacterInActiveParty`, `ModelIdToCharId`) and the `[party-state]` formation diagnostic remain in place — harmless, well-documented, may be useful later.
+2. **v0.14.108 designed, built, BAT-passed, and pushed.** Replaced the canonical-mapping filter with a behavioral fingerprint check inside the catalog qualification loop (modelId 0–9 + walk-through + no-talk + no-push). Parallel to the existing v0.12.12 push-only-skip. The v0.14.107 helpers (`IsCharacterInActiveParty`, `ModelIdToCharId`) and the `[party-state]` formation diagnostic remain in place — harmless, well-documented, may be useful later. BAT validated across two fields with two different party compositions; pushed as commit `e9a60eb4`.
+3. **Push utility hardened.** First exercise of the new auto-flow `push_to_github.ps1` (rewritten earlier this session) failed silently — hidden PowerShell process, no dialog, no log update. Added phase-by-phase diagnostic logging to a fallback file (`Logs/push_diagnostic.log`) plus a top-level try/catch with a fallback MessageBox. Aaron's retry succeeded with a Success dialog. Instrumentation is permanent so further silent failures can be diagnosed immediately.
 
 ## v0.14.108 BAT evidence
 
@@ -36,7 +37,7 @@ Filter correctly catches followers regardless of which model slot the field assi
 
 ## Once Aaron pushes
 
-After `Utilities/push_to_github.vbs` succeeds, GitHub `main` HEAD becomes the v0.14.108 commit. The deferred priority list:
+v0.14.108 has been pushed (commit `e9a60eb4`). The deferred priority list:
 
 1. **X-ATM092 chase scene accessibility.** Long-deferred. Timed visual sequence in Dollet — blind player has no sense of distance or direction to flee. Needs preliminary deep research on the chase's engine internals (the ATM092 entity behavior across screen transitions, the chase script structure) before any code changes.
 2. **Walk-and-talk dialog gap.** Hardcoded engine path; longstanding. Field dialog TTS works for static dialogs but engine-driven walk-and-talk segments bypass the show_dialog hook. Needs investigation of the engine's walk-and-talk code path to find a different hook point.
