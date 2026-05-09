@@ -9,6 +9,10 @@
 // v02.00: First production build. Title screen TTS with direct memory
 //         read of cursor position at pMenuStateA + 0x1F6.
 
+#include "chase_diag.h"
+#include "chase_detector.h"
+#include "chase_ask_overlay.h"
+#include "chase_kani_freeze.h"
 #include "ff8_accessibility.h"
 #include "ff8_addresses.h"
 #include "mod_forward_decls.h"
@@ -115,6 +119,16 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     MenuTTS::Initialize();       // v07.00: In-game menu TTS diagnostic
     BattleTTS::Initialize();     // v0.10.01: Battle sequence TTS
     WorldMap::Initialize();       // v0.11.03: World map navigation
+    ChaseDetector::Initialize();  // v0.15.1: Chase state authority (must be
+                                  //          before ChaseDiag/Overlay/KaniFreeze
+                                  //          since they query it)
+    ChaseDiag::Initialize();      // v0.15.0: Dollet/X-ATM092 chase diagnostic
+    ChaseAskOverlay::Initialize();// v0.15.1: Chase entry ASK overlay
+    ChaseKaniFreeze::Initialize();// v0.15.2.3: kani-wakeup byte-diff diagnostic
+                                  //   (replaces v0.15.1 ChaseBattleFreeze
+                                  //   opcode_battle hook, which only worked
+                                  //   in domt4_1; kani wakeup is the same
+                                  //   state machine across all chase fields)
     
     // Enable all MinHook hooks
     mhStatus = MH_EnableHook(MH_ALL_HOOKS);
@@ -178,6 +192,19 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
 
         // World map navigation TTS (v0.11.03)
         WorldMap::Update();
+
+        // v0.15.1: Chase scene state authority + ASK overlay polling.
+        // ChaseDetector polls field/game-mode and resolves kani slot;
+        // ChaseAskOverlay polls keyboard for the chase ASK choice.
+        // v0.15.2.3: ChaseKaniFreeze diagnoses/freezes kani's post-battle
+        // wakeup transition so the robot stays incapacitated until field
+        // exit — replaces the v0.15.1 ChaseBattleFreeze opcode_battle hook.
+        ChaseDetector::Update();
+        ChaseAskOverlay::Update();
+        ChaseKaniFreeze::Update();
+
+        // Chase scene diagnostic (v0.15.0) — F12 toggle, no-op when disabled
+        ChaseDiag::Update();
         
         // --- Accessibility keyboard shortcuts (v0.14.45 layout) ---
         // `  = Repeat last dialog
@@ -188,6 +215,8 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
         // Shift+F3 / Shift+F4  = Speech volume down / up
         // F5 / F6              = SFX volume down / up
         // F7 / F8              = BGM volume down / up
+        // F11                  = On-demand screenshot
+        // F12                  = Toggle chase scene diagnostic (v0.15.0)
         // Navigation (-/+/Backspace) handled inside FieldNavigation::Update()
         {
             static bool s_graveWas = false;
@@ -197,6 +226,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
             static bool s_f5was = false, s_f6was = false;
             static bool s_f7was = false, s_f8was = false;
             static bool s_f11was = false;
+            static bool s_f12was = false;
             static bool s_vWas = false;
 
             bool grave = (GetAsyncKeyState(VK_OEM_3) & 0x8000) != 0; // ` key
@@ -209,6 +239,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
             bool f7 = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
             bool f8 = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
             bool f11 = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
+            bool f12 = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
             bool vkey = (GetAsyncKeyState('V') & 0x8000) != 0;
             bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
             // v0.14.105: Suppress accessibility hotkeys when Alt is held.
@@ -266,6 +297,14 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
                 Log::Mod("[F11-SCREENSHOT] Capture requested: '%s.png'", path);
                 ScreenReader::Speak(L"Screenshot captured.", true);
             }
+            // v0.15.0: F12 = toggle chase scene diagnostic. Per the F12 rule
+            // in userMemories, F12 is reserved for per-session diagnostic
+            // builds; this is the v0.15.0 chase-diag instrumentation. The
+            // toggle calls into ChaseDiag::Toggle which flips the enable flag,
+            // snapshots fresh baselines, and announces the new state via TTS.
+            if (f12 && !s_f12was && !alt) {
+                ChaseDiag::Toggle();
+            }
             if (vkey && !s_vWas) {
                 wchar_t verMsg[128];
                 wsprintfW(verMsg, L"Version %hs", FF8OPC_VERSION);
@@ -279,13 +318,13 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
             s_f5was = f5; s_f6was = f6;
             s_f7was = f7; s_f8was = f8;
             s_f11was = f11;
+            s_f12was = f12;
             s_vWas = vkey;
         }
 
-        // v0.14.75: F12 has no consumer in this build. Reserved exclusively
-        // for per-session diagnostic builds per the F12 rule in userMemories.
-        // The v0.14.74.4-diag F12 = screenshot binding was promoted to F11
-        // permanently in this build (see the F11 handler above).
+        // v0.15.0: F12 = ChaseDiag::Toggle (chase scene diagnostic). See
+        // F12 handler above. The previous v0.14.75 "F12 has no consumer"
+        // comment is now obsolete.
         // ENT-MON code removed in v0.12.23.
         
         // --- Sleep to avoid burning CPU ---
@@ -296,6 +335,10 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     // Cleanup
     BattleTTS::Shutdown();       // v0.10.01: Battle TTS cleanup
     WorldMap::Shutdown();         // v0.11.03: World map cleanup
+    ChaseKaniFreeze::Shutdown();  // v0.15.2.3: kani-wakeup diagnostic cleanup
+    ChaseAskOverlay::Shutdown();  // v0.15.1: close ASK if open + reset state
+    ChaseDiag::Shutdown();        // v0.15.0: Chase diagnostic cleanup
+    ChaseDetector::Shutdown();    // v0.15.1: Chase state cleanup
     GameAudio::Shutdown();       // v0.09.22: Remove BGM volume hook
     NameBypass::Shutdown();      // v04.26: Remove naming screen hook
     FieldNavigation::Shutdown(); // v05.00: Field navigation cleanup

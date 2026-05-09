@@ -93,6 +93,18 @@ namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); }
 // dialog, etc.) speaks normally through this hook.
 namespace ScanTTS { bool IsScreenActive(); }
 
+// v0.15.1: Chase scene wiring.
+// - ChaseAskOverlay::OnDialogText is called from Hook_show_dialog for every
+//   decoded text the engine renders. The overlay does a cheap strncmp filter
+//   for Squall's chase-trigger MES ("Forget it!  Let's go!") and opens the
+//   manual-vs-auto-drive ASK when matched.
+// - ChaseDiag::OnAskOpcodeFired is called from Hook_opcode_ask and
+//   Hook_opcode_aask. When chase-diag is enabled (F12), it snapshots all 8
+//   pWindowsArray slots so chase_ask_overlay can mine real engine-set ASK
+//   template values for v0.15.2 proxy-window tuning. No-op when disabled.
+namespace ChaseAskOverlay { void OnDialogText(const char* text); }
+namespace ChaseDiag       { void OnAskOpcodeFired(const char* opcodeLabel); }
+
 namespace FieldDialog {
 
 typedef int (__cdecl *OpcodeHandler_t)(int);
@@ -1022,6 +1034,14 @@ static char __cdecl Hook_show_dialog(int32_t window_id, uint32_t state, int16_t 
                window_id, currentMode, (unsigned)tutoId, state, (int)transition,
                usedText2 ? " [T2]" : "", decoded.c_str());
 
+    // v0.15.1: forward EVERY decoded field-dialog text to chase_ask_overlay.
+    // Cheap strncmp filter inside; opens the chase ASK when it sees Squall's
+    // "Forget it!  Let's go!" trigger MES in a chase field. Outside of chase
+    // context this is a near-no-op (single string compare + early return).
+    if (currentMode == 1 /* MODE_FIELD */) {
+        ::ChaseAskOverlay::OnDialogText(decoded.c_str());
+    }
+
     // Check if opcode hooks already spoke this
     EnterCriticalSection(&s_cs);
     WindowState& ws = s_winState[window_id];
@@ -1317,6 +1337,7 @@ static int __cdecl Hook_opcode_ask(int entityPtr)
     EnterCriticalSection(&s_cs);
     ScanAndSpeakChoiceWindows("ASK");
     LeaveCriticalSection(&s_cs);
+    ::ChaseDiag::OnAskOpcodeFired("ASK");  // v0.15.1: chase-diag template snapshot
     return result;
 }
 
@@ -1335,6 +1356,7 @@ static int __cdecl Hook_opcode_aask(int entityPtr)
     EnterCriticalSection(&s_cs);
     ScanAndSpeakChoiceWindows("AASK");
     LeaveCriticalSection(&s_cs);
+    ::ChaseDiag::OnAskOpcodeFired("AASK");  // v0.15.1: chase-diag template snapshot
     return result;
 }
 

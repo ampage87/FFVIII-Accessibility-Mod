@@ -152,6 +152,10 @@ cl /nologo /W3 /EHsc /O2 /MD /LD ^
     "%SRC_DIR%\menu_tts.cpp" ^
     "%SRC_DIR%\battle_tts.cpp" ^
     "%SRC_DIR%\world_map.cpp" ^
+    "%SRC_DIR%\chase_diag.cpp" ^
+    "%SRC_DIR%\chase_detector.cpp" ^
+    "%SRC_DIR%\chase_ask_overlay.cpp" ^
+    "%SRC_DIR%\chase_kani_freeze.cpp" ^
     "%SRC_DIR%\ff8_text_decode.cpp" ^
     "%MINHOOK_DIR%\src\buffer.c" ^
     "%MINHOOK_DIR%\src\hook.c" ^
