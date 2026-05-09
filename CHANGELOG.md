@@ -4,6 +4,445 @@ Newest on top. Each entry begins with a `## vMAJOR.MINOR.BUILD` heading followed
 
 The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_accessibility.h`. The push utility refuses to push if they don't.
 
+## v0.15.3
+
+Single-pronged cleanup: remove the static kani+battleyarou pin from chase_kani_freeze; fix the deploy.bat "Version: World" regex bug.
+
+The v0.15.2.15 BAT was a milestone success. Aaron played through the entire X-ATM092 chase end-to-end -- five mountain-trail fields, the bridge (doopen2a), Town Square (dotown_3), and out the chase-end Lapin Beach FMV with all eight audio descriptions playing cleanly across the 74-second cutscene. One battle per field, no crashes, no hangs, no robot-walking-around. Every chase field's CHASE-AGENT FINAL SUMMARY showed the dynamic agent pin holding the actual robot at zero or near-zero changed bytes. The doopen2a strcmp guard worked exactly as designed (one PASS log line, no [CHASE-AGENT] line, fieldId-flip deactivation fired correctly on the doopen2a -> dotown_3 handoff). The DEVNOTES decision criterion was satisfied: "if [CHASE-AGENT] resolves AND CHASE-AGENT FINAL SUMMARY shows few/zero byte changes AND freeze# count is low for that field, the agent pin is sufficient."
+
+### What changes in v0.15.3
+
+The static kani+battleyarou pin in `src/chase_kani_freeze.cpp` is removed. Across three v0.15.2.x BATs, the OTHERS-DIAG scanner consistently showed kani had at most 7 changed bytes and battleyarou had 0 -- both static pins were inert in every chase field tested, because the actual chase agents in those fields were rinoa-slot in domt5_1, director0 in doopen2a, and various robot-slots in the trail fields, NOT the kani or battleyarou symbols the static pin was targeting. They were dead code.
+
+What goes:
+
+- The `s_kaniPtr` / `s_strideBytes` / `s_arrayKind` / `s_haveFullSnapshot` / `s_fullSnapshot` / `s_initial` / `s_prev` / `s_byteFirstChangeLogged` state.
+- The `s_battleyarouPtr` / `s_battleyarouStrideBytes` / `s_battleyarouArrayKind` / `s_battleyarouInitial` / `s_haveBattleyarouSnapshot` / `s_battleyarouSnapshot` state.
+- `ReadKaniBlock`, `LogInitialSnapshot`, `LogChangeSummary`, `DiffAndLogFirstChanges` helpers.
+- The kani INITIAL / snapshot / memcpy / FINAL blocks in `StartCapture`, `ApplyFreezePin`, `EndCapture`.
+- The battleyarou INITIAL / snapshot / memcpy / FINAL blocks in the same three functions.
+- The per-tick FIRST CHANGE diff loop and the MID-WINDOW heartbeat in `Update` (both anchored to the kani buffer).
+- The kani-related cleanup lines in `DeactivateFreeze`.
+
+What stays:
+
+- The dynamic chase-agent pin (`RegisterChaseAgent` + agent INITIAL / snapshot / memcpy / FINAL SUMMARY blocks).
+- The v0.15.2.14 fieldId-flip deactivation (`ReadCurrentFieldId` helper, `s_freezeFieldId` capture, raw-fieldId check before debounced-name check).
+- The v0.15.2.9 OTHERS-DIAG diagnostic scanner (kept for future agent-resolution audits).
+- The v0.15.2.3.1 capture trigger (`s_battleSeenRecently` mode 3->1 detection).
+- The SEH probe pattern before agent writes.
+- The `LogHexRow` helper (used for the AGENT-INIT log block).
+
+### Net effect
+
+`chase_kani_freeze.cpp` goes from ~700 lines to ~580 lines. The field log gets much quieter during chase battles -- no per-tick FIRST CHANGE spam, no MID-WINDOW heartbeat, no kani / battleyarou INITIAL or FINAL SUMMARY blocks. The CHASE-AGENT lines and the OTHERS-DIAG block remain. The per-frame cost in chase fields drops by two memcpys plus one ReadKaniBlock per Update tick.
+
+`chase_kani_freeze.h`'s design comment is rewritten to document the v0.15.3 single-pronged design, with the v0.15.2.x history retained as a terse trail. The Initialize log line is updated to "v0.15.3 DYNAMIC AGENT PIN ONLY" wording.
+
+### Cosmetic fix bundled in: deploy.bat "Version: World" regex bug
+
+The v0.15.2.x deploy log lines all printed `Version: World` instead of the actual version string. Root cause: the `findstr /C:"FF8OPC_VERSION "` pattern in `src/deploy.bat` matched comment-trail lines in `ff8_accessibility.h` in addition to the actual `#define`. The `for /f` loop's last-iteration-wins behavior left `VERSION` set to token 3 of an unrelated comment line.
+
+Fix: tighten the findstr to `/C:"#define FF8OPC_VERSION "` so only the actual `#define` line matches. Drop the now-redundant `^| findstr /V "DATE"` filter. The `%%~V` modifier strips surrounding quotes from `"0.15.3"` to give `VERSION=0.15.3` in the deploy log.
+
+### Risk
+
+Very low. The removed code paths only ran during chase-field battle exits, never wrote to entities outside their resolved kani/battleyarou pointers, and v0.15.2.15 BAT's OTHERS-DIAG already proved kani and battleyarou were inert -- removing inert pins changes nothing the engine observes.
+
+### Predicted v0.15.3 BAT outcome
+
+Identical chase behavior to v0.15.2.15: single-fight chase, robots stay down, dotown_3 transition succeeds, Lapin Beach FMV plays through to dotown_2. Field log is shorter and cleaner. Deploy log shows `Version: 0.15.3` instead of `Version: World`.
+
+### Files changed
+
+- `src/chase_kani_freeze.cpp` (rewritten, ~580 lines down from ~700)
+- `src/chase_kani_freeze.h` (design comment rewrite)
+- `src/ff8_accessibility.h` (version bump to 0.15.3 + new comment trail entry)
+- `src/deploy.bat` (1 line: tighten findstr to `#define`-prefixed)
+- `CHANGELOG.md` (this top entry)
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`
+
+## v0.15.2.15
+
+Surgical doopen2a fix on top of v0.15.2.14 -- skip dynamic chase-agent pin in doopen2a only
+
+The v0.15.2.14 BAT confirmed that the new dynamic chase-agent pin works beautifully across the five mountain-trail chase fields (domt1_1 through domt5_1). Auto-announce field name fired correctly on every load. The robots stayed pinned. No crashes.
+
+The failure was in doopen2a, the bridge field between the trail and dotown_3 (fieldId=0x014D; Aaron called it "town square" in his report, but the freeze actually happened one field upstream of dotown_3). After the chase battle in doopen2a resolved, the field froze before any transition. Music kept playing, no crash, but no dotown_3 entry was ever logged.
+
+### Diagnosis
+
+The v0.15.2.14 BAT log gives the answer. In doopen2a, the dynamic agent pin registered the BATTLE caller as `director0` (Others slot 4, symIdx 9) -- and the CHASE-AGENT FINAL SUMMARY showed 41 changed bytes in the t=0..1500ms grace period before our snapshot, scattered across the animation/position regions (+0x140-+0x147 X/Y, +0x190-+0x197, +0x1B5-+0x1BA, +0x1F6-+0x1FA, +0x206-+0x207). After t=1500ms, the pin held director0 frozen for the rest of the field session.
+
+Cross-referencing with the v0.15.2.13 BAT: the BATTLE caller in doopen2a was logged at entityPtr=0x0188CA04, which v0.15.2.14 correctly resolved to director0. So in doopen2a the BATTLE caller and the chase-progress-tracker are the same entity. Pinning its full state for the rest of the field session prevents the chase-end script from advancing -- director0 presumably waits on a flag/counter byte at one of the offsets we're now overwriting every frame, so the transition to dotown_3 never fires.
+
+The v0.15.2.10 deferred concern about director0 was prescient. domt1_1 through domt5_1 don't share this pattern: their BATTLE caller is the actual robot (the chase agent), not the field's progress director, so pinning it works.
+
+### Fix
+
+`src/chase_battle_freeze.cpp` Hook_opcode_battle PASS branch now captures the debounced field name and wraps the RegisterChaseAgent call in a strcmp:
+
+```cpp
+const char* fieldName = ChaseDetector::GetDebouncedFieldName();
+if (fieldName != nullptr && std::strcmp(fieldName, "doopen2a") == 0) {
+    Log::Field("[CBF] PASS in doopen2a -- skipping RegisterChaseAgent ...");
+} else {
+    ChaseKaniFreeze::RegisterChaseAgent((uintptr_t)entityPtr);
+}
+```
+
+The BATTLE NO-OP gate (battleCount >= 1) is unchanged and carries the load in doopen2a -- that field has exactly one chase battle in the whole sequence, so capping at 1 is sufficient. Other chase fields keep the dynamic pin.
+
+The static kani+battleyarou pin in chase_kani_freeze still runs in doopen2a, but it's inert there: per the v0.15.2.14 OTHERS-DIAG, kani had 7 changed bytes and battleyarou had 0, so the pin had nothing to hold.
+
+Also added `<cstring>` include for `std::strcmp` and updated the Initialize log line to v0.15.2.15 wording ("skip register-agent in doopen2a only"). v0.15.2.14 dynamic agent pin design, tightened deactivation (raw fieldId check + SEH probe), and field_announce module are all UNCHANGED.
+
+### What v0.15.2.15 BAT should show
+
+- Each chase field except doopen2a: one `[CBF] PASS` line plus one `[CHASE-AGENT]` line (same as v0.15.2.14)
+- doopen2a: one `[CBF] PASS in doopen2a -- skipping RegisterChaseAgent` line, NO `[CHASE-AGENT]` line for that field, no CHASE-AGENT FINAL SUMMARY block
+- doopen2a kani+battleyarou FINAL SUMMARY shows changed_bytes=0 (those entities still dormant)
+- A `KaniFreeze: FREEZE DEACTIVATED -- fieldId changed 0x014D -> 0x0158 (pre-debounce)` line shortly after the doopen2a battle ends
+- dotown_3 cutscene plays through, chase-end FMV fires, control returns to dotown_2 or wherever the chase ends
+
+If the freeze recurs even with the dynamic pin disabled in doopen2a, the cause is something else and we'll need a different angle (next candidates: was the static kani+battleyarou pin in earlier doopen2a entries causing trouble? does the BATTLE NO-OP itself break the chase-end script in doopen2a?).
+
+### Files changed
+
+- `src/chase_battle_freeze.cpp` (~30 lines: capture fieldName, wrap RegisterChaseAgent in strcmp guard, add `<cstring>` include, update Initialize log line)
+- `src/chase_battle_freeze.h` (~20 lines: new design rationale paragraph at top documenting v0.15.2.15 doopen2a skip)
+- `src/ff8_accessibility.h` (version bump to 0.15.2.15 + new comment trail entry)
+- `CHANGELOG.md` (this entry)
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`
+
+## v0.15.2.14
+
+Dynamic chase-agent pin + tightened deactivation (dotown_3 crash fix) + auto-announce field name on field load
+
+v0.15.2.13 BAT confirmed end-to-end traversal of the X-ATM092 chase but exposed two issues that this build addresses, plus an unrelated user-requested feature.
+
+### Issue 1: dotown_3 crash recurred
+
+v0.15.2.13 BAT crashed approximately 16 seconds after entering dotown_3 from doopen2a, the same pattern as the v0.15.2.10 BAT crash. v0.15.2.11's removal of dotown_3 from CHASE_FIELD_NAMES had stopped chase_kani_freeze from starting a new capture inside dotown_3, but it didn't fix the handoff. The actual mechanism: when fieldId flips from doopen2a (0x014D) to dotown_3 (0x0158), there is a roughly 2-second window before ChaseDetector's name-debounce settles on the new name. The v0.15.2.4 ApplyFreezePin design explicitly preserved the cached pointer through that window ("empty-string field name during the 2s name-debounce after fieldId flip does NOT deactivate -- we don't yet know the destination"). During those 2 seconds, ApplyFreezePin kept writing 0x21 to bytes at +0x150/+0x23F/+0x241 and 0x14 to +0x154/+0x1FA on the cached doopen2a kani pointer, plus a 292-byte memcpy of the full-state snapshot, on a memory region that had been freed and reallocated to dotown_3 entities. The cutscene crashed when it read the corrupted state.
+
+v0.15.2.11 was pushed to GitHub but never demonstrably proven crash-free -- the v0.15.2.11 BAT didn't actually replay through dotown_3, v0.15.2.12 got stuck in domt5_1, and v0.15.2.13 was the first build since v0.15.2.10 to reach dotown_3.
+
+### Issue 2: Pin was hitting the wrong entities
+
+v0.15.2.13's BATTLE NO-OP suppressed combat correctly (6 PASS + 8 NO-OP across 14 chase BATTLE calls in 6 fields, exactly one PASS per field). But the actual chase agent in domt5_1 -- the rinoa-slot wearing kani's robot model (Others slot 3, model 12, 47 changed bytes in the v0.15.2.12 OTHERS-DIAG) -- was waking up and walking around silently while the BATTLE NO-OP suppressed combat. The kani+battleyarou pin from v0.15.2.7-.8 was holding two dormant entities perfectly still while the actual robot wandered loose. Aaron's design preference inverted: pin should keep the agent down on the ground (so it stays incapacitated visually too); BATTLE NO-OP becomes the safety net for cases where the pin misses.
+
+### Fix 1: Dynamic chase-agent pin
+
+`src/chase_kani_freeze.h` exposes a new `RegisterChaseAgent(uintptr_t entityPtr)` entry point. `src/chase_battle_freeze.cpp` calls it from the PASS branch of Hook_opcode_battle, handing over the entity pointer that just made the BATTLE call. `RegisterChaseAgent` resolves the pointer to (arrayKind, slot, symIdx, symName) by reading `pFieldStateOthers` and `pFieldStateBackgrounds` bases under SEH, walking with the appropriate stride (0x264 / 0x1B4), and checking offset modulo + slot range. On success, logs a structured line for per-field identity audit:
+
+```
+[CHASE-AGENT] field='domt5_1' entityPtr=0x0188C5D8
+              -> array=Others slot=3 symIdx=7 sym='rinoa'
+              stride=0x264 header[0x00..0x10]: <16 hex bytes>
+```
+
+On failure (pointer outside both arrays, JSMCounts unavailable, etc.), logs `[CHASE-AGENT-UNRESOLVED]` with the reason -- pin stays inactive, BATTLE NO-OP carries the load.
+
+The new agent state runs alongside kani+battleyarou. StartCapture snapshots the agent's INITIAL state (logged as `AGENT-INIT` hex dump). ApplyFreezePin takes the agent's full-state snapshot at SNAPSHOT_DELAY_MS=1500ms post-activation, then memcpy's it back over the agent's +0x140..stride region every frame. EndCapture logs CHASE-AGENT FINAL SUMMARY with changed_bytes count and per-byte deltas vs INITIAL.
+
+Thread safety: RegisterChaseAgent runs on the game thread, ApplyFreezePin on the mod thread. Identity fields (stride, kind, slot, symName) are written first; s_chaseAgentPtr is written last (32-bit aligned, atomic on x86, store-store reordering forbidden), so the mod thread sees either uninitialized or fully populated state.
+
+### Fix 2: Tightened deactivation
+
+`src/chase_kani_freeze.cpp` ApplyFreezePin captures `pCurrentFieldId` at FREEZE ACTIVATED time (new state s_freezeFieldId) and reads it under SEH every frame. If the live fieldId differs from the captured value, it calls a new centralized `DeactivateFreeze(reason)` helper that clears all pin state (kani + battleyarou + agent + snapshot flags + freeze ticks) immediately -- before the 2-second name-debounce settles. The existing debounced-name check stays as a backup. Plus a one-byte SEH-guarded probe read before each entity write to catch torn pointers; on fault, skip the frame silently.
+
+This fixes the dotown_3 crash without dotown_3 needing any special-case logic. The fieldId check fires the moment the engine flips it, before any reallocation can cross-contaminate.
+
+### Fix 3: BATTLE NO-OP becomes the safety net
+
+`src/chase_battle_freeze.h` and `.cpp` are repurposed from primary suppression (v0.15.2.13) to safety-net + agent identifier. The PASS branch now calls RegisterChaseAgent(entityPtr) as a side effect of the existing log line. The NO-OP gate (battleCount >= 1) is preserved unchanged as the fallback. In a healthy v0.15.2.14 run, the pin holds the agent on the ground and the NO-OP fires zero or rarely; the freeze# counter from the Shutdown summary becomes a real diagnostic (low = pin healthy, high = pin missing the agent and safety net carrying the load).
+
+### Feature: auto-announce field name on field load
+
+New module `src/field_announce.{h,cpp}` (~140 lines total). Polls `FF8Addresses::pCurrentFieldId` every Update tick under SEH; on fieldId change, starts an 800ms debounce timer; once the new fieldId is stable, looks up `FIELD_DISPLAY_NAMES[fieldId]` (the existing 982-entry catalog from `src/field_display_names.h`) and calls `ScreenReader::Speak(name, false)` -- queued, not interrupting, so dialog or in-flight TTS finishes first. Skip rules: fieldId == 0 (title screen), fieldId out of range, already-announced (no spam on battle/menu re-entry to the same field), not in MODE_FIELD. Wired into dinput8.cpp's main loop next to FieldNavigation::Update.
+
+### Files changed
+
+- `src/chase_kani_freeze.h` (rewritten ~70 lines)
+- `src/chase_kani_freeze.cpp` (rewritten ~700 lines)
+- `src/chase_battle_freeze.h` (rewritten ~50 lines)
+- `src/chase_battle_freeze.cpp` (rewritten ~135 lines: include chase_kani_freeze.h, RegisterChaseAgent call in PASS branch)
+- `src/field_announce.h` + `.cpp` (NEW)
+- `src/dinput8.cpp` (~20 lines: include field_announce.h, FieldAnnounce::Initialize/Update/Shutdown wired in, ChaseKaniFreeze + ChaseBattleFreeze comment blocks rewritten)
+- `src/deploy.bat` (1 line: field_announce.cpp added to compile list)
+- `src/ff8_accessibility.h` (version bump)
+- `CHANGELOG.md` (this entry)
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`
+
+### What v0.15.2.14 BAT should show
+
+For each chase field, exactly one `[CBF] PASS` line followed by exactly one `[CHASE-AGENT]` line resolving the BATTLE caller's entityPtr to a slot identity. Six fields total = six pairs. After the post-battle StartCapture in each field, a `KaniFreeze: CHASE-AGENT INITIAL snapshot` line and a `KaniFreeze: CHASE-AGENT full-state snapshot taken` line about 1500ms later. Subsequent collisions in the same field should NOT generate `[CBF] NO-OP` lines if the pin is working (the agent stays on the ground and never reaches BATTLE again); a low freeze# count at Shutdown indicates a healthy pin. CHASE-AGENT FINAL SUMMARY changed_bytes should be near zero per field.
+
+On the doopen2a -> dotown_3 transition, expect a single `KaniFreeze: FREEZE DEACTIVATED -- fieldId changed 0x014D -> 0x0158 (pre-debounce)` line, then no further pin activity, no crash, dotown_3 cutscene plays through to credits.
+
+Aaron should also hear field display names auto-spoken on every field load.
+
+## v0.15.2.13
+
+Flip `chase_battle_freeze` from passive observer to active BATTLE NO-OP based on v0.15.2.12 BAT data
+
+The v0.15.2.12 BAT in `domt5_1` produced three `[CBF]` log lines, one
+per chase battle, all paired one-to-one with `ChaseDetector battle
+entered` events:
+
+```
+11:51:32  [CBF] chase BATTLE call #2 (total #3)  battleCount=0
+          caller=other  entityPtr=0x0188C5D8
+11:53:21  [CBF] chase BATTLE call #3 (total #4)  battleCount=1
+          caller=other  entityPtr=0x0188C5D8
+11:54:47  [CBF] chase BATTLE call #4 (total #5)  battleCount=2
+          caller=other  entityPtr=0x0188C5D8
+```
+
+`opcode_battle` fires for every chase battle in `domt5_1`. The
+v0.15.2.2 finding that opcode_battle was dead in `domt5_1` was wrong:
+v0.15.1's pass-through logger sampled at every-50th-call frequency and
+the freeze branch only logged kani-driven calls, so non-kani chase
+BATTLE calls were essentially invisible. v0.15.2.12's per-call
+chase-field logging caught what earlier builds missed.
+
+### What entityPtr 0x0188C5D8 actually is
+
+`othersBase(0x0188BEAC) + 3 * 0x264 = Others slot 3 = symIdx 7 =
+'rinoa' SYM entry`. Same-window OTHERS-DIAG showed rinoa-slot had
+`changed_bytes=47/612` (second-most-active entity in `domt5_1`); the
+immediately-prior `[TALKRAD]` line for the same pointer showed
+`model=12`, kani's robot model. The rinoa-slot is the actual chase
+agent in `domt5_1`, wearing model 12. Not the kani-slot (slot 8, only
+the 5 pinned bytes changed). Not the battleyarou-slot (slot 10, 0
+changes).
+
+v0.15.2.8/9/10 had been pinning the wrong two entities the whole time
+in `domt5_1`. The pin worked perfectly but missed the chase agent.
+
+### What v0.15.2.13 ships
+
+A simple BATTLE-opcode NO-OP that doesn't depend on knowing which
+entity is the chase agent. `chase_battle_freeze.cpp` reactivates the
+freeze branch with gate:
+
+```cpp
+freeze = (mode == MODE_MANUAL && IsInChaseField()
+          && GetCurrentFieldBattleCount() >= 1);
+```
+
+Returns `JSM_RC_ADVANCE = 3` without invoking the original handler
+when the gate matches. **The caller-identity check (kani / battleyarou)
+is dropped from the gate** -- it's still computed for log tagging only.
+The first chase battle per field still passes through so the scripted
+opening encounter fires; only the second-and-later calls are NO-OP'd.
+
+Same mechanism v0.15.1 used successfully in `domt4_1`, just with a
+broader gate.
+
+### Implementation
+
+**`src/chase_battle_freeze.h` (rewritten):**
+- Documents the v0.15.2.13 design rationale and includes the v0.15.2.12
+  BAT findings inline so future maintainers don't repeat the v0.15.2.2
+  misinterpretation.
+- Public API (`Initialize`, `Shutdown`) unchanged.
+
+**`src/chase_battle_freeze.cpp` (rewritten):**
+- `Hook_opcode_battle` re-enables the freeze branch with the
+  caller-agnostic gate.
+- New `s_freezeCount` global counts NO-OP'd calls for the Shutdown
+  summary.
+- Per-call log lines tagged `NO-OP` or `PASS` so the BAT can verify the
+  freeze pattern at a glance.
+- `Initialize` log line documents the active-freeze role.
+
+**`src/dinput8.cpp`:**
+- `ChaseBattleFreeze::Initialize` / `Shutdown` comment blocks updated to
+  reflect ACTIVE FREEZE role.
+
+### Predicted v0.15.2.13 BAT outcome
+
+Enter `domt5_1`, fight battle #1 normally (`PASS` log line), walk
+toward field exit, robot collides with Squall, opcode_battle fires but
+is NO-OP'd (`NO-OP` log line). Squall continues walking, exits to next
+chase field, pattern repeats. End result: traverse the entire chase
+scene through the Lapin Beach FMV.
+
+### Risk
+
+Very low.
+
+1. No entity bytes touched -- v0.15.2.11's `dotown_3` cutscene fix
+   stays intact.
+2. Returning JSM advance code without calling original is exactly what
+   v0.15.1 did in `domt4_1` -- and that worked.
+3. Aaron confirmed there are no random encounters during the chase
+   scene, so the "cap at 1 battle per chase field" policy doesn't
+   suppress legitimate non-chase battles.
+4. The v0.15.2.12 BAT showed Aaron stuck in `domt5_1` with three
+   battles and no forward progress -- this build directly addresses
+   that failure mode.
+
+### What this also resolves
+
+The `doopen2a` second-chase-battle issue (deferred from v0.15.2.10 over
+concerns about a `director0` pin breaking the chase-end logic) is
+**solved by this fix without ever needing to pin `director0`**.
+v0.15.2.13 caps `doopen2a` at one battle the same way it caps every
+other chase field.
+
+### What this does NOT change
+
+- v0.15.2.11 dotown removal preserved.
+- v0.15.2.10 `domt1_1` chase coverage preserved.
+- v0.15.2.9 OTHERS-DIAG scanner preserved.
+- v0.15.2.8 dual-entity (kani + battleyarou) pin preserved -- now
+  defensive belt-and-suspenders, harmless when those entities aren't
+  the chase agent and may still help in fields where kani-slot IS the
+  agent (e.g. `domt4_1`).
+- All earlier kani-pin layers preserved.
+
+### Files changed
+
+- `src/chase_battle_freeze.h` (rewritten)
+- `src/chase_battle_freeze.cpp` (rewritten)
+- `src/dinput8.cpp` (init / shutdown comment blocks)
+- `src/ff8_accessibility.h` (version bump)
+- `CHANGELOG.md` (this entry)
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`
+
+## v0.15.2.12
+
+Reactivate `chase_battle_freeze.cpp` as a passive opcode_battle observer (no behavior change, log only)
+
+v0.15.2.10 BAT confirmed `doopen2a` fires a second chase battle even
+with kani + battleyarou pinned. The clean OTHERS-DIAG at 22:03:34
+flagged `director0` (31 changes / 612 bytes) as the prime non-pinned
+suspect, but pinning a third entity carries real risk -- if `director0`
+is the chase-progress-tracker, freezing it could re-break the chase-end
+cutscene that v0.15.2.11 just unblocked, or stall progression in some
+other way we can't predict from byte-change counts alone.
+
+Before committing to a `director0` pin we want one piece of empirical
+data: does the second-battle event in `doopen2a` go through
+`opcode_battle` at all? If yes, the cleanest fix is a simple BATTLE
+NO-OP hook (no entity bytes touched, no script-state corruption). If
+no, we know the second battle takes a different code path -- the same
+dead-code situation v0.15.2.2 BAT documented for `domt2_1` and
+`domt5_1` -- and we move to entity-level work knowing the cheaper
+strategy was never available.
+
+### What v0.15.2.12 ships
+
+**Reactivates the orphan `chase_battle_freeze.{h,cpp}` as a pure
+passive observer.** The hook is installed on
+`pExecuteOpcodeTable[0x69]` and ALWAYS forwards to the original
+handler. No freeze, no NO-OP, no short-circuit. This is observation
+only.
+
+When `ChaseDetector::IsInChaseField()` is true, every BATTLE call
+emits one log line:
+
+```
+[CBF] chase BATTLE call #N (total #M) field='X' mode=Y battleCount=Z
+      caller=kani|battleyarou|other entityPtr=0xADDR
+```
+
+The `caller` tag uses `ChaseDetector::IsKaniEntityPtr` and
+`IsBattleyarouEntityPtr` to identify whether the calling script entity
+is one of the two we already track. For other callers, the raw
+`entityPtr` value lets the BAT analyst correlate against the entity
+addresses captured in OTHERS-DIAG.
+
+Outside chase fields the hook is silent (no log spam from random
+encounters or non-chase scripted battles).
+
+### Three predicted BAT outcomes
+
+**(A) FIRES-BOTH** -- two `[CBF]` lines in `doopen2a` (battleCount=0
+for the first battle, battleCount=1 for the second). Strategy 1
+(NO-OP the second+ call) is viable; v0.15.2.13 ships the active
+freeze.
+
+**(B) FIRES-FIRST-ONLY** -- one `[CBF]` line for the first battle,
+none for the second that `ChaseDetector` still observes via
+game-mode 1 -> 3 transition. Same dead-code pattern as `domt2_1`
+and `domt5_1`. Move to Strategy 2 (targeted byte pin on the specific
+`director0` offsets that change) or Strategy 3 (full `director0`
+freeze, riskiest).
+
+**(C) FIRES-NEITHER** -- no `[CBF]` lines at all but `ChaseDetector`
+still reports battles. Confirms `opcode_battle` is fully dead in
+`doopen2a`. Same conclusion as B.
+
+### Implementation
+
+**`src/chase_battle_freeze.h` (rewritten ~30 lines):**
+- Updated header comment block to describe the v0.15.2.12 passive
+  observer role and the three predicted outcomes.
+- Public API (`Initialize`, `Shutdown`) unchanged.
+
+**`src/chase_battle_freeze.cpp` (rewritten ~140 lines):**
+- Removed the freeze branch entirely. `Hook_opcode_battle` now
+  computes chase-field state purely for logging and unconditionally
+  forwards to `s_origBattle(entityPtr)`.
+- Per-call logging inside chase fields includes both kani and
+  battleyarou caller-pointer matches via the existing
+  `ChaseDetector::Is*EntityPtr` helpers (battleyarou support added
+  in v0.15.2.8 was not present in v0.15.1).
+- Removed periodic pass-through summary lines (every-50th sampling
+  no longer needed -- we want EVERY chase-field call).
+- `Initialize` log line updated to v0.15.2.12 wording.
+- `Shutdown` log line now reports both total opcode_battle calls and
+  the chase-field subset.
+
+**`src/deploy.bat` (1 line):**
+- `chase_battle_freeze.cpp` added back to the cl.exe compile list,
+  immediately after `chase_kani_freeze.cpp`.
+
+**`src/dinput8.cpp` (~12 lines):**
+- `#include "chase_battle_freeze.h"` added.
+- `ChaseBattleFreeze::Initialize()` called after
+  `ChaseKaniFreeze::Initialize()`. ChaseDetector is already
+  initialized earlier in the chain so its kani / battleyarou queries
+  return valid data when the hook fires.
+- `ChaseBattleFreeze::Shutdown()` called before
+  `ChaseKaniFreeze::Shutdown()` (reverse order).
+
+### What this does NOT change
+
+- v0.15.2.11 dotown removal preserved.
+- v0.15.2.10 `domt1_1` chase coverage preserved.
+- v0.15.2.9 OTHERS-DIAG scanner preserved.
+- v0.15.2.8 dual-entity (kani + battleyarou) pin preserved.
+- All earlier kani-pin layers preserved.
+- `ChaseAskOverlay`, `ChaseDiag`, `ChaseDetector` unchanged.
+
+### Risk
+
+Zero. The hook does not modify engine behavior in any case. The only
+output is log lines. If for some reason the hook fails to install
+(MinHook error, address resolution failure), the build still runs
+identically to v0.15.2.11 -- the failure path logs an error and
+leaves the engine untouched.
+
+### v0.15.2.12 BAT plan
+
+Drive Squall through the chase scene focusing on `doopen2a`. Whatever
+outcome we observe (A, B, or C above) directly determines v0.15.2.13's
+strategy.
+
+### Files changed
+
+- `src/chase_battle_freeze.h` (rewritten)
+- `src/chase_battle_freeze.cpp` (rewritten)
+- `src/deploy.bat` (compile list)
+- `src/dinput8.cpp` (init / shutdown wiring)
+- `src/ff8_accessibility.h` (version bump)
+- `CHANGELOG.md` (this entry)
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`
+
 ## v0.15.2.11
 
 Remove `dotown_3`/`dotown_2`/`dotown_1` from `CHASE_FIELD_NAMES[]`

@@ -7,8 +7,13 @@ REM Lives in src\ — invoked by deploy.vbs in project root.
 REM ============================================================
 
 :: Extract version from ff8_accessibility.h
+:: v0.15.3 fix: tighten findstr to /C:"#define FF8OPC_VERSION " so only the
+:: actual #define line matches. The previous /C:"FF8OPC_VERSION " pattern
+:: matched comment-trail lines too and the for /f loop's last-iteration-wins
+:: behavior left VERSION set to token 3 of an unrelated comment line
+:: ("World"). The %%~V modifier strips surrounding quotes from "X.Y.Z".
 set "VERSION=unknown"
-for /f "tokens=3 delims= " %%V in ('findstr /C:"FF8OPC_VERSION " "%~dp0ff8_accessibility.h" ^| findstr /V "DATE"') do (
+for /f "tokens=3 delims= " %%V in ('findstr /C:"#define FF8OPC_VERSION " "%~dp0ff8_accessibility.h"') do (
     set "VERSION=%%~V"
 )
 
@@ -156,6 +161,8 @@ cl /nologo /W3 /EHsc /O2 /MD /LD ^
     "%SRC_DIR%\chase_detector.cpp" ^
     "%SRC_DIR%\chase_ask_overlay.cpp" ^
     "%SRC_DIR%\chase_kani_freeze.cpp" ^
+    "%SRC_DIR%\chase_battle_freeze.cpp" ^
+    "%SRC_DIR%\field_announce.cpp" ^
     "%SRC_DIR%\ff8_text_decode.cpp" ^
     "%MINHOOK_DIR%\src\buffer.c" ^
     "%MINHOOK_DIR%\src\hook.c" ^

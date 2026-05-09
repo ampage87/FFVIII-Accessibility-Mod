@@ -1,79 +1,140 @@
-# Next Session Prompt — v0.15.2.11 ready to BAT
+# Next Session Prompt -- v0.15.3 ready to BAT
 
-**Status:** v0.15.2.11 source changes complete. Awaiting Aaron's `deploy.vbs` and BAT.
+**Status:** v0.15.3 BUILT (six files updated, build pending Aaron's `deploy.vbs` run). Single-pronged cleanup on top of the v0.15.2.15 milestone success. The static kani+battleyarou pin in `chase_kani_freeze.cpp` is removed; the dynamic chase-agent pin, the v0.15.2.14 fieldId-flip deactivation, and the v0.15.2.9 OTHERS-DIAG scanner all stay. Bundled fix: `src/deploy.bat` "Version: World" regex bug.
 
-## What changed since v0.15.2.10
+## What v0.15.3 changes
 
-v0.15.2.10 BAT crashed/hung ~16 seconds after entering `dotown_3` from `doopen2a`. Aaron diagnosed: `dotown_3`'s chase-end cutscene plays an animation where X-ATM092 (kani) walks across the town square, driven by the `dotown_3` kani entity in `Backgrounds` slot 1. With `dotown_3` in `CHASE_FIELD_NAMES`, our `chase_kani_freeze` module kept tracking that kani address. If a mode 4→1 transition fired during the cutscene, `StartCapture` would pin the cutscene kani's anim ID bytes (`+0x150/+0x154/+0x1FA/+0x23F/+0x241`), fighting the animation script every frame. v0.15.2.9 BAT survived by timing luck; v0.15.2.10 got unlucky.
+`src/chase_kani_freeze.cpp` is rewritten from ~700 lines to ~580. Removed: the `s_kaniPtr`/`s_strideBytes`/`s_arrayKind`/`s_haveFullSnapshot`/`s_fullSnapshot`/`s_initial`/`s_prev`/`s_byteFirstChangeLogged` state, the `s_battleyarouPtr`/`s_battleyarouStrideBytes`/`s_battleyarouArrayKind`/`s_battleyarouInitial`/`s_haveBattleyarouSnapshot`/`s_battleyarouSnapshot` state, the `ReadKaniBlock`/`LogInitialSnapshot`/`LogChangeSummary`/`DiffAndLogFirstChanges` helpers, the kani INITIAL / snapshot / memcpy / FINAL blocks in `StartCapture`/`ApplyFreezePin`/`EndCapture`, the parallel battleyarou blocks in the same three functions, the per-tick FIRST CHANGE diff loop, the MID-WINDOW heartbeat, and the kani-related cleanup lines in `DeactivateFreeze`. Kept: the dynamic chase-agent pin (`RegisterChaseAgent` + agent INITIAL/snapshot/memcpy/FINAL SUMMARY), the v0.15.2.14 fieldId-flip deactivation (`ReadCurrentFieldId`/`s_freezeFieldId`/raw-fieldId-check-before-debounce), the OTHERS-DIAG scanner, the v0.15.2.3.1 capture trigger, the SEH probe pattern, the `LogHexRow` helper.
 
-**v0.15.2.11 fix:** remove `dotown_3`, `dotown_2`, and `dotown_1` from `CHASE_FIELD_NAMES[]`. These are post-chase cutscene fields. No kani battles fire there; the chase is over.
+`src/chase_kani_freeze.h`'s design comment is rewritten to document the v0.15.3 single-pronged design. Initialize log line updated to "v0.15.3 DYNAMIC AGENT PIN ONLY".
 
-## v0.15.2.11 changes
+`src/deploy.bat` regex fix: tighten `findstr /C:"FF8OPC_VERSION "` to `findstr /C:"#define FF8OPC_VERSION "` so only the `#define` line matches. Drop the now-redundant `^| findstr /V "DATE"`. The `%%~V` modifier strips quotes -> `VERSION=0.15.3`.
 
-- `src/chase_detector.cpp`: removed `"dotown_3"`, `"dotown_2"`, `"dotown_1"` from `CHASE_FIELD_NAMES[]`. Comment block extended.
-- `src/ff8_accessibility.h`: `FF8OPC_VERSION` bumped to `"0.15.2.11"`.
-- `CHANGELOG.md`: top entry added.
-- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`: updated.
+### Why this matters
 
-## What's deferred to v0.15.2.12
+The v0.15.2.15 BAT proved the dynamic chase-agent pin is sufficient on its own. Across three v0.15.2.x BATs the OTHERS-DIAG scanner consistently showed kani had at most 7 changed bytes and battleyarou had 0 in every chase field tested. Both static pins were dead code -- their target entities (the kani and battleyarou symbols) were never the actual chase agents. The actual agents were rinoa-slot in domt5_1, director0 in doopen2a, and various robot-slots elsewhere, all of which the dynamic agent pin handles by resolving the BATTLE caller's pointer at runtime. Removing the dead code reduces field-log noise and the per-frame cost in chase fields.
 
-**The `doopen2a` "second chase battle" issue.** v0.15.2.10 BAT showed kani+battleyarou pinned but battle still triggered. Clean OTHERS-DIAG at 22:03:34 in `doopen2a` identifies `director0` (31 changes/612, highest non-pinned) as the prime suspect. A `director0` pin is the obvious next move BUT carries its own risk: `director0` might be the chase-progress-tracker, in which case pinning it could break the chase-end cutscene we just unblocked. We want v0.15.2.11 to ship a clean win first, then evaluate `director0` separately.
+### Files changed
 
-## v0.15.2.10 BAT — other major data point worth remembering
+- `src/chase_kani_freeze.cpp` (rewritten, ~580 lines down from ~700)
+- `src/chase_kani_freeze.h` (design comment rewrite)
+- `src/ff8_accessibility.h` (version bump to 0.15.3 + new comment trail entry)
+- `src/deploy.bat` (1 line: tighten findstr to `#define`-prefixed)
+- `CHANGELOG.md` (new top entry)
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md` (this file)
 
-**`domt5_1` clean OTHERS-DIAG (18 slots, in-field at 21:53:20):**
+## What Aaron should do next session
 
-| Sym | Changes | |
-|-----|---------|---|
-| selphie2 | 73 | party member, highest |
-| irvine | 64 | party member |
-| rinoa | 47 | party member |
-| zell2 | 31 | party member |
-| kani | 5 | **pinned** |
-| battleyarou | 0 | pinned (already dormant) |
-| dic, plane1, onkyou, Garutyan, liti, gura, saidotoujou, Gakekuzure | 0 | **all static** |
+1. **Build via `deploy.vbs`** from the project root. Should be a clean build -- no new source files, deploy.bat compile list unchanged. If build fails, immediately read `Logs/build_latest.log` for errors. Likely candidate if anything goes wrong: a stray reference to one of the removed state vars (e.g. `s_kaniPtr`) somewhere I missed -- but I rewrote the file in full, so there shouldn't be any. Watch the deploy log for `Version: 0.15.3` (confirms the deploy.bat regex fix worked); if it still says `Version: World`, the regex change didn't take.
 
-**The previous "Director-is-the-chase-agent in `domt5_1`" hypothesis is refuted.** Every Director candidate shows zero changes. The active entities are all party members running normal chase-cutscene animations. The kani+battleyarou pin worked correctly in `domt5_1`.
+2. **BAT** -- replay through the chase scene. Same path as v0.15.2.15:
+   - Mountain trail (domt1_1 -> ... -> domt5_1 in whatever order the chase routes through)
+   - Bridge (doopen2a)
+   - Town Square (dotown_3)
+   - Chase-end FMV (Lapin Beach, disc00_07h.avi, 74 seconds, 8 audio descriptions)
+   - Control returns to dotown_2
 
-## domt1_1 chase coverage — confirmed working in v0.15.2.10
+3. **Report results.** When Aaron says "BAT", I'll check `Logs/build_latest.log` first (the deploy line should now read `Version: 0.15.3`), then `Logs/ff8_field.log`, `Logs/ff8_battle.log`, `Logs/ff8_mod.log` for runtime results.
+
+## What to look for in the v0.15.3 BAT logs
+
+### Deploy log
+
+`Logs/build_latest.log` tail should include:
 
 ```
-[21:59:51] ChaseDetector: battle entered (game-mode 0x0001 -> 0x0003);
-           field='domt1_1' chaseActive=1 count=1
+============================================================
+Deployment Complete
+Version: 0.15.3
+Files deployed to: "C:\Program Files (x86)\Steam\steamapps\common\FINAL FANTASY VIII"
+...
 ```
 
-`chaseActive=1` (was `0` in v0.15.2.9 BAT). v0.15.2.10's domt1_1 fix is doing its job.
+If it still says `Version: World` or `Version: unknown`, the regex fix didn't work and I need to re-investigate.
 
-## BAT plan
+### Mod log
 
-1. Aaron runs `deploy.vbs`. Verify `Logs/build_latest.log` shows a timestamp later than `Fri 05/08/2026 21:46:18.99`.
-2. Reach the chase scene (Comm Tower top → mountain trail → Dollet town).
-3. Look for in `Logs/ff8_field.log`:
-   - `chase ACTIVATED on entry to 'domt4_1'` (or wherever chase begins for Aaron's path)
-   - `chaseActive=1` on all kani battles in mountain/bridge fields
-   - **`chase DEACTIVATED on entry to 'dotown_3' (non-chase field)`** — NEW for v0.15.2.11
-   - **No crash. The cutscene plays. Aaron reaches Lapin Beach FMV.**
-4. Aaron sends "BAT" — Claude reads field log for crash signatures + chase battle counts.
+`Logs/ff8_mod.log` should include the new Initialize line:
 
-## Known gotchas
+```
+ChaseKaniFreeze: Initialized (v0.15.3 DYNAMIC AGENT PIN ONLY). On chase-field battle exit, pins the dynamically-registered chase agent...
+```
 
-- The chase scene's only active engagement points are now mountain trail (`domt1_1`–`domt5_1`) and bridge (`doopen2a`). `dotown_x` is no longer chase-tracked.
-- If crash persists: the cause is something else entirely. Need a fresh investigation angle.
-- F12 reserved exclusively for diagnostic builds. Currently owned by `ChaseDiag::Toggle`.
+### Field log -- healthy run (expected)
 
-## Workflow reminder
+For each chase field except doopen2a, in order:
 
-- **Never push.** Aaron runs `Utilities/push_to_github.vbs` after BAT validation.
-- **Build error:** Read `Logs/build_latest.log` first, then domain log.
-- **BAT workflow:** Read `Logs/build_latest.log` tail, then `Logs/ff8_field.log` (for chase work).
-- **Filesystem MCP** for ALL Windows project files. Bash often unavailable.
+- `[CBF] PASS chase BATTLE call ... field='<name>' ... entityPtr=0x........`
+- `[CHASE-AGENT] field='<name>' entityPtr=0x........ -> array=... slot=... symIdx=... sym='...' stride=0x...`
+- `KaniFreeze: FREEZE ACTIVATED -- v0.15.3 dynamic agent pin only (static kani+battleyarou pin removed); in field '<name>' (fieldId=0x....) until field change`
+- `KaniFreeze: ===== CAPTURE STARTED =====`
+- `KaniFreeze: CHASE-AGENT INITIAL snapshot (agentPtr=0x........ stride=0x... arrayKind=... slot=... symIdx=... sym='...'):`
+- AGENT-INIT hex rows (~20-40 rows for stride 0x264)
+- `KaniFreeze: OTHERS-DIAG snapshot taken: N/M slots captured...`
+- ~1500ms later: `KaniFreeze: CHASE-AGENT full-state snapshot taken at t=15..ms sym='...'...`
+- ~10000ms later: `KaniFreeze: CHASE-AGENT FINAL SUMMARY t=10000ms tick=... sym='...' changed_bytes=N/0x264:` (N should be small or zero)
+- `KaniFreeze: OTHERS-DIAG FINAL t=10000ms ...` block
+- `KaniFreeze: ===== CAPTURE COMPLETE (elapsed=10000ms, ticks=...) =====`
+
+CRITICALLY ABSENT:
+- NO `KaniFreeze: INITIAL snapshot` (kani INITIAL hex dump). It used to fire here; in v0.15.3 it's removed.
+- NO `KaniFreeze: BATTLEYAROU INITIAL snapshot` blocks.
+- NO `KaniFreeze: BATTLEYAROU FINAL SUMMARY` blocks.
+- NO `KaniFreeze: t=...ms tick=... +0x...: FIRST CHANGE...` per-tick lines.
+- NO `KaniFreeze: MID-WINDOW heartbeat...` line.
+- NO `KaniFreeze: FINAL SUMMARY t=10000ms tick=... changed_bytes=N/0x264:` block (this was kani's FINAL; the new format only has CHASE-AGENT FINAL SUMMARY).
+
+If any of those CRITICALLY ABSENT lines do show up, the cleanup didn't actually take effect (somehow the old code is still being called). If the EXPECTED lines are missing, the agent pin path got accidentally removed.
+
+### Field log -- doopen2a specifically
+
+Expected:
+- `[CBF] PASS in doopen2a -- skipping RegisterChaseAgent (agent is chase-progress director; pin would block transition to dotown_3). BATTLE NO-OP carries the load.`
+- `KaniFreeze: FREEZE ACTIVATED -- v0.15.3 dynamic agent pin only ... in field 'doopen2a' (fieldId=0x014D)`
+- `KaniFreeze: no chase agent registered for field='doopen2a' -- agent pin inactive (BATTLE NO-OP is the only suppression)`
+- `KaniFreeze: OTHERS-DIAG snapshot taken: ...` (the diagnostic still runs in doopen2a)
+- A `[CBF] NO-OP chase BATTLE call ...` line at the second BATTLE call (cap-at-1 safety net)
+- After the doopen2a battle ends and Squall walks toward the town: `KaniFreeze: FREEZE DEACTIVATED -- fieldId changed 0x014D -> 0x0158 (pre-debounce)`
+- The transition to dotown_3 succeeds, cutscene plays, Lapin Beach FMV fires.
+
+### Chase-end transition
+
+- dotown_3 entry, cutscene plays, chase-end FMV fires, control returns to dotown_2.
+
+### If chase behavior regresses
+
+If anything diverges from v0.15.2.15 (new crash, hang, robot walking around, missing audio descriptions, dotown_3 frozen), the regression is in v0.15.3's cleanup. Likely candidates:
+1. Some agent-pin code path got accidentally removed alongside the kani-pin code -- check the `chase_kani_freeze.cpp` rewrite for any missed `s_chaseAgentPtr` reference.
+2. A state variable was reset prematurely -- check `Initialize` / `Shutdown` / `DeactivateFreeze` reset blocks.
+3. The `LogHexRow` helper still exists but was a dependency of removed code paths -- if `AGENT-INIT` hex dump is missing, that dependency got broken.
+
+In any of those cases, revert is a single commit: roll back `src/chase_kani_freeze.cpp` and `.h` to v0.15.2.15 state, keep the deploy.bat fix, bump to v0.15.3.1.
+
+### If BAT succeeds end to end
+
+- Push v0.15.2.12, .13, .14, .15, and v0.15.3 history to GitHub via `Utilities/push_to_github.vbs`. The push utility validates the CHANGELOG top heading (`## v0.15.3`) matches `FF8OPC_VERSION` (`"0.15.3"`) -- both are set, so it'll work in one push.
+
+## Workflow reminders
+
+- Filesystem MCP for ALL Windows project files. Bash cannot reach Windows source.
 - Every response begins with `## Claude Says`.
+- CHANGELOG.md ASCII-only in commit body. Heading must match `FF8OPC_VERSION` exactly. Both are set to v0.15.3.
+- Aaron pushes via `Utilities/push_to_github.vbs` -- Claude never pushes.
+- Build via `deploy.vbs` from project root -> reads `src/deploy.ps1` -> `src/deploy.bat`.
+- Version is bumped in ONE place: `FF8OPC_VERSION` in `src/ff8_accessibility.h`.
+- Read DEVNOTES.md and this file at start of every session.
 
-## Backlog (v0.15.3+)
+## State of the codebase
 
-- v0.15.2.12: `director0` pin in `doopen2a` to prevent the second chase battle.
-- Re-enable engine-rendered chase ASK using the `gameObj+0xD2/0xD3` bitmask recipe.
-- Fix `chase_diag::OnAskOpcodeFired` snprintf size-tracking bug.
-- Delete orphan `src/chase_battle_freeze.{h,cpp}`.
-- Fix the field-change-mid-capture diagnostic skip (BATTLEYAROU FINAL + OTHERS-DIAG FINAL get silently skipped when field changes during the 10s capture window — needs preserved-for-EndCapture state copies).
-- Push v0.15.0–v0.15.2.x to GitHub once the chase scene is end-to-end stable.
+v0.15.3 source files staged, awaiting Aaron's first build:
+- `src/chase_kani_freeze.cpp` rewritten (single-pronged design)
+- `src/chase_kani_freeze.h` rewritten (design comment)
+- `src/ff8_accessibility.h` version bumped to "0.15.3"
+- `src/deploy.bat` regex tightened
+- `CHANGELOG.md` has new top entry titled `## v0.15.3`
+- `DEVNOTES.md` updated for v0.15.3 state
+- `NEXT_SESSION_PROMPT.md` is this file
+
+GitHub HEAD: v0.15.2.11 (commit `d65edb32`). Local-only and unpushed: v0.15.2.12, .13, .14, .15, and v0.15.3.
+
+No other source changes. v0.15.2.14 dynamic agent pin design preserved. v0.15.2.14 tightened deactivation preserved. v0.15.2.15 doopen2a strcmp guard in chase_battle_freeze preserved. v0.15.2.14 field_announce auto-announce module unchanged.

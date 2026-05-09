@@ -13,6 +13,7 @@
 #include "chase_detector.h"
 #include "chase_ask_overlay.h"
 #include "chase_kani_freeze.h"
+#include "chase_battle_freeze.h"
 #include "ff8_accessibility.h"
 #include "ff8_addresses.h"
 #include "mod_forward_decls.h"
@@ -20,6 +21,7 @@
 #include "name_bypass.h"
 #include "menu_tts.h"
 #include "battle_tts.h"
+#include "field_announce.h"
 #include "field_archive.h"
 #include "field_dialog.h"
 #include "field_navigation.h"
@@ -114,6 +116,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     ScanTTS::Initialize();                  // v0.14.50: Scan spell TTS first slice
     FieldDialog::Initialize();   // v04.00: Hooks opcode dispatch table for dialog text capture
     FieldNavigation::Initialize(); // v05.00: Field navigation assistance
+    FieldAnnounce::Initialize(); // v0.15.2.14: auto-announce field display name on field load
     NameBypass::Initialize();    // v04.26: Auto-bypass character/GF naming screens
     GameAudio::Initialize();      // v0.09.22: Centralized game audio control
     MenuTTS::Initialize();       // v07.00: In-game menu TTS diagnostic
@@ -124,11 +127,26 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
                                   //          since they query it)
     ChaseDiag::Initialize();      // v0.15.0: Dollet/X-ATM092 chase diagnostic
     ChaseAskOverlay::Initialize();// v0.15.1: Chase entry ASK overlay
-    ChaseKaniFreeze::Initialize();// v0.15.2.3: kani-wakeup byte-diff diagnostic
-                                  //   (replaces v0.15.1 ChaseBattleFreeze
-                                  //   opcode_battle hook, which only worked
-                                  //   in domt4_1; kani wakeup is the same
-                                  //   state machine across all chase fields)
+    ChaseKaniFreeze::Initialize();// v0.15.2.14: kani+battleyarou static pin +
+                                  //   DYNAMIC chase-agent pin (resolves the
+                                  //   actual entity calling BATTLE in each
+                                  //   chase field via RegisterChaseAgent;
+                                  //   pins it post-battle to keep the robot
+                                  //   on the ground). Tightened deactivation:
+                                  //   raw fieldId check fires before the 2s
+                                  //   name-debounce, fixing the doopen2a ->
+                                  //   dotown_3 handoff crash that recurred
+                                  //   in v0.15.2.10 and v0.15.2.13 BATs.
+    ChaseBattleFreeze::Initialize();// v0.15.2.14: BATTLE NO-OP safety net +
+                                  //   chase-agent identifier. On the first
+                                  //   PASS in each chase field, hands the
+                                  //   caller's entityPtr to ChaseKaniFreeze
+                                  //   so the pin can target the correct
+                                  //   entity. Subsequent BATTLE calls in
+                                  //   the same field NO-OP'd as fallback
+                                  //   (freeze# stays low when the pin is
+                                  //   healthy; high freeze# = pin missing
+                                  //   the agent).
     
     // Enable all MinHook hooks
     mhStatus = MH_EnableHook(MH_ALL_HOOKS);
@@ -176,6 +194,9 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
         GfAudioDesc::OnFrame();  // v0.14.44: poll for GF summon end + fire cues
         
         FieldNavigation::Update();
+
+        // v0.15.2.14: Auto-announce field display name on field load.
+        FieldAnnounce::Update();
 
         // Field dialog polling fallback (v04.13)
         // Catches dialogs that bypass hooked opcodes
@@ -335,12 +356,14 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     // Cleanup
     BattleTTS::Shutdown();       // v0.10.01: Battle TTS cleanup
     WorldMap::Shutdown();         // v0.11.03: World map cleanup
+    ChaseBattleFreeze::Shutdown();// v0.15.2.13: active opcode_battle freeze
     ChaseKaniFreeze::Shutdown();  // v0.15.2.3: kani-wakeup diagnostic cleanup
     ChaseAskOverlay::Shutdown();  // v0.15.1: close ASK if open + reset state
     ChaseDiag::Shutdown();        // v0.15.0: Chase diagnostic cleanup
     ChaseDetector::Shutdown();    // v0.15.1: Chase state cleanup
     GameAudio::Shutdown();       // v0.09.22: Remove BGM volume hook
     NameBypass::Shutdown();      // v04.26: Remove naming screen hook
+    FieldAnnounce::Shutdown();   // v0.15.2.14: field-name auto-announce cleanup
     FieldNavigation::Shutdown(); // v05.00: Field navigation cleanup
     FieldDialog::Shutdown();     // v04.00: Restore opcode table entries
     FmvAudioDesc::Shutdown();

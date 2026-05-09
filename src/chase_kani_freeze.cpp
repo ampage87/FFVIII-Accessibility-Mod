@@ -1,24 +1,62 @@
-// chase_kani_freeze.cpp — Capture and freeze kani's post-battle wakeup
-// transition. See chase_kani_freeze.h for design notes.
+// chase_kani_freeze.cpp -- Chase-agent freeze module. See header for v0.15.3 design.
 //
-// v0.15.2.3   — DIAGNOSTIC ONLY. Capture triggered by game-mode 3->non-3.
-// v0.15.2.3.1 — Capture trigger fixed: now fires on first frame of
-//               MODE_FIELD (1) after a battle, with a 10s window.
-//               v0.15.2.3 fired during mode 5 (post-battle fade transition
-//               where the engine pauses entity updates), capturing zero
-//               byte changes.
-// v0.15.2.4   — ADDS FREEZE on three animation-ID bytes (+0x150, +0x23F,\n//               +0x241). Conservative first attempt.\n// v0.15.2.5   — Layer on +0x154 and +0x1FA sub-state pins. v0.15.2.4 BAT\n//               proved the +0x150/+0x23F/+0x241 pin is purely a RENDERING\n//               pin: in domt4_1 across two consecutive captures, the\n//               FINAL SUMMARY for those three bytes was empty (pin held)\n//               but kani still woke up and triggered battles #2 and #3.\n//               Wakeup-driver bytes that v0.15.2.4 left unpinned:\n//                 +0x154 (dword LSB): 0x14 -> 0x0C (sub-state countdown)\n//                 +0x1FA (byte):      0x14 -> 0x0C (sub-state mirror)\n//               Engine appears to decrement the +0x154 LSB from 0x14 over\n//               ~5 seconds; once it crosses some threshold, AI/movement\n//               logic starts moving kani toward Squall regardless of the\n//               anim ID pin. Capture #2 INITIAL +0x154 = 0x0C \u2014 engine\n//               PERSISTED the post-wakeup value across battle/field reload\n//               (only +0x150 got reset to 0x21 by the engine's init), so\n//               each successive battle woke up faster than the last.\n//               v0.15.2.5 pins +0x150, +0x154, +0x1FA, +0x23F, +0x241 \u2014 the\n//               full \"down\" state to byte +0x14 / 0x21 values seen in the\n//               first capture's INITIAL. NEXT_SESSION_PROMPT.md scoped\n//               v0.15.2.6 for position pinning if AI still moves kani\n//               despite the full sub-state pin.\n//\n// The diagnostic capture runs alongside the freeze so the next BAT can\n// verify the pin holds: in the FINAL SUMMARY, +0x150/+0x154/+0x1FA/\n// +0x23F/+0x241 should ALL be ABSENT (no net change) if the freeze is\n// working. If kani still wakes up despite the full sub-state pin, look at\n// position bytes (+0x140-+0x148, +0x190-+0x199, +0x1B5-+0x1BD) \u2014 those\n// are the v0.15.2.6 candidates.
+// v0.15.3: SINGLE-PRONGED CLEANUP. Removed the static kani+battleyarou pin
+// (v0.15.2.7-.8 layered design) entirely. v0.15.2.15 BAT confirmed the dynamic
+// chase-agent pin (v0.15.2.14) handles every chase field that is not
+// doopen2a; doopen2a uses chase_battle_freeze's strcmp guard plus the BATTLE
+// NO-OP. The static kani+battleyarou pin proved inert in every chase field
+// tested (kani 0-7 changed bytes, battleyarou 0 changed bytes per OTHERS-DIAG)
+// because the actual chase agents in those fields were rinoa-slot, director0,
+// etc., NOT kani or battleyarou. Removing the dead code reduces the per-frame
+// cost in chase fields and removes a class of stale-pointer hazards on field
+// handoff.
+//
+// Current design retained:
+//   (1) Dynamic chase-agent pin: RegisterChaseAgent() arms a per-field full-
+//       state pin on the BATTLE caller. StartCapture snapshots its INITIAL
+//       state; ApplyFreezePin takes a full-state snapshot 1500ms in and pins
+//       every byte every frame thereafter; EndCapture logs CHASE-AGENT FINAL
+//       SUMMARY.
+//
+//   (2) fieldId-flip deactivation (v0.15.2.14): the freeze deactivates
+//       IMMEDIATELY when pCurrentFieldId differs from the value captured at
+//       FREEZE ACTIVATED time, before the 2-second name debounce settles.
+//       Fixes the doopen2a -> dotown_3 handoff crash that recurred in
+//       v0.15.2.10 / v0.15.2.13 BATs.
+//
+//   (3) OTHERS-DIAG diagnostic scanner (v0.15.2.9): at StartCapture,
+//       snapshots all Others-array entities; at EndCapture, logs per-slot
+//       byte-change counts. Useful for identifying chase agents in fields
+//       where RegisterChaseAgent fails to resolve, and for auditing entity
+//       behavior drift.
+//
+// Earlier v0.15.2.x history -- terse:
+//   v0.15.2.3   -- DIAGNOSTIC capture (byte-diff window).
+//   v0.15.2.3.1 -- Trigger fix: first frame of MODE_FIELD post-battle.
+//   v0.15.2.4   -- Static kani anim-ID pin.
+//   v0.15.2.5   -- +0x154 / +0x1FA sub-state layer.
+//   v0.15.2.6   -- Position pin (subsumed).
+//   v0.15.2.7   -- Static kani full-state pin.
+//   v0.15.2.8   -- Parallel battleyarou pin.
+//   v0.15.2.9   -- All-Others diagnostic scanner.
+//   v0.15.2.10/.11 -- chase-field set adjustments.
+//   v0.15.2.12  -- Passive-observer BATTLE hook.
+//   v0.15.2.13  -- Active BATTLE NO-OP.
+//   v0.15.2.14  -- Dynamic chase-agent pin + tightened deactivation.
+//   v0.15.2.15  -- Surgical doopen2a skip in chase_battle_freeze.
+//   v0.15.3     -- Removed static kani+battleyarou pin (this version).
 
 #include "chase_kani_freeze.h"
 #include "chase_detector.h"
 #include "ff8_accessibility.h"
 #include "ff8_addresses.h"
-#include "field_archive.h"  // v0.15.2.9: JSMCounts for all-Others scanner
+#include "field_archive.h"
 #include "mod_forward_decls.h"
 
 #include <windows.h>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 
 namespace ChaseKaniFreeze {
 
@@ -26,186 +64,68 @@ namespace ChaseKaniFreeze {
 // Constants
 // ============================================================================
 
-// Game mode for battle (matches chase_detector.cpp's MODE_BATTLE_VAL).
 static const uint16_t MODE_BATTLE_VAL = 3;
-
-// Game mode for active field. v0.15.2.3.1: critical for triggering
-// the capture in the right window. v0.15.2.3 BAT showed that the
-// post-battle sequence is mode 3 (battle) -> mode 5 (fade-to-field
-// transition, ~6 seconds, ENGINE DOES NOT UPDATE ENTITY BLOCKS) ->
-// mode 1 (active field, entity state machine runs). Triggering the
-// capture on mode 3 -> non-3 fired during mode 5 and caught zero
-// byte changes for 5 seconds straight. We now wait for the first
-// frame of mode 1 after a battle has been seen.
-static const uint16_t MODE_FIELD_VAL = 1;
-
-// Capture window duration. v0.15.2.3 used 5s and missed the wakeup
-// entirely because the trigger fired during the mode-5 transition.
-// v0.15.2.3.1 starts the capture at first-frame-of-mode-1, when the
-// engine resumes entity updates; 10s comfortably covers the visible
-// "kani on ground" period plus the standing animation onset. v0.15.2.3
-// BAT timing: field re-init at 17:38:37, second battle at 17:38:44,
-// so the wakeup completed within ~7 seconds of mode 1 starting.
-static const DWORD CAPTURE_DURATION_MS = 10000;
-
-// Entity strides per array (mirrors chase_detector.cpp).
-static const int STRIDE_BACKGROUND = 0x1B4;
-static const int STRIDE_OTHER      = 0x264;
-static const int MAX_STRIDE        = STRIDE_OTHER;  // larger of the two
-
-// Mid-window summary tick. Halfway through the new 10s window.
-static const DWORD MID_SUMMARY_AT_MS = 5000;
+static const uint16_t MODE_FIELD_VAL  = 1;
+static const DWORD    CAPTURE_DURATION_MS = 10000;
+static const int      STRIDE_BACKGROUND = 0x1B4;
+static const int      STRIDE_OTHER      = 0x264;
+static const int      MAX_STRIDE        = STRIDE_OTHER;
+static const DWORD    SNAPSHOT_DELAY_MS = 1500;
+static const uint16_t SNAPSHOT_OFFSET_START = 0x140;
+static const int      MAX_OTHERS = 32;
 
 // ============================================================================
 // State
 // ============================================================================
 
+// --- Capture trigger / general
 static uint16_t   s_lastGameMode      = 0xFFFF;
 static bool       s_capturing         = false;
 static DWORD      s_captureStartTick  = 0;
-static uintptr_t  s_kaniPtr           = 0;
-static int        s_strideBytes       = 0;
-static int        s_arrayKind         = 0;     // 1=Backgrounds, 2=Others
-static int        s_tickN             = 0;     // ticks since capture start
-static bool       s_midSummaryFired   = false;
-
-// v0.15.2.3.1: tracks whether the player has been in battle since the
-// last capture (or since module init). Set to true when game mode reads
-// MODE_BATTLE_VAL; cleared after a capture starts. The capture trigger
-// is the FIRST FRAME of MODE_FIELD_VAL with this flag true, so we land
-// in the window where the engine actively updates entities (rather than
-// the mode-5 transition where the v0.15.2.3 trigger landed).
+static int        s_tickN             = 0;
 static bool       s_battleSeenRecently = false;
 
-// v0.15.2.4: per-frame freeze state. Activated at capture start (when
-// we've witnessed a chase-field battle exit), deactivated on field change.
-// While active, every Update() tick re-writes the three animation-ID
-// bytes (+0x150, +0x23F, +0x241) to 0x21 to keep kani locked in the
-// "on the ground" pose. We re-resolve the kani pointer each frame via
-// ChaseDetector::GetKaniEntityPtr() rather than caching, in case the
-// engine relocates the entity arrays during the field session.
-static bool       s_freezeActive       = false;
+// --- Freeze (drives fieldId-flip deactivation; armed by StartCapture)
+static bool       s_freezeActive      = false;
 static char       s_freezeFieldName[64] = "";
+static uint16_t   s_freezeFieldId     = 0xFFFF;
+static DWORD      s_freezeStartTick   = 0;
 
-// v0.15.2.7: BRUTE-FORCE FULL-STATE PIN. v0.15.2.6 BAT in domt4_1 showed
-// the position pin successfully prevented kani from colliding with Squall
-// (no battle), but Aaron heard kani's running animation/audio playing in
-// place — the +0x150 anim ID pin doesn't drive rendered animation, and
-// the engine reads other unpinned bytes (+0x162 candidate, anim shadows,
-// etc.) for actual playback. Aaron's design pivot: "keep the robot from
-// getting up, rather than locking it in place when it does."
-//
-// The brute-force fix: snapshot kani's full state region (+0x140 to end
-// of stride) at t=SNAPSHOT_DELAY_MS post-activation, after Phase A re-init
-// has settled but before Phase C wakeup begins. Then memcpy that snapshot
-// back over every frame. Every byte the engine would otherwise modify to
-// drive wakeup — anim playback, AI state, position, collision flags —
-// stays at "down and settled" forever. Header bytes (+0x000..+0x028) NOT
-// pinned — that's where heartbeat/frame counters live and freezing them
-// could trip engine life-detection.
-//
-// Subsumes v0.15.2.6's position pin (those regions are inside +0x140..end).
-// The five sub-state byte writes from v0.15.2.5 are preserved as belt-and-
-// suspenders for the t < SNAPSHOT_DELAY_MS grace period — once the
-// snapshot kicks in, the memcpy overwrites them with the same values.
-//
-// Field-change deactivation clears s_haveFullSnapshot so the next chase
-// field captures a fresh post-Phase-A snapshot for that field's geometry.
-static bool       s_haveFullSnapshot   = false;
-static uint8_t    s_fullSnapshot[MAX_STRIDE];
-static DWORD      s_freezeStartTick    = 0;
+// --- All-Others diagnostic scanner (v0.15.2.9, retained as diagnostic)
+static int        s_othersCountSnapshot = 0;
+static uintptr_t  s_othersBaseSnapshot  = 0;
+static int        s_othersStartSymIdx   = 0;
+static uint8_t    s_othersInitial[MAX_OTHERS][MAX_STRIDE];
 
-// Snapshot timing & range constants.
-// SNAPSHOT_DELAY_MS — wait this long after FREEZE ACTIVATED before taking
-// the snapshot. v0.15.2.5 BAT timing showed Phase A re-init's last write
-// was at t=765ms (+0x207), Phase B is quiet, Phase C wakeup begins at
-// t=5375ms. 1500ms is solidly in Phase B with margin on both sides.
-// SNAPSHOT_OFFSET_START — first byte to pin. +0x140 is the start of the
-// known-meaningful state region (X position dword). Below that is mostly
-// zeros plus the heartbeat at +0x028 we want to NOT pin.
-static const DWORD    SNAPSHOT_DELAY_MS    = 1500;
-static const uint16_t SNAPSHOT_OFFSET_START = 0x140;
-
-// v0.15.2.8: PARALLEL BATTLEYAROU PIN. v0.15.2.7 BAT in domt5_1 proved
-// kani is dead code there (FINAL SUMMARY changed_bytes=0/612 over 10
-// seconds, but battle still triggered). The chase battle in fields
-// beyond domt4_1 must come from a different entity. Top candidate:
-// 'battleyarou' (Japanese for "battle guy"), which has the same 3-method
-// JSM signature as kani in BOTH domt4_1 and domt5_1, and appears as an
-// Interactive Object in domt5_1's JSMScan output (param=-1, no position
-// — runtime-driven).
+// --- Dynamic chase-agent pin (v0.15.2.14)
 //
-// We now resolve battleyarou via ChaseDetector::GetBattleyarouEntityPtr
-// in StartCapture, snapshot its full state at the same t=1500ms moment
-// as kani, and memcpy back every frame. NO belt-and-suspenders byte
-// writes for battleyarou — the kani byte values (0x21, 0x14) are
-// kani-specific magic numbers from kani's BAT data; we don't yet know
-// battleyarou's state-byte semantics. Snapshot-only is safer.
+// Set by RegisterChaseAgent (called from chase_battle_freeze on first PASS
+// per chase field, except doopen2a). Read by StartCapture, ApplyFreezePin,
+// EndCapture. Cleared on field change inside ApplyFreezePin.
 //
-// Diagnostic: log INITIAL hex dump on activation and FINAL summary at
-// capture end. Per-tick FIRST CHANGE diff is NOT done for battleyarou
-// (would double the log volume); the INITIAL/FINAL pair is enough to
-// answer (a) is battleyarou active in this field? (b) did the pin hold?
-//
-// If battleyarou doesn't exist in the current field (s_battleyarouPtr=0),
-// the pin is inert — kani-only behavior, identical to v0.15.2.7.
-static uintptr_t  s_battleyarouPtr            = 0;
-static int        s_battleyarouStrideBytes    = 0;
-static int        s_battleyarouArrayKind      = 0;     // 1=Backgrounds, 2=Others
-static uint8_t    s_battleyarouInitial[MAX_STRIDE];
-static bool       s_haveBattleyarouSnapshot   = false;
-static uint8_t    s_battleyarouSnapshot[MAX_STRIDE];
-
-// v0.15.2.9: ALL-OTHERS DIAGNOSTIC SCANNER. v0.15.2.8 BAT in domt5_1
-// confirmed both kani (slot 8) and battleyarou (slot 10) are dormant
-// (FINAL SUMMARY changed_bytes=0/612 for both), but battle still
-// triggered. The actual chase agent is a different entity in the field.
-// Candidates from JSMScan output: dic, onkyou, plane1 (Director),
-// liti, gura, saidotoujou — or it could be a SETLINE-driven trigger
-// zone with no entity animating.
-//
-// This scanner snapshots ALL Others slots' INITIAL state in StartCapture
-// and reports per-slot changed_bytes counts in EndCapture. Slots with
-// changed_bytes > 0 during the 10s window are running scripts/AI/anim;
-// the slot with the most changes is the most likely chase-agent
-// candidate. NO PIN — diagnostic only. v0.15.2.10 will pin whichever
-// entity the data identifies.
-//
-// Memory: MAX_OTHERS × STRIDE_OTHER bytes (32 × 612 = 19,584 bytes).
-static const int MAX_OTHERS = 32;
-static int       s_othersCountSnapshot = 0;
-static uintptr_t s_othersBaseSnapshot  = 0;
-static int       s_othersStartSymIdx   = 0;     // doors+lines+bgs (for sym-name lookup)
-static uint8_t   s_othersInitial[MAX_OTHERS][MAX_STRIDE];
-
-// Snapshot at capture start (for delta summary at end).
-static uint8_t    s_initial[MAX_STRIDE];
-
-// Previous-tick snapshot (for diff'ing each frame).
-static uint8_t    s_prev[MAX_STRIDE];
-
-// Track whether each byte has had its first change logged yet. Resetting
-// the tracker on capture start gives us a clean per-window timeline.
-static bool       s_byteFirstChangeLogged[MAX_STRIDE];
+// Write order in RegisterChaseAgent: identity first, then pointer LAST. The
+// non-zero pointer is the "armed" signal observed by ApplyFreezePin from
+// the mod thread. On x86, 32-bit aligned scalar writes are atomic and
+// store-store reordering is forbidden, so the mod thread sees a coherent
+// view: either uninitialized (s_chaseAgentPtr == 0) or fully populated.
+static uintptr_t  s_chaseAgentPtr            = 0;
+static int        s_chaseAgentStrideBytes    = 0;
+static int        s_chaseAgentArrayKind      = 0;     // 1=Backgrounds, 2=Others
+static int        s_chaseAgentSlot           = -1;
+static int        s_chaseAgentSymIdx         = -1;
+static char       s_chaseAgentSymName[32]    = "";
+static char       s_chaseAgentFieldName[64]  = "";
+static uint8_t    s_chaseAgentInitial[MAX_STRIDE];
+static bool       s_haveChaseAgentInitial    = false;
+static uint8_t    s_chaseAgentSnapshot[MAX_STRIDE];
+static bool       s_haveChaseAgentSnapshot   = false;
 
 // ============================================================================
 // Helpers
 // ============================================================================
 
-static bool ReadKaniBlock(uint8_t* dst, int n)
+static void LogHexRow(const char* label, const uint8_t* buf, int off, int /*len*/)
 {
-    if (!s_kaniPtr || n <= 0) return false;
-    __try {
-        memcpy(dst, (const void*)s_kaniPtr, (size_t)n);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
-static void LogHexRow(const char* label, const uint8_t* buf, int off, int len)
-{
-    // 16 bytes per line; len should be 16 in normal use.
     Log::Field("KaniFreeze: %s +0x%03X: "
                "%02X %02X %02X %02X %02X %02X %02X %02X  "
                "%02X %02X %02X %02X %02X %02X %02X %02X",
@@ -214,94 +134,47 @@ static void LogHexRow(const char* label, const uint8_t* buf, int off, int len)
                buf[4],  buf[5],  buf[6],  buf[7],
                buf[8],  buf[9],  buf[10], buf[11],
                buf[12], buf[13], buf[14], buf[15]);
-    (void)len;  // currently fixed at 16 per call
 }
 
-static void LogInitialSnapshot()
+// v0.15.2.14: Read the raw current fieldId from FF8Addresses, SEH-guarded.
+// Returns 0xFFFF if the address isn't resolved or the read faults.
+static uint16_t ReadCurrentFieldId()
 {
-    Log::Field("KaniFreeze: INITIAL snapshot (kaniPtr=0x%08X stride=0x%X arrayKind=%d):",
-               (uint32_t)s_kaniPtr, s_strideBytes, s_arrayKind);
-    int rows = (s_strideBytes + 15) / 16;
-    for (int r = 0; r < rows; r++) {
-        int off = r * 16;
-        int remaining = s_strideBytes - off;
-        if (remaining >= 16) {
-            LogHexRow("INIT", s_initial + off, off, 16);
-        } else if (remaining > 0) {
-            // Pad the last partial row with zeros for readable formatting.
-            uint8_t pad[16] = {};
-            memcpy(pad, s_initial + off, (size_t)remaining);
-            LogHexRow("INIT", pad, off, remaining);
-        }
+    if (!FF8Addresses::pCurrentFieldId) return 0xFFFF;
+    __try {
+        return *FF8Addresses::pCurrentFieldId;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0xFFFF;
     }
 }
 
-static void LogChangeSummary(const char* label, const uint8_t* finalBuf,
-                             DWORD elapsedMs)
+// v0.15.2.14: Reset all chase-agent state. Called on field change and at
+// Initialize/Shutdown.
+static void ClearChaseAgent()
 {
-    int changedCount = 0;
-    for (int i = 0; i < s_strideBytes; i++) {
-        if (s_initial[i] != finalBuf[i]) changedCount++;
-    }
-    Log::Field("KaniFreeze: %s SUMMARY t=%lums tick=%d "
-               "changed_bytes=%d/%d:",
-               label, (unsigned long)elapsedMs, s_tickN,
-               changedCount, s_strideBytes);
-    for (int i = 0; i < s_strideBytes; i++) {
-        if (s_initial[i] != finalBuf[i]) {
-            Log::Field("KaniFreeze:   +0x%03X: 0x%02X -> 0x%02X (delta=%d)",
-                       i, s_initial[i], finalBuf[i],
-                       (int)finalBuf[i] - (int)s_initial[i]);
-        }
-    }
+    s_chaseAgentPtr            = 0;
+    s_chaseAgentStrideBytes    = 0;
+    s_chaseAgentArrayKind      = 0;
+    s_chaseAgentSlot           = -1;
+    s_chaseAgentSymIdx         = -1;
+    s_chaseAgentSymName[0]     = '\0';
+    s_chaseAgentFieldName[0]   = '\0';
+    s_haveChaseAgentInitial    = false;
+    s_haveChaseAgentSnapshot   = false;
 }
+
+// ============================================================================
+// StartCapture
+// ============================================================================
 
 static void StartCapture(uint16_t prevMode, uint16_t curMode)
 {
     if (!ChaseDetector::IsInChaseField()) return;
 
-    uintptr_t kaniPtr = ChaseDetector::GetKaniEntityPtr();
-    if (!kaniPtr) {
-        Log::Field("KaniFreeze: battle exit detected (mode %u->%u) but "
-                   "GetKaniEntityPtr returned 0; skipping capture.",
-                   (unsigned)prevMode, (unsigned)curMode);
-        return;
-    }
-
-    ChaseDetector::KaniLocation loc = ChaseDetector::GetKaniLocation();
-    int stride = (loc.arrayKind == 1) ? STRIDE_BACKGROUND
-               : (loc.arrayKind == 2) ? STRIDE_OTHER
-               : 0;
-    if (stride == 0) {
-        Log::Field("KaniFreeze: kani arrayKind=%d unrecognized; skipping capture",
-                   loc.arrayKind);
-        return;
-    }
-
-    // Snapshot the entity block. If the read fails, abandon — the engine
-    // may not have finished restoring the field yet.
-    s_kaniPtr      = kaniPtr;
-    s_strideBytes  = stride;
-    s_arrayKind    = loc.arrayKind;
-    if (!ReadKaniBlock(s_initial, s_strideBytes)) {
-        Log::Field("KaniFreeze: initial read at 0x%08X failed; skipping capture",
-                   (uint32_t)kaniPtr);
-        return;
-    }
-    memcpy(s_prev, s_initial, (size_t)s_strideBytes);
-    memset(s_byteFirstChangeLogged, 0, sizeof(s_byteFirstChangeLogged));
-
     s_capturing        = true;
     s_captureStartTick = GetTickCount();
     s_tickN            = 0;
-    s_midSummaryFired  = false;
 
-    // v0.15.2.4: Activate the per-frame freeze. Save the current debounced
-    // field name so ApplyFreezePin() can detect when the player leaves the
-    // field and self-deactivate. If a battle hasn't actually been witnessed
-    // (defensive: shouldn't happen since StartCapture's caller gates on
-    // s_battleSeenRecently), the diagnostic still runs but the freeze
-    // would be a no-op once the field changes.
     s_freezeActive = true;
     {
         const char* curField = ChaseDetector::GetDebouncedFieldName();
@@ -310,93 +183,61 @@ static void StartCapture(uint16_t prevMode, uint16_t curMode)
         memcpy(s_freezeFieldName, curField, len);
         s_freezeFieldName[len] = '\0';
     }
-    // v0.15.2.7: Mark the brute-force pin start time on FIRST freeze
-    // activation in this field. ApplyFreezePin will take the full-state
-    // snapshot at SNAPSHOT_DELAY_MS post-this tick, then pin the entire
-    // +0x140..stride region every frame. Subsequent captures in the same
-    // field do NOT reset the start tick — they continue using the
-    // existing snapshot from the first activation. Field-change
-    // deactivation in ApplyFreezePin clears s_haveFullSnapshot so the
-    // next chase field gets a fresh snapshot timer.
-    if (!s_haveFullSnapshot) {
-        s_freezeStartTick = GetTickCount();
-    }
+    // v0.15.2.14: capture raw fieldId for fast deactivation in ApplyFreezePin.
+    s_freezeFieldId   = ReadCurrentFieldId();
+    s_freezeStartTick = GetTickCount();
 
-    Log::Field("KaniFreeze: FREEZE ACTIVATED — pinning +0x150/+0x23F/+0x241="
-               "0x21 and +0x154/+0x1FA=0x14 every frame; full-state snapshot "
-               "of +0x%03X..+0x%03X will be taken at t=%lums and pinned every "
-               "frame thereafter, in field '%s' until field change",
-               (unsigned)SNAPSHOT_OFFSET_START, (unsigned)s_strideBytes,
-               (unsigned long)SNAPSHOT_DELAY_MS, s_freezeFieldName);
+    Log::Field("KaniFreeze: FREEZE ACTIVATED -- v0.15.3 dynamic agent pin only "
+               "(static kani+battleyarou pin removed); in field '%s' "
+               "(fieldId=0x%04X) until field change",
+               s_freezeFieldName, (unsigned)s_freezeFieldId);
 
     Log::Field("KaniFreeze: ===== CAPTURE STARTED =====");
-    Log::Field("KaniFreeze: trigger: mode %u->%u, field='%s', kaniPtr=0x%08X, stride=0x%X",
+    Log::Field("KaniFreeze: trigger: mode %u->%u, field='%s'",
                (unsigned)prevMode, (unsigned)curMode,
-               ChaseDetector::GetDebouncedFieldName(),
-               (uint32_t)kaniPtr, stride);
-    LogInitialSnapshot();
+               ChaseDetector::GetDebouncedFieldName());
 
-    // v0.15.2.8: parallel battleyarou capture. Resolve battleyarou's
-    // runtime entity address; if present, snapshot INITIAL and log a hex
-    // dump. The per-frame pin and the FINAL summary are wired in
-    // ApplyFreezePin and EndCapture respectively. If battleyarou is not
-    // present in this field, all battleyarou state is left zeroed and
-    // the pin is inert — v0.15.2.7-equivalent behavior for that field.
-    s_battleyarouPtr         = 0;
-    s_battleyarouStrideBytes = 0;
-    s_battleyarouArrayKind   = 0;
-    {
-        uintptr_t byouPtr = ChaseDetector::GetBattleyarouEntityPtr();
-        ChaseDetector::KaniLocation byouLoc = ChaseDetector::GetBattleyarouLocation();
-        int byouStride = (byouLoc.arrayKind == 1) ? STRIDE_BACKGROUND
-                       : (byouLoc.arrayKind == 2) ? STRIDE_OTHER
-                       : 0;
-        if (byouPtr && byouStride > 0) {
-            __try {
-                memcpy(s_battleyarouInitial, (const void*)byouPtr, (size_t)byouStride);
-                s_battleyarouPtr         = byouPtr;
-                s_battleyarouStrideBytes = byouStride;
-                s_battleyarouArrayKind   = byouLoc.arrayKind;
-                Log::Field("KaniFreeze: BATTLEYAROU INITIAL snapshot "
-                           "(byouPtr=0x%08X stride=0x%X arrayKind=%d "
-                           "symIdx=%d arraySlot=%d):",
-                           (uint32_t)byouPtr, byouStride, byouLoc.arrayKind,
-                           byouLoc.symIdx, byouLoc.arraySlot);
-                int rows = (byouStride + 15) / 16;
-                for (int r = 0; r < rows; r++) {
-                    int off = r * 16;
-                    int remaining = byouStride - off;
-                    if (remaining >= 16) {
-                        LogHexRow("BYOU-INIT", s_battleyarouInitial + off, off, 16);
-                    } else if (remaining > 0) {
-                        uint8_t pad[16] = {};
-                        memcpy(pad, s_battleyarouInitial + off, (size_t)remaining);
-                        LogHexRow("BYOU-INIT", pad, off, remaining);
-                    }
+    // v0.15.2.14: Chase-agent INITIAL capture if RegisterChaseAgent has armed
+    // an agent for this field. SEH-guarded; on read failure, agent pin stays
+    // disarmed (the BATTLE NO-OP carries the load). Reset s_haveChaseAgentSnapshot
+    // so ApplyFreezePin will take a fresh full-state snapshot at SNAPSHOT_DELAY_MS.
+    s_haveChaseAgentInitial  = false;
+    s_haveChaseAgentSnapshot = false;
+    if (s_chaseAgentPtr && s_chaseAgentStrideBytes > 0) {
+        __try {
+            memcpy(s_chaseAgentInitial, (const void*)s_chaseAgentPtr,
+                   (size_t)s_chaseAgentStrideBytes);
+            s_haveChaseAgentInitial = true;
+            Log::Field("KaniFreeze: CHASE-AGENT INITIAL snapshot "
+                       "(agentPtr=0x%08X stride=0x%X arrayKind=%d slot=%d "
+                       "symIdx=%d sym='%s'):",
+                       (uint32_t)s_chaseAgentPtr, s_chaseAgentStrideBytes,
+                       s_chaseAgentArrayKind, s_chaseAgentSlot,
+                       s_chaseAgentSymIdx, s_chaseAgentSymName);
+            int rows = (s_chaseAgentStrideBytes + 15) / 16;
+            for (int r = 0; r < rows; r++) {
+                int off = r * 16;
+                int remaining = s_chaseAgentStrideBytes - off;
+                if (remaining >= 16) {
+                    LogHexRow("AGENT-INIT", s_chaseAgentInitial + off, off, 16);
+                } else if (remaining > 0) {
+                    uint8_t pad[16] = {};
+                    memcpy(pad, s_chaseAgentInitial + off, (size_t)remaining);
+                    LogHexRow("AGENT-INIT", pad, off, remaining);
                 }
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                Log::Field("KaniFreeze: BATTLEYAROU initial read at 0x%08X failed; "
-                           "battleyarou pin will be inactive this capture",
-                           (uint32_t)byouPtr);
-                s_battleyarouPtr         = 0;
-                s_battleyarouStrideBytes = 0;
-                s_battleyarouArrayKind   = 0;
             }
-        } else {
-            Log::Field("KaniFreeze: battleyarou not present in field='%s' "
-                       "(symIdx=%d arraySlot=%d arrayKind=%d) — "
-                       "battleyarou pin inactive this field",
-                       ChaseDetector::GetDebouncedFieldName(),
-                       byouLoc.symIdx, byouLoc.arraySlot, byouLoc.arrayKind);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            Log::Field("KaniFreeze: CHASE-AGENT initial read at 0x%08X failed -- "
+                       "agent pin will be inactive this capture",
+                       (uint32_t)s_chaseAgentPtr);
         }
+    } else {
+        Log::Field("KaniFreeze: no chase agent registered for field='%s' -- "
+                   "agent pin inactive (BATTLE NO-OP is the only suppression)",
+                   ChaseDetector::GetDebouncedFieldName());
     }
-    s_haveBattleyarouSnapshot = false;
 
-    // v0.15.2.9: snapshot ALL Others slots in the current field for the
-    // diagnostic scanner. Skips silently if JSMCounts unavailable, the
-    // pFieldStateOthers base hasn't been allocated yet, or the field has
-    // zero Others. Caps at MAX_OTHERS = 32 slots; chase fields all have
-    // <= 18 Others, so the cap doesn't trigger in practice.
+    // All-Others diagnostic scanner (unchanged from v0.15.2.9).
     s_othersCountSnapshot = 0;
     s_othersBaseSnapshot  = 0;
     s_othersStartSymIdx   = 0;
@@ -433,91 +274,51 @@ static void StartCapture(uint16_t prevMode, uint16_t curMode)
                                captured, wantCount, s_othersStartSymIdx,
                                jsmCounts.doors, jsmCounts.lines, jsmCounts.backgrounds,
                                (uint32_t)base);
-                } else {
-                    Log::Field("KaniFreeze: OTHERS-DIAG skipped — "
-                               "pFieldStateOthers not yet allocated");
                 }
-            } else {
-                Log::Field("KaniFreeze: OTHERS-DIAG skipped — wantCount=%d", wantCount);
             }
-        } else {
-            Log::Field("KaniFreeze: OTHERS-DIAG skipped — "
-                       "LoadJSMCounts failed for field='%s'", curField);
         }
     }
 }
 
-// Diff current vs prev snapshot; log first-change events. Returns the
-// number of bytes that differ from prev this tick (NOT first-change).
-static int DiffAndLogFirstChanges(const uint8_t* cur, DWORD elapsedMs)
-{
-    int diffCount = 0;
-    for (int i = 0; i < s_strideBytes; i++) {
-        if (cur[i] != s_prev[i]) {
-            diffCount++;
-            if (!s_byteFirstChangeLogged[i]) {
-                Log::Field("KaniFreeze: t=%lums tick=%d +0x%03X: "
-                           "FIRST CHANGE 0x%02X -> 0x%02X",
-                           (unsigned long)elapsedMs, s_tickN,
-                           i, s_prev[i], cur[i]);
-                s_byteFirstChangeLogged[i] = true;
-            }
-            s_prev[i] = cur[i];
-        }
-    }
-    return diffCount;
-}
+// ============================================================================
+// EndCapture
+// ============================================================================
 
 static void EndCapture(DWORD elapsedMs)
 {
-    // Read one more time so the FINAL summary reflects current state.
-    uint8_t finalBuf[MAX_STRIDE];
-    if (ReadKaniBlock(finalBuf, s_strideBytes)) {
-        LogChangeSummary("FINAL", finalBuf, elapsedMs);
-    } else {
-        Log::Field("KaniFreeze: FINAL read failed; using prev buffer for summary");
-        LogChangeSummary("FINAL (from prev)", s_prev, elapsedMs);
-    }
-
-    // v0.15.2.8: parallel battleyarou FINAL summary. Compare current
-    // battleyarou state to the INITIAL snapshot we captured in StartCapture.
-    if (s_battleyarouPtr && s_battleyarouStrideBytes > 0) {
-        uint8_t byouFinal[MAX_STRIDE];
+    // v0.15.2.14: Chase-agent FINAL summary. Compares current state to
+    // s_chaseAgentInitial. The success metric is changed_bytes ~ 0 -- meaning
+    // the pin is holding the agent still after the snapshot kicks in.
+    if (s_chaseAgentPtr && s_chaseAgentStrideBytes > 0 && s_haveChaseAgentInitial) {
+        uint8_t agentFinal[MAX_STRIDE];
         bool readOk = false;
         __try {
-            memcpy(byouFinal, (const void*)s_battleyarouPtr, (size_t)s_battleyarouStrideBytes);
+            memcpy(agentFinal, (const void*)s_chaseAgentPtr,
+                   (size_t)s_chaseAgentStrideBytes);
             readOk = true;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             readOk = false;
         }
         if (readOk) {
             int changedCount = 0;
-            for (int i = 0; i < s_battleyarouStrideBytes; i++) {
-                if (s_battleyarouInitial[i] != byouFinal[i]) changedCount++;
+            for (int i = 0; i < s_chaseAgentStrideBytes; i++) {
+                if (s_chaseAgentInitial[i] != agentFinal[i]) changedCount++;
             }
-            Log::Field("KaniFreeze: BATTLEYAROU FINAL SUMMARY t=%lums tick=%d "
-                       "changed_bytes=%d/%d:",
-                       (unsigned long)elapsedMs, s_tickN,
-                       changedCount, s_battleyarouStrideBytes);
-            for (int i = 0; i < s_battleyarouStrideBytes; i++) {
-                if (s_battleyarouInitial[i] != byouFinal[i]) {
-                    Log::Field("KaniFreeze:   BYOU +0x%03X: 0x%02X -> 0x%02X (delta=%d)",
-                               i, s_battleyarouInitial[i], byouFinal[i],
-                               (int)byouFinal[i] - (int)s_battleyarouInitial[i]);
+            Log::Field("KaniFreeze: CHASE-AGENT FINAL SUMMARY t=%lums tick=%d "
+                       "sym='%s' changed_bytes=%d/%d:",
+                       (unsigned long)elapsedMs, s_tickN, s_chaseAgentSymName,
+                       changedCount, s_chaseAgentStrideBytes);
+            for (int i = 0; i < s_chaseAgentStrideBytes; i++) {
+                if (s_chaseAgentInitial[i] != agentFinal[i]) {
+                    Log::Field("KaniFreeze:   AGENT +0x%03X: 0x%02X -> 0x%02X (delta=%d)",
+                               i, s_chaseAgentInitial[i], agentFinal[i],
+                               (int)agentFinal[i] - (int)s_chaseAgentInitial[i]);
                 }
             }
-        } else {
-            Log::Field("KaniFreeze: BATTLEYAROU FINAL read failed; "
-                       "summary not produced");
         }
     }
 
-    // v0.15.2.9: ALL-OTHERS DIAGNOSTIC FINAL summary. For each Others slot
-    // we snapshotted in StartCapture, compute changed-bytes count vs the
-    // INITIAL snapshot. Log per-slot results with sym name. Slots with
-    // changed_bytes > 0 are running scripts/AI/anim during the chase
-    // window; the slot with the most changes is the prime suspect for
-    // the chase agent.
+    // All-Others diagnostic FINAL (unchanged from v0.15.2.9).
     if (s_othersCountSnapshot > 0 && s_othersBaseSnapshot) {
         Log::Field("KaniFreeze: OTHERS-DIAG FINAL t=%lums tick=%d "
                    "(scanning %d slots, othersStartSymIdx=%d):",
@@ -550,8 +351,7 @@ static void EndCapture(DWORD elapsedMs)
                        "changed_bytes=%d/%d",
                        slot, symIdx, sym, changed, STRIDE_OTHER);
         }
-        Log::Field("KaniFreeze: OTHERS-DIAG summary: %d/%d slots had byte changes "
-                   "during the 10s window",
+        Log::Field("KaniFreeze: OTHERS-DIAG summary: %d/%d slots had byte changes",
                    activeSlots, s_othersCountSnapshot);
     }
 
@@ -560,168 +360,101 @@ static void EndCapture(DWORD elapsedMs)
     s_capturing = false;
 }
 
-// v0.15.2.4: Per-frame freeze writer. Called every Update() while
-// s_freezeActive is true. Pins kani's wakeup-control bytes until the
-// player leaves the field. Self-clears when ChaseDetector reports a
-// different debounced field name (skipping the empty-string debounce-
-// window state to avoid spurious deactivation during transitions).
+// ============================================================================
+// ApplyFreezePin
+// ============================================================================
 //
-// v0.15.2.5: Pin set extended from {+0x150, +0x23F, +0x241}=0x21 to
-// also include {+0x154, +0x1FA}=0x14. v0.15.2.4 BAT proved the anim-ID
-// trio is purely a RENDERING pin — the FINAL SUMMARY confirmed those
-// three bytes were never modified, but kani still woke up because the
-// engine's countdown lives in +0x154 / +0x1FA.
+// v0.15.3: only the dynamic chase-agent pin is active here. The static
+// kani+battleyarou pin (v0.15.2.7-.8) was removed -- v0.15.2.x BATs proved
+// kani and battleyarou were inert in every chase field; the actual chase
+// agents (rinoa-slot in domt5_1, robot-slots elsewhere) are pinned via
+// RegisterChaseAgent.
 //
-// v0.15.2.7: BRUTE-FORCE FULL-STATE PIN. v0.15.2.6 BAT showed the
-// position pin prevented collision in domt4_1 (no battle) but Aaron
-// heard kani's running animation playing in place — the engine drives
-// rendered animation from bytes we never pinned. Aaron's design pivot:
-// stop the wakeup itself, not paper over it with position lock.
-//
-// New strategy: at t=SNAPSHOT_DELAY_MS (1500ms) post-FREEZE-ACTIVATED,
-// snapshot kani's entire post-header state (+0x140..stride) and pin
-// EVERY byte in that range to its post-Phase-A "settled down" value
-// every subsequent frame. Anim playback drivers, AI state, position,
-// collision flags — anything the engine modifies during wakeup — gets
-// overwritten before it can take effect. Header bytes (+0x000..+0x028)
-// stay free so the engine's heartbeat/frame counter still ticks.
-//
-// The five sub-state byte writes (+0x150, +0x23F, +0x241=0x21,
-// +0x154/+0x1FA=0x14) are preserved during the t<SNAPSHOT_DELAY_MS
-// grace period to keep kani down through Phase A. Once the full pin
-// kicks in, the byte writes become redundant (the snapshot embeds
-// those same values) but harmless.
-//
-// v0.15.2.8: PARALLEL BATTLEYAROU PIN. v0.15.2.7 BAT in domt5_1
-// showed kani's full-state pin worked perfectly (FINAL SUMMARY
-// changed_bytes=0/612) but battle STILL triggered — kani is dead
-// code in that field. We now also pin battleyarou (resolved per
-// field via ChaseDetector::GetBattleyarouEntityPtr). Snapshot-only,
-// no belt-and-suspenders byte writes (kani's magic 0x21/0x14 values
-// don't apply). Same SNAPSHOT_DELAY_MS=1500ms timing. If battleyarou
-// is the actual chase agent in domt5_1, freezing it should prevent
-// the chase battle. If battleyarou is also dead in that field,
-// v0.15.2.9 will try the next candidate (plane1 Director, dic, etc.).
+// v0.15.2.14 tightened deactivation preserved: capture pCurrentFieldId at
+// FREEZE ACTIVATED time and check it every frame. If it differs, deactivate
+// immediately; the existing debounced-name check stays as backup. Plus an
+// SEH-guarded probe before each write: if the agent pointer faults, skip.
+
+static void DeactivateFreeze(const char* reasonFmt, ...)
+{
+    char reason[256];
+    va_list ap;
+    va_start(ap, reasonFmt);
+    vsnprintf(reason, sizeof(reason), reasonFmt, ap);
+    va_end(ap);
+
+    Log::Field("KaniFreeze: FREEZE DEACTIVATED -- %s", reason);
+    s_freezeActive            = false;
+    s_freezeFieldName[0]      = '\0';
+    s_freezeFieldId           = 0xFFFF;
+    s_freezeStartTick         = 0;
+    s_othersCountSnapshot     = 0;
+    s_othersBaseSnapshot      = 0;
+    s_othersStartSymIdx       = 0;
+    ClearChaseAgent();
+}
+
 static void ApplyFreezePin()
 {
     if (!s_freezeActive) return;
 
-    // Field-change check. During the 2s name-debounce after a fieldId flip,
-    // GetDebouncedFieldName returns "" — don't deactivate then, since we
-    // don't yet know the destination field. Only deactivate on a confirmed
-    // change to a different non-empty name.
-    const char* curField = ChaseDetector::GetDebouncedFieldName();
-    if (curField[0] != '\0' && strcmp(curField, s_freezeFieldName) != 0) {
-        Log::Field("KaniFreeze: FREEZE DEACTIVATED — field changed from '%s' to '%s'",
-                   s_freezeFieldName, curField);
-        s_freezeActive            = false;
-        s_freezeFieldName[0]      = '\0';
-        s_haveFullSnapshot        = false;  // v0.15.2.7: next field gets a fresh post-Phase-A snapshot
-        s_haveBattleyarouSnapshot = false;  // v0.15.2.8: same for battleyarou
-        s_battleyarouPtr          = 0;
-        s_battleyarouStrideBytes  = 0;
-        s_battleyarouArrayKind    = 0;
-        s_freezeStartTick         = 0;
-        s_othersCountSnapshot     = 0;       // v0.15.2.9
-        s_othersBaseSnapshot      = 0;
-        s_othersStartSymIdx       = 0;
+    // v0.15.2.14: raw fieldId check FIRST (catches handoff before debounce).
+    uint16_t curFieldId = ReadCurrentFieldId();
+    if (curFieldId != 0xFFFF && s_freezeFieldId != 0xFFFF
+        && curFieldId != s_freezeFieldId) {
+        DeactivateFreeze("fieldId changed 0x%04X -> 0x%04X (pre-debounce)",
+                         (unsigned)s_freezeFieldId, (unsigned)curFieldId);
         return;
     }
 
-    // Re-resolve kani each frame. ChaseDetector returns 0 if not in a
-    // chase field or if the slot can't be resolved — transient, not an
-    // error, just skip this frame.
-    uintptr_t kaniPtr = ChaseDetector::GetKaniEntityPtr();
-    if (!kaniPtr) return;
-
-    // SEH-guarded: take the snapshot if it's time, then write all pinned
-    // values. Two layers of pin: belt-and-suspenders byte writes (always),
-    // and the full-state memcpy (once the post-Phase-A snapshot is taken).
-    __try {
-        uint8_t* kani = reinterpret_cast<uint8_t*>(kaniPtr);
-
-        // v0.15.2.5 belt-and-suspenders byte pins. Cover the t<1500ms grace
-        // period before the full snapshot kicks in. Once s_haveFullSnapshot
-        // is true, the memcpy below overwrites these with the same values
-        // (since the snapshot was taken AFTER these writes had been firing
-        // for 1500ms, the snapshotted bytes are 0x21 / 0x14).
-        kani[0x150] = 0x21;
-        kani[0x23F] = 0x21;
-        kani[0x241] = 0x21;
-        kani[0x154] = 0x14;
-        kani[0x1FA] = 0x14;
-
-        // v0.15.2.7: take the full-state snapshot once per field, after
-        // Phase A has settled. Then pin the snapshot every subsequent
-        // frame.
-        if (!s_haveFullSnapshot) {
-            DWORD elapsed = GetTickCount() - s_freezeStartTick;
-            if (elapsed >= SNAPSHOT_DELAY_MS) {
-                int snapLen = s_strideBytes - SNAPSHOT_OFFSET_START;
-                if (snapLen > 0 && snapLen <= MAX_STRIDE) {
-                    memcpy(s_fullSnapshot + SNAPSHOT_OFFSET_START,
-                           kani + SNAPSHOT_OFFSET_START,
-                           (size_t)snapLen);
-                    s_haveFullSnapshot = true;
-                    Log::Field("KaniFreeze: full-state snapshot taken at t=%lums "
-                               "(+0x%03X..+0x%03X = %d bytes); pinning every "
-                               "frame for the rest of this field session",
-                               (unsigned long)elapsed,
-                               (unsigned)SNAPSHOT_OFFSET_START,
-                               (unsigned)s_strideBytes,
-                               snapLen);
-                }
-            }
-        } else {
-            int snapLen = s_strideBytes - SNAPSHOT_OFFSET_START;
-            if (snapLen > 0 && snapLen <= MAX_STRIDE) {
-                memcpy(kani + SNAPSHOT_OFFSET_START,
-                       s_fullSnapshot + SNAPSHOT_OFFSET_START,
-                       (size_t)snapLen);
-            }
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        // Bad pointer this frame — skip silently. Will retry next tick.
+    // Backup: debounced-name check (existing logic).
+    const char* curField = ChaseDetector::GetDebouncedFieldName();
+    if (curField[0] != '\0' && strcmp(curField, s_freezeFieldName) != 0) {
+        DeactivateFreeze("field changed from '%s' to '%s' (debounce-settled)",
+                         s_freezeFieldName, curField);
+        return;
     }
 
-    // v0.15.2.8: parallel battleyarou pin. Skip if battleyarou not present
-    // in the current field (s_battleyarouPtr == 0). Snapshot at the same
-    // t=1500ms moment as kani; memcpy back every frame thereafter. NO
-    // belt-and-suspenders byte writes (kani's 0x21/0x14 magic values are
-    // kani-specific). SEH-guarded separately so a bad battleyarou pointer
-    // doesn't take out the kani pin path.
-    if (s_battleyarouPtr) {
+    // ----- v0.15.2.14: Chase-agent pin (the only pin in v0.15.3) -----
+    //
+    // The agent is the actual entity that called BATTLE in this field's
+    // first chase encounter (e.g. rinoa-slot in domt5_1). We pin its
+    // full post-header state region to keep it on the ground after the
+    // first battle exits, so it never wakes up and follows Squall around.
+    if (s_chaseAgentPtr) {
         __try {
-            uint8_t* byou = reinterpret_cast<uint8_t*>(s_battleyarouPtr);
-            if (!s_haveBattleyarouSnapshot) {
+            volatile uint8_t probe = *reinterpret_cast<uint8_t*>(s_chaseAgentPtr);
+            (void)probe;
+
+            uint8_t* agent = reinterpret_cast<uint8_t*>(s_chaseAgentPtr);
+            if (!s_haveChaseAgentSnapshot) {
                 DWORD elapsed = GetTickCount() - s_freezeStartTick;
                 if (elapsed >= SNAPSHOT_DELAY_MS) {
-                    int snapLen = s_battleyarouStrideBytes - SNAPSHOT_OFFSET_START;
+                    int snapLen = s_chaseAgentStrideBytes - SNAPSHOT_OFFSET_START;
                     if (snapLen > 0 && snapLen <= MAX_STRIDE) {
-                        memcpy(s_battleyarouSnapshot + SNAPSHOT_OFFSET_START,
-                               byou + SNAPSHOT_OFFSET_START,
+                        memcpy(s_chaseAgentSnapshot + SNAPSHOT_OFFSET_START,
+                               agent + SNAPSHOT_OFFSET_START,
                                (size_t)snapLen);
-                        s_haveBattleyarouSnapshot = true;
-                        Log::Field("KaniFreeze: BATTLEYAROU full-state snapshot "
-                                   "taken at t=%lums (+0x%03X..+0x%03X = %d bytes); "
-                                   "pinning every frame for the rest of this field "
-                                   "session",
-                                   (unsigned long)elapsed,
+                        s_haveChaseAgentSnapshot = true;
+                        Log::Field("KaniFreeze: CHASE-AGENT full-state snapshot "
+                                   "taken at t=%lums sym='%s' (+0x%03X..+0x%03X = "
+                                   "%d bytes); pinning every frame for the rest "
+                                   "of this field session",
+                                   (unsigned long)elapsed, s_chaseAgentSymName,
                                    (unsigned)SNAPSHOT_OFFSET_START,
-                                   (unsigned)s_battleyarouStrideBytes,
-                                   snapLen);
+                                   (unsigned)s_chaseAgentStrideBytes, snapLen);
                     }
                 }
             } else {
-                int snapLen = s_battleyarouStrideBytes - SNAPSHOT_OFFSET_START;
+                int snapLen = s_chaseAgentStrideBytes - SNAPSHOT_OFFSET_START;
                 if (snapLen > 0 && snapLen <= MAX_STRIDE) {
-                    memcpy(byou + SNAPSHOT_OFFSET_START,
-                           s_battleyarouSnapshot + SNAPSHOT_OFFSET_START,
+                    memcpy(agent + SNAPSHOT_OFFSET_START,
+                           s_chaseAgentSnapshot + SNAPSHOT_OFFSET_START,
                            (size_t)snapLen);
                 }
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            // Bad battleyarou pointer this frame — skip silently.
+            // Bad agent pointer this frame -- skip silently.
         }
     }
 }
@@ -735,68 +468,45 @@ void Initialize()
     s_lastGameMode       = 0xFFFF;
     s_capturing          = false;
     s_captureStartTick   = 0;
-    s_kaniPtr            = 0;
-    s_strideBytes        = 0;
-    s_arrayKind          = 0;
     s_tickN              = 0;
-    s_midSummaryFired    = false;
     s_battleSeenRecently = false;
-    s_freezeActive            = false;
-    s_freezeFieldName[0]      = '\0';
-    s_haveFullSnapshot        = false;
-    s_freezeStartTick         = 0;
-    s_battleyarouPtr          = 0;
-    s_battleyarouStrideBytes  = 0;
-    s_battleyarouArrayKind    = 0;
-    s_haveBattleyarouSnapshot = false;
-    s_othersCountSnapshot     = 0;
-    s_othersBaseSnapshot      = 0;
-    s_othersStartSymIdx       = 0;
-    Log::Mod("ChaseKaniFreeze: Initialized (v0.15.2.9 DIAGNOSTIC + DUAL-ENTITY "
-             "FULL-STATE PIN + ALL-OTHERS SCANNER; captures kani entity bytes "
-             "for %lums after first frame of MODE_FIELD following any chase-field "
-             "battle, AND pins +0x150/+0x23F/+0x241=0x21, +0x154/+0x1FA=0x14 "
-             "every frame, AND snapshots BOTH kani and battleyarou entity "
-             "+0x%03X..stride regions at t=%lums post-activation then pins both "
-             "snapshots every frame until field change, AND snapshots ALL Others "
-             "slots in the field for per-slot changed-bytes diagnostic at "
-             "capture-end — v0.15.2.10 will pin whichever slot the diagnostic "
-             "identifies as the active chase agent).",
-             (unsigned long)CAPTURE_DURATION_MS,
-             (unsigned)SNAPSHOT_OFFSET_START,
-             (unsigned long)SNAPSHOT_DELAY_MS);
+    s_freezeActive       = false;
+    s_freezeFieldName[0] = '\0';
+    s_freezeFieldId      = 0xFFFF;
+    s_freezeStartTick    = 0;
+    s_othersCountSnapshot = 0;
+    s_othersBaseSnapshot  = 0;
+    s_othersStartSymIdx   = 0;
+    ClearChaseAgent();
+
+    Log::Mod("ChaseKaniFreeze: Initialized (v0.15.3 DYNAMIC AGENT PIN ONLY). "
+             "On chase-field battle exit, pins the dynamically-registered "
+             "chase agent (the entity that called BATTLE on first contact in "
+             "the field). Static kani+battleyarou pin REMOVED in v0.15.3 -- "
+             "v0.15.2.x BATs proved both entities were inert (0-7 changed bytes) "
+             "in every chase field; the actual chase agents are pinned via "
+             "RegisterChaseAgent. fieldId-flip deactivation kept (fixes the "
+             "doopen2a -> dotown_3 handoff crash from v0.15.2.10/.13). "
+             "OTHERS-DIAG diagnostic scanner kept for future agent-resolution "
+             "audits. chase_battle_freeze handles registration via "
+             "RegisterChaseAgent on the first PASS event per field (with "
+             "v0.15.2.15 doopen2a skip).");
 }
 
 void Shutdown()
 {
-    s_capturing               = false;
-    s_freezeActive            = false;
-    s_haveFullSnapshot        = false;
-    s_freezeStartTick         = 0;
-    s_battleyarouPtr          = 0;
-    s_battleyarouStrideBytes  = 0;
-    s_battleyarouArrayKind    = 0;
-    s_haveBattleyarouSnapshot = false;
-    s_othersCountSnapshot     = 0;
-    s_othersBaseSnapshot      = 0;
-    s_othersStartSymIdx       = 0;
+    s_capturing = false;
+    s_freezeActive = false;
+    ClearChaseAgent();
 }
 
 void Update()
 {
-    // Read current game mode under SEH.
     if (!FF8Addresses::pGameMode) return;
     uint16_t curMode = 0xFFFF;
     __try { curMode = *FF8Addresses::pGameMode; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return; }
 
-    // v0.15.2.3.1 trigger: first frame of MODE_FIELD (1) after a battle
-    // (3) has been seen. v0.15.2.3 used the simpler edge prev==3 && cur!=3,
-    // which fired during mode 5 (post-battle fade transition) where the
-    // engine has all entity updates paused — the BAT log captured 0 byte
-    // changes for the entire 5s window because of this. We now defer the
-    // capture start until the engine has actually returned to active
-    // field-mode and entity state machines are running again.
     if (curMode == MODE_BATTLE_VAL) {
         s_battleSeenRecently = true;
     }
@@ -806,50 +516,178 @@ void Update()
         && s_lastGameMode != MODE_FIELD_VAL)
     {
         StartCapture(s_lastGameMode, curMode);
-        s_battleSeenRecently = false;  // re-arm only after the next battle
+        s_battleSeenRecently = false;
     }
     s_lastGameMode = curMode;
 
-    // v0.15.2.4: Apply per-frame freeze pin (no-op if !s_freezeActive).
-    // Runs regardless of whether the diagnostic capture is currently
-    // active — the freeze persists past the 10s capture window, until
-    // the player leaves the field.
     ApplyFreezePin();
 
-    // If we're not capturing, nothing else to do.
     if (!s_capturing) return;
 
-    // Drive the capture loop.
     DWORD now = GetTickCount();
     DWORD elapsed = now - s_captureStartTick;
     s_tickN++;
 
-    uint8_t cur[MAX_STRIDE];
-    if (!ReadKaniBlock(cur, s_strideBytes)) {
-        Log::Field("KaniFreeze: read failed mid-capture at t=%lums; aborting",
-                   (unsigned long)elapsed);
-        s_capturing = false;
+    if (elapsed >= CAPTURE_DURATION_MS) {
+        EndCapture(elapsed);
+    }
+}
+
+// v0.15.2.14: Resolve entityPtr to (arrayKind, slot, symIdx, symName) and
+// arm the chase-agent pin. Unchanged in v0.15.3.
+void RegisterChaseAgent(uintptr_t entityPtr)
+{
+    if (!entityPtr) return;
+
+    // Idempotent within a field: if we've already armed the same pointer
+    // for the current field, skip silently.
+    const char* curField = ChaseDetector::GetDebouncedFieldName();
+    if (s_chaseAgentPtr == entityPtr
+        && curField[0] != '\0'
+        && strcmp(curField, s_chaseAgentFieldName) == 0) {
         return;
     }
 
-    int diffCount = DiffAndLogFirstChanges(cur, elapsed);
-
-    // Mid-window summary: a short pulse so the log shows progress even if
-    // the transition fires near the end of the window.
-    if (!s_midSummaryFired && elapsed >= MID_SUMMARY_AT_MS) {
-        int totalChanged = 0;
-        for (int i = 0; i < s_strideBytes; i++) {
-            if (s_byteFirstChangeLogged[i]) totalChanged++;
-        }
-        Log::Field("KaniFreeze: MID-WINDOW heartbeat t=%lums tick=%d "
-                   "diff_this_tick=%d total_changed_so_far=%d",
-                   (unsigned long)elapsed, s_tickN, diffCount, totalChanged);
-        s_midSummaryFired = true;
+    if (curField[0] == '\0') {
+        Log::Field("[CHASE-AGENT-UNRESOLVED] entityPtr=0x%08X registered before "
+                   "field name debounced -- skipping (BATTLE NO-OP carries the load)",
+                   (uint32_t)entityPtr);
+        return;
     }
 
-    // End of window?
-    if (elapsed >= CAPTURE_DURATION_MS) {
-        EndCapture(elapsed);
+    FieldArchive::JSMCounts jsmCounts = {};
+    if (!FieldArchive::LoadJSMCounts(curField, jsmCounts)) {
+        Log::Field("[CHASE-AGENT-UNRESOLVED] field='%s' entityPtr=0x%08X -- "
+                   "JSMCounts unavailable, cannot resolve slot",
+                   curField, (uint32_t)entityPtr);
+        return;
+    }
+
+    int doors = jsmCounts.doors;
+    int lines = jsmCounts.lines;
+    int bgs   = jsmCounts.backgrounds;
+    int oths  = jsmCounts.others;
+
+    int  resolvedArrayKind = 0;
+    int  resolvedSlot      = -1;
+    int  resolvedStride    = 0;
+    int  resolvedSymIdx    = -1;
+    uintptr_t othersBase = 0;
+    uintptr_t bgsBase    = 0;
+
+    // Try Others array.
+    if (oths > 0 && FF8Addresses::pFieldStateOthers) {
+        __try {
+            othersBase = (uintptr_t)*reinterpret_cast<uint8_t**>(
+                FF8Addresses::pFieldStateOthers);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            othersBase = 0;
+        }
+        if (othersBase) {
+            if (entityPtr >= othersBase) {
+                uintptr_t off = entityPtr - othersBase;
+                if ((off % (uintptr_t)STRIDE_OTHER) == 0) {
+                    int slot = (int)(off / (uintptr_t)STRIDE_OTHER);
+                    if (slot >= 0 && slot < oths) {
+                        resolvedArrayKind = 2;  // Others
+                        resolvedSlot      = slot;
+                        resolvedStride    = STRIDE_OTHER;
+                        resolvedSymIdx    = doors + lines + bgs + slot;
+                    }
+                }
+            }
+        }
+    }
+
+    // Try Backgrounds array if Others didn't resolve.
+    if (resolvedArrayKind == 0 && bgs > 0 && FF8Addresses::pFieldStateBackgrounds) {
+        __try {
+            bgsBase = (uintptr_t)*reinterpret_cast<uint8_t**>(
+                FF8Addresses::pFieldStateBackgrounds);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            bgsBase = 0;
+        }
+        if (bgsBase) {
+            if (entityPtr >= bgsBase) {
+                uintptr_t off = entityPtr - bgsBase;
+                if ((off % (uintptr_t)STRIDE_BACKGROUND) == 0) {
+                    int slot = (int)(off / (uintptr_t)STRIDE_BACKGROUND);
+                    if (slot >= 0 && slot < bgs) {
+                        resolvedArrayKind = 1;  // Backgrounds
+                        resolvedSlot      = slot;
+                        resolvedStride    = STRIDE_BACKGROUND;
+                        resolvedSymIdx    = doors + lines + slot;
+                    }
+                }
+            }
+        }
+    }
+
+    if (resolvedArrayKind == 0) {
+        Log::Field("[CHASE-AGENT-UNRESOLVED] field='%s' entityPtr=0x%08X "
+                   "(othersBase=0x%08X stride=0x%X count=%d, "
+                   "bgsBase=0x%08X stride=0x%X count=%d) -- "
+                   "pointer doesn't lie inside either array, skipping pin",
+                   curField, (uint32_t)entityPtr,
+                   (uint32_t)othersBase, STRIDE_OTHER, oths,
+                   (uint32_t)bgsBase, STRIDE_BACKGROUND, bgs);
+        return;
+    }
+
+    const char* sym = ChaseDetector::GetSymName(resolvedSymIdx);
+
+    // Read first 16 bytes of header for fingerprint.
+    uint8_t header[16] = {};
+    bool headerOk = false;
+    __try {
+        memcpy(header, (const void*)entityPtr, 16);
+        headerOk = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        headerOk = false;
+    }
+
+    // Commit identity FIRST, then pointer LAST so the mod thread sees a
+    // coherent armed view.
+    s_chaseAgentStrideBytes = resolvedStride;
+    s_chaseAgentArrayKind   = resolvedArrayKind;
+    s_chaseAgentSlot        = resolvedSlot;
+    s_chaseAgentSymIdx      = resolvedSymIdx;
+    {
+        size_t len = strlen(sym);
+        if (len >= sizeof(s_chaseAgentSymName)) len = sizeof(s_chaseAgentSymName) - 1;
+        memcpy(s_chaseAgentSymName, sym, len);
+        s_chaseAgentSymName[len] = '\0';
+    }
+    {
+        size_t len = strlen(curField);
+        if (len >= sizeof(s_chaseAgentFieldName)) len = sizeof(s_chaseAgentFieldName) - 1;
+        memcpy(s_chaseAgentFieldName, curField, len);
+        s_chaseAgentFieldName[len] = '\0';
+    }
+    s_haveChaseAgentInitial  = false;
+    s_haveChaseAgentSnapshot = false;
+    s_chaseAgentPtr = entityPtr;  // armed signal -- write LAST
+
+    if (headerOk) {
+        Log::Field("[CHASE-AGENT] field='%s' entityPtr=0x%08X "
+                   "-> array=%s slot=%d symIdx=%d sym='%s' "
+                   "stride=0x%X "
+                   "header[0x00..0x10]: %02X %02X %02X %02X %02X %02X %02X %02X "
+                   "%02X %02X %02X %02X %02X %02X %02X %02X",
+                   curField, (uint32_t)entityPtr,
+                   (resolvedArrayKind == 2) ? "Others" : "Backgrounds",
+                   resolvedSlot, resolvedSymIdx, sym, resolvedStride,
+                   header[0], header[1], header[2], header[3],
+                   header[4], header[5], header[6], header[7],
+                   header[8], header[9], header[10], header[11],
+                   header[12], header[13], header[14], header[15]);
+    } else {
+        Log::Field("[CHASE-AGENT] field='%s' entityPtr=0x%08X "
+                   "-> array=%s slot=%d symIdx=%d sym='%s' stride=0x%X "
+                   "(header read faulted)",
+                   curField, (uint32_t)entityPtr,
+                   (resolvedArrayKind == 2) ? "Others" : "Backgrounds",
+                   resolvedSlot, resolvedSymIdx, sym, resolvedStride);
     }
 }
 
