@@ -4,6 +4,66 @@ Newest on top. Each entry begins with a `## vMAJOR.MINOR.BUILD` heading followed
 
 The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_accessibility.h`. The push utility refuses to push if they don't.
 
+## v0.15.4
+
+Engine-rendered dialog injection -- Phase 1. New module `src/dialog_inject.{h,cpp}` synthesizes a phantom `script_context` and calls `opcode_mes(&ctx)` directly to prove the recipe for mod-driven engine dialog rendering. F12 fires a one-shot test. If a dialog box renders, Phase 2 (chase ASK via `opcode_ask`) is mechanical -- it follows the same pattern with a different opcode dispatch index and arg layout.
+
+### Why this approach (the v0.15.x bitmask recipe was wrong)
+
+v0.15.0 through v0.15.2.1 attempted to populate `ff8_win_obj` slot 1 with byte-perfect contents derived from a captured engine ASK snapshot. Every iteration ended with the engine ignoring the populated slot. The follow-up section of `Plan & Research Documents/Field dialog system disassembly analysis.md` identifies why: `show_dialog` is registered as a per-slot callback via `sub_4B6210/sub_4B6230` inside `sub_4A0880` (window-system init) at engine startup, and externally-populated slots are never part of that registry. The `gameObj+0xD2/0xD3/0xD4` bitmasks v0.15.x targeted are per-slot allocation flags (used by script-VM opcodes to refuse double-allocation), NOT the render trigger.
+
+`Plan & Research Documents/ASK render binding deep research results.md` recommends Path A: synthesize a fake `script_context` and call `opcode_mes(&ctx)` / `opcode_ask(&ctx)` directly. Path A reuses the engine's full setup path verbatim, including the per-slot callback registration that triggers actual rendering.
+
+### Phase 1 implementation
+
+- Phantom 0x300-byte zero-init script_context buffer (sized to cover ASK's `[+0x204]` write with margin).
+- `ctx[0x184] = 2` -- script-VM SP byte.
+- `ctx[8] = 0` -- msg_id arg (every field has msg 0).
+- `ctx[4] = 1` -- slot index arg (slot 1 leaves slot 0 free for the engine's main MES).
+- Resolve `opcode_mes` from the dispatch table at fire time (with cached fallback).
+- SEH-wrap the call. `__cdecl`, single arg = phantom ctx pointer.
+
+### Verification (all automated for blind dev)
+
+- Log `opcode_mes` return code (3 = advance/success, 5 = wait/slot-busy; exceptions caught and reported).
+- The existing v0.04.36 dialog hook fires on `opcode_mes` entry, so Aaron hears the dialog text via SAPI as the "call entered" signal.
+- Per-frame slot poll for 3 seconds at 100 ms cadence logging `pWindowsArray[1]+0x1C` (open_close_transition), `+0x1E` (velocity), `+0x24` (state), `+0x16` (field16), and `gameObj.D2/D3/D4` bitmasks. If `+0x1C` advances from 0 toward 0x1000, the open-transition is animating and the render path is alive.
+- SAPI announces "Dialog inject phase one. Slot N. Return code X." so Aaron knows the result without checking logs.
+- Pre/post slot snapshots and gameObj bitmask snapshots are logged around the call for diff visibility.
+
+### Safeguards
+
+- Field-mode guard (`IsOnField()`) before fire -- field opcodes are only valid in MODE_FIELD.
+- Address-resolved guards before fire -- abort with TTS message if `opcode_mes` or `pWindowsArray` is unresolved.
+- SEH wrap on the opcode call to catch crashes from a malformed phantom context (which would indicate the script_context layout needs more fields populated than v0.15.4's minimal set).
+- Static phantom buffer persists for the dialog's lifetime (engine retains the pointer indirectly through `sub_49FD50` + window state).
+
+### F12 hotkey rebinding
+
+Replaces v0.15.0's `ChaseDiag::Toggle` binding. Per the F12 rule (only one diagnostic active on F12 at a time), the chase diagnostic is retired -- the chase chapter shipped end-to-end as v0.15.3. The `ChaseDiag` module remains in source and continues to poll if previously enabled, but cannot be toggled at runtime now. If a future session needs chase-diag, it can be re-bound.
+
+### Predicted outcomes
+
+Three branches the BAT could land on:
+
+- **SUCCESS**: opcode_mes returns 3, the SAPI hook speaks msg 0 of the current field, the slot poll shows `+0x1C` advancing 0 -> 0x200 -> 0x400 -> ... -> 0x1000. Phase 2 (chase ASK) follows immediately on the same primitive.
+- **PARTIAL**: opcode_mes returns 3 but the slot poll shows `+0x1C` stuck at 0. Means the call entered but the engine's open transition didn't kick. Investigate: check `set_window_object` ran (slot text pointers populated post-call), check `sub_4A0620` ran (slot velocity at `+0x1E` == 0x200), and trace the difference vs a captured natural-MES snapshot.
+- **FAIL/CRASH**: SEH catches an exception. The phantom context is missing fields the opcode reads. Expand the buffer or populate additional offsets based on the SEH-caught instruction pointer (logged for debugging).
+
+### Files changed
+
+- `src/dialog_inject.h` (NEW, ~80 lines): design rationale documenting Path A and why the bitmask recipe was outdated; public API.
+- `src/dialog_inject.cpp` (NEW, ~280 lines): phantom ctx buffer, slot snapshot helpers, gameObj mask read helpers, `Phase1_TestMes` with pre/post snapshots and SEH-wrapped call, `Update` slot poll.
+- `src/dinput8.cpp` (~10 lines): include `dialog_inject.h`, `DialogInject::Initialize` after `ChaseBattleFreeze::Initialize`, `DialogInject::Update` in main loop after `ChaseDiag::Update`, `DialogInject::Shutdown` before `ChaseBattleFreeze::Shutdown`, F12 handler swap from `ChaseDiag::Toggle` to `DialogInject::Phase1_TestMes`, comment block updates documenting the swap.
+- `src/deploy.bat` (1 line): `dialog_inject.cpp` added to compile list after `chase_battle_freeze.cpp`.
+- `src/ff8_accessibility.h`: version bump to 0.15.4 with new comment trail entry.
+- `CHANGELOG.md`: this top entry.
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`: refreshed for v0.15.4 ready-to-BAT state.
+
+### Risk
+
+Low-to-moderate. The new module is gated behind an explicit F12 press in field mode; nothing fires automatically. The opcode call is SEH-wrapped so a malformed phantom context cannot crash the game. The F12 binding swap removes the chase-diag toggle, but chase-diag is no longer a needed feature path post-v0.15.3 milestone. The only behavioral change at engine level is what happens when F12 is pressed -- if the recipe works, a dialog opens; if it doesn't, the call is harmless and only logs.
+
 ## v0.15.3
 
 Single-pronged cleanup: remove the static kani+battleyarou pin from chase_kani_freeze; fix the deploy.bat "Version: World" regex bug.

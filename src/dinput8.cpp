@@ -14,6 +14,7 @@
 #include "chase_ask_overlay.h"
 #include "chase_kani_freeze.h"
 #include "chase_battle_freeze.h"
+#include "dialog_inject.h"
 #include "ff8_accessibility.h"
 #include "ff8_addresses.h"
 #include "mod_forward_decls.h"
@@ -147,6 +148,12 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
                                   //   (freeze# stays low when the pin is
                                   //   healthy; high freeze# = pin missing
                                   //   the agent).
+    DialogInject::Initialize();   // v0.15.4: Phase 1 engine-dialog injection
+                                  //   (mod-driven opcode_mes via synthesized
+                                  //   script_context). F12 fires a one-shot
+                                  //   test; multi-layered verification (log,
+                                  //   SAPI, per-frame slot poll). See
+                                  //   dialog_inject.h for design notes.
     
     // Enable all MinHook hooks
     mhStatus = MH_EnableHook(MH_ALL_HOOKS);
@@ -224,8 +231,14 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
         ChaseAskOverlay::Update();
         ChaseKaniFreeze::Update();
 
-        // Chase scene diagnostic (v0.15.0) — F12 toggle, no-op when disabled
+        // Chase scene diagnostic (v0.15.0) -- F12 toggle, no-op when disabled.
+        // v0.15.4: F12 binding moved to DialogInject; ChaseDiag still polls
+        // when previously enabled but cannot be toggled at runtime now.
         ChaseDiag::Update();
+
+        // Dialog injection (v0.15.4) -- per-frame slot poll after a Phase 1
+        // F12 fire; cheap no-op otherwise.
+        DialogInject::Update();
         
         // --- Accessibility keyboard shortcuts (v0.14.45 layout) ---
         // `  = Repeat last dialog
@@ -318,13 +331,15 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
                 Log::Mod("[F11-SCREENSHOT] Capture requested: '%s.png'", path);
                 ScreenReader::Speak(L"Screenshot captured.", true);
             }
-            // v0.15.0: F12 = toggle chase scene diagnostic. Per the F12 rule
-            // in userMemories, F12 is reserved for per-session diagnostic
-            // builds; this is the v0.15.0 chase-diag instrumentation. The
-            // toggle calls into ChaseDiag::Toggle which flips the enable flag,
-            // snapshots fresh baselines, and announces the new state via TTS.
+            // F12 = Dialog inject Phase 1 test fire (v0.15.4).
+            // Replaces v0.15.0's chase-diag toggle. Per the F12 rule, only
+            // one diagnostic active on F12 at a time; the chase chapter is
+            // complete (v0.15.3 shipped end-to-end) so the chase-diag
+            // binding is retired. ChaseDiag module remains in source but
+            // is no longer hot-keyed; if needed for future chase work it
+            // can be re-bound in a session-specific build.
             if (f12 && !s_f12was && !alt) {
-                ChaseDiag::Toggle();
+                DialogInject::Phase1_TestMes();
             }
             if (vkey && !s_vWas) {
                 wchar_t verMsg[128];
@@ -343,9 +358,10 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
             s_vWas = vkey;
         }
 
-        // v0.15.0: F12 = ChaseDiag::Toggle (chase scene diagnostic). See
-        // F12 handler above. The previous v0.14.75 "F12 has no consumer"
-        // comment is now obsolete.
+        // v0.15.4: F12 = DialogInject::Phase1_TestMes (engine-dialog
+        // injection diagnostic). See F12 handler above. Replaces v0.15.0's
+        // ChaseDiag::Toggle binding; per the F12 rule only one diagnostic
+        // active on F12 at a time, and the chase chapter is complete.
         // ENT-MON code removed in v0.12.23.
         
         // --- Sleep to avoid burning CPU ---
@@ -356,6 +372,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     // Cleanup
     BattleTTS::Shutdown();       // v0.10.01: Battle TTS cleanup
     WorldMap::Shutdown();         // v0.11.03: World map cleanup
+    DialogInject::Shutdown();     // v0.15.4: Dialog inject Phase 1 cleanup
     ChaseBattleFreeze::Shutdown();// v0.15.2.13: active opcode_battle freeze
     ChaseKaniFreeze::Shutdown();  // v0.15.2.3: kani-wakeup diagnostic cleanup
     ChaseAskOverlay::Shutdown();  // v0.15.1: close ASK if open + reset state

@@ -1,140 +1,102 @@
-# Next Session Prompt -- v0.15.3 ready to BAT
+# Next Session Prompt -- v0.15.4 BAT'd, Phase 2 (chase ASK) is the next ship
 
-**Status:** v0.15.3 BUILT (six files updated, build pending Aaron's `deploy.vbs` run). Single-pronged cleanup on top of the v0.15.2.15 milestone success. The static kani+battleyarou pin in `chase_kani_freeze.cpp` is removed; the dynamic chase-agent pin, the v0.15.2.14 fieldId-flip deactivation, and the v0.15.2.9 OTHERS-DIAG scanner all stay. Bundled fix: `src/deploy.bat` "Version: World" regex bug.
+**Status:** v0.15.4 BAT'd successfully on 2026-05-09 17:35-17:36. Phase 1 of engine-rendered dialog injection works exactly as designed. NOT pushed yet -- Aaron to decide whether to push v0.15.4 first or bundle with v0.15.5 (Phase 2).
 
-## What v0.15.3 changes
+---
 
-`src/chase_kani_freeze.cpp` is rewritten from ~700 lines to ~580. Removed: the `s_kaniPtr`/`s_strideBytes`/`s_arrayKind`/`s_haveFullSnapshot`/`s_fullSnapshot`/`s_initial`/`s_prev`/`s_byteFirstChangeLogged` state, the `s_battleyarouPtr`/`s_battleyarouStrideBytes`/`s_battleyarouArrayKind`/`s_battleyarouInitial`/`s_haveBattleyarouSnapshot`/`s_battleyarouSnapshot` state, the `ReadKaniBlock`/`LogInitialSnapshot`/`LogChangeSummary`/`DiffAndLogFirstChanges` helpers, the kani INITIAL / snapshot / memcpy / FINAL blocks in `StartCapture`/`ApplyFreezePin`/`EndCapture`, the parallel battleyarou blocks in the same three functions, the per-tick FIRST CHANGE diff loop, the MID-WINDOW heartbeat, and the kani-related cleanup lines in `DeactivateFreeze`. Kept: the dynamic chase-agent pin (`RegisterChaseAgent` + agent INITIAL/snapshot/memcpy/FINAL SUMMARY), the v0.15.2.14 fieldId-flip deactivation (`ReadCurrentFieldId`/`s_freezeFieldId`/raw-fieldId-check-before-debounce), the OTHERS-DIAG scanner, the v0.15.2.3.1 capture trigger, the SEH probe pattern, the `LogHexRow` helper.
+## What v0.15.4 BAT proved
 
-`src/chase_kani_freeze.h`'s design comment is rewritten to document the v0.15.3 single-pronged design. Initialize log line updated to "v0.15.3 DYNAMIC AGENT PIN ONLY".
+Aaron pressed F12 once in field `doani1_2` (Dollet Comm Tower top, fieldId 0x136). Every metric green:
 
-`src/deploy.bat` regex fix: tighten `findstr /C:"FF8OPC_VERSION "` to `findstr /C:"#define FF8OPC_VERSION "` so only the `#define` line matches. Drop the now-redundant `^| findstr /V "DATE"`. The `%%~V` modifier strips quotes -> `VERSION=0.15.3`.
+- `opcode_mes(&phantom_ctx)` returned 3.
+- Existing dialog hook fired and SAPI spoke: `Selphie "Wanna go up?" Go up Stay`.
+- `pWindowsArray[1] + 0x1C` advanced 0 -> 0x400 (+15ms) -> 0x1000 (+125ms) and held.
+- `+0x1E` velocity 0x200 armed by engine on entry.
+- State machine 0 -> 1 -> 7.
+- `gameObj.D3 = 0x02`, `D4 = 0x02` (bit 1 set for slot 1 -- as the opcode does for any natural MES).
+- `show_dialog` callback fired for slot 1 -- the per-slot callback registration v0.15.x worried about happens automatically through the opcode path.
+- F11 screenshot at 17:36:00 confirmed: dialog visually rendered, looks like any natural FF8 MES.
 
-### Why this matters
+Phantom context layout that worked:
+- 0x300-byte zero-init buffer
+- `ctx[0x184] = 2` (SP)
+- `ctx[0x08] = 0` (msg_id, since SP=2 means top of stack is at +SP*4 = +8)
+- `ctx[0x04] = 1` (slot index, at +(SP-1)*4 = +4)
 
-The v0.15.2.15 BAT proved the dynamic chase-agent pin is sufficient on its own. Across three v0.15.2.x BATs the OTHERS-DIAG scanner consistently showed kani had at most 7 changed bytes and battleyarou had 0 in every chase field tested. Both static pins were dead code -- their target entities (the kani and battleyarou symbols) were never the actual chase agents. The actual agents were rinoa-slot in domt5_1, director0 in doopen2a, and various robot-slots elsewhere, all of which the dynamic agent pin handles by resolving the BATTLE caller's pointer at runtime. Removing the dead code reduces field-log noise and the per-frame cost in chase fields.
+That's the entire Phase 1 recipe, and it's enough for `opcode_mes`.
 
-### Files changed
+---
 
-- `src/chase_kani_freeze.cpp` (rewritten, ~580 lines down from ~700)
-- `src/chase_kani_freeze.h` (design comment rewrite)
-- `src/ff8_accessibility.h` (version bump to 0.15.3 + new comment trail entry)
-- `src/deploy.bat` (1 line: tighten findstr to `#define`-prefixed)
-- `CHANGELOG.md` (new top entry)
-- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md` (this file)
+## v0.15.5 = Phase 2: chase ASK via `opcode_ask`
 
-## What Aaron should do next session
+The plan and disassembly are written up in DEVNOTES.md. Summary:
 
-1. **Build via `deploy.vbs`** from the project root. Should be a clean build -- no new source files, deploy.bat compile list unchanged. If build fails, immediately read `Logs/build_latest.log` for errors. Likely candidate if anything goes wrong: a stray reference to one of the removed state vars (e.g. `s_kaniPtr`) somewhere I missed -- but I rewrote the file in full, so there shouldn't be any. Watch the deploy log for `Version: 0.15.3` (confirms the deploy.bat regex fix worked); if it still says `Version: World`, the regex change didn't take.
+- New API in `dialog_inject.cpp`:
+  - `Phase2_OpenAsk(prompt_text, options[], n_options, default_idx) -> slot`
+  - `PollAskAnswer(slot) -> answer_idx | -1`
+  - `CloseAsk(slot)`
+- `opcode_ask` (dispatch index 0x4A) at `0x00529520`, pulls 6 args off the script stack. SP=6 in the phantom context.
+- Returns 1 (wait) on first call; engine spins each frame. We DON'T spin -- engine replays automatically.
+- Each tick poll `pWindowsArray[slot] + 0x2B` (curQ) for navigation feedback.
+- Detect commit via `[ctx+0x174/0x175]` ASK-pending bit clear; read answer at `[ctx+0x204]`.
+- Use `set_window_object_ASK` directly (call its address, not via opcode) for custom prompt/option strings -- bypasses `field_get_dialog_string` and lets us pass FF8-encoded buffers we compose ourselves. Cleaner than patching the field message table.
 
-2. **BAT** -- replay through the chase scene. Same path as v0.15.2.15:
-   - Mountain trail (domt1_1 -> ... -> domt5_1 in whatever order the chase routes through)
-   - Bridge (doopen2a)
-   - Town Square (dotown_3)
-   - Chase-end FMV (Lapin Beach, disc00_07h.avi, 74 seconds, 8 audio descriptions)
-   - Control returns to dotown_2
+Wire into `chase_ask_overlay::OpenAsk` as the primary path; existing trigger logic stays intact.
 
-3. **Report results.** When Aaron says "BAT", I'll check `Logs/build_latest.log` first (the deploy line should now read `Version: 0.15.3`), then `Logs/ff8_field.log`, `Logs/ff8_battle.log`, `Logs/ff8_mod.log` for runtime results.
+Three options in the chase ASK:
+- "Manual" (default cursor)
+- "Auto" (still falls back to manual until v0.15.6)
+- "Original" (still no-op until v0.15.7)
 
-## What to look for in the v0.15.3 BAT logs
+### Outstanding research before coding Phase 2
 
-### Deploy log
+Two questions to nail down by reading more of the disassembly:
 
-`Logs/build_latest.log` tail should include:
+1. **opcode_ask arg-to-meaning mapping.** The opcode pops 6 args; we need to know which is msg_id, which is firstQ/lastQ, which are the two curQ values, which is slot. The research doc has the assembly but doesn't fully decode the order. Read `set_window_object_ASK` at `0x004A04E0` to see which args feed into which output offsets, then trace back through `opcode_ask` to map the script-stack positions.
 
-```
-============================================================
-Deployment Complete
-Version: 0.15.3
-Files deployed to: "C:\Program Files (x86)\Steam\steamapps\common\FINAL FANTASY VIII"
-...
-```
+2. **FF8 text encoding for custom strings.** "Manual", "Auto", "Original" need to be in the FF8 character encoding (high-bit-set extension chars for special tokens, etc.). The mod already has `ff8_text_decode.cpp` for the reverse direction (FF8 -> ASCII). Check whether there's an encode helper already; if not, write one (or hand-craft the encoded bytes for those three short strings, since they're all printable ASCII and in FF8's encoding probably just map to 0x20-0x7F directly).
 
-If it still says `Version: World` or `Version: unknown`, the regex fix didn't work and I need to re-investigate.
+Once those are answered, Phase 2 is a copy of Phase 1 with different opcode and arg layout.
 
-### Mod log
+---
 
-`Logs/ff8_mod.log` should include the new Initialize line:
-
-```
-ChaseKaniFreeze: Initialized (v0.15.3 DYNAMIC AGENT PIN ONLY). On chase-field battle exit, pins the dynamically-registered chase agent...
-```
-
-### Field log -- healthy run (expected)
-
-For each chase field except doopen2a, in order:
-
-- `[CBF] PASS chase BATTLE call ... field='<name>' ... entityPtr=0x........`
-- `[CHASE-AGENT] field='<name>' entityPtr=0x........ -> array=... slot=... symIdx=... sym='...' stride=0x...`
-- `KaniFreeze: FREEZE ACTIVATED -- v0.15.3 dynamic agent pin only (static kani+battleyarou pin removed); in field '<name>' (fieldId=0x....) until field change`
-- `KaniFreeze: ===== CAPTURE STARTED =====`
-- `KaniFreeze: CHASE-AGENT INITIAL snapshot (agentPtr=0x........ stride=0x... arrayKind=... slot=... symIdx=... sym='...'):`
-- AGENT-INIT hex rows (~20-40 rows for stride 0x264)
-- `KaniFreeze: OTHERS-DIAG snapshot taken: N/M slots captured...`
-- ~1500ms later: `KaniFreeze: CHASE-AGENT full-state snapshot taken at t=15..ms sym='...'...`
-- ~10000ms later: `KaniFreeze: CHASE-AGENT FINAL SUMMARY t=10000ms tick=... sym='...' changed_bytes=N/0x264:` (N should be small or zero)
-- `KaniFreeze: OTHERS-DIAG FINAL t=10000ms ...` block
-- `KaniFreeze: ===== CAPTURE COMPLETE (elapsed=10000ms, ticks=...) =====`
-
-CRITICALLY ABSENT:
-- NO `KaniFreeze: INITIAL snapshot` (kani INITIAL hex dump). It used to fire here; in v0.15.3 it's removed.
-- NO `KaniFreeze: BATTLEYAROU INITIAL snapshot` blocks.
-- NO `KaniFreeze: BATTLEYAROU FINAL SUMMARY` blocks.
-- NO `KaniFreeze: t=...ms tick=... +0x...: FIRST CHANGE...` per-tick lines.
-- NO `KaniFreeze: MID-WINDOW heartbeat...` line.
-- NO `KaniFreeze: FINAL SUMMARY t=10000ms tick=... changed_bytes=N/0x264:` block (this was kani's FINAL; the new format only has CHASE-AGENT FINAL SUMMARY).
-
-If any of those CRITICALLY ABSENT lines do show up, the cleanup didn't actually take effect (somehow the old code is still being called). If the EXPECTED lines are missing, the agent pin path got accidentally removed.
-
-### Field log -- doopen2a specifically
-
-Expected:
-- `[CBF] PASS in doopen2a -- skipping RegisterChaseAgent (agent is chase-progress director; pin would block transition to dotown_3). BATTLE NO-OP carries the load.`
-- `KaniFreeze: FREEZE ACTIVATED -- v0.15.3 dynamic agent pin only ... in field 'doopen2a' (fieldId=0x014D)`
-- `KaniFreeze: no chase agent registered for field='doopen2a' -- agent pin inactive (BATTLE NO-OP is the only suppression)`
-- `KaniFreeze: OTHERS-DIAG snapshot taken: ...` (the diagnostic still runs in doopen2a)
-- A `[CBF] NO-OP chase BATTLE call ...` line at the second BATTLE call (cap-at-1 safety net)
-- After the doopen2a battle ends and Squall walks toward the town: `KaniFreeze: FREEZE DEACTIVATED -- fieldId changed 0x014D -> 0x0158 (pre-debounce)`
-- The transition to dotown_3 succeeds, cutscene plays, Lapin Beach FMV fires.
-
-### Chase-end transition
-
-- dotown_3 entry, cutscene plays, chase-end FMV fires, control returns to dotown_2.
-
-### If chase behavior regresses
-
-If anything diverges from v0.15.2.15 (new crash, hang, robot walking around, missing audio descriptions, dotown_3 frozen), the regression is in v0.15.3's cleanup. Likely candidates:
-1. Some agent-pin code path got accidentally removed alongside the kani-pin code -- check the `chase_kani_freeze.cpp` rewrite for any missed `s_chaseAgentPtr` reference.
-2. A state variable was reset prematurely -- check `Initialize` / `Shutdown` / `DeactivateFreeze` reset blocks.
-3. The `LogHexRow` helper still exists but was a dependency of removed code paths -- if `AGENT-INIT` hex dump is missing, that dependency got broken.
-
-In any of those cases, revert is a single commit: roll back `src/chase_kani_freeze.cpp` and `.h` to v0.15.2.15 state, keep the deploy.bat fix, bump to v0.15.3.1.
-
-### If BAT succeeds end to end
-
-- Push v0.15.2.12, .13, .14, .15, and v0.15.3 history to GitHub via `Utilities/push_to_github.vbs`. The push utility validates the CHANGELOG top heading (`## v0.15.3`) matches `FF8OPC_VERSION` (`"0.15.3"`) -- both are set, so it'll work in one push.
-
-## Workflow reminders
+## Workflow reminders (unchanged)
 
 - Filesystem MCP for ALL Windows project files. Bash cannot reach Windows source.
 - Every response begins with `## Claude Says`.
-- CHANGELOG.md ASCII-only in commit body. Heading must match `FF8OPC_VERSION` exactly. Both are set to v0.15.3.
+- CHANGELOG.md ASCII-only in commit body. Heading must match `FF8OPC_VERSION` exactly. Push utility refuses if mismatched.
 - Aaron pushes via `Utilities/push_to_github.vbs` -- Claude never pushes.
 - Build via `deploy.vbs` from project root -> reads `src/deploy.ps1` -> `src/deploy.bat`.
 - Version is bumped in ONE place: `FF8OPC_VERSION` in `src/ff8_accessibility.h`.
 - Read DEVNOTES.md and this file at start of every session.
+- F12 = `DialogInject::Phase1_TestMes` (replaces v0.15.0's `ChaseDiag::Toggle`). Per the F12 rule, only one diagnostic active on F12 at a time.
+- For Phase 2: keep the "resolve from dispatch table at fire time, fall back to cached" pattern. The v0.15.4 BAT log showed the table value (FFNx wrapper) differed from cached; routing through the table preserves the FFNx hook chain and our own dialog hook.
+
+---
 
 ## State of the codebase
 
-v0.15.3 source files staged, awaiting Aaron's first build:
-- `src/chase_kani_freeze.cpp` rewritten (single-pronged design)
-- `src/chase_kani_freeze.h` rewritten (design comment)
-- `src/ff8_accessibility.h` version bumped to "0.15.3"
-- `src/deploy.bat` regex tightened
-- `CHANGELOG.md` has new top entry titled `## v0.15.3`
-- `DEVNOTES.md` updated for v0.15.3 state
-- `NEXT_SESSION_PROMPT.md` is this file
+- `src/dialog_inject.h` -- v0.15.4 (~80 lines)
+- `src/dialog_inject.cpp` -- v0.15.4 (~280 lines), Phase 1 only
+- `src/dinput8.cpp` -- v0.15.4 (DialogInject wired, F12 swap)
+- `src/deploy.bat` -- v0.15.4 (dialog_inject.cpp in compile list)
+- `src/ff8_accessibility.h` -- `FF8OPC_VERSION "0.15.4"` with v0.15.4 + v0.15.3 trail
+- `src/chase_kani_freeze.cpp` -- v0.15.3 design unchanged
+- `src/chase_ask_overlay.cpp` -- v0.15.2.2 design (TTS+keyboard only) unchanged; v0.15.5 will swap its body to use the Phase 2 API
+- `CHANGELOG.md` -- top entry `## v0.15.4`
+- `DEVNOTES.md` -- post-BAT state, Phase 2 plan
+- `NEXT_SESSION_PROMPT.md` -- this file
 
-GitHub HEAD: v0.15.2.11 (commit `d65edb32`). Local-only and unpushed: v0.15.2.12, .13, .14, .15, and v0.15.3.
+---
 
-No other source changes. v0.15.2.14 dynamic agent pin design preserved. v0.15.2.14 tightened deactivation preserved. v0.15.2.15 doopen2a strcmp guard in chase_battle_freeze preserved. v0.15.2.14 field_announce auto-announce module unchanged.
+## Quick-start for next session
+
+1. Read this file + DEVNOTES.md.
+2. Confirm with Aaron whether v0.15.4 was pushed standalone or v0.15.5 is being bundled.
+3. Read `Plan & Research Documents/Field dialog system disassembly analysis.md` for the `opcode_ask` and `set_window_object_ASK` disassembly.
+4. Pull the FF8_EN.exe asm at `0x00529520` (opcode_ask) and `0x004A04E0` (set_window_object_ASK) to confirm the arg-to-meaning mapping.
+5. Decide the text-encoding path: pre-encode the three option strings as FF8 byte sequences (likely just ASCII passthrough since they're all `[A-Za-z]`), or write a small encoder.
+6. Implement `Phase2_OpenAsk`, `PollAskAnswer`, `CloseAsk` in `dialog_inject.cpp`.
+7. Wire into `chase_ask_overlay::OpenAsk`.
+8. Bump version, update CHANGELOG, DEVNOTES, NEXT_SESSION_PROMPT.
+9. Hand to Aaron for BAT.

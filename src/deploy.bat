@@ -162,6 +162,7 @@ cl /nologo /W3 /EHsc /O2 /MD /LD ^
     "%SRC_DIR%\chase_ask_overlay.cpp" ^
     "%SRC_DIR%\chase_kani_freeze.cpp" ^
     "%SRC_DIR%\chase_battle_freeze.cpp" ^
+    "%SRC_DIR%\dialog_inject.cpp" ^
     "%SRC_DIR%\field_announce.cpp" ^
     "%SRC_DIR%\ff8_text_decode.cpp" ^
     "%MINHOOK_DIR%\src\buffer.c" ^
