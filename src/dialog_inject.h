@@ -1,4 +1,4 @@
-// dialog_inject.h -- Mod-driven engine dialog injection (Phases 1 + 2a).
+// dialog_inject.h -- Mod-driven engine dialog injection (Phases 1, 2a, 2b).
 //
 // v0.15.4: Phase 1. Synthesize a phantom script_context and call
 // opcode_mes(&ctx) directly. Proven to work end-to-end (BAT 17:35
@@ -12,10 +12,29 @@
 // and gives empirical data on the SWO_ASK arg layout. Bound to
 // Shift+F12 (Phase 1 stays on F12 alone).
 //
-// Phase 2b (next ship -- v0.15.5.1 or v0.15.6) will layer on custom
-// FF8 text encoding so we can pass a mod-composed prompt + options
-// ("Manual / Auto / Original") and wire into chase_ask_overlay as
-// the primary path.
+// v0.15.6: Phase 2b. Custom text injection via field_get_dialog_string
+// hook override. dialog_inject.cpp now ships a per-fire override flag
+// that field_dialog.cpp's Hook_field_get_dialog_string consults. When
+// the flag is set, the hook returns our FF8-encoded buffer instead of
+// calling the original game function. v0.15.6 BAT failed: zero
+// [GETSTR-RAW] log lines despite the hook's unconditional first-10-calls
+// logging. Diagnosis: FFNx's replace_call pattern rewrote the engine's
+// CALL field_get_dialog_string operand to point at FFNx's own function,
+// so our hook on engine 0x00530750 is dead under FFNx.
+//
+// v0.15.6.1: Phase 2b fix -- post-ASK slot+0x08 patching. Don't rely on
+// the bypassed get_dialog_string hook. Inside Hook_opcode_ask, after
+// s_origAsk has populated slot+0x08 with the natural text pointer,
+// overwrite slot+0x08 with our override buffer pointer before
+// ScanAndSpeakChoiceWindows reads it. The TTS path then decodes our
+// text; the engine reads slot+0x08 every frame for rendering and input
+// too, so visually the dialog also displays our text. firstQ/lastQ at
+// slot+0x29/+0x2A are already our values from the opcode_ask call
+// (BAT log confirmed firstQ=1 lastQ=3), so cursor positions are correct.
+//
+// Future v0.15.7+ ships answer detection (poll slot+0x2B for cursor
+// changes; detect commit when gameObj.D2 bit clears) and v0.15.8 wires
+// this into chase_ask_overlay::OpenAsk as the primary chase ASK path.
 //
 // See "Plan & Research Documents/Field dialog system disassembly
 // analysis.md" (the follow-up correction section) and "Plan & Research
@@ -31,6 +50,32 @@
 //     sub_49FD50 foreground (MES only), gameObj bitmask updates,
 //     and (critically) the per-slot callback registration that
 //     triggers actual rendering.
+//
+// v0.15.6.1 layer on top of Path A: when Phase2_TestAsk fires, the engine
+// (via FFNx's wrapped opcode_ask) populates slot+0x08 (text_data1) with
+// the field's natural text pointer. Our existing Hook_opcode_ask in
+// field_dialog.cpp runs after s_origAsk returns. Before it scans the
+// slot for TTS, it consults DialogInject::IsOverrideActive() and patches
+// slot+0x08 to our override buffer when active. This works because:
+//   1. slot+0x08 is the canonical text pointer the engine reads every
+//      frame for rendering and input handling. Overwriting it after
+//      opcode_ask returns and before the next frame substitutes our
+//      text into both display and TTS paths.
+//   2. Our buffer is statically allocated so it persists for the dialog's
+//      lifetime.
+//   3. The override flag is set just before opcode_ask and cleared just
+//      after, so post-ASK patching only happens for our injected calls,
+//      not natural game ASKs.
+//   4. The slot index is communicated via GetOverrideSlot() so the patch
+//      targets the correct slot.
+//
+// Why post-ASK and not pre-fetch: FFNx's replace_call rewrote the engine's
+// internal CALL field_get_dialog_string to point at FFNx's own function.
+// Our hook on engine 0x00530750 is unreachable under FFNx (BAT log proves
+// zero calls during a full minute of gameplay). Post-ASK patching attacks
+// the slot at a single well-defined point (after FFNx fully populates it,
+// before our TTS scan reads it) and is robust to FFNx version changes
+// because it doesn't depend on FFNx's internal addresses.
 //
 // Why this is needed: v0.15.0 - v0.15.2.1 attempted to populate an
 // ff8_win_obj slot directly with byte-perfect contents. The slot was
@@ -48,11 +93,15 @@
 //   - Per-frame poll of pWindowsArray[slot]+0x1C for ~3 sec; should
 //     advance from 0 to 0x1000 (fully open) if rendering is alive.
 //   - SAPI announces "Dialog inject phase X, slot N, return code Y."
+//   - v0.15.6: when override is active, [GETSTR-OVERRIDE] log line
+//     confirms the hook saw the flag and returned our buffer.
 //
 // Hotkeys (per the F12 rule in userMemories: one diagnostic per
 // physical key state):
 //   - F12 alone   = Phase 1 MES test (slot 1, msg 0).
-//   - Shift + F12 = Phase 2a ASK test (slot 2, msg 0, SP=6).
+//   - Shift + F12 = Phase 2 ASK test (slot 2). v0.15.6 includes
+//                   Phase 2b custom text via override; the field's
+//                   natural msg 0 is not used.
 
 #pragma once
 
@@ -77,13 +126,59 @@ void Update();
 // field mode or when addresses are not yet resolved.
 void Phase1_TestMes();
 
-// Phase 2a test entry point (v0.15.5). Synthesizes a phantom
-// script_context with SP=6 and calls opcode_ask(&ctx) targeting
-// slot 2 with msg_id 0. The field's natural msg 0 must be an ASK
-// for the choice cursor to render correctly; in doani1_2 (Dollet
-// Comm Tower top, where Aaron BAT'd v0.15.4) this is the Selphie
-// elevator ASK. Bound to Shift+F12.
+// Phase 2 test entry point. Synthesizes a phantom script_context
+// with SP=6 and calls opcode_ask(&ctx) targeting slot 2.
+//
+// v0.15.5 (Phase 2a): used the field's natural msg 0 -- in doani1_2
+// (Aaron's BAT field) that's the Selphie elevator ASK.
+//
+// v0.15.6 (Phase 2b): sets a field_get_dialog_string override before
+// the opcode_ask call so the dialog renders our hardcoded
+// "Mode? / Manual / Auto / Original" prompt regardless of which
+// field msg 0 is. The override is cleared immediately after the
+// opcode returns. Wire-format: 4 lines separated by 0x02 with 0x00
+// terminator; firstQ=1, lastQ=3, curQ=1 (Manual selected).
+//
+// Bound to Shift+F12.
 void Phase2_TestAsk();
+
+// ============================================================================
+// v0.15.6.1 Phase 2b: text override coordination
+//
+// field_dialog.cpp's Hook_opcode_ask consults these inside the post-ASK
+// patch block to decide whether to overwrite slot+0x08 with our override
+// buffer.
+//
+// IsOverrideActive(), GetOverrideText(), and GetOverrideSlot() must be
+// safe to call from the game thread (the hook fires there). All three
+// reads are atomic on x86 -- the active flag is a volatile LONG, the text
+// pointer is 32-bit aligned, and the slot int is 32-bit aligned -- so we
+// don't need a lock. The window between SetOverride() and ClearOverride()
+// is a single function call (opcode_ask) on the same thread, so there's
+// no race.
+//
+// v0.15.6.2 adds GetOverrideBufferStart/Size: expose the static buffer's
+// address range so field_dialog.cpp's IsValidTextPointer check can
+// whitelist our buffer. v0.15.6.1 BAT confirmed our pointer-swap landed
+// (POST-ASK-OVERRIDE log line fired, slot+0x08 holds our address) but
+// IsValidTextPointer rejected the pointer because our DLL's data section
+// lives above 0x30000000, the upper bound of the existing FF8-heap-range
+// heuristic. ScanAndSpeakChoiceWindows silently skipped the slot,
+// Hook_show_dialog fell back to text_data2 (which still held the
+// engine's natural prompt), and Aaron heard the natural text. The
+// buffer's location is stable for the DLL's lifetime, so whitelisting
+// by exact range is safe.
+// ============================================================================
+bool        IsOverrideActive();
+const char* GetOverrideText();
+int         GetOverrideSlot();   // v0.15.6.1: which slot Hook_opcode_ask should patch
+
+// v0.15.6.2: stable bounds of the override buffer for IsValidTextPointer
+// whitelisting. These return s_overrideBuffer's static-storage range and
+// do NOT depend on the override flag being active -- show_dialog can fire
+// after ClearOverride and still need to validate the buffer.
+const unsigned char* GetOverrideBufferStart();
+unsigned int         GetOverrideBufferSize();
 
 }  // namespace DialogInject
 

@@ -1,10 +1,39 @@
-// dialog_inject.cpp -- Mod-driven engine dialog injection (Phase 1).
+// dialog_inject.cpp -- Mod-driven engine dialog injection.
 // See dialog_inject.h for design notes.
 //
 // v0.15.4: Initial Phase 1. Synthesizes a phantom script_context and
-// calls opcode_mes(&ctx) directly to prove the engine renders. If
-// successful, Phase 2 (chase ASK via opcode_ask) follows the same
-// pattern with different opcode dispatch index and arg layout.
+// calls opcode_mes(&ctx) directly to prove the engine renders.
+// v0.15.5: Phase 2a -- same recipe extended to opcode_ask. SP=6.
+// v0.15.5.1: ASK-pending tracking bytes ctx[+0x174]/[+0x175] fix.
+// v0.15.5.2: sub_49FD50(slot) call to wire arrow input.
+// v0.15.5.3: Speak interrupt=false in AnnouncePhase*Result so the
+//            FieldDialog hook's spoken dialog text is heard before
+//            our diagnostic announcement.
+// v0.15.6:  Phase 2b -- field_get_dialog_string override pattern.
+//            Custom FF8-encoded buffer "Mode? / Manual / Auto / Original"
+//            replaces the field's natural msg 0 text via the
+//            existing field_dialog hook.
+// v0.15.6.1: Phase 2b fix -- post-ASK slot+0x08 patching. v0.15.6 BAT
+//            failed: zero [GETSTR-RAW] log lines proved FFNx's
+//            replace_call had rewritten the engine's CALL
+//            field_get_dialog_string operand to point at FFNx's own
+//            function, leaving our hook on 0x00530750 dead. Fix moves
+//            the substitution into Hook_opcode_ask (field_dialog.cpp)
+//            which patches slot+0x08 between s_origAsk return and
+//            ScanAndSpeakChoiceWindows. SetOverride now also captures
+//            target slot, exposed via GetOverrideSlot().
+// v0.15.6.2: v0.15.6.1 patch landed cleanly (POST-ASK-OVERRIDE log fired,
+//            slot+0x08 = our buffer address 0x6E98E020) but Aaron still
+//            heard Selphie's text. Root cause: our static buffer lives
+//            in the DLL data section above 0x30000000, the upper bound
+//            of field_dialog's IsValidTextPointer FF8-heap-range
+//            heuristic. ScanAndSpeakChoiceWindows silently skipped the
+//            slot (no [ASK] win[2] line in BAT log) and Hook_show_dialog
+//            fell back to text_data2 (still holding the natural Selphie
+//            pointer) and spoke that. Fix: expose the override buffer's
+//            stable address range via new GetOverrideBufferStart/Size
+//            APIs, and field_dialog.cpp's IsValidTextPointer whitelists
+//            pointers within that range.
 
 #include "dialog_inject.h"
 #include "ff8_accessibility.h"
@@ -32,57 +61,53 @@ static const size_t PHANTOM_CTX_SIZE = 0x300;
 // disassembly of opcode_mes at 0x00528F20).
 static const size_t CTX_SP_OFFSET = 0x184;
 
-// Phase 1 test parameters. SP=2 means two args on the script-VM stack:
-//   stack[SP]   = ctx[2*4] = ctx[8]  = msg_id  (top of stack, popped first)
-//   stack[SP-1] = ctx[1*4] = ctx[4]  = slot index (popped second)
-// opcode_mes reads:
-//   edi = [ebx + eax*4]     where eax = SP
-//   esi = [ebx + eax*4 - 4]
-// then validates esi < pop_script_args() return value. With SP=2, this
-// returns 2, so slot must be < 2. We pick slot 1 to leave slot 0 free
-// for the engine's own foreground dialog.
+// Phase 1 test parameters. SP=2 means two args on the script-VM stack.
 static const int8_t  TEST_SP        = 2;
 static const int32_t TEST_MSG_ID    = 0;     // every field has msg 0
 static const int32_t TEST_SLOT      = 1;     // pWindowsArray[1]
 
-// Phase 2a test parameters. SP=6 means six args on the script-VM stack.
-// From the opcode_ask disassembly at 0x00529520:
-//   stack[SP-5] (ctx[+0x04]) -> edi -> slot index   (CONFIRMED)
-//   stack[SP-4] (ctx[+0x08]) -> ecx -> msg_id       (CONFIRMED via field_get_dialog_string)
-//   stack[SP-3] (ctx[+0x0C]) -> edx -> SWO_ASK arg2 (clamp lower bound)
-//   stack[SP-2] (ctx[+0x10]) -> ecx -> SWO_ASK arg3 (clamp upper bound, written to slot+0x29)
-//   stack[SP-1] (ctx[+0x14]) -> ebp -> SWO_ASK arg4 (clamped value, written to slot+0x2A)
-//   stack[SP-0] (ctx[+0x18]) -> ebx -> SWO_ASK arg5 (aux byte, slot-indexed)
-// Phase 2a fires in doani1_2 (Aaron's BAT field) where msg 0 is the
-// Selphie elevator ASK with two choice lines ("Go up" / "Stay"). Setting
-// the cursor range to [2, 3] should land the cursor on those lines.
+// Phase 2 test parameters. SP=6 means six args on the script-VM stack.
+// EMPIRICAL ARG MAP (confirmed v0.15.5.1 BAT post-fire decode of slot fields):
+//   stack[SP-5] (ctx[+0x04]) -> edi -> slot index
+//   stack[SP-4] (ctx[+0x08]) -> ecx -> msg_id
+//   stack[SP-3] (ctx[+0x0C]) -> SWO_ASK arg2 -> slot+0x29 (firstQ)
+//   stack[SP-2] (ctx[+0x10]) -> SWO_ASK arg3 -> slot+0x2A (lastQ)
+//   stack[SP-1] (ctx[+0x14]) -> SWO_ASK arg4 -> slot+0x2C (curQ, clamped to [firstQ, lastQ])
+//   stack[SP-0] (ctx[+0x18]) -> SWO_ASK arg5 -> slot+0x2B (aux)
+//
+// The real signature is: set_window_object_ASK(slot, text, firstQ, lastQ, curQ, aux).
+//
+// v0.15.6 Phase 2b values for our injected "Mode? / Manual / Auto / Original":
+//   Line 0 = "Mode?" (prompt prefix)
+//   Line 1 = "Manual"  -> first choice (firstQ=1)
+//   Line 2 = "Auto"
+//   Line 3 = "Original" -> last choice (lastQ=3)
+// Default cursor on Manual: curQ=1.
 static const int8_t  TEST_SP_ASK     = 6;
-static const int32_t TEST_SLOT_ASK   = 2;     // pWindowsArray[2] -- avoid Phase 1's slot 1
-static const int32_t TEST_MSG_ID_ASK = 0;     // every field has msg 0
-static const int32_t TEST_ASK_ARG2   = 1;     // clamp lower bound
-static const int32_t TEST_ASK_ARG3   = 3;     // clamp upper bound / firstQ candidate
-static const int32_t TEST_ASK_ARG4   = 2;     // clamped value / lastQ candidate
-static const int32_t TEST_ASK_ARG5   = 2;     // aux byte / curQ candidate
+static const int32_t TEST_SLOT_ASK   = 2;
+static const int32_t TEST_MSG_ID_ASK = 0;     // unused when override active
+static const int32_t TEST_ASK_FIRST_Q = 1;    // first choice line index
+static const int32_t TEST_ASK_LAST_Q  = 3;    // last choice line index
+static const int32_t TEST_ASK_CUR_Q   = 1;    // default cursor on Manual
+static const int32_t TEST_ASK_AUX     = 0;    // aux byte
 
 // JSM dispatch table opcode indices (mirrors ff8_addresses.h).
 static const int OPCODE_MES_INDEX   = 0x47;
 static const int OPCODE_ASK_INDEX   = 0x4A;
 
-// ff8_win_obj layout — only the fields Phase 1 polls.
+// ff8_win_obj layout -- only the fields we poll.
 static const size_t WIN_OBJ_STRIDE              = 0x3C;
-static const size_t WIN_OBJ_OPEN_CLOSE_OFFSET   = 0x1C;  // int16_t
-static const size_t WIN_OBJ_STATE_OFFSET        = 0x24;  // uint32_t
-static const size_t WIN_OBJ_FIELD16_OFFSET      = 0x16;  // byte
-static const size_t WIN_OBJ_VELOCITY_OFFSET     = 0x1E;  // int16_t
+static const size_t WIN_OBJ_OPEN_CLOSE_OFFSET   = 0x1C;
+static const size_t WIN_OBJ_STATE_OFFSET        = 0x24;
+static const size_t WIN_OBJ_FIELD16_OFFSET      = 0x16;
+static const size_t WIN_OBJ_VELOCITY_OFFSET     = 0x1E;
 
-// gameObj bitmask offsets (informational; not the render trigger but
-// useful as diagnostic state — see Field dialog system disassembly
-// analysis.md follow-up section).
+// gameObj bitmask offsets.
 static const size_t GAMEOBJ_ASK_MASK_OFFSET     = 0xD2;
 static const size_t GAMEOBJ_WIN_MASK_OFFSET     = 0xD3;
 static const size_t GAMEOBJ_MES_MASK_OFFSET     = 0xD4;
 
-// Slot-polling cadence and duration after a Phase 1 fire.
+// Slot-polling cadence and duration after a fire.
 static const DWORD POLL_DURATION_MS = 3000;
 static const DWORD POLL_INTERVAL_MS = 100;
 
@@ -108,16 +133,124 @@ static int    s_pollSampleIdx = 0;
 static int    s_testCounter   = 0;
 
 // ============================================================================
+// v0.15.6.1 Phase 2b: text override state
+//
+// When s_overrideActive != 0, field_dialog.cpp's Hook_opcode_ask patches
+// slot s_overrideSlot's +0x08 (text_data1) to point at s_overrideText
+// after s_origAsk returns and before ScanAndSpeakChoiceWindows reads it.
+// The buffer s_overrideBuffer is statically allocated and persists for
+// the dialog's lifetime (the engine reads slot+0x08 every frame while the
+// dialog is open).
+//
+// Coordination is single-threaded: SetOverride is called immediately
+// before opcode_ask on the game thread, and ClearOverride is called
+// immediately after opcode_ask returns on the same thread. Hook_opcode_ask
+// fires inside opcode_ask on the same thread, so there's no race.
+//
+// v0.15.6 originally relied on a hook of field_get_dialog_string but FFNx's
+// replace_call pattern bypassed that hook entirely (BAT log: zero
+// [GETSTR-RAW] lines despite unconditional first-10-calls logging).
+// v0.15.6.1 moves the substitution to a point downstream of the bypass.
+// ============================================================================
+static const size_t OVERRIDE_BUFFER_SIZE = 256;
+static uint8_t s_overrideBuffer[OVERRIDE_BUFFER_SIZE] = {0};
+static volatile LONG s_overrideActive = 0;
+static const char* s_overrideText = nullptr;
+static int s_overrideSlot = -1;   // v0.15.6.1: target slot for post-ASK patching
+
+// ============================================================================
+// FF8 dialog text encoder (v0.15.6)
+//
+// Inverts the decode table in ff8_text_decode.cpp. Maps ASCII to FF8
+// dialog encoding. '\n' becomes 0x02 (line break), null terminator is
+// 0x00. Returns the number of bytes written (including the terminator).
+// Unknown characters are skipped silently.
+// ============================================================================
+static int EncodeFf8(const char* in, uint8_t* out, int outSize) {
+    if (in == nullptr || out == nullptr || outSize < 1) return 0;
+    int n = 0;
+    for (const char* p = in; *p && n < outSize - 1; ++p) {
+        char c = *p;
+        uint8_t enc = 0;
+        bool wrote = true;
+        if      (c == '\n') enc = 0x02;
+        else if (c == ' ')  enc = 0x20;
+        else if (c >= '0' && c <= '9') enc = (uint8_t)(0x21 + (c - '0'));
+        else if (c == '%')  enc = 0x2B;
+        else if (c == '/')  enc = 0x2C;
+        else if (c == ':')  enc = 0x2D;
+        else if (c == '!')  enc = 0x2E;
+        else if (c == '?')  enc = 0x2F;
+        else if (c == '+')  enc = 0x31;
+        else if (c == '-')  enc = 0x32;
+        else if (c == '=')  enc = 0x33;
+        else if (c == '*')  enc = 0x34;
+        else if (c == '&')  enc = 0x35;
+        else if (c == '(')  enc = 0x38;
+        else if (c == ')')  enc = 0x39;
+        else if (c == '\'') enc = 0x40;
+        else if (c == '#')  enc = 0x41;
+        else if (c == 0x24) enc = 0x42;  // '$' as hex literal to avoid editor issues
+        else if (c == '_')  enc = 0x44;
+        else if (c == '.')  enc = 0x3B;
+        else if (c == ',')  enc = 0x3C;
+        else if (c == '~')  enc = 0x3D;
+        else if (c == '"')  enc = 0x3E;
+        else if (c >= 'A' && c <= 'Z') enc = (uint8_t)(0x45 + (c - 'A'));
+        else if (c >= 'a' && c <= 'z') enc = (uint8_t)(0x5F + (c - 'a'));
+        else wrote = false;  // skip unknown chars silently
+        if (wrote) out[n++] = enc;
+    }
+    out[n++] = 0x00;  // terminator
+    return n;
+}
+
+// ============================================================================
+// v0.15.6.1 Phase 2b: override flag management
+// ============================================================================
+static void SetOverride(int slot, const char* text) {
+    s_overrideSlot = slot;
+    s_overrideText = text;
+    InterlockedExchange(&s_overrideActive, 1);
+}
+
+static void ClearOverride() {
+    InterlockedExchange(&s_overrideActive, 0);
+    s_overrideText = nullptr;
+    s_overrideSlot = -1;
+}
+
+// Public override API for field_dialog.cpp's Hook_opcode_ask.
+bool IsOverrideActive() {
+    return InterlockedCompareExchange(&s_overrideActive, 0, 0) != 0;
+}
+
+const char* GetOverrideText() {
+    return s_overrideText;
+}
+
+int GetOverrideSlot() {
+    return s_overrideSlot;
+}
+
+// v0.15.6.2: expose the static override buffer's address range so
+// field_dialog.cpp's IsValidTextPointer can whitelist pointers within
+// it. The buffer's location is fixed for the DLL's lifetime; these
+// accessors do not depend on the override flag being active.
+const unsigned char* GetOverrideBufferStart() {
+    return (const unsigned char*)s_overrideBuffer;
+}
+
+unsigned int GetOverrideBufferSize() {
+    return (unsigned int)OVERRIDE_BUFFER_SIZE;
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
 
-// Read the gameObj base pointer. pGameObjGlobal stores the *address of the
-// global* that holds a pointer to the game object. Returns nullptr if the
-// address chain is not yet resolved or the dereferenced pointer is null.
 static void* GetGameObjPtr() {
-    if (FF8Addresses::pGameObjGlobal == 0) {
-        return nullptr;
-    }
+    if (FF8Addresses::pGameObjGlobal == 0) return nullptr;
     void* gameObj = nullptr;
     __try {
         gameObj = *(void**)(uintptr_t)FF8Addresses::pGameObjGlobal;
@@ -127,7 +260,6 @@ static void* GetGameObjPtr() {
     return gameObj;
 }
 
-// Read the three gameObj dialog bitmasks. Returns true if read succeeded.
 static bool ReadGameObjMasks(uint8_t& askMask, uint8_t& winMask, uint8_t& mesMask) {
     void* gameObj = GetGameObjPtr();
     if (gameObj == nullptr) return false;
@@ -141,12 +273,11 @@ static bool ReadGameObjMasks(uint8_t& askMask, uint8_t& winMask, uint8_t& mesMas
     return true;
 }
 
-// Snapshot a slot's polled fields. Returns false on read failure.
 struct SlotSnapshot {
-    int16_t  openClose;   // [+0x1C]
-    int16_t  velocity;    // [+0x1E]
-    uint32_t state;       // [+0x24]
-    uint8_t  field16;     // [+0x16]
+    int16_t  openClose;
+    int16_t  velocity;
+    uint32_t state;
+    uint8_t  field16;
 };
 
 static bool ReadSlotSnapshot(int slot, SlotSnapshot& out) {
@@ -165,28 +296,18 @@ static bool ReadSlotSnapshot(int slot, SlotSnapshot& out) {
 }
 
 // SAPI-friendly Phase 1 result announcement.
-//
-// v0.15.5.3: changed interrupt flag from true -> false so this
-// announcement QUEUES after the FieldDialog hook's spoken dialog text
-// rather than preempting it. The v0.15.5.2 BAT confirmed that the
-// FieldDialog [MES]/[ASK] hook fires DURING opcode_mes/opcode_ask and
-// speaks the dialog text via SAPI, but our subsequent Speak with
-// interrupt=true was cutting that text off mid-sentence and replacing
-// it with the diagnostic phase announcement. Aaron heard only the
-// phase announcement, never the dialog text. With interrupt=false,
-// SAPI plays the dialog text first, then queues the phase announcement
-// after.
+// v0.15.5.3: interrupt=false so this queues after the FieldDialog hook's
+// spoken dialog text rather than preempting it.
 static void AnnouncePhase1Result(int slot, int retCode) {
     char msg[160];
     snprintf(msg, sizeof(msg),
              "Dialog inject phase one. Slot %d. Return code %d.",
              slot, retCode);
     if (ScreenReader::IsAvailable()) {
-        ScreenReader::Speak(msg, false);  // queue, don't interrupt
+        ScreenReader::Speak(msg, false);
     }
 }
 
-// Diagnostic-only banner for the start of a Phase 1 attempt.
 static void LogPhase1Banner(int testIdx, int slot, int msgId) {
     Log::Dialog("[DLG-INJ] ===== PHASE 1 TEST #%d START =====", testIdx);
     Log::Dialog("[DLG-INJ] Target: opcode_mes(slot=%d, msg_id=%d) via dispatch table[0x%02X]",
@@ -194,7 +315,6 @@ static void LogPhase1Banner(int testIdx, int slot, int msgId) {
     Log::Dialog("[DLG-INJ] FF8OPC_VERSION = %s", FF8OPC_VERSION);
 }
 
-// Log resolved addresses at fire time so we can diagnose missing chains.
 static void LogResolvedAddresses() {
     Log::Dialog("[DLG-INJ] pExecuteOpcodeTable    = 0x%08X",
                 (uint32_t)(uintptr_t)FF8Addresses::pExecuteOpcodeTable);
@@ -225,7 +345,7 @@ void Initialize() {
     s_initialized = true;
     s_pollActive = false;
     s_testCounter = 0;
-    Log::Dialog("[DLG-INJ] Initialize -- Phase 1 module ready (v%s).", FF8OPC_VERSION);
+    Log::Dialog("[DLG-INJ] Initialize -- module ready (v%s).", FF8OPC_VERSION);
 }
 
 void Shutdown() {
@@ -242,11 +362,9 @@ void Update() {
     DWORD now = GetTickCount();
     DWORD elapsed = now - s_pollStartMs;
 
-    // Cadence gate.
     if ((now - s_lastPollMs) < POLL_INTERVAL_MS) return;
     s_lastPollMs = now;
 
-    // Snapshot the slot.
     SlotSnapshot snap = {0, 0, 0, 0};
     bool ok = ReadSlotSnapshot(s_pollSlot, snap);
 
@@ -266,9 +384,8 @@ void Update() {
                    : "(slot read fail)");
     s_pollSampleIdx++;
 
-    // Stop after the duration.
     if (elapsed >= POLL_DURATION_MS) {
-        Log::Dialog("[DLG-INJ] ===== PHASE 1 TEST POLL COMPLETE (slot=%d, %d samples) =====",
+        Log::Dialog("[DLG-INJ] ===== TEST POLL COMPLETE (slot=%d, %d samples) =====",
                     s_pollSlot, s_pollSampleIdx);
         s_pollActive = false;
     }
@@ -280,7 +397,6 @@ void Phase1_TestMes() {
         return;
     }
 
-    // Field-mode guard. Field opcodes are only valid in MODE_FIELD.
     if (!FF8Addresses::IsOnField()) {
         Log::Dialog("[DLG-INJ] Phase1_TestMes: not in field mode (mode=%u); aborting.",
                     (unsigned)FF8Addresses::GetCurrentMode());
@@ -290,7 +406,6 @@ void Phase1_TestMes() {
         return;
     }
 
-    // Required-address guard.
     if (FF8Addresses::opcode_mes == 0) {
         Log::Dialog("[DLG-INJ] Phase1_TestMes: opcode_mes not resolved; aborting.");
         if (ScreenReader::IsAvailable()) {
@@ -310,7 +425,6 @@ void Phase1_TestMes() {
     LogPhase1Banner(s_testCounter, TEST_SLOT, TEST_MSG_ID);
     LogResolvedAddresses();
 
-    // Pre-fire snapshot of the target slot.
     SlotSnapshot pre = {0, 0, 0, 0};
     bool preOk = ReadSlotSnapshot(TEST_SLOT, pre);
     Log::Dialog("[DLG-INJ] PRE  slot=%d trans=0x%04X vel=0x%04X state=0x%08X field16=0x%02X %s",
@@ -321,29 +435,16 @@ void Phase1_TestMes() {
                 preOk ? pre.field16             : 0xFFu,
                 preOk ? "" : "(read fail)");
 
-    // Pre-fire snapshot of the gameObj bitmasks.
     {
         uint8_t askMask = 0, winMask = 0, mesMask = 0;
         if (ReadGameObjMasks(askMask, winMask, mesMask)) {
             Log::Dialog("[DLG-INJ] PRE  gameObj.D2(ASK)=0x%02X D3(win)=0x%02X D4(MES)=0x%02X",
                         askMask, winMask, mesMask);
-        } else {
-            Log::Dialog("[DLG-INJ] PRE  gameObj masks unread.");
         }
     }
 
-    // Build the phantom script_context. Zero everything first to ensure
-    // unused fields read as 0 (avoids stale state from a prior test).
     memset(s_phantomCtx, 0, sizeof(s_phantomCtx));
-
-    // SP byte: signed; opcode_mes uses MOVSX so any high bit causes a
-    // negative value, which would index BEFORE the buffer. Keep TEST_SP
-    // small and non-negative.
     s_phantomCtx[CTX_SP_OFFSET] = (uint8_t)TEST_SP;
-
-    // Stack args. Order: opcode_mes pulls msg_id from stack[SP] and slot
-    // from stack[SP-1]. The validator pop_script_args returns a max-arg
-    // count; with SP=2 it returns 2, so slot must be < 2. Slot 1 is OK.
     *(int32_t*)(s_phantomCtx + (TEST_SP    ) * 4) = TEST_MSG_ID;
     *(int32_t*)(s_phantomCtx + (TEST_SP - 1) * 4) = TEST_SLOT;
 
@@ -352,8 +453,6 @@ void Phase1_TestMes() {
                 TEST_MSG_ID, (unsigned)((TEST_SP    ) * 4),
                 TEST_SLOT,   (unsigned)((TEST_SP - 1) * 4));
 
-    // Resolve opcode_mes from the dispatch table at call time, in case
-    // the cached value at FF8Addresses::opcode_mes was stale.
     uint32_t opcodeMesAddr = FF8Addresses::opcode_mes;
     if (FF8Addresses::pExecuteOpcodeTable != nullptr) {
         __try {
@@ -375,9 +474,6 @@ void Phase1_TestMes() {
     Log::Dialog("[DLG-INJ] FIRING opcode_mes(0x%08X)(ctx=0x%08X)...",
                 opcodeMesAddr, (uint32_t)(uintptr_t)s_phantomCtx);
 
-    // Call the opcode. __cdecl, single arg = script_context*. Return
-    // codes from the opcode (per disassembly): 3 = advance PC,
-    // 5 = wait/retry next frame (slot busy or pending).
     typedef int (__cdecl *opcode_mes_t)(void*);
     opcode_mes_t opcode_mes_fn = (opcode_mes_t)(uintptr_t)opcodeMesAddr;
 
@@ -390,8 +486,7 @@ void Phase1_TestMes() {
     }
 
     if (crashed) {
-        Log::Dialog("[DLG-INJ] *** opcode_mes RAISED EXCEPTION *** "
-                    "phantom ctx layout likely needs more fields populated.");
+        Log::Dialog("[DLG-INJ] *** opcode_mes RAISED EXCEPTION ***");
         if (ScreenReader::IsAvailable()) {
             ScreenReader::Speak("Dialog inject crashed. See dialog log.", true);
         }
@@ -402,7 +497,6 @@ void Phase1_TestMes() {
                 "(3=advance/success, 5=wait/slot-busy, other=undocumented)",
                 retCode);
 
-    // Post-fire snapshot of the target slot.
     SlotSnapshot post = {0, 0, 0, 0};
     bool postOk = ReadSlotSnapshot(TEST_SLOT, post);
     Log::Dialog("[DLG-INJ] POST slot=%d trans=0x%04X vel=0x%04X state=0x%08X field16=0x%02X %s",
@@ -413,7 +507,6 @@ void Phase1_TestMes() {
                 postOk ? post.field16             : 0xFFu,
                 postOk ? "" : "(read fail)");
 
-    // Post-fire snapshot of the gameObj bitmasks.
     {
         uint8_t askMask = 0, winMask = 0, mesMask = 0;
         if (ReadGameObjMasks(askMask, winMask, mesMask)) {
@@ -422,51 +515,29 @@ void Phase1_TestMes() {
         }
     }
 
-    // Audible result.
     AnnouncePhase1Result(TEST_SLOT, retCode);
 
-    // Start per-frame slot poll for ~3 sec to verify rendering is alive.
     s_pollActive    = true;
     s_pollSlot      = TEST_SLOT;
     s_pollStartMs   = GetTickCount();
-    s_lastPollMs    = 0;  // force first sample on next Update
+    s_lastPollMs    = 0;
     s_pollSampleIdx = 0;
     Log::Dialog("[DLG-INJ] Slot poll active for %u ms at %u ms cadence.",
                 POLL_DURATION_MS, POLL_INTERVAL_MS);
 }
 
 // ============================================================================
-// Phase 2a -- experimental opcode_ask call
+// Phase 2 -- opcode_ask call (Phase 2a in v0.15.5; Phase 2b override in v0.15.6)
 // ============================================================================
-//
-// v0.15.5: Same recipe as Phase 1, different opcode and slot. Calls
-// opcode_ask(&phantom_ctx) with SP=6 to render the field's natural ASK
-// at msg 0 in slot 2. The field's MSD content drives what's displayed;
-// our six stack args set: slot index (CONFIRMED via assertion check at
-// 0x52955A), msg_id (CONFIRMED via field_get_dialog_string call at
-// 0x5295CD), and four values that propagate to set_window_object_ASK
-// args 2-5 (clamp range + firstQ/lastQ/aux).
-//
-// Aaron's BAT environment is doani1_2 (Dollet Comm Tower top), where
-// msg 0 is the Selphie elevator ASK with two choice lines ("Go up" /
-// "Stay"). Setting our cursor range to [2,3] should land the cursor
-// on those lines.
-//
-// opcode_ask returns 1 on the first call ("wait for user to choose").
-// The engine's input handler updates slot+0x2B (curQ) on arrows and
-// clears state on Enter. Phase 2a doesn't yet detect the answer
-// commit; that's a Phase 2b deliverable. For now we just confirm
-// the dialog renders with cursor and is navigable.
 
+// v0.15.5.3: interrupt=false so this queues after the FieldDialog hook's
+// [ASK] spoken dialog text rather than preempting it.
 static void AnnouncePhase2Result(int slot, int retCode) {
     char msg[160];
     snprintf(msg, sizeof(msg),
-             "Dialog inject phase two A. Slot %d. Return code %d.",
+             "Dialog inject phase two B. Slot %d. Return code %d.",
              slot, retCode);
     if (ScreenReader::IsAvailable()) {
-        // v0.15.5.3: interrupt=false so this queues after the FieldDialog
-        // hook's [ASK] spoken dialog text rather than preempting it.
-        // See AnnouncePhase1Result comment for full rationale.
         ScreenReader::Speak(msg, false);
     }
 }
@@ -486,29 +557,36 @@ void Phase2_TestAsk() {
         return;
     }
 
-    if (FF8Addresses::opcode_ask == 0) {
-        Log::Dialog("[DLG-INJ] Phase2_TestAsk: opcode_ask not resolved; aborting.");
+    if (FF8Addresses::opcode_ask == 0 || FF8Addresses::pWindowsArray == nullptr) {
+        Log::Dialog("[DLG-INJ] Phase2_TestAsk: addresses not resolved; aborting.");
         if (ScreenReader::IsAvailable()) {
-            ScreenReader::Speak("Dialog inject ASK opcode address missing.", true);
-        }
-        return;
-    }
-    if (FF8Addresses::pWindowsArray == nullptr) {
-        Log::Dialog("[DLG-INJ] Phase2_TestAsk: pWindowsArray not resolved; aborting.");
-        if (ScreenReader::IsAvailable()) {
-            ScreenReader::Speak("Dialog inject windows array missing.", true);
+            ScreenReader::Speak("Dialog inject ASK addresses missing.", true);
         }
         return;
     }
 
     s_testCounter++;
-    Log::Dialog("[DLG-INJ] ===== PHASE 2A TEST #%d START =====", s_testCounter);
-    Log::Dialog("[DLG-INJ] Target: opcode_ask(slot=%d, msg_id=%d) via dispatch table[0x%02X]",
-                TEST_SLOT_ASK, TEST_MSG_ID_ASK, OPCODE_ASK_INDEX);
+    Log::Dialog("[DLG-INJ] ===== PHASE 2B TEST #%d START =====", s_testCounter);
+    Log::Dialog("[DLG-INJ] Target: opcode_ask(slot=%d) via dispatch table[0x%02X]",
+                TEST_SLOT_ASK, OPCODE_ASK_INDEX);
     Log::Dialog("[DLG-INJ] FF8OPC_VERSION = %s", FF8OPC_VERSION);
     LogResolvedAddresses();
 
-    // Pre-fire snapshot of the target slot.
+    // v0.15.6: encode the custom prompt + 3 options into our static buffer.
+    // The FieldDialog hook on field_get_dialog_string will return this
+    // buffer instead of the natural game data when SetOverride is active.
+    const char* customText = "Mode?\nManual\nAuto\nOriginal";
+    int encodedLen = EncodeFf8(customText, s_overrideBuffer, OVERRIDE_BUFFER_SIZE);
+    Log::Dialog("[DLG-INJ] v0.15.6 override text: \"%s\" -> %d bytes encoded", customText, encodedLen);
+    {
+        char hex[256];
+        int hp = 0;
+        for (int i = 0; i < encodedLen && hp < (int)sizeof(hex) - 4; ++i) {
+            hp += snprintf(hex + hp, sizeof(hex) - hp, "%02X ", s_overrideBuffer[i]);
+        }
+        Log::Dialog("[DLG-INJ] override buffer hex: %s", hex);
+    }
+
     SlotSnapshot pre = {0, 0, 0, 0};
     bool preOk = ReadSlotSnapshot(TEST_SLOT_ASK, pre);
     Log::Dialog("[DLG-INJ] PRE  ASK slot=%d trans=0x%04X vel=0x%04X state=0x%08X field16=0x%02X %s",
@@ -524,83 +602,36 @@ void Phase2_TestAsk() {
         if (ReadGameObjMasks(askMask, winMask, mesMask)) {
             Log::Dialog("[DLG-INJ] PRE  ASK gameObj.D2(ASK)=0x%02X D3(win)=0x%02X D4(MES)=0x%02X",
                         askMask, winMask, mesMask);
-            // Slot-busy gate inside opcode_ask reads gameObj+0xD2 bit (1<<slot).
-            // If already set, opcode_ask returns 5 without doing anything.
             uint8_t mySlotBit = (uint8_t)(1u << TEST_SLOT_ASK);
             if (askMask & mySlotBit) {
                 Log::Dialog("[DLG-INJ] WARNING: gameObj.D2 bit %d already set; "
                             "opcode_ask will return 5 without rendering.",
                             TEST_SLOT_ASK);
             }
-        } else {
-            Log::Dialog("[DLG-INJ] PRE  ASK gameObj masks unread.");
         }
     }
 
-    // Build the phantom script_context for ASK. Re-use the same buffer
-    // as Phase 1 (zeroed each fire) since the two tests don't overlap
-    // in time -- only one F12 / Shift+F12 press can be in flight at a
-    // time given the 3-second poll window.
+    // Phantom ctx with v0.15.5.1 ASK-pending tracking bytes.
     memset(s_phantomCtx, 0, sizeof(s_phantomCtx));
     s_phantomCtx[CTX_SP_OFFSET] = (uint8_t)TEST_SP_ASK;
-
-    // v0.15.5.1: ASK-pending tracking bytes. The v0.15.5 BAT showed
-    // opcode_ask returning 1 but slot 2 stayed all zeros and gameObj.D2
-    // bit 2 stayed 0 -- meaning the call exited via an early-return path
-    // (0x529683 -> sub_49FD50 / sub_49FD70 / sub_4A0660 -> ++[esi+0x204]
-    // -> ret 1) before reaching the .alloc branch that calls
-    // set_window_object_ASK.
-    //
-    // The early exit is the test at 0x52956D-0x529582:
-    //   cl = [esi+0x174]              ; "current pending ASK slot" tracker
-    //   al = [esi+0x175]              ; "ASK pending bitmask" tracker
-    //   edx = 1 << cl
-    //   test al, dl                   ; ctx[+0x175] & (1 << ctx[+0x174])
-    //   je 0x529622                   ; if 0, branch to answer-correlation path
-    //                                 ; if non-zero, fall through to .alloc
-    //
-    // With ctx[+0x174] = 0 and ctx[+0x175] = 1, the test passes
-    // (al & dl = 1 & 1 = 1), the je is NOT taken, and execution falls
-    // through to:
-    //   slot-busy check at 0x529588 (gameObj.D2 & (1<<slot)),
-    //   then -- if not busy -- to .alloc at 0x5295AB which calls
-    //   field_get_dialog_string + set_window_object_ASK and sets the
-    //   gameObj.D2 bit.
-    //
-    // The natural script-VM execution sets these tracking bytes via a
-    // preparatory opcode before the ASK opcode runs. We don't run that
-    // preparatory opcode, so we must set them ourselves.
     s_phantomCtx[0x174] = 0;  // shift count
-    s_phantomCtx[0x175] = 1;  // bit 0 set
+    s_phantomCtx[0x175] = 1;  // bit 0 set (forces .alloc path)
 
-    // Stack args (SP=6). See header comment for the mapping.
-    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 5) * 4) = TEST_SLOT_ASK;     // slot
-    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 4) * 4) = TEST_MSG_ID_ASK;   // msg_id
-    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 3) * 4) = TEST_ASK_ARG2;     // SWO_ASK arg2
-    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 2) * 4) = TEST_ASK_ARG3;     // SWO_ASK arg3
-    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 1) * 4) = TEST_ASK_ARG4;     // SWO_ASK arg4
-    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 0) * 4) = TEST_ASK_ARG5;     // SWO_ASK arg5
+    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 5) * 4) = TEST_SLOT_ASK;
+    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 4) * 4) = TEST_MSG_ID_ASK;
+    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 3) * 4) = TEST_ASK_FIRST_Q;
+    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 2) * 4) = TEST_ASK_LAST_Q;
+    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 1) * 4) = TEST_ASK_CUR_Q;
+    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 0) * 4) = TEST_ASK_AUX;
 
     Log::Dialog("[DLG-INJ] phantom ctx ASK: SP=%d at +0x%X",
                 TEST_SP_ASK, (unsigned)CTX_SP_OFFSET);
-    Log::Dialog("[DLG-INJ]   ctx[+0x174] = %u  ctx[+0x175] = 0x%02X  (ASK-pending tracking bytes; v0.15.5.1)",
+    Log::Dialog("[DLG-INJ]   ctx[+0x174]=%u ctx[+0x175]=0x%02X (ASK-pending tracking)",
                 s_phantomCtx[0x174], s_phantomCtx[0x175]);
-    Log::Dialog("[DLG-INJ]   stack[SP-5] @ +0x%02X = %d (slot)",
-                (unsigned)((TEST_SP_ASK - 5) * 4), TEST_SLOT_ASK);
-    Log::Dialog("[DLG-INJ]   stack[SP-4] @ +0x%02X = %d (msg_id)",
-                (unsigned)((TEST_SP_ASK - 4) * 4), TEST_MSG_ID_ASK);
-    Log::Dialog("[DLG-INJ]   stack[SP-3] @ +0x%02X = %d (SWO_ASK arg2 / clamp lo)",
-                (unsigned)((TEST_SP_ASK - 3) * 4), TEST_ASK_ARG2);
-    Log::Dialog("[DLG-INJ]   stack[SP-2] @ +0x%02X = %d (SWO_ASK arg3 / clamp hi / firstQ?)",
-                (unsigned)((TEST_SP_ASK - 2) * 4), TEST_ASK_ARG3);
-    Log::Dialog("[DLG-INJ]   stack[SP-1] @ +0x%02X = %d (SWO_ASK arg4 / lastQ?)",
-                (unsigned)((TEST_SP_ASK - 1) * 4), TEST_ASK_ARG4);
-    Log::Dialog("[DLG-INJ]   stack[SP-0] @ +0x%02X = %d (SWO_ASK arg5 / aux?)",
-                (unsigned)((TEST_SP_ASK - 0) * 4), TEST_ASK_ARG5);
+    Log::Dialog("[DLG-INJ]   stack: slot=%d msg_id=%d firstQ=%d lastQ=%d curQ=%d aux=%d",
+                TEST_SLOT_ASK, TEST_MSG_ID_ASK,
+                TEST_ASK_FIRST_Q, TEST_ASK_LAST_Q, TEST_ASK_CUR_Q, TEST_ASK_AUX);
 
-    // Resolve opcode_ask from the dispatch table at fire time, with
-    // cached fallback (mirrors the Phase 1 pattern; the v0.15.4 BAT
-    // showed FFNx wraps these table entries).
     uint32_t opcodeAskAddr = FF8Addresses::opcode_ask;
     if (FF8Addresses::pExecuteOpcodeTable != nullptr) {
         __try {
@@ -614,33 +645,19 @@ void Phase2_TestAsk() {
                 opcodeAskAddr = fromTable;
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            Log::Dialog("[DLG-INJ] WARNING: exception reading dispatch table; "
-                        "using cached opcode_ask=0x%08X.", opcodeAskAddr);
+            Log::Dialog("[DLG-INJ] WARNING: exception reading dispatch table.");
         }
     }
 
     Log::Dialog("[DLG-INJ] FIRING opcode_ask(0x%08X)(ctx=0x%08X)...",
                 opcodeAskAddr, (uint32_t)(uintptr_t)s_phantomCtx);
 
-    // v0.15.5.2: Call sub_49FD50(slot) BEFORE opcode_ask to set
-    // pCurrentDialogSlot. The .alloc branch we take doesn't set this
-    // internally; only the stage-1 setup path at 0x529683 does (via its
-    // own sub_49FD50 call). Without pCurrentDialogSlot pointing at our
-    // slot, the engine's input handler doesn't send arrow keys to
-    // slot+0x2B (curQ), so the cursor doesn't move and Aaron doesn't
-    // hear FF8's standard cursor-move SFX.
-    //
-    // sub_49FD50 takes one int arg (slot index) and writes it to the
-    // global byte at 0x01D2B51C (pCurrentDialogSlot). Hardcoded address
-    // 0x0049FD50 since it's a stable internal helper not in the JSM
-    // opcode dispatch table (no FFNx wrapping concern). If a future
-    // game-version mismatch surfaces, promote to FF8Addresses.
+    // v0.15.5.2: sub_49FD50(slot) sets pCurrentDialogSlot for arrow input.
     {
         const uint32_t SUB_49FD50_ADDR = 0x0049FD50;
         typedef void (__cdecl *sub_49fd50_t)(int);
         sub_49fd50_t sub_49fd50_fn = (sub_49fd50_t)(uintptr_t)SUB_49FD50_ADDR;
 
-        // Read pCurrentDialogSlot before and after the call for diagnostic.
         const uint32_t PCURRENT_DIALOG_SLOT_ADDR = 0x01D2B51C;
         uint8_t* pCurrentDialogSlot = (uint8_t*)(uintptr_t)PCURRENT_DIALOG_SLOT_ADDR;
         uint8_t preCurSlot = 0xFF;
@@ -657,14 +674,20 @@ void Phase2_TestAsk() {
         __try { postCurSlot = *pCurrentDialogSlot; }
         __except (EXCEPTION_EXECUTE_HANDLER) {}
 
-        Log::Dialog("[DLG-INJ] sub_49FD50(%d): pCurrentDialogSlot 0x%02X -> 0x%02X (enables arrow input for this slot)",
+        Log::Dialog("[DLG-INJ] sub_49FD50(%d): pCurrentDialogSlot 0x%02X -> 0x%02X",
                     TEST_SLOT_ASK, preCurSlot, postCurSlot);
     }
 
-    // Call. opcode_ask is __cdecl, single arg = script_context*.
-    // Return codes: 1 = wait for answer, 5 = slot busy, 3 = advance
-    // (typically only after the answer has been read on a subsequent
-    // call within the script-VM loop -- which we don't run).
+    // v0.15.6.1 Phase 2b: activate the post-ASK slot patch BEFORE calling
+    // opcode_ask. Inside Hook_opcode_ask (field_dialog.cpp), after s_origAsk
+    // returns and before ScanAndSpeakChoiceWindows reads slot+0x08, the
+    // override-active branch overwrites slot+0x08 with our override buffer.
+    // The TTS path then decodes our text instead of the natural field text.
+    SetOverride(TEST_SLOT_ASK, (const char*)s_overrideBuffer);
+    Log::Dialog("[DLG-INJ] v0.15.6.1 SetOverride active for slot %d; "
+                "opcode_ask post-call patch will swap slot[+0x08] = 0x%08X",
+                TEST_SLOT_ASK, (uint32_t)(uintptr_t)s_overrideBuffer);
+
     typedef int (__cdecl *opcode_ask_t)(void*);
     opcode_ask_t opcode_ask_fn = (opcode_ask_t)(uintptr_t)opcodeAskAddr;
 
@@ -676,11 +699,16 @@ void Phase2_TestAsk() {
         crashed = true;
     }
 
+    // Clear immediately after the opcode returns so other engine callers
+    // of opcode_ask (e.g. natural game scripts) don't trigger the post-ASK
+    // slot patch.
+    ClearOverride();
+    Log::Dialog("[DLG-INJ] v0.15.6.1 ClearOverride called");
+
     if (crashed) {
-        Log::Dialog("[DLG-INJ] *** opcode_ask RAISED EXCEPTION *** "
-                    "phantom ctx layout likely needs more fields populated.");
+        Log::Dialog("[DLG-INJ] *** opcode_ask RAISED EXCEPTION ***");
         if (ScreenReader::IsAvailable()) {
-            ScreenReader::Speak("Dialog inject phase two A crashed. See dialog log.", true);
+            ScreenReader::Speak("Dialog inject phase two B crashed. See dialog log.", true);
         }
         return;
     }
@@ -689,7 +717,6 @@ void Phase2_TestAsk() {
                 "(1=wait, 5=slot-busy, 3=advance, other=undocumented)",
                 retCode);
 
-    // Post-fire snapshot.
     SlotSnapshot post = {0, 0, 0, 0};
     bool postOk = ReadSlotSnapshot(TEST_SLOT_ASK, post);
     Log::Dialog("[DLG-INJ] POST ASK slot=%d trans=0x%04X vel=0x%04X state=0x%08X field16=0x%02X %s",
@@ -708,17 +735,17 @@ void Phase2_TestAsk() {
         }
     }
 
-    // Read the slot's choice fields (firstQ, lastQ, curQ, second cursor).
-    // These tell us which arg landed in which slot field, mapping the
-    // SWO_ASK args empirically.
     if (postOk && FF8Addresses::pWindowsArray != nullptr) {
         uint8_t* slotBase = FF8Addresses::pWindowsArray + (TEST_SLOT_ASK * WIN_OBJ_STRIDE);
         __try {
             uint8_t firstQ = *(uint8_t*)(slotBase + 0x29);
             uint8_t lastQ  = *(uint8_t*)(slotBase + 0x2A);
             uint8_t curQ_2 = *(uint8_t*)(slotBase + 0x2C);
-            Log::Dialog("[DLG-INJ] POST ASK slot[+0x29]firstQ=%u slot[+0x2A]lastQ=%u slot[+0x2C]curQ_2=%u",
-                        firstQ, lastQ, curQ_2);
+            char* text1 = *(char**)(slotBase + 0x08);
+            Log::Dialog("[DLG-INJ] POST ASK slot[+0x29]firstQ=%u slot[+0x2A]lastQ=%u slot[+0x2C]curQ=%u text1=0x%08X (override=0x%08X)",
+                        firstQ, lastQ, curQ_2,
+                        (uint32_t)(uintptr_t)text1,
+                        (uint32_t)(uintptr_t)s_overrideBuffer);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             Log::Dialog("[DLG-INJ] POST ASK choice fields unread.");
         }
@@ -726,7 +753,6 @@ void Phase2_TestAsk() {
 
     AnnouncePhase2Result(TEST_SLOT_ASK, retCode);
 
-    // Start per-frame slot poll for ~3 sec to verify rendering is alive.
     s_pollActive    = true;
     s_pollSlot      = TEST_SLOT_ASK;
     s_pollStartMs   = GetTickCount();

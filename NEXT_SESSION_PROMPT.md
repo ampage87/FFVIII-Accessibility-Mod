@@ -1,101 +1,152 @@
-# Next Session Prompt -- v0.15.5.3 ready to BAT
+# Next Session Prompt -- v0.15.6.2 BAT-PASSED, ready to push
 
-**Status:** v0.15.5.3 BUILT, ready to BAT. Two-character SAPI fix on top of v0.15.5.2. NOT pushed.
+**Status:** v0.15.6.2 BAT-PASSED. Aaron heard "Mode?. Selected: Manual. Auto. Original" through the engine ASK render path. Ready to push via `Utilities/push_to_github.vbs`. GitHub HEAD currently = v0.15.5.3 (commit `c58d993a`).
 
 If you're reading this in a fresh session:
 1. Read this file + DEVNOTES.md.
-2. Tail `Logs/ff8_dialog.log` for `[DLG-INJ]` lines from the latest BAT.
-3. If no Phase 2a lines, check `Logs/build_latest.log` for build errors.
+2. If GitHub HEAD is now `v0.15.6.2`: Aaron pushed -- proceed to v0.15.7 (answer detection).
+3. If GitHub HEAD is still `v0.15.5.3`: Aaron hasn't pushed yet -- ask what's next.
 
 ---
 
-## What v0.15.5.3 ships
+## What v0.15.6.2 closed
 
-Two character changes in `src/dialog_inject.cpp`:
+The v0.15.0 -> v0.15.6.2 arc shipped end-to-end mod-driven dialog rendering with custom FF8-encoded text:
 
-```cpp
-// In AnnouncePhase1Result and AnnouncePhase2Result:
--       ScreenReader::Speak(msg, true);   // was: interrupt
-+       ScreenReader::Speak(msg, false);  // now: queue
+| Version | Approach | Outcome |
+|---------|----------|---------|
+| v0.15.0-v0.15.2.1 | Populate ff8_win_obj slot directly | Engine ignored slot (per-slot callback registration via `sub_4A0880` happens at startup; externally-populated slots aren't in the registry) |
+| v0.15.4 | Synthesize phantom script_context, call opcode_mes(&ctx) | Phase 1 SUCCESS. Engine renders natural msg 0 |
+| v0.15.5/.5.1/.5.2/.5.3 | Same recipe via opcode_ask | Phase 2a SUCCESS. Cursor input wired (sub_49FD50). SAPI race fixed (queue not interrupt) |
+| v0.15.6 | Inject custom text via Hook_field_get_dialog_string override | FAILED. FFNx replace_call bypassed our hook (zero `[GETSTR-RAW]` lines despite unconditional logging) |
+| v0.15.6.1 | Post-ASK slot+0x08 patching in Hook_opcode_ask | Pointer swap landed but `IsValidTextPointer` rejected our DLL-data-section address |
+| v0.15.6.2 | Whitelist override buffer's exact range in `IsValidTextPointer` | SUCCESS. End-to-end working |
+
+### v0.15.6.2 BAT log signature (Phase 2B Test #1, 00:59:30)
+
+```
+PRE  ASK gameObj.D2=0x00              clean slot 2
+FIRING opcode_ask(0x65325610)
+sub_49FD50(2): pCurrentDialogSlot 0xFF -> 0x02
+v0.15.6.1 SetOverride active for slot 2
+[POST-ASK-OVERRIDE] Patched slot[2]+0x08: 0x16C50E98 -> 0x64EAF020
+[ASK] win[2] Parsed 3 choices (firstQ=1 lastQ=3 curChoice=1)
+[ASK] win[2] Speaking: "Mode?. Selected: Manual. Auto. Original"
+opcode_ask returned 1
+POST ASK ... text1=0x64EAF020 (override=0x64EAF020)
+[SHOW_DIALOG-TEXT] win[2] ... text="Mode? Manual Auto Original"   no [T2]
+[SHOW_DIALOG-TEXT] win[2] (already spoken by opcode hook)         dedup caught it
 ```
 
-Plus ~15 lines of new comment explaining the rationale. That's the entire change.
+State machine progressed `0 -> 1 -> 0xD` cleanly. Slot held open through all 28 polls.
 
-## Why
+### Key architectural lessons (capture for HISTORY)
 
-v0.15.5.2 BAT confirmed Phase 2a's cursor input is fully wired (`sub_49FD50(2): pCurrentDialogSlot 0xFF -> 0x02` in log; cursor-move SFX plays on arrow press during dialog). But Aaron only heard the diagnostic announcement, not the dialog text.
+1. **FFNx's `replace_call` bypass.** FFNx rewrites engine-internal CALL operands to point at FFNx's own functions. MinHook on the engine's entry point never fires. Future dialog hooks should target slot state post-`opcode_*` rather than the text-fetch function. Smoking gun: zero `[GETSTR-RAW]` lines despite unconditional first-10-calls logging.
+2. **`IsValidTextPointer` is FF8-heap-tuned.** The `0x00010000-0x30000000` range filters spurious pointers but rejects mod-DLL data-section addresses (typical at `~0x60000000-0x80000000` under FFNx). Mod-injected buffers need either a whitelist or relocation. v0.15.6.2 chose targeted whitelisting via stable-address accessors.
+3. **Post-ASK slot patching is FFNx-version-robust.** Doesn't depend on FFNx's internal addresses or function names, only on the engine-defined slot layout.
 
-The FieldDialog `[ASK]` hook fires DURING `opcode_ask` and starts speaking the dialog text via SAPI (e.g., `"Selphie. 'Wanna go up?'. Selected: Go up. Stay"`). Then `opcode_ask` returns and our `AnnouncePhase2Result` calls `ScreenReader::Speak(msg, true)` -- the `true` interrupts in-flight speech. SAPI was halfway through speaking the dialog text when our diagnostic announcement preempted it.
+---
 
-With `interrupt=false`, the diagnostic announcement queues after the dialog text instead of cutting it off.
+## Push plan
 
-Phase 1's `AnnouncePhase1Result` gets the same fix proactively. The v0.15.4 BAT had the same race but Aaron didn't notice -- likely because Phase 1's MES dialog text and the diagnostic announcement are textually similar enough that the cut-off wasn't obvious.
+`Utilities/push_to_github.vbs` validates `CHANGELOG.md` top heading (`## v0.15.6.2`) matches `FF8OPC_VERSION` ("0.15.6.2"). Both match. CHANGELOG entry is push-quality with full BAT diagnosis, fix mechanism, and risk assessment.
 
-## v0.15.5.3 BAT plan
+Aaron's choice: push v0.15.6.2 alone, or bundle with v0.15.7 (answer detection) for a single push. Either way the next BAT is v0.15.7.
+
+---
+
+## v0.15.7 plan -- answer detection
+
+DialogInject's `Update()` polls per frame while a Phase 2B ASK is open. On cursor changes, speak which option is now selected. On commit, speak "You chose X" and store the answer for v0.15.8's chase wiring.
+
+### v0.15.7 design
+
+State additions in dialog_inject.cpp:
+
+```cpp
+static bool   s_phase2Active   = false;
+static int    s_phase2Slot     = -1;
+static uint8_t s_phase2LastCurQ = 0xFF;
+static int    s_phase2LastAnswer = -1;
+```
+
+`Phase2_TestAsk` end (after firing opcode_ask):
+
+```cpp
+s_phase2Active   = true;
+s_phase2Slot     = TEST_SLOT_ASK;
+s_phase2LastCurQ = 0xFF;       // forces first-poll announce
+s_phase2LastAnswer = -1;
+```
+
+Update() loop (alongside or replacing existing 3-second slot poll):
+
+```cpp
+if (s_phase2Active) {
+    uint8_t curQ = ReadSlotByte(s_phase2Slot, 0x2B);   // NOTE: 0x2B not 0x2C
+    uint8_t askMask = ReadGameObjMask(GAMEOBJ_ASK_MASK_OFFSET);
+    bool slotBitClear = (askMask & (1 << s_phase2Slot)) == 0;
+    uint32_t state = ReadSlotState(s_phase2Slot);
+
+    // Cursor-change announce
+    if (curQ != s_phase2LastCurQ && curQ >= 1 && curQ <= 3) {
+        const char* names[] = { "Manual", "Auto", "Original" };
+        char msg[64];
+        snprintf(msg, sizeof(msg), "%s selected", names[curQ - 1]);
+        ScreenReader::Speak(msg, false);
+        s_phase2LastCurQ = curQ;
+    }
+
+    // Commit detection
+    if (slotBitClear || state != 0xD) {
+        s_phase2LastAnswer = (int)s_phase2LastCurQ;
+        if (s_phase2LastAnswer >= 1 && s_phase2LastAnswer <= 3) {
+            const char* names[] = { "Manual", "Auto", "Original" };
+            char msg[64];
+            snprintf(msg, sizeof(msg), "You chose %s", names[s_phase2LastAnswer - 1]);
+            ScreenReader::Speak(msg, false);
+        }
+        s_phase2Active = false;
+    }
+}
+```
+
+Public accessor (header):
+
+```cpp
+int GetLastAnswer();   // returns 1=Manual, 2=Auto, 3=Original, -1=none
+```
+
+### Important: slot+0x2B is curQ, NOT slot+0x2C
+
+dialog_inject.cpp's existing POST-ASK readback uses `slot+0x2C` for curQ -- that's the AUX byte, not curQ. The actual curQ is at `slot+0x2B` (per FFNx's ff8.h and per field_dialog's working choice handler which has been correctly reading curChoice at 0x2B since v04.03). The v0.15.5.1 BAT comment that established the stack-arg map got the byte offsets crossed in the comment. v0.15.7 must read 0x2B for cursor changes.
+
+(Cosmetic followup: fix dialog_inject.cpp's POST-ASK log line to read 0x2B and label it correctly. Or leave as a known quirk and document.)
+
+### v0.15.7 BAT plan
 
 1. Deploy via `deploy.vbs`.
-2. **Quit FF8 and re-launch** -- clean restart for fresh slot state.
-3. Load `doani1_2` save.
-4. Press **F12 once**:
-   - Hear FIRST: `"Selphie 'Wanna go up?' Go up Stay"` (elevator dialog from FieldDialog hook).
-   - Hear THEN: `"Dialog inject phase one. Slot 1. Return code 3."` (queued diagnostic).
-5. Wait for the announcements to finish. Wait 3 seconds for slot poll completion.
-6. Press **Shift+F12 once**:
-   - Hear FIRST: `"Selphie. 'Wanna go up?'. Selected: Go up. Stay"` (ASK with cursor on "Go up").
-   - Hear THEN: `"Dialog inject phase two A. Slot 2. Return code 1."` (queued diagnostic).
-7. Press arrows during the open ASK -- cursor SFX should still play (v0.15.5.2 fix preserved).
-8. Wait 3 seconds for slot poll completion.
-9. Quit, send `Logs/ff8_dialog.log`.
+2. Quit FF8 and re-launch.
+3. Load any save in field mode.
+4. Press **Shift+F12** -- hear "Mode?. Selected: Manual. Auto. Original" + diagnostic. Cursor on Manual.
+5. Press **Down** arrow -- hear "Auto selected" + FF8 cursor SFX.
+6. Press **Down** again -- hear "Original selected" + cursor SFX.
+7. Press **Up** -- hear "Auto selected" + cursor SFX.
+8. Press **Enter** (or whatever the engine's commit key is for ASK) -- hear "You chose Auto".
+9. Send `Logs/ff8_dialog.log`.
 
-## BAT outcomes
+### v0.15.7 outcomes
 
-### SUCCESS
+- **SUCCESS**: each cursor move produces "X selected" within ~100ms; commit produces "You chose X". Move to v0.15.8 chase wiring.
+- **NO CURSOR ANNOUNCE**: `slot+0x2B` not changing on arrows? Add slot+0x2B to the existing slot poll diagnostic to confirm. Could mean the engine writes curQ to a different offset, or our 0x2B reads are racing with the engine's writes.
+- **DOUBLE/STUTTERING ANNOUNCE**: cursor poll firing too fast. Debounce by ~100ms.
+- **NO COMMIT DETECTION**: slot bit not clearing on Enter, or state staying at 0xD. Investigate which mechanism the engine uses to mark ASK as "answered" -- could be `gameObj.D2 & (1<<slot)` clearing, OR `state != 0xD`, OR neither (engine pushes the answer back to the script-VM which we don't run).
+- **WRONG ANSWER**: cursor poll captured stale curQ at commit time. Use `s_phase2LastCurQ` directly rather than re-reading at commit moment.
 
-Both phases speak the dialog text BEFORE the diagnostic announcement. Cursor SFX works on arrow press during open ASK. Phase 2a recipe FULLY proven. Move to **v0.15.6 Phase 2b**: FF8 text encoding for custom strings + answer detection + chase wiring.
+### Risk
 
-### PARTIAL
-
-Dialog text gets spoken but something else preempts it (another mod component? The FieldDialog hook itself using interrupt=true on its Speak call?). Investigate the SAPI event chain. Possibly need to delay `AnnouncePhase2Result` by a fixed time after `opcode_ask` returns.
-
-### REGRESSION
-
-Unrelated regression in Phase 1 or Phase 2a. Inspect log for differences from v0.15.5.2.
-
-## Known-but-deferred (Phase 2b will resolve)
-
-Aaron reported in the v0.15.5.2 BAT that arrows moved Squall AND cursor simultaneously. This is a known limitation: the standalone Phase 2a diagnostic doesn't suspend field input because we don't run the script-VM polling loop that normally blocks field movement during ASK. **Phase 2b chase wiring (v0.15.6) inherits `chase_ask_overlay`'s input gating** which already handles this for the existing TTS-only chase ASK. Not addressed in v0.15.5.3.
-
----
-
-## v0.15.6 Phase 2b sketch (if v0.15.5.3 SUCCESS)
-
-Goals:
-1. Custom prompt + 3 options ("Manual / Auto / Original") via FF8 text encoding.
-2. Answer detection (poll curQ; detect commit; report selected option via SAPI).
-3. Wire into `chase_ask_overlay::OpenAsk` as primary path.
-
-**Path A (recommended)**: bypass `opcode_ask` entirely. Direct calls:
-```cpp
-// 1. Compose FF8-encoded buffer:
-//    "Mode?" \x02 "Manual" \x02 "Auto" \x02 "Original" \x00
-// 2. set_window_object_ASK(slot, buf, firstQ=1, lastQ=3, curQ=defaultIdx, aux=0)
-// 3. sub_49FD50(slot)            -- enable arrow input
-// 4. sub_4A0620(slot)            -- open transition (need to find/resolve address)
-// 5. gameObj.D2 |= (1<<slot)     -- mark slot as ASK-active
-// 6. gameObj.D3 |= (1<<slot)     -- mark window-active
-```
-
-Per-frame Update() polling:
-- Read `slot+0x2B` (curQ); if changed, speak "Manual selected" / "Auto selected" / "Original selected".
-- Detect commit: watch for `gameObj.D2 & (1<<slot) == 0` (engine cleared on Enter) OR `state` field transition out of 0xD.
-- On commit, read final curQ as the answer; report to chase_ask_overlay caller.
-
-This avoids `opcode_ask`'s state machine entirely. Simpler, more controllable. Field-input gating handled by `chase_ask_overlay`.
-
-FF8 text encoding (already in `ff8_text_decode.cpp`, just need to invert):
-- A-Z: 0x45-0x5E. a-z: 0x5F-0x78. 0-9: 0x21-0x2A. Space: 0x20. ?: 0x2F. Newline: 0x02. End: 0x00.
-
-Need to resolve `sub_4A0620` address (open-transition function). Hardcode similarly to `sub_49FD50`.
+Very low. Pure read of slot bytes + SAPI calls. No engine state writes. No new hooks.
 
 ---
 
@@ -107,39 +158,37 @@ Need to resolve `sub_4A0620` address (open-transition function). Hardcode simila
 - Aaron pushes via `Utilities/push_to_github.vbs` -- Claude never pushes.
 - Build via `deploy.vbs` from project root.
 - Version is bumped in ONE place: `FF8OPC_VERSION` in `src/ff8_accessibility.h`.
-- Read DEVNOTES.md and this file at start of every session.
 - F12 alone = `Phase1_TestMes`; Shift+F12 = `Phase2_TestAsk`.
 
 ---
 
 ## State of the codebase
 
-**v0.15.5.3 BUILT, NOT pushed. v0.15.4 (commit `41251c39`) remains HEAD on GitHub. v0.15.5/.5.1/.5.2/.5.3 all BAT'd locally but never pushed.**
+**v0.15.6.2 BAT-PASSED, ready to push. v0.15.5.3 (commit `c58d993a`) is HEAD on GitHub.**
 
-- `src/dialog_inject.h` -- v0.15.5 (unchanged since)
-- `src/dialog_inject.cpp` -- v0.15.5.3 (2 char changes + comments; v0.15.5.1 ctx-bytes fix and v0.15.5.2 sub_49FD50 call preserved)
-- `src/dinput8.cpp` -- v0.15.5 (unchanged since)
+- `src/dialog_inject.h` -- v0.15.6.2 (design rationale documenting v0.15.6 BAT failure, v0.15.6.1 patch landing without TTS pickup, v0.15.6.2 whitelist fix; `GetOverrideSlot`/`GetOverrideBufferStart`/`GetOverrideBufferSize` decls)
+- `src/dialog_inject.cpp` -- v0.15.6.2 (override state, EncodeFf8 utility, SetOverride/ClearOverride/GetOverride*, Phase2_TestAsk with full v0.15.5.x mechanics + v0.15.6.1 SetOverride pre-call)
+- `src/field_dialog.cpp` -- v0.15.6.2 (forward-decl block exposes DialogInject namespace; `Hook_opcode_ask` post-ASK patch block; `IsValidTextPointer` whitelist clause for override buffer; v0.15.6 dead-hook override branch left in `Hook_field_get_dialog_string` as documentation)
+- `src/dinput8.cpp` -- v0.15.5 (unchanged)
 - `src/deploy.bat` -- unchanged from v0.15.4
-- `src/ff8_accessibility.h` -- `FF8OPC_VERSION "0.15.5.3"` with full comment trail
-- `CHANGELOG.md` -- top entry `## v0.15.5.3`
-- `DEVNOTES.md` -- post-v0.15.5.3-build state, BAT plan, Phase 2b sketch
+- `src/ff8_accessibility.h` -- `FF8OPC_VERSION "0.15.6.2"` with full comment trail
+- `CHANGELOG.md` -- top entry `## v0.15.6.2` (push-quality body)
+- `DEVNOTES.md` -- post-BAT, ready-to-push, v0.15.7 plan
 - `NEXT_SESSION_PROMPT.md` -- this file
 
 ---
 
-## Quick-start for next session (after v0.15.5.3 BAT)
+## Quick-start for next session
 
 1. Read this file + DEVNOTES.md.
-2. Tail `Logs/ff8_dialog.log` for `[DLG-INJ]` lines.
-3. Look for `[ASK]` / `[MES]` Speaking lines AROUND the BAT timestamps -- those should now play before the queued diagnostic announcement.
-4. If Aaron reports hearing dialog text first then the diagnostic announcement -> SUCCESS, ship v0.15.6 Phase 2b.
-5. If still preempted -> PARTIAL. Investigate SAPI scheduling.
+2. If Aaron has pushed v0.15.6.2: implement v0.15.7 per the design above. Five files: dialog_inject.{h,cpp}, ff8_accessibility.h, CHANGELOG.md, DEVNOTES.md/NEXT_SESSION_PROMPT.md.
+3. If Aaron hasn't pushed yet: ask what to work on. Likely v0.15.7 implementation in parallel for bundled push.
 
-## Dispute notes
+## v0.15.7 implementation checklist (next session ready-to-go)
 
-If at any point Aaron disputes v0.15.5.x's success, point him to the `Logs/ff8_dialog.log` lines:
-- `FieldDialog: [ASK] win[2] Speaking: ...` -- proves the engine populated slot 2 and our hook saw the text.
-- `sub_49FD50(2): pCurrentDialogSlot 0xFF -> 0x02` -- proves the cursor-input fix landed.
-- `opcode_ask returned 1`, slot 2 trans `0 -> 0x1000`, state `0xD` -- proves the state machine progressed.
-
-The log evidence is solid. The remaining concerns are all UX (SAPI scheduling, field-input gating) -- mechanical fixes, not design problems.
+- [ ] dialog_inject.h: add `int GetLastAnswer();` decl; document v0.15.7 design.
+- [ ] dialog_inject.cpp: add s_phase2Active/Slot/LastCurQ/LastAnswer state; add poll block in Update(); set state in Phase2_TestAsk after opcode_ask returns; clear in Shutdown.
+- [ ] dialog_inject.cpp: fix POST-ASK readback to read slot+0x2B (curQ) not slot+0x2C (aux). Optional cosmetic but consistent with v0.15.7 changes.
+- [ ] ff8_accessibility.h: bump to 0.15.7, add comment trail entry.
+- [ ] CHANGELOG.md: prepend v0.15.7 entry.
+- [ ] DEVNOTES.md, NEXT_SESSION_PROMPT.md: refresh for v0.15.7 ready-to-BAT.

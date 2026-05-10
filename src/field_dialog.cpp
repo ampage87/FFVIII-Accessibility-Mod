@@ -105,6 +105,29 @@ namespace ScanTTS { bool IsScreenActive(); }
 namespace ChaseAskOverlay { void OnDialogText(const char* text); }
 namespace ChaseDiag       { void OnAskOpcodeFired(const char* opcodeLabel); }
 
+// v0.15.6.1 Phase 2b: dialog_inject.cpp's text override coordination.
+// When IsOverrideActive() returns true, our Hook_opcode_ask patches
+// slot[GetOverrideSlot()]+0x08 (text_data1) with GetOverrideText() AFTER
+// s_origAsk returns and BEFORE ScanAndSpeakChoiceWindows reads the slot.
+// This puts our buffer in front of both TTS and the engine's render/input
+// reads. The flag is set immediately before opcode_ask and cleared
+// immediately after, so natural game ASKs are not affected.
+//
+// v0.15.6 originally proposed an override path through this file's existing
+// Hook_field_get_dialog_string but FFNx's replace_call rewrote the engine's
+// internal CALL field_get_dialog_string operand to point at FFNx's own
+// function, leaving our hook on engine 0x00530750 dead. The v0.15.6 BAT
+// log proves this: zero [GETSTR-RAW] lines despite the hook's unconditional
+// first-10-calls logging. v0.15.6.1 moves the substitution to a point
+// downstream of FFNx's bypass.
+namespace DialogInject {
+    bool        IsOverrideActive();
+    const char* GetOverrideText();
+    int         GetOverrideSlot();   // v0.15.6.1
+    const unsigned char* GetOverrideBufferStart();   // v0.15.6.2
+    unsigned int         GetOverrideBufferSize();    // v0.15.6.2
+}
+
 namespace FieldDialog {
 
 typedef int (__cdecl *OpcodeHandler_t)(int);
@@ -441,7 +464,21 @@ static bool IsValidTextPointer(const char* ptr)
     uintptr_t addr = (uintptr_t)ptr;
     // v04.18: lowered from 0x00A00000 to 0x00010000 to catch thought text
     // that may use lower-address buffers. ProbePointer() still provides safety.
-    return (addr >= 0x00010000 && addr <= 0x30000000);
+    if (addr >= 0x00010000 && addr <= 0x30000000) return true;
+    // v0.15.6.2: whitelist DialogInject's static override buffer. Our buffer
+    // lives in the DLL data section above 0x30000000, outside the FF8
+    // heap-range heuristic above. Without this whitelist, v0.15.6.1's
+    // post-ASK pointer swap landed but ScanAndSpeakChoiceWindows silently
+    // skipped the slot and Hook_show_dialog fell back to text_data2 (still
+    // holding the engine's natural prompt). The buffer's location is stable
+    // for the DLL's lifetime so range comparison is safe.
+    const unsigned char* obStart = ::DialogInject::GetOverrideBufferStart();
+    if (obStart != nullptr) {
+        uintptr_t obStartAddr = (uintptr_t)obStart;
+        uintptr_t obEndAddr   = obStartAddr + (uintptr_t)::DialogInject::GetOverrideBufferSize();
+        if (addr >= obStartAddr && addr < obEndAddr) return true;
+    }
+    return false;
 }
 
 static bool ProbePointer(const char* ptr)
@@ -757,6 +794,30 @@ static DWORD s_getstrLastDiagTime = 0;
 // v04.23: Fixed signature to match FFNx: (char* msgBase, int dialogId)
 static char* __cdecl Hook_field_get_dialog_string(char* msgBase, int dialogId)
 {
+    // v0.15.6 Phase 2b: override path. When DialogInject has activated the
+    // override flag (which it does just before calling opcode_ask), short-
+    // circuit and return our FF8-encoded buffer instead of the natural game
+    // data. set_window_object_ASK consumes the returned char* and stores it
+    // in slot+0x08, where the engine reads it every frame for the dialog's
+    // lifetime. DialogInject's buffer is statically allocated and lives long
+    // enough.
+    //
+    // We log the override path so BAT logs clearly show when the substitution
+    // happened. Error guards: if the override flag is set but the pointer is
+    // null (shouldn't happen given DialogInject's discipline of setting both
+    // together), fall through to the original to avoid crashes.
+    if (::DialogInject::IsOverrideActive()) {
+        const char* overrideText = ::DialogInject::GetOverrideText();
+        if (overrideText != nullptr) {
+            Log::Dialog("FieldDialog: [GETSTR-OVERRIDE] DialogInject providing custom text "
+                        "(orig msgBase=0x%08X dialogId=%d -> override=0x%08X)",
+                        (uint32_t)(uintptr_t)msgBase, dialogId,
+                        (uint32_t)(uintptr_t)overrideText);
+            return (char*)overrideText;
+        }
+        Log::Dialog("FieldDialog: [GETSTR-OVERRIDE] flag set but text is null; falling through");
+    }
+
     char* result = s_origGetDialogString(msgBase, dialogId);
 
     // Diagnostic: log first few calls unconditionally, then periodic summary
@@ -1334,6 +1395,48 @@ static int __cdecl Hook_opcode_mesw(int entityPtr)
 static int __cdecl Hook_opcode_ask(int entityPtr)
 {
     int result = s_origAsk(entityPtr);
+
+    // v0.15.6.1: post-ASK slot+0x08 override.
+    //
+    // FFNx's replace_call pattern rewrote the engine's internal CALL
+    // field_get_dialog_string operand to point at FFNx's own function, so
+    // the v0.15.6 pre-fetch override (via Hook_field_get_dialog_string) is
+    // bypassed (the v0.15.6 BAT log showed zero [GETSTR-RAW] lines despite
+    // unconditional first-10-calls logging). DialogInject's flag is set
+    // before opcode_ask and cleared after, so by the time we reach this
+    // point, IsOverrideActive() is still true if our injected call is in
+    // flight.
+    //
+    // s_origAsk has just populated slot+0x08 with the natural text pointer.
+    // We overwrite it with the override buffer pointer. The next things
+    // that read slot+0x08 are:
+    //   - ScanAndSpeakChoiceWindows below (TTS path) -- decodes our text
+    //   - the engine's render loop next frame -- displays our text
+    //   - the engine's input handler -- positions cursor on our lines
+    // firstQ/lastQ at slot+0x29/+0x2A were set from our opcode_ask args, so
+    // cursor positions match our line layout (BAT log confirmed firstQ=1
+    // lastQ=3 post-call).
+    if (::DialogInject::IsOverrideActive()) {
+        const char* overrideText = ::DialogInject::GetOverrideText();
+        int targetSlot = ::DialogInject::GetOverrideSlot();
+        if (overrideText && targetSlot >= 0 && targetSlot < MAX_WINDOWS) {
+            uint8_t* winObj = GetWindowObj(targetSlot);
+            if (winObj) {
+                __try {
+                    char** text1Ptr = (char**)(winObj + WIN_OBJ_TEXT1_OFFSET);
+                    char* origText1 = *text1Ptr;
+                    *text1Ptr = (char*)overrideText;
+                    Log::Dialog("FieldDialog: [POST-ASK-OVERRIDE] Patched slot[%d]+0x08: 0x%08X -> 0x%08X",
+                                targetSlot,
+                                (uint32_t)(uintptr_t)origText1,
+                                (uint32_t)(uintptr_t)overrideText);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    Log::Dialog("FieldDialog: [POST-ASK-OVERRIDE] SEH writing slot[%d]+0x08", targetSlot);
+                }
+            }
+        }
+    }
+
     EnterCriticalSection(&s_cs);
     ScanAndSpeakChoiceWindows("ASK");
     LeaveCriticalSection(&s_cs);
