@@ -36,6 +36,40 @@
 // changes; detect commit when gameObj.D2 bit clears) and v0.15.8 wires
 // this into chase_ask_overlay::OpenAsk as the primary chase ASK path.
 //
+// v0.15.7: Answer detection ships. While a Phase 2B ASK is open, poll
+// slot+0x2B (current_choice_question, the cursor position FF8 updates on
+// arrows) per frame. Speak "Manual selected" / "Auto selected" /
+// "Original selected" on each cursor change. Detect commit via gameObj.D2
+// bit clearing OR slot state leaving 0xD, speak "You chose X", and store
+// the answer for v0.15.8's chase wiring. Pure read of slot bytes; no
+// engine state writes. New public API: GetLastAnswer().
+//
+// v0.15.7.1: Two fixes from v0.15.7 BAT.
+//
+// 1) Premature commit. v0.15.7 BAT log showed:
+//      v0.15.7 cursor-change slot=2 curQ 255->1 announce="Manual selected"
+//      v0.15.7 commit reason=state left 0xD capturing answer=1   <-- WRONG
+//    The dialog's state field at +0x24 progresses 0 -> 1 -> 0xD over ~450ms
+//    after opcode_ask returns. We armed answer-detection BEFORE state
+//    reached 0xD, so the very next poll saw "state != 0xD" and tripped
+//    the commit. Fix: gate commit on having OBSERVED state == 0xD at least
+//    once. Cursor-active-state must be entered before leaving it can
+//    count as a commit.
+//
+// 2) Confirm key documented as Enter. The actual FF8 confirm key is X (or
+//    whatever the player has bound for confirm). Doc-only fix in
+//    DEVNOTES, NEXT_SESSION_PROMPT, CHANGELOG. The mod doesn't intercept
+//    the key; we observe slot state changes either way.
+//
+// 3) Squall and party still walking during the ASK. Known limitation
+//    deferred to v0.15.7.2. The engine's natural ASK rendering doesn't
+//    block field-character movement -- the script-VM normally parks on
+//    opcode_ask returning 1, but our injected call doesn't keep the
+//    script-VM parked because we're not running it. Investigate in
+//    v0.15.7.2 with a dispatch-instrumentation diagnostic to see whether
+//    update_field_entities is firing while our ASK is open and what's
+//    moving Squall.
+//
 // See "Plan & Research Documents/Field dialog system disassembly
 // analysis.md" (the follow-up correction section) and "Plan & Research
 // Documents/ASK render binding deep research results.md" for the
@@ -179,6 +213,26 @@ int         GetOverrideSlot();   // v0.15.6.1: which slot Hook_opcode_ask should
 // after ClearOverride and still need to validate the buffer.
 const unsigned char* GetOverrideBufferStart();
 unsigned int         GetOverrideBufferSize();
+
+// ============================================================================
+// v0.15.7 Phase 2b answer detection
+//
+// While a Phase 2B ASK is open (set by Phase2_TestAsk and cleared on
+// commit), DialogInject::Update() polls slot+0x2B (the cursor position).
+// Each cursor change is announced via SAPI ("Manual selected" / "Auto
+// selected" / "Original selected") and the final selection is captured
+// when the engine commits (gameObj.D2 bit for our slot clears OR the
+// slot's state field leaves 0xD).
+//
+// GetLastAnswer() returns the committed answer:
+//   1 = Manual
+//   2 = Auto
+//   3 = Original
+//   -1 = no answer captured yet (ASK not yet committed, or never opened)
+//
+// v0.15.8 will read this to drive chase mode selection.
+// ============================================================================
+int GetLastAnswer();
 
 }  // namespace DialogInject
 

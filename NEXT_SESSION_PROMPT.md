@@ -1,152 +1,145 @@
-# Next Session Prompt -- v0.15.6.2 BAT-PASSED, ready to push
+# Next Session Prompt -- v0.15.7.1 BAT-PASSED, ready to push
 
-**Status:** v0.15.6.2 BAT-PASSED. Aaron heard "Mode?. Selected: Manual. Auto. Original" through the engine ASK render path. Ready to push via `Utilities/push_to_github.vbs`. GitHub HEAD currently = v0.15.5.3 (commit `c58d993a`).
+**Status:** v0.15.7.1 BAT-PASSED. End-to-end answer detection works: gating triggered at t+422ms (predicted ~450ms), eight cursor announces fired cleanly across 14 seconds of arrow presses, commit fired only on X press, final answer captured as 3 = Original. Ready to push via `Utilities/push_to_github.vbs`. GitHub HEAD currently = v0.15.6.2 (commit `249d9e47`).
 
 If you're reading this in a fresh session:
 1. Read this file + DEVNOTES.md.
-2. If GitHub HEAD is now `v0.15.6.2`: Aaron pushed -- proceed to v0.15.7 (answer detection).
-3. If GitHub HEAD is still `v0.15.5.3`: Aaron hasn't pushed yet -- ask what's next.
+2. If GitHub HEAD is now `v0.15.7.1`: Aaron pushed -- proceed to v0.15.8 (chase_ask_overlay wiring).
+3. If GitHub HEAD is still `v0.15.6.2`: Aaron hasn't pushed yet -- ask what's next.
 
 ---
 
-## What v0.15.6.2 closed
+## What v0.15.7.1 closed
 
-The v0.15.0 -> v0.15.6.2 arc shipped end-to-end mod-driven dialog rendering with custom FF8-encoded text:
+The full Phase 2B answer-detection chain is now working:
 
-| Version | Approach | Outcome |
-|---------|----------|---------|
-| v0.15.0-v0.15.2.1 | Populate ff8_win_obj slot directly | Engine ignored slot (per-slot callback registration via `sub_4A0880` happens at startup; externally-populated slots aren't in the registry) |
-| v0.15.4 | Synthesize phantom script_context, call opcode_mes(&ctx) | Phase 1 SUCCESS. Engine renders natural msg 0 |
-| v0.15.5/.5.1/.5.2/.5.3 | Same recipe via opcode_ask | Phase 2a SUCCESS. Cursor input wired (sub_49FD50). SAPI race fixed (queue not interrupt) |
-| v0.15.6 | Inject custom text via Hook_field_get_dialog_string override | FAILED. FFNx replace_call bypassed our hook (zero `[GETSTR-RAW]` lines despite unconditional logging) |
-| v0.15.6.1 | Post-ASK slot+0x08 patching in Hook_opcode_ask | Pointer swap landed but `IsValidTextPointer` rejected our DLL-data-section address |
-| v0.15.6.2 | Whitelist override buffer's exact range in `IsValidTextPointer` | SUCCESS. End-to-end working |
+| Step | Mechanism | Verified by |
+|------|-----------|-------------|
+| 1 | Inject `opcode_ask` with custom text | v0.15.6.2 BAT (Aaron heard "Mode?. Selected: Manual. Auto. Original") |
+| 2 | Cursor input via `sub_49FD50(slot)` + arrow detection | v0.15.5.2 BAT (Aaron heard cursor SFX) |
+| 3 | Per-frame poll of `slot+0x2B` for cursor changes -> SAPI announce | v0.15.7 BAT (cursor announces worked) |
+| 4 | Gate commit on having observed cursor-active state | v0.15.7.1 BAT (no premature commit, fired only on X) |
+| 5 | Capture final cursor as answer; expose via `GetLastAnswer()` | v0.15.7.1 BAT (`announce="You chose Original"`, answer=3) |
 
-### v0.15.6.2 BAT log signature (Phase 2B Test #1, 00:59:30)
+`GetLastAnswer()` is now ready to drive v0.15.8's chase wiring.
+
+### v0.15.7.1 BAT log signature (Phase 2B Test #1, 10:12:28 -> 10:12:42)
 
 ```
-PRE  ASK gameObj.D2=0x00              clean slot 2
-FIRING opcode_ask(0x65325610)
-sub_49FD50(2): pCurrentDialogSlot 0xFF -> 0x02
-v0.15.6.1 SetOverride active for slot 2
-[POST-ASK-OVERRIDE] Patched slot[2]+0x08: 0x16C50E98 -> 0x64EAF020
-[ASK] win[2] Parsed 3 choices (firstQ=1 lastQ=3 curChoice=1)
-[ASK] win[2] Speaking: "Mode?. Selected: Manual. Auto. Original"
 opcode_ask returned 1
-POST ASK ... text1=0x64EAF020 (override=0x64EAF020)
-[SHOW_DIALOG-TEXT] win[2] ... text="Mode? Manual Auto Original"   no [T2]
-[SHOW_DIALOG-TEXT] win[2] (already spoken by opcode hook)         dedup caught it
+POST ASK ... slot[+0x2B]curQ=1 slot[+0x2C]aux=0 text1=0x64EAF020 (override=0x64EAF020)
+v0.15.7 answer-detection armed for slot 2 (timeout 60000 ms)
+v0.15.7 cursor-change slot=2 curQ 255->1 announce="Manual selected"
+v0.15.7.1 active-state observed slot=2 t+422ms (state=0xD D2=0x04); commit gating now armed
+                ... 14 seconds of cursor changes ...
+v0.15.7 commit reason=state left 0xD capturing answer=3
+v0.15.7 announce="You chose Original"
 ```
 
-State machine progressed `0 -> 1 -> 0xD` cleanly. Slot held open through all 28 polls.
+### Architectural lessons
 
-### Key architectural lessons (capture for HISTORY)
-
-1. **FFNx's `replace_call` bypass.** FFNx rewrites engine-internal CALL operands to point at FFNx's own functions. MinHook on the engine's entry point never fires. Future dialog hooks should target slot state post-`opcode_*` rather than the text-fetch function. Smoking gun: zero `[GETSTR-RAW]` lines despite unconditional first-10-calls logging.
-2. **`IsValidTextPointer` is FF8-heap-tuned.** The `0x00010000-0x30000000` range filters spurious pointers but rejects mod-DLL data-section addresses (typical at `~0x60000000-0x80000000` under FFNx). Mod-injected buffers need either a whitelist or relocation. v0.15.6.2 chose targeted whitelisting via stable-address accessors.
-3. **Post-ASK slot patching is FFNx-version-robust.** Doesn't depend on FFNx's internal addresses or function names, only on the engine-defined slot layout.
+- **Slot state walks `0 -> 1 -> 0xD` over ~450 ms** after `opcode_ask` returns. Gate state checks on having seen 0xD first.
+- **`gameObj.D2` bit set immediately** after `opcode_ask` (PRE 0x00 -> POST 0x04). Same gating for symmetry.
+- **`slot+0x2B` is curQ** (current_choice_question). v0.15.5.1 had it crossed with aux at 0x2C; v0.15.7 corrected.
+- **Engine commit signal in v0.15.7.1 BAT was "state leaves 0xD"**. `D2 bit clear` is also valid; gating accepts either.
 
 ---
 
 ## Push plan
 
-`Utilities/push_to_github.vbs` validates `CHANGELOG.md` top heading (`## v0.15.6.2`) matches `FF8OPC_VERSION` ("0.15.6.2"). Both match. CHANGELOG entry is push-quality with full BAT diagnosis, fix mechanism, and risk assessment.
-
-Aaron's choice: push v0.15.6.2 alone, or bundle with v0.15.7 (answer detection) for a single push. Either way the next BAT is v0.15.7.
+`Utilities/push_to_github.vbs` validates `## v0.15.7.1` matches `FF8OPC_VERSION "0.15.7.1"`. Both confirmed. Push utility takes the v0.15.7.1 entry as the commit body. v0.15.7's CHANGELOG entry stays in local CHANGELOG.md but won't appear as its own GitHub commit -- v0.15.7.1's BAT-diagnosis section documents the v0.15.7 design adequately. If Aaron specifically wants v0.15.7 as a separate commit, that's a manual two-step push (revert ff8_accessibility.h to "0.15.7", push, restore "0.15.7.1") -- not worth the complexity.
 
 ---
 
-## v0.15.7 plan -- answer detection
+## v0.15.8 plan -- chase_ask_overlay wiring
 
-DialogInject's `Update()` polls per frame while a Phase 2B ASK is open. On cursor changes, speak which option is now selected. On commit, speak "You chose X" and store the answer for v0.15.8's chase wiring.
+Wire Phase 2B + answer detection into `chase_ask_overlay::OpenAsk` as the primary chase ASK path. Replaces v0.15.3's TTS-only overlay. Inherits chase_ask_overlay's existing input gating, which solves v0.15.7.1's deferred Squall-walking limitation.
 
-### v0.15.7 design
+### v0.15.8 design
 
-State additions in dialog_inject.cpp:
+**1. New public API in dialog_inject:**
 
 ```cpp
-static bool   s_phase2Active   = false;
-static int    s_phase2Slot     = -1;
-static uint8_t s_phase2LastCurQ = 0xFF;
-static int    s_phase2LastAnswer = -1;
+namespace DialogInject {
+    // Generalizes Phase2_TestAsk with caller-supplied prompt and choices.
+    // Encodes prompt + choices into the override buffer via EncodeFf8,
+    // fires opcode_ask with firstQ=1, lastQ=numChoices, curQ=defaultCursor,
+    // arms answer detection. Returns true if the call returned 1
+    // (wait-for-answer success), false otherwise.
+    //
+    // After this returns true, callers should poll GetLastAnswer() per
+    // frame; non--1 means the user committed and the result is ready.
+    bool OpenAsk(const char* prompt,
+                 const char* const* choices,
+                 int numChoices,
+                 int defaultCursor,    // 1-based, in [1, numChoices]
+                 int slot);            // typically 2
+
+    // Resets s_phase2LastAnswer to -1. Callers should call this before
+    // OpenAsk if they want to differentiate "no commit yet" from "stale
+    // answer from previous ASK".
+    void ResetLastAnswer();
+}
 ```
 
-`Phase2_TestAsk` end (after firing opcode_ask):
+**2. dialog_inject.cpp refactor:**
+
+Factor `Phase2_TestAsk()`'s body into `OpenAskInternal(prompt, choices, numChoices, defaultCursor, slot)` and call it from both `Phase2_TestAsk()` (hardcoded "Mode? / Manual / Auto / Original" with slot=2, defaultCursor=1) and the new public `OpenAsk()`. Existing test path stays for diagnostics (still on Shift+F12).
+
+The override-buffer encoder needs to handle variable choice count: encode prompt + `\n` + each choice + `\n`, terminate with `\0`. The choice-count `numChoices` becomes `lastQ`; default cursor maps to `curQ`.
+
+Also need an `OptionNameAt(int curQ)` indirection -- can't keep the hardcoded `CurQToOptionName` switch since OpenAsk callers supply arbitrary choice strings. Pass the choice list through to Update() via state, OR have OpenAsk callers register their own announcer callback. Simpler: store the choice strings in a small static array when OpenAsk fires, look up by index in Update().
+
+**3. chase_ask_overlay rewire:**
+
+Locate where v0.15.3's TTS-only overlay opens (somewhere near the existing `OnDialogText` trigger that matches Squall's "Forget it!  Let's go!"). Replace the open path with:
 
 ```cpp
-s_phase2Active   = true;
-s_phase2Slot     = TEST_SLOT_ASK;
-s_phase2LastCurQ = 0xFF;       // forces first-poll announce
-s_phase2LastAnswer = -1;
+const char* choices[] = { "Manual", "Auto", "Original" };
+DialogInject::ResetLastAnswer();
+if (DialogInject::OpenAsk("Mode?", choices, 3, 1, 2)) {
+    s_chaseAskWaiting = true;
+    // chase_ask_overlay's existing input-gating flag stays set; will be
+    // cleared in OnAnswer() below.
+}
 ```
 
-Update() loop (alongside or replacing existing 3-second slot poll):
+Then in chase_ask_overlay's per-frame update:
 
 ```cpp
-if (s_phase2Active) {
-    uint8_t curQ = ReadSlotByte(s_phase2Slot, 0x2B);   // NOTE: 0x2B not 0x2C
-    uint8_t askMask = ReadGameObjMask(GAMEOBJ_ASK_MASK_OFFSET);
-    bool slotBitClear = (askMask & (1 << s_phase2Slot)) == 0;
-    uint32_t state = ReadSlotState(s_phase2Slot);
-
-    // Cursor-change announce
-    if (curQ != s_phase2LastCurQ && curQ >= 1 && curQ <= 3) {
-        const char* names[] = { "Manual", "Auto", "Original" };
-        char msg[64];
-        snprintf(msg, sizeof(msg), "%s selected", names[curQ - 1]);
-        ScreenReader::Speak(msg, false);
-        s_phase2LastCurQ = curQ;
-    }
-
-    // Commit detection
-    if (slotBitClear || state != 0xD) {
-        s_phase2LastAnswer = (int)s_phase2LastCurQ;
-        if (s_phase2LastAnswer >= 1 && s_phase2LastAnswer <= 3) {
-            const char* names[] = { "Manual", "Auto", "Original" };
-            char msg[64];
-            snprintf(msg, sizeof(msg), "You chose %s", names[s_phase2LastAnswer - 1]);
-            ScreenReader::Speak(msg, false);
-        }
-        s_phase2Active = false;
+if (s_chaseAskWaiting) {
+    int answer = DialogInject::GetLastAnswer();
+    if (answer != -1) {
+        s_chaseAskWaiting = false;
+        OnAnswer(answer);  // 1=Manual, 2=Auto, 3=Original
     }
 }
 ```
 
-Public accessor (header):
+`OnAnswer(int)` dispatches: Manual -> normal play, Auto -> mark for v0.15.9 run-from-robot, Original -> mark for v0.15.10 chase-mod-active flag. v0.15.8 itself can announce "You chose <X>" plus "(not yet implemented)" for Auto/Original.
 
-```cpp
-int GetLastAnswer();   // returns 1=Manual, 2=Auto, 3=Original, -1=none
-```
+**4. Input gating coordination:**
 
-### Important: slot+0x2B is curQ, NOT slot+0x2C
+chase_ask_overlay already gates input during its overlay's lifetime. Need to verify that flag stays set across the entire ASK -- from OpenAsk fire to OnAnswer dispatch. May require an explicit hold-down period if the flag clears too early.
 
-dialog_inject.cpp's existing POST-ASK readback uses `slot+0x2C` for curQ -- that's the AUX byte, not curQ. The actual curQ is at `slot+0x2B` (per FFNx's ff8.h and per field_dialog's working choice handler which has been correctly reading curChoice at 0x2B since v04.03). The v0.15.5.1 BAT comment that established the stack-arg map got the byte offsets crossed in the comment. v0.15.7 must read 0x2B for cursor changes.
+### v0.15.8 BAT plan
 
-(Cosmetic followup: fix dialog_inject.cpp's POST-ASK log line to read 0x2B and label it correctly. Or leave as a known quirk and document.)
-
-### v0.15.7 BAT plan
-
-1. Deploy via `deploy.vbs`.
-2. Quit FF8 and re-launch.
-3. Load any save in field mode.
-4. Press **Shift+F12** -- hear "Mode?. Selected: Manual. Auto. Original" + diagnostic. Cursor on Manual.
-5. Press **Down** arrow -- hear "Auto selected" + FF8 cursor SFX.
-6. Press **Down** again -- hear "Original selected" + cursor SFX.
-7. Press **Up** -- hear "Auto selected" + cursor SFX.
-8. Press **Enter** (or whatever the engine's commit key is for ASK) -- hear "You chose Auto".
-9. Send `Logs/ff8_dialog.log`.
-
-### v0.15.7 outcomes
-
-- **SUCCESS**: each cursor move produces "X selected" within ~100ms; commit produces "You chose X". Move to v0.15.8 chase wiring.
-- **NO CURSOR ANNOUNCE**: `slot+0x2B` not changing on arrows? Add slot+0x2B to the existing slot poll diagnostic to confirm. Could mean the engine writes curQ to a different offset, or our 0x2B reads are racing with the engine's writes.
-- **DOUBLE/STUTTERING ANNOUNCE**: cursor poll firing too fast. Debounce by ~100ms.
-- **NO COMMIT DETECTION**: slot bit not clearing on Enter, or state staying at 0xD. Investigate which mechanism the engine uses to mark ASK as "answered" -- could be `gameObj.D2 & (1<<slot)` clearing, OR `state != 0xD`, OR neither (engine pushes the answer back to the script-VM which we don't run).
-- **WRONG ANSWER**: cursor poll captured stale curQ at commit time. Use `s_phase2LastCurQ` directly rather than re-reading at commit moment.
+1. Reach the chase trigger field (where Squall says "Forget it!  Let's go!"). Aaron will know the field name -- I think it's `enter1` based on past sessions.
+2. Trigger the chase. Expect:
+   - Squall's "Forget it!" line speaks normally.
+   - Chase ASK opens automatically: "Mode?. Selected: Manual. Auto. Original" + "Manual selected".
+   - **Squall does NOT walk while the ASK is open** (chase_ask_overlay gating).
+3. Press arrows -- "Auto selected" / "Original selected" announce as in v0.15.7.1.
+4. Press X -- "You chose <X>" announces; ASK closes; Squall regains control.
+5. Verify the chosen mode took effect (or for v0.15.8: announces it for v0.15.9/.10).
 
 ### Risk
 
-Very low. Pure read of slot bytes + SAPI calls. No engine state writes. No new hooks.
+Medium. Two unknowns to verify:
+1. **Input gating coordination.** Does chase_ask_overlay's existing flag stay set across the engine ASK's full lifetime?
+2. **chase_ask_overlay's existing logic assumed TTS-only.** Any "auto-proceed after N seconds" logic needs deletion.
+
+Once cleared, the v0.15.7.1 detection path is proven and the wiring is mechanical.
 
 ---
 
@@ -154,41 +147,44 @@ Very low. Pure read of slot bytes + SAPI calls. No engine state writes. No new h
 
 - Filesystem MCP for ALL Windows project files. Bash cannot reach Windows source.
 - Every response begins with `## Claude Says`.
-- CHANGELOG.md ASCII-only in commit body. Heading must match `FF8OPC_VERSION` exactly. Push utility refuses if mismatched.
+- CHANGELOG.md ASCII-only in commit body. Heading must match `FF8OPC_VERSION` exactly.
 - Aaron pushes via `Utilities/push_to_github.vbs` -- Claude never pushes.
 - Build via `deploy.vbs` from project root.
-- Version is bumped in ONE place: `FF8OPC_VERSION` in `src/ff8_accessibility.h`.
+- Version bumped in ONE place: `FF8OPC_VERSION` in `src/ff8_accessibility.h`.
 - F12 alone = `Phase1_TestMes`; Shift+F12 = `Phase2_TestAsk`.
+- FF8 confirm key is X (not Enter).
 
 ---
 
 ## State of the codebase
 
-**v0.15.6.2 BAT-PASSED, ready to push. v0.15.5.3 (commit `c58d993a`) is HEAD on GitHub.**
+**v0.15.7.1 BAT-PASSED, ready to push. v0.15.6.2 (commit `249d9e47`) is HEAD on GitHub.**
 
-- `src/dialog_inject.h` -- v0.15.6.2 (design rationale documenting v0.15.6 BAT failure, v0.15.6.1 patch landing without TTS pickup, v0.15.6.2 whitelist fix; `GetOverrideSlot`/`GetOverrideBufferStart`/`GetOverrideBufferSize` decls)
-- `src/dialog_inject.cpp` -- v0.15.6.2 (override state, EncodeFf8 utility, SetOverride/ClearOverride/GetOverride*, Phase2_TestAsk with full v0.15.5.x mechanics + v0.15.6.1 SetOverride pre-call)
-- `src/field_dialog.cpp` -- v0.15.6.2 (forward-decl block exposes DialogInject namespace; `Hook_opcode_ask` post-ASK patch block; `IsValidTextPointer` whitelist clause for override buffer; v0.15.6 dead-hook override branch left in `Hook_field_get_dialog_string` as documentation)
+- `src/dialog_inject.h` -- v0.15.7.1 (design rationale through v0.15.7.1, GetLastAnswer decl)
+- `src/dialog_inject.cpp` -- v0.15.7.1 (state vars, helpers, Update() answer-detection block with gating, Phase2_TestAsk arms detection, Shutdown disarms, POST-ASK readback fixed)
+- `src/field_dialog.cpp` -- v0.15.6.2 (unchanged; whitelist + post-ASK patch in place)
 - `src/dinput8.cpp` -- v0.15.5 (unchanged)
 - `src/deploy.bat` -- unchanged from v0.15.4
-- `src/ff8_accessibility.h` -- `FF8OPC_VERSION "0.15.6.2"` with full comment trail
-- `CHANGELOG.md` -- top entry `## v0.15.6.2` (push-quality body)
-- `DEVNOTES.md` -- post-BAT, ready-to-push, v0.15.7 plan
-- `NEXT_SESSION_PROMPT.md` -- this file
+- `src/ff8_accessibility.h` -- `FF8OPC_VERSION "0.15.7.1"` with full comment trail
+- `CHANGELOG.md` -- top entry `## v0.15.7.1`, `## v0.15.7` below it (push-quality)
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md` -- post-BAT, ready-to-push, v0.15.8 plan
 
 ---
 
 ## Quick-start for next session
 
 1. Read this file + DEVNOTES.md.
-2. If Aaron has pushed v0.15.6.2: implement v0.15.7 per the design above. Five files: dialog_inject.{h,cpp}, ff8_accessibility.h, CHANGELOG.md, DEVNOTES.md/NEXT_SESSION_PROMPT.md.
-3. If Aaron hasn't pushed yet: ask what to work on. Likely v0.15.7 implementation in parallel for bundled push.
+2. Verify GitHub HEAD: if v0.15.7.1 there, work v0.15.8. If still v0.15.6.2, ask Aaron about push status.
+3. For v0.15.8, locate chase_ask_overlay.cpp/.h and read its current OpenAsk logic + input gating flag. Then implement OpenAsk in dialog_inject and rewire chase_ask_overlay to call it.
 
-## v0.15.7 implementation checklist (next session ready-to-go)
+## v0.15.8 implementation checklist (next session ready-to-go)
 
-- [ ] dialog_inject.h: add `int GetLastAnswer();` decl; document v0.15.7 design.
-- [ ] dialog_inject.cpp: add s_phase2Active/Slot/LastCurQ/LastAnswer state; add poll block in Update(); set state in Phase2_TestAsk after opcode_ask returns; clear in Shutdown.
-- [ ] dialog_inject.cpp: fix POST-ASK readback to read slot+0x2B (curQ) not slot+0x2C (aux). Optional cosmetic but consistent with v0.15.7 changes.
-- [ ] ff8_accessibility.h: bump to 0.15.7, add comment trail entry.
-- [ ] CHANGELOG.md: prepend v0.15.7 entry.
-- [ ] DEVNOTES.md, NEXT_SESSION_PROMPT.md: refresh for v0.15.7 ready-to-BAT.
+- [ ] Read chase_ask_overlay.cpp/.h to understand existing TTS-only overlay logic + input gating flag.
+- [ ] dialog_inject.h: add `OpenAsk` decl, `ResetLastAnswer` decl. Document choice-array ownership (caller retains).
+- [ ] dialog_inject.cpp: add `s_phase2Choices[]` static array (max 8 entries, 32 bytes each), `s_phase2NumChoices`. `EncodeFf8WithChoices(prompt, choices, n, outBuf)` helper. Factor `Phase2_TestAsk` body into `OpenAskInternal(prompt, choices, numChoices, defaultCursor, slot)`. Update CurQToOptionName to look up s_phase2Choices instead of hardcoded.
+- [ ] Update `s_phase2Choices` from OpenAsk callers; clear on Shutdown.
+- [ ] chase_ask_overlay.cpp: replace TTS-only OpenAsk body with DialogInject::OpenAsk + GetLastAnswer poll. Add `s_chaseAskWaiting` state. Wire `OnAnswer()` dispatch.
+- [ ] Verify chase_ask_overlay's input gating flag stays set across the full engine ASK lifetime. Add hold-down if needed.
+- [ ] ff8_accessibility.h: bump to 0.15.8, add comment trail entry.
+- [ ] CHANGELOG.md: prepend v0.15.8 entry.
+- [ ] DEVNOTES.md, NEXT_SESSION_PROMPT.md: refresh for v0.15.8 ready-to-BAT.

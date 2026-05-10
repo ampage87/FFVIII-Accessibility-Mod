@@ -4,6 +4,183 @@ Newest on top. Each entry begins with a `## vMAJOR.MINOR.BUILD` heading followed
 
 The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_accessibility.h`. The push utility refuses to push if they don't.
 
+## v0.15.7.1
+
+Premature commit fix from v0.15.7 BAT. v0.15.7 BAT log showed answer-detection firing `commit reason=state left 0xD` on the very first poll after arming, before Aaron pressed any key. Aaron's reported behavior matched: cursor announces worked, but the mod said "You chose Manual" before he made a selection.
+
+### v0.15.7 BAT diagnosis
+
+```
+10:02:21 [DLG-INJ] opcode_ask returned 1
+10:02:21 [DLG-INJ] POST ASK slot=2 trans=0x0000 vel=0x0200 state=0x00000000
+10:02:21 [DLG-INJ] v0.15.7 answer-detection armed for slot 2 (timeout 60000 ms)
+10:02:21 [DLG-INJ] v0.15.7 cursor-change slot=2 curQ 255->1 announce="Manual selected"
+10:02:21 [DLG-INJ] v0.15.7 commit reason=state left 0xD capturing answer=1   <-- WRONG
+```
+
+The slot's state field at `+0x24` starts at `0x00000000` immediately after `opcode_ask` returns. It progresses `0x00 -> 0x01 -> 0x0D` over ~450 ms (the 3-second diagnostic poll captured this clearly: poll #0 state=0x00, poll #2 state=0x01, poll #4 state=0x0D, poll #4-#27 state=0x0D until shutdown). v0.15.7's commit detector treated `state != 0xD` as a commit signal -- so the initial transient `state == 0` satisfied "left 0xD" before `0xD` was ever entered.
+
+The cursor-change announce fired correctly (the `0xFF -> 1` transition is the initial state populating), and the commit fired one frame later because `state == 0` is not `0xD`. By the time the dialog actually rendered and entered cursor-active state, our answer-detection was already disarmed.
+
+### v0.15.7.1 fix
+
+Gate the `state left 0xD` and `D2 bit clear` commit branches on having OBSERVED the cursor-active state at least once. New state variable `s_phase2SeenActive` flips true the first time `Update()` reads `state == 0xD` AND the `gameObj.D2` bit for our slot is set. Until then both natural commit signals are suppressed; once observed, normal commit detection takes over.
+
+The 60-second timeout is unconditional -- it doesn't gate on `s_phase2SeenActive`, so a stuck arming (slot never reaches `0xD`, e.g. because the dialog never opened) can't poll forever.
+
+New log line confirms gating transitioned:
+
+```
+[DLG-INJ] v0.15.7.1 active-state observed slot=2 t+~450ms (state=0xD D2=0x04); commit gating now armed
+```
+
+Expect this to fire ~450 ms after the `armed` line, then nothing else from the answer-detection block until the user presses X (FF8 confirm).
+
+### Documentation correction: confirm key is X
+
+v0.15.7 docs and code comments referenced "Enter" as the commit key. The actual FF8 confirm key is X (or whatever the player has bound in FF8 controls). The mod doesn't intercept the key; we observe slot state changes either way -- the engine consumes X internally and clears either the D2 bit or transitions state out of 0xD. Doc-only fix; no behavior change.
+
+### Squall and party still walking during the ASK
+
+Known limitation deferred. Aaron reported during the v0.15.7 BAT that the cursor announces work but Squall and party walk around freely while the ASK is open. Background:
+
+The engine's natural ASK rendering doesn't directly block field-character movement. The script-VM normally parks on `opcode_ask` returning 1 (the wait-for-answer path) so subsequent script opcodes -- which would move characters via `set_pos` etc. -- don't run until the player commits. But field input flows independently through `update_field_entities`, reading the keyboard and moving the player character, regardless of dialog state.
+
+Our injected `opcode_ask` populates the slot correctly but doesn't keep the script-VM parked because we're not running it. The natural "don't move party while waiting" behavior depends on script ordering, not a global input-block flag.
+
+Resolution path:
+
+- **v0.15.8 (chase wiring)** is the right place to address this. `chase_ask_overlay::OpenAsk` already gates input during chase ASKs via its own input-suppression flag. Once Phase 2B is wired into the chase overlay, the gating inherits naturally -- the standalone `Phase2_TestAsk` test isn't user-facing, so its missing input gate is acceptable.
+- **v0.15.7.2 alternative**: if the standalone test feels broken enough to warrant a fix now, we can intercept arrow/dpad reads via the existing `dinput8.dll` proxy and zero them out while `s_phase2Active` is true (and `s_phase2SeenActive` is true to avoid blocking input during the open animation). Risk: shared input source between cursor and walk -- need to verify the engine reads cursor through a different code path than walk, or selectively gate by examining the call site.
+
+Deferring to v0.15.8 unless Aaron specifically wants the standalone test cleaned up first.
+
+### Predicted v0.15.7.1 BAT outcome
+
+1. Clean save reload, slot 2 fresh.
+2. Press **Shift+F12**. Hear: "Mode?. Selected: Manual. Auto. Original" + diagnostic + "Manual selected" (initial cursor announce). Cursor SFX on arrows works as before.
+3. Press **Down**, **Down**, **Up** -- cursor announces work.
+4. **No premature commit.** The dialog stays open until the user presses X.
+5. Press **X**. Hear: "You chose <Option>" announce.
+
+Log should show:
+
+```
+[DLG-INJ] v0.15.7.1 active-state observed slot=2 t+~450ms (state=0xD D2=0x04); commit gating now armed
+[DLG-INJ] v0.15.7 cursor-change slot=2 curQ 1->2 announce="Auto selected"      (Down)
+[DLG-INJ] v0.15.7 cursor-change slot=2 curQ 2->3 announce="Original selected"  (Down)
+[DLG-INJ] v0.15.7 cursor-change slot=2 curQ 3->2 announce="Auto selected"      (Up)
+[DLG-INJ] v0.15.7 commit reason=D2 bit clear capturing answer=2                (X)
+[DLG-INJ] v0.15.7 announce="You chose Auto"
+```
+
+(Or `reason=state left 0xD` -- both are valid commit signals, gated on `s_phase2SeenActive`.)
+
+### BAT outcomes
+
+- **SUCCESS**: Aaron makes selections without premature commit, hears "You chose X" only after pressing X. Move to v0.15.8 chase wiring. Squall/party walking during ASK acknowledged as deferred.
+- **STILL PREMATURE COMMIT**: `s_phase2SeenActive` never went true. Inspect log: did `[DLG-INJ] v0.15.7.1 active-state observed` line fire? If not, why not -- did slot 2's state never reach 0xD? Was D2 bit ever set? Compare to the 3-second diagnostic poll which clearly showed both.
+- **NO COMMIT EVER**: `s_phase2SeenActive` went true but neither `state left 0xD` nor `D2 bit clear` fires on X. Means the engine commits via a different mechanism we don't observe. Investigate which slot fields change on X press.
+- **CRASH**: pure SEH-guarded reads, can't crash directly.
+
+### Files changed
+
+- `src/dialog_inject.h`: design rationale extending v0.15.7.1 trail with the three v0.15.7 BAT findings (premature commit, X confirm key, party-walk limitation).
+- `src/dialog_inject.cpp`: comment trail extends; new `s_phase2SeenActive` state var; `Update()` adds active-state observation block before cursor-change/commit blocks; commit detection now gates on `s_phase2SeenActive` for `state left 0xD` and `D2 bit clear` (timeout still unconditional); `Phase2_TestAsk` clears `s_phase2SeenActive` on arm; `Shutdown` clears it; comment line referencing "Enter" updated to "X".
+- `src/ff8_accessibility.h`: version bump to 0.15.7.1 + comment trail entry.
+- `CHANGELOG.md`: this top entry.
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`: refreshed for v0.15.7.1 ready-to-BAT state. Confirm key documented as X.
+
+### Risk
+
+Very low. Adds a single boolean flag and gates two existing branches on it. No engine writes; no new hooks; no new addresses. The 60-second timeout safety net unchanged.
+
+## v0.15.7
+
+Phase 2b answer detection. v0.15.6.2 BAT confirmed end-to-end mod-driven dialog rendering with custom FF8-encoded text working under FFNx -- Aaron heard "Mode?. Selected: Manual. Auto. Original" through the engine ASK render path, with cursor SFX on arrow keys. v0.15.7 layers per-frame cursor polling and commit detection on top so the user's selection is announced and captured.
+
+### What ships
+
+While a Phase 2B ASK is open, `DialogInject::Update()` polls `slot+0x2B` (current_choice_question, the cursor position the engine updates on Up/Down arrows). On each cursor change announce the new option via SAPI: "Manual selected" / "Auto selected" / "Original selected", with `interrupt=false` so the announcement queues after any in-flight TTS rather than preempting it.
+
+Commit is detected via three independent conditions, any one of which fires:
+
+1. `gameObj.D2` bit for our slot clears -- the engine consumed the ASK and moved on.
+2. The slot's state field at `+0x24` transitions out of `0xD` -- the engine left the cursor-active state.
+3. 60-second timeout (sanity ceiling). Generous for any user pondering time; prevents unbounded polling if neither natural commit signal fires.
+
+On commit, capture the most recent observed cursor value (`s_phase2LastCurQ`) as the answer, announce "You chose <Option>" via SAPI, store the answer in `s_phase2LastAnswer` for v0.15.8's chase wiring to read via the new `GetLastAnswer()` public API, and disarm the active flag.
+
+New public API:
+
+```cpp
+int GetLastAnswer();   // returns 1=Manual, 2=Auto, 3=Original, -1=no commit yet
+```
+
+The new per-frame poll runs concurrently with the existing 3-second slot-state diagnostic poll. Both are gated independently. Pure read of slot bytes plus SAPI calls; no engine state writes; no new hooks.
+
+### Cosmetic correction: curQ is at slot+0x2B, not slot+0x2C
+
+v0.15.5.1's POST-ASK readback labeled `slot+0x2C` as `curQ` and read it as such. Cross-check during v0.15.7 implementation: `field_dialog.cpp`'s offset constants (`WIN_OBJ_FIRST_Q_OFFSET=0x29`, `WIN_OBJ_LAST_Q_OFFSET=0x2A`, `WIN_OBJ_CUR_CHOICE_OFFSET=0x2B`) place curQ at `0x2B`. Cross-check via v0.15.6.2 BAT log: the `[ASK] win[2]` hook in field_dialog.cpp reads `curChoice` from `0x2B` and produced `curChoice=1`, matching our `TEST_ASK_CUR_Q=1`. The dialog_inject.cpp empirical-arg-map comment had arg4/arg5 crossed (claimed curQ at 0x2C, aux at 0x2B). v0.15.7 corrects:
+
+- The empirical-arg-map comment block: arg4 -> slot+0x2B (curQ), arg5 -> slot+0x2C (aux).
+- The POST-ASK readback in `Phase2_TestAsk`: log `slot[+0x2B]curQ=N` and `slot[+0x2C]aux=N` separately.
+- New `WIN_OBJ_CUR_Q_OFFSET = 0x2B` constant for `ReadSlotCurQ()`.
+
+The v0.15.5.1/.5.2/.6.x BATs were not affected by this -- the slot fields were populated correctly by the engine; only the readback log line was misleading. v0.15.6.2 still rendered the right cursor on the right line because the engine's input handler reads its own offset, not ours.
+
+### Predicted v0.15.7 BAT outcome
+
+1. Clean save reload, slot 2 fresh.
+2. Press **Shift+F12**: hear "Mode?. Selected: Manual. Auto. Original" (FieldDialog [ASK] hook), then queued diagnostic "Dialog inject phase two B. Slot 2. Return code 1." Same as v0.15.6.2 SUCCESS.
+3. Press **Down** arrow: cursor moves Manual -> Auto, hear FF8 cursor-move SFX, hear "Auto selected" within ~100ms.
+4. Press **Down** again: hear "Original selected" + cursor SFX.
+5. Press **Up**: hear "Auto selected" + cursor SFX.
+6. Press **Enter** (engine commit key for ASK): hear "You chose Auto".
+
+Log signature for steps 3-5:
+
+```
+[DLG-INJ] v0.15.7 cursor-change slot=2 curQ 1->2 announce="Auto selected"
+[DLG-INJ] v0.15.7 cursor-change slot=2 curQ 2->3 announce="Original selected"
+[DLG-INJ] v0.15.7 cursor-change slot=2 curQ 3->2 announce="Auto selected"
+```
+
+Log signature for step 6:
+
+```
+[DLG-INJ] v0.15.7 commit reason=D2 bit clear capturing answer=2
+[DLG-INJ] v0.15.7 announce="You chose Auto"
+```
+
+(Or `reason=state left 0xD` -- both are valid commit signals.)
+
+### v0.15.7 BAT outcomes
+
+- **SUCCESS**: each cursor move produces "X selected" within ~100ms; commit produces "You chose X". Move to v0.15.8 chase_ask_overlay wiring.
+- **NO CURSOR ANNOUNCE**: `slot+0x2B` not changing on arrows. Possible causes: the engine writes curQ to a different offset under FFNx (unlikely -- field_dialog.cpp's hook reads from `0x2B` and confirmed correct curChoice in v0.15.6.2 BAT), or our 0x2B reads are racing with the engine's writes (also unlikely -- single-threaded, byte reads are atomic on x86). Inspect log: are `[DLG-INJ] v0.15.7 cursor-change` lines firing at all? If so, with what curQ values?
+- **DOUBLE/STUTTERING ANNOUNCE**: cursor poll firing too fast, OR the same curQ value being detected as a change (loose dedup). The `s_phase2LastCurQ` check should prevent this -- inspect log for repeated `cursor-change slot=2 curQ N->N` (same value).
+- **NO COMMIT DETECTION**: neither `D2 bit clear` nor `state left 0xD` fires on Enter. Investigate the engine's commit mechanism -- it might write the answer to a different slot field or push it back to the script-VM through a path we don't observe. Worst case: rely on the 60s timeout (announce "You chose <last cursor>" after 60 seconds, which is too slow for v0.15.8 chase wiring).
+- **WRONG ANSWER**: cursor poll captured stale curQ at commit time. We use `s_phase2LastCurQ` (last observed) rather than re-reading at commit, so this would mean we missed a cursor change just before commit. Possible fix: poll faster, or also re-read at commit moment as a tiebreaker.
+- **CRASH**: pure SEH-guarded slot reads + SAPI calls, no engine writes. If something crashes it's downstream of this code.
+
+### Known-but-deferred (resolved by v0.15.8)
+
+- **Squall walks while cursor moves.** Standalone Phase 2B doesn't suspend field input. The chase_ask_overlay wiring in v0.15.8 inherits existing input gating that handles this.
+- **Test buffer is hardcoded.** Phase 2B uses "Mode? / Manual / Auto / Original" verbatim. v0.15.8 will accept caller-supplied text via a new `OpenAsk()` API that takes a prompt and choice list.
+
+### Files changed
+
+- `src/dialog_inject.h` (~25 lines): design rationale extending v0.15.7 trail; new `GetLastAnswer()` public decl with documented return-value semantics.
+- `src/dialog_inject.cpp` (~150 lines): comment trail extends; EMPIRICAL ARG MAP comment corrected (arg4 -> 0x2B curQ, arg5 -> 0x2C aux); new `WIN_OBJ_CUR_Q_OFFSET=0x2B` constant; `s_phase2Active`/`Slot`/`LastCurQ`/`LastAnswer`/`StartMs` state with `PHASE2_TIMEOUT_MS=60000` sanity timeout; `GetLastAnswer`/`CurQToOptionName`/`ReadSlotCurQ`/`ReadSlotState` helpers; `Update()` extended with answer-detection block ahead of the existing 3-sec diagnostic poll; `Phase2_TestAsk` arms detection only when `retCode==1`; `Shutdown` disarms detection state; POST-ASK readback corrected to read 0x2B for curQ and 0x2C for aux.
+- `src/ff8_accessibility.h`: version bump to 0.15.7 + comment trail entry.
+- `CHANGELOG.md`: this top entry.
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`: refreshed for v0.15.7 ready-to-BAT state.
+
+### Risk
+
+Very low. The new poll is a per-frame read of one byte (`slot+0x2B`), one bitmask byte (`gameObj.D2`), and one DWORD (slot state at `+0x24`), all SEH-guarded via existing helpers. SAPI calls are the same `ScreenReader::Speak(msg, false)` pattern proven in v0.15.5.3. No engine state writes, no hooks, no new addresses. The 60-second timeout prevents unbounded polling in the worst case where neither commit signal fires.
+
 ## v0.15.6.2
 
 Phase 2b fix follow-up. v0.15.6.1 BAT confirmed our pointer swap landed cleanly but Aaron still heard Selphie's natural elevator dialog. Root cause: `field_dialog.cpp`'s `IsValidTextPointer` heuristic capped accepted pointers at `0x30000000` (FF8 heap range), and our static override buffer at `0x6E98E020` lives in the DLL data section, well above that cap. Both the TTS path and the show_dialog fallback rejected our buffer.

@@ -33,7 +33,35 @@
 //            pointer) and spoke that. Fix: expose the override buffer's
 //            stable address range via new GetOverrideBufferStart/Size
 //            APIs, and field_dialog.cpp's IsValidTextPointer whitelists
-//            pointers within that range.
+//            pointers within that range. END-TO-END SUCCESS.
+// v0.15.7:   Answer detection. v0.15.6.2 confirmed Aaron hears the prompt
+//            and three options through the engine-rendered ASK. v0.15.7
+//            polls slot+0x2B (cursor position) per frame while a Phase 2B
+//            ASK is open. Each cursor change announces "Manual selected"
+//            / "Auto selected" / "Original selected". On commit (gameObj.D2
+//            bit for our slot clears OR slot state leaves 0xD), the final
+//            cursor value is captured as the answer and announced as "You
+//            chose X". GetLastAnswer() returns 1/2/3 for v0.15.8's chase
+//            wiring, or -1 if no commit has happened yet. Pure read of
+//            slot bytes; no engine state writes; no new hooks. Also fixes
+//            the v0.15.5.1 POST-ASK readback that was reading slot+0x2C
+//            (aux byte) and labeling it curQ -- curQ is at 0x2B per
+//            field_dialog.cpp's offsets and the v0.15.6.2 BAT decoder.
+// v0.15.7.1: Premature commit fix. v0.15.7 BAT showed answer-detection
+//            firing 'commit reason=state left 0xD' on the very first
+//            poll, before Aaron pressed any key. Root cause: dialog
+//            state at slot+0x24 starts at 0x00, progresses 0->1->0xD over
+//            ~450 ms. v0.15.7's commit detector treated 'state != 0xD' as
+//            a commit signal, so the initial transient state==0 satisfied
+//            'left 0xD' before 0xD was ever entered. Fix: track whether
+//            the cursor-active state (0xD) has been entered at least once;
+//            gate the 'state left 0xD' commit branch on having seen 0xD
+//            first. Same belt-and-braces logic for the gameObj.D2 bit:
+//            the bit IS set immediately after opcode_ask returns (BAT
+//            log: PRE D2=0x00 -> POST D2=0x04), but if we ever armed
+//            before the bit was set we'd trip the same way. Also adds the
+//            entry-state observed time to log lines for diagnostic value.
+//            Doc-only fix elsewhere: the FF8 confirm key is X, not Enter.
 
 #include "dialog_inject.h"
 #include "ff8_accessibility.h"
@@ -67,13 +95,20 @@ static const int32_t TEST_MSG_ID    = 0;     // every field has msg 0
 static const int32_t TEST_SLOT      = 1;     // pWindowsArray[1]
 
 // Phase 2 test parameters. SP=6 means six args on the script-VM stack.
-// EMPIRICAL ARG MAP (confirmed v0.15.5.1 BAT post-fire decode of slot fields):
+// EMPIRICAL ARG MAP (confirmed v0.15.5.1 BAT post-fire decode of slot fields,
+// CORRECTED v0.15.7 against field_dialog.cpp's offset constants):
 //   stack[SP-5] (ctx[+0x04]) -> edi -> slot index
 //   stack[SP-4] (ctx[+0x08]) -> ecx -> msg_id
 //   stack[SP-3] (ctx[+0x0C]) -> SWO_ASK arg2 -> slot+0x29 (firstQ)
 //   stack[SP-2] (ctx[+0x10]) -> SWO_ASK arg3 -> slot+0x2A (lastQ)
-//   stack[SP-1] (ctx[+0x14]) -> SWO_ASK arg4 -> slot+0x2C (curQ, clamped to [firstQ, lastQ])
-//   stack[SP-0] (ctx[+0x18]) -> SWO_ASK arg5 -> slot+0x2B (aux)
+//   stack[SP-1] (ctx[+0x14]) -> SWO_ASK arg4 -> slot+0x2B (curQ, clamped to [firstQ, lastQ])
+//   stack[SP-0] (ctx[+0x18]) -> SWO_ASK arg5 -> slot+0x2C (aux)
+//
+// v0.15.5.1's commit comment had the offsets crossed (claimed curQ at 0x2C,
+// aux at 0x2B). The v0.15.6.2 BAT log confirmed the correct mapping: the
+// FieldDialog [ASK] hook in field_dialog.cpp reads curChoice from 0x2B and
+// produced "curChoice=1" matching our TEST_ASK_CUR_Q=1. v0.15.7's answer
+// detection reads 0x2B for cursor changes accordingly.
 //
 // The real signature is: set_window_object_ASK(slot, text, firstQ, lastQ, curQ, aux).
 //
@@ -101,6 +136,11 @@ static const size_t WIN_OBJ_OPEN_CLOSE_OFFSET   = 0x1C;
 static const size_t WIN_OBJ_STATE_OFFSET        = 0x24;
 static const size_t WIN_OBJ_FIELD16_OFFSET      = 0x16;
 static const size_t WIN_OBJ_VELOCITY_OFFSET     = 0x1E;
+// v0.15.7: cursor position byte. The engine updates this on Up/Down arrows
+// while the ASK dialog is open, clamped to [firstQ, lastQ]. We poll it for
+// answer detection. (firstQ at 0x29, lastQ at 0x2A, curQ at 0x2B, aux at
+// 0x2C -- per field_dialog.cpp offsets and v0.15.6.2 BAT confirmation.)
+static const size_t WIN_OBJ_CUR_Q_OFFSET        = 0x2B;
 
 // gameObj bitmask offsets.
 static const size_t GAMEOBJ_ASK_MASK_OFFSET     = 0xD2;
@@ -131,6 +171,39 @@ static int    s_pollSampleIdx = 0;
 
 // Sequential test counter so log lines are easy to correlate.
 static int    s_testCounter   = 0;
+
+// ============================================================================
+// v0.15.7 Phase 2b answer-detection state
+//
+// Set by Phase2_TestAsk after opcode_ask returns successfully (retCode == 1
+// = wait-for-answer). Update() polls per frame while active:
+//   - Read slot+0x2B (curQ). On change, speak "<Option> selected".
+//   - Watch gameObj.D2 bit for our slot AND slot state field. Commit is
+//     either bit-clear (engine consumed our ASK and moved on) or state
+//     leaves 0xD (engine transitioned past the cursor-active state).
+//   - On commit: capture final curQ, speak "You chose <Option>", set
+//     s_phase2LastAnswer for GetLastAnswer(), clear active flag.
+//
+// Initialized to 0xFF for s_phase2LastCurQ so the first poll after fire
+// always announces the initial cursor position (matches our TEST_ASK_CUR_Q
+// default). Single-threaded: only the game thread reads/writes these.
+// ============================================================================
+static bool   s_phase2Active     = false;
+static int    s_phase2Slot       = -1;
+static uint8_t s_phase2LastCurQ  = 0xFF;
+static int    s_phase2LastAnswer = -1;
+// v0.15.7.1: gates the 'state left 0xD' / 'D2 bit clear' commit branches.
+// Set true the first time Update() observes state == 0xD AND the D2 bit
+// for our slot is set. Until then, neither commit signal counts -- the
+// dialog hasn't entered cursor-active state yet, so 'leaving' it is
+// meaningless. The 60s timeout still fires regardless of this flag so
+// a stuck arming can't poll forever.
+static bool   s_phase2SeenActive = false;
+// Sanity timeout: if neither commit signal fires within this window, force
+// a clean shutdown of answer detection so we don't poll forever. The 60s
+// ceiling is generous for any conceivable user pondering time.
+static DWORD  s_phase2StartMs    = 0;
+static const DWORD PHASE2_TIMEOUT_MS = 60000;
 
 // ============================================================================
 // v0.15.6.1 Phase 2b: text override state
@@ -246,6 +319,51 @@ unsigned int GetOverrideBufferSize() {
 }
 
 // ============================================================================
+// v0.15.7 Phase 2b answer detection
+// ============================================================================
+int GetLastAnswer() {
+    return s_phase2LastAnswer;
+}
+
+// Map a curQ value (1-based, in [firstQ, lastQ]) to a human-readable name
+// for SAPI. firstQ=1=Manual, 2=Auto, 3=Original. Returns nullptr if curQ
+// is out of range so the caller can fall back to a generic "Choice N".
+static const char* CurQToOptionName(uint8_t curQ) {
+    switch (curQ) {
+        case 1: return "Manual";
+        case 2: return "Auto";
+        case 3: return "Original";
+        default: return nullptr;
+    }
+}
+
+static uint8_t ReadSlotCurQ(int slot) {
+    if (FF8Addresses::pWindowsArray == nullptr) return 0xFF;
+    if (slot < 0 || slot >= 8) return 0xFF;
+    uint8_t* slotBase = FF8Addresses::pWindowsArray + (slot * WIN_OBJ_STRIDE);
+    uint8_t curQ = 0xFF;
+    __try {
+        curQ = *(uint8_t*)(slotBase + WIN_OBJ_CUR_Q_OFFSET);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0xFF;
+    }
+    return curQ;
+}
+
+static uint32_t ReadSlotState(int slot) {
+    if (FF8Addresses::pWindowsArray == nullptr) return 0xFFFFFFFFu;
+    if (slot < 0 || slot >= 8) return 0xFFFFFFFFu;
+    uint8_t* slotBase = FF8Addresses::pWindowsArray + (slot * WIN_OBJ_STRIDE);
+    uint32_t state = 0xFFFFFFFFu;
+    __try {
+        state = *(uint32_t*)(slotBase + WIN_OBJ_STATE_OFFSET);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0xFFFFFFFFu;
+    }
+    return state;
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
 
@@ -351,12 +469,117 @@ void Initialize() {
 void Shutdown() {
     if (!s_initialized) return;
     s_pollActive = false;
+    // v0.15.7: disarm answer detection on shutdown so a subsequent re-init
+    // doesn't reuse stale state. Don't clear s_phase2LastAnswer -- a caller
+    // that has already read it via GetLastAnswer() may rely on its value
+    // until a new ASK is fired.
+    s_phase2Active     = false;
+    s_phase2SeenActive = false;
+    s_phase2Slot       = -1;
     s_initialized = false;
     Log::Dialog("[DLG-INJ] Shutdown.");
 }
 
 void Update() {
     if (!s_initialized) return;
+
+    // v0.15.7: per-frame answer-detection poll while a Phase 2B ASK is open.
+    // Runs independently of (and concurrently with) the 3-second slot-state
+    // diagnostic poll below. Single-threaded so no synchronization needed.
+    if (s_phase2Active) {
+        uint8_t curQ = ReadSlotCurQ(s_phase2Slot);
+        uint8_t askMask = 0, winMask = 0, mesMask = 0;
+        bool maskOk = ReadGameObjMasks(askMask, winMask, mesMask);
+        uint32_t state = ReadSlotState(s_phase2Slot);
+        uint8_t mySlotBit = (uint8_t)(1u << s_phase2Slot);
+        bool slotBitSet = maskOk && ((askMask & mySlotBit) != 0);
+        bool slotBitClear = maskOk && ((askMask & mySlotBit) == 0);
+        bool stateAtAsk = (state == 0x0000000Du);
+        bool stateLeftAsk = (state != 0xFFFFFFFFu) && (state != 0x0000000Du);
+        DWORD elapsed = GetTickCount() - s_phase2StartMs;
+        bool timedOut = (elapsed >= PHASE2_TIMEOUT_MS);
+
+        // v0.15.7.1: gate commit signals on having entered the active
+        // state at least once. The dialog's state field progresses
+        // 0 -> 1 -> 0xD over ~450 ms after opcode_ask returns. Without
+        // this gate, the initial transient state == 0 satisfies
+        // 'state != 0xD' and we trip the commit before the dialog has
+        // even rendered. We require BOTH state == 0xD AND the D2 bit
+        // for our slot to be set before we'll honor 'state left 0xD'
+        // or 'D2 bit clear' as commit signals.
+        if (!s_phase2SeenActive && stateAtAsk && slotBitSet) {
+            s_phase2SeenActive = true;
+            Log::Dialog("[DLG-INJ] v0.15.7.1 active-state observed slot=%d t+%ums "
+                        "(state=0x%X D2=0x%02X); commit gating now armed",
+                        s_phase2Slot, elapsed, state, askMask);
+        }
+
+        // Cursor-change announce. Skip the 0xFF sentinel (read failure or
+        // pre-render) and skip values outside [firstQ, lastQ] -- the engine
+        // clamps them, but we belt-and-brace check.
+        if (curQ != s_phase2LastCurQ && curQ != 0xFF && curQ >= 1 && curQ <= 3) {
+            const char* name = CurQToOptionName(curQ);
+            if (name != nullptr) {
+                char msg[64];
+                snprintf(msg, sizeof(msg), "%s selected", name);
+                Log::Dialog("[DLG-INJ] v0.15.7 cursor-change slot=%d curQ %u->%u announce=\"%s\"",
+                            s_phase2Slot, s_phase2LastCurQ, curQ, msg);
+                if (ScreenReader::IsAvailable()) {
+                    // interrupt=false to queue after any in-flight choice TTS
+                    // (ScanAndSpeakChoiceWindows or our diagnostic announce).
+                    ScreenReader::Speak(msg, false);
+                }
+            } else {
+                Log::Dialog("[DLG-INJ] v0.15.7 cursor-change slot=%d curQ %u->%u (no name; out of range)",
+                            s_phase2Slot, s_phase2LastCurQ, curQ);
+            }
+            s_phase2LastCurQ = curQ;
+        }
+
+        // Commit detection.
+        // v0.15.7.1: 'state left 0xD' and 'D2 bit clear' only count after
+        // s_phase2SeenActive went true (i.e., we observed the dialog
+        // actively in cursor-input state). Timeout is unconditional.
+        bool commitFromState = s_phase2SeenActive && stateLeftAsk;
+        bool commitFromMask  = s_phase2SeenActive && slotBitClear;
+        if (commitFromState || commitFromMask || timedOut) {
+            const char* reason = timedOut ? "timeout"
+                                : commitFromMask ? "D2 bit clear"
+                                : "state left 0xD";
+            // Capture the final cursor value. We use s_phase2LastCurQ
+            // (the most recent observed value) rather than re-reading the
+            // slot at commit time -- the engine may have already cleared
+            // or repurposed the slot, but we know what was selected the
+            // last time the user moved the cursor.
+            int answer = (int)s_phase2LastCurQ;
+            if (answer < 1 || answer > 3) {
+                // No cursor moves observed; fall back to TEST_ASK_CUR_Q
+                // default (Manual). On timeout this is the only meaningful
+                // value; on legitimate commit the user pressed X on the
+                // default choice without moving.
+                answer = TEST_ASK_CUR_Q;
+                Log::Dialog("[DLG-INJ] v0.15.7 commit reason=%s no cursor moves observed; "
+                            "defaulting answer to %d (Manual)", reason, answer);
+            } else {
+                Log::Dialog("[DLG-INJ] v0.15.7 commit reason=%s capturing answer=%d",
+                            reason, answer);
+            }
+            s_phase2LastAnswer = answer;
+
+            const char* name = CurQToOptionName((uint8_t)answer);
+            if (name != nullptr && !timedOut && ScreenReader::IsAvailable()) {
+                char msg[64];
+                snprintf(msg, sizeof(msg), "You chose %s", name);
+                Log::Dialog("[DLG-INJ] v0.15.7 announce=\"%s\"", msg);
+                ScreenReader::Speak(msg, false);
+            }
+            s_phase2Active     = false;
+            s_phase2SeenActive = false;
+            s_phase2Slot       = -1;
+        }
+    }
+
+    // 3-second slot-state diagnostic poll (unchanged from v0.15.6).
     if (!s_pollActive) return;
 
     DWORD now = GetTickCount();
@@ -740,10 +963,17 @@ void Phase2_TestAsk() {
         __try {
             uint8_t firstQ = *(uint8_t*)(slotBase + 0x29);
             uint8_t lastQ  = *(uint8_t*)(slotBase + 0x2A);
-            uint8_t curQ_2 = *(uint8_t*)(slotBase + 0x2C);
+            // v0.15.7: read curQ from 0x2B (correct) and aux from 0x2C
+            // (informational). v0.15.5.1 had these crossed in the comment
+            // and readback. The actual SWO_ASK arg map from the engine is
+            // confirmed by field_dialog.cpp's offset constants and the
+            // v0.15.6.2 BAT decoder output.
+            uint8_t curQ   = *(uint8_t*)(slotBase + 0x2B);
+            uint8_t aux    = *(uint8_t*)(slotBase + 0x2C);
             char* text1 = *(char**)(slotBase + 0x08);
-            Log::Dialog("[DLG-INJ] POST ASK slot[+0x29]firstQ=%u slot[+0x2A]lastQ=%u slot[+0x2C]curQ=%u text1=0x%08X (override=0x%08X)",
-                        firstQ, lastQ, curQ_2,
+            Log::Dialog("[DLG-INJ] POST ASK slot[+0x29]firstQ=%u slot[+0x2A]lastQ=%u "
+                        "slot[+0x2B]curQ=%u slot[+0x2C]aux=%u text1=0x%08X (override=0x%08X)",
+                        firstQ, lastQ, curQ, aux,
                         (uint32_t)(uintptr_t)text1,
                         (uint32_t)(uintptr_t)s_overrideBuffer);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -752,6 +982,27 @@ void Phase2_TestAsk() {
     }
 
     AnnouncePhase2Result(TEST_SLOT_ASK, retCode);
+
+    // v0.15.7: arm answer-detection polling. Update() will read slot+0x2B
+    // each frame and announce cursor changes; on commit, it captures the
+    // final answer and announces "You chose <Option>". Only arm if the
+    // opcode call succeeded -- retCode 1 (wait-for-answer) is the success
+    // path; retCode 5 means the slot was busy and our injection failed,
+    // so there's nothing to poll. retCode 3 (advance) means the slot
+    // already returned an answer somehow, also no polling needed.
+    if (retCode == 1) {
+        s_phase2Active     = true;
+        s_phase2Slot       = TEST_SLOT_ASK;
+        s_phase2LastCurQ   = 0xFF;   // forces first-poll announce of initial cursor
+        s_phase2LastAnswer = -1;
+        s_phase2SeenActive = false;  // v0.15.7.1: cleared until state==0xD observed
+        s_phase2StartMs    = GetTickCount();
+        Log::Dialog("[DLG-INJ] v0.15.7 answer-detection armed for slot %d (timeout %u ms)",
+                    s_phase2Slot, PHASE2_TIMEOUT_MS);
+    } else {
+        Log::Dialog("[DLG-INJ] v0.15.7 answer-detection NOT armed (retCode=%d != 1)",
+                    retCode);
+    }
 
     s_pollActive    = true;
     s_pollSlot      = TEST_SLOT_ASK;
