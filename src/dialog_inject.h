@@ -1,11 +1,21 @@
-// dialog_inject.h -- Mod-driven engine dialog injection (Phase 1).
+// dialog_inject.h -- Mod-driven engine dialog injection (Phases 1 + 2a).
 //
-// v0.15.4: New module. The first concrete step toward replacing the
-// chase ASK's TTS+keyboard-only path with the engine's actual rendered
-// ASK dialog box. Phase 1 proves the recipe by synthesizing a phantom
-// script_context and calling opcode_mes(&ctx) directly. If the dialog
-// renders, the recipe is solid and Phase 2 (chase ASK via opcode_ask)
-// is mechanical.
+// v0.15.4: Phase 1. Synthesize a phantom script_context and call
+// opcode_mes(&ctx) directly. Proven to work end-to-end (BAT 17:35
+// 2026-05-09): dialog renders visually, slot transitions advance,
+// engine state machine progresses, gameObj bitmasks update, and the
+// existing show_dialog hook fires for the slot.
+//
+// v0.15.5: Phase 2a. Same recipe, different opcode -- call
+// opcode_ask(&ctx) with SP=6 to render the field's natural ASK at
+// msg 0 with a different slot. Confirms the recipe extends to ASK
+// and gives empirical data on the SWO_ASK arg layout. Bound to
+// Shift+F12 (Phase 1 stays on F12 alone).
+//
+// Phase 2b (next ship -- v0.15.5.1 or v0.15.6) will layer on custom
+// FF8 text encoding so we can pass a mod-composed prompt + options
+// ("Manual / Auto / Original") and wire into chase_ask_overlay as
+// the primary path.
 //
 // See "Plan & Research Documents/Field dialog system disassembly
 // analysis.md" (the follow-up correction section) and "Plan & Research
@@ -14,33 +24,35 @@
 //
 // Approach -- Path A from the deep research:
 //   - Synthesize a fake script_context buffer.
-//   - Set [+0x184] = SP byte (e.g. 2).
-//   - Write opcode args to [+sp*4] and [+(sp-1)*4] (msg_id, slot index).
-//   - Call opcode_mes(&ctx) at the dispatch-table entry. The engine
-//     does the rest: set_window_object, sub_4A0620 open transition,
-//     sub_49FD50 foreground, gameObj bitmask updates, and (critically)
-//     the per-slot callback registration that triggers actual rendering.
+//   - Set [+0x184] = SP byte.
+//   - Write opcode args to script-VM stack positions [+sp*4]..[+(sp-N)*4].
+//   - Call the opcode at the dispatch-table entry. The engine does
+//     the rest: set_window_object(_ASK), sub_4A0620 open transition,
+//     sub_49FD50 foreground (MES only), gameObj bitmask updates,
+//     and (critically) the per-slot callback registration that
+//     triggers actual rendering.
 //
 // Why this is needed: v0.15.0 - v0.15.2.1 attempted to populate an
 // ff8_win_obj slot directly with byte-perfect contents. The slot was
 // never rendered because show_dialog is registered as a per-slot
 // callback via sub_4B6210/sub_4B6230 inside sub_4A0880 (window-system
 // init) at engine startup. Externally-populated slots are never part
-// of that registry. Calling opcode_mes goes through the callback
+// of that registry. Calling the opcode goes through the callback
 // registration path correctly.
 //
 // Verification (all automated, no sighted help required):
-//   - Log the opcode_mes return code (3 = advance/success, 5 = slot busy).
-//   - The existing v0.04.36 dialog hook fires for opcode_mes; SAPI
+//   - Log the opcode return code (MES: 3=advance/success, 5=busy.
+//     ASK: 1=wait, 5=busy, 3=advance after answer).
+//   - The existing v0.04.36 dialog hook fires on opcode entry; SAPI
 //     speaks the dialog text when our injected call enters.
 //   - Per-frame poll of pWindowsArray[slot]+0x1C for ~3 sec; should
 //     advance from 0 to 0x1000 (fully open) if rendering is alive.
-//   - SAPI announces "Dialog inject phase one, slot N, return code X."
+//   - SAPI announces "Dialog inject phase X, slot N, return code Y."
 //
-// Hotkey: F12 (replaces v0.15.0's chase-diag F12 binding; chase chapter
-// is complete, chase_diag module remains in source but no longer hot-
-// keyed). Per the F12 rule in userMemories: only one diagnostic active
-// on F12 at a time.
+// Hotkeys (per the F12 rule in userMemories: one diagnostic per
+// physical key state):
+//   - F12 alone   = Phase 1 MES test (slot 1, msg 0).
+//   - Shift + F12 = Phase 2a ASK test (slot 2, msg 0, SP=6).
 
 #pragma once
 
@@ -54,9 +66,9 @@ void Initialize();
 // Cleanup. Currently a no-op.
 void Shutdown();
 
-// Per-tick driver. When a Phase 1 test fires, this polls the target
-// slot for ~3 seconds and logs the open-transition advance. Cheap
-// no-op when no test is active.
+// Per-tick driver. When a Phase 1/2a test fires, this polls the
+// target slot for ~3 seconds and logs the open-transition advance.
+// Cheap no-op when no test is active.
 void Update();
 
 // Phase 1 test entry point. Synthesizes a phantom script_context and
@@ -65,4 +77,13 @@ void Update();
 // field mode or when addresses are not yet resolved.
 void Phase1_TestMes();
 
+// Phase 2a test entry point (v0.15.5). Synthesizes a phantom
+// script_context with SP=6 and calls opcode_ask(&ctx) targeting
+// slot 2 with msg_id 0. The field's natural msg 0 must be an ASK
+// for the choice cursor to render correctly; in doani1_2 (Dollet
+// Comm Tower top, where Aaron BAT'd v0.15.4) this is the Selphie
+// elevator ASK. Bound to Shift+F12.
+void Phase2_TestAsk();
+
 }  // namespace DialogInject
+

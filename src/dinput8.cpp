@@ -332,14 +332,16 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
                 ScreenReader::Speak(L"Screenshot captured.", true);
             }
             // F12 = Dialog inject Phase 1 test fire (v0.15.4).
+            // Shift+F12 = Phase 2a ASK test (v0.15.5).
             // Replaces v0.15.0's chase-diag toggle. Per the F12 rule, only
-            // one diagnostic active on F12 at a time; the chase chapter is
-            // complete (v0.15.3 shipped end-to-end) so the chase-diag
-            // binding is retired. ChaseDiag module remains in source but
-            // is no longer hot-keyed; if needed for future chase work it
-            // can be re-bound in a session-specific build.
+            // one diagnostic active per physical key state; the chase
+            // chapter is complete (v0.15.3 shipped end-to-end) so the
+            // chase-diag binding is retired. ChaseDiag module remains in
+            // source but is no longer hot-keyed; if needed for future
+            // chase work it can be re-bound in a session-specific build.
             if (f12 && !s_f12was && !alt) {
-                DialogInject::Phase1_TestMes();
+                if (shift) DialogInject::Phase2_TestAsk();
+                else       DialogInject::Phase1_TestMes();
             }
             if (vkey && !s_vWas) {
                 wchar_t verMsg[128];
@@ -359,9 +361,11 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
         }
 
         // v0.15.4: F12 = DialogInject::Phase1_TestMes (engine-dialog
-        // injection diagnostic). See F12 handler above. Replaces v0.15.0's
-        // ChaseDiag::Toggle binding; per the F12 rule only one diagnostic
-        // active on F12 at a time, and the chase chapter is complete.
+        // injection diagnostic). v0.15.5: Shift+F12 = Phase2_TestAsk
+        // (experimental ASK call). See F12 handler above. Replaces
+        // v0.15.0's ChaseDiag::Toggle binding; per the F12 rule only one
+        // diagnostic active per physical key state, and the chase chapter
+        // is complete.
         // ENT-MON code removed in v0.12.23.
         
         // --- Sleep to avoid burning CPU ---

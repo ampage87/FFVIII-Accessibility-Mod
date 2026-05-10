@@ -4,6 +4,284 @@ Newest on top. Each entry begins with a `## vMAJOR.MINOR.BUILD` heading followed
 
 The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_accessibility.h`. The push utility refuses to push if they don't.
 
+## v0.15.5.3
+
+Two-character SAPI fix. **v0.15.5.2 BAT showed the cursor input fix worked perfectly** -- arrow keys now move the cursor and trigger FF8's cursor-move SFX -- but Aaron heard only the diagnostic announcement, never the dialog text itself. Root cause: `AnnouncePhase2Result` called `ScreenReader::Speak(msg, true)` where `true` interrupts in-flight speech. The FieldDialog `[ASK]` hook had already started speaking the dialog text inside `opcode_ask`, and our diagnostic announcement preempted it.
+
+### v0.15.5.2 BAT recap
+
+Log confirmed cursor input is fully wired:
+
+- `sub_49FD50(2): pCurrentDialogSlot 0xFF -> 0x02` (the new call).
+- `opcode_ask returned 1`, slot 2 trans `0 -> 0x400 -> 0x1000`, state `0 -> 1 -> 0xD`.
+- `gameObj.D2=0x04` (slot 2 bit set).
+- Two BATs in two different fields:
+  - Test #1 in `doani1_2`: `[ASK] win[2] Speaking: "Selphie. 'Wanna go up?'. Selected: Go up. Stay"` -- the elevator ASK at msg 0.
+  - Test #2 in `doan1_2`: `[ASK] win[2] Speaking: "Battle. Battle"` -- that field's msg 0 is just the word "Battle".
+- Aaron heard the cursor-move SFX when pressing arrows during the open dialog.
+- Aaron did NOT hear the dialog text -- only the diagnostic announcement.
+- Aaron's character (Squall) walked simultaneously with the cursor moving.
+
+### v0.15.5.3 fix (2 character changes + ~15 lines of comment)
+
+In `src/dialog_inject.cpp`:
+
+```cpp
+// AnnouncePhase1Result and AnnouncePhase2Result both:
+-       ScreenReader::Speak(msg, true);   // interrupt in-flight speech
++       ScreenReader::Speak(msg, false);  // queue, don't interrupt
+```
+
+Also adds two comment blocks documenting why -- the FieldDialog hook fires DURING opcode_ask and starts speaking the dialog text via SAPI, so our subsequent post-call Speak with `interrupt=true` was racing in and cutting it off mid-sentence. With `false`, SAPI queues the diagnostic announcement after the dialog text completes.
+
+Phase 1's `AnnouncePhase1Result` gets the same fix proactively for consistency. The v0.15.4 BAT had the same race but Aaron didn't notice -- likely because Phase 1's MES dialog text and the diagnostic announcement are textually similar enough ("Selphie..." vs "Dialog inject phase one...") that the cut-off wasn't obvious.
+
+Other diagnostic Speak calls (the error guards like "Dialog inject opcode address missing" or "Dialog inject crashed") still use `interrupt=true` intentionally -- those are error paths where preemption is correct.
+
+### Predicted v0.15.5.3 BAT outcome
+
+Clean save reload. Press F12 once: hear the elevator dialog text spoken first, then "Dialog inject phase one. Slot 1. Return code 3." Press Shift+F12 once: hear "Selphie. 'Wanna go up?'. Selected: Go up. Stay" first, then "Dialog inject phase two A. Slot 2. Return code 1." Pressing arrows during the open ASK still moves the cursor with audible SFX (v0.15.5.2 fix preserved).
+
+### Known-but-deferred issue
+
+Aaron also reported arrows moved Squall AND the dialog cursor SIMULTANEOUSLY. This is a **known limitation** of the standalone Phase 2a diagnostic -- our injected dialog doesn't suspend field input because we don't run the script-VM polling loop that normally blocks field movement during ASK. **Phase 2b (chase wiring, v0.15.6) will resolve this naturally** because `chase_ask_overlay` already handles input gating during ASKs. NOT addressed in v0.15.5.3.
+
+### Files changed
+
+- `src/dialog_inject.cpp`: 2 character changes (`true` -> `false` in two locations) + ~15 lines of new comment/rationale.
+- `src/ff8_accessibility.h`: version bump to 0.15.5.3 with new comment trail entry.
+- `CHANGELOG.md`: this top entry.
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`: refreshed for v0.15.5.3 ready-to-BAT state.
+
+### Risk
+
+Minimal. The change is from "interrupt in-flight speech" to "queue speech" for two diagnostic announcements. Cannot cause crashes; cannot affect engine state; just changes SAPI scheduling.
+
+## v0.15.5.2
+
+Quick follow-up to v0.15.5.1 BAT. **v0.15.5.1 actually succeeded at rendering the ASK on the first Shift+F12 press** -- the apparent failure was about cursor input, not rendering. v0.15.5.2 adds the missing `sub_49FD50(slot)` call to enable arrow input for the rendered slot.
+
+### v0.15.5.1 BAT was a clean SUCCESS
+
+Test #2 at 19:45:49 in `doani1_2`:
+
+- `opcode_ask` returned 1 (correct "wait for answer").
+- `gameObj.D2` acquired bit 2 (`0x04`).
+- Slot 2 transition advance `0 -> 0x400 -> 0x1000`.
+- State machine `0 -> 1 -> 0xD` (ASK active with cursor).
+- FieldDialog `[ASK]` hook fired on `win[2]` with `"Parsed 3 choices (firstQ=1 lastQ=3 curChoice=2)"`.
+- SAPI spoke: `"Selphie. 'Wanna go up?'. Selected: Go up. Stay"`.
+
+Subsequent Shift+F12 presses correctly returned 5 (slot busy) since slot 2 was still locked.
+
+### Empirical SWO_ASK arg map (CONFIRMED)
+
+The `slot+0x29/0x2A/0x2C` post-fire decode landed our values exactly as expected:
+
+| Stack pos | Our value | Lands in slot field | Engine semantic |
+|---|---|---|---|
+| `stack[SP-3]` (arg2) | 1 | `slot+0x29` | **firstQ** |
+| `stack[SP-2]` (arg3) | 3 | `slot+0x2A` | **lastQ** |
+| `stack[SP-1]` (arg4) | 2 | `slot+0x2C` | **curQ** (cursor; clamped to [firstQ, lastQ] by SWO_ASK entry) |
+| `stack[SP]` (arg5) | 2 | `slot+0x2B` | aux (not decoded post-fire) |
+
+The SWO_ASK signature is therefore: `(slot, msg_id, firstQ, lastQ, curQ, aux)`. v0.15.6 Phase 2b can now confidently pass the right values for any custom ASK.
+
+### Why arrows didn't move the cursor
+
+The `.alloc` branch we successfully reached at `0x5295AB` does NOT call `sub_49FD50`. Only the stage-1 setup path at `0x529683` does (which we deliberately bypassed by setting `ctx[+0x174]/[+0x175]`). Without `sub_49FD50(slot)` setting the global `pCurrentDialogSlot` (BYTE at `0x01D2B51C`) to point at our slot, the engine's input handler doesn't route arrow keys to `slot+0x2B` (curQ), so the cursor stays put and Aaron doesn't hear FF8's standard cursor-move SFX -- the unambiguous "this is a navigable menu" audio cue.
+
+### v0.15.5.2 fix (~30 lines)
+
+In `Phase2_TestAsk`, before the `opcode_ask` call:
+
+```cpp
+const uint32_t SUB_49FD50_ADDR = 0x0049FD50;
+typedef void (__cdecl *sub_49fd50_t)(int);
+sub_49fd50_t sub_49fd50_fn = (sub_49fd50_t)(uintptr_t)SUB_49FD50_ADDR;
+
+// Pre/post pCurrentDialogSlot diagnostic
+const uint32_t PCURRENT_DIALOG_SLOT_ADDR = 0x01D2B51C;
+uint8_t* pCurrentDialogSlot = (uint8_t*)(uintptr_t)PCURRENT_DIALOG_SLOT_ADDR;
+uint8_t preCurSlot = *pCurrentDialogSlot;
+
+sub_49fd50_fn(TEST_SLOT_ASK);
+
+uint8_t postCurSlot = *pCurrentDialogSlot;
+Log::Dialog("sub_49FD50(%d): pCurrentDialogSlot 0x%02X -> 0x%02X", ...);
+```
+
+All wrapped in SEH for safety. Hardcoded address `0x0049FD50` since `sub_49FD50` is a stable internal helper not in the JSM opcode dispatch table (no FFNx wrapping concern; the dispatch-table-wrapping pattern only applies to opcodes). If a future game-version mismatch surfaces, promote to `FF8Addresses`.
+
+### Predicted v0.15.5.2 BAT outcome
+
+Clean save reload (slot 2 fresh). Press F12 once (Phase 1 should still work, ret=3). Press Shift+F12 once (Phase 2a). Now:
+
+- `opcode_ask` returns 1 same as v0.15.5.1.
+- Dialog renders.
+- Log shows `sub_49FD50(2): pCurrentDialogSlot 0xFF -> 0x02` confirming the address resolved and the global was written.
+- **Pressing arrow keys moves the cursor and triggers FF8's cursor-move SFX** -- the audio cue Aaron was looking for. (`slot+0x2B` curQ field updates as arrows are pressed; the standard cursor-move sound plays through FFNx's audio.)
+
+If arrows still don't move the cursor: the engine's input handler may need additional state we haven't mirrored (e.g., a per-frame "current ASK slot" pointer separate from `pCurrentDialogSlot`, or a button-edge-detection variable in the script-VM globals). Iterate v0.15.5.3.
+
+### Files changed
+
+- `src/dialog_inject.cpp` (~30 lines added): `sub_49FD50(slot)` call with pre/post `pCurrentDialogSlot` diagnostic logging in `Phase2_TestAsk` before the `opcode_ask` call. NO changes to `Phase1_TestMes`.
+- `src/ff8_accessibility.h`: version bump to 0.15.5.2 with new comment trail entry.
+- `CHANGELOG.md`: this top entry.
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`: refreshed for v0.15.5.2 ready-to-BAT state.
+
+No changes to `dialog_inject.h`, `dinput8.cpp`, `deploy.bat`, or any other file.
+
+### Risk
+
+Very low. `sub_49FD50` is a small internal helper that writes one global byte. SEH-wrapped. The `pCurrentDialogSlot` global is normally written by the engine itself during ASK setup; we're just doing the same write the engine would have done in stage-1 setup that we bypassed. Phase 1 unchanged.
+
+## v0.15.5.1
+
+Fix Phase 2a PARTIAL outcome from the v0.15.5 BAT. Two-byte addition to the phantom `script_context` to make `opcode_ask` take the `.alloc` rendering path instead of the answer-correlation early-exit path.
+
+### What v0.15.5 BAT showed
+
+Phase 1 (F12 -> opcode_mes on slot 1): identical to v0.15.4 success. ret=3, slot 1 trans 0 -> 0x400 -> 0x1000, gameObj.D3=D4=0x02, FieldDialog hook spoke the elevator dialog. Phase 1 is solid.
+
+Phase 2a (Shift+F12 -> opcode_ask on slot 2): ret=1 but slot 2 entirely untouched across all 28 polls -- trans=0x0000 vel=0x0000 state=0x0 field16=0x00, gameObj.D2=0x00, slot[+0x29] firstQ=0xFF and slot[+0x2A] lastQ=0xFF (both still at 0xFF default placeholder set by SWO_ASK's first writes -- meaning SWO_ASK was NEVER called).
+
+The Test #3 FieldDialog `[ASK]` hook line spoke slot 1 content (the natural Phase 1 MES from 5 seconds earlier that hadn't cleared) -- not slot 2. That's the existing v0.04.36 hook's normal post-call scan finding slot 1 still populated; it doesn't reflect our injected call rendering anything.
+
+### Diagnosis
+
+Extended the disassembly walk through `0x52956D-0x5296B6` (10 more anchors past v0.15.5's stopping point). The early-exit path is gated on two persistent script_context bytes:
+
+```
+0x0052956D:  cl  = [esi+0x174]            ; "current pending ASK slot" tracker
+0x00529573:  al  = [esi+0x175]            ; "ASK pending bitmask" tracker
+0x00529579:  edx = 1
+0x0052957E:  shl edx, cl                  ; edx = 1 << ctx[+0x174]
+0x00529580:  test al, dl                  ; ctx[+0x175] & (1 << ctx[+0x174])
+0x00529582:  je   0x529622                ; if 0 -> answer-correlation path (NO render)
+                                          ; if non-zero -> fall through to slot-busy + .alloc (render)
+```
+
+With both bytes zeroed in our phantom ctx, `al & dl = 0 & 1 = 0`, the `je` is taken, and we land at the answer-correlation path. That path checks `word [esi+0x204]`:
+
+- `[esi+0x204] == 0` -> branch to `0x529683` which calls `sub_49FD50` (set current dialog slot), `sub_49FD70` (returns eax stored at `[esi+0x140]`), `sub_4A0660` (writes `pWindowsArray[slot]+0x1E = 0xFE00`, no SWO call), increments `[esi+0x204]` to 1, returns 1.
+- `[esi+0x204] == 1` -> falls through to `0x529631` which is the **answer-received cleanup** (clears `gameObj.D2` bit, decrements SP by 6 via `dl + 0xfa`, returns 3).
+- `[esi+0x204] >= 2` -> jumps to `0x5296ac` which returns 1 unchanged.
+
+**`set_window_object_ASK` is ONLY called from the `.alloc` branch at `0x5295AB`** -- entered when `(ctx[+0x175] & (1 << ctx[+0x174])) != 0` AND `gameObj.D2 & (1 << slot) == 0`.
+
+### The fix (~30 lines)
+
+Before writing the script-stack args in `Phase2_TestAsk`, set:
+
+```cpp
+s_phantomCtx[0x174] = 0;  // shift count
+s_phantomCtx[0x175] = 1;  // bit 0 set
+```
+
+Then `cl=0`, `al=1`, `edx=1<<0=1`, `test al, dl = 1 & 1 = 1` (non-zero), `je` is NOT taken, execution falls through. v0.15.5 PRE confirmed `gameObj.D2 = 0x00` for slot 2, so the slot-busy gate `je 0x5295ab` is taken to `.alloc`. `.alloc` calls `field_get_dialog_string(msg_table, msg_id=0)` to get the elevator dialog text pointer, calls `set_window_object_ASK(slot=2, text_ptr, arg2, arg3, arg4, arg5)` with our four script-stack values, sets `gameObj.D2 |= (1<<2) = 0x04` at `0x529613`, and returns 1.
+
+The natural FF8 script-VM sets these tracking bytes via a preparatory opcode before `opcode_ask` runs in script flow. We don't run that preparatory opcode, so we set the bytes ourselves to mimic the post-prep state.
+
+### Predicted v0.15.5.1 BAT outcome (replay Phase 2a in `doani1_2`)
+
+- ret=1.
+- Slot 2 trans advances 0 -> 0x400 -> 0x1000 (matching Phase 1 MES pattern).
+- `gameObj.D2` acquires bit 2 (`0x04`) post-call.
+- `slot+0x29` (firstQ) and `slot+0x2A` (lastQ) acquire values from our four script-stack args (1 / 3 / 2 / 2 in some order).
+- Existing FieldDialog `[ASK]` hook fires with `win[2]` (not win[1] like the noise from Test #3) and SAPI speaks the elevator dialog with parsed choices.
+- F11 screenshot post-fire confirms a visible dialog box.
+
+If SUCCESS: empirical map of which arg lands in `slot+0x29/0x2A/0x2C` is nailed down for v0.15.6 Phase 2b (custom text + answer detection + chase wiring). Both outcomes leave that empirical map in the log -- the slot decode runs unconditionally after the call, so we learn something either way.
+
+If still PARTIAL (slot populated but cursor doesn't track input): the engine's input handler needs additional state we haven't mirrored. Suspect: an entry in an ASK-pending list elsewhere (gameObj or script-VM globals), or a slot-state byte not in our model.
+
+### Files changed
+
+- `src/dialog_inject.cpp` (~30 lines): two ctx-byte writes after the `memset` in `Phase2_TestAsk`, plus a ~25-line comment block documenting the `0x52956D-0x529582` test mechanic and a new log line confirming the values were set. NO changes to `Phase1_TestMes`.
+- `src/ff8_accessibility.h`: version bump to 0.15.5.1 with new comment trail entry.
+- `CHANGELOG.md`: this top entry.
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`: refreshed for v0.15.5.1 ready-to-BAT state.
+
+No changes to `dialog_inject.h`, `dinput8.cpp`, `deploy.bat`, or any other file.
+
+### Risk
+
+Very low. The two ctx bytes are persistent script_context state which the natural FF8 script-VM writes anyway during ASK preparation; we're just preempting that write with values matching the post-prep state. The phantom ctx is our private buffer, not FF8's real script_context, so no engine state is being overwritten externally. Phase 1 is unchanged.
+
+## v0.15.5
+
+Phase 2a -- experimental `opcode_ask` call. v0.15.4 BAT was complete success; recipe is proven. v0.15.5 extends it from MES to ASK with the same dispatch-table-with-cached-fallback pattern, in preparation for v0.15.6 chase ASK wiring.
+
+### What v0.15.4 proved (recap)
+
+Aaron pressed F12 in field `doani1_2` (Dollet Comm Tower top). Every metric green:
+
+- `opcode_mes` returned 3.
+- Existing dialog hook fired and SAPI spoke: `Selphie "Wanna go up?" Go up Stay`.
+- `pWindowsArray[1] + 0x1C` (open_close_transition) advanced 0 -> 0x400 (+15ms) -> 0x1000 (+125ms) and held.
+- `+0x1E` velocity 0x200 armed by engine on entry.
+- State machine 0 -> 1 -> 7.
+- `gameObj.D3 = 0x02`, `D4 = 0x02` (bit 1 set for slot 1).
+- `show_dialog` callback fired for slot 1 -- the per-slot callback registration v0.15.x worried about happens automatically through the opcode path.
+- F11 screenshot at 17:36:00 confirmed: dialog visually rendered, indistinguishable from any natural in-game MES.
+
+Useful incidental: dispatch table value (`0x649E57F0`) differed from cached value (`0x00528F20`) -- FFNx wraps these table entries. The defensive table-with-cached-fallback pattern in `dialog_inject.cpp` correctly chained through FFNx. v0.15.5 keeps this pattern for `opcode_ask`.
+
+### What v0.15.5 ships
+
+New function `DialogInject::Phase2_TestAsk` in `src/dialog_inject.cpp`. Bound to **Shift+F12**; Phase 1 (MES) stays on F12 alone per the F12 rule of one diagnostic per physical key state.
+
+Phantom `script_context` with `SP=6` (vs Phase 1's `SP=2`). Stack layout determined by walking `opcode_ask`'s body at `0x00529520-0x005295D7`:
+
+| Stack pos | Reg | Meaning | Set to |
+|---|---|---|---|
+| `stack[SP-5]` | `edi` | **slot index** (CONFIRMED via assertion at `0x52955A`) | **2** (avoid Phase 1's slot 1) |
+| `stack[SP-4]` | `ecx` | **msg_id** (CONFIRMED via `field_get_dialog_string` call at `0x5295CD`) | **0** |
+| `stack[SP-3]` | `edx` | `set_window_object_ASK` arg2 (clamp lower bound) | **1** |
+| `stack[SP-2]` | `ecx` | SWO_ASK arg3 (clamp upper bound, written to `slot+0x29`) | **3** |
+| `stack[SP-1]` | `ebp` | SWO_ASK arg4 (clamped value, written to `slot+0x2A`) | **2** |
+| `stack[SP]` | `ebx` | SWO_ASK arg5 (aux byte, slot-indexed) | **2** |
+
+Slot 2 chosen to avoid colliding with Phase 1's slot 1: the slot-busy gate at `0x529588-0x52959E` returns 5 if `gameObj+0xD2` bit `(1<<slot)` is already set.
+
+In Aaron's BAT field `doani1_2`, msg 0 is the Selphie elevator ASK with two choice lines ("Go up" / "Stay"). Setting our cursor range to `[2, 3]` should land the cursor on those lines.
+
+### Verification (mirrors Phase 1)
+
+- SEH-wrap the `opcode_ask` call.
+- Log return code (1 = wait, 5 = slot busy, 3 = advance, exception caught and reported).
+- Pre/post snapshots of slot bytes (`+0x1C` trans, `+0x1E` vel, `+0x24` state, `+0x16` field16) and `gameObj.D2/D3/D4` masks.
+- Post-fire decode of `slot+0x29` (firstQ), `slot+0x2A` (lastQ), `slot+0x2C` (curQ_2) to **empirically map which arg landed in which slot field** -- this turns the BAT into a concrete arg-to-meaning mapping for SWO_ASK.
+- 3-second slot poll at 100ms cadence.
+- SAPI announces "Dialog inject phase two A. Slot N. Return code X."
+
+### What Phase 2a does NOT yet do
+
+- **Custom text.** Uses the field's natural msg 0 because we haven't wired FF8 text encoding yet. `doani1_2`'s msg 0 happens to be a real ASK with choices, which is convenient for testing.
+- **Answer commit detection.** `opcode_ask` returns 1 (wait for answer); the engine's input handler updates `slot+0x2B` (curQ) on arrows and clears state on Enter, but our injected call doesn't run the script-VM polling loop that reads the answer back from gameObj. Phase 2b (next ship) will add answer detection.
+- **Chase ASK wiring.** `chase_ask_overlay::OpenAsk` still uses the v0.15.2.2 TTS+keyboard-only path. Phase 2b/v0.15.6 will swap its body to use `Phase2_OpenAsk(prompt, options[], default_idx)` with the strings "Manual / Auto / Original" (Aaron's preference).
+
+### Three predicted BAT outcomes
+
+- **SUCCESS**: ret=1, dialog renders with cursor on "Go up" / "Stay", arrows move cursor (engine input handler picks up our slot), state machine progresses, slot poll shows trans 0 -> 0x1000. Empirical SWO_ASK arg map nailed via `slot+0x29/0x2A/0x2C` decode. Phase 2b (custom text + answer detection) follows immediately on the same primitive.
+- **PARTIAL**: ret=1 but cursor doesn't render or input doesn't track. Means engine's ASK input handling needs additional state we haven't mirrored (likely script-VM `ctx[+0x174/0x175]` ASK-pending bits or a per-frame tracking var). Diagnose by comparing the post-fire slot bytes against a captured natural-ASK snapshot.
+- **FAIL/CRASH**: SEH catches an exception. The phantom context is missing fields `opcode_ask` reads beyond what `opcode_mes` needed. v0.15.5.1 expands the buffer / populates additional offsets based on the SEH-caught instruction pointer.
+
+### Files changed
+
+- `src/dialog_inject.h` (~30 lines): header rewrite documenting Phases 1 + 2a, new `Phase2_TestAsk` decl, Shift+F12 binding noted.
+- `src/dialog_inject.cpp` (~210 lines added): Phase 2a constants block (`TEST_SP_ASK`, `TEST_SLOT_ASK`, etc., plus `OPCODE_ASK_INDEX`), `AnnouncePhase2Result` helper, full `Phase2_TestAsk` implementation with SEH-wrapped `opcode_ask` call and post-fire choice-field decode.
+- `src/dinput8.cpp` (~10 lines): F12 handler now calls `Phase1_TestMes` by default and `Phase2_TestAsk` when shift held; comment block updates documenting the addition.
+- `src/ff8_accessibility.h`: version bump to 0.15.5 with new comment trail entry.
+- `CHANGELOG.md`: this top entry.
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`: refreshed for v0.15.5 ready-to-BAT state.
+
+### Risk
+
+Low. The new function is gated behind an explicit Shift+F12 press in field mode. The SEH wrap catches malformed-context crashes. Slot 2 choice avoids the Phase 1 slot collision. Field-mode and address-resolved guards prevent calls when the engine isn't in a state to handle them. Phase 1 is unchanged (still bound to F12 alone) so the v0.15.4 capability is preserved.
+
 ## v0.15.4
 
 Engine-rendered dialog injection -- Phase 1. New module `src/dialog_inject.{h,cpp}` synthesizes a phantom `script_context` and calls `opcode_mes(&ctx)` directly to prove the recipe for mod-driven engine dialog rendering. F12 fires a one-shot test. If a dialog box renders, Phase 2 (chase ASK via `opcode_ask`) is mechanical -- it follows the same pattern with a different opcode dispatch index and arg layout.
