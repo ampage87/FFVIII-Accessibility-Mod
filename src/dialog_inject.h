@@ -70,6 +70,13 @@
 //    update_field_entities is firing while our ASK is open and what's
 //    moving Squall.
 //
+// v0.15.8: Public OpenAsk() API. Generalizes Phase2_TestAsk to accept a
+// caller-supplied prompt and choice list, encoded into the same override
+// buffer. chase_ask_overlay calls this to render the chase mode prompt
+// through the engine's native dialog system instead of TTS-only. The
+// answer flows back via GetLastAnswer() which chase_ask_overlay polls
+// per frame.
+//
 // See "Plan & Research Documents/Field dialog system disassembly
 // analysis.md" (the follow-up correction section) and "Plan & Research
 // Documents/ASK render binding deep research results.md" for the
@@ -225,14 +232,55 @@ unsigned int         GetOverrideBufferSize();
 // slot's state field leaves 0xD).
 //
 // GetLastAnswer() returns the committed answer:
-//   1 = Manual
-//   2 = Auto
-//   3 = Original
+//   1 = first choice in the prompt's choice list
+//   2 = second choice
+//   3 = third choice
+//   ...
 //   -1 = no answer captured yet (ASK not yet committed, or never opened)
 //
-// v0.15.8 will read this to drive chase mode selection.
+// Callers that issue a fresh ASK should call ResetLastAnswer() first
+// to distinguish 'still waiting' from 'stale answer from previous ASK'.
+//
+// v0.15.8 generalizes the API: OpenAsk() takes a caller-supplied prompt
+// and choice list. The choice strings are copied into a static array so
+// that Update()'s cursor-change announcer can speak them as the user
+// navigates. chase_ask_overlay uses this for the chase mode prompt.
 // ============================================================================
-int GetLastAnswer();
+int  GetLastAnswer();
+void ResetLastAnswer();
+
+// Open an engine-rendered ASK with caller-supplied text. Encodes prompt
+// + choices into the override buffer, fires opcode_ask, arms answer
+// detection. Returns true if the call succeeded (retCode == 1, the wait-
+// for-answer success path); false on validation failure, slot-busy, or
+// crash. After a true return, callers should poll GetLastAnswer() per
+// frame; non--1 means the user committed and the answer is ready.
+//
+// prompt: short prompt text (will be the dialog's first line). Plain
+//   ASCII. Encoded via the same EncodeFf8 utility as Phase2_TestAsk's
+//   hardcoded prompt; characters not in the encoder table are dropped.
+// choices: array of choice strings, length = numChoices. Each becomes
+//   one selectable line. The pointer array is read once during this
+//   call; the strings themselves are copied into a static buffer for
+//   later cursor-change announce.
+// numChoices: 1 to 8. Becomes the slot's lastQ. firstQ is always 1.
+// defaultCursor: 1-based, in [1, numChoices]. Becomes the slot's
+//   curQ; the engine's input handler clamps to [firstQ, lastQ].
+// slot: ff8_win_obj index (0-7). Typically 2; slots 0 and 1 are reserved
+//   for the engine's main dialog flow.
+// announceCommit (v0.15.8.1): when true (default), DialogInject's
+//   Update() commit branch announces "You chose <name>" via SAPI on
+//   commit. Callers that want to handle the post-commit announce
+//   themselves (e.g. chase_ask_overlay, which now speaks a brief
+//   mode-specific message instead) pass false to suppress the generic
+//   announce. The cursor-change announces ("<name> selected") on
+//   navigation are unaffected; this only gates the final commit line.
+bool OpenAsk(const char* prompt,
+             const char* const* choices,
+             int numChoices,
+             int defaultCursor,
+             int slot,
+             bool announceCommit = true);
 
 }  // namespace DialogInject
 

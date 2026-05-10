@@ -4,112 +4,119 @@ Aaron is the sole developer of the FF8 Accessibility Mod -- a `dinput8.dll` inje
 
 **Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
 
-GitHub: `ampage87/FFVIII-Accessibility-Mod`. **HEAD = v0.15.6.2** (commit `249d9e47`). **Local tree: v0.15.7.1 BAT-PASSED, ready to push.** Push covers v0.15.7 (answer detection ships) and v0.15.7.1 (premature commit fix) together since v0.15.7 was never pushed.
+GitHub: `ampage87/FFVIII-Accessibility-Mod`. **HEAD = v0.15.7.1** (commit `67e5b74f`). **Local tree: v0.15.8.1 BUILT, ready to BAT, NOT pushed.** v0.15.8 was BAT-confirmed SUCCESS but not pushed since v0.15.8.1 is a polish patch on top.
 
 ---
 
-## v0.15.7.1 BAT result: SUCCESS
+## Current build: v0.15.8.1 -- ready to BAT
 
-Phase 2B Test #1 in `doani1_2`, 10:12:28 -> 10:12:42:
+UX polish on top of v0.15.8 per Aaron's BAT feedback. v0.15.8 BAT was a clean SUCCESS end-to-end (dialog opened, cursor announces fired, X commit captured Manual at 11:05:06, chase proceeded with 1-battle-per-field cap holding through Selphie's rendezvous line) but Aaron noticed a glitch -- after pressing X, three TTS announces stacked up while the chase resumed:
+
+1. "Manual selected" (cursor highlight just before commit)
+2. "You chose Manual" (DialogInject's commit announce)
+3. "Manual mode selected. One battle per chase field will be allowed." (chase_ask_overlay's verbose CommitChoice)
+
+~10 seconds of speech. The chase doesn't wait. v0.15.8.1 trims this to a single brief line.
+
+### What v0.15.8.1 ships
+
+**chase_ask_overlay -- descriptive choice labels.** kChaseChoices changed from `{"Manual", "Auto", "Original"}` to:
+
+- `"Manual: one battle per field"` -- states implemented behavior
+- `"Auto: falls back to manual"` -- honest about current state until v0.15.9 implements
+- `"Original: falls back to manual"` -- honest about current state until v0.15.10 implements
+
+The descriptions get spoken on cursor change during navigation (DialogInject's existing `"<name> selected"` announce path) and on dialog open (FieldDialog's `[ASK]` hook reads them from the encoded override buffer). No new code path -- the labels carry the description.
+
+**chase_ask_overlay -- brief commit announces.** CommitChoice trimmed from verbose multi-clause messages to single short lines per Aaron's exact phrasing:
+
+- Manual -> `"Manual selected"`
+- Auto -> `"Automatic selected"`
+- Original -> `"Original selected"`
+- default -> `"Manual selected"` (silent fallback, no "unknown choice" announce)
+
+ChaseDetector::SetChaseMode(MODE_MANUAL) routing unchanged for all three options.
+
+**dialog_inject -- announceCommit param.** OpenAsk gains a sixth parameter `bool announceCommit = true`. Plumbed through OpenAskInternal and stored in s_phase2AnnounceCommit. When false, Update()'s commit branch suppresses the generic `"You chose <name>"` SAPI announce (still logs `[DLG-INJ] v0.15.8.1 commit announce suppressed by caller`). chase_ask_overlay passes false; Phase2_TestAsk passes true (Shift+F12 has no other commit announce).
+
+**Infrastructure.** PHASE2_NAME_CAP 32 -> 64 to fit descriptive labels. Cursor-announce and commit-announce msg buffers in Update() bumped 64 -> 128 so longer names + `" selected"` / `"You chose "` suffixes don't snprintf-truncate.
+
+### v0.15.8.1 BAT plan
+
+1. Deploy via `deploy.vbs`.
+2. Quit FF8 and re-launch.
+3. Load a save just before a chase trigger.
+4. Trigger the chase. Expect:
+   - Squall's "Forget it!  Let's go!" plays normally.
+   - After ~3 seconds (TRIGGER_DELAY_MS), engine ASK renders.
+   - FieldDialog [ASK] hook speaks: "Mode?. Selected: Manual: one battle per field. Auto: falls back to manual. Original: falls back to manual."
+   - Initial cursor announce: "Manual: one battle per field selected".
+   - Press **Down** -> "Auto: falls back to manual selected".
+   - Press **Down** again -> "Original: falls back to manual selected".
+   - Press **X** -> single brief "Manual selected" / "Automatic selected" / "Original selected". **NO** "You chose <name>" announce.
+5. Verify chase resumes promptly without TTS still rattling on.
+6. Verify subsequent chase battles cap at 1 per field.
+7. Send `Logs/ff8_dialog.log` and `Logs/ff8_field.log`.
+
+### Expected log signature
 
 ```
-10:12:28  opcode_ask returned 1
-10:12:28  POST ASK ... slot[+0x2B]curQ=1 slot[+0x2C]aux=0 text1=0x64EAF020 (override=0x64EAF020)
-10:12:28  v0.15.7 answer-detection armed for slot 2 (timeout 60000 ms)
-10:12:28  v0.15.7 cursor-change slot=2 curQ 255->1 announce="Manual selected"
-10:12:29  v0.15.7.1 active-state observed slot=2 t+422ms (state=0xD D2=0x04); commit gating now armed
-          ... 14 seconds of cursor changes ...
-10:12:33  v0.15.7 cursor-change slot=2 curQ 1->2 announce="Auto selected"
-10:12:34  v0.15.7 cursor-change slot=2 curQ 2->3 announce="Original selected"
-10:12:36  v0.15.7 cursor-change slot=2 curQ 3->1 announce="Manual selected"
-10:12:38  v0.15.7 cursor-change slot=2 curQ 1->2 announce="Auto selected"
-10:12:39  v0.15.7 cursor-change slot=2 curQ 2->3 announce="Original selected"
-10:12:40  v0.15.7 cursor-change slot=2 curQ 3->1 announce="Manual selected"
-10:12:41  v0.15.7 cursor-change slot=2 curQ 1->2 announce="Auto selected"
-10:12:41  v0.15.7 cursor-change slot=2 curQ 2->3 announce="Original selected"
-10:12:42  v0.15.7 commit reason=state left 0xD capturing answer=3
-10:12:42  v0.15.7 announce="You chose Original"
+[FIELD] ChaseAskOverlay: chase trigger MES detected: "Forget it!  Let's go!"; deferring ASK open by 3000 ms
+[FIELD] ChaseAskOverlay: deferred-open timer expired; opening ASK now
+[DLG-INJ] ===== OPEN-ASK TEST #N START =====
+[DLG-INJ] v0.15.8 override text: "Mode?\nManual: one battle per field\nAuto: falls back to manual\nOriginal: falls back to manual" -> ~95 bytes encoded
+[DLG-INJ] FIRING opcode_ask(...)...
+[DLG-INJ] opcode_ask returned 1
+[DLG-INJ] v0.15.7 answer-detection armed for slot 2 (timeout 60000 ms, announceCommit=0)
+[FIELD] ChaseAskOverlay: chase ASK opened via DialogInject (slot=2, 3 choices, default cursor=1)
+[DLG-INJ] v0.15.7 cursor-change slot=2 curQ 255->1 announce="Manual: one battle per field selected"
+[DLG-INJ] v0.15.7.1 active-state observed slot=2 t+~450ms (state=0xD D2=0x04); commit gating now armed
+            ... user navigates and presses X ...
+[DLG-INJ] v0.15.7 commit reason=state left 0xD capturing answer=1
+[DLG-INJ] v0.15.8.1 commit announce suppressed by caller (answer=1 name="Manual: one battle per field")
+[FIELD] ChaseAskOverlay: DialogInject::GetLastAnswer returned 1; dispatching
+[FIELD] ChaseAskOverlay: committed choice = 1 (Manual: one battle per field)
+[FIELD] ChaseAskOverlay: chase ASK closed
 ```
 
-End-to-end: dialog opens, gating arms after 422ms (matches the predicted ~450ms exactly), eight cursor changes announced cleanly, commit fires only on X press, final answer captured as 3 = Original.
+### v0.15.8.1 BAT outcomes
 
-`GetLastAnswer()` is now ready to drive v0.15.8's chase wiring.
+- **SUCCESS**: chase ASK opens, descriptions spoken on navigation, commit announces brief line, NO "You chose" announce, chase resumes promptly. Move to v0.15.9 (Auto = run-from-robot). Push v0.15.8.1 (which carries the v0.15.8 changes too since v0.15.8 was never pushed).
+- **DESCRIPTION TOO LONG**: if the engine truncates a label visually or rejects it, fall back to shorter labels with description moved to a separate per-cursor-move announce. Watch for crashes from buffer overflow in EncodeFf8 / override buffer (256 bytes) -- with 95-byte encoded text we have lots of room but worth verifying.
+- **REGRESSION**: if all three TTS announces still stack (cursor + "You chose" + verbose), check that announceCommit gate fires (look for the suppression log line) and that CommitChoice strings are the short ones.
 
-### Architectural lessons captured
+### Known-but-deferred (unchanged from v0.15.8)
 
-- **Slot state field at `+0x24` walks `0 -> 1 -> 0xD` over ~450 ms** after `opcode_ask` returns. Don't trust state checks until cursor-active state has been observed at least once.
-- **`gameObj.D2` bit for the slot is set immediately** after `opcode_ask` returns (PRE D2=0x00 -> POST D2=0x04). Same belt-and-braces gating still applies for symmetry.
-- **Cursor field is `slot+0x2B`** (current_choice_question), aux is at `slot+0x2C`. v0.15.5.1 had these crossed; v0.15.7 corrected.
-- **Engine commit signal is "state leaves 0xD"** in this BAT (not "D2 bit clear"). Both are valid, but state is the faster/cleaner signal.
+- Squall and party walking during open ASK.
+- Number-key shortcuts (removed; arrows + X only).
+- Phase2_TestAsk (Shift+F12) stays as standalone diagnostic. Aaron will NOT toggle Shift+F12 during BAT.
 
 ---
 
-## Push plan
+## v0.15.8 -- BAT-confirmed SUCCESS (NOT pushed; superseded locally by v0.15.8.1)
 
-Both v0.15.7 and v0.15.7.1 will appear as separate commits. CHANGELOG.md has both entries (v0.15.7.1 on top, v0.15.7 below it). `Utilities/push_to_github.vbs` will push the top entry (v0.15.7.1) -- since v0.15.7 was never pushed, its CHANGELOG body will be included in v0.15.7.1's commit body's chronological history block.
+For the record: v0.15.8 dialog log evidence at 11:04:52-11:05:06:
+- `[DLG-INJ] v0.15.7.1 active-state observed slot=2 t+578ms (state=0xD D2=0x04); commit gating now armed`
+- Cursor moved through Manual/Auto/Original/Manual/Auto/Original/Auto/Manual multiple times, each announce fired correctly.
+- `[DLG-INJ] v0.15.7 commit reason=state left 0xD capturing answer=1`
+- `[DLG-INJ] v0.15.7 announce="You chose Manual"`
+- Chase battles followed (Diamond Dust, Can't escape, Escaped, Selphie's "Hurry to the rendezvous!"), 1-per-field cap held.
 
-Wait -- the push utility validates `## v0.15.7.1` matches `FF8OPC_VERSION "0.15.7.1"`, both confirmed. It uses everything between `## v0.15.7.1` and the next `## v` heading as the commit message body. So v0.15.7's body will NOT be in the v0.15.7.1 commit -- it'll just be in the local CHANGELOG.md file. That's fine; the v0.15.7.1 entry's "What v0.15.7 ships" section explains what was added.
-
-If Aaron wants v0.15.7 to appear as its own commit on GitHub: would need to manually push v0.15.7 first (revert ff8_accessibility.h locally, push, restore). Not worth it -- v0.15.7.1's commit body documents the v0.15.7 design via the BAT-diagnosis section.
-
----
-
-## Next: v0.15.8 -- chase_ask_overlay wiring
-
-Wire Phase 2B + answer detection into `chase_ask_overlay::OpenAsk` as the primary chase ASK path. Replaces v0.15.3's TTS-only overlay. Inherits chase_ask_overlay's existing input gating, which solves v0.15.7.1's deferred Squall-walking limitation.
-
-### v0.15.8 design
-
-**New API in dialog_inject:**
-
-```cpp
-// Generalizes Phase2_TestAsk with caller-supplied prompt and choices.
-// Encodes the prompt + choices into the override buffer using EncodeFf8,
-// fires opcode_ask with the right firstQ/lastQ/curQ for the choice count,
-// arms answer detection, returns true if successfully opened.
-bool OpenAsk(const char* prompt,
-             const char** choices,
-             int numChoices,
-             int defaultCursor,    // 1-based, in [1, numChoices]
-             int slot);            // typically 2 to leave 0/1 for engine
-```
-
-**chase_ask_overlay rewire:**
-
-1. Replace v0.15.3's TTS-only overlay open path with `DialogInject::OpenAsk("Mode?", {"Manual", "Auto", "Original"}, 3, 1, 2)`.
-2. After OpenAsk returns true, poll `DialogInject::GetLastAnswer()` per frame (could piggyback on existing chase_ask_overlay update).
-3. When `GetLastAnswer() != -1`, treat as the chosen mode and dispatch (Manual = no auto-drive, Auto = run-from-robot, Original = chase-mod-active flag).
-4. chase_ask_overlay's existing input-gating flag (which suppresses field input during the overlay's lifetime) covers our injected ASK as a side effect -- Squall stops walking.
-5. Preserve the existing trigger logic (matches Squall's "Forget it!  Let's go!" via show_dialog hook).
-
-### Risk
-
-Medium. The biggest unknown is the input-gating coordination -- chase_ask_overlay sets some flag/state that suppresses input during its overlay; we need to verify that flag stays set while DialogInject's ASK is open and clears only after the user commits. May require adding a short hold-down period after `GetLastAnswer()` returns non--1, to avoid the gate releasing before the engine has fully closed the slot.
-
-Minor unknown: chase_ask_overlay was designed assuming TTS-only (no actual engine dialog). It might have logic like "after announcing the ASK, always proceed in N seconds" that needs deletion since we now have a real engine ASK with its own timing.
-
-### v0.15.8 BAT plan
-
-1. Trigger the chase scene in `enter1` (or wherever Squall says "Forget it!  Let's go!").
-2. Hear the chase ASK open: "Mode?. Selected: Manual. Auto. Original" + "Manual selected".
-3. Verify Squall does NOT walk during the ASK.
-4. Make a selection with arrows + X.
-5. Verify the chosen mode dispatches correctly (Manual = no auto-drive proceeds, Auto = ?, Original = ?).
-
-(Note: v0.15.9/.10 will implement Auto/Original dispatch logic. v0.15.8 just wires the ASK; selecting Auto or Original should announce "You chose X" but v0.15.8 itself won't have those modes implemented yet.)
+Wiring path is proven. v0.15.8.1 is purely UX polish on the same path.
 
 ---
 
 ## Backlog
 
-### After v0.15.8 SUCCESS
+### After v0.15.8.1 SUCCESS
 
-- **v0.15.9**: "Auto" option = run-from-robot logic.
-- **v0.15.10**: "Original" option = chase-mod-active flag gating.
+- **v0.15.9**: implement Auto = run-from-robot (X-ATM092 chase auto-flee). Update kChaseChoices[1] to "Auto: skip the chase battle" or similar.
+- **v0.15.10**: implement Original = chase-mod-active flag (vanilla chase behavior). Update kChaseChoices[2] to "Original: vanilla chase, no battle cap" or similar.
+- **v0.15.x cleanup**: remove Phase2_TestAsk + Shift+F12 hotkey + Phase 1 test once chase wiring is fully proven across multiple chase entries.
+- **v0.15.x input gating**: address Squall-walking during ASK. Approaches: (1) DirectInput proxy filter while askOpen, (2) find engine's input-block flag via disassembly.
 
 ### Standalone (any version)
 
-- **v0.15.7.2** (optional, low priority now): suppress field input during standalone Phase2_TestAsk via dinput8 proxy. Once v0.15.8 ships, the standalone test isn't user-facing -- skip.
 - X-ATM092 battle-name fix.
 - Generalized countdown-timer hook.
 - Cleanup: remove the dead `Hook_field_get_dialog_string` override branch in field_dialog.cpp now that v0.15.6.2 SUCCESS confirms post-ASK patching is the correct path.

@@ -62,6 +62,20 @@
 //            before the bit was set we'd trip the same way. Also adds the
 //            entry-state observed time to log lines for diagnostic value.
 //            Doc-only fix elsewhere: the FF8 confirm key is X, not Enter.
+// v0.15.8:   Public OpenAsk() API. Refactors Phase2_TestAsk's body into
+//            OpenAskInternal which takes a caller-supplied prompt + choice
+//            list, encoded into the override buffer with the same EncodeFf8
+//            utility. Phase2_TestAsk now calls OpenAskInternal with the
+//            hardcoded 'Mode? / Manual / Auto / Original' test buffer.
+//            New public OpenAsk() takes the same parameters and arms answer
+//            detection identically. CurQToOptionName replaced with
+//            s_phase2ChoiceNames[][32] populated by OpenAskInternal so
+//            the cursor-change announcer can speak any caller-supplied
+//            choice. ResetLastAnswer() exposed for callers that need to
+//            distinguish 'stale answer from previous ASK' from 'still
+//            waiting'. chase_ask_overlay v0.15.8 uses this to render the
+//            chase mode prompt through the engine's native dialog system
+//            (replacing v0.15.2.2's TTS-only fallback).
 
 #include "dialog_inject.h"
 #include "ff8_accessibility.h"
@@ -203,6 +217,27 @@ static bool   s_phase2SeenActive = false;
 // a clean shutdown of answer detection so we don't poll forever. The 60s
 // ceiling is generous for any conceivable user pondering time.
 static DWORD  s_phase2StartMs    = 0;
+
+// v0.15.8: caller-supplied choice names for the open ASK. Populated by
+// OpenAskInternal when the ASK is armed. Update()'s cursor-change
+// announcer reads s_phase2ChoiceNames[curQ - 1] for the spoken name and
+// s_phase2ChoiceCount to bounds-check curQ. Static-storage so the names
+// outlive the caller's stack frame; copied via strncpy at OpenAsk time
+// because some callers may pass pointers into transient memory.
+//
+// v0.15.8.1: PHASE2_NAME_CAP bumped 32 -> 64 to fit descriptive choice
+// labels (e.g. "Manual: one battle per field"). The cursor-announce msg
+// buffer in Update() is also bumped 64 -> 128 to fit "<name> selected"
+// for any name up to PHASE2_NAME_CAP.
+static const int PHASE2_MAX_CHOICES   = 8;
+static const int PHASE2_NAME_CAP      = 64;
+static char  s_phase2ChoiceNames[PHASE2_MAX_CHOICES][PHASE2_NAME_CAP] = {};
+static int   s_phase2ChoiceCount     = 0;
+// v0.15.8.1: when false, suppress Update()'s commit-branch "You chose <name>"
+// announce. Callers like chase_ask_overlay handle their own brief commit
+// announce and don't want the generic one stacking on top. Set per-call
+// in OpenAskInternal; defaults true so Phase2_TestAsk is unchanged.
+static bool  s_phase2AnnounceCommit  = true;
 static const DWORD PHASE2_TIMEOUT_MS = 60000;
 
 // ============================================================================
@@ -325,16 +360,17 @@ int GetLastAnswer() {
     return s_phase2LastAnswer;
 }
 
-// Map a curQ value (1-based, in [firstQ, lastQ]) to a human-readable name
-// for SAPI. firstQ=1=Manual, 2=Auto, 3=Original. Returns nullptr if curQ
-// is out of range so the caller can fall back to a generic "Choice N".
+// v0.15.8: Replaces the v0.15.7 hardcoded "Manual/Auto/Original" switch
+// with a lookup into s_phase2ChoiceNames, populated by OpenAskInternal
+// from caller-supplied strings. curQ is 1-based and bounded by
+// s_phase2ChoiceCount; values outside that range return nullptr so the
+// caller falls back to a generic "Choice N" announce.
 static const char* CurQToOptionName(uint8_t curQ) {
-    switch (curQ) {
-        case 1: return "Manual";
-        case 2: return "Auto";
-        case 3: return "Original";
-        default: return nullptr;
-    }
+    if (curQ < 1 || (int)curQ > s_phase2ChoiceCount) return nullptr;
+    int idx = (int)curQ - 1;
+    if (idx < 0 || idx >= PHASE2_MAX_CHOICES) return nullptr;
+    if (s_phase2ChoiceNames[idx][0] == '\0') return nullptr;
+    return s_phase2ChoiceNames[idx];
 }
 
 static uint8_t ReadSlotCurQ(int slot) {
@@ -517,10 +553,16 @@ void Update() {
         // Cursor-change announce. Skip the 0xFF sentinel (read failure or
         // pre-render) and skip values outside [firstQ, lastQ] -- the engine
         // clamps them, but we belt-and-brace check.
-        if (curQ != s_phase2LastCurQ && curQ != 0xFF && curQ >= 1 && curQ <= 3) {
+        // v0.15.8: bound check uses s_phase2ChoiceCount (set by
+        // OpenAskInternal from caller's numChoices) instead of hardcoded 3.
+        if (curQ != s_phase2LastCurQ && curQ != 0xFF
+            && curQ >= 1 && (int)curQ <= s_phase2ChoiceCount) {
             const char* name = CurQToOptionName(curQ);
             if (name != nullptr) {
-                char msg[64];
+                // v0.15.8.1: msg buffer bumped 64 -> 128 to fit
+                // descriptive choice labels (PHASE2_NAME_CAP=64) plus
+                // " selected" suffix without snprintf truncation.
+                char msg[128];
                 snprintf(msg, sizeof(msg), "%s selected", name);
                 Log::Dialog("[DLG-INJ] v0.15.7 cursor-change slot=%d curQ %u->%u announce=\"%s\"",
                             s_phase2Slot, s_phase2LastCurQ, curQ, msg);
@@ -551,15 +593,19 @@ void Update() {
             // slot at commit time -- the engine may have already cleared
             // or repurposed the slot, but we know what was selected the
             // last time the user moved the cursor.
+            // v0.15.8: bound check now uses s_phase2ChoiceCount; default
+            // fallback is 1 (the first choice, which OpenAskInternal
+            // typically assigns to the safe option).
             int answer = (int)s_phase2LastCurQ;
-            if (answer < 1 || answer > 3) {
-                // No cursor moves observed; fall back to TEST_ASK_CUR_Q
-                // default (Manual). On timeout this is the only meaningful
-                // value; on legitimate commit the user pressed X on the
-                // default choice without moving.
-                answer = TEST_ASK_CUR_Q;
+            if (answer < 1 || answer > s_phase2ChoiceCount) {
+                // No cursor moves observed; fall back to the first
+                // choice. On timeout this is the only meaningful value;
+                // on legitimate commit the user pressed X on the default
+                // choice without moving.
+                answer = 1;
                 Log::Dialog("[DLG-INJ] v0.15.7 commit reason=%s no cursor moves observed; "
-                            "defaulting answer to %d (Manual)", reason, answer);
+                            "defaulting answer to %d (%s)", reason, answer,
+                            CurQToOptionName(1) ? CurQToOptionName(1) : "Choice 1");
             } else {
                 Log::Dialog("[DLG-INJ] v0.15.7 commit reason=%s capturing answer=%d",
                             reason, answer);
@@ -567,11 +613,20 @@ void Update() {
             s_phase2LastAnswer = answer;
 
             const char* name = CurQToOptionName((uint8_t)answer);
-            if (name != nullptr && !timedOut && ScreenReader::IsAvailable()) {
-                char msg[64];
+            if (name != nullptr && !timedOut && s_phase2AnnounceCommit
+                && ScreenReader::IsAvailable()) {
+                // v0.15.8.1: msg buffer bumped 64 -> 128 to match the
+                // cursor-announce buffer above. Commit announce is gated
+                // on s_phase2AnnounceCommit so callers (chase_ask_overlay)
+                // can suppress it when they speak their own brief
+                // mode-specific commit message.
+                char msg[128];
                 snprintf(msg, sizeof(msg), "You chose %s", name);
                 Log::Dialog("[DLG-INJ] v0.15.7 announce=\"%s\"", msg);
                 ScreenReader::Speak(msg, false);
+            } else if (name != nullptr && !timedOut && !s_phase2AnnounceCommit) {
+                Log::Dialog("[DLG-INJ] v0.15.8.1 commit announce suppressed by caller "
+                            "(answer=%d name=\"%s\")", answer, name);
             }
             s_phase2Active     = false;
             s_phase2SeenActive = false;
@@ -765,42 +820,96 @@ static void AnnouncePhase2Result(int slot, int retCode) {
     }
 }
 
-void Phase2_TestAsk() {
+// ============================================================================
+// v0.15.8: OpenAskInternal -- the shared core for Phase2_TestAsk and OpenAsk.
+//
+// Encodes a caller-supplied prompt + choices into the override buffer,
+// fires opcode_ask through the same v0.15.5.x recipe, and arms answer
+// detection identically to v0.15.7's Phase2_TestAsk. Returns the opcode
+// return code: 1 on success (wait-for-answer), 5 on slot-busy, -999 on
+// crash, other on validation failure.
+//
+// Phase2_TestAsk is a thin wrapper that calls this with the hardcoded
+// 'Mode? / Manual / Auto / Original' test buffer (slot=2, defaultCursor=1).
+// The public OpenAsk() also calls this with caller-supplied parameters.
+// ============================================================================
+static int OpenAskInternal(const char* prompt,
+                           const char* const* choices,
+                           int numChoices,
+                           int defaultCursor,
+                           int slot,
+                           const char* logBanner,
+                           bool announceCommit) {
     if (!s_initialized) {
-        Log::Dialog("[DLG-INJ] Phase2_TestAsk: module not initialized; aborting.");
-        return;
+        Log::Dialog("[DLG-INJ] OpenAskInternal: module not initialized; aborting.");
+        return -1;
     }
-
     if (!FF8Addresses::IsOnField()) {
-        Log::Dialog("[DLG-INJ] Phase2_TestAsk: not in field mode (mode=%u); aborting.",
+        Log::Dialog("[DLG-INJ] OpenAskInternal: not in field mode (mode=%u); aborting.",
                     (unsigned)FF8Addresses::GetCurrentMode());
         if (ScreenReader::IsAvailable()) {
             ScreenReader::Speak("Dialog inject requires field mode.", true);
         }
-        return;
+        return -2;
     }
-
     if (FF8Addresses::opcode_ask == 0 || FF8Addresses::pWindowsArray == nullptr) {
-        Log::Dialog("[DLG-INJ] Phase2_TestAsk: addresses not resolved; aborting.");
+        Log::Dialog("[DLG-INJ] OpenAskInternal: addresses not resolved; aborting.");
         if (ScreenReader::IsAvailable()) {
             ScreenReader::Speak("Dialog inject ASK addresses missing.", true);
         }
-        return;
+        return -3;
+    }
+    if (prompt == nullptr || choices == nullptr) {
+        Log::Dialog("[DLG-INJ] OpenAskInternal: null prompt or choices; aborting.");
+        return -4;
+    }
+    if (numChoices < 1 || numChoices > PHASE2_MAX_CHOICES) {
+        Log::Dialog("[DLG-INJ] OpenAskInternal: numChoices=%d out of range [1, %d]; aborting.",
+                    numChoices, PHASE2_MAX_CHOICES);
+        return -5;
+    }
+    if (slot < 0 || slot >= 8) {
+        Log::Dialog("[DLG-INJ] OpenAskInternal: slot=%d out of range; aborting.", slot);
+        return -6;
+    }
+    if (defaultCursor < 1 || defaultCursor > numChoices) {
+        Log::Dialog("[DLG-INJ] OpenAskInternal: defaultCursor=%d out of [1, %d]; clamping to 1.",
+                    defaultCursor, numChoices);
+        defaultCursor = 1;
     }
 
     s_testCounter++;
-    Log::Dialog("[DLG-INJ] ===== PHASE 2B TEST #%d START =====", s_testCounter);
+    Log::Dialog("[DLG-INJ] ===== %s TEST #%d START =====",
+                logBanner ? logBanner : "OPEN-ASK", s_testCounter);
     Log::Dialog("[DLG-INJ] Target: opcode_ask(slot=%d) via dispatch table[0x%02X]",
-                TEST_SLOT_ASK, OPCODE_ASK_INDEX);
+                slot, OPCODE_ASK_INDEX);
     Log::Dialog("[DLG-INJ] FF8OPC_VERSION = %s", FF8OPC_VERSION);
     LogResolvedAddresses();
 
-    // v0.15.6: encode the custom prompt + 3 options into our static buffer.
-    // The FieldDialog hook on field_get_dialog_string will return this
-    // buffer instead of the natural game data when SetOverride is active.
-    const char* customText = "Mode?\nManual\nAuto\nOriginal";
-    int encodedLen = EncodeFf8(customText, s_overrideBuffer, OVERRIDE_BUFFER_SIZE);
-    Log::Dialog("[DLG-INJ] v0.15.6 override text: \"%s\" -> %d bytes encoded", customText, encodedLen);
+    // v0.15.8: build the override buffer text from prompt + choices.
+    // Format: "<prompt>\n<choice1>\n<choice2>\n...<choiceN>\0"
+    // matching the v0.15.6 hardcoded layout (Line 0 = prompt, Lines 1-N = choices).
+    char composed[256];
+    int cp = 0;
+    int promptLen = (int)strlen(prompt);
+    if (promptLen > 200) promptLen = 200;
+    memcpy(composed + cp, prompt, promptLen);
+    cp += promptLen;
+    for (int i = 0; i < numChoices; i++) {
+        if (cp >= (int)sizeof(composed) - 2) break;
+        composed[cp++] = '\n';
+        const char* ch = choices[i] ? choices[i] : "";
+        int chLen = (int)strlen(ch);
+        if (chLen > 60) chLen = 60;
+        if (cp + chLen >= (int)sizeof(composed) - 1) break;
+        memcpy(composed + cp, ch, chLen);
+        cp += chLen;
+    }
+    composed[cp] = '\0';
+
+    int encodedLen = EncodeFf8(composed, s_overrideBuffer, OVERRIDE_BUFFER_SIZE);
+    Log::Dialog("[DLG-INJ] v0.15.8 override text: \"%s\" -> %d bytes encoded",
+                composed, encodedLen);
     {
         char hex[256];
         int hp = 0;
@@ -810,10 +919,23 @@ void Phase2_TestAsk() {
         Log::Dialog("[DLG-INJ] override buffer hex: %s", hex);
     }
 
+    // v0.15.8: copy choice names into static storage for Update()'s
+    // cursor-change announcer to read. strncpy + explicit terminator
+    // because some callers may pass strings longer than PHASE2_NAME_CAP.
+    for (int i = 0; i < PHASE2_MAX_CHOICES; i++) {
+        s_phase2ChoiceNames[i][0] = '\0';
+    }
+    for (int i = 0; i < numChoices; i++) {
+        const char* ch = choices[i] ? choices[i] : "";
+        strncpy(s_phase2ChoiceNames[i], ch, PHASE2_NAME_CAP - 1);
+        s_phase2ChoiceNames[i][PHASE2_NAME_CAP - 1] = '\0';
+    }
+    s_phase2ChoiceCount = numChoices;
+
     SlotSnapshot pre = {0, 0, 0, 0};
-    bool preOk = ReadSlotSnapshot(TEST_SLOT_ASK, pre);
+    bool preOk = ReadSlotSnapshot(slot, pre);
     Log::Dialog("[DLG-INJ] PRE  ASK slot=%d trans=0x%04X vel=0x%04X state=0x%08X field16=0x%02X %s",
-                TEST_SLOT_ASK,
+                slot,
                 preOk ? (uint16_t)pre.openClose : 0xFFFFu,
                 preOk ? (uint16_t)pre.velocity  : 0xFFFFu,
                 preOk ? pre.state               : 0xFFFFFFFFu,
@@ -825,11 +947,11 @@ void Phase2_TestAsk() {
         if (ReadGameObjMasks(askMask, winMask, mesMask)) {
             Log::Dialog("[DLG-INJ] PRE  ASK gameObj.D2(ASK)=0x%02X D3(win)=0x%02X D4(MES)=0x%02X",
                         askMask, winMask, mesMask);
-            uint8_t mySlotBit = (uint8_t)(1u << TEST_SLOT_ASK);
+            uint8_t mySlotBit = (uint8_t)(1u << slot);
             if (askMask & mySlotBit) {
                 Log::Dialog("[DLG-INJ] WARNING: gameObj.D2 bit %d already set; "
                             "opcode_ask will return 5 without rendering.",
-                            TEST_SLOT_ASK);
+                            slot);
             }
         }
     }
@@ -840,20 +962,19 @@ void Phase2_TestAsk() {
     s_phantomCtx[0x174] = 0;  // shift count
     s_phantomCtx[0x175] = 1;  // bit 0 set (forces .alloc path)
 
-    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 5) * 4) = TEST_SLOT_ASK;
-    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 4) * 4) = TEST_MSG_ID_ASK;
-    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 3) * 4) = TEST_ASK_FIRST_Q;
-    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 2) * 4) = TEST_ASK_LAST_Q;
-    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 1) * 4) = TEST_ASK_CUR_Q;
-    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 0) * 4) = TEST_ASK_AUX;
+    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 5) * 4) = slot;
+    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 4) * 4) = 0;            // msg_id (unused under override)
+    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 3) * 4) = 1;            // firstQ
+    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 2) * 4) = numChoices;   // lastQ
+    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 1) * 4) = defaultCursor;// curQ
+    *(int32_t*)(s_phantomCtx + (TEST_SP_ASK - 0) * 4) = 0;            // aux
 
     Log::Dialog("[DLG-INJ] phantom ctx ASK: SP=%d at +0x%X",
                 TEST_SP_ASK, (unsigned)CTX_SP_OFFSET);
     Log::Dialog("[DLG-INJ]   ctx[+0x174]=%u ctx[+0x175]=0x%02X (ASK-pending tracking)",
                 s_phantomCtx[0x174], s_phantomCtx[0x175]);
-    Log::Dialog("[DLG-INJ]   stack: slot=%d msg_id=%d firstQ=%d lastQ=%d curQ=%d aux=%d",
-                TEST_SLOT_ASK, TEST_MSG_ID_ASK,
-                TEST_ASK_FIRST_Q, TEST_ASK_LAST_Q, TEST_ASK_CUR_Q, TEST_ASK_AUX);
+    Log::Dialog("[DLG-INJ]   stack: slot=%d msg_id=0 firstQ=1 lastQ=%d curQ=%d aux=0",
+                slot, numChoices, defaultCursor);
 
     uint32_t opcodeAskAddr = FF8Addresses::opcode_ask;
     if (FF8Addresses::pExecuteOpcodeTable != nullptr) {
@@ -888,9 +1009,9 @@ void Phase2_TestAsk() {
         __except (EXCEPTION_EXECUTE_HANDLER) {}
 
         __try {
-            sub_49fd50_fn(TEST_SLOT_ASK);
+            sub_49fd50_fn(slot);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            Log::Dialog("[DLG-INJ] WARNING: sub_49FD50(%d) raised exception", TEST_SLOT_ASK);
+            Log::Dialog("[DLG-INJ] WARNING: sub_49FD50(%d) raised exception", slot);
         }
 
         uint8_t postCurSlot = 0xFF;
@@ -898,18 +1019,13 @@ void Phase2_TestAsk() {
         __except (EXCEPTION_EXECUTE_HANDLER) {}
 
         Log::Dialog("[DLG-INJ] sub_49FD50(%d): pCurrentDialogSlot 0x%02X -> 0x%02X",
-                    TEST_SLOT_ASK, preCurSlot, postCurSlot);
+                    slot, preCurSlot, postCurSlot);
     }
 
-    // v0.15.6.1 Phase 2b: activate the post-ASK slot patch BEFORE calling
-    // opcode_ask. Inside Hook_opcode_ask (field_dialog.cpp), after s_origAsk
-    // returns and before ScanAndSpeakChoiceWindows reads slot+0x08, the
-    // override-active branch overwrites slot+0x08 with our override buffer.
-    // The TTS path then decodes our text instead of the natural field text.
-    SetOverride(TEST_SLOT_ASK, (const char*)s_overrideBuffer);
+    SetOverride(slot, (const char*)s_overrideBuffer);
     Log::Dialog("[DLG-INJ] v0.15.6.1 SetOverride active for slot %d; "
                 "opcode_ask post-call patch will swap slot[+0x08] = 0x%08X",
-                TEST_SLOT_ASK, (uint32_t)(uintptr_t)s_overrideBuffer);
+                slot, (uint32_t)(uintptr_t)s_overrideBuffer);
 
     typedef int (__cdecl *opcode_ask_t)(void*);
     opcode_ask_t opcode_ask_fn = (opcode_ask_t)(uintptr_t)opcodeAskAddr;
@@ -922,9 +1038,6 @@ void Phase2_TestAsk() {
         crashed = true;
     }
 
-    // Clear immediately after the opcode returns so other engine callers
-    // of opcode_ask (e.g. natural game scripts) don't trigger the post-ASK
-    // slot patch.
     ClearOverride();
     Log::Dialog("[DLG-INJ] v0.15.6.1 ClearOverride called");
 
@@ -933,7 +1046,7 @@ void Phase2_TestAsk() {
         if (ScreenReader::IsAvailable()) {
             ScreenReader::Speak("Dialog inject phase two B crashed. See dialog log.", true);
         }
-        return;
+        return -999;
     }
 
     Log::Dialog("[DLG-INJ] opcode_ask returned %d  "
@@ -941,9 +1054,9 @@ void Phase2_TestAsk() {
                 retCode);
 
     SlotSnapshot post = {0, 0, 0, 0};
-    bool postOk = ReadSlotSnapshot(TEST_SLOT_ASK, post);
+    bool postOk = ReadSlotSnapshot(slot, post);
     Log::Dialog("[DLG-INJ] POST ASK slot=%d trans=0x%04X vel=0x%04X state=0x%08X field16=0x%02X %s",
-                TEST_SLOT_ASK,
+                slot,
                 postOk ? (uint16_t)post.openClose : 0xFFFFu,
                 postOk ? (uint16_t)post.velocity  : 0xFFFFu,
                 postOk ? post.state               : 0xFFFFFFFFu,
@@ -959,15 +1072,10 @@ void Phase2_TestAsk() {
     }
 
     if (postOk && FF8Addresses::pWindowsArray != nullptr) {
-        uint8_t* slotBase = FF8Addresses::pWindowsArray + (TEST_SLOT_ASK * WIN_OBJ_STRIDE);
+        uint8_t* slotBase = FF8Addresses::pWindowsArray + (slot * WIN_OBJ_STRIDE);
         __try {
             uint8_t firstQ = *(uint8_t*)(slotBase + 0x29);
             uint8_t lastQ  = *(uint8_t*)(slotBase + 0x2A);
-            // v0.15.7: read curQ from 0x2B (correct) and aux from 0x2C
-            // (informational). v0.15.5.1 had these crossed in the comment
-            // and readback. The actual SWO_ASK arg map from the engine is
-            // confirmed by field_dialog.cpp's offset constants and the
-            // v0.15.6.2 BAT decoder output.
             uint8_t curQ   = *(uint8_t*)(slotBase + 0x2B);
             uint8_t aux    = *(uint8_t*)(slotBase + 0x2C);
             char* text1 = *(char**)(slotBase + 0x08);
@@ -981,36 +1089,71 @@ void Phase2_TestAsk() {
         }
     }
 
-    AnnouncePhase2Result(TEST_SLOT_ASK, retCode);
-
-    // v0.15.7: arm answer-detection polling. Update() will read slot+0x2B
-    // each frame and announce cursor changes; on commit, it captures the
-    // final answer and announces "You chose <Option>". Only arm if the
-    // opcode call succeeded -- retCode 1 (wait-for-answer) is the success
-    // path; retCode 5 means the slot was busy and our injection failed,
-    // so there's nothing to poll. retCode 3 (advance) means the slot
-    // already returned an answer somehow, also no polling needed.
+    // Arm answer detection only on the wait-for-answer success path.
     if (retCode == 1) {
         s_phase2Active     = true;
-        s_phase2Slot       = TEST_SLOT_ASK;
-        s_phase2LastCurQ   = 0xFF;   // forces first-poll announce of initial cursor
+        s_phase2Slot       = slot;
+        s_phase2LastCurQ   = 0xFF;   // forces first-poll announce
         s_phase2LastAnswer = -1;
-        s_phase2SeenActive = false;  // v0.15.7.1: cleared until state==0xD observed
+        s_phase2SeenActive = false;  // v0.15.7.1
+        s_phase2AnnounceCommit = announceCommit;  // v0.15.8.1
         s_phase2StartMs    = GetTickCount();
-        Log::Dialog("[DLG-INJ] v0.15.7 answer-detection armed for slot %d (timeout %u ms)",
-                    s_phase2Slot, PHASE2_TIMEOUT_MS);
+        Log::Dialog("[DLG-INJ] v0.15.7 answer-detection armed for slot %d (timeout %u ms, "
+                    "announceCommit=%d)",
+                    s_phase2Slot, PHASE2_TIMEOUT_MS, (int)announceCommit);
     } else {
         Log::Dialog("[DLG-INJ] v0.15.7 answer-detection NOT armed (retCode=%d != 1)",
                     retCode);
     }
 
+    return retCode;
+}
+
+void Phase2_TestAsk() {
+    // Hardcoded test buffer: 'Mode? / Manual / Auto / Original' on slot 2,
+    // default cursor on Manual. Used by Shift+F12 for the standalone
+    // diagnostic test path. Will be removed once chase wiring is fully
+    // proven (per Aaron's v0.15.8 plan: "Shift+F12 dialog test becomes
+    // redundant").
+    //
+    // v0.15.8.1: passes announceCommit=true so the diagnostic still hears
+    // "You chose <name>" -- Shift+F12 has no other commit announce, so
+    // suppressing it would leave the test with no audible commit signal.
+    static const char* kTestChoices[] = { "Manual", "Auto", "Original" };
+    int retCode = OpenAskInternal("Mode?", kTestChoices, 3, 1, 2,
+                                  "PHASE 2B", true);
+
+    AnnouncePhase2Result(2, retCode);
+
+    // Also run the 3-second slot-state diagnostic poll for visibility
+    // into the open transition, as v0.15.4-v0.15.7.1 did.
     s_pollActive    = true;
-    s_pollSlot      = TEST_SLOT_ASK;
+    s_pollSlot      = 2;
     s_pollStartMs   = GetTickCount();
     s_lastPollMs    = 0;
     s_pollSampleIdx = 0;
     Log::Dialog("[DLG-INJ] ASK slot poll active for %u ms at %u ms cadence.",
                 POLL_DURATION_MS, POLL_INTERVAL_MS);
+}
+
+// ============================================================================
+// v0.15.8: public OpenAsk + ResetLastAnswer
+// v0.15.8.1: announceCommit param plumbs through to OpenAskInternal
+// ============================================================================
+bool OpenAsk(const char* prompt,
+             const char* const* choices,
+             int numChoices,
+             int defaultCursor,
+             int slot,
+             bool announceCommit) {
+    int retCode = OpenAskInternal(prompt, choices, numChoices, defaultCursor,
+                                  slot, "OPEN-ASK", announceCommit);
+    return (retCode == 1);
+}
+
+void ResetLastAnswer() {
+    s_phase2LastAnswer = -1;
+    Log::Dialog("[DLG-INJ] v0.15.8 ResetLastAnswer called");
 }
 
 }  // namespace DialogInject
