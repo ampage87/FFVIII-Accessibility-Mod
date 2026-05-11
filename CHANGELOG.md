@@ -4,6 +4,1485 @@ Newest on top. Each entry begins with a `## vMAJOR.MINOR.BUILD` heading followed
 
 The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_accessibility.h`. The push utility refuses to push if they don't.
 
+## v0.15.9.2.15
+
+Use INF gateways as the chase-drive crossing target. v0.15.9.2.14's trigger-line crossing detection works, but the SETLINE entities on domt2_1 are Event Triggers (kani battle calls), not screen boundaries. The actual screen-transition exit is the INF gateway, which the engine already parses but the auto-pilot wasn't using.
+
+### v0.15.9.2.14 BAT diagnosis
+
+Field log on domt2_1 at 10:44:09:
+
+```
+ChaseAutoPilot: fallback config built for field='domt2_1' mode=TARGET
+                tgt=(276,-727) walk=0 running
+                (cluster-center fallback, no trigger line found)
+[chase-drive] STARTED tgt=(276,-727) ... trigIdx=-1
+```
+
+`GetTriggerLineNearestCluster` returned false. Earlier in the same log:
+
+```
+[fieldload] lineType assigned: 2 captured, 2 mapped
+            (camPan=0 screenBd=0 event=2 interact=0 unknown=0)
+ent0 cat=1 type=Event Trigger sym='squall' param=-1
+ent1 cat=1 type=Event Trigger sym='zell' param=-1
+```
+
+Both captured Line entities are typed Event Trigger — v0.15.9.2.14's filter (`SCREEN_BOUND` or `UNKNOWN`) correctly rejected them. They're battle-summon triggers, not screen transitions.
+
+But the INF parser already found the right thing:
+
+```
+[INF-GW] gw[0] line=(-497,-3414)->(311,-3414) center=(-93,-3414)
+         destId=321 dest='bgmon_5'
+[INF-GW] gw[1] line=(482,1825)->(118,1351) center=(300,1588)
+         destId=328 dest='bgryo1_8'
+INF parsed: 2 active gateways for 'domt2_1'
+```
+
+gw[0] is the south exit. gw[1] is the entry-back. Aaron's instruction: *"Let's make sure we're actually targeting the exit gateway and its trigger line."*
+
+### The fix
+
+**1. Preserve gateway endpoints.** `FieldArchive::GatewayInfo` gains `lineX1, lineY1, lineX2, lineY2`. `LoadINFGateways` already reads them off the INF — just store them now.
+
+**2. New public API `GetGatewayNearestCluster`.** Picks the gateway whose direction-from-player aligns with the player→cluster direction (positive dot product). Direction-aligned rather than nearest-to-cluster because the entry-back gateway can be geometrically closer (on domt2_1: gw[1] center distance from cluster is ~2316, gw[0] is ~2711). The dot product correctly discriminates:
+
+```
+player (520,1391) -> cluster (276,-728): direction (-244, -2119)
+player -> gw[0] (-93,-3414):              direction (-613, -4805)
+  dot = (-244)(-613) + (-2119)(-4805) = +10,331,967    SELECTED
+player -> gw[1] (300,1588):                direction (-220, +197)
+  dot = (-244)(-220) + (-2119)(+197)  =    -363,763    rejected
+```
+
+**3. Unified crossing-line state.** New `s_driveCrossLineX1/Y1/X2/Y2` and `s_driveCrossLineActive` in field_navigation.cpp. Both trigger-line and gateway paths write the line endpoints here. `UpdateAutoDrive`'s crossing-check block reads from these state vars for chase-drive (decoupled from `s_capturedLines`).
+
+**4. `StartChaseDrive` signature extended:**
+
+```cpp
+bool StartChaseDrive(int32_t targetX, int32_t targetY,
+                     int triggerLineIdx,
+                     int32_t crossLineX1, int32_t crossLineY1,
+                     int32_t crossLineX2, int32_t crossLineY2,
+                     bool walk);
+```
+
+The two crossing-line sources are mutually exclusive — caller passes either a trigger index (`triggerLineIdx >= 0`) or gateway endpoints (`crossLineX1/Y1/X2/Y2` non-zero), not both.
+
+**5. Three-tier fallback in `BuildFallbackConfig`:**
+
+```cpp
+int32_t gwX1, gwY1, gwX2, gwY2;
+if (FieldNavigation::GetGatewayNearestCluster(&tgtX, &tgtY, &gwX1, &gwY1, &gwX2, &gwY2)) {
+    // Tier 1: INF gateway -- the engine's actual screen-transition exit.
+    s_fallbackGwLineX1 = gwX1; /* etc. */
+} else if (FieldNavigation::GetTriggerLineNearestCluster(&tgtX, &tgtY, &trigIdx)) {
+    // Tier 2: SETLINE SCREEN_BOUND or UNKNOWN line.
+    s_fallbackTriggerLineIdx = trigIdx;
+} else if (FieldNavigation::GetLargestClusterCenter(&tgtX, &tgtY)) {
+    // Tier 3: plain cluster center (point-distance arrival).
+}
+```
+
+Explicit per-field configs (`domt5_1`) keep their point-target behavior — only the fallback path uses crossing detection.
+
+### Files changed
+
+- `src/field_archive.h` — GatewayInfo gains line endpoints.
+- `src/field_archive.cpp` — LoadINFGateways stores them.
+- `src/field_navigation.h` — new API; StartChaseDrive signature.
+- `src/field_navigation.cpp` — GetGatewayNearestCluster impl; new state vars.
+- `src/field_nav_directiondrive.inl` — StartChaseDrive crossing setup.
+- `src/field_nav_autodrive.inl` — crossing-check reads s_driveCrossLine* for chase-drive.
+- `src/chase_auto_pilot.cpp` — BuildFallbackConfig three-tier; Engage passthrough.
+- `src/ff8_accessibility.h` — version `0.15.9.2.15`.
+- `CHANGELOG.md` — this entry.
+
+### Risk
+
+Medium-high. Seven files across multiple subsystems, one struct field-addition, one API signature change. The existing F9 trigger-line crossing path is preserved: the `!s_chaseDriveActive` branch in UpdateAutoDrive still reads `s_capturedLines[trigCrossIdx]` exactly as before, only chase-drive switched to the unified state vars. The struct field addition is at the end of `GatewayInfo` and shouldn't break ABI for any existing reader.
+
+### Predicted v0.15.9.2.15 BAT outcomes
+
+**SUCCESS** — On domt2_1, log shows:
+```
+GetGatewayNearestCluster matched cluster(276,-728) player=(520,1391)
+  -> gateway[0] center=(-93,-3414) line=(-497,-3414)->(311,-3414)
+  destFieldId=321 score=10331967
+fallback config built ... INF-GATEWAY line(-497,-3414)->(311,-3414)
+[chase-drive] gateway crossing line (-497,-3414)->(311,-3414) crossStart=...
+[chase-drive] STARTED ... crossLine=yes
+```
+Party walks south through the corridor, crosses the gateway line, `Arrived.` fires from crossing detection, field transitions to `bgmon_5`. Subsequent chase fields work the same way.
+
+**PARTIAL** — Direction heuristic picks the wrong gateway on a field with three or more gateways where the player→cluster vector doesn't clearly favor one exit. v0.15.9.2.16 would refine the heuristic (e.g., require not just positive dot product but also farthest-from-spawn).
+
+**FAIL** — INF gateways missing on some chase fields, causing fall-through to trigger lines / cluster center on those. Each such field then needs an explicit per-field config or a script-based exit detector.
+
+## v0.15.9.2.14
+
+Fix the fundamental design: detect when the player physically **crosses** the trigger line, instead of stopping in front of it. Aaron pointed out the obvious: "As these are trigger lines to move between fields or trigger animations, we need to actually cross them not stop in front of them."
+
+### v0.15.9.2.13 BAT result
+
+Field log on domt2_1:
+
+```
+22:39:32 wp 14 reached (dist=56), wp 15 reached (dist=49), wp 16 reached (dist=40)
+22:39:32 stopped: Arrived.
+```
+
+Tighter arrive distance (60) got the player one more waypoint than v0.15.9.2.12 (wp 16 vs wp 15). But still "Arrived" while ~300 units from target. The arrive-distance approach is geometrically wrong for screen-transition triggers — FF8 only fires transitions when the player physically crosses the line, not when they approach it.
+
+### The fix
+
+F9 auto-drive already handles trigger-line targets correctly: cross-product sign-flip detection plus a heading offset that aims 300 units past the line center so player momentum carries them through. Chase-drive was explicitly disabling that logic. This change wires it in.
+
+**1. New public API: `FieldNavigation::GetTriggerLineNearestCluster()`**
+
+Finds the SETLINE-defined trigger line whose center is closest to the largest dead-end cluster. The cluster heuristic finds the "deepest pocket" of the walkmesh; the screen-transition trigger lives at the boundary of that pocket. Combining the two gives "the trigger line you want."
+
+**2. `StartChaseDrive` signature extended:**
+
+```cpp
+bool StartChaseDrive(int32_t targetX, int32_t targetY, int triggerLineIdx, bool walk);
+```
+
+When `triggerLineIdx >= 0`:
+- `s_driveTrigTarget = true` (enables crossing detection)
+- `s_driveTrigCrossStart` computed from initial player position
+- `s_driveSkipTrigIdx = triggerLineIdx` (exempts target line from A* avoidance)
+
+When `triggerLineIdx == -1`, falls back to point-target arrival (existing behavior, used by explicit per-field configs like domt5_1).
+
+**3. `UpdateAutoDrive` crossing-check extended:**
+
+The existing block was gated on `ei <= -200` (F9's trigger-line entity encoding). Now also fires for chase-drive by reading the trigger index from `s_driveSkipTrigIdx`:
+
+```cpp
+int trigCrossIdx = -1;
+if (s_driveTrigTarget) {
+    if (s_chaseDriveActive)  trigCrossIdx = s_driveSkipTrigIdx;
+    else if (ei <= -200)     trigCrossIdx = -(ei + 200);
+}
+if (trigCrossIdx >= 0 && trigCrossIdx < s_capturedLineCount) {
+    // ... existing cross-product check + 300-unit heading offset ...
+}
+```
+
+**4. `BuildFallbackConfig` prefers trigger lines:**
+
+```cpp
+int trigIdx = -1;
+bool gotTarget = FieldNavigation::GetTriggerLineNearestCluster(&tgtX, &tgtY, &trigIdx);
+if (!gotTarget) {
+    if (!FieldNavigation::GetLargestClusterCenter(&tgtX, &tgtY)) return nullptr;
+    trigIdx = -1;  // no trigger; cluster-center fallback
+}
+s_fallbackTriggerLineIdx = trigIdx;
+```
+
+Explicit per-field configs (`domt5_1`) keep point-target behavior — only the fallback path passes a trigger index.
+
+### Files changed
+
+- `src/field_navigation.h` — new API declaration; `StartChaseDrive` signature change.
+- `src/field_navigation.cpp` — `GetTriggerLineNearestCluster` implementation.
+- `src/field_nav_directiondrive.inl` — `StartChaseDrive` signature + trigger setup block.
+- `src/field_nav_autodrive.inl` — crossing-check gate extended to chase-drive.
+- `src/chase_auto_pilot.cpp` — `BuildFallbackConfig` trigger lookup, `Engage` passes trigger index.
+- `src/ff8_accessibility.h` — version bump.
+- `CHANGELOG.md` — this entry.
+
+### Risk
+
+Medium. Five files changed, API signature change, two compilation units (field_navigation.cpp and chase_auto_pilot.cpp). Existing F9 trigger-line logic is unmodified — only the gate condition was extended. The chase-drive point-target path is preserved for explicit configs.
+
+### Predicted v0.15.9.2.14 BAT outcomes
+
+**SUCCESS** — On domt2_1, log shows `TRIGGER-LINE idx=N` in the fallback config line. Chase-drive aims through the trigger center (300 units past), player crosses the line, `Arrived.` fires from crossing detection (not arrive distance), domt2_1 transitions to the next chase field. Subsequent fallback chase fields work the same way. Chase eventually completes naturally.
+
+**PARTIAL** — Trigger line found but its center isn't actually the screen-transition line (the cluster has multiple nearby lines and we picked the wrong one). Drive crosses wrong line and stays on domt2_1. v0.15.9.2.15 then refines line selection (filter by `lineType=SCREEN_BOUND` only, or prefer lines farther from spawn).
+
+**FAIL** — Trigger-line crossing never fires (cross-product never flips sign). Can happen if the trigger line's orientation makes the 300-unit offset point project onto the same side as spawn. v0.15.9.2.15 either inverts `crossStart` sign for chase-drive, or picks the trigger endpoint farthest from spawn as the offset target.
+
+## v0.15.9.2.13
+
+Tighten chase-drive arrive distance from 300 to 60 units so the auto-pilot actually walks the player onto the screen-transition trigger instead of stopping 250–300 units short. Builds on v0.15.9.2.12 — the walk-vs-run fix worked, running footsteps audible on domt2_1.
+
+### v0.15.9.2.12 BAT result
+
+Field log on domt2_1 showed the auto-pilot mechanically working but stopping short:
+
+```
+22:08:00 STARTED tgt=(276,-727) player=(520,1391) waypoints=18
+22:08:01 wp 0-1 reached
+22:08:02 wp 2-7 reached
+22:08:03 wp 8-12 reached (player at (683,8))
+22:08:05 velocity-stuck advance from wp 13 to wp 14 (v0.15.9.2.9 fix firing correctly)
+22:08:06 wp 14 reached (dist=56), wp 15 reached (dist=49), Arrived.
+22:08:06 DISENGAGED (chase-drive completed)
+```
+
+Aaron reported: "after a few seconds the party either quits moving or gets stuck and does not proceed." Total auto-pilot run was 6 seconds. The party reached wp 14 and 15, then "Arrived" while still ~300 units from the actual target `(276, -727)`.
+
+### Diagnosis
+
+The funnel pathing data tells the story:
+
+```
+portal 17/19: L=(419,-531) R=(717,-643)  tri 40->39
+portal 18/19: L=(276,-727) R=(276,-727)  tri 39->-1
+```
+
+Portal 18 is **degenerate** — both endpoints at exactly `(276, -727)` — which means tri 39 (the goal triangle) has only one vertex/edge on the world boundary, and it's at that point. That's where the screen-transition trigger line lives. The cluster center heuristic landed on the right place.
+
+But `s_driveArriveDist = DRIVE_ARRIVE_DIST_DEFAULT` is **300 units**. That's appropriate for F9 navigation to entities (NPCs have talk radii, save points have walk-into zones, etc.), but it's way too loose for chase-drive where the target IS the trigger line. The auto-pilot considered the player "close enough" 300 units before reaching the trigger, and disengaged.
+
+### Fix
+
+One line in `StartChaseDrive`:
+
+```cpp
+s_driveArriveDist = 60.0f;  // was: DRIVE_ARRIVE_DIST_DEFAULT (300)
+```
+
+60 matches `FUNNEL_ARRIVE_DIST`, the per-waypoint advance threshold. The player will keep driving through wp 16, 17 and onto the trigger itself.
+
+### Safety nets
+
+If 60 turns out to be unreachable (final waypoint camera-unreachable, geometry mismatch, etc.):
+
+- **v0.15.9.2.9 velocity-stuck advance** fires when the player stops moving for 80 ticks. It already saved us at wp 13 in the v0.15.9.2.12 BAT.
+- **v0.15.9.2.11 completion marker** ensures we don't loop — if the auto-pilot can't reach 60, it eventually times out and marks the field done.
+
+### Files changed
+
+- `src/field_nav_directiondrive.inl` — `s_driveArriveDist = 60.0f` in `StartChaseDrive` + updated comment.
+- `src/ff8_accessibility.h` — version bump.
+- `CHANGELOG.md` — this entry.
+
+### Risk
+
+Low. One constant changed in the chase-drive code path only. F9 path-finding's arrive distance is untouched. Direction-drive (no path-finding) is untouched. If 60 is too tight, v0.15.9.2.14 picks something between 60 and 300.
+
+### Predicted v0.15.9.2.13 BAT outcomes
+
+**SUCCESS** — On domt2_1 the party reaches `(276,-727)` or very close, crosses the screen-transition trigger, field transitions to the next chase field. v0.15.9.2.11's path-changed marker cleanup re-engages auto-pilot on the new field. Chase continues with running footsteps audible throughout.
+
+**PARTIAL** — Party reaches the trigger area but doesn't cross. Trigger geometry mismatch, or the last waypoint is camera-unreachable AND the trigger requires precise positioning. v0.15.9.2.14 then either projects the target past the cluster, or uses F9-style trigger-line crossing detection.
+
+**FAIL** — 60 is too tight, auto-pilot enters a perma-stuck loop on chase fields. v0.15.9.2.14 picks a middle value like 150.
+
+## v0.15.9.2.12
+
+Flip the fallback walk default from `true` to `false` (running). v0.15.9.2.11 BAT on domt2_1 (Hideout 1, the field after the west trail) was a mechanical success in the log — ASK gate held, completion marker behaved correctly, chase-drive computed 18 waypoints, party walked through wp 0–12, v0.15.9.2.9's velocity-stuck advance fired correctly on wp 13, party reached wp 14–15 and Arrived, no engagement loop. But Aaron heard no footsteps on domt2_1 and clarified what he wanted:
+
+> "The party should be running on this field not walking. On the west trail I did hear footsteps clearly."
+
+### Diagnosis
+
+The fallback config was hardcoded to `walk=true` based on a misreading of Aaron's AI rule #1. That rule applies **only** to domt5_1 (running shakes the cliff path, party gets caught). Other chase fields should default to running — the chase as a whole is Squall fleeing X-ATM092 at top speed.
+
+The walking modifier may also be why footsteps weren't audible on domt2_1:
+
+- Walking footsteps are quieter than running.
+- The W keyboard injection has `KEYEVENTF_EXTENDEDKEY` set unconditionally in `InjectKey` — correct for arrow keys (E0 extended), wrong for W (scancode 0x11, regular alphanumeric). The engine may discard or misinterpret the malformed event, producing a half-state that's neither pure walking nor pure running.
+- The chase scene script on domt2_1 may mask walking audio.
+
+We'll find out which on the next BAT.
+
+### Fix
+
+One line, plus comment + log message update:
+
+```cpp
+s_fallbackConfig.walk = false;  // was: true
+```
+
+domt5_1's explicit config keeps `walk=true` as before. domt4_1's explicit config keeps `walk=false`. Only fallback fields (the ones we don't have an explicit config for) get the new default.
+
+### Files changed
+
+- `src/chase_auto_pilot.cpp` — ~8 lines: `walk=false` in `BuildFallbackConfig`, updated comment, updated log line.
+- `src/ff8_accessibility.h` — version bump.
+- `CHANGELOG.md` — this entry.
+
+### Risk
+
+Very low. Only the fallback default changes; the explicit per-field configs are untouched. If walking turns out to be needed on some other fallback field, we add an explicit config for that field.
+
+### Predicted v0.15.9.2.12 BAT outcomes
+
+**SUCCESS** — Aaron hears running footsteps on domt2_1 and any other fallback chase fields. domt5_1 still walks audibly as before (explicit config unchanged).
+
+**PARTIAL** — footsteps audible on some fallback fields, still silent on domt2_1 specifically. Means the field has a unique audio quirk separate from the walk modifier. Investigate per-field audio configuration.
+
+**FAIL** — footsteps still silent on domt2_1 with `walk=false`. Likely the `InjectKey` `KEYEVENTF_EXTENDEDKEY` bug or some deeper cause. Then v0.15.9.2.13 fixes `InjectKey` to only set the extended flag for arrow scancodes.
+
+## v0.15.9.2.11
+
+Stop the engage/arrive/disengage re-engagement loop on chase fields where the fallback target lands inside the player's spawn arrival radius. Builds on v0.15.9.2.10's ASK gate — which worked correctly: Aaron heard footsteps on the west trail (domt5_1), no footsteps elsewhere.
+
+### The loop
+
+Field log on domt2_1 showed hundreds of identical lines per second:
+
+```
+[chase-drive] STARTED tgt=(276,-727) player=(444,-500) startDist=282
+ENGAGED on domt2_1
+[drive] stopped: Arrived.
+DISENGAGED (chase-drive completed)
+fallback config built for field='domt2_1'
+[chase-drive] STARTED ...      ← repeats at ~60Hz
+```
+
+The player spawned at `(444, -500)` on domt2_1. The fallback target was the largest dead-end cluster at `(276, -727)` — 282 units away, which is inside `DRIVE_ARRIVE_DIST_DEFAULT`. Chase-drive engaged, immediately called `Arrived.` on its first tick, disengaged with reason "chase-drive completed (target reached or stuck)". Next `Update()` saw `s_engaged=false` and rebuilt the fallback, engaged, arrived, disengaged again. **The fake gamepad was being installed and uninstalled hundreds of times per second.** The input pipeline thrash probably explains why no footsteps were audible on any of the fallback-target chase fields — the engine never had time to settle into a steady input state.
+
+### Fix
+
+Add a per-field completion marker:
+
+```cpp
+static char s_completedField[32] = {0};
+```
+
+In `Disengage()`, when the reason contains `"chase-drive completed"`, copy `s_engagedField` into `s_completedField` before clearing engaged state:
+
+```cpp
+if (reason && std::strstr(reason, "chase-drive completed") != nullptr &&
+    s_engagedField[0] != '\0') {
+    std::strncpy(s_completedField, s_engagedField, sizeof(s_completedField) - 1);
+    Log::Field("ChaseAutoPilot: field '%s' marked auto-pilot complete; "
+               "won't re-engage until field changes", s_completedField);
+}
+```
+
+In `Update()`, after resolving the debounced field name:
+
+```cpp
+// Field changed since last completion? Clear the marker.
+if (s_completedField[0] != '\0' && std::strcmp(s_completedField, fieldName) != 0) {
+    s_completedField[0] = '\0';
+}
+
+// If we've already completed auto-pilot on this field, refuse to re-engage.
+if (s_completedField[0] != '\0' && std::strcmp(s_completedField, fieldName) == 0) {
+    return;
+}
+```
+
+Player can still drive manually if there's more ground to cover (the fallback target was the largest dead-end cluster, which may or may not be the actual screen-transition trigger). The marker only suppresses auto-pilot retries.
+
+### Files changed
+
+- `src/chase_auto_pilot.cpp` — `s_completedField` state, Disengage marker set, Update marker check + clear-on-change, Initialize reset.
+- `src/ff8_accessibility.h` — version bump.
+- `CHANGELOG.md` — this entry.
+
+### Risk
+
+Low. The marker is purely additive — doesn't change any existing engagement path. If the marker ever gets stuck (a clear-on-field-change bug), the player can switch to manual mode and back to auto via the in-game UI to reset.
+
+### Predicted v0.15.9.2.11 BAT outcomes
+
+**SUCCESS** — ASK gate still works. On domt5_1 chase-drive runs with footsteps as before. On domt2_1 (and other fallback fields) engagement happens ONCE per field visit, then either (a) chase-drive runs to a far target and we hear footsteps, or (b) chase-drive arrives instantly because the target is too close, marker is set, no loop. Log shows ONE "fallback config built" per field visit instead of hundreds.
+
+The direction-drive issue on domt4_1 (no footsteps despite engagement) is a **separate** open question for v0.15.9.2.12. That probably needs the v0.15.9.1.1 keepalive pulse to be examined — it may not be producing fresh-enough KEYDOWN events for the engine on this field. Or possibly the engine on domt4_1 specifically ignores fake-gamepad analog values during the scripted chase intro tail.
+
+**PARTIAL** — marker prevents the loop but the player is genuinely stuck at each fallback field's close target. v0.15.9.2.12 then revisits the fallback heuristic to pick targets farther from spawn or use field-specific configs.
+
+**FAIL** — marker doesn't clear properly on field change, auto-pilot misses subsequent chase fields after the first completion. Quick fix: switch chase mode to Manual and back to Auto via the in-game UI to reset all state.
+
+## v0.15.9.2.10
+
+Re-add the chase ASK gate to auto-pilot engagement. Fixes the regression Aaron reported on the v0.15.9.2.9 BAT: "unable to move" on domt4_1 with no footsteps audible.
+
+### What the BAT showed
+
+Auto-pilot engaged on field-entry to domt4_1, immediately installed the fake gamepad and held `lX=-1000 lY=0` (run west). Over 14 seconds the position log showed Squall moving 320 units west to (-2150, 4080), then stuck near the west exit. But Aaron heard **no footsteps the entire BAT**. The position changes weren't from auto-pilot input — they were the chase script's own scripted entity motion during the intro. The auto-pilot's input wasn't reaching the engine, AND it wedged the input pipeline so that after the ASK closed Aaron couldn't move via any path (auto-pilot's stale held arrows + analog confused the engine's state).
+
+### Why this regressed
+
+v0.15.9.1 dropped the `!IsAskActive()` gate based on the theory that "FF8 blocks input during the ASK regardless, so the gate adds no protection but delays engagement." That ignored the **window between chase activation and ASK open**:
+
+- T+0: field load.
+- T+2s: `chase_detector` debounce settles. `IsInChaseField()` returns true.
+- T+2s–T+12s: scripted intro plays. Squall's chase-trigger MES line plays.
+- T+5s after MES: chase ASK deferred-opens.
+
+So there's roughly a 5–12 second window where `inChaseField` is true and `IsAskActive` is false but the engine is mid-scripted-intro. With v0.15.9.1's looser gate, auto-pilot engaged immediately at T+2s and held input through that entire window plus the ASK itself.
+
+Aaron's clarification:
+
+> "auto-drive for the chase scene should not start or be affecting navigation until the ASK dialog fires and an option is selected."
+
+Just `!IsAskActive()` isn't enough — the gate needs to wait for the ASK to have **been seen open and then closed**, which is the precise signal that the scripted intro is done and the player has handed control to the auto-pilot.
+
+### What ships
+
+A two-step state machine in `chase_auto_pilot.cpp`:
+
+```cpp
+static bool s_prevChaseActive  = false;  // tracks IsChaseActive transitions
+static bool s_askWasActive     = false;  // ASK has been seen open
+static bool s_askAnswered      = false;  // ASK was open and is now closed
+```
+
+In `Update()`, before the existing engagement gate:
+
+```cpp
+bool chaseActive = ChaseDetector::IsChaseActive();
+if (chaseActive && !s_prevChaseActive) {
+    s_askWasActive = false;
+    s_askAnswered  = false;
+} else if (!chaseActive && s_prevChaseActive) {
+    s_askWasActive = false;
+    s_askAnswered  = false;
+}
+s_prevChaseActive = chaseActive;
+
+if (chaseActive) {
+    bool askActiveNow = ChaseAskOverlay::IsAskActive();
+    if (askActiveNow) {
+        s_askWasActive = true;
+    } else if (s_askWasActive && !s_askAnswered) {
+        s_askAnswered = true;
+    }
+}
+
+bool wantEngage = inChaseField && autoMode && onField && s_askAnswered;
+```
+
+Both flags reset on chase-activation transitions, so a new chase session re-arms the gate. The chase-end → new-chase cycle works correctly even if the previous chase didn't complete normally.
+
+### What this means for the flow on domt4_1
+
+1. Field load. `chase_detector` debounces.
+2. Debounce settles. `IsInChaseField` becomes true. `s_askAnswered` is false.
+3. Auto-pilot logs `chase activated, waiting for ASK to fire and be answered before engaging`. **Does not** install the fake gamepad.
+4. Squall's chase-trigger MES line plays. ASK deferred-opens.
+5. Auto-pilot logs `chase ASK observed open (auto-pilot stays disengaged)`.
+6. Aaron picks Auto.
+7. ASK closes. Auto-pilot logs `chase ASK answered, engagement gate is now open`.
+8. Next tick: `wantEngage` becomes true. Auto-pilot calls `StartDirectionDrive(-1, 0, false)`. Fake gamepad installed for the first time. Engine sees fresh first-time input.
+
+### Files changed
+
+- `src/chase_auto_pilot.cpp` — include `chase_ask_overlay.h`, three state flags, state machine at top of `Update()`, 4th gate condition, new reason string in disengage.
+- `src/ff8_accessibility.h` — version bump.
+- `CHANGELOG.md` — this entry.
+
+### Risk
+
+Low. The state machine is purely additive — it adds a gate but doesn't change any existing engagement or refresh path. If the chase activates without an ASK firing for some reason (unlikely — the ASK is integral to chase-mode dispatch), auto-pilot stays disengaged for that session and the player drives manually, same as if they'd picked Manual.
+
+### Predicted v0.15.9.2.10 BAT outcomes
+
+**SUCCESS** — ASK fires normally on domt4_1, Aaron picks Auto, auto-pilot engages cleanly. Footsteps audible. Party runs west. May still encounter the camera-axis issue near the west exit (player needs NW, direction-drive only pushes W) — if so, that's a separate fix for v0.15.9.2.11 (likely switching domt4_1 to MODE_TARGET aimed at the west exit trigger `(-2290, 4337)`).
+
+**PARTIAL** — ASK gate works (logs show `engagement gate is now open` after Aaron picks Auto) but party still doesn't move audibly after engagement. Means there's a deeper issue with direction-drive on domt4_1 beyond just the timing of when the fake gamepad installs.
+
+**FAIL** — ASK never fires or never closes (game state bug); auto-pilot never engages. Recovery: switch chase mode to Manual via in-game UI, then back to Auto, which should re-trigger the ASK on the next chase activation.
+
+## v0.15.9.2.9
+
+Two fixes. The collision-push hypothesis is refuted; input injection works; the wp-13 stuck is now a known bug in the no-progress detection structure, and v0.15.9.2.9 patches it.
+
+### v0.15.9.2.8 BAT result: kani is dormant on domt2_1
+
+The kani-position diagnostic worked. On domt2_1:
+
+```
+20:18:04 pos=(586,1102) kani=(814,-875) kdist=61903
+20:18:05 pos=(545,700)  kani=(814,-875) kdist=39910
+20:18:06 pos=(683,8)    kani=(814,-875) kdist=12471
+... 27 seconds later, every line: kani=(814,-875) ...
+```
+
+The kani's runtime position was bit-for-bit constant at (814, -875) for the entire 27-second BAT. Squall moved 1,383 units south from (520, 1391) through (683, 8) while the kani sat motionless 1,990+ units away. **Squall walked under his own power, not via collision-push.** On domt2_1 specifically, the kani SYM entry exists but the entity isn't an active AI agent (matches v0.15.0's finding that `battleyarou` is the chase-active entity on this and several other fields, not `kani`).
+
+This refutes the collision-push hypothesis for domt2_1. Earlier chase fields (domt4_1, domt3_2, domt5_1) might still have an active kani contributing to motion — we'd need separate kani logs to be sure — but at minimum, **the auto-pilot's analog/keyboard input is doing real work on at least one chase field**, so v0.15.9.2.5's successful west-trail run wasn't *only* kani push either.
+
+Also shipped a cosmetic bug: the `kdist` values in the log were inflated about 14×. Real distance from (683, 8) to (814, -875) is sqrt(131² + 883²) ≈ 892, log showed 12471. Newton's method starting from `x = v` doesn't converge in 6 iterations for large squared values. Fixed below.
+
+### What went wrong with v0.15.9.2.5's advance-on-stuck
+
+v0.15.9.2.8 BAT also confirmed: ZERO `no-progress stuck` or `chase-drive: skipping wp` log lines appeared during the 27-second wp-13 stall on domt2_1. v0.15.9.2.5's mechanism isn't firing. Reading `field_nav_autodrive.inl` shows why — the no-progress check (and v0.15.9.2.5's chase-drive wp advance inside it) is structurally nested:
+
+```cpp
+if (s_driveStuckTicks >= DRIVE_STUCK_THRESH && s_driveTotalTicks >= 60) {
+    float stuckDist = sqrtf(sdx*sdx + sdy*sdy);
+    if (stuckDist < DRIVE_STUCK_MIN_DIST) {
+        // Player hasn't moved enough — trigger recovery.
+        // (stuckTicks stays >= thresh so the recovery block below fires)
+    } else {
+        // Player moved — check no-progress
+        if (closed < DRIVE_PROGRESS_MIN) {
+            s_driveNoProgressCount++;
+            if (s_driveNoProgressCount >= DRIVE_NO_PROGRESS_MAX) {
+                // ... v0.15.9.2.5's chase-drive wp advance is HERE ...
+            }
+        }
+    }
+}
+// Recovery block (gated off for chase-drive per v0.15.9.2.2 Fix B):
+else if (s_driveStuckTicks >= DRIVE_STUCK_THRESH && !s_chaseDriveActive) { ... }
+```
+
+v0.15.9.2.5 fixed the **oscillation-stuck** case (player moving but not making progress toward target). On wp 13 on domt2_1, the player isn't moving AT ALL (`moveDist=0` for 27 seconds), so `stuckDist < DRIVE_STUCK_MIN_DIST` is true, the if-branch is taken, the no-progress check never runs, and v0.15.9.2.5's advance never fires. Meanwhile the regular recovery branch is also gated off for chase-drive. **Velocity-stuck on chase-drive was completely unhandled** — the party hangs forever.
+
+### What ships
+
+**Fix 1: Chase-drive velocity-stuck advance** in `field_nav_autodrive.inl`. Add the chase-drive wp advance inside the `if (stuckDist < DRIVE_STUCK_MIN_DIST)` branch, parallel to v0.15.9.2.5's no-progress advance:
+
+```cpp
+if (stuckDist < DRIVE_STUCK_MIN_DIST) {
+    // Player hasn't moved enough — trigger recovery.
+    // ...
+    if (s_chaseDriveActive && s_waypointIdx < s_waypointCount - 1) {
+        Log::Field("FieldNavigation: [drive] chase-drive: velocity-stuck "
+                   "(stuckDist=%.0f < %d), skipping wp %d/%d, advancing to wp %d/%d",
+                   stuckDist, (int)DRIVE_STUCK_MIN_DIST,
+                   s_waypointIdx, s_waypointCount,
+                   s_waypointIdx + 1, s_waypointCount);
+        s_waypointIdx++;
+        s_wpMinDist = 1e30f;
+        s_driveStuckTicks = 0;  // wait another window before next advance
+    }
+}
+```
+
+Resetting `s_driveStuckTicks = 0` ensures each wp advance waits another full ~80-tick window (≈1.3s at 60Hz) before the next one fires — preventing chain-skip through all remaining waypoints in one tick.
+
+For wp 13 on domt2_1: after ≈80 ticks (1.3s) of `moveDist=0`, advance to wp 14. If wp 14 is reachable, party walks SW. If wp 14 is also unreachable (camera-stuck again), another 1.3s and advance to wp 15. Funnel has 18 waypoints total; worst case is ≈6 advances × 1.3s = 8 seconds before exhausting the funnel and triggering the main 200-second drive timeout.
+
+**Fix 2: `IntSqrt`** in `chase_auto_pilot.cpp`. Switch from Newton's method to `std::sqrt` via `<cmath>`:
+
+```cpp
+static int32_t IntSqrt(int32_t v)
+{
+    if (v <= 0) return 0;
+    return (int32_t)std::sqrt((double)v);
+}
+```
+
+The `kdist` values in the per-second diagnostic log will be correct now.
+
+### Files changed
+
+- `src/field_nav_autodrive.inl` — ~33 lines: chase-drive velocity-stuck advance inside the `if (stuckDist < DRIVE_STUCK_MIN_DIST)` branch.
+- `src/chase_auto_pilot.cpp` — ~6 lines: `IntSqrt` rewrite, `<cmath>` include.
+- `src/ff8_accessibility.h` — version bump.
+- `CHANGELOG.md` — this entry.
+
+### Risk
+
+Very low. The velocity-stuck advance is gated on `s_chaseDriveActive` so F9 path-finding sees no change. `IntSqrt` change is purely mathematical correctness (the old code was wrong; the new code is right).
+
+### Predicted v0.15.9.2.9 BAT outcomes
+
+**SUCCESS** — at wp 13 on domt2_1, ~80 ticks of `moveDist=0` triggers velocity-stuck advance. Log shows `chase-drive: velocity-stuck (stuckDist=... < 30), skipping wp 13/18, advancing to wp 14/18`. If wp 14 is camera-reachable, party walks SW. Continues through remaining waypoints, exits the field at the south corridor (target (276, -727)), transitions to the next chase field.
+
+**PARTIAL** — advance fires, party advances past wp 13 but stalls at a later wp. Chain-skip eventually reaches end of funnel; refine in v0.15.9.2.10 (e.g., switch to direct steering toward long-range target on funnel exhaustion).
+
+**FAIL** — party still hangs at (683, 8) even after velocity-stuck advance fires. Means the engine refuses to move from this triangle regardless of analog/kb input — walkmesh collision, scripted block, or something deeper. v0.15.9.2.10 then adds geometric tri ID diagnostic to figure out what the engine is doing.
+
+Most likely outcome is SUCCESS or PARTIAL. We have v0.15.9.2.5 evidence that the chain-skip approach works on domt5_1, and the wp-13 stuck on domt2_1 has the same pattern (camera-unreachable funnel waypoint), so the same workaround should apply.
+
+## v0.15.9.2.8
+
+Diagnostic-only release. Adds kani position and Squall-kani distance to the per-second chase auto-pilot log so we can directly test the collision-push hypothesis. No behavior change.
+
+### v0.15.9.2.7 BAT result: clean logs reveal two things
+
+The log spam fix worked. Field log on domt2_1 is clean:
+
+```
+ChaseAutoPilot: fallback config built for field='domt2_1' mode=TARGET tgt=(276,-727) walk=1
+ChaseAutoPilot: ENGAGED on field='domt2_1' mode=TARGET tgt=(276,-727) WALKING (walk=1)
+[CALIB] phase 1 done: lX=+1000 moved (206,-122) dist=239 -> camRight=(0.860,-0.510)
+[CALIB] phase 2 done: lY=+1000 moved (-155,-197) dist=251 -> camDown=(-0.618,-0.786)
+[drive] wp 0/18 reached (dist=34), advancing
+[drive] wp 1/18 reached (dist=23), advancing
+... wp 2 dist=58, wp 3 dist=57, wp 4 dist=51, wp 5 dist=47, wp 6 dist=48, wp 7 dist=55
+[drive] wp 8 dist=50, wp 9 dist=58, wp 10 dist=53, wp 11 dist=51, wp 12 dist=37
+[drive] tick=168 dist=959 player=(730,118) ... moveDist=1083
+[drive] tick=288 dist=840 player=(683,8) wp=13/18 kb=DL ... moveDist=120
+[drive] tick=408 dist=840 player=(683,8) wp=13/18 kb=DL ... moveDist=0  <-- frozen
+... 9 more identical [drive] logs through tick=1128 (16 seconds), moveDist=0 throughout ...
+```
+
+Two observations:
+
+1. **The party walked 12 waypoints in ~2 seconds (~700 units/sec)**, then froze at (683, 8) targeting wp 13 = (622, -48). 700 units/sec is faster than the v0.15.9.2.2 estimate of walking speed (~250 units/sec) and is consistent with running speed (or a kani push).
+2. **No `no-progress stuck` or `chase-drive: skipping wp` log lines appear during the 16-second stuck period.** v0.15.9.2.5's advance-on-stuck mechanism is NOT firing on wp 13 on domt2_1 even though the conditions for it (sustained zero progress on a chase-drive target) clearly hold.
+
+### Aaron's collision-push hypothesis
+
+After hearing the v0.15.9.2.7 BAT, Aaron noted he doesn't hear footsteps on the "working" chase fields either. His hypothesis: **the kani's (X-ATM092 spider's) collision is what pushes Squall through chase fields**. The auto-pilot's analog and keyboard input may have been doing nothing the entire time. The chase route would appear to advance because the kani shoves Squall through screen transitions, not because the auto-pilot moves him.
+
+If true, this invalidates the entire chase-drive premise. Every "success" so far (v0.15.9.2.5 west trail end-to-end, v0.15.9.2.4 first 6 waypoints, etc.) might have been collision-push. The wp-13 stuck on domt2_1 would then be explained as: kani is somewhere out of pushing range (still entering the field, stuck behind geometry, or just not pursuing close enough), so the only movement force is gone.
+
+### What ships
+
+**Pure-diagnostic helper** in `chase_auto_pilot.cpp`:
+
+```cpp
+static bool ReadKaniPosition(int32_t& outX, int32_t& outY)
+{
+    uintptr_t kani = ChaseDetector::GetKaniEntityPtr();
+    if (kani == 0) return false;
+    __try {
+        uint8_t* block = reinterpret_cast<uint8_t*>(kani);
+        int32_t fpX = *(int32_t*)(block + 0x190);
+        int32_t fpY = *(int32_t*)(block + 0x194);
+        outX = fpX / 4096;
+        outY = fpY / 4096;
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+```
+
+Plus `DistSquared` and `IntSqrt` helpers for kani-to-Squall distance display.
+
+The per-second diagnostic log line now ends with one of:
+- ` kani=(KX,KY) kdist=KD` when both Squall and kani positions are readable.
+- ` kani=(KX,KY) kdist=?` when only the kani reads (Squall read failed mid-load).
+- ` kani=UNRESOLVED` when ChaseDetector has no kani slot for this field.
+
+Reads the kani's runtime block pointer from `ChaseDetector::GetKaniEntityPtr()` which is cached at field-change time. SEH-wrapped pointer read so a field load mid-tick won't crash. No behavior change to engage / disengage / per-tick refresh paths.
+
+### Three patterns to watch for in the v0.15.9.2.8 BAT
+
+**(A)** `kdist` is consistently SMALL (<100) when waypoint progress happens, and LARGE (>500) or `kani=UNRESOLVED` when the party stalls. → Collision-push confirmed. The auto-pilot's input injection is doing nothing. Need to rethink the entire approach — perhaps script-pin the kani's velocity to chase the party, or accept that the chase isn't safely playable in auto mode without sighted assistance.
+
+**(B)** `kdist` is roughly constant or independent of waypoint progress, OR the party moves with the kani clearly far away (>500 units). → Input injection works at least sometimes. The wp-13 stuck has a different cause: most likely a camera-unreachable funnel waypoint combined with the advance-on-stuck guard bug from v0.15.9.2.5 that's not firing on this field. v0.15.9.2.9 then investigates why advance-on-stuck doesn't fire on wp 13 (re-reads `field_nav_autodrive.inl` no-progress block).
+
+**(C)** Every kani log line says `kani=UNRESOLVED`. → ChaseDetector's slot resolution didn't work in this context, or the kani is genuinely not in the others-entity array on these fields (it's a Background entity per v0.15.0 findings). v0.15.9.2.9 then refines `ReadKaniPosition` to handle the Backgrounds array case.
+
+### Files changed
+
+- `src/chase_auto_pilot.cpp` — ~70 lines: `ReadKaniPosition` + `DistSquared` + `IntSqrt` helpers; per-second diagnostic extended with `kaniBuf`; `<cstdio>` include; header trail entry.
+- `src/ff8_accessibility.h` — version bump.
+- `CHANGELOG.md` — this entry.
+
+Deferred: DEVNOTES.md, NEXT_SESSION_PROMPT.md, research doc — will update after v0.15.9.2.8 BAT reveals which hypothesis is correct, since the next steps depend entirely on which pattern (A/B/C) we see.
+
+### Risk
+
+Very low. Purely additive diagnostic. SEH wrap around the kani pointer dereference protects against field-load timing faults. The kani pointer comes from ChaseDetector which already uses it safely for `IsKaniEntityPtr` comparisons. If `ReadKaniPosition` fails for any reason (null pointer, fault), the log line shows `kani=UNRESOLVED` and the auto-pilot keeps running normally.
+
+## v0.15.9.2.7
+
+Fix v0.15.9.2.6 log spam. Restructured `chase_auto_pilot.cpp::Update()` so config lookup only runs on fresh engagement, not every tick.
+
+### v0.15.9.2.6 BAT result: architectural success + structural log-spam bug
+
+The generic fallback worked as designed. Field log shows:
+
+```
+ChaseAutoPilot: fallback config built for field='domt2_1' mode=TARGET tgt=(276,-727) walk=1 (largest cluster from walkmesh dead-end scan)
+```
+
+...and the party walked 12 of 18 waypoints (`wp=13/18` in the [drive] log) on domt2_1 before stalling at wp 13 = (622, -48). Aaron's chase-multi-field generic engagement request: solved at the architectural level. Every chase field now engages.
+
+But: there were ~960 copies of that one log line over 16 seconds (~60/sec). `BuildFallbackConfig()` was being called from the TOP of `Update()` before the "already engaged on this field" branch, so it ran every tick. The logging line buried the [drive] periodic logs and presumably the v0.15.9.2.5 advance-on-stuck signals ("no-progress stuck:" / "chase-drive: skipping wp"), so we can't tell from the v0.15.9.2.6 logs whether advance-on-stuck fired at wp 13 or not.
+
+The stuck-at-wp-13 pattern is the same shape as the v0.15.9.2.4 wp 7 stuck on domt5_1 (dist=840 constant, player=(683,8) constant, moveDist=0 constant for 16+ seconds, analog says SW toward wp 13 but engine produces no movement). Camera-unreachable target is plausible. But that's a v0.15.9.2.8 question; v0.15.9.2.7 just unmutes the diagnostic.
+
+### What ships
+
+**Update() reorder** in `chase_auto_pilot.cpp`:
+
+Before (v0.15.9.2.6):
+```
+1. gate check (wantEngage)
+2. fieldName lookup
+3. if engaged on different field -> disengage
+4. LookupConfig + (if null) BuildFallbackConfig    <-- runs every tick
+5. if already engaged on this field -> per-tick refresh using cfg->X
+6. else -> Engage(cfg)
+```
+
+After (v0.15.9.2.7):
+```
+1. gate check (wantEngage)
+2. fieldName lookup
+3. if engaged on different field -> disengage
+4. if already engaged on this field -> per-tick refresh using s_engagedX cached state + return
+5. LookupConfig + (if null) BuildFallbackConfig    <-- runs only on fresh engagement
+6. Engage(cfg)
+```
+
+The per-tick refresh's diagnostic log also moves from `cfg->dirX/cfg->dirY/cfg->targetX/cfg->targetY/cfg->walk` to `s_engagedDirX/s_engagedDirY/s_engagedTargetX/s_engagedTargetY/s_engagedWalk`. Same printed values, no functional difference — the cached state was already populated by `Engage()` at fresh engagement.
+
+Net effect: `BuildFallbackConfig` fires at most once per fresh engagement on a given field, not once per tick. Same for `LookupConfig`. Periodic [drive] logs and any v0.15.9.2.5 advance-on-stuck events become visible again.
+
+### Files changed
+
+- `src/chase_auto_pilot.cpp` — ~30 lines: Update() reorder; diagnostic log reads cached state; header trail entry.
+- `src/ff8_accessibility.h` — version bump.
+- `CHANGELOG.md` — this entry.
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md` — still TODO from v0.15.9.2.6; will update after the v0.15.9.2.7 BAT.
+
+### Risk
+
+Very low. Structural reorder only; same calls, same state, just a different order. `s_engagedX` cached state was already populated by `Engage()` before this change — just unused in the per-tick refresh path. The chase route behavior is preserved for explicit-config fields (domt4_1, domt5_1) and unchanged for fallback fields except that the noisy log line stops firing per-tick.
+
+### Predicted v0.15.9.2.7 BAT outcomes
+
+**SUCCESS** — clean logs reveal whether v0.15.9.2.5's advance-on-stuck mechanism is doing its job at wp 13 on domt2_1.
+
+- (A) advance-on-stuck WAS firing in v0.15.9.2.6 but the spam buried the logs — v0.15.9.2.7 logs show it firing, party walks past wp 13 through the funnel.
+- (B) advance-on-stuck WAS NOT firing because of some guard we missed — v0.15.9.2.7 logs show party still stuck the same way, and we'll know to look for the guard in v0.15.9.2.8 (likely the no-progress trigger needs to be loosened for chase-drive's MODE_TARGET specifically, or fall through to next waypoint when player distance from current wp stabilizes for N seconds).
+- (C) advance-on-stuck fires but the next wp is also unreachable — party chain-skips through funnel waypoints until reaching a navigable one.
+
+**PARTIAL** — logs clean but unexpected pattern; mechanism revealed by trace.
+
+**FAIL** — build error or regression from the structural change. Very unlikely given how mechanical the reorder is.
+
+## v0.15.9.2.6
+
+Generic chase-field engagement fallback. When chase auto-pilot encounters a chase field with no per-field config, use the walkmesh dead-end scanner's largest cluster as the target. Every chase field engages automatically now.
+
+### v0.15.9.2.5 BAT result: SUCCESS on west trail, exposed new problem
+
+Aaron audibly confirmed: party walked the entire west trail (domt5_1) end-to-end. The advance-on-stuck fix kicked in at wp 7 (the camera-unreachable east waypoint) and the party continued through the remaining funnel waypoints. Saga across v0.15.9.2.1 - .2.5 resolved.
+
+Then the party transitioned to domt2_1 and stood still for the rest of the BAT. ChaseDetector correctly identified domt2_1 as a chase field (chaseField=1, kani symIdx=16 -> Others slot 14, battleyarou symIdx=20 -> Others slot 18), but chase_auto_pilot's per-field config table only has entries for domt4_1 and domt5_1. LookupConfig() returned null, Engage() returned silently, no chase-drive engaged.
+
+### Generic fallback
+
+The right fix isn't to hardcode every chase field individually. The chase scene threads through many maps; the BAT pattern would expose them one at a time forever. Generic engagement is better: when no per-field config matches AND the chase field is real, pick a reasonable target dynamically.
+
+The walkmesh dead-end scanner already runs at field load (in `HookedFieldScriptsInit`). It uses BFS through 1-2 neighbor triangles to find narrow corridors and alcoves. Output for domt2_1:
+
+```
+[DEADEND] domt2_1: 141 tris, 6 dead-ends, 93 narrow, 4 clusters
+[DEADEND]  * cluster[1] center=(276,-728)  tris=42    <- largest
+[DEADEND]    cluster[3] center=(-223,-250) tris=10
+[DEADEND]    cluster[2] center=(1495,516)  tris=2
+[DEADEND]    cluster[0] center=(-369,-3744) tris=1
+```
+
+cluster[1] at (276, -728) with 42 triangles is almost certainly the south exit corridor (-Y is screen-south). cluster[3] is the next-largest, likely a side area or the player spawn. Use the largest as the default target.
+
+### What ships
+
+**1. Promote cluster storage to file scope** (`field_navigation.cpp`).
+The `DeadEndCluster` struct and `deadClusters[]` array were locals in `HookedFieldScriptsInit` -- results logged then discarded. Moved to file-scope `s_deadClusters[MAX_DEAD_CLUSTERS]` / `s_deadClusterCount`. Per-field reset clears the count. Scanner writes to the file-scope state.
+
+**2. Public API** `FieldNavigation::GetLargestClusterCenter(int32_t* outX, int32_t* outY)`.
+Linear scan over `s_deadClusters`; returns the center of the cluster with the highest `triCount`. Ties broken by first found. Returns false if walkmesh didn't load or no clusters.
+
+**3. Fallback config builder** in `chase_auto_pilot.cpp`.
+New `BuildFallbackConfig(fieldName)`: calls `GetLargestClusterCenter`, synthesizes a `MODE_TARGET` FieldConfig in module-static `s_fallbackConfig`, walks at default. Returns a pointer to the buffer. `Update()` calls it whenever `LookupConfig()` returns null. If both return null (walkmesh failed), behaves as before.
+
+All downstream Engage/Disengage/per-tick refresh/diagnostic logic works unchanged because the fallback config is structurally identical to an explicit one. The only visible behavior change is engagement happens on previously-unhandled chase fields.
+
+### Behavior across the chase route
+
+- `domt4_1` -- MODE_DIRECTION (explicit, RUN LEFT), unchanged. Cleared in v0.15.9.1.
+- `domt3_2` -- no explicit config, fallback fires, MODE_TARGET to largest cluster, walk.
+- `domt5_1` -- MODE_TARGET (explicit, (382, 235), walk), unchanged. Walked end-to-end in v0.15.9.2.5.
+- `domt2_1` -- no explicit config, fallback fires, MODE_TARGET to (276, -728), walk.
+- Any further chase fields downstream -- fallback handles each one.
+
+Chase ends naturally with `CHASE-END SUMMARY mode=auto` when the scene ends.
+
+### Files changed
+
+- `src/field_navigation.cpp` -- ~38 lines: `DeadEndCluster` struct, `s_deadClusters[]`, `s_deadClusterCount`, `GetLargestClusterCenter()` implementation.
+- `src/field_nav_fieldscripts.inl` -- ~12 lines: scanner uses file-scope state, per-field reset clears count.
+- `src/field_navigation.h` -- ~20 lines: `GetLargestClusterCenter` public declaration with full doc comment.
+- `src/chase_auto_pilot.cpp` -- ~50 lines: `BuildFallbackConfig()` + integration in `Update()` + header trail entry + initialize log update.
+- `src/ff8_accessibility.h` -- version bump.
+- `CHANGELOG.md`, `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`.
+- `Plan & Research Documents/Auto-drive lessons from chase auto-pilot.md` -- new finding on the generic fallback pattern.
+
+### Risk
+
+Low. The fallback only fires when no explicit config matches AND the engagement gate is open AND the walkmesh loaded clusters. Existing per-field configs are unchanged. The new public API is read-only with no side effects. F9 path-finding's behavior is bitwise unchanged.
+
+### Predicted v0.15.9.2.6 BAT outcomes
+
+**SUCCESS** -- chase auto-pilot engages on every chase field encountered. Same v0.15.9.2.5 flow on domt4_1 and domt5_1. On domt2_1, fallback fires with target (276, -728), party walks SE toward the south corridor. Field transitions trigger as the party reaches each exit. Chase ends naturally. Push v0.15.9.2.6.
+
+**PARTIAL** -- fallback engages on domt2_1 but party gets stuck at some point (camera-unreachable funnel wp, walkmesh wall, etc). The advance-on-stuck from v0.15.9.2.5 should handle most cases; if not, refine in v0.15.9.2.7.
+
+**FAIL** -- fallback fires but the cluster center is on a separate walkmesh island from player spawn (no bridge). Chase-drive times out and disengages. Rare for chase fields (the kani would walk that path too) but possible. Would need a different fallback heuristic.
+
+## v0.15.9.2.5
+
+Advance funnel waypoint when chase-drive sees no-progress stuck. Workaround for camera-unreachable waypoints on rotated cameras.
+
+### v0.15.9.2.4 BAT result: MAJOR PROGRESS, stuck at wp 7
+
+The kb-from-analog fix WORKED. Party walked from `(-1057, 3301)` start through **7 waypoints in ~3 seconds**, reaching `(-978, 1741)` -- 1,560 units of progress. Aaron heard the party walking. The kb/analog conflict that was freezing v0.15.9.2.2/.3 is solved.
+
+Waypoints reached: wp 0 (dist 42), wp 1 (50), wp 2 (49), wp 3 (47), wp 4 (42), wp 5 (47), wp 6 (46). Then stuck at wp 7 at `(-878, 1752)`, oscillating between `(-978, 1741)` and `(-978, 1770)` for 60+ seconds, dist hovering at ~100.
+
+### Root cause: rotated camera squashes X-axis access
+
+domt5_1's camera: `camRight = (0.069, 0.998)`, `camDown = (0, -1)`. Cross-product determinant ~-0.07. The camera projects mostly to +Y world for `lX`, and pure -Y world for `lY`. World-X is barely accessible.
+
+Calibration measured: `lX = +1000` produces `(+12, +174)` world movement. East movement is ~80x slower than south movement on this camera.
+
+wp 7 at `(-878, 1752)` is east of the player at `(-978, 1741)` -- needs +100 X. But the camera can barely produce +X. Player oscillates around the wp's Y line:
+
+- At `Y=1741` (south of wp), analog says screen-up (NE in projection), kb=UR. Engine moves player north past 1752 to Y=1770.
+- At `Y=1770` (north of wp), analog says screen-down (SW), kb=DL. Engine moves player south past 1752 to Y=1741.
+
+Classic oscillation around an axis-unreachable target. The player stays at constant X distance ~100 from wp 7, never reaching FUNNEL_ARRIVE_DIST=60.
+
+### The no-progress detection IS firing
+
+Log shows:
+
+```
+[drive] no-progress stuck: dist=2029 progressBaseline=2051 closed=22 noProgressCount=3 -- forcing recovery
+```
+
+Fires every few seconds. But recovery is gated off for chase-drive (v0.15.9.2.2 Fix B), so nothing happens.
+
+### The fix
+
+In the no-progress branch, when `s_chaseDriveActive` AND waypoints remain, **advance `s_waypointIdx` by 1** and reset `s_wpMinDist`. This treats no-progress as the signal that we've gotten as close to the current wp as the camera will allow; move on. If the next wp is also camera-unreachable, no-progress fires again and we advance again.
+
+The next funnel waypoint (wp 8) comes from portal 11 (tri 37→21), L=(-803, 1659) R=(-864, 1706). From player `(-978, 1741)`:
+
+- To `(-803, 1659)`: `dx=+175, dz=-82`. Strong south + strong east. Both camera-aligned (south is the dominant axis).
+- To `(-864, 1706)`: `dx=+114, dz=-35`. Moderate east, moderate south.
+
+Either way, the displacement is camera-aligned -- the strong Y axis carries most of the work, and the small X component happens incidentally.
+
+### Files changed
+
+- `src/field_nav_autodrive.inl` -- ~22 lines (chase-drive wp advance in no-progress branch).
+- `src/ff8_accessibility.h` -- version bump.
+- `CHANGELOG.md`, `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`.
+- `Plan & Research Documents/Auto-drive lessons from chase auto-pilot.md` -- new finding on funnel waypoints being camera-unreachable; new priority entry for advance-on-stuck.
+
+### Risk
+
+Low. The advance only fires when chase-drive is active AND no-progress is detected AND more waypoints exist. F9 path-finding's no-progress branch behavior is bitwise unchanged.
+
+### Predicted v0.15.9.2.5 BAT outcomes
+
+**SUCCESS** -- party walks through all funnel waypoints. wp 7 stuck → advance to wp 8 (camera-aligned) → party walks SE. Continues through corridor. Transitions through south exit gateway. Chase ends with `CHASE-END SUMMARY mode=auto`. Push v0.15.9.2.5.
+
+**PARTIAL** -- party advances past wp 7 but gets stuck at a later wp. Log shows which wp. Refine in v0.15.9.2.6 (may need overshoot threshold relaxation or a more general "camera-aware" reachability check).
+
+**FAIL** -- chain-skip cycles through all 28 waypoints rapidly without progress. Means the entire path is camera-unreachable; would need a fundamentally different navigation approach. Most likely fix would be to switch to constant-direction analog (like v0.15.9.1 did for domt4_1) for the dominant axis, accepting that off-axis precision will be lost.
+
+## v0.15.9.2.4
+
+Derive keyboard heading from ANALOG values for chase-drive. The keyboard and analog must agree on direction or FF8 freezes movement.
+
+### v0.15.9.2.3 BAT result: PARTIAL FAIL
+
+Build clean at 17:21:10. Chase-drive engaged at 17:25:16 on domt5_1. With v0.15.9.2.3's corridor-steering disable, the steer target was correctly the funnel waypoint at `(-1225, 2811)` (L vertex of portal 2, tri 36 → 38 edge) -- a proper south-then-east turning point along the planned route. Steer was right.
+
+But the party stayed frozen at `(-989, 3195)` for 60+ seconds. Every periodic [drive] log was identical:
+
+```
+player=(-989,3195) steer=(-1225,2811) wp=0/28 kb=DR lX=-886 lY=852 moveDist=0
+```
+
+### Root cause: ANY axis-level kb/analog conflict freezes movement
+
+- Analog `lX=-886 lY=852` projects through camera `camRight=(0.069, 0.998)` `camDown=(0, -1)` to world direction `(~-61, ~-1736)` = mostly **south on screen, slight west** -- correctly aimed at the funnel waypoint SW of player.
+- Keyboard `kb=DR` = south-east, set by v0.15.9.2.2 Fix A which uses origDx/origDz from the long-range target (382, 235) which is SE of player.
+- **Y axis agrees** (both south). **X axis disagrees** (kb=east, analog=west).
+- Movement: zero.
+
+In v0.15.9.2.1, kb=UP fought analog=SW (full Y disagreement, no X bit set). Player drifted slowly. In v0.15.9.2.2/.3, kb has BOTH bits set (DR), and the X-axis mismatch is enough to lock movement entirely. Confirms Finding #13 from `Plan & Research Documents/Auto-drive lessons from chase auto-pilot.md`: **the keyboard heading must match the analog direction, not the target direction**. The keyboard's job is to wake up FF8's movement code; the analog provides the actual steering vector. When they conflict on any axis, FF8 reads inconsistent input and won't move.
+
+### The fix
+
+For chase-drive, derive the keyboard heading from the analog values (s_analogDesiredLX/LY set by `SetAnalogFromVector`). Screen-relative:
+
+- `lX > 100` → `DIR_RIGHT` (screen right)
+- `lX < -100` → `DIR_LEFT`
+- `lY > 100` → `DIR_DOWN` (DirectInput convention: lY +1000 = screen down)
+- `lY < -100` → `DIR_UP`
+
+Dominant-axis fallback if neither passes threshold (rare; analog in deadzone).
+
+For F9 path-finding, keep v0.15.9.2.2's origDx/origDz heading unchanged. F9's NPC targets are usually far away, so origDx/origDz matches the analog direction by default. Gating on chase-drive minimizes F9 regression risk; if F9 ever hits the same freeze pattern, the global fix is to replace F9's branch with the chase-drive logic.
+
+### Reorganization
+
+Moved `SetAnalogFromVector(dx, dz)` to BEFORE the heading bitmask computation (was after), so the heading code can read the analog values that the analog projection just produced.
+
+### Files changed
+
+- `src/field_nav_autodrive.inl` -- ~40 lines (SetAnalogFromVector reorder, dual-branch heading bitmask with chase-drive analog-derived path).
+- `src/ff8_accessibility.h` -- version bump.
+- `CHANGELOG.md`, `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`.
+- `Plan & Research Documents/Auto-drive lessons from chase auto-pilot.md` -- new findings confirming axis-level conflict and updating priorities.
+
+### Risk
+
+Low. F9's heading branch is unchanged. Only chase-drive uses the new analog-derived heading. The reorganization (SetAnalogFromVector moved up) has no behavioral effect: the wiggle and recovery branches both call `SetAnalogFromVector` again inside themselves, overriding whatever the pre-compute set.
+
+### Predicted v0.15.9.2.4 BAT outcomes
+
+**SUCCESS** -- keyboard now derived from analog. With analog SW (`lX=-886 lY=852`), heading becomes `DL` (DIR_DOWN | DIR_LEFT). Both kb and analog agree on south-west. Party walks SW toward funnel wp 0 at full walking pace, reaches it, wp advances, party continues along the funnel path. Eventually transitions through the south exit gateway.
+
+**PARTIAL** -- party moves but doesn't track waypoints precisely or gets stuck at a specific point. Indicates a different problem (waypoint advance logic, walkmesh collision at a tight gap, etc.).
+
+**FAIL: still stuck** -- means there's something more fundamental than kb/analog conflict locking movement. Top candidates:
+
+- FF8 movement-validation refuses to leave the engine-reported tri (51), even when the player wants to go SW into tri 13. The engine's collision check may use its own tri ID to decide whether the move is valid.
+- Some walkmesh geometry blocks SW movement from the player's current position.
+- A scripted lockout we haven't identified.
+
+If FAIL, v0.15.9.2.5 ships diagnostic: log the geometric containing triangle (computed locally) alongside the engine's reported tri. If they diverge, we've confirmed the stale-tri-ID hypothesis and can pursue workarounds (e.g., teleport the player a few units in the desired direction to force engine reclassification).
+
+## v0.15.9.2.3
+
+Disable corridor-level steering for chase-drive. Falls back to funnel waypoints, which don't depend on the engine's per-tick tri ID.
+
+### v0.15.9.2.2 BAT result: PARTIAL FAIL (worse than v0.15.9.2.1)
+
+Build clean at 17:01:35. Chase-drive engaged at 17:05:02 on domt5_1 with target (382, 235). A* found 31-triangle path with 28 waypoints. Calibration completed: `camRight=(0.069, 0.998)` `camDown=(0, -1)`. Then the party **fully froze at (-989, 3195) for 60+ seconds**. Zero motion. Every periodic `[drive]` log line was identical:
+
+```
+player=(-989,3195) steer=(-1135,3293) wp=0/28 kb=DR lX=499 lY=-557 moveAng=0 moveDist=0
+```
+
+v0.15.9.2.2's fixes did exactly what they were supposed to (kb=DR now reflects the long-range SE target, no recovery thrashing, longer timeout) -- but the freeze is now WORSE than v0.15.9.2.1. In v0.15.9.2.1 with the broken DIR_UP fallback, kb=U fought analog=SW in the Y axis only, leaving X free so the player drifted (slowly). In v0.15.9.2.2 with kb=DR fully consistent with the long-range target, BOTH axes oppose the analog, producing total freeze.
+
+### Root cause: engine tri ID is stale
+
+The steer target `(-1135, 3293)` is the midpoint of portal 0 (tri 51 → 13 shared edge). The player at `(-989, 3195)` is geometrically SOUTH of this edge (Y=3316-3330 for the edge, player Y=3195 below it). The player should be on tri 13, past portal 0. But the engine's reported tri ID (read from entity +0x1FA) still says tri 51.
+
+Corridor-level steering finds tri 51 at `corridor[0]`, picks `nextTri = corridor[1] = 13`, and targets the 51-13 shared edge midpoint -- which is NORTHWEST of the player's actual position. The analog projection of that direction works out to `lX=499 lY=-557`, which through the camera projection is mostly +Y world = NORTH on screen. Keyboard says SE (toward long-range target). Analog says NW (toward backward portal). Perfect 2D opposition.
+
+Possibly the engine only reclassifies the tri ID when the entity actively moves. The player was frozen post-calibration, so the engine never updated the tri ID. Chicken-and-egg:
+
+- Stale tri ID → corridor steering targets backward portal
+- Analog says NW (toward backward portal)
+- Keyboard says SE (toward long-range target, per v0.15.9.2.2 Fix A)
+- Perfect opposition → zero movement
+- Zero movement → engine doesn't reclassify → stale tri ID persists
+
+### The fix
+
+Don't depend on the engine's per-tick tri ID for chase-drive steering. v0.15.9.2.3 ships one change: gate the v06.17 corridor-level steering block on `!s_chaseDriveActive`. When chase-drive is active, the steer target falls back to the **funnel waypoint** at `s_waypoints[s_waypointIdx]`.
+
+Funnel waypoints are computed by `FunnelPath` at A* time from the portal sequence. They're position-based (specific (X, Y) coords), not tri-ID-based. They don't suffer from the stale-tri-ID feedback loop. The funnel waypoint advances naturally as the player closes on it (FUNNEL_ARRIVE_DIST=60 plus overshoot detection), pulling the player along the planned path.
+
+The corridor steering's advantage was anchoring the player to specific portal midpoints for precise edge crossings; the funnel waypoints can be slightly less precise at edges. But they don't lock up.
+
+### Files changed
+
+- `src/field_nav_autodrive.inl` -- ~17 lines (one condition + rationale comment block).
+- `src/ff8_accessibility.h` -- version bump.
+- `CHANGELOG.md`, `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`.
+- `Plan & Research Documents/Auto-drive lessons from chase auto-pilot.md` -- 3 new findings.
+
+### Risk
+
+Low. Corridor steering remains active for F9 path-finding (gate only fires when `s_chaseDriveActive` is true, which only chase auto-pilot sets). Chase-drive's funnel waypoints are the same code path F9 uses by default when the corridor steering isn't applicable.
+
+### Predicted v0.15.9.2.3 BAT outcomes
+
+**SUCCESS** -- with corridor steering off, the steer target becomes funnel waypoint 0 (somewhere along the south-tending corridor). Keyboard kb=DR and analog should largely agree -- funnel waypoints follow the corridor which goes south then east. Party walks south at calibration-pace, reaches funnel waypoints further along, crosses through the south exit gateway, chase ends naturally.
+
+**PARTIAL** -- party moves but doesn't reach the exit. Means funnel waypoints alone aren't tracking the corridor precisely enough (the corridor steering's job was to fix that). Refine in v0.15.9.2.4 with funnel waypoint dump in the log.
+
+**FAIL** -- party still stuck. Means there's another issue we haven't identified (e.g., FF8 movement-validation refusing to enter tri 13 because the engine still thinks the player is in tri 51, walkmesh collision against tri 13's geometry, etc.). If FAIL, debug by logging player's actual geometric tri (computed via point-in-triangle test) alongside engine's reported tri.
+
+## v0.15.9.2.2
+
+Three coordinated fixes for v0.15.9.2.1 BAT (PARTIAL FAIL: party stuck thrashing near spawn on domt5_1 for 20+ seconds, footsteps audible throughout, net progress zero).
+
+### v0.15.9.2.1 BAT result: PARTIAL FAIL
+
+Build clean at 16:25:39. Chase-drive engaged at 16:32:42 with target (382, 235), walk=1, starting position (-1233, 3576). The v0.15.9.2.1 fixes WORKED — no "No target" SAPI, chase-drive ran for the full engagement window. But the party never escaped the top of domt5_1's walkmesh.
+
+Player position over 20 seconds (one row per chase auto-pilot 1-sec log):
+
+```
+16:32:43 (-1255, 3555)   post-calibration start
+16:32:44-46 (-1255, 3555) FROZEN 3 sec
+16:32:47-50 (-1257, 3578) drifted NORTH 23
+16:32:51    (-1264, 3568) brief south
+16:32:53-54 (-1234, 3574)..(-1264, 3580) oscillates
+16:32:56-59 (-1242, 3559) FROZEN 3 sec
+16:33:00-02 (-1244, 3576) FROZEN 2 sec
+```
+
+Net Y displacement: zero (started 3576, ended 3576). 12 recovery phases fired in 20 seconds. The party walked in a 30-unit radius near spawn the entire time.
+
+### Three problems identified from the field log
+
+**(1) Heading-fallback bug.** The corridor-level steering (v06.17, lines around 530 of `field_nav_autodrive.inl`) overwrites `dx`/`dz` to point at the nearby shared-edge midpoint between the current and next corridor triangle. On domt5_1, that midpoint is only ~30 units west and ~116 units south of the player — both below `DRIVE_AXIS_THRESH=150`. The heading-bitmask threshold check fails for ALL four direction bits, and the fallback `if (heading == 0) heading = DIR_UP;` fires. So the keyboard presses UP arrow every tick while the analog says SW (toward the actual target). FF8 reads keyboard and analog as voting inputs; with them in direct opposition, the engine resolves to crawl-speed.
+
+Periodic [drive] logs show this clearly across 20 seconds:
+
+```
+[16:32:52] tick=600  player=(-1264,3568) steer=(-1294,3452) wp=1/31 kb=U lX=-978 lY=968 analogAng=-135 moveAng=-35 moveDist=12
+[16:32:54] tick=720  player=(-1264,3580) steer=(-1138,3586) wp=0/30 kb=U lX=92   lY=-51 analogAng=61   moveAng=180 moveDist=12
+[16:32:56] tick=840  player=(-1242,3559) steer=(-1294,3452) wp=0/31 kb=U lX=-917 lY=900 analogAng=-134 moveAng=46  moveDist=30
+[16:32:58] tick=960  player=(-1242,3559) steer=(-1294,3452) wp=0/31 kb=U lX=-917 lY=900 analogAng=-134 moveAng=0   moveDist=0
+```
+
+`kb=U` is `DIR_UP` only — for the entire log. Despite the analog pointing SW (lX≈-950, lY≈+936), the keyboard insists on UP. Result: 30 units of movement in 2 seconds = 15 units/sec walk pace, vs calibration's 864 units/sec.
+
+**(2) Misdirected recovery nudges.** Every ~1.5 seconds, `DRIVE_STUCK_THRESH=80` ticks fires recovery. Even phases pick the perpendicular nudge direction whose dot-product with `(next-tri-center − player)` is larger — preferring the perp pointing TOWARD the centroid. On elongated triangles (tri 51 in domt5_1 spans X from -1313 to ~-980, ~330 units wide), the centroid can be EAST of the player even when the shared edge to cross is WEST. The chosen perp pushes AWAY from the edge the corridor wants to cross.
+
+Worse: on this field, the camera calibration produces `camRight=(0.041, 0.999)` and `camDown=(0, -1)` — both axes nearly parallel to world ±Y, cross-product determinant ≈ −0.041. The world-direction nudge `(1.00, -0.01)` projects through `SetAnalogFromVector` to `lX=31 lY=10` — tiny values the engine treats as deadzone analog. Net effect: nudge produces no useful movement, but the small `lY=10` alone projects back to slight +Y world (NORTH), drifting the player into tri 29. Next recovery fires from tri 29 wanting south back to tri 32. The party oscillates between tri 29 and tri 32 forever.
+
+**(3) Too-short timeout.** `DRIVE_MAX_TICKS=2400` (40 s) is too short for chase corridors. domt5_1 is ~3300 world units start-to-finish; even at full walking pace without interference, traversal takes ~110 seconds.
+
+### Fixes
+
+**Fix A — Heading bitmask uses original target direction.** Save `float origDx = dx; float origDz = dz;` right after dx/dz are computed from `tx`/`tz` (the long-range target). Use origDx/origDz for the heading bitmask threshold check instead of the post-corridor-override dx/dz. The keyboard wake-up trigger doesn't need to be pixel-precise — it just needs to push in the right broad direction. Analog steering continues to use the corridor-tuned dx/dz for fine waypoint targeting.
+
+Net effect: keyboard and analog AGREE on direction, FF8 reads consistent input, party walks at calibration pace.
+
+**Fix B — Skip stuck-detection-and-recovery for chase-drive.** Gate the entire `else if (s_driveStuckTicks >= DRIVE_STUCK_THRESH)` block on `!s_chaseDriveActive`. Chase corridors are hand-picked and don't need recovery's wiggle nudges; with Fix A in place, main steering can hold a coherent direction without recovery thrashing it. Recovery's perpendicular-nudge logic is fundamentally wrong for elongated triangles on rotated cameras, and disabling it for chase-drive is safer than trying to fix the perp-selection logic in general.
+
+**Fix C — Extended timeout for chase-drive.** `int driveMaxTicks = s_chaseDriveActive ? 12000 : DRIVE_MAX_TICKS;` then check `>= driveMaxTicks` instead of `>= DRIVE_MAX_TICKS`. 12000 ticks = 200 seconds; gives enough slack for full corridor traversal at walking pace. F9 path-finding stays at 40 s.
+
+### Files changed
+
+- `src/field_nav_autodrive.inl` — ~50 lines: origDx/origDz save, heading-bitmask using origDx/origDz, extended timeout, recovery gate, three rationale comment blocks.
+- `src/ff8_accessibility.h` — version bump.
+- `CHANGELOG.md`, `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`.
+
+### Risk
+
+Low.
+
+- (a) origDx/origDz heading change only affects the keyboard bitmask, which is a wake-up trigger; the analog (which determines actual movement direction in the engine) is unchanged. F9's existing NPC-target use case uses long-range steer too, so `origDx/origDz == dx/dz` in that path and behavior is identical.
+- (b) Recovery gate adds one boolean check; F9 path-finding's behavior is bitwise-identical.
+- (c) Timeout extension is gated on chase-drive flag; F9 sees `DRIVE_MAX_TICKS` unchanged.
+
+### Predicted v0.15.9.2.2 BAT outcomes
+
+**SUCCESS** — party walks south through the domt5_1 corridor at full walking pace, reaches the cluster[2] target (382, 235) or transitions through a south exit gateway, chase auto-pilot disengages cleanly with `chase-drive completed` log, chase ends naturally with `CHASE-END SUMMARY mode=auto`.
+
+**PARTIAL** — party makes real progress (positions visible in periodic [drive] logs each second) but doesn't reach target. Target refinement needed for v0.15.9.2.3 (cluster[2] center may be off-walkmesh or wrong end of corridor).
+
+**FAIL** — party still stuck. Means the corridor steering itself produces a nonsense steer target, or the engine's input-reading is broken in a way we haven't diagnosed; debug further with more periodic-log instrumentation.
+
+Most likely actual outcome: SUCCESS or PARTIAL. The heading-bitmask fix alone should resolve the keyboard-vs-analog conflict that was strangling movement.
+
+## v0.15.9.2.1
+
+Fix two bugs in v0.15.9.2 chase-drive exposed by 2026-05-10 15:48-15:52 BAT.
+
+### v0.15.9.2 BAT result: PARTIAL FAIL
+
+Build clean. Chase ASK worked. Chase-drive `STARTED tgt=(382,235) walk=1 player=(-1057,3301) waypoints=28 startDist=3387`. A* found a 31-triangle path with 28 funnel waypoints — path computation works end-to-end. Calibration completed cleanly: `camRight=(0.041,0.999) camDown=(0.000,-1.000)`.
+
+Then immediately after calibration:
+
+```
+[CALIB] complete
+[drive] fake gamepad removed, original ptrs restored
+[drive] stopped: No target.
+```
+
+F9's `UpdateAutoDrive` fell through to its entity-catalog check, read `s_catalog[s_selectedCatalogIdx]` (stale state from before chase started), saw the catalog entity's `entityIdx == s_playerEntityIdx`, and called `StopAutoDrive("No target.")` — which spoke *"no target"* via SAPI. Drive torn down (fake gamepad removed, analog deactivated, arrows released) but `s_chaseDriveActive` stayed true because F9's `StopAutoDrive` doesn't know about chase-drive's flag. chase_auto_pilot's per-tick `IsChaseDriveActive()` check kept returning true; per-second diagnostic kept logging for 30+ seconds while the actual drive was dead.
+
+Aaron's manual arrow presses moved the party (analog off, fake gamepad gone, raw keyboard reached the engine):
+
+> *"When we got to the west trail it walked for a moment then I heard no target. I pressed down and the party could move freely."*
+
+Aaron's directional feedback *"party needs to head down and slightly right"* confirms the target `(382, 235)` is in the correct direction — player at `(-1057, 3301)` needs to go to `(382, 235)`, which is south (Y decreasing) and east (X increasing). Path was right; teardown was the bug.
+
+### Two coordinated bugs
+
+1. **`UpdateAutoDrive`'s entity-catalog passthrough**: chase-drive's `s_driveTargetEntityIdx = -1` setting wasn't enough. UpdateAutoDrive reads from `s_catalog[s_selectedCatalogIdx]` (a different state path) and fires `StopAutoDrive("No target.")` if the catalog entity matches the player.
+
+2. **`StopAutoDrive` doesn't reset `s_chaseDriveActive`**: When F9 internally stops the drive, chase_auto_pilot never notices because `IsChaseDriveActive()` only checks `s_chaseDriveActive`, not `s_driveActive`.
+
+### Positive signals from v0.15.9.2 BAT
+
+Framework wiring is solid. A* path computation works end-to-end (28-waypoint route from `(-1057, 3301)` to `(382, 235)` computed and funnel-smoothed). Calibration phase works (correct axes derived). Target direction is correct. Chase ASK still works.
+
+### Fix design
+
+**Fix 1 — chase-drive bypass in UpdateAutoDrive** (`field_nav_autodrive.inl`):
+
+Branch on `s_chaseDriveActive` at three places:
+
+- **Entity validation block**: if chase-drive owns the drive, set `ei = -1` sentinel and skip the player/range/target checks (which were firing the spurious *"No target."*).
+- **Target-coord lookup block**: read `tx/tz` from `s_chaseDriveTargetX` / `s_chaseDriveTargetY` (new file-scope statics in `field_nav_directiondrive.inl`, cached by `StartChaseDrive`) instead of dereferencing the entity catalog.
+- **Wiggle re-path target lookup**: so recovery (wiggle nudge + re-path A*) works for chase-drive, not just nudges.
+
+Replace `catTarget.entityIdx` references with `ei` in the `rpSkipTrigIdx` logic (semantically identical in the F9 path since `ei = catTarget.entityIdx` there, but safer for chase-drive where catTarget would be stale catalog state).
+
+**Fix 2 — disengage detection** (`field_nav_directiondrive.inl`):
+
+`IsChaseDriveActive()` now returns `s_chaseDriveActive && s_driveActive`. If F9's `StopAutoDrive` ever fires internally during chase-drive (defense-in-depth, since Fix 1 should prevent it), `s_driveActive` flips false, `IsChaseDriveActive()` returns false on the next tick, and chase_auto_pilot's Update detects this and calls Disengage which releases W and clears `s_chaseDriveActive` cleanly. No zombie engagement state.
+
+**Fix 3 — silent internal stops** (`field_nav_autodrive.inl`):
+
+`StopAutoDrive`'s SAPI announce gated on `!s_chaseDriveActive`. Internal stops (`"No target."`, `"Stuck."`, `"Arrived."`) fire silently when chase-drive owns the drive — chase auto-pilot is supposed to be silent. Log lines still fire unconditionally for diagnostics.
+
+**Fix 4 — `StartChaseDrive` caches target coords**:
+
+New file-scope statics `s_chaseDriveTargetX` / `s_chaseDriveTargetY` in `field_nav_directiondrive.inl`, set at the bottom of `StartChaseDrive` before `s_chaseDriveActive = true`. `UpdateAutoDrive` reads these via Fix 1.
+
+### Files changed
+
+- `src/field_nav_directiondrive.inl` (~30 lines: target coord statics, cache in `StartChaseDrive`, `IsChaseDriveActive` gating, version comment bump).
+- `src/field_nav_autodrive.inl` (~50 lines: `StopAutoDrive` SAPI gate, entity-validation chase branch, target-coord chase branch, wiggle re-path chase branch, `catTarget.entityIdx` → `ei` replacement in skipTrig logic).
+- `src/ff8_accessibility.h` (this version).
+- `CHANGELOG.md` (this entry).
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`.
+
+No `deploy.bat` change needed.
+
+### Risk: low
+
+All chase-drive bypass branches activate only when `s_chaseDriveActive` is true (only chase_auto_pilot sets it). F9's behavior is unchanged because all branches have an `else` clause running the original code unmodified. The `catTarget.entityIdx` → `ei` replacement is semantically identical in the F9 path.
+
+### Predicted v0.15.9.2.1 BAT outcomes
+
+- **SUCCESS**: same chase trigger flow. Party engages on domt4_1 (run west direction-drive, clears in one step). Party engages on domt5_1 with mode=TARGET. A* path follows the 28-waypoint route. Party walks south-then-east through the corridor. Reaches south exit. Field transitions. Chase ends naturally with `CHASE-END SUMMARY mode=auto`. **No spurious "no target" announce.**
+- **PARTIAL: party path-finds for a while then gets stuck**. Recovery should kick in (nudge + re-path); if it gives up, `IsChaseDriveActive()` returns false and chase_auto_pilot disengages with the *"chase-drive completed (target reached or stuck)"* log line. Final position visible; refine target in v0.15.9.2.2 if needed.
+- **FAIL: F9 path-finding regressed**. Mitigation: branches all have else fallthroughs preserving F9 behavior exactly. F9 backslash test still available.
+
+## v0.15.9.2
+
+Pivot chase auto-pilot from constant-direction analog to F9-style path-finding for fields with bends.
+
+### v0.15.9.1.1 BAT result: PARTIAL SUCCESS, theory wrong
+
+Build clean, cosmetic `tick=60` fix landed, party walked one cycle from `(-877, 2531)` to `(-769, 2217)` in domt5_1 (correct south direction, slightly more motion than v0.15.9.1's first cycle). But position then froze at exactly `(-769, 2217)` for 30+ seconds. Both v0.15.9.1 and v0.15.9.1.1 BATs converged on the **same end coordinates** from different starting positions.
+
+Aaron confirmed during BAT review: *"I did not hear the spider approach."* Mountain-shake catch ruled out (no kani audio = no AI-rule trigger). Walkmesh wall confirmed: domt5_1's corridor angles east of pure south, and constant-direction analog can't navigate the bend. v0.15.9.1.1's keep-alive theory was wrong; the engine isn't dropping movement intent, the party physically can't proceed past `(-769, 2217)` without changing heading.
+
+### Fix: use FF8's existing path-finding
+
+F9 backslash auto-drive already does walkmesh-aware A*+funnel pathing with stuck-detection and wiggle recovery. It threads narrow corridors, navigates bends, and handles the exact geometry chase auto-pilot was tripping on.
+
+### New public API
+
+```cpp
+bool FieldNavigation::StartChaseDrive(int32_t targetX, int32_t targetY, bool walk);
+void FieldNavigation::StopChaseDrive();
+bool FieldNavigation::IsChaseDriveActive();
+```
+
+Lives in `field_nav_directiondrive.inl` alongside the existing direction-drive API since both share the fake-gamepad infrastructure. Implementation:
+
+- **Drive setup**: duplicates the relevant subset of F9's start logic from `field_nav_handlekeys.inl` -- drive state init (`s_driveActive`, `s_driveLastTriId` from player's current triangle, stuck/wiggle/ticks counters), calibration setup (piggybacks on `s_calibPending` so a single calibration covers both F9 and chase-drive), fake gamepad install, default arrive distance.
+- **Path computation**: same `ComputeAStarPath` + `FunnelPath` pipeline F9 uses. Includes island-bridging via trigger lines for the rare cross-island case. Skips entity-specific setup (talkRadius, save/draw walk-into, trigger crossing) since chase auto-pilot has no entity to target.
+- **Walk modifier**: chase fields like domt5_1 require walking instead of running (Aaron's AI rule #1: the mountain shakes when running and the party gets caught). Chase-drive holds W (cancel scancode 0x11) for the duration of the drive. F9 path-finding doesn't support this because F9 always runs to its target.
+- **Teardown**: `StopChaseDrive` releases W if held, then calls F9's `StopAutoDrive(nullptr)` to release arrows, deactivate analog, remove fake gamepad. `nullptr` reason suppresses the "Cancelled." SAPI announce.
+
+### Mutex with F9
+
+- `StartChaseDrive` refuses if `s_driveActive` is true and `s_chaseDriveActive` is false (i.e., F9 backslash drive is running).
+- F9 backslash handler refuses to cancel the drive when `s_chaseDriveActive` is true; instead announces *"Auto-drive unavailable: chase auto-pilot is active."*
+- Arrow-key cancel branch suppressed for chase-drive (player can't accidentally bump out of chase mode by tapping a direction).
+- Mutex with direction-drive: chase auto-pilot routes to one or the other per-field via its config; never both.
+
+### chase_auto_pilot per-field mode discriminator
+
+New `enum FieldDriveMode { MODE_DIRECTION, MODE_TARGET }`. `FieldConfig` extended to `{fieldName, mode, dirX, dirY, targetX, targetY, walk}`.
+
+Per-field assignment:
+
+- `domt4_1` stays `MODE_DIRECTION` (RUN LEFT, `dirX=-1 dirY=0`). v0.15.9.1 BAT proved direction-drive cleared this field in one walking step; geometry is short.
+- `domt5_1` switches to `MODE_TARGET (382, 235)` walk=true. Target chosen from the v0.15.9.1.1 BAT walkmesh dead-end scanner output: cluster[2] at `(382, 235)` is the largest narrow cluster (14 tris) in the south of the walkmesh, likely the field-exit corridor entry. Significantly **east** of the v0.15.9.1.1 stuck point `(-769, 2217)` -- the corridor turns east before heading south, which is why straight-south analog couldn't navigate it.
+
+`Engage()` routes to `StartDirectionDrive` or `StartChaseDrive` per `cfg->mode`. `Disengage()` routes to the matching stop function per cached `s_engagedMode`. Per-tick refresh in `Update`'s already-engaged branch:
+
+- `MODE_DIRECTION`: re-call `StartDirectionDrive` (idempotent + keep-alive pulse).
+- `MODE_TARGET`: check `IsChaseDriveActive()` and `Disengage` with *"chase-drive completed (target reached or stuck)"* if false (path-finder finished but no field transition fired -- means target was wrong, refine in v0.15.9.3).
+
+Per-second diagnostic split per mode:
+
+- DIRECTION: `mode=DIRECTION dir=(dX,dY) walk=B pos=(pX,pY) lX=N lY=M`
+- TARGET: `mode=TARGET tgt=(tX,tY) walk=B pos=(pX,pY) dist=(dX,dY)`
+
+### Files changed
+
+- `src/field_navigation.h` (~32 lines: 3 new public-API decls + design comment block).
+- `src/field_nav_directiondrive.inl` (~280 lines: chase-drive design rationale, file-scope state `s_chaseDriveActive` + `s_chaseDriveWalk`, `StartChaseDrive` / `StopChaseDrive` / `IsChaseDriveActive`).
+- `src/field_nav_handlekeys.inl` (~15 lines: arrow-cancel suppression when `s_chaseDriveActive`, F9 toggle refusal with announce).
+- `src/chase_auto_pilot.cpp` (~150 lines net: header trail extended, `FieldDriveMode` enum, `FieldConfig` refactored, kFieldConfigs updated, `s_engagedMode` cached state, `DirectionName` extended for `(0,0)='target'`, `Engage`/`Disengage` route per mode, Initialize/Update logs reflect mode).
+- `src/ff8_accessibility.h` (this version).
+- `CHANGELOG.md` (this entry).
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`.
+
+No `deploy.bat` change needed -- `.inl` is a textual include.
+
+### Risk: moderate
+
+The chase-drive duplicates ~150 lines of F9's start logic to avoid refactoring F9 itself (lower regression risk for general nav). The shared `s_driveActive` flag means F9's `UpdateAutoDrive` state machine runs whenever EITHER F9 or chase-drive is active; same path-finding logic, just different entry points. The `s_chaseDriveActive` flag distinguishes them for mutex purposes.
+
+Edge cases:
+
+1. If chase auto-pilot's target is unreachable (different walkmesh island, no bridge trigger), `StartChaseDrive`'s island-bridging logic kicks in -- mirrors F9 verbatim.
+2. If the player presses backslash to cancel during a chase, the F9 handler's new gate refuses with announce -- cleaner than silently ignoring.
+3. If the player taps an arrow during chase, the new arrow-cancel gate suppresses cancel -- chase auto-pilot stays engaged.
+4. If F9 is already running when chase-drive tries to start, `StartChaseDrive` returns false; chase_auto_pilot retries on next Update tick when F9 might have stopped.
+
+### Predicted v0.15.9.2 BAT outcomes
+
+- **SUCCESS**: same chase trigger flow. Auto-pilot engages on domt4_1 with MODE_DIRECTION RUN LEFT (clears field per v0.15.9.1 BAT pattern). Engages on domt5_1 with MODE_TARGET `(382, 235)` walk=true. F9 path-finder computes A*+funnel route from spawn position around the wall at `(-769, 2217)` and continues to the south corridor. Per-second diagnostic shows pos changing each second as path-finding steers. Field transitions when party reaches the south exit gateway. Chase ends naturally with `CHASE-END SUMMARY mode=auto`.
+- **PARTIAL: domt5_1 path computed but party gets stuck before reaching target**. F9's wiggle-recovery state machine handles most stuck cases; if it gives up, `IsChaseDriveActive()` returns false and we Disengage with the *"completed (target reached or stuck)"* log line. Final position visible in diagnostic; tells us which target refinement is needed for v0.15.9.3.
+- **FAIL: F9 path-finding regressed in some way**. Most likely cause: chase-drive's shared use of `s_driveActive` collides with F9's expectations. Mitigation: I duplicated all F9 state init verbatim; F9 backslash test path still available for verification.
+
+After v0.15.9.2 BAT SUCCESS, v0.15.9.3 could fill in domt3_2 and refine targets; v0.15.9.4+ ships the doopen2a bridge state machine.
+
+## v0.15.9.1.1
+
+Keep-alive pulse for `FieldNavigation`'s direction-drive path so the chase auto-pilot's continuous southward analog input doesn't get debounced by FF8's apparent ~60-tick walking-cycle movement-intent gate.
+
+### v0.15.9.1 BAT result: PARTIAL SUCCESS
+
+Build clean, chase ASK fully worked (Aaron committed Auto at 14:38:10, INI persisted), field transitions on domt4_1 and domt3_2 happened (auto-pilot likely engaged silently on domt4_1's RUN LEFT and the run cleared the field in one step), and `ChaseAutoPilot` ENGAGED correctly on domt5_1 with WALK SOUTH (`dirX=0 dirY=1 walk=1`) at 14:38:32.
+
+**The party MOVED on domt5_1.** Position went from `(-843, 2482)` at 14:38:33 to `(-769, 2217)` at 14:38:34: that is -265 in Y (= screen-down = south) and +74 in X. That single ~1-second walking cycle proved the entire framework -- fake gamepad install, analog override, keyboard wake-up, direction-drive plumbing all reach the engine and move Squall in the correct screen-relative direction.
+
+But after that one walking step, the position froze at `(-769, 2217)` for 80+ seconds straight while diagnostic logs continued to confirm `lX=0`/`lY=1000` was being asserted every frame.
+
+### Theory: engine debounces movement intent after one walking cycle
+
+FF8's engine appears to drop "user wants to move" abstract button state after one walking cycle (~60 ticks) when keyboard input is constant. F9 path-finding sidesteps this because its heading vector wobbles tick-to-tick as the player walks toward dynamic waypoints -- `SetHeldDirections` fires fresh KEYUP/KEYDOWN events whenever the arrow bitmask flips, which the engine treats as new movement-intent events. chase direction-drive's heading is fixed (e.g., always `(0, +1)` for domt5_1), so the arrow bitmask never changes, no fresh events fire, and the engine drops intent after one walking cycle. The single walking-step boundary in the BAT data matches this hypothesis cleanly.
+
+### v0.15.9.1.1 fix
+
+`field_nav_directiondrive.inl`: in the "already running" branch of `StartDirectionDrive` (which `chase_auto_pilot::Update` calls every tick on an engaged field), run a short cycle that releases the held arrow for one tick and re-presses it the next, every `KEEPALIVE_PERIOD` ticks (30, well below the ~60-tick debounce window).
+
+New file-scope statics:
+- `KEEPALIVE_PERIOD` (const int, 30)
+- `s_keepAliveCounter` (volatile int)
+
+Cycle:
+- Counter increments each call.
+- Ticks 1..29: normal hold (idempotent `SetHeldDirections(arrows)`).
+- Tick 30: RELEASE arrows -- `SetHeldDirections(0)` fires KEYUP.
+- Tick 31: RE-PRESS arrows -- `SetHeldDirections(arrows)` fires KEYDOWN, counter resets to 0.
+
+`SetHeldDirections` is diff-based, so the actual `SendInput` KEYUP/KEYDOWN events only fire on the two boundary ticks per cycle -- the rest are no-ops. At 60 FPS that's a re-press every ~0.5 seconds, well inside the engine's apparent debounce window.
+
+The analog vote (`lX`/`lY`) never goes to zero across the pulse -- only the discrete keyboard re-pulse generates the intent event, so the visible movement is continuous (not stop-and-go).
+
+**W (walk modifier) is NOT pulsed** because it's a held modifier the engine reads continuously to set walk-vs-run speed; toggling it would cause speed glitches.
+
+Fresh-start branch and `StopDirectionDrive` both reset `s_keepAliveCounter` to 0 so a stop+restart can't land mid-cycle and immediately fire a release pulse.
+
+### Cosmetic fix bundled
+
+v0.15.9.1's per-second diagnostic logging in `chase_auto_pilot.cpp` reset `s_diagTickCounter` to 0 BEFORE the `Log::Field` call, so every log line read `tick=0` instead of the trigger value (60). Reset moved to AFTER the log call so the printed value matches the per-second cycle.
+
+### Files changed
+
+- `src/field_nav_directiondrive.inl` (~75 lines: KEEP-ALIVE PULSE header comment block, `KEEPALIVE_PERIOD` const, `s_keepAliveCounter` state, three-branch keep-alive logic in "already running" branch, counter reset in fresh-start branch and in `StopDirectionDrive`, version comment bumped to v0.15.9.1.1).
+- `src/chase_auto_pilot.cpp` (~10 lines: header comment trail extended, log-before-reset in per-second diagnostic block).
+- `src/ff8_accessibility.h` (this version).
+- `CHANGELOG.md` (this entry).
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`.
+
+### Risk: very low
+
+The keep-alive logic only activates on the "already running" path, which only chase auto-pilot hits today. F9 path-finding's `StartAutoDrive` uses the same field-scope state (`s_analogOverrideActive`, `s_fakeGamepadInstalled`, `s_driveHeld`) but never enters `StartDirectionDrive`. The mutex check in `field_nav_handlekeys.inl` (F9 refuses if `s_directionDriveActive` is true) and `StartDirectionDrive`'s reverse check (refuses if `s_driveActive` is true) prevent concurrent operation.
+
+The release-tick is exactly 1 frame; even if the engine misinterprets the brief KEYUP, the immediate KEYDOWN re-press the next tick should restore intent. `SetHeldDirections`'s diff logic guarantees we only fire `SendInput` when the bitmask actually changes, so per-frame cost during the held portion of the cycle is one volatile increment + one if/else branch -- negligible.
+
+### Predicted v0.15.9.1.1 BAT outcomes
+
+- **SUCCESS**: same chase trigger as v0.15.9.1, party walks south on domt5_1 continuously across multiple walking cycles, diagnostic shows pos changing every second until field transitions to next chase field (likely doopen2a). Tick value in diagnostic now shows 60, not 0.
+- **PARTIAL**: party walks for some additional cycles but stops short of the field exit. Could mean the engine debounce window is shorter than `KEEPALIVE_PERIOD=30`, in which case v0.15.9.1.2 lowers the period (try 15 or 20). Or freeze pattern matches v0.15.9.1 exactly with no additional motion -- could mean the engine doesn't process WM_KEYDOWN events at all and v0.15.9.1.2 needs a different keep-alive mechanism (e.g., subtle analog jitter via per-tick variation of `lX`/`lY`).
+- **FAIL**: F9 path-finding broke. Should be impossible by design (F9 doesn't enter `StartDirectionDrive`), but BAT verifies. Roll back keep-alive, leave cosmetic fix.
+
+## v0.15.9.1
+
+Wire chase auto-pilot into FieldNavigation's analog-override path. v0.15.9 BAT was a PARTIAL FAIL: the framework wiring fired correctly (chase ASK opened with descriptive labels, commit captured Auto, INI persistence wrote `chase_mode=auto`, ChaseAutoPilot ENGAGED on domt5_1 with the right direction and walk modifier) but two things broke. The auto-pilot MISSED domt4_1 (chase START) because the `!IsAskActive()` engagement gate kept it disengaged for the entire ~37s the chase ASK was open; by the time the ASK cleared, Aaron had already crossed two fields. And once engaged on domt5_1, the party did not move. 46 seconds of no field transition, no `CHASE-END SUMMARY` line, no audible footsteps during the ASK.
+
+Root cause is in `field_nav_autodrive.inl`'s v05.85 comment:
+
+> Keyboard injection is REQUIRED to activate the game's movement code path. Analog steering overrides the direction, but keyboard buttons are the trigger that makes the game process movement at all.
+
+chase_auto_pilot's v0.15.9 standalone SendInput arrows + W weren't enough. The engine reads movement direction from the gamepad analog stick (DIJOYSTATE2 lX/lY); keyboard is just a wake-up trigger. F9 path-finding works because StartAutoDrive installs a fake gamepad and writes lX/lY values; chase_auto_pilot did neither.
+
+Also captured empirically from the BAT log: chase route is `domt4_1 -> domt3_2 -> domt5_1 -> ... -> doopen2a`. domt3_2 was unconfigured in v0.15.9; v0.15.9.2+ will fill it in once we have BAT data confirming what works.
+
+### What ships
+
+**Three coordinated fixes plus per-second diagnostic logging.**
+
+**1. Drop the `!IsAskActive()` gate.** chase_auto_pilot.cpp's engagement gate is now THREE conditions (was four): `IsInChaseField + GetChaseMode==MODE_AUTO + IsOnField`. FF8 already blocks input during ASK regardless, so the dropped gate added no protection but did delay engagement by tens of seconds on chase-START fields. With the gate removed, auto-pilot engages immediately on field entry; the engine queues our analog values until the ASK closes, then movement begins.
+
+**2. New public API in FieldNavigation.**
+
+```cpp
+namespace FieldNavigation {
+    void StartDirectionDrive(int8_t dirX, int8_t dirY, bool walk);
+    void StopDirectionDrive();
+    bool IsDirectionDriveActive();
+}
+```
+
+`dirX` / `dirY` are screen-relative direction signs in `{-1, 0, +1}` matching DirectInput axis convention (`dirX +1` = right, `dirY +1` = south). New module `field_nav_directiondrive.inl` (~190 lines):
+
+- Installs the fake gamepad, mirroring the install code in `field_nav_handlekeys.inl`'s F9 drive branch (idempotent).
+- Activates `s_analogOverrideActive` and writes screen-relative analog values directly: `lX = dirX * 1000`, `lY = dirY * 1000`. NO camera projection -- chase fields hand us the direction the engine should see directly.
+- Holds one keyboard arrow as the wake-up trigger via the existing `SetHeldDirections` helper. Direction matches `dirX` / `dirY` so the keyboard "vote" agrees with the analog "vote".
+- If `walk=true`, holds W (scancode 0x11) via SendInput. FF8 PC default keymap: cancel = W = walk modifier on foot.
+
+**Mutex with F9 path-finding** via new `s_directionDriveActive` flag. `StartDirectionDrive` refuses if `s_driveActive` is true; the F9 handler in `field_nav_handlekeys.inl` refuses (with announce + log line) if `s_directionDriveActive` is true. The two paths share the analog override and fake gamepad infrastructure but cannot run concurrently.
+
+The new `.inl` is included in `field_navigation.cpp` AFTER `field_nav_autodrive.inl` (so `SetHeldDirections` / `InjectKey` / `ReleaseAllDirections` are visible) and BEFORE `field_nav_handlekeys.inl` (so the F9 handler sees the new flag).
+
+**3. chase_auto_pilot rewired to use the new API.** Replaces v0.15.9's standalone SendInput infrastructure (`InjectKey` / `ReleaseAll` / `SetHeld` helpers, scan code constants, `DIR_*` bitmask) with `FieldNavigation::StartDirectionDrive` / `StopDirectionDrive` calls. `FieldConfig` struct refactored from `{fieldName, arrowMask, holdCancel}` to `{fieldName, dirX, dirY, walk}` -- maps more directly to the DirectInput convention. Same two configured fields:
+
+```cpp
+static const FieldConfig kFieldConfigs[] = {
+    { "domt4_1", -1,  0, /*walk=*/false },  // RUN LEFT
+    { "domt5_1",  0, +1, /*walk=*/true  },  // WALK SOUTH
+};
+```
+
+`chase_ask_overlay.h` include dropped (no longer needed).
+
+### Per-second diagnostic logging
+
+While engaged, `chase_auto_pilot::Update` logs once per ~60 ticks:
+
+```
+ChaseAutoPilot: tick=T field='X' dir=(dX,dY) walk=B pos=(pX,pY) lX=N lY=M
+```
+
+Position reads SEH-guarded from `entity[0]` (Squall) at `+0x190` / `+0x194` (matching `field_nav_helpers.inl::GetEntityPos`'s fixed-point path). If `pX` / `pY` change tick-to-tick, movement IS reaching the engine; if frozen, the fake gamepad install isn't taking effect.
+
+### Predicted v0.15.9.1 BAT outcome
+
+Same chase trigger as v0.15.9. Aaron should keep playing through MH-7 even if it feels like nothing's happening for a few seconds (the engine needs ~60 ticks to engage movement after fake gamepad install per `field_nav_autodrive.inl`'s v06.08 comment). Watch for the per-second diagnostic line in `Logs/ff8_field.log`.
+
+### BAT outcomes
+
+- **SUCCESS**: party walks south on domt5_1, transitions to next field, chase eventually ends with `CHASE-END SUMMARY mode=auto battles_fired=0 battles_suppressed=N`. Push v0.15.9.1; move to v0.15.9.2 (bridge state machine for doopen2a, fill in domt3_2 direction).
+- **PARTIAL: party still doesn't move on domt5_1**: the diagnostic log tells us why. (a) Position frozen, lX/lY correct -> fake gamepad install isn't taking effect; re-check `DD_InstallFakeGamepad` ordering vs FF8's gamepad init. (b) Position moves but never reaches exit -> direction wrong for this field's camera, or stuck on geometry; try other directions, check walkmesh.
+- **FAIL: F9 path-finding broke**: refactor regression in `field_nav_directiondrive.inl` or its mutex hook. Roll back the FieldNavigation changes; ship v0.15.9.1.1 with just Fix 1 + diagnostic logging, leave Fix 2 for v0.15.9.2.
+
+### Files changed
+
+- `src/field_navigation.h` -- 3 new public-API decls in namespace, comment block documenting screen-relative axis convention + mutex with F9.
+- `src/field_nav_directiondrive.inl` (NEW, ~190 lines) -- design rationale, file-scope state (`s_directionDriveActive` + `s_directionDriveWalk` + `SC_W_CANCEL_DD`), `DD_InstallFakeGamepad` / `DD_UninstallFakeGamepad` / `DD_DirsToArrowMask` helpers, `StartDirectionDrive` / `StopDirectionDrive` / `IsDirectionDriveActive` at namespace scope.
+- `src/field_navigation.cpp` -- include the new `.inl` between `autodrive.inl` and `gps.inl`.
+- `src/field_nav_handlekeys.inl` -- F9 mutex check refuses if `s_directionDriveActive`.
+- `src/chase_auto_pilot.h` -- design rationale updated for v0.15.9.1, three-condition engagement gate documented, diagnostic logging documented.
+- `src/chase_auto_pilot.cpp` -- dropped standalone SendInput infrastructure, dropped `chase_ask_overlay.h` include, `FieldConfig` struct refactored to `{fieldName, dirX, dirY, walk}`, `ReadSquallPosition` SEH-guarded helper, `Engage` now calls `FieldNavigation::StartDirectionDrive`, `Disengage` calls `StopDirectionDrive`, three-condition engagement gate, per-second diagnostic block in `Update`.
+- `src/ff8_accessibility.h` -- this version.
+- `CHANGELOG.md` -- this entry.
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md` -- updated for v0.15.9.1 ready-to-BAT state.
+
+### Risk
+
+Low-to-moderate. The new direction-drive API is purely additive; it cannot affect F9 path-finding when no one calls `Start` / `Stop`. The mutex check in F9 is a single boolean condition that fires only when chase auto-pilot is active. The chase_auto_pilot rewrite preserves the v0.15.9 engagement logic (just drops one gate condition + swaps the input mechanism). Edge case: both paths run on the same Update tick and never interleave; the mutex check makes concurrent install impossible by design.
+
+## v0.15.9
+
+Auto chase mode framework + linear-field auto-drive + walk-not-run on the west trail. v0.15.8.1 BAT was a clean SUCCESS (descriptive labels, suppressed redundant commit announce, chase resumed promptly on Auto pick) and the menu UX is now solid. v0.15.9 routes Auto from "falls back to manual" to actual auto-drive behavior so the X-ATM092 chase becomes hands-off on the configured fields.
+
+### What ships
+
+**Three coordinated changes route Auto to MODE_AUTO with cap=0 battle suppression.**
+
+1. `chase_ask_overlay::CommitChoice` ANSWER_AUTO branch now calls `ChaseDetector::SetChaseMode(MODE_AUTO)` instead of `MODE_MANUAL`. ANSWER_ORIGINAL still falls back to MODE_MANUAL until v0.15.10 ships the chase-mod-active flag (vanilla chase, no battle cap).
+
+2. `chase_battle_freeze::Hook_opcode_battle` gate reworked into a per-mode cap:
+   ```cpp
+   int  cap    = (mode == ChaseDetector::MODE_AUTO) ? 0 : 1;
+   bool freeze = (battleCount >= cap);
+   ```
+   MANUAL keeps cap=1 (first scripted chase battle PASSes, subsequent NO-OP) so the v0.15.8.1 BAT-proven chase-cap behavior is preserved verbatim. AUTO uses cap=0 -- ALL chase battles NO-OP'd, including the scripted opener in domt4_1. The chase progresses as a movement-only scenario: chase_auto_pilot drives, robot scripts play visually, the BATTLE opcode never reaches a battle screen. The doopen2a strcmp guard in the PASS branch is unchanged. NO-OP and PASS log lines now print `cap=N` so the post-BAT log shows which mode was active.
+
+3. **NEW MODULE** `src/chase_auto_pilot.{h,cpp}` (~285 lines total). On chase field entry with mode=AUTO, looks up the field name in a hardcoded FieldConfig table and (if found) injects raw keyboard input via SendInput hardware scan codes -- same pattern as `field_nav_autodrive.inl::InjectKey`. No analog stick override since chase fields are linear corridors.
+
+### Field configuration
+
+```cpp
+static const FieldConfig kFieldConfigs[] = {
+    { "domt4_1", DIR_LEFT, /*holdCancel=*/false },  // chase start, run west
+    { "domt5_1", DIR_DOWN, /*holdCancel=*/true  },  // west trail, walk south
+};
+```
+
+- **domt4_1** (Mountain Hideout 6, chase start / Selphie cliff): RUN LEFT. Per Jegged.com chase route: "run immediately to the left as quickly as possible. If you delay at all, you will have to fight X-ATM092 again."
+- **domt5_1** (Mountain Hideout 7, west trail): WALK DOWN. Per Jegged: "pathway leading south. Walk, don't run, to the bottom of the screen." Aaron confirmed AI rule #1 on 2026-05-10: mountain shakes when running, party loses balance, gets caught. Walk modifier is W (scancode 0x11) -- FF8 PC default cancel binding which on foot acts as the walk modifier (opposite of FF7's run modifier).
+
+Other chase fields (`domt1_1`, `domt2_1`, `domt3_2`, `doopen2a`) are unconfigured -- ChaseAutoPilot::Update returns silently for unrecognized field names, player drives manually. Bridge handling (`doopen2a`) is deferred to v0.15.9.1 with a PJUMPA hook detecting kani's two scripted leaps over the party + reverse-direction state machine per Aaron's AI rule #2.
+
+### Engagement gate
+
+All four conditions must hold:
+
+1. `ChaseDetector::IsInChaseField()` -- in a known chase field
+2. `ChaseDetector::GetChaseMode() == MODE_AUTO` -- Auto selected in ASK
+3. `FF8Addresses::IsOnField()` -- game mode 1 (not battle/menu)
+4. `!ChaseAskOverlay::IsAskActive()` -- chase ASK isn't open (defensive)
+
+Disengagement releases all held keys (arrows + W) cleanly via SendInput KEYUP events. The diff-based `SetHeld` function reconciles held-key state to a desired tuple, idempotent if state already matches -- defends against rare cases where Windows drops a held key (focus-loss races); cheap, called every Update tick on engaged field.
+
+### Wiring
+
+- `dinput8.cpp`: include `chase_auto_pilot.h`, `ChaseAutoPilot::Initialize` after `ChaseAskOverlay::Initialize`, `ChaseAutoPilot::Update` after `ChaseAskOverlay::Update` in the main loop, `ChaseAutoPilot::Shutdown` between `ChaseBattleFreeze::Shutdown` and `ChaseKaniFreeze::Shutdown`.
+- `deploy.bat`: `chase_auto_pilot.cpp` added to the compile list after `chase_ask_overlay.cpp`.
+
+### Predicted v0.15.9 BAT outcome
+
+Drive FF8 to chase trigger, pick Auto in dialog, then go hands-off:
+
+- Dialog opens, cursor announces "Auto: falls back to manual selected" (description label still says "falls back to manual" until v0.15.9.1 ships and we update `kChaseChoices`).
+- X to commit. SAPI says "Automatic selected"; ChaseDetector logs `chase_mode = auto`.
+- Chase resumes; chase_auto_pilot picks up on next Update. Field log shows:
+  ```
+  ChaseAutoPilot: ENGAGED on field='domt4_1' direction=west running (arrows=0x4 holdCancel=0)
+  ```
+  Party walks left, no chase battle fires (cap=0 NO-OP). Field log shows:
+  ```
+  [CBF] NO-OP chase BATTLE call ... mode=auto cap=0
+  ```
+  for the would-be opener.
+- Field transitions when party reaches gateway. ENGAGED line for the next field (likely an unconfigured one) doesn't fire; Aaron drives manually until reaching domt5_1.
+- ENGAGED line for domt5_1 fires:
+  ```
+  ChaseAutoPilot: ENGAGED on field='domt5_1' direction=south WALKING (arrows=0x2 holdCancel=1)
+  ```
+  Party walks south slowly with W held; no mountain-shake battle (the hypothetical battle is NO-OP'd anyway by cap=0).
+- Continued progress through unconfigured fields (player drives) until reaching doopen2a. ENGAGED doesn't fire for doopen2a; Aaron handles the bridge manually (turns around twice as the robot leaps).
+- doopen2a -> dotown_3 transition fires per v0.15.2.15's preserved fieldId-flip mechanic; Lapin Beach FMV plays through; control returns to dotown_2.
+
+Total chase battles fought: zero. Total chase battles NO-OP'd: 5-7 depending on which fields the auto-pilot didn't reach in time.
+
+### Risk
+
+Low. The `chase_auto_pilot` module is purely additive -- it does nothing when `mode != AUTO`, so MANUAL chases work exactly as v0.15.8.1. The cap=0 in AUTO is a single-line gate change that preserves the entire MANUAL path verbatim. The keyboard injection uses SendInput which is a documented Win32 API the `field_nav_autodrive.inl` path has been exercising successfully since v0.05.85; same scancode (W=0x11) as v0.14.102's car AD path.
+
+The W modifier might briefly skip a stray dialog if one fires while engaged on domt5_1 (cancel acts as "next" in dialogs). Chase fields rarely have mid-field dialogs so risk is low. If it surfaces in BAT, a v0.15.9.0.1 patch can add a `!FieldDialog::IsDialogActive()` gate.
+
+### Files changed
+
+- `src/chase_auto_pilot.h` (NEW, ~75 lines)
+- `src/chase_auto_pilot.cpp` (NEW, ~210 lines)
+- `src/chase_ask_overlay.cpp` (~15 lines)
+- `src/chase_battle_freeze.cpp` (~30 lines)
+- `src/dinput8.cpp` (4 spots)
+- `src/deploy.bat` (1 line)
+- `src/ff8_accessibility.h` (this version)
+- `CHANGELOG.md` (this entry)
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`
+
+After v0.15.9 BAT SUCCESS, v0.15.9.1 implements the `doopen2a` bridge state machine. After v0.15.9.1, the `kChaseChoices` labels in `chase_ask_overlay` can be updated from "Auto: falls back to manual" to "Auto: hands-off chase" or similar.
+
 ## v0.15.8.1
 
 Chase ASK menu UX polish. v0.15.8 BAT was a clean SUCCESS end-to-end: dialog opened on Squall's chase-trigger MES, cursor announced through all three options, X commit captured Manual at 11:05:06, and the chase resumed with the 1-battle-per-field cap holding through Selphie's rendezvous line. But Aaron noticed a glitch -- the chase resumed while three TTS announces were still queued post-commit:

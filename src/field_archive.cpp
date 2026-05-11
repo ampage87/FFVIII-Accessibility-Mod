@@ -591,6 +591,9 @@ bool LoadINFGateways(const char* fieldName, GatewayInfo* gateways, int maxGatewa
         // X = screen-horizontal, Y = screen-vertical (matching entity coords).
         info.centerX = (float)(x1 + x2) / 2.0f;
         info.centerZ = (float)(y1 + y2) / 2.0f;  // "centerZ" = centerY in our coord system
+        // v0.15.9.2.15: store endpoints for crossing detection.
+        info.lineX1 = x1; info.lineY1 = y1;
+        info.lineX2 = x2; info.lineY2 = y2;
         info.destFieldId = destId;
 
         // Look up destination field name.

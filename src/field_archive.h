@@ -39,6 +39,15 @@ struct JSMCounts {
 struct GatewayInfo {
     float   centerX;          // midpoint X of the two vertices
     float   centerZ;          // midpoint Z of the two vertices
+    // v0.15.9.2.15: Exit line endpoints preserved for crossing detection.
+    // The INF gateway is a 2-vertex line segment that the player physically
+    // crosses to fire the screen transition. centerX/centerZ are the midpoint
+    // (useful for compass / navigation targeting), but to detect crossing we
+    // need the full line so we can do cross-product sign-flip detection.
+    // Chase auto-pilot reads these via GetGatewayNearestCluster() and passes
+    // them to StartChaseDrive.
+    int16_t lineX1, lineY1;   // first endpoint (screen X, Y)
+    int16_t lineX2, lineY2;   // second endpoint (screen X, Y)
     uint16_t destFieldId;     // destination field ID (0xFFFF = unused)
     char    destFieldName[64]; // looked up from field.fl if possible
 };

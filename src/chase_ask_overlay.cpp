@@ -189,10 +189,21 @@ static void CommitChoice(int answer)
             ChaseDetector::SetChaseMode(ChaseDetector::MODE_MANUAL);
             break;
         case ANSWER_AUTO:
+            // v0.15.9: Auto now routes to MODE_AUTO instead of falling
+            // back to MODE_MANUAL. ChaseAutoPilot picks this up via
+            // ChaseDetector::GetChaseMode() and engages on each chase
+            // field (currently configured: domt4_1 run-west, domt5_1
+            // walk-south). chase_battle_freeze caps battles at 0 in
+            // MODE_AUTO so any chase battle that does fire gets NO-OP'd.
+            // Bridge (doopen2a) handling deferred to v0.15.9.1; player
+            // drives the bridge manually in v0.15.9.
             ScreenReader::Speak("Automatic selected", false);
-            ChaseDetector::SetChaseMode(ChaseDetector::MODE_MANUAL);
+            ChaseDetector::SetChaseMode(ChaseDetector::MODE_AUTO);
             break;
         case ANSWER_ORIGINAL:
+            // Original still falls back to MODE_MANUAL until v0.15.10
+            // implements the chase-mod-active flag (vanilla chase
+            // behavior with no battle cap).
             ScreenReader::Speak("Original selected", false);
             ChaseDetector::SetChaseMode(ChaseDetector::MODE_MANUAL);
             break;

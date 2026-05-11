@@ -160,6 +160,7 @@ cl /nologo /W3 /EHsc /O2 /MD /LD ^
     "%SRC_DIR%\chase_diag.cpp" ^
     "%SRC_DIR%\chase_detector.cpp" ^
     "%SRC_DIR%\chase_ask_overlay.cpp" ^
+    "%SRC_DIR%\chase_auto_pilot.cpp" ^
     "%SRC_DIR%\chase_kani_freeze.cpp" ^
     "%SRC_DIR%\chase_battle_freeze.cpp" ^
     "%SRC_DIR%\dialog_inject.cpp" ^

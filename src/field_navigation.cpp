@@ -291,6 +291,17 @@ static float       s_driveTrigCrossStart = 0.0f; // cross product at drive start
 static bool        s_driveTrigTarget     = false; // true if driving to a trigger line
 // v06.05: Trigger line index to skip during A* and recovery (target trigger line).
 static int         s_driveSkipTrigIdx    = -1;
+// v0.15.9.2.15: Explicit crossing-line endpoints for chase-drive. The crossing
+// detection in UpdateAutoDrive can fire for either a SETLINE-defined trigger
+// (chosen by trigger-line index, copied here) or an INF gateway (passed
+// directly by chase_auto_pilot). Unifying both into one pair of endpoint state
+// variables keeps the crossing-check block simple and lets us extend to other
+// crossing sources later without further plumbing changes.
+static int16_t     s_driveCrossLineX1    = 0;
+static int16_t     s_driveCrossLineY1    = 0;
+static int16_t     s_driveCrossLineX2    = 0;
+static int16_t     s_driveCrossLineY2    = 0;
+static bool        s_driveCrossLineActive = false;
 
 // --- Camera axes (loaded per field from .ca file for screen-space mapping) ---
 static FieldArchive::CameraAxes s_cameraAxes = {};
@@ -586,7 +597,40 @@ static bool  s_camCalibrated = false;
 #include "field_nav_announce.inl"
 
 // --- Auto-drive state machine, steering, recovery (extracted v0.12.18) ---
+// v0.15.9.2.1: Chase-drive state declared here so field_nav_autodrive.inl
+// can reference s_chaseDriveActive / s_chaseDriveTargetX/Y. The chase-drive
+// IMPLEMENTATION (StartChaseDrive / StopChaseDrive / IsChaseDriveActive)
+// lives in field_nav_directiondrive.inl which is included later, after
+// autodrive.inl, so it can use SetHeldDirections / InjectKey from autodrive.
+// File-scope statics in textual includes share one translation unit, so
+// these definitions are visible to both .inl files.
+static volatile bool s_chaseDriveActive = false;  // owned by directiondrive.inl, read by autodrive.inl
+static bool          s_chaseDriveWalk   = false;  // owned by directiondrive.inl
+static int32_t       s_chaseDriveTargetX = 0;     // cached by StartChaseDrive, read by autodrive's UpdateAutoDrive
+static int32_t       s_chaseDriveTargetY = 0;
+
+// v0.15.9.2.6: File-scope dead-end cluster state populated by the walkmesh
+// dead-end scanner in HookedFieldScriptsInit (was a local variable before;
+// results were logged then discarded). Promoted to file scope so the public
+// API GetLargestClusterCenter() can read them, used by chase_auto_pilot to
+// pick a default MODE_TARGET destination on chase fields that aren't in its
+// explicit per-field config table.
+struct DeadEndCluster {
+    float centerX, centerY;
+    int   triCount;
+    int   seedTri;
+};
+static const int MAX_DEAD_CLUSTERS = 32;
+static DeadEndCluster s_deadClusters[MAX_DEAD_CLUSTERS] = {};
+static int            s_deadClusterCount = 0;
+
 #include "field_nav_autodrive.inl"
+
+// --- Direction-based auto-drive for chase scenes (v0.15.9.1) ---
+// Included AFTER field_nav_autodrive.inl so SetHeldDirections / InjectKey /
+// ReleaseAllDirections are visible. Included BEFORE field_nav_handlekeys.inl
+// so the F9 drive handler can see s_directionDriveActive for mutex.
+#include "field_nav_directiondrive.inl"
 
 // --- GPS guided navigation (extracted v0.12.18) ---
 #include "field_nav_gps.inl"
@@ -1001,5 +1045,129 @@ void Shutdown()
 }
 
 bool IsActive() { return s_initialized; }
+
+// v0.15.9.2.6: Walkmesh cluster query for chase auto-pilot fallback.
+// Returns the center of the cluster with the highest triCount across the
+// dead-end scanner's results. Ties broken by first found (lowest seedTri).
+// See header for full contract.
+bool GetLargestClusterCenter(int32_t* outX, int32_t* outY)
+{
+    if (!outX || !outY) return false;
+    if (s_deadClusterCount <= 0) return false;
+    int bestIdx = -1;
+    int bestCount = 0;
+    for (int i = 0; i < s_deadClusterCount; ++i) {
+        if (s_deadClusters[i].triCount > bestCount) {
+            bestCount = s_deadClusters[i].triCount;
+            bestIdx = i;
+        }
+    }
+    if (bestIdx < 0) return false;
+    *outX = (int32_t)s_deadClusters[bestIdx].centerX;
+    *outY = (int32_t)s_deadClusters[bestIdx].centerY;
+    return true;
+}
+
+// v0.15.9.2.14: Trigger-line lookup for chase auto-pilot fallback.
+// See header for full contract. Implementation: find largest cluster, then
+// pick the trigger line whose center is closest to that cluster.
+bool GetTriggerLineNearestCluster(int32_t* outX, int32_t* outY, int* outTrigIdx)
+{
+    if (!outX || !outY || !outTrigIdx) return false;
+
+    int32_t clusterX = 0, clusterY = 0;
+    if (!GetLargestClusterCenter(&clusterX, &clusterY)) return false;
+
+    int bestIdx = -1;
+    float bestDistSq = 1e30f;
+    for (int t = 0; t < s_capturedLineCount; ++t) {
+        if (!s_capturedLines[t].active) continue;
+        // Match the IsSeparatedByTriggerLine filter: SCREEN_BOUND for actual
+        // screen transitions, UNKNOWN for unclassified lines that haven't been
+        // labeled yet (common on early-game chase fields).
+        if (s_capturedLines[t].lineType != FieldArchive::JSM_ENT_LINE_SCREEN_BOUND &&
+            s_capturedLines[t].lineType != FieldArchive::JSM_ENT_UNKNOWN) continue;
+        float cx = ((float)s_capturedLines[t].x1 + (float)s_capturedLines[t].x2) * 0.5f;
+        float cy = ((float)s_capturedLines[t].y1 + (float)s_capturedLines[t].y2) * 0.5f;
+        float dx = cx - (float)clusterX;
+        float dy = cy - (float)clusterY;
+        float distSq = dx*dx + dy*dy;
+        if (distSq < bestDistSq) {
+            bestDistSq = distSq;
+            bestIdx = t;
+        }
+    }
+
+    if (bestIdx < 0) return false;
+
+    *outX = (int32_t)(((float)s_capturedLines[bestIdx].x1 +
+                       (float)s_capturedLines[bestIdx].x2) * 0.5f);
+    *outY = (int32_t)(((float)s_capturedLines[bestIdx].y1 +
+                       (float)s_capturedLines[bestIdx].y2) * 0.5f);
+    *outTrigIdx = bestIdx;
+    Log::Field("FieldNavigation: GetTriggerLineNearestCluster matched cluster(%d,%d) "
+               "-> trigger[%d] center=(%d,%d) distFromCluster=%.0f",
+               (int)clusterX, (int)clusterY, bestIdx, *outX, *outY, sqrtf(bestDistSq));
+    return true;
+}
+
+// v0.15.9.2.15: INF gateway lookup for chase auto-pilot fallback.
+// See header for full contract. Implementation: get largest cluster + player
+// position, then pick the gateway whose direction-from-player has the largest
+// positive dot product with the player->cluster vector. That selects forward-
+// progress gateways and rejects entry-back gateways even when the entry-back
+// gateway is geometrically closer to the cluster center.
+bool GetGatewayNearestCluster(int32_t* outX, int32_t* outY,
+                              int32_t* outLineX1, int32_t* outLineY1,
+                              int32_t* outLineX2, int32_t* outLineY2)
+{
+    if (!outX || !outY || !outLineX1 || !outLineY1 || !outLineX2 || !outLineY2)
+        return false;
+    if (s_gatewayCount <= 0) return false;
+
+    int32_t clusterX = 0, clusterY = 0;
+    if (!GetLargestClusterCenter(&clusterX, &clusterY)) return false;
+
+    float playerX = 0, playerY = 0;
+    if (s_playerEntityIdx < 0) return false;
+    if (!GetEntityPos(s_playerEntityIdx, playerX, playerY)) return false;
+
+    // Vector from player to cluster -- defines "forward" direction.
+    float clx = (float)clusterX - playerX;
+    float cly = (float)clusterY - playerY;
+
+    int bestIdx = -1;
+    float bestScore = -1e30f;
+    for (int g = 0; g < s_gatewayCount; ++g) {
+        // Skip degenerate gateways (zero-length line).
+        if (s_gateways[g].lineX1 == 0 && s_gateways[g].lineY1 == 0 &&
+            s_gateways[g].lineX2 == 0 && s_gateways[g].lineY2 == 0)
+            continue;
+        float gwDx = s_gateways[g].centerX - playerX;
+        float gwDy = s_gateways[g].centerZ - playerY;  // centerZ = Y in our coords
+        float dot = gwDx * clx + gwDy * cly;
+        if (dot > bestScore) {
+            bestScore = dot;
+            bestIdx = g;
+        }
+    }
+
+    if (bestIdx < 0) return false;
+
+    *outX = (int32_t)s_gateways[bestIdx].centerX;
+    *outY = (int32_t)s_gateways[bestIdx].centerZ;
+    *outLineX1 = (int32_t)s_gateways[bestIdx].lineX1;
+    *outLineY1 = (int32_t)s_gateways[bestIdx].lineY1;
+    *outLineX2 = (int32_t)s_gateways[bestIdx].lineX2;
+    *outLineY2 = (int32_t)s_gateways[bestIdx].lineY2;
+    Log::Field("FieldNavigation: GetGatewayNearestCluster matched cluster(%d,%d) "
+               "player=(%.0f,%.0f) -> gateway[%d] center=(%d,%d) "
+               "line=(%d,%d)->(%d,%d) destFieldId=%u score=%.0f",
+               (int)clusterX, (int)clusterY, playerX, playerY,
+               bestIdx, *outX, *outY,
+               *outLineX1, *outLineY1, *outLineX2, *outLineY2,
+               (unsigned)s_gateways[bestIdx].destFieldId, bestScore);
+    return true;
+}
 
 }  // namespace FieldNavigation

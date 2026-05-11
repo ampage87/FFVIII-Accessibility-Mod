@@ -12,6 +12,7 @@
 #include "chase_diag.h"
 #include "chase_detector.h"
 #include "chase_ask_overlay.h"
+#include "chase_auto_pilot.h"
 #include "chase_kani_freeze.h"
 #include "chase_battle_freeze.h"
 #include "dialog_inject.h"
@@ -128,6 +129,14 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
                                   //          since they query it)
     ChaseDiag::Initialize();      // v0.15.0: Dollet/X-ATM092 chase diagnostic
     ChaseAskOverlay::Initialize();// v0.15.1: Chase entry ASK overlay
+    ChaseAutoPilot::Initialize(); // v0.15.9: Chase auto-drive (MODE_AUTO).
+                                  //   Per-field config: domt4_1 run-west,
+                                  //   domt5_1 walk-south. Engages only when
+                                  //   chase mode is AUTO and player is on a
+                                  //   configured chase field. Other chase
+                                  //   fields and the bridge (doopen2a) are
+                                  //   left to the player in v0.15.9; bridge
+                                  //   state machine ships in v0.15.9.1.
     ChaseKaniFreeze::Initialize();// v0.15.2.14: kani+battleyarou static pin +
                                   //   DYNAMIC chase-agent pin (resolves the
                                   //   actual entity calling BATTLE in each
@@ -229,6 +238,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
         // exit — replaces the v0.15.1 ChaseBattleFreeze opcode_battle hook.
         ChaseDetector::Update();
         ChaseAskOverlay::Update();
+        ChaseAutoPilot::Update();   // v0.15.9: drives party on configured chase fields
         ChaseKaniFreeze::Update();
 
         // Chase scene diagnostic (v0.15.0) -- F12 toggle, no-op when disabled.
@@ -378,6 +388,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     WorldMap::Shutdown();         // v0.11.03: World map cleanup
     DialogInject::Shutdown();     // v0.15.4: Dialog inject Phase 1 cleanup
     ChaseBattleFreeze::Shutdown();// v0.15.2.13: active opcode_battle freeze
+    ChaseAutoPilot::Shutdown();   // v0.15.9: release any held auto-drive keys
     ChaseKaniFreeze::Shutdown();  // v0.15.2.3: kani-wakeup diagnostic cleanup
     ChaseAskOverlay::Shutdown();  // v0.15.1: close ASK if open + reset state
     ChaseDiag::Shutdown();        // v0.15.0: Chase diagnostic cleanup

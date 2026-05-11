@@ -18,6 +18,7 @@
 // All accesses to game memory are SEH-guarded.
 
 #include "chase_detector.h"
+#include "chase_battle_freeze.h"
 #include "ff8_accessibility.h"
 #include "ff8_addresses.h"
 #include "field_archive.h"
@@ -126,6 +127,16 @@ static char       s_debouncedFieldName[64] = "";
 
 // Chase-active span (true between first chase-field entry and exit).
 static bool       s_chaseActive = false;
+
+// v0.15.9: Per-chase barometer snapshot. Captured at chase activation
+// from ChaseBattleFreeze's session-cumulative counters; subtracted at
+// deactivation to produce the per-chase CHASE-END SUMMARY log line.
+// Aaron uses these counts as the iteration barometer: chase Auto is
+// fully configured when battles_fired = battles_suppressed = 0 across
+// the whole chase scene (cap=0 stops being needed because chase_auto_pilot
+// routes the party perfectly through every field).
+static int        s_chaseStartBattleCalls   = 0;
+static int        s_chaseStartBattleFreezes = 0;
 
 // Per-field state.
 static int        s_currentFieldBattleCount = 0;
@@ -273,11 +284,37 @@ static void OnDebouncedFieldChange(const char* newFieldName)
     bool nowChase = IsChaseFieldName(newFieldName);
     if (nowChase && !s_chaseActive) {
         s_chaseActive = true;
-        Log::Field("ChaseDetector: chase ACTIVATED on entry to '%s'", newFieldName);
+        // v0.15.9: snapshot battle counters so the chase-end summary
+        // reports per-chase deltas (not session totals).
+        s_chaseStartBattleCalls   = ChaseBattleFreeze::GetChaseBattleCallCount();
+        s_chaseStartBattleFreezes = ChaseBattleFreeze::GetChaseBattleFreezeCount();
+        Log::Field("ChaseDetector: chase ACTIVATED on entry to '%s' "
+                   "(mode=%s, baseline calls=%d freezes=%d)",
+                   newFieldName, ChaseModeName(s_chaseMode),
+                   s_chaseStartBattleCalls, s_chaseStartBattleFreezes);
     } else if (!nowChase && s_chaseActive) {
         s_chaseActive = false;
+        // v0.15.9: per-chase barometer summary. battles_fired = the
+        // chase battles that actually reached a battle screen (PASS
+        // path); battles_suppressed = NO-OP'd. The barometer for Auto
+        // refinement: every additional field config in chase_auto_pilot
+        // and every bridge state-machine improvement should reduce
+        // battles_suppressed toward 0. When it stays at 0 across
+        // multiple BATs, the cap=0 scaffold becomes redundant and can
+        // be removed (or flipped to cap=1 matching MANUAL).
+        int callsNow    = ChaseBattleFreeze::GetChaseBattleCallCount();
+        int freezesNow  = ChaseBattleFreeze::GetChaseBattleFreezeCount();
+        int callsThis   = callsNow   - s_chaseStartBattleCalls;
+        int freezesThis = freezesNow - s_chaseStartBattleFreezes;
+        int firedThis   = callsThis  - freezesThis;
+        if (callsThis < 0)   callsThis   = 0;
+        if (freezesThis < 0) freezesThis = 0;
+        if (firedThis < 0)   firedThis   = 0;
         Log::Field("ChaseDetector: chase DEACTIVATED on entry to '%s' "
-                   "(non-chase field)", newFieldName);
+                   "(non-chase field). CHASE-END SUMMARY mode=%s "
+                   "battles_fired=%d battles_suppressed=%d",
+                   newFieldName, ChaseModeName(s_chaseMode),
+                   firedThis, freezesThis);
     }
 }
 
@@ -397,6 +434,8 @@ void Initialize()
     s_debounceActive          = false;
     s_debouncedFieldName[0]   = '\0';
     s_chaseActive             = false;
+    s_chaseStartBattleCalls   = 0;  // v0.15.9 barometer baseline
+    s_chaseStartBattleFreezes = 0;  // v0.15.9 barometer baseline
     s_currentFieldBattleCount = 0;
     s_lastGameMode            = 0xFFFF;
     s_kaniLoc                 = KaniLocation{ -1, -1, 0, "" };

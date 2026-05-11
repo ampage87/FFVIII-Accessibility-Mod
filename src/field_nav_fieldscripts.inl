@@ -37,6 +37,8 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
     s_waypointCount      = 0;
     s_waypointIdx        = 0;
     s_usingFunnel        = false;  // v05.95
+    // v0.15.9.2.6: reset cluster state (will be repopulated by the dead-end scanner below)
+    s_deadClusterCount   = 0;
     // Free previous walkmesh before loading new one.
     FieldArchive::FreeWalkmesh(s_walkmesh);
     // Reset camera axes for new field.
@@ -591,14 +593,12 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                 static bool s_deadVisited[4096];
                 memset(s_deadVisited, 0, numTri * sizeof(bool));
 
-                struct DeadEndCluster {
-                    float centerX, centerY;
-                    int triCount;
-                    int seedTri;
-                };
-                static const int MAX_DEAD_CLUSTERS = 32;
-                DeadEndCluster deadClusters[MAX_DEAD_CLUSTERS];
-                int deadClusterCount = 0;
+                // v0.15.9.2.6: cluster array promoted to file-scope state
+                // (s_deadClusters / s_deadClusterCount in field_navigation.cpp)
+                // so chase_auto_pilot can read it via GetLargestClusterCenter().
+                // Reset before populating.
+                s_deadClusterCount = 0;
+                memset(s_deadClusters, 0, sizeof(s_deadClusters));
                 int totalDeadEnds = 0, totalNarrow = 0;
 
                 for (int t = 0; t < numTri; t++) {
@@ -606,7 +606,7 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                     else if (s_neighborCount[t] == 2) totalNarrow++;
                 }
 
-                for (int t = 0; t < numTri && deadClusterCount < MAX_DEAD_CLUSTERS; t++) {
+                for (int t = 0; t < numTri && s_deadClusterCount < MAX_DEAD_CLUSTERS; t++) {
                     if (s_deadVisited[t] || s_neighborCount[t] != 1) continue;
                     // BFS from this dead-end through narrow (<=2 neighbor) triangles
                     float sumX = 0, sumY = 0;
@@ -630,25 +630,25 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                             }
                         }
                     }
-                    deadClusters[deadClusterCount].centerX = sumX / (float)count;
-                    deadClusters[deadClusterCount].centerY = sumY / (float)count;
-                    deadClusters[deadClusterCount].triCount = count;
-                    deadClusters[deadClusterCount].seedTri = t;
-                    deadClusterCount++;
+                    s_deadClusters[s_deadClusterCount].centerX = sumX / (float)count;
+                    s_deadClusters[s_deadClusterCount].centerY = sumY / (float)count;
+                    s_deadClusters[s_deadClusterCount].triCount = count;
+                    s_deadClusters[s_deadClusterCount].seedTri = t;
+                    s_deadClusterCount++;
                 }
 
                 Log::Field("FieldNavigation: [DEADEND] %s: %d tris, %d dead-ends, %d narrow, %d clusters",
-                           fieldName, numTri, totalDeadEnds, totalNarrow, deadClusterCount);
+                           fieldName, numTri, totalDeadEnds, totalNarrow, s_deadClusterCount);
 
                 // Step 3: Log significant clusters and match to unpositioned interactive objects.
                 static const int MIN_CLUSTER_TRIS = 2;
                 int significantClusters = 0;
-                for (int c = 0; c < deadClusterCount; c++) {
-                    const char* tag = (deadClusters[c].triCount >= MIN_CLUSTER_TRIS) ? "*" : " ";
-                    if (deadClusters[c].triCount >= MIN_CLUSTER_TRIS) significantClusters++;
+                for (int c = 0; c < s_deadClusterCount; c++) {
+                    const char* tag = (s_deadClusters[c].triCount >= MIN_CLUSTER_TRIS) ? "*" : " ";
+                    if (s_deadClusters[c].triCount >= MIN_CLUSTER_TRIS) significantClusters++;
                     Log::Field("FieldNavigation: [DEADEND]  %s cluster[%d] center=(%.0f,%.0f) tris=%d seed=%d",
-                               tag, c, deadClusters[c].centerX, deadClusters[c].centerY,
-                               deadClusters[c].triCount, deadClusters[c].seedTri);
+                               tag, c, s_deadClusters[c].centerX, s_deadClusters[c].centerY,
+                               s_deadClusters[c].triCount, s_deadClusters[c].seedTri);
                 }
                 Log::Field("FieldNavigation: [DEADEND] %d significant clusters (>=%d tris)",
                            significantClusters, MIN_CLUSTER_TRIS);

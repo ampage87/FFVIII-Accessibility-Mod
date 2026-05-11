@@ -73,34 +73,49 @@ static int __cdecl Hook_opcode_battle(int entityPtr)
         if (kaniCaller)             whoTag = "kani";
         else if (battleyarouCaller) whoTag = "battleyarou";
 
-        bool freeze = (mode == ChaseDetector::MODE_MANUAL && battleCount >= 1);
+        // v0.15.9: cap chase battles per mode.
+        //   MANUAL: cap=1. First scripted chase battle per field passes
+        //     through (the opening encounter); subsequent NO-OP'd.
+        //   AUTO:   cap=0. ALL chase battles NO-OP'd. Even the scripted
+        //     opener is suppressed since Auto mode is skipping the
+        //     entire chase scene. The chase progresses as a movement-
+        //     only scenario (chase_auto_pilot drives, robot scripts
+        //     play visually but never reach a battle screen).
+        // Cap=0 also acts as the safety net for the AI-rule fields:
+        // if chase_auto_pilot's W-press hasn't engaged in time on the
+        // west trail (race window at field entry), the ground-shake
+        // battle that would fire from running gets NO-OP'd anyway.
+        int  cap    = (mode == ChaseDetector::MODE_AUTO) ? 0 : 1;
+        bool freeze = (battleCount >= cap);
 
         if (freeze) {
             LONG freezeN = InterlockedIncrement(&s_freezeCount);
             Log::Field("[CBF] NO-OP chase BATTLE call #%ld (total #%ld, "
-                       "freeze#%ld) field='%s' mode=%s battleCount=%d "
+                       "freeze#%ld) field='%s' mode=%s battleCount=%d cap=%d "
                        "caller=%s entityPtr=0x%08X -- returning %d",
                        (long)chaseN, (long)total, (long)freezeN,
                        ChaseDetector::GetDebouncedFieldName(),
                        ChaseDetector::ChaseModeName(mode),
-                       battleCount, whoTag, (uint32_t)(uintptr_t)entityPtr,
+                       battleCount, cap, whoTag, (uint32_t)(uintptr_t)entityPtr,
                        JSM_RC_ADVANCE);
             return JSM_RC_ADVANCE;
         }
 
-        // PASS: first chase battle in field (or auto mode). Log it AND
-        // (in most fields) register the calling entity as the field's
-        // chase agent so chase_kani_freeze can pin it post-battle.
-        // RegisterChaseAgent is idempotent, so subsequent PASS events
-        // with the same entityPtr in the same field are no-ops.
+        // PASS: first chase battle in field (only reachable in MANUAL
+        // mode at battleCount==0; AUTO caps at 0 so this branch never
+        // fires there). Log it AND (in most fields) register the
+        // calling entity as the field's chase agent so chase_kani_freeze
+        // can pin it post-battle. RegisterChaseAgent is idempotent, so
+        // subsequent PASS events with the same entityPtr in the same
+        // field are no-ops.
         const char* fieldName = ChaseDetector::GetDebouncedFieldName();
         Log::Field("[CBF] PASS chase BATTLE call #%ld (total #%ld) "
-                   "field='%s' mode=%s battleCount=%d "
+                   "field='%s' mode=%s battleCount=%d cap=%d "
                    "caller=%s entityPtr=0x%08X",
                    (long)chaseN, (long)total,
                    fieldName,
                    ChaseDetector::ChaseModeName(mode),
-                   battleCount, whoTag, (uint32_t)(uintptr_t)entityPtr);
+                   battleCount, cap, whoTag, (uint32_t)(uintptr_t)entityPtr);
 
         // v0.15.2.15: skip the dynamic pin in doopen2a only. The v0.15.2.14
         // BAT showed that the BATTLE caller in doopen2a (Others slot 4,
@@ -167,10 +182,11 @@ void Initialize()
         return;
     }
 
-    Log::Mod("ChaseBattleFreeze: Initialized v0.15.2.15 (opcode_battle hooked at "
-             "0x%08X, trampoline=0x%08X). Gates: PASS+register-agent on "
-             "battleCount==0 (skip register-agent in doopen2a only); "
-             "NO-OP on battleCount>=1 (return %d). "
+    Log::Mod("ChaseBattleFreeze: Initialized v0.15.9 (opcode_battle hooked at "
+             "0x%08X, trampoline=0x%08X). Gates: cap=1 in MANUAL (PASS at "
+             "battleCount==0, NO-OP at >=1), cap=0 in AUTO (NO-OP all "
+             "chase battles); skip register-agent in doopen2a only; "
+             "all NO-OPs return %d. "
              "Hook activated by global MH_EnableHook(ALL).",
              s_battleAddr, (uint32_t)(uintptr_t)s_origBattle, JSM_RC_ADVANCE);
     s_initialized = true;
@@ -191,5 +207,11 @@ void Shutdown()
     s_battleAddr = 0;
     s_initialized = false;
 }
+
+// v0.15.9: Barometer accessors. ChaseDetector reads these at chase
+// activation (snapshot) and deactivation (delta) to log the per-chase
+// CHASE-END SUMMARY (battles_fired vs battles_suppressed).
+int GetChaseBattleCallCount()   { return (int)s_chaseCallCount; }
+int GetChaseBattleFreezeCount() { return (int)s_freezeCount; }
 
 }  // namespace ChaseBattleFreeze

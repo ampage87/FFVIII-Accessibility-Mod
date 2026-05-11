@@ -56,4 +56,12 @@ void Initialize();
 // Cleanup. Disables the hook.
 void Shutdown();
 
+// v0.15.9: Barometer accessors. Used by ChaseDetector to log the
+// per-chase end summary (battles_fired vs battles_suppressed). Both
+// counters are session-cumulative (start at 0 on Initialize, never
+// reset); ChaseDetector snapshots them at chase activation and computes
+// deltas at chase deactivation. battles_fired = calls - freezes.
+int GetChaseBattleCallCount();
+int GetChaseBattleFreezeCount();
+
 }  // namespace ChaseBattleFreeze

@@ -43,7 +43,12 @@ static void HandleKeys()
     // We must only cancel if the arrow key is NOT one we're currently injecting
     // via SetHeldDirections. Check which keys are held by us (s_driveHeld bitmask)
     // and only cancel on keys we're NOT injecting.
-    if (s_driveActive) {
+    //
+    // v0.15.9.2: Suppress arrow-key cancel when chase-drive is active.
+    // chase auto-pilot owns the drive on chase fields; player arrow taps
+    // (or JAWS-injected ones) should not bump us out of chase mode. Player
+    // can still cancel via the chase ASK Manual mode at chase trigger.
+    if (s_driveActive && !s_chaseDriveActive) {
         bool arrowUp    = (GetAsyncKeyState(VK_UP)    & 0x8000) != 0;
         bool arrowDown  = (GetAsyncKeyState(VK_DOWN)  & 0x8000) != 0;
         bool arrowLeft  = (GetAsyncKeyState(VK_LEFT)  & 0x8000) != 0;
@@ -82,7 +87,23 @@ static void HandleKeys()
     }
     if (drive && !s_driveWasDown) {
         if (s_driveActive) {
-            StopAutoDrive("Cancelled.");
+            // v0.15.9.2: If chase-drive owns the drive, refuse the toggle
+            // -- the player can't cancel chase auto-pilot via backslash.
+            // Otherwise it's an F9 player drive; toggle cancels as before.
+            if (s_chaseDriveActive) {
+                ScreenReader::Speak("Auto-drive unavailable: chase auto-pilot is active.");
+                Log::Field("FieldNavigation: F9 drive REFUSED "
+                           "(chase-drive is active)");
+            } else {
+                StopAutoDrive("Cancelled.");
+            }
+        } else if (s_directionDriveActive) {
+            // v0.15.9.1: Direction-drive (chase auto-pilot) owns the
+            // analog/fake-gamepad path right now. F9 path-finding cannot
+            // run alongside it.
+            ScreenReader::Speak("Auto-drive unavailable: chase auto-pilot is active.");
+            Log::Field("FieldNavigation: F9 drive REFUSED "
+                       "(direction-drive is active)");
         } else if (FieldDialog::IsDialogOpen()) {
             ScreenReader::Speak("Auto-drive unavailable: dialog is open.");
         } else {
