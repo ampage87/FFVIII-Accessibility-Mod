@@ -4,26 +4,75 @@ Aaron is the sole developer of the FF8 Accessibility Mod -- a `dinput8.dll` inje
 
 **Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
 
-GitHub: `ampage87/FFVIII-Accessibility-Mod`. **HEAD = v0.15.9.8.3** (pushed 2026-05-12). Local tree matches HEAD. v0.15.9.8.3 push squashed v0.15.9.8 / .8.1 / .8.2 / .8.3 into a single commit using the top CHANGELOG section as commit message.
+GitHub: `ampage87/FFVIII-Accessibility-Mod`. **HEAD = v0.15.9.9.1** (pushed 2026-05-12). Local tree matches HEAD. v0.15.9.9.1 push squashed v0.15.9.9 / .9.1 into a single commit using the top CHANGELOG section as commit message.
 
 ---
 
-## Current state: v0.15.9.9.1 BAT SUCCESS -- duplicate "Let's go!" eliminated ✨
+## Current state: v0.15.9.10 BAT SUCCESS -- MODE_ORIGINAL working as vanilla ✨
+
+**v0.15.9.10 BAT SUCCESS 2026-05-12.** Aaron: "I believe that worked. The robot got up shortly after battles as expected in vanilla ff8." The short-circuits in chase_battle_freeze, chase_kani_freeze, and the auto-pilot's natural MODE_AUTO-only engagement gate all cooperated: no mod chase machinery activated, chase battles fired as Square shipped them, and the X-ATM092 wakeup-after-battle behavior (which v0.15.2.x worked hard to suppress in MANUAL/AUTO) is back exactly as the vanilla engine implements it. Aaron's chase-scene item #2 complete.
+
+### Chase scene status -- ALL ITEMS DONE
+
+Aaron's four chase-scene items (2026-05-12 list) are now complete:
+- [x] **#4** (ASK dialog text revisions): shipped in v0.15.9.9, BAT-confirmed, pushed.
+- [x] **#1** (verify auto-pilot self-sufficient): v0.15.9.9 BAT proved auto-pilot does all the work; pushed.
+- [x] **(post-BAT cleanup)** duplicate "Let's go!" line: fixed in v0.15.9.9.1, pushed.
+- [x] **#2** (MODE_ORIGINAL): shipped in v0.15.9.10, BAT-confirmed, awaiting push.
+- [ ] **#3** (keyboard suppressor during Auto chase): scheduled for v0.15.9.11.
+
+After #3 ships and BATs, the chase scene work is fully closed.
+
+### Push state
+
+Local tree is one version ahead of GitHub HEAD (v0.15.9.9.1). Once Aaron pushes, v0.15.9.10 will land as its own commit (no squash since there's only one new version on top of HEAD).
+
+---
+
+## Pre-v0.15.9.10 history (kept for context)
+
+## v0.15.9.10 design (now BAT-validated)
+
+### Design
+
+When the player picks Original at the chase ASK, `ChaseDetector::SetChaseMode(MODE_ORIGINAL)` persists the mode to `ff8_accessibility.ini`. Every piece of mod chase machinery short-circuits when mode is Original:
+- `chase_battle_freeze::Hook_opcode_battle`: returns `s_origBattle(entityPtr)` immediately, no logs.
+- `chase_kani_freeze::Update`: bails before reading `pGameMode`. `DeactivateFreeze` runs if a previous-mode freeze was active.
+- `chase_kani_freeze::RegisterChaseAgent`: short-circuits as belt-and-suspenders.
+- `chase_auto_pilot`: no change needed; engagement gate already requires `mode == MODE_AUTO`.
+
+The mod's screen-reader assistance (field TTS, dialog announcements, etc.) is unaffected.
+
+### BAT plan
+
+Aaron triggers the chase, listens for the explainer prompt + three option labels, picks **Original**. Then experiences the vanilla unmodified chase: chase battles fire (battle music + battle TTS), robot pursues and catches the party, ground shakes on the west trail. Confirms in `Logs/ff8_field.log` that no `[CBF]` lines and no `KaniFreeze:` lines appear in chase fields. Battles in `Logs/ff8_battle.log` should reflect normal battle activity.
+
+Aaron may also want to verify the persistence: after picking Original once, restart FF8 and confirm `ff8_accessibility.ini` shows `chase_mode=original` under `[Chase]`, and that the mod loads the mode correctly on next startup (Log line: `ChaseDetector: loaded chase_mode='original' from INI`).
+
+### Risk
+
+Low-medium. Five-file integration, but each change is small and at well-defined top-of-hook points. Mode is opt-in via the ASK; default users (Manual/Auto) are completely unaffected.
+
+---
+
+## Pre-v0.15.9.10 history (kept for context)
+
+## v0.15.9.9.1 BAT SUCCESS -- duplicate "Let's go!" eliminated ✨
 
 **v0.15.9.9.1 BAT SUCCESS 2026-05-12.** Aaron: "That worked! Only heard Squall's let's go message once." The `firstQ == 0xFF || lastQ == 0xFF` predicate in `ScanAndSpeakChoiceWindows` correctly skipped the stale slot-0 MES text on chase ASK open. Sequence works as designed: AMESW speaks "Forget it! Let's go!" once, deferred-open elapses 3s, new ASK prompt + option labels read out, no duplicate.
 
 ### Chase scene status
 
-Three of Aaron's four chase-scene items (2026-05-12 list) are now complete:
-- [x] **#4** (ASK dialog text revisions): shipped in v0.15.9.9, BAT-confirmed.
-- [x] **#1** (verify auto-pilot self-sufficient): v0.15.9.9 with cap=INT_MAX, 0 battles fired -- proved auto-pilot does all the work without the suppressor band-aid.
-- [x] **(post-BAT cleanup)** duplicate "Let's go!" line: fixed in v0.15.9.9.1.
-- [ ] **#2** (MODE_ORIGINAL): scheduled for v0.15.9.10.
+Aaron's four chase-scene items (2026-05-12 list) are now mostly complete:
+- [x] **#4** (ASK dialog text revisions): shipped in v0.15.9.9, BAT-confirmed, pushed.
+- [x] **#1** (verify auto-pilot self-sufficient): v0.15.9.9 BAT proved auto-pilot does all the work; pushed.
+- [x] **(post-BAT cleanup)** duplicate "Let's go!" line: fixed in v0.15.9.9.1, pushed.
+- [x] **#2** (MODE_ORIGINAL): shipped in v0.15.9.10, awaiting BAT.
 - [ ] **#3** (keyboard suppressor during Auto chase): scheduled for v0.15.9.11.
 
 ### Push state
 
-Local tree is two versions ahead of GitHub HEAD (v0.15.9.8.3). Once Aaron pushes, v0.15.9.9 + v0.15.9.9.1 will squash into a single commit with v0.15.9.9.1's CHANGELOG entry as the commit message. The push utility validates CHANGELOG heading matches `FF8OPC_VERSION` -- both currently show `0.15.9.9.1` so the push is ready.
+GitHub HEAD = v0.15.9.9.1, pushed 2026-05-12. Push squashed v0.15.9.9 + v0.15.9.9.1 into a single commit with v0.15.9.9.1's CHANGELOG entry as the message.
 
 ---
 
@@ -845,8 +894,9 @@ The INF gateway insight from v0.15.9.2.14's failure: SETLINE Line entities can b
 
 ## Recent history
 
-- **v0.15.9.9.1** -- **BAT SUCCESS 2026-05-12.** Duplicate Squall "Let's go!" line at chase ASK open eliminated. 0xFF sentinel skip predicate in `ScanAndSpeakChoiceWindows` did exactly what the dialog-log trace predicted.
-- **v0.15.9.9** -- BAT SUCCESS 2026-05-12 (auto-pilot proven self-sufficient). Cap=INT_MAX verification + ASK text revisions. Local; not yet pushed.
+- **v0.15.9.10** -- **BAT SUCCESS 2026-05-12.** MODE_ORIGINAL working as vanilla; robot wakeup behavior intact. Awaiting push.
+- **v0.15.9.9.1** -- **BAT SUCCESS 2026-05-12. Pushed.** Duplicate Squall "Let's go!" line at chase ASK open eliminated.
+- **v0.15.9.9** -- BAT SUCCESS 2026-05-12 (auto-pilot proven self-sufficient). Cap=INT_MAX verification + ASK text revisions. Squashed into v0.15.9.9.1 push.
 - **v0.15.9.8.3** -- **BAT SUCCESS 2026-05-12.** Pushed. 0 catches across the entire chase route. Bridge dance + kani-slot override worked exactly as designed. The asymmetric EAST/WEST state machine tricked X-ATM092 into a wasted westward leap during which the party slipped past to the east-edge SETLINE.
 - **v0.15.9.8.2** -- BAT 2026-05-11/12. Diagnostic-only; BridgeDiag identified laguna at Others slot 3 as the moving kani on the bridge. Drove v0.15.9.8.3 thresholds.
 - **v0.15.9.8.1** -- BAT SUCCESS 2026-05-12. targetY -3800 on doopen2a, zero catches.
@@ -888,9 +938,8 @@ The INF gateway insight from v0.15.9.2.14's failure: SETLINE Line entities can b
 
 Chase auto-pilot catch elimination is COMPLETE (v0.15.9.8.3 pushed). Remaining chase scene work focuses on verification, the third ASK option, input safety, and ASK dialog polish.
 
-1. **Push v0.15.9.9 + v0.15.9.9.1 to GitHub.** Aaron runs `Utilities/push_to_github.vbs`. Will squash both into one commit using v0.15.9.9.1's CHANGELOG entry as the message.
-2. **v0.15.9.10 -- Third ASK option: 'Original' = no mod modifications to chase.** Per project memory, the chase ASK currently offers Manual/Auto/Original options but Original routes to `MODE_MANUAL`. Implement Original as a real third mode: don't engage chase_auto_pilot AND disable chase_battle_freeze (no cap, no freeze, no NO-OP, no agent register). Vanilla-engine chase behavior for users who want it. Touches `ChaseDetector::Mode` (add MODE_ORIGINAL), `ChaseAskOverlay::CommitChoice` routing, top-of-hook short-circuit in `chase_battle_freeze::Hook_opcode_battle` and `chase_kani_freeze`.
-3. **v0.15.9.11 -- Keyboard suppressor during Auto chase.** Stop the player from accidentally pressing direction keys during an engaged Auto chase. Currently if the player presses arrow keys, those events fight the analog override and could disrupt the route. Need to gate the suppressor narrowly: only during chase_auto_pilot ENGAGED state in Auto mode, only direction keys (arrows + W) -- preserve all F-key accessibility hotkeys, V (version), G/T/L/R, slash (help), backslash (world map AD), ASK navigation keys, etc. Existing `HookedGetKeyState` already zeros arrows when `s_analogOverrideActive` is true; extend to W (0x11), ESC (0x01), and FF8 confirm/cancel/menu keys.
+1. **Push v0.15.9.10 to GitHub.** Aaron runs `Utilities/push_to_github.vbs`. Will land as its own commit (no squash, since one version ahead of HEAD).
+2. **v0.15.9.11 -- Keyboard suppressor during Auto chase** (Aaron's item #3, the last chase-scene item). Extend `HookedGetKeyState` in `field_nav_input_hooks.inl` to zero W (0x11), ESC (0x01), and FF8 confirm/cancel/menu scancodes when `ChaseAutoPilot::IsEngaged() && ChaseDetector::GetChaseMode() == MODE_AUTO`. Accessibility hotkeys (read via `GetAsyncKeyState` in mod-owned code) bypass the keyboard buffer entirely so they're unaffected.
 
 5. **Push v0.15.9.9+ to GitHub** after each verification cycle. Aaron runs `Utilities/push_to_github.vbs`. Claude does NOT push.
 6. **Cleanup of BridgeDiag verbosity** (low priority, can fold into v0.15.10). With the dance proven, the 10Hz per-sample BridgeDance log + the 10Hz BridgeDiag all-slots dump is noise on every BAT. Trim to transition-only events.

@@ -1,73 +1,101 @@
-# Next Session Prompt -- v0.15.9.9.1 READY-TO-BAT (duplicate "Let's go!" fix)
+# Next Session Prompt -- v0.15.9.10 READY-TO-BAT (MODE_ORIGINAL)
 
-**Build state:** v0.15.9.9.1 implemented 2026-05-12, awaiting build. One-line predicate added to `src/field_dialog.cpp::ScanAndSpeakChoiceWindows` to skip windows whose `firstQ`/`lastQ` is `0xFF` (FF8's "no ASK fields set" sentinel).
+**Build state:** v0.15.9.10 implemented 2026-05-12, awaiting build. Aaron's chase-scene item #2 complete: the third ASK option ("Original") is now a real third chase mode that bypasses all mod chase machinery and lets the vanilla FF8 chase play out unmodified.
 
-**HEAD on GitHub:** v0.15.9.8.3 (pushed 2026-05-12). Local tree is two versions ahead at v0.15.9.9.1 awaiting BAT. After this BAT succeeds, Aaron pushes v0.15.9.9 + v0.15.9.9.1 in a single cumulative push to GitHub.
+**HEAD on GitHub:** v0.15.9.9.1 (pushed 2026-05-12). Local tree is one version ahead at v0.15.9.10 awaiting BAT.
 
 ## Read first
 
-1. `DEVNOTES.md` -- current state (v0.15.9.9.1 READY-TO-BAT section at top, plus v0.15.9.9 BAT success preserved for context).
+1. `DEVNOTES.md` -- current state (v0.15.9.10 READY-TO-BAT section at top, plus v0.15.9.9.1 BAT success preserved for context).
 2. This file -- BAT plan and verification markers.
 
-## What just landed (v0.15.9.9.1)
+## What just landed (v0.15.9.10)
 
-Targeted fix for the duplicate Squall "Let's go!" line that v0.15.9.9 BAT identified as the one remaining issue.
+Five-file touch implementing MODE_ORIGINAL as a real third chase mode:
 
-### Root cause from Logs/ff8_dialog.log at 10:27:54-57
+### 1. `src/chase_detector.h`
 
-The chase-trigger MES fires once correctly through AMESW (win[0]). Three seconds later, when `chase_ask_overlay` opens the chase ASK in slot 2, `ScanAndSpeakChoiceWindows` iterates over ALL 8 dialog window slots. Slot 0 still holds Squall's "Let's go!" with `firstQ=0xFF lastQ=0xFF` (FF8's "no ASK fields set" sentinel). The existing skip predicates `if (firstQ == 0 && lastQ == 0) continue;` and `if (lastQ < firstQ) continue;` correctly catch the all-zeros sentinel and inverted ranges but miss the `(0xFF, 0xFF)` case. Slot 0 got decoded as a 0-choice dialog with non-empty prompt, and the prompt was spoken as a duplicate.
+Added `MODE_ORIGINAL = 2` to the `Mode` enum with rationale comments. Backward-compatible (MODE_MANUAL=0 and MODE_AUTO=1 unchanged).
 
-The v0.15.9.9 prompt change only affected slot 2; the duplicate was always coming from slot 0, which is why the new explainer prompt couldn't have eliminated it.
+### 2. `src/chase_detector.cpp`
 
-### Fix
+- `LoadChaseModeFromIni`: accepts `"original"` string -> `MODE_ORIGINAL`.
+- `ChaseModeName`: switch statement returns `"original"` for `MODE_ORIGINAL` (previously a ternary; rewritten for three cases).
 
-`src/field_dialog.cpp` around line 681, added after the existing sentinel checks:
+### 3. `src/chase_battle_freeze.cpp::Hook_opcode_battle`
 
-```cpp
-if (firstQ == 0xFF || lastQ == 0xFF) continue;
-```
+Short-circuit at top of the `if (inChase)` branch. When `mode == MODE_ORIGINAL`, returns `s_origBattle(entityPtr)` immediately with no chase-counter increment, no `[CBF] PASS`/`NO-OP` log, no `RegisterChaseAgent` call. Vanilla FF8 chase battles fire as Square shipped them. Reordered so `mode` is read before `s_chaseCallCount` is incremented (the short-circuit needs to happen before any chase counter touches). Initialize log message updated.
 
-`0xFF` is unambiguously a sentinel (FF8 dialogs cap at ~16 choices, so neither `firstQ` nor `lastQ` can be `0xFF` in a real ASK). Comments document the v0.15.9.9 BAT-traced rationale so future-Claude understands why the predicate is there.
+### 4. `src/chase_kani_freeze.cpp`
 
-## BAT plan for v0.15.9.9.1
+- `Update`: short-circuit before reading `pGameMode`. If `s_freezeActive` is true from a previous mode (e.g. user changed mode mid-chase via INI), `DeactivateFreeze` runs cleanly so no stale pin keeps writing.
+- `RegisterChaseAgent`: short-circuit immediately after the `!entityPtr` early return -- belt-and-suspenders in case any future code path calls it bypassing chase_battle_freeze.
+
+### 5. `src/chase_ask_overlay.cpp::CommitChoice`
+
+`ANSWER_ORIGINAL` branch now sets `ChaseDetector::MODE_ORIGINAL` instead of `MODE_MANUAL`. Comment updated to describe the new behavior.
+
+### Not changed
+
+`chase_auto_pilot` -- its engagement gate already requires `mode == MODE_AUTO`, so MODE_ORIGINAL naturally fails the gate and the auto-pilot stays disengaged. Verified via inspection: line 1933, `bool autoMode = (ChaseDetector::GetChaseMode() == ChaseDetector::MODE_AUTO);`.
+
+## BAT plan for v0.15.9.10
+
+Aaron's BAT cycle:
 
 1. `deploy.vbs` -> `src/deploy.ps1` -> `src/deploy.bat`.
-2. Launch FF8, load the save near chase start.
-3. Trigger the chase. Listen for the sequence:
-   - Squall's "Forget it! Let's go!" line speaks ONCE via AMESW.
-   - 3 seconds elapse (chase_ask_overlay's deferred-open timer).
-   - The new ASK prompt reads: "X-ATM092 is heading right for you. How do you want to run?"
-   - The three option labels read on cursor navigation, NO duplicate Squall line in between.
-4. Choose **Auto** at the ASK.
-5. Confirm chase completes hands-off with 0 battles (same as v0.15.9.9).
+2. Launch FF8. Listen for the startup log via mod loader; if Aaron previously committed Auto from v0.15.9.9.1's BAT, the INI will say `chase_mode=auto` and a fresh chase would default to Auto. That's fine -- the ASK will fire again and Aaron picks Original this time.
+3. Load the save near chase start.
+4. Trigger the chase. Listen for:
+   - Squall's "Forget it! Let's go!" line ONCE via AMESW.
+   - 3 seconds elapse.
+   - New ASK prompt: "X-ATM092 is heading right for you. How do you want to run?"
+   - Three option labels read out as cursor navigates.
+5. **Choose Original.** Listen for: "Original selected".
+6. Experience the vanilla chase: walk west on the trail, get caught by chase battles, robot pursues, ground shakes, etc.
+7. Optional persistence check: after the chase, exit FF8 and inspect `ff8_accessibility.ini` -- should show `chase_mode=original` under `[Chase]` section.
 
-### Verification markers in Logs/ff8_dialog.log
+### Verification markers in Logs/ff8_field.log
 
-**Expected sequence after fix:**
-
-```
-FieldDialog: [AMESW] win[0] Speaking: "Squall "Forget it!  Let's go!""
-... 3s elapse ...
-[DLG-INJ] v0.15.7 cursor-change slot=2 curQ 255->1 announce="Manual: ... selected"
-```
-
-**No longer expected (was the duplicate in v0.15.9.9):**
+**At mod load (startup):**
 
 ```
-FieldDialog: [ASK] win[0] Parsed 0 choices (firstQ=255 lastQ=255 curChoice=0)
-FieldDialog: [ASK] win[0] Speaking: "Squall "Forget it! Let's go!""
+ChaseBattleFreeze: Initialized v0.15.9.10 (... MODE_ORIGINAL short-circuits before any chase logic so vanilla chase plays out unmodified ...)
+ChaseDetector: loaded chase_mode='<previous>' from INI
 ```
 
-If the `[ASK] win[0] Parsed 0 choices` line is gone from the log, the fix worked. If it's still there, the predicate didn't catch the case and we need to investigate further.
+**After ASK commits Original:**
+
+```
+ChaseAskOverlay: committed choice = 3 (Original: vanilla chase, no mod help)
+ChaseDetector: chase_mode set to 'original' (persisted)
+```
+
+**On chase ACTIVATED:**
+
+```
+ChaseDetector: chase ACTIVATED on entry to 'domt4_1' (mode=original, baseline calls=N freezes=0)
+```
+
+**Throughout the chase fields:**
+
+- **No `[CBF]` lines** (PASS or NO-OP). The short-circuit returns `s_origBattle` before any logging.
+- **No `KaniFreeze:` lines** (no FREEZE ACTIVATED, no CAPTURE STARTED, no CHASE-AGENT). The Update short-circuit bails before any of that work runs.
+- **No `ChaseAutoPilot: ENGAGED` lines.** Auto-pilot's engagement gate naturally skips MODE_ORIGINAL.
+
+**Battles WILL fire** and appear in `Logs/ff8_battle.log` as normal battle activity (BTL_START, battle TTS, battle command menus, etc.). The party WILL get caught by X-ATM092 -- that's the vanilla behavior, which is what Original mode delivers.
 
 ### Outcomes
 
-- **Best (duplicate eliminated):** Aaron hears Squall's line once, then the new ASK prompt + option labels cleanly. Aaron pushes v0.15.9.9 + v0.15.9.9.1 cumulatively to GitHub.
-- **Partial (duplicate still present but log shows slot 0 skipped):** The duplicate is coming from a different code path. Next candidates: `Hook_show_dialog`'s slot-paint re-read or `DialogInject::OpenAsk`'s render path. v0.15.9.9.2 traces those.
-- **Worst (something we didn't anticipate):** Revert the predicate in v0.15.9.9.2 and re-diagnose.
+- **Best (mode works cleanly):** Aaron experiences the vanilla chase end-to-end. No mod chase machinery activates. Log markers as above. Push v0.15.9.10 and move to item #3.
+- **Acceptable (chase works but some log noise):** A path was missed. Aaron sees the vanilla behavior, but the log has stray `[CBF]` or `KaniFreeze:` lines. Diagnose which path, add a short-circuit in v0.15.9.10.1.
+- **Worst (mode doesn't behave as vanilla):** Something unexpected. E.g. battles get suppressed despite the short-circuit, or auto-pilot engages. Revert the ASK routing to MODE_MANUAL in v0.15.9.10.1 to restore working behavior, then diagnose.
 
-## Outstanding chase-scene items (after v0.15.9.9.1 BAT)
+## After v0.15.9.10 BAT
 
-2. **v0.15.9.10 -- Original = MODE_ORIGINAL** (Aaron's item #2). Add `MODE_ORIGINAL = 2` to `ChaseDetector::Mode`. `chase_battle_freeze` short-circuits at top of hook for MODE_ORIGINAL (no PASS log, no NO-OP, no agent register, full pass-through to original). `chase_kani_freeze` similarly short-circuits. `chase_ask_overlay::CommitChoice` routes `ANSWER_ORIGINAL` to MODE_ORIGINAL instead of MODE_MANUAL. Vanilla-engine chase for users who want it.
-3. **v0.15.9.11 -- Keyboard suppressor during Auto chase** (Aaron's item #3). Extend `HookedGetKeyState` in `field_nav_input_hooks.inl` to zero W (0x11), ESC (0x01), and FF8 confirm/cancel/menu scancodes when `ChaseAutoPilot::IsEngaged() && ChaseDetector::GetChaseMode() == MODE_AUTO`. Accessibility hotkeys (read via `GetAsyncKeyState` in mod-owned code) bypass the keyboard buffer entirely so they're unaffected.
-4. **Aaron pushes v0.15.9.9 + v0.15.9.9.1 to GitHub** after BAT success. Push utility validates CHANGELOG heading matches `FF8OPC_VERSION`; refuses if mismatched. With v0.15.9.9.1 as the top heading, the push will create one cumulative commit from v0.15.9.8.3 to v0.15.9.9.1.
+1. **Push v0.15.9.10 to GitHub.** Aaron runs `Utilities/push_to_github.vbs`.
+2. **v0.15.9.11 -- Keyboard suppressor during Auto chase** (Aaron's item #3). Last item in the chase scene work. Extend `HookedGetKeyState` in `field_nav_input_hooks.inl` to zero W (0x11), ESC (0x01), and FF8 confirm/cancel/menu scancodes when `ChaseAutoPilot::IsEngaged() && ChaseDetector::GetChaseMode() == MODE_AUTO`. Accessibility hotkeys bypass the keyboard buffer (read via `GetAsyncKeyState` in mod-owned code) so they're unaffected. Predicate is narrowly scoped: only fires during engaged Auto chase; Manual/Original chases are untouched; F9 path-finding and world-map AD are untouched.
+
+## Mid-chase mode swap edge case (already handled)
+
+If Aaron edits `ff8_accessibility.ini` mid-chase to flip mode (which is admittedly unusual), `chase_kani_freeze::Update`'s MODE_ORIGINAL short-circuit calls `DeactivateFreeze("chase mode switched to MODE_ORIGINAL")` to release any active freeze cleanly. Documented in the implementation comments. Not part of the BAT plan but worth knowing.

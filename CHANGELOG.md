@@ -4,6 +4,61 @@ Newest on top. Each entry begins with a `## vMAJOR.MINOR.BUILD` heading followed
 
 The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_accessibility.h`. The push utility refuses to push if they don't.
 
+## v0.15.9.10
+
+MODE_ORIGINAL implementation (Aaron's chase-scene item #2). The third ASK option is now a real third mode that bypasses all mod chase machinery, letting the vanilla FF8 chase play out unmodified.
+
+### Design
+
+When the player picks Original at the chase ASK, `ChaseDetector::SetChaseMode(MODE_ORIGINAL)` persists the mode to `ff8_accessibility.ini`. From that point until the user picks a different mode, every piece of mod chase machinery short-circuits:
+
+- `chase_battle_freeze::Hook_opcode_battle` returns `s_origBattle(entityPtr)` immediately when mode is Original, with no chase-counter increment, no `[CBF] PASS`/`NO-OP` log, and no `RegisterChaseAgent` call. Vanilla FF8 chase battles fire as Square shipped them.
+- `chase_kani_freeze::Update` bails before reading `pGameMode` when mode is Original. If a freeze was active from a previous mode (mid-chase mode swap via INI), `DeactivateFreeze` runs cleanly so no stale pin keeps writing.
+- `chase_kani_freeze::RegisterChaseAgent` also short-circuits as belt-and-suspenders, in case any future code path calls it without going through chase_battle_freeze.
+- `chase_auto_pilot` needs no change: its engagement gate already requires `mode == MODE_AUTO`, so MODE_ORIGINAL naturally fails the gate and the auto-pilot stays disengaged.
+
+The mod's screen-reader assistance (field TTS, dialog announcements, etc.) is unaffected -- only the chase-specific mod machinery goes inert. The chase ASK itself still fires and reads out the three options; the user just chooses Original instead of Manual or Auto.
+
+### Implementation
+
+Five-file touch:
+
+- **`src/chase_detector.h`**: `MODE_ORIGINAL = 2` added to the `Mode` enum with rationale comments. Existing `MODE_MANUAL = 0` and `MODE_AUTO = 1` values unchanged for backward compatibility with existing INI files.
+- **`src/chase_detector.cpp`**:
+  - `LoadChaseModeFromIni` accepts `"original"` string -> `MODE_ORIGINAL`.
+  - `ChaseModeName` returns `"original"` for `MODE_ORIGINAL` via switch (previously a ternary; rewritten for the third case).
+- **`src/chase_battle_freeze.cpp::Hook_opcode_battle`**: short-circuit at top of the `if (inChase)` branch. Sequence: read mode -> if MODE_ORIGINAL, return `s_origBattle(entityPtr)` immediately. Reordered so `mode` is read before `chaseN` is incremented so the short-circuit doesn't leak counts. Initialize log message updated to mention the MODE_ORIGINAL behavior.
+- **`src/chase_kani_freeze.cpp`**:
+  - `Update`: short-circuit before reading `pGameMode`. Calls `DeactivateFreeze` if `s_freezeActive` is true (handles mid-chase mode swap via INI edit).
+  - `RegisterChaseAgent`: short-circuit immediately after the `!entityPtr` early return.
+- **`src/chase_ask_overlay.cpp::CommitChoice`**: `ANSWER_ORIGINAL` branch now sets `MODE_ORIGINAL` instead of `MODE_MANUAL`. Comment updated to describe the new behavior and the short-circuits that make it work.
+
+### Expected v0.15.9.10 BAT
+
+Aaron triggers the chase, hears the explainer prompt + three option labels, picks **Original**. The chase plays out as vanilla FF8: chase battles fire (Aaron will hear the battle music and the battle TTS announce them as usual), the X-ATM092 robot pursues and catches the party, the ground shakes on the west trail, etc. None of the mod's chase-specific machinery activates.
+
+For verification in `Logs/ff8_field.log`:
+- `ChaseBattleFreeze: Initialized v0.15.9.10 (... MODE_ORIGINAL short-circuits before any chase logic ...)` at startup.
+- After the ASK commits Original: `ChaseDetector: chase_mode set to 'original' (persisted)`.
+- On chase ACTIVATED: `ChaseDetector: chase ACTIVATED on entry to 'domt4_1' (mode=original, baseline calls=N freezes=0)`.
+- Throughout the chase: **no `[CBF]` lines** (PASS or NO-OP) and **no `KaniFreeze:` lines** (no FREEZE ACTIVATED, no CAPTURE STARTED).
+- Battles WILL fire and be visible in `Logs/ff8_battle.log` as normal battle activity.
+
+### Risk
+
+Low-medium. Five-file integration but each individual change is small and the short-circuits are at well-defined top-of-hook points. The mode is opt-in via the ASK so default users (MODE_MANUAL / MODE_AUTO) are completely unaffected. Worst case (a chase machinery path was missed and still activates in MODE_ORIGINAL): the user reports unexpected mod behavior in Original mode, we add another short-circuit, and other modes are not affected.
+
+### Files
+
+- `src/chase_detector.h` -- Mode enum + comments.
+- `src/chase_detector.cpp` -- LoadChaseModeFromIni + ChaseModeName switch.
+- `src/chase_battle_freeze.cpp` -- top-of-chase-branch short-circuit + Initialize log update.
+- `src/chase_kani_freeze.cpp` -- Update + RegisterChaseAgent short-circuits.
+- `src/chase_ask_overlay.cpp` -- ANSWER_ORIGINAL routes to MODE_ORIGINAL.
+- `src/ff8_accessibility.h` -- version bump.
+- `CHANGELOG.md` -- this entry.
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md` -- current state + BAT plan.
+
 ## v0.15.9.9.1
 
 Fix duplicate Squall "Let's go!" line at chase ASK open.

@@ -64,11 +64,31 @@ static int __cdecl Hook_opcode_battle(int entityPtr)
     bool inChase = ChaseDetector::IsInChaseField();
 
     if (inChase) {
+        ChaseDetector::Mode mode = ChaseDetector::GetChaseMode();
+
+        // v0.15.9.10: MODE_ORIGINAL short-circuit. The third ASK option lets
+        // users opt in to the vanilla, unmodified chase scene -- no auto-pilot
+        // engagement, no battle cap, no kani/battleyarou pin, no chase-agent
+        // registration. We bail BEFORE incrementing s_chaseCallCount, BEFORE
+        // logging [CBF] PASS/NO-OP, and BEFORE registering the chase agent so
+        // chase_kani_freeze's per-frame pin stays inert too (chase_kani_freeze
+        // also has its own MODE_ORIGINAL short-circuit at the top of StartCapture
+        // and the pin tick, in case some other code path arms it). Result:
+        // vanilla FF8 chase plays out exactly as Square shipped it -- battles
+        // fire, robot pursues, ground shakes on the west trail, etc. The
+        // mod's screen-reader assistance (field TTS, etc.) is unaffected.
+        //
+        // s_callCount has already been incremented above; that's intentional --
+        // it's a session-wide opcode_battle call counter useful for diagnostics
+        // regardless of mode. The chase-specific counters stay untouched.
+        if (mode == ChaseDetector::MODE_ORIGINAL) {
+            return s_origBattle(entityPtr);
+        }
+
         LONG chaseN = InterlockedIncrement(&s_chaseCallCount);
         int  battleCount = ChaseDetector::GetCurrentFieldBattleCount();
         bool kaniCaller        = ChaseDetector::IsKaniEntityPtr((uintptr_t)entityPtr);
         bool battleyarouCaller = ChaseDetector::IsBattleyarouEntityPtr((uintptr_t)entityPtr);
-        ChaseDetector::Mode mode = ChaseDetector::GetChaseMode();
 
         const char* whoTag = "other";
         if (kaniCaller)             whoTag = "kani";
@@ -212,12 +232,14 @@ void Initialize()
         return;
     }
 
-    Log::Mod("ChaseBattleFreeze: Initialized v0.15.9.9 (opcode_battle hooked at "
+    Log::Mod("ChaseBattleFreeze: Initialized v0.15.9.10 (opcode_battle hooked at "
              "0x%08X, trampoline=0x%08X). Gates: cap=1 in MANUAL (PASS at "
              "battleCount==0, NO-OP at >=1), cap=INT_MAX in AUTO "
              "(VERIFICATION BUILD -- chase battles PASS through to real "
-             "battle screen; v0.15.9.8.3 catch elimination is proven if "
-             "BAT shows 0 PASS lines on chase fields); skip register-agent "
+             "battle screen; v0.15.9.8.3 catch elimination proven by "
+             "v0.15.9.9 BAT showing 0 PASS lines on chase fields), "
+             "MODE_ORIGINAL short-circuits before any chase logic so "
+             "vanilla chase plays out unmodified; skip register-agent "
              "in doopen2a only; all NO-OPs return %d. "
              "Hook activated by global MH_EnableHook(ALL).",
              s_battleAddr, (uint32_t)(uintptr_t)s_origBattle, JSM_RC_ADVANCE);

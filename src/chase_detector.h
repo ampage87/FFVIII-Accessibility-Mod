@@ -29,9 +29,17 @@ namespace ChaseDetector {
 
 // Chase mode constants. Stored in INI as the lowercase string.
 enum Mode {
-    MODE_MANUAL = 0,   // "manual" — cap chase battles at 1 per field
-    MODE_AUTO   = 1,   // "auto"   — auto-drive (v0.15.2+ stretch goal; falls
-                        //              back to manual until implemented)
+    MODE_MANUAL   = 0,   // "manual"   — cap chase battles at 1 per field
+    MODE_AUTO     = 1,   // "auto"     — chase_auto_pilot drives, all chase
+                          //              battles suppressed (v0.15.9.8.3 proven
+                          //              self-sufficient; v0.15.10 will drop the
+                          //              cap=INT_MAX scaffold).
+    MODE_ORIGINAL = 2,   // "original" — vanilla chase, no mod help. No auto-pilot
+                          //              engagement, no battle cap, no kani/battleyarou
+                          //              pin, no agent registration. Top-of-hook
+                          //              short-circuits in chase_battle_freeze and
+                          //              chase_kani_freeze make all chase machinery
+                          //              inert in this mode. v0.15.9.10.
 };
 
 // One-time setup. Reads chase_mode from INI; resets per-field counters.

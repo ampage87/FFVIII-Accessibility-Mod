@@ -485,6 +485,9 @@ static void LoadChaseModeFromIni()
                               "manual", buf, sizeof(buf), GetIniPath());
     if (_stricmp(buf, "auto") == 0) {
         s_chaseMode = MODE_AUTO;
+    } else if (_stricmp(buf, "original") == 0) {
+        // v0.15.9.10: third mode added. Vanilla chase, no mod help.
+        s_chaseMode = MODE_ORIGINAL;
     } else {
         // Default for any unrecognized value — manual.
         s_chaseMode = MODE_MANUAL;
@@ -644,7 +647,13 @@ void SetChaseMode(Mode m)
 
 const char* ChaseModeName(Mode m)
 {
-    return (m == MODE_AUTO) ? "auto" : "manual";
+    // v0.15.9.10: third mode added.
+    switch (m) {
+        case MODE_AUTO:     return "auto";
+        case MODE_ORIGINAL: return "original";
+        case MODE_MANUAL:
+        default:            return "manual";
+    }
 }
 
 KaniLocation GetKaniLocation()

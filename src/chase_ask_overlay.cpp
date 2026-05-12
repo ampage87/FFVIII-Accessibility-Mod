@@ -216,11 +216,16 @@ static void CommitChoice(int answer)
             ChaseDetector::SetChaseMode(ChaseDetector::MODE_AUTO);
             break;
         case ANSWER_ORIGINAL:
-            // Original still falls back to MODE_MANUAL until v0.15.10
-            // implements the chase-mod-active flag (vanilla chase
-            // behavior with no battle cap).
+            // v0.15.9.10: Original now routes to MODE_ORIGINAL instead of
+            // falling back to MODE_MANUAL. chase_battle_freeze and
+            // chase_kani_freeze each short-circuit at the top of their hooks
+            // when mode == MODE_ORIGINAL, so the vanilla chase plays out with
+            // no battle cap, no agent pin, no auto-pilot engagement. The
+            // mod's screen-reader assistance (field TTS, etc.) is unaffected.
+            // chase_auto_pilot already gates on mode == MODE_AUTO so it
+            // naturally skips engagement in MODE_ORIGINAL.
             ScreenReader::Speak("Original selected", false);
-            ChaseDetector::SetChaseMode(ChaseDetector::MODE_MANUAL);
+            ChaseDetector::SetChaseMode(ChaseDetector::MODE_ORIGINAL);
             break;
         default:
             ScreenReader::Speak("Manual selected", false);

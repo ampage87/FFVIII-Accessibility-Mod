@@ -503,6 +503,27 @@ void Shutdown()
 void Update()
 {
     if (!FF8Addresses::pGameMode) return;
+
+    // v0.15.9.10: MODE_ORIGINAL short-circuit. Defense in depth: chase_battle_freeze
+    // already short-circuits before RegisterChaseAgent in MODE_ORIGINAL, so the
+    // agent pin should never arm. But the OTHERS-DIAG scanner, StartCapture
+    // logging, and per-frame ApplyFreezePin all run on every tick regardless
+    // of whether an agent is armed -- they only gate on s_capturing /
+    // s_freezeActive. To keep MODE_ORIGINAL truly inert (no log spam, no
+    // capture cycles, no risk of pinning a still-armed agent from a prior
+    // mode), we bail before any of that work runs. Returns early without
+    // touching s_lastGameMode, so the next mode-change after the user
+    // switches out of MODE_ORIGINAL still detects edges cleanly.
+    if (ChaseDetector::GetChaseMode() == ChaseDetector::MODE_ORIGINAL) {
+        // If a freeze was active from a previous mode (e.g. user changed
+        // mode mid-chase via INI edit), deactivate it cleanly so no stale
+        // pin keeps writing.
+        if (s_freezeActive) {
+            DeactivateFreeze("chase mode switched to MODE_ORIGINAL");
+        }
+        return;
+    }
+
     uint16_t curMode = 0xFFFF;
     __try { curMode = *FF8Addresses::pGameMode; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return; }
@@ -535,9 +556,18 @@ void Update()
 
 // v0.15.2.14: Resolve entityPtr to (arrayKind, slot, symIdx, symName) and
 // arm the chase-agent pin. Unchanged in v0.15.3.
+//
+// v0.15.9.10: MODE_ORIGINAL short-circuit added. chase_battle_freeze already
+// short-circuits before calling this in MODE_ORIGINAL, so this guard is
+// belt-and-suspenders -- prevents arming the pin if any other code path
+// ever calls RegisterChaseAgent while chase mode is Original.
 void RegisterChaseAgent(uintptr_t entityPtr)
 {
     if (!entityPtr) return;
+
+    if (ChaseDetector::GetChaseMode() == ChaseDetector::MODE_ORIGINAL) {
+        return;
+    }
 
     // Idempotent within a field: if we've already armed the same pointer
     // for the current field, skip silently.
