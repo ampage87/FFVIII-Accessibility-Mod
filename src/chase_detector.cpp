@@ -285,6 +285,47 @@ static void ResolveKaniLocation(const char* fieldName)
     ResolveEntityLocation("kani", fieldName, "kani", s_kaniLoc);
 }
 
+// v0.15.9.8.3: Per-field kani-slot override applied AFTER ResolveKaniLocation.
+// The default SYM-name-based resolution finds whichever entity is named "kani"
+// in the field's SYM table and computes its slot. On most chase fields that
+// entity is the X-ATM092 robot. On domt1_1 (the Dollet bridge), however,
+// v0.15.9.8.2 BAT BridgeDiag (416 samples over 6.7 seconds of bridge transit)
+// empirically confirmed that the SYM-resolved "kani" at Others slot 6 reads
+// (0, 0) the entire transit, while the actually-pursuing chasing entity is at
+// Others slot 3 with SYM name "laguna". The bridge field appears to reuse a
+// generic NPC SYM template (laguna being a common name for guest entities)
+// for its X-ATM092 chase agent. Without this override the bridge dance can't
+// read the kani's real position, defeating the entire state-machine premise.
+//
+// Per-field override table is per-field-specific and intentionally narrow:
+// adding a wrong entry is the only failure mode, and the cost is one field's
+// kani slot pointing at the wrong entity (the same situation we're in without
+// the override). Each entry should be backed by BAT diagnostic evidence.
+static void ApplyPerFieldKaniOverride(const char* fieldName)
+{
+    if (fieldName == nullptr || fieldName[0] == '\0') return;
+
+    if (_stricmp(fieldName, "domt1_1") == 0) {
+        // Override to Others slot 3 (SYM 'laguna').
+        // For domt1_1 the v0.15.9.8.2 BAT logged JSM counts: doors=0, lines=4,
+        // bgs=2, others=17. Slot 3 in Others corresponds to symIdx =
+        // doors(0) + lines(4) + bgs(2) + slot(3) = 9. The symIdx is only used
+        // for log cosmetics; arrayKind and arraySlot are what GetKaniEntityPtr
+        // reads to compute the runtime block address.
+        s_kaniLoc.symIdx    = 9;
+        s_kaniLoc.arraySlot = 3;
+        s_kaniLoc.arrayKind = 2;  // Others
+        strncpy(s_kaniLoc.symName, "laguna", sizeof(s_kaniLoc.symName) - 1);
+        s_kaniLoc.symName[sizeof(s_kaniLoc.symName) - 1] = '\0';
+        Log::Field("ChaseDetector: field='%s' v0.15.9.8.3 OVERRIDE -> kani -> "
+                   "Others slot 3 (SYM 'laguna'), replacing default symIdx-based "
+                   "resolution. Empirically confirmed via v0.15.9.8.2 BAT BridgeDiag "
+                   "(416 samples; slot 6 read (0,0) throughout, slot 3 tracked party "
+                   "and leaped over to X=3836 at landing).",
+                   fieldName);
+    }
+}
+
 // v0.15.2.8: Resolve battleyarou's location in the new field. Same
 // SYM/JSMCounts logic as kani. Resolves to runtime slot in Others or
 // Backgrounds depending on JSM layout.
@@ -307,6 +348,7 @@ static void OnDebouncedFieldChange(const char* newFieldName)
     }
 
     ResolveKaniLocation(newFieldName);
+    ApplyPerFieldKaniOverride(newFieldName);   // v0.15.9.8.3
     ResolveBattleyarouLocation(newFieldName);  // v0.15.2.8
 
     // Chase-active span tracking. We enter "active" on first chase-field

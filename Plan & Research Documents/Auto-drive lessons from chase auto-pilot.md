@@ -923,3 +923,61 @@ For each F9 fix:
 - Camera calibration: same file, `s_calibPhase` state machine.
 - `Plan & Research Documents/Auto-Drive Architecture Review.md` -- existing review of the architecture, may need refresh post-v0.15.9.2.x.
 - `Plan & Research Documents/Field Navigation Improvements Plan.md` -- existing plan, may overlap.
+
+## Finding #34: `GetTriggerLineNearestCluster` mis-selects on fields where the walkmesh's largest dead-end isn't the exit
+
+**Discovered:** v0.15.9.8 (post-mortem on v0.15.9.7.8 BAT, 2026-05-12)
+
+**Field affected:** `doopen2a` (Dollet Town Square, immediately after the bridge `domt1_1`)
+
+### The bug
+
+`BuildFallbackConfig`'s tier 2 (TRIGGER-LINE) calls `GetTriggerLineNearestCluster` to pick which SETLINE trigger to target when INF gateways are unavailable. The heuristic finds the walkmesh's largest dead-end cluster, then selects the trigger line nearest that cluster's center.
+
+The underlying assumption -- that the largest walkmesh dead-end correlates with the field's exit direction -- holds for corridors and narrow trails where the biggest walkmesh feature IS the exit funnel. It breaks on fields with interior architectural features (town squares, plazas, building corners) where the biggest dead-end is a non-exit.
+
+### Concrete trace from v0.15.9.7.8 BAT log
+
+```
+[22:22:07] FieldArchive: INF parsed: 0 active gateways for 'doopen2a'
+[22:22:07] FieldNavigation: [SETLINE] call#21 line(-1432,660)->(-1349,1048) idx=1 center=(-1390,854)
+[22:22:07] FieldNavigation: [SETLINE] call#22 line(-814,-3717)->(-1091,-3689) idx=257 center=(-952,-3703)
+[22:22:08] FieldNavigation: GetTriggerLineNearestCluster matched cluster(-1315,503)
+                            -> trigger[0] center=(-1390,854) distFromCluster=359
+[22:22:08] ChaseAutoPilot: fallback config built for field='doopen2a' mode=TARGET
+                            tgt=(-1390,854) walk=0 running TRIGGER-LINE idx=0
+```
+
+`doopen2a` has two trigger lines: one NW at `(-1390, 854)`, one SOUTH at `(-952, -3703)`. The walkmesh's largest dead-end cluster is at `(-1315, 503)` -- an interior corner in the NW. The heuristic picks the NW trigger (359 units from cluster) over the SOUTH trigger (~4200 units from cluster). But the actual exit is SOUTH.
+
+Aaron's recipe for this field: *"The Town Square does require the party to keep running. You mostly head down from where you enter the field in order to get to the next."*
+
+### Downstream consequence
+
+With the wrong target, the party briefly moved NW, the catch evaluator fired at 22:22:10 during the mis-directed run, the post-catch script knockback teleported the party south to `(-1042, -917)`, the A* path was now stale, and the party sat stuck for ~9 seconds while the chase script eventually forced a field transition at 22:22:21. Two `[CBF]` catches fired during the wait.
+
+### The fix (v0.15.9.8)
+
+Per-field explicit MODE_TARGET config for `doopen2a` in `kFieldConfigs[]` pointing at the south trigger center `(-952, -3703)`. Bypasses the heuristic entirely. Pattern matches the existing explicit configs for `domt4_1`, `domt3_2`, `domt5_1`, `dotown_2`, `dotown_1`.
+
+### Deeper fix (deferred)
+
+The heuristic could be improved by re-scoring trigger lines using one or more of:
+
+1. **Direction-from-spawn alignment.** Score each trigger line by the dot product of `(trigger_center - player_spawn)` and `(player_facing_direction)` or the chase script's preferred direction. Whichever trigger is in the player's run direction wins. This matches what `GetGatewayNearestCluster` already does for INF gateways via cross-product detection.
+2. **INF destination-field IDs (when available).** INF gateways encode `destFieldId`. If the auto-pilot knows the chase order's next field (`dotown_3` after `doopen2a`), it could match against that. Doesn't help when INF=0 like `doopen2a`, but could help on other fields.
+3. **Distance from player spawn.** The exit trigger is typically further from spawn than interior-architecture clusters. Score by distance-from-spawn, prefer the farther trigger.
+
+None of these is ironclad on its own -- options 1 and 3 can mis-score on U-shaped fields where the exit is BACK in the spawn direction; option 2 only helps when INF data is present. Per-field explicit configs are the safety valve and remain the right answer for any field that trips the heuristic.
+
+### Methodology takeaways
+
+1. **When a field has 0 INF gateways AND multiple SETLINE trigger lines, the cluster heuristic is unreliable.** Always verify against Aaron's authoritative direction recipe before assuming the auto-pilot picked correctly.
+2. **The 1187 dmag was NOT script-controlled motion** (my earlier wrong theory). It was the post-catch script knockback after the auto-pilot steered into a catch. Lesson: don't conflate "single anomalous tick" with "pervasive script control." Look at the full picture -- did the party have a chance to move before the script intervened?
+3. **Per-field explicit configs are cheap and surgical.** Adding one config entry takes minutes; the heuristic improvement project takes days and may not generalize. Use explicit configs liberally on problem fields.
+
+### References
+
+- v0.15.9.8 implementation: `src/chase_auto_pilot.cpp` -- new `doopen2a` entry in `kFieldConfigs[]`.
+- v0.15.9.7.8 BAT field log: `Logs/ff8_field.log` line 4499 (INF parsed: 0 for doopen2a), 4488-4489 (SETLINE call#21, call#22), 5936 (GetTriggerLineNearestCluster output).
+- Existing heuristic implementation: `src/field_navigation.cpp` `GetTriggerLineNearestCluster` and `GetGatewayNearestCluster` (these are parallel implementations -- INF gateway version uses cross-product detection, trigger-line version uses nearest-to-cluster; the cross-product approach is more robust and should ideally be ported to the trigger-line picker too).

@@ -4,27 +4,183 @@ Aaron is the sole developer of the FF8 Accessibility Mod -- a `dinput8.dll` inje
 
 **Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
 
-GitHub: `ampage87/FFVIII-Accessibility-Mod`. **HEAD = v0.15.9.2.15** (pushed 2026-05-11, commit `8ec63616`). **Local tree: v0.15.9.7.8 BAT SUCCESS 2026-05-12.** Unpushed since v0.15.9.2.15: v0.15.9.2.16-.18, .3, .4, .5, .6, .7, .7.1-.7.8. Comment trail in `ff8_accessibility.h` carries the full design rationale.
+GitHub: `ampage87/FFVIII-Accessibility-Mod`. **HEAD = v0.15.9.7.8** (pushed 2026-05-12, commit `64f3b736`). Local tree matches HEAD. Push utility squashed v0.15.9.2.16-.18, .3, .4, .5, .6, .7, .7.1-.7.8 into a single commit using the top CHANGELOG section as commit message (expected behavior).
 
 ---
 
-## Current state: v0.15.9.7.8 BAT SUCCESSFUL -- west trail FIXED (extended-key bug closed)
+## Current state: v0.15.9.8.3 READY-TO-BAT -- bridge dance + kani-slot override
 
-**v0.15.9.7.8 BAT SUCCESS 2026-05-12.** Aaron: "BAT. It worked! We successfully made it down the west trail by walking and without triggering the robot."
+**v0.15.9.8.3 READY-TO-BAT 2026-05-12.** Two coordinated changes targeting the bridge's remaining 1 catch from v0.15.9.8.1 / .8.2 BATs: (1) ChaseDetector per-field kani-slot override routes `domt1_1` to Others slot 3 (SYM 'laguna') -- empirically confirmed as the actually-pursuing X-ATM092 in v0.15.9.8.2 BAT. (2) `MODE_BRIDGE_DANCE` state machine in chase_auto_pilot.cpp drives the EAST/WEST dance using kani X-velocity classification.
 
-Field log confirms the full chase route completed end-to-end through every chase field: `domt4_1` → `domt3_2` → `domt5_1` (the troublesome one) → `domt2_1` → `domt1_1` → `doopen2a` → `dotown_3` → `dotown_2` → `dotown_1`. After 14 versions of investigation (v0.15.9.7 through .7.8), the kani catch on the west trail is resolved.
+### v0.15.9.8.2 BAT findings (the empirical foundation)
 
-### The fix that landed
+BridgeDiag ran 416 samples over 6.7 seconds of bridge transit (00:00:53 -> 00:01:02). Six non-zero entity slots, only one tracked the party:
 
-`InjectKey` in `field_nav_autodrive.inl` was unconditionally setting `KEYEVENTF_EXTENDEDKEY`. Arrow keys ARE extended (E0 hardware prefix); letter keys like W are NOT. So every W injection from chase auto-pilot produced a malformed `E0+0x11` scancode that FF8's DirectInput keyboard reader never recognized as W. Arrows worked the whole time (correctly extended); W silently dropped.
+| Slot | SYM | Behavior |
+|---|---|---|
+| Backgrounds 0/1 | zell2/selphie2 | static at (16, 0) -- irrelevant |
+| Others 0 | irvine | tracks party exactly (party-leader proxy) |
+| Others 1 | rinoa | trails ~145 units |
+| Others 2 | quistis | trails ~348 units |
+| **Others 3** | **laguna** | **THE KANI: X range -4419 -> 3836 (vaults party). Y constant -446.** |
 
-The same bug had been fixed in `world_map.cpp`'s separate `PressKey`/`ReleaseKey` helpers in v0.14.102 for car-driving — just never propagated to the field-nav helpers.
+ChaseDetector's default `"kani"` SYM resolves to Others slot 6 which reads `(0, 0)` throughout. The bridge field reuses the `laguna` SYM template for X-ATM092.
 
-v0.15.9.7.8 adds an `extended` parameter to `InjectKey` (default `true` preserves arrow-call compat). The three W call sites pass `extended=false`. The defensive W re-press path was also removed per Aaron's hold-vs-tap point.
+**CRITICAL: Y is constant on the bridge.** The pre-BAT v0.15.9.8.2 Y-axis-divergence theory (Aaron's mechanic descriptions interpreted as Y-match for landing, Y-divergence for jumping) is REFUTED. Jumps are X-axis only in walkmesh coords. The visual jump is the 3D Z axis. v0.15.9.8.3 uses X-velocity instead.
+
+**Per-tick X-delta analysis** (laguna at Others slot 3, 100ms sample period):
+
+- Pre-chase stationary (12 samples ~1.2s): dX=0, laguna at far-west spawn X=-4419.
+- Normal pursuit (ticks 13-47, ~3.5s): 70-140 units/tick (avg ~106). Slightly faster than party (~93).
+- Leap (ticks 48-59, ~1.2s): 350-500 units/tick (avg ~372, 3.5x normal).
+- Landed (ticks 61-65, ~0.5s): 0-1 units/tick. laguna at X=3836.
+- Catch fires at tick ~67 when party reaches X=2053 (laguna 1747u east, blocking).
+
+Catch is followed by script-side teleport of party to X=3529, then field transition to doopen2a 1 second later.
+
+### v0.15.9.8.3 design (in chase_auto_pilot.cpp)
+
+MODE_BRIDGE_DANCE state machine, 10Hz sampling (every 6 Update ticks):
+
+**Thresholds:** `kBridgeLeapThreshold=200`, `kBridgeLandThreshold=50`, `kBridgeLandConsec=2`, `kBridgeMinDwellTicks=60` (1s), `kBridgeWestTimeoutTicks=300` (5s).
+
+**EAST_LEG -> WEST_LEG**: `isLanded && kX > pX && wasLeaping` for 2 consecutive samples AND minDwell met. The `wasLeaping` latch is essential -- without it the pre-chase stationary phase would trip the landed-ahead detector on sample 1.
+
+**WEST_LEG -> EAST_LEG**: `justStartedLeaping` edge (instant turn the moment we detect a new leap mid-air, so party slips past while robot can't course-correct).
+
+**WEST_LEG timeout**: 5-second bail-back-to-east safety net. Empirically we don't have west-leg robot behavior data (the v0.15.9.8.2 catch fired before any turn). Without timeout, a bridge variant where the robot never re-leaps would leave the party retreating forever. Worst-case timeout fire = identical to v0.15.9.8.2 behavior (1 catch at X=2053).
+
+**ChaseDetector override** in `chase_detector.cpp::ApplyPerFieldKaniOverride(fieldName)`, called from `OnDebouncedFieldChange` after `ResolveKaniLocation`. For `domt1_1`: overwrites s_kaniLoc to arrayKind=2, arraySlot=3, symIdx=9, symName='laguna'. With the override, ReadKaniPosition() returns laguna's pos and UpdateBridgeDance can read X-velocity reliably.
+
+### Expected v0.15.9.8.3 BAT outcomes
+
+- `ChaseDetector: field='domt1_1' v0.15.9.8.3 OVERRIDE -> kani -> Others slot 3 (SYM 'laguna')` at field-debounce settle.
+- `ChaseAutoPilot: ENGAGED on field='domt1_1' mode=BRIDGE_DANCE initial state=EAST_LEG ...` after ASK answered.
+- `BridgeDance: sample state=... motion=LEAPING|LANDED|CHASING ...` at 10Hz.
+- `BridgeDance: leap #1 STARTED state=EAST ...` ~5s into transit.
+- `BridgeDance: EAST->WEST transition kani=... party=... kdx=...` ~1s after that.
+- **Best**: `BridgeDance: WEST->EAST transition` on second leap, 0 catches.
+- **Acceptable**: `BridgeDance: WEST->EAST TIMEOUT` after 5s, 0-1 catches; bridge still progresses.
+- **Worst**: unforeseen interaction; BridgeDiag captures slot trajectories for post-BAT analysis.
+
+BridgeDiag remains active for one more BAT cycle to confirm slot-3 consistency and capture west-leg robot behavior.
+
+### Risk
+
+Medium. East-leg detection fully calibrated from v0.15.9.8.2 data. West-leg detection inferred from Aaron's verbal description with no empirical backing. 5s timeout backstops any failure mode.
+
+---
+
+## Pre-v0.15.9.8.3 history (kept for context)
+
+### v0.15.9.8.2 BAT result (2026-05-11/12)
+
+Diagnostic-only build. Bridge took 9 seconds with 1 catch at X=2053 (matches v0.15.9.8.1 baseline as expected). BridgeDiag dumped 416 lines identifying laguna at Others slot 3 as the moving kani. Findings detailed above drive v0.15.9.8.3.
+
+### v0.15.9.8.1 BAT result (town square clean)
+
+**v0.15.9.8.1 BAT SUCCESS 2026-05-12.** Aaron's prediction matched the result exactly: zero catches on the town square, just the one on the bridge left.
+
+### v0.15.9.8.1 BAT result on doopen2a
+
+TargetY bumped from -3703 to -3800 (97 units past the south trigger line). A* found a path further south than v0.15.9.8 -- party reached pos `(-955, -3672)`, just 31 units north of the trigger line at y ~= -3703. Field transitioned cleanly 3 seconds later, before the chase script's catch evaluator window expired. **Zero `[CBF]` catches on doopen2a.**
+
+Comparison v0.15.9.8 vs v0.15.9.8.1 (south-stop position):
+
+- v0.15.9.8 (tgt=-3703): party stopped at `(-958, -3541)` -- 162 units north of trigger -- catch fired during 8s wait
+- v0.15.9.8.1 (tgt=-3800): party stopped at `(-955, -3672)` -- 31 units north of trigger -- field transitioned in 3s, no catch
+
+The walkmesh DID extend further south than v0.15.9.8's stop point; A* was conservatively pulling its goal back from the requested target. Asking for a target further south let A* find a path further south. The 31-unit gap to the actual trigger line is close enough that either (a) the party crossed it during the final south burst between 1Hz log samples or (b) the engine's trigger detection accepts the walkmesh-edge stop as a crossing.
+
+### Cumulative progression
+
+| Version | Total chase catches | Delta |
+|---|---|---|
+| v0.15.9.2.18 (baseline before refinement) | 11 | -- |
+| v0.15.9.7.8 (west trail extended-key fix) | 3 | -8 |
+| v0.15.9.8 (town square south-target fix) | 2 | -1 |
+| v0.15.9.8.1 (town square targetY -3800) | 1 | -1 |
+| v0.15.9.8.2 (diagnostic-only, no behavior change) | 1 | 0 |
+| **v0.15.9.8.3 target (bridge dance)** | **0** | **-1** |
+
+**91% reduction from baseline as of v0.15.9.8.1. v0.15.9.8.3 targets the final catch.**
+
+### Open questions
+
+1. **Bridge (domt1_1) west-leg robot behavior.** Empirically unknown -- v0.15.9.8.3 BAT will give us the first data on what laguna does when the party turns west. The 5s timeout fallback covers any failure mode.
+2. **dotown_1 stuck at (-210, -1000).** UNBLOCKED 2026-05-12: Aaron confirmed the Lapin Beach FMV does fire after the extract is generated. The stall is pre-FMV, not a real problem.
+
+---
+
+## Pre-v0.15.9.8.1 history (kept for context)
+
+### v0.15.9.8 BAT result (town square partial fix)
+
+**v0.15.9.8 ready to BAT 2026-05-12.** The v0.15.9.7.8 BAT was a success on the west trail (the original goal of v0.15.9.7+). Reviewing the full BAT log identified two remaining issues: 2 catches on `doopen2a` (town square) and 1 catch on `domt1_1` (bridge). v0.15.9.8 addresses the bigger of the two -- the town square.
+
+### Diagnosis of doopen2a from v0.15.9.7.8 BAT field log
+
+`doopen2a` has **0 INF gateways** (per `INF parsed: 0 active gateways for 'doopen2a'` at line 4499). The field exposes exactly two SETLINE trigger lines:
+
+- `idx=1` line(-1432,660) -> (-1349,1048) center (-1390, 854) -- NW
+- `idx=257` line(-814,-3717) -> (-1091,-3689) center (-952, -3703) -- **SOUTH (the actual exit)**
+
+`BuildFallbackConfig` dropped to tier 2 (TRIGGER-LINE) because INF gateways were unavailable, then `GetTriggerLineNearestCluster` mis-selected the NW trigger because the walkmesh's largest dead-end cluster lands at `(-1315, 503)` (an interior corner, not an exit). The party was steered NW; the catch evaluator fired during the mis-directed run; the post-catch script knockback teleported them south to `(-1042, -917)` (that's the 1187 dmag I'd previously and wrongly attributed to general script-control); the A* path was now stale; party sat stuck for ~9 seconds with 2 catches firing during the wait.
+
+Aaron's recipe (the actual ground truth): *"The Town Square does require the party to keep running. You mostly head down from where you enter the field in order to get to the next."* My prior "script-controlled / no footsteps because the script owns positioning" theory was wrong -- the party SHOULD be running, and they weren't because the auto-pilot was steering against the chase direction.
+
+### The fix that landed in v0.15.9.8
+
+New explicit MODE_TARGET config entry for `doopen2a` in `kFieldConfigs[]` (`src/chase_auto_pilot.cpp`), inserted between `domt5_1` and `dotown_2` to match chase-route order:
+
+```cpp
+{ "doopen2a", MODE_TARGET,
+  /*dirX=*/0, /*dirY=*/0,
+  /*targetX=*/-952, /*targetY=*/-3703,
+  /*walk=*/false,
+  /*stages=*/nullptr, /*stageCount=*/0 },
+```
+
+Targets the SOUTH SETLINE trigger center directly, bypassing the cluster heuristic. Running per Aaron's recipe.
 
 ### Backlog status
 
-The v0.15.9.x chase auto-pilot is functionally complete for the playable chase route. Next development is v0.15.9.8+ for any remaining polish, plus consideration of pushing the v0.15.9.7.x stack (15+ unpushed versions) to GitHub.
+The v0.15.9.x chase auto-pilot is functionally complete for the playable chase route, with v0.15.9.8 being the targeted polish on the remaining heavy-catch field. After the v0.15.9.8 BAT, the remaining catch sources are: `domt1_1` bridge (1 catch mid-traversal -- low priority polish) and any open questions on `dotown_1`'s south-exit / FMV completion.
+
+### Field-name mapping (Aaron's authoritative in-game geography, confirmed 2026-05-12)
+
+Past sessions misidentified several chase fields. The correct mapping is:
+
+| Aaron's name | Field code | Direction |
+|---|---|---|
+| chase start | `domt4_1` | south-east |
+| (intermediate, transitions ~instantly) | `domt3_2` | west |
+| **west trail** | `domt5_1` | walk SW → S → SE |
+| one field between west trail and bridge | `domt2_1` | TARGET south |
+| **bridge** | `domt1_1` | due east |
+| **town square** | `doopen2a` | running south (v0.15.9.8 explicit MODE_TARGET to south trigger) |
+| (after town square) | `dotown_3`, `dotown_2`, `dotown_1` | south sequence to Lapin Beach FMV |
+
+**Important:** `doopen2a` is NOT the bridge. Past DEVNOTES backlog entries referencing "bridge AI rule #2" on `doopen2a` were wrong — that field is the town square, and the v0.15.9.7.8 BAT analysis initially attributed it to script-controlled positioning. That was also wrong. The actual cause was the cluster heuristic mis-selecting the NW trigger when the field requires running south. v0.15.9.8 adds an explicit MODE_TARGET entry pointing at the south trigger center `(-952, -3703)` which sidesteps the heuristic entirely.
+
+### v0.15.9.7.8 BAT [CBF] catch counts by field
+
+| Field | Aaron's name | Time | Catches | Notes |
+|---|---|---|---|---|
+| domt4_1 | chase start | 3 s | 0 | running SE, clean |
+| domt3_2 | (intermediate) | 1 s | 0 | transitions immediately |
+| **domt5_1** | **west trail** | 15 s | **0** ✨ | the v0.15.9.7.8 win |
+| domt2_1 | (between west trail and bridge) | 14 s | 0 | TARGET, brief stall |
+| **domt1_1** | **bridge** | 9 s | **1** | east traversal, catch mid-bridge ~22:22:04 |
+| **doopen2a** | **town square** | 13 s | **2** | wrong direction (NW vs south); fixed in v0.15.9.8 |
+| dotown_3 | (after town square) | 15 s | 0 | brief stall, recovers |
+| dotown_2 | | 13 s | 0 | south run, brief stall |
+| dotown_1 | (final pre-FMV) | 22+ s | 0 | stuck at (-210,-1000); extract ends here without field-change |
+| **Total** | | | **3** | -8 from v0.15.9.2.18 baseline of 11; v0.15.9.8 targets -2 (down to 1) |
+
+### Open question (dotown_1)
+
+The extract ends at 22:23:22 with the party stuck at `dotown_1` pos (-210,-1000), still ENGAGED, no field-change or chase-end markers captured. Need to confirm with Aaron whether the BAT proceeded to the Lapin Beach FMV after the extract was generated, or whether the chase stalled there. Historically `dotown_1` has been a stall-then-recover field (v0.15.9.2.17 stalled 24 s, v0.15.9.2.18 stalled 9 s before FMV).
 
 ---
 
@@ -548,6 +704,9 @@ The INF gateway insight from v0.15.9.2.14's failure: SETLINE Line entities can b
 
 ## Recent history
 
+- **v0.15.9.8.3** -- READY-TO-BAT 2026-05-12. Bridge dance + kani-slot override.
+- **v0.15.9.8.2** -- BAT 2026-05-11/12. Diagnostic-only; BridgeDiag identified laguna at Others slot 3 as the moving kani on the bridge. Drove v0.15.9.8.3 thresholds.
+- **v0.15.9.8.1** -- BAT SUCCESS 2026-05-12. targetY -3800 on doopen2a, zero catches.
 - **v0.15.9.7.8** -- **BAT SUCCESS 2026-05-12.** West trail walked, full chase completed end-to-end. ROOT CAUSE was InjectKey's unconditional KEYEVENTF_EXTENDEDKEY for non-extended W. Fixed + defensive re-press removed.
 - **v0.15.9.7.7** -- BAT FAILED 2026-05-12. Pure keyboard, no fake gamepad. W never reached engine due to extended-key bug. Logs confirmed the build ran correctly.
 - **v0.15.9.7.6** -- BAT FAILED 2026-05-12. Magnitude 0 but fake gamepad still installed; party ran.
@@ -584,14 +743,17 @@ The INF gateway insight from v0.15.9.2.14's failure: SETLINE Line entities can b
 
 ### Next development priorities
 
-1. **Push the v0.15.9.7.x stack to GitHub.** HEAD on GitHub is still at v0.15.9.2.15; we have 16 unpushed local versions (v0.15.9.2.16-.18, .3, .4, .5, .6, .7, .7.1-.7.8) representing roughly two weeks of investigation including the now-closed west-trail catch fix. Run `Utilities/push_to_github.vbs`.
-2. **v0.15.9.8: chase auto-pilot polish.** With the west trail solved, sweep through any remaining chase-field rough edges: dotown_1 south-exit handling (party gets stuck at -210,-1000 pushing against a wall, log shows `delta=(0,0) dmag=0` after ~10s), X-ATM092 chase scene (deferred item from initial backlog), kani-co-location issues if any remain, walk-and-talk dialog gap.
-3. **Add Finding #33 to the lessons doc.** The extended-key trap and the methodology lesson: when two modules use parallel implementations of the same OS API, drift between them can hide bugs for months. Suggested consolidation: unify world_map.cpp's `PressKey/ReleaseKey` with field-nav's `InjectKey` into a single helper module.
-4. **Clean up the vestigial re-press state.** `WALK_REPRESS_PERIOD` constant, `s_walkRepressCounter`, `s_walkRepressLogged` in `field_nav_directiondrive.inl` are no longer referenced. Safe to delete after a confidence cycle.
-5. **v0.15.9.9+ -- continue down the chase route.** domt2_1, domt1_1, doopen2a polish if needed (bridge AI rule #2).
-6. **v0.15.10 -- Original = chase-mod-active flag.** Vanilla-engine chase behavior for the Original choice. Not blocking on full-chase completion.
-7. **F9 path-finding cleanup.** Apply v0.15.9.2.4's kb-from-analog and v0.15.9.2.5's advance-on-stuck to F9 path-finding by dropping the `s_chaseDriveActive`-only gates.
-8. **v0.15.x cleanup** -- remove `Phase2_TestAsk` + Shift+F12 diagnostic.
+1. **BAT v0.15.9.8.3 on the bridge.** Expected markers: `ChaseDetector ... v0.15.9.8.3 OVERRIDE ... Others slot 3 (SYM 'laguna')` at field-debounce settle, `ChaseAutoPilot: ENGAGED ... mode=BRIDGE_DANCE` after ASK answered, `BridgeDance: sample state=... motion=...` at 10Hz throughout transit, `BridgeDance: leap #1 STARTED state=EAST ...` ~5s in, `BridgeDance: EAST->WEST transition` ~1s after that. Best case: `BridgeDance: WEST->EAST transition` on second leap with 0 catches recorded for `domt1_1` in `[CBF] count by field`. Acceptable: `BridgeDance: WEST->EAST TIMEOUT` after 5s with 0-1 catches.
+2. **Bridge dance refinement** based on v0.15.9.8.3 BAT data. If west-leg timeout fires, characterize laguna's west-leg behavior and update detection. If the dance works, cleanup pass: trim BridgeDiag verbosity, consider removing BridgeDiag entirely.
+3. **`dotown_1` south-exit / FMV completion.** UNBLOCKED 2026-05-12: Aaron confirmed the Lapin Beach FMV does fire after the extract is generated. The stuck-at-(-210,-1000) is the pre-FMV stall, not a real problem.
+4. **Stall recovery improvements** on `domt2_1`, `dotown_3`, `dotown_2` -- brief stalls of 5-7 s each. Lower priority than catch elimination.
+5. **Push v0.15.9.8.x to GitHub** after the bridge work is complete. Aaron runs `Utilities/push_to_github.vbs`. Claude does NOT push.
+2. **Add Finding #33 to the lessons doc.** Already done during the v0.15.9.7.8 checkpoint.
+3. **Clean up the vestigial re-press state.** `WALK_REPRESS_PERIOD` constant, `s_walkRepressCounter`, `s_walkRepressLogged` in `field_nav_directiondrive.inl` are no longer referenced. Safe to delete after a confidence cycle.
+4. **v0.15.10 -- Original = chase-mod-active flag.** Vanilla-engine chase behavior for the Original choice. Not blocking on full-chase completion.
+5. **Consolidate key-injection helpers** (lower priority, per Finding #33). Unify `world_map.cpp`'s `PressKey`/`ReleaseKey` with field-nav's `InjectKey`.
+6. **F9 path-finding cleanup.** Apply v0.15.9.2.4's kb-from-analog and v0.15.9.2.5's advance-on-stuck to F9 path-finding by dropping the `s_chaseDriveActive`-only gates.
+7. **v0.15.x cleanup** -- remove `Phase2_TestAsk` + Shift+F12 diagnostic.
 
 ### Standalone
 
@@ -616,7 +778,7 @@ The INF gateway insight from v0.15.9.2.14's failure: SETLINE Line entities can b
 **Chase auto-pilot per-field config** (`src/chase_auto_pilot.cpp`):
 
 ```cpp
-enum FieldDriveMode { MODE_DIRECTION, MODE_TARGET, MODE_STAGED_DIRECTION };
+enum FieldDriveMode { MODE_DIRECTION, MODE_TARGET, MODE_STAGED_DIRECTION, MODE_BRIDGE_DANCE };
 struct FieldStage {            // v0.15.9.7
     int8_t  dirX, dirY;
     bool    walk;
@@ -636,6 +798,8 @@ struct FieldConfig {
 - `domt4_1`: `MODE_DIRECTION` RUN SOUTH-EAST (dirX=+1, dirY=+1, walk=false). Explicit config (v0.15.9.4).
 - `domt3_2`: `MODE_DIRECTION` RUN EAST (dirX=+1, dirY=0, walk=false). Explicit config (v0.15.9.5).
 - `domt5_1`: `MODE_STAGED_DIRECTION` walk SW→S→SE by Y. Stages `kStages_domt5_1` (v0.15.9.7).
+- `domt1_1`: `MODE_BRIDGE_DANCE` EAST/WEST state machine driven by kani X-velocity (v0.15.9.8.3).
+- `doopen2a`: `MODE_TARGET` south to (-952, -3800) (v0.15.9.8.1).
 - `dotown_2`, `dotown_1`: `MODE_DIRECTION` RUN SOUTH (dirY=+1).
 - All other chase fields: generic fallback via `BuildFallbackConfig`. Three-tier preference:
   1. `GetGatewayNearestCluster` -- INF gateway aligned with player->cluster direction (cross-product test).

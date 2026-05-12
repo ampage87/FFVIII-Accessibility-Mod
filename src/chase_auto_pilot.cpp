@@ -355,6 +355,7 @@ enum FieldDriveMode {
     MODE_DIRECTION        = 0,
     MODE_TARGET           = 1,
     MODE_STAGED_DIRECTION = 2,  // v0.15.9.7
+    MODE_BRIDGE_DANCE     = 3,  // v0.15.9.8.3 -- domt1_1 only
 };
 
 // v0.15.9.7: Stage descriptor for MODE_STAGED_DIRECTION. Stages let a single
@@ -653,6 +654,116 @@ static const FieldConfig kFieldConfigs[] = {
       /*targetX=*/0, /*targetY=*/0,
       /*walk=*/true,
       /*stages=*/kStages_domt5_1, /*stageCount=*/kStages_domt5_1_count },
+    // domt1_1 = Dollet bridge. Chase route order: domt5_1 -> domt2_1 (fallback)
+    // -> domt1_1 -> doopen2a. v0.15.9.8.3 introduces MODE_BRIDGE_DANCE with an
+    // interactive EAST/WEST state machine driven by the kani's X-velocity.
+    //
+    // The mechanic (per Aaron, 2026-05-12): party starts east. Robot leaps
+    // east, vaulting over the party and landing far ahead on the corridor.
+    // Catch evaluator fires if party keeps running east into the blocking
+    // robot (consistent X~2053 in v0.15.9.7.8 / .8 / .8.1 / .8.2 BATs). Party
+    // must turn west after the robot LANDS. Robot then leaps again (presumed
+    // westward); party must turn east the moment that second leap STARTS, so
+    // we slip past while the robot is airborne.
+    //
+    // v0.15.9.8.2 BAT BridgeDiag (416 samples / 6.7 seconds, ChaseDetector
+    // override to Others slot 3 SYM='laguna' shipped in v0.15.9.8.3)
+    // characterized the signals:
+    //   * Y is constant (-446) -- jumps are X-axis only in walkmesh coords.
+    //   * Normal pursuit: ~106 units / 100ms tick.
+    //   * Leap: ~372 units / 100ms tick (3.5x normal).
+    //   * Landed/stationary: 0-1 units / tick.
+    //
+    // Thresholds (kBridgeLeapThreshold=200, kBridgeLandThreshold=50,
+    // kBridgeLandConsec=2, kBridgeMinDwellTicks=60, kBridgeWestTimeoutTicks=300)
+    // are documented inline above. The west-leg timeout is the safety net for
+    // the empirically-unknown west-leg behavior: if no second leap fires, we
+    // bail east after 5 seconds so the bridge progresses rather than getting
+    // stuck retreating forever.
+    //
+    // The dirX/dirY fields below are the INITIAL direction-drive analog used
+    // at engagement (east, running). They are subsequently overwritten by
+    // UpdateBridgeDance() as the state machine fires.
+    { "domt1_1", MODE_BRIDGE_DANCE,
+      /*dirX=*/+1, /*dirY=*/0,
+      /*targetX=*/0, /*targetY=*/0,
+      /*walk=*/false,
+      /*stages=*/nullptr, /*stageCount=*/0 },
+    // doopen2a = Dollet Town Square (immediately after the bridge domt1_1).
+    // v0.15.9.8: Explicit MODE_TARGET south. v0.15.9.7.8 BAT showed the
+    // generic fallback picked the WRONG trigger line on this field:
+    // GetTriggerLineNearestCluster matched the NW trigger (idx=1, center
+    // (-1390, 854)) because the walkmesh's largest dead-end cluster is at
+    // (-1315, 503) -- an interior corner, not an exit. The actual exit is
+    // the SOUTH trigger line (idx=257, center (-952, -3703)). With NW as
+    // the target, the party briefly moved north, the catch evaluator fired
+    // at 22:22:10 producing a post-catch script teleport south to
+    // (-1042, -917), and the auto-pilot stuck there (A* path stale) until
+    // the chase script forced a field transition at 22:22:21. Two catches
+    // in 13 seconds of stuck movement.
+    //
+    // doopen2a has ZERO INF gateways (per `INF parsed: 0 active gateways
+    // for 'doopen2a'`), so tier-1 of the BuildFallbackConfig fallback chain
+    // is unavailable. Two SETLINE trigger lines exist on the field:
+    //
+    //   idx=1   line(-1432, 660) -> (-1349, 1048)  center=(-1390, 854)   NW
+    //   idx=257 line(-814, -3717) -> (-1091, -3689) center=(-952, -3703)  S
+    //
+    // The cluster-direction heuristic picks the trigger nearest to the
+    // walkmesh's largest dead-end. On this field the largest cluster is
+    // an interior corner in the NW, not an exit -- so the heuristic
+    // mis-selects the NW trigger. This is a general pattern: any field
+    // where the biggest walkmesh feature isn't the exit will trip the
+    // heuristic. The fix is per-field explicit config; the deeper fix
+    // (improving the heuristic, e.g., scoring by distance-from-spawn or
+    // by INF destination-field IDs) is deferred.
+    //
+    // Aaron's authoritative recipe (2026-05-12): "The Town Square does
+    // require the party to keep running. You mostly head down from where
+    // you enter the field in order to get to the next." Party spawns at
+    // ~(-784, -474), must run south to cross the trigger line at
+    // y ~= -3700. Running (walk=false) -- no AI rule restricts pace on
+    // this field; the town square is at top speed like the bridge before
+    // it and the streets after.
+    //
+    // Target chosen as the south trigger line's center (-952, -3703).
+    // The path-finding drive's point-distance arrival radius is small
+    // enough (~60 units per v0.15.9.2.13) that the party crosses the
+    // line at y ~= -3700 during travel even if they stop short of the
+    // target proper. If a future BAT shows the party arriving at the
+    // target without crossing, bump the targetY south of the line
+    // (e.g., -3800) to force crossing.
+    //
+    // Predicted v0.15.9.8 BAT outcome: 0 catches on doopen2a, transit
+    // 5-8 seconds (similar to dotown_2 / dotown_1 south-running fields).
+    // Field transitions cleanly to dotown_3 via south trigger crossing.
+    //
+    // Lesson (will be Finding #34 in the lessons doc): the
+    // GetTriggerLineNearestCluster heuristic in chase auto-pilot's
+    // BuildFallbackConfig assumes the walkmesh's largest dead-end cluster
+    // correlates with the field exit direction. That assumption holds on
+    // many fields (corridors, narrow trails) but breaks on fields with
+    // interior architectural features (town squares, plazas, building
+    // corners) where the biggest walkmesh dead-end is a non-exit. The
+    // safety valve is per-field explicit configs; the heuristic itself
+    // should ideally score by direction from spawn rather than nearest-
+    // to-cluster, but that fix is deferred since explicit configs are
+    // surgical enough for the remaining problematic fields.
+    //
+    // v0.15.9.8.1: targetY bumped from -3703 to -3800. v0.15.9.8 BAT showed
+    // the south-target fix worked structurally -- party ran 3300+ units south
+    // in 6 seconds with no NW detour -- but A* stopped 159 units short of the
+    // trigger line at pos=(-958,-3541) and sat there for 8 seconds before the
+    // chase script's catch evaluator fired once and forced a transition. By
+    // targeting -3800 (97 units past the trigger line at y ~= -3700), A*'s
+    // last reachable waypoint should fall closer to or past the line itself,
+    // letting the party actually cross and trigger the script-side field
+    // transition before the catch evaluator window expires.
+    { "doopen2a", MODE_TARGET,
+      /*dirX=*/0, /*dirY=*/0,
+      /*targetX=*/-952, /*targetY=*/-3800,
+      /*walk=*/false,
+      /*stages=*/nullptr, /*stageCount=*/0 },
     // dotown_2 = Town Square 8 (Dollet streets, between dotown_3 and
     // dotown_1, post-FMV disc00_06h). v0.15.9.2.16 BAT proved
     // path-finding can't navigate this field -- the walkmesh has
@@ -798,6 +909,90 @@ static int32_t s_prevPosX                = 0;
 static int32_t s_prevPosY                = 0;
 static bool    s_prevPosValid            = false;
 
+// v0.15.9.8.2: Bridge (domt1_1) all-slots diagnostic tick counter. Fires
+// LogBridgeDiagnostic every 6 Update ticks (10Hz) when engaged on the
+// bridge field. v0.15.9.8.1 BAT found ChaseDetector resolves kani symIdx=12
+// to Others slot 6 on domt1_1, but that slot reads pos=(0,0) on every tick
+// throughout the bridge traversal -- so the actually-pursuing kani is
+// either in a different slot or in the Backgrounds array. The diagnostic
+// enumerates every non-zero slot of both arrays and dumps slot index +
+// SYM name + pos + Y-delta-vs-party so v0.15.9.8.3 can route the dance
+// logic to the right entity.
+static int     s_bridgeDiagTick = 0;
+
+// v0.15.9.8.3: Bridge dance state machine. The bridge (domt1_1) has an
+// interactive feedback loop with X-ATM092:
+//
+//   1. Party starts heading east (default).
+//   2. Robot eventually leaps east, vaulting over the party and landing
+//      ahead of them on the corridor (X far east of party).
+//   3. With robot blocking east, party must turn west to retreat;
+//      otherwise the chase script's catch evaluator fires at X~2053.
+//   4. After turning west, robot eventually leaps again (presumably west).
+//      As soon as the leap STARTS (mid-air, before landing), turn east
+//      immediately -- robot can't course-correct mid-jump, so party slips
+//      past while it's airborne.
+//   5. Resume east, cross the natural east-edge SETLINE into doopen2a.
+//
+// Detection signals confirmed by v0.15.9.8.2 BAT (laguna at Others slot 3):
+//   * Robot Y is constant on the bridge (-446) -- jumps are X-axis only
+//     in walkmesh coords (the visual "jump" is the 3D Z-axis, not Y).
+//   * Normal pursuit speed: ~106 units / 100ms tick (slightly faster than
+//     party at ~93).
+//   * Leap speed: ~372 units / 100ms tick (3.5x normal).
+//   * Landed: 0-1 units / tick (stationary).
+//
+// State variables here track previous-sample kani.X for delta computation,
+// the current dance state (EAST / WEST leg), a "was leaping" latch (so we
+// only treat "landed" as significant after observing a leap), and dwell-
+// time counters for transition debouncing and west-leg timeout fallback.
+enum BridgeDanceState {
+    BRIDGE_DANCE_EAST = 0,  // initial: drive east, watch for landed-in-front
+    BRIDGE_DANCE_WEST = 1,  // drive west, watch for next leap start
+};
+
+// Per-sample tick budget. Update() runs at ~60 Hz; we sample kani motion
+// every kBridgeSamplePeriodTicks ticks, matching the existing BridgeDiag
+// 10 Hz cadence so the X-delta values line up with the v0.15.9.8.2 data
+// that calibrated the thresholds below.
+static const int     kBridgeSamplePeriodTicks = 6;
+
+// X-speed thresholds (units per 100 ms sample) classifying robot motion.
+// From v0.15.9.8.2 BAT: normal pursuit 70-140, leap 350-500, stationary
+// 0-36. Two-tier classification with a deliberate gap so a borderline
+// sample doesn't ambiguously read as both.
+static const int32_t kBridgeLeapThreshold  = 200;
+static const int32_t kBridgeLandThreshold  = 50;
+
+// East-leg "landed in front" debounce: require this many consecutive
+// samples meeting the landed criteria before committing the turn. Cheap
+// protection against a one-sample noise spike masquerading as a landing.
+static const int     kBridgeLandConsec     = 2;
+
+// Minimum dwell time per state (in 60 Hz Update ticks) before any
+// transition can fire. Prevents oscillation if the kani's X delta briefly
+// flickers during a landing.
+static const int     kBridgeMinDwellTicks  = 60;     // 1 second
+
+// West-leg safety timeout. If no leap is detected for this long after
+// turning west, force a transition back to east. Without this, a bridge
+// where the robot never re-leaps would leave the party walking west
+// forever (we'd never reach the east-edge SETLINE exit). Generous value
+// because the natural pre-leap chase phase took ~3 seconds in the
+// v0.15.9.8.2 BAT (ticks 13-47), and we want to give the west leg the
+// same room to develop before bailing.
+static const int     kBridgeWestTimeoutTicks = 300;  // 5 seconds
+
+// State.
+static BridgeDanceState s_bridgeDanceState     = BRIDGE_DANCE_EAST;
+static int32_t          s_bridgeLastKaniX      = 0;
+static bool             s_bridgeLastKaniValid  = false;
+static int              s_bridgeSampleCounter  = 0;  // counts 60Hz ticks toward next sample
+static int              s_bridgeConsecLandSamples = 0;
+static bool             s_bridgeWasLeaping     = false;
+static int              s_bridgeTicksSinceXition  = 0;  // 60Hz ticks since last state transition (or engage)
+static int              s_bridgeLeapCount      = 0;  // total leaps observed this engagement (diagnostic)
+
 // Cached config for the engaged field (so the per-second log can read
 // dir/walk values without re-running LookupConfig).
 static FieldDriveMode s_engagedMode = MODE_DIRECTION;
@@ -822,11 +1017,14 @@ static int               s_engagedStageCount = 0;
 static int               s_currentStageIdx   = -1;
 
 // v0.15.9.7: Helper -- does this mode use direction-drive plumbing?
-// MODE_DIRECTION and MODE_STAGED_DIRECTION both call StartDirectionDrive /
-// StopDirectionDrive. MODE_TARGET uses StartChaseDrive instead.
+// MODE_DIRECTION, MODE_STAGED_DIRECTION, and (v0.15.9.8.3) MODE_BRIDGE_DANCE
+// all call StartDirectionDrive / StopDirectionDrive. MODE_TARGET uses
+// StartChaseDrive instead.
 static inline bool IsDirectionLikeMode(FieldDriveMode mode)
 {
-    return mode == MODE_DIRECTION || mode == MODE_STAGED_DIRECTION;
+    return mode == MODE_DIRECTION
+        || mode == MODE_STAGED_DIRECTION
+        || mode == MODE_BRIDGE_DANCE;
 }
 
 // v0.15.9.7: Helper -- find the active stage for a given Y position.
@@ -1150,6 +1348,260 @@ static void LogChaseActiveDiagnostic(const char* fieldName)
 }
 
 // ============================================================================
+// v0.15.9.8.2: Bridge (domt1_1) all-slots diagnostic
+// ============================================================================
+//
+// Per-tick (10Hz when called every 6 ticks) dump of every non-zero entity
+// slot in both pFieldStateOthers and pFieldStateBackgrounds when engaged on
+// the bridge. v0.15.9.8.1 BAT confirmed ChaseDetector resolved kani symIdx=12
+// to Others slot 6 but that slot reads (0, 0) the entire bridge traversal --
+// the real moving kani entity is somewhere else. Output identifies which
+// slot is actually tracking the chase so v0.15.9.8.3 can route the bridge
+// dance logic to it.
+//
+// Output format (one line per non-zero slot):
+//   BridgeDiag: field='X' party=(pX,pY) array=Others|Backgrounds
+//     slot=I sym='Y' pos=(eX,eY) ydelta=N
+//
+// Hard-gated to fieldName == "domt1_1". Skips slots whose computed position
+// is (0, 0) so the log is concise -- the absence of a slot in the output
+// indicates it's empty or unset. SEH-guarded per array.
+//
+// SYM-name lookup: ChaseDetector caches the field's SYM names at field-
+// transition time. The map from (arrayKind, slot) to symIdx is:
+//   Backgrounds slot I -> symIdx = doorsLines + I
+//   Others      slot I -> symIdx = doorsLines + backgrounds + I
+// where doorsLines = doors + lines. For domt1_1 the v0.15.9.8.1 BAT logged
+// doors=0, lines=4, bgs=2, others=17, so:
+//   kBridgeBgStart     = 4   (doors(0) + lines(4))
+//   kBridgeOthersStart = 6   (doors(0) + lines(4) + bgs(2))
+// These are hard-coded here because the diagnostic only runs on domt1_1
+// and avoiding FieldArchive::LoadJSMCounts keeps the include surface small.
+// If the counts ever differ in another game version the sym names will be
+// off-by-N -- not a correctness problem (we'd still see which SLOT is moving)
+// but it would mislabel the SYM string in the log.
+static void LogBridgeDiagnostic(const char* fieldName)
+{
+    if (fieldName == nullptr || std::strcmp(fieldName, "domt1_1") != 0) return;
+
+    int32_t pX = 0, pY = 0;
+    bool gotPos = ReadSquallPosition(pX, pY);
+
+    const int kBridgeBgStart     = 4;
+    const int kBridgeOthersStart = 6;
+    const uint32_t STRIDE_BG     = 0x1B4;
+
+    // --- Others array ---
+    if (FF8Addresses::pFieldStateOthers != nullptr &&
+        FF8Addresses::pFieldStateOtherCount != nullptr)
+    {
+        __try {
+            uint8_t* base  = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+            int      count = (int)*FF8Addresses::pFieldStateOtherCount;
+            if (base != nullptr && count > 0) {
+                if (count > 32) count = 32;
+                for (int i = 0; i < count; ++i) {
+                    uint8_t* block = base + (uintptr_t)i * ENTITY_STRIDE_OTHERS;
+                    int32_t fpX = *(int32_t*)(block + 0x190);
+                    int32_t fpY = *(int32_t*)(block + 0x194);
+                    int32_t x   = fpX / 4096;
+                    int32_t y   = fpY / 4096;
+                    if (x == 0 && y == 0) continue;
+                    int32_t ydelta = gotPos ? (y - pY) : 0;
+                    const char* sym = ChaseDetector::GetSymName(kBridgeOthersStart + i);
+                    Log::Field("BridgeDiag: field='%s' party=(%d,%d) array=Others "
+                               "slot=%d sym='%s' pos=(%d,%d) ydelta=%d",
+                               fieldName, (int)pX, (int)pY,
+                               i, (sym && sym[0]) ? sym : "?",
+                               (int)x, (int)y, (int)ydelta);
+                }
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
+
+    // --- Backgrounds array ---
+    if (FF8Addresses::pFieldStateBackgrounds != nullptr &&
+        FF8Addresses::pFieldStateBackgroundCount != nullptr)
+    {
+        __try {
+            uint8_t* base  = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateBackgrounds);
+            int      count = (int)*FF8Addresses::pFieldStateBackgroundCount;
+            if (base != nullptr && count > 0) {
+                if (count > 32) count = 32;
+                for (int i = 0; i < count; ++i) {
+                    uint8_t* block = base + (uintptr_t)i * STRIDE_BG;
+                    int32_t fpX = *(int32_t*)(block + 0x190);
+                    int32_t fpY = *(int32_t*)(block + 0x194);
+                    int32_t x   = fpX / 4096;
+                    int32_t y   = fpY / 4096;
+                    if (x == 0 && y == 0) continue;
+                    int32_t ydelta = gotPos ? (y - pY) : 0;
+                    const char* sym = ChaseDetector::GetSymName(kBridgeBgStart + i);
+                    Log::Field("BridgeDiag: field='%s' party=(%d,%d) array=Backgrounds "
+                               "slot=%d sym='%s' pos=(%d,%d) ydelta=%d",
+                               fieldName, (int)pX, (int)pY,
+                               i, (sym && sym[0]) ? sym : "?",
+                               (int)x, (int)y, (int)ydelta);
+                }
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
+}
+
+// ============================================================================
+// v0.15.9.8.3: Bridge dance per-tick update
+// ============================================================================
+//
+// Called once per Update() tick when MODE_BRIDGE_DANCE is the engaged mode
+// and the field is domt1_1. Samples the kani's X-position every
+// kBridgeSamplePeriodTicks ticks (10 Hz), computes the X-delta vs the
+// previous sample, and classifies it as LEAPING / LANDED / CHASING. Drives
+// the EAST <-> WEST state machine; on transition, updates s_engagedDirX/Y
+// so the per-tick StartDirectionDrive refresh below picks up the new
+// direction cleanly.
+//
+// All thresholds and counters are static-file constants documented above.
+// Side effects are limited to module-static state and Log::Field output.
+static void UpdateBridgeDance(const char* fieldName)
+{
+    // 60 Hz dwell counters tick every Update() call regardless of sample
+    // cadence -- they govern transition gating, not motion classification.
+    s_bridgeTicksSinceXition++;
+
+    // 10 Hz sample gate.
+    s_bridgeSampleCounter++;
+    if (s_bridgeSampleCounter < kBridgeSamplePeriodTicks) return;
+    s_bridgeSampleCounter = 0;
+
+    // Read kani position via ChaseDetector (with v0.15.9.8.3 per-field
+    // override applied). A read failure here means the kani entity isn't
+    // resolvable yet -- hold state and try again next sample.
+    int32_t kX = 0, kY = 0;
+    if (!ReadKaniPosition(kX, kY)) {
+        Log::Field("BridgeDance: kani read FAILED -- holding state=%s dwell=%d",
+                   s_bridgeDanceState == BRIDGE_DANCE_EAST ? "EAST" : "WEST",
+                   (int)s_bridgeTicksSinceXition);
+        return;
+    }
+
+    // Read party position for the "kani ahead of party" predicate.
+    int32_t pX = 0, pY = 0;
+    bool gotParty = ReadSquallPosition(pX, pY);
+
+    // X-delta vs previous sample. On the first sample of an engagement,
+    // there's no previous sample -- delta defaults to 0 (classified as
+    // landed but the kBridgeLandConsec debounce + wasLeaping latch prevent
+    // any spurious transition).
+    int32_t dX = s_bridgeLastKaniValid ? (kX - s_bridgeLastKaniX) : 0;
+    int32_t absDx = (dX < 0) ? -dX : dX;
+
+    bool isLeaping = (absDx > kBridgeLeapThreshold);
+    bool isLanded  = (absDx < kBridgeLandThreshold);
+    bool minDwellMet = (s_bridgeTicksSinceXition >= kBridgeMinDwellTicks);
+
+    // The "was leaping" latch: only set true after observing a leap. Used
+    // on the east leg so a landed sample without a preceding leap doesn't
+    // trigger the turn-west (the kani is initially stationary west of the
+    // party for ~1 second before the chase starts; that's not the
+    // landing-in-front signal we're after).
+    bool justStartedLeaping = (isLeaping && !s_bridgeWasLeaping);
+    if (isLeaping) {
+        if (!s_bridgeWasLeaping) {
+            s_bridgeLeapCount++;
+            Log::Field("BridgeDance: leap #%d STARTED state=%s kani=(%d,%d) "
+                       "party=(%d,%d) kdx=%d",
+                       s_bridgeLeapCount,
+                       s_bridgeDanceState == BRIDGE_DANCE_EAST ? "EAST" : "WEST",
+                       (int)kX, (int)kY,
+                       gotParty ? (int)pX : 0, gotParty ? (int)pY : 0,
+                       (int)dX);
+        }
+        s_bridgeWasLeaping = true;
+    }
+
+    // ===== State machine =====
+
+    if (s_bridgeDanceState == BRIDGE_DANCE_EAST) {
+        // East leg: turn west when kani lands IN FRONT (east of party) AFTER
+        // observing a leap. The "after a leap" gate is essential -- the
+        // kani spends the first ~12 samples stationary at the far-west spawn
+        // position, which would otherwise trigger an immediate turn-west on
+        // the very first sample.
+        bool kaniAhead = gotParty && (kX > pX);
+        if (isLanded && kaniAhead && s_bridgeWasLeaping) {
+            s_bridgeConsecLandSamples++;
+        } else {
+            s_bridgeConsecLandSamples = 0;
+        }
+
+        if (minDwellMet &&
+            s_bridgeConsecLandSamples >= kBridgeLandConsec) {
+            Log::Field("BridgeDance: EAST->WEST transition kani=(%d,%d) party=(%d,%d) "
+                       "kdx=%d (landed_in_front for %d samples, leapCount=%d, dwell=%d)",
+                       (int)kX, (int)kY,
+                       gotParty ? (int)pX : 0, gotParty ? (int)pY : 0,
+                       (int)dX, (int)s_bridgeConsecLandSamples,
+                       (int)s_bridgeLeapCount, (int)s_bridgeTicksSinceXition);
+            s_engagedDirX            = -1;
+            s_engagedDirY            =  0;
+            s_bridgeDanceState       = BRIDGE_DANCE_WEST;
+            s_bridgeTicksSinceXition = 0;
+            s_bridgeConsecLandSamples = 0;
+            s_bridgeWasLeaping       = false;
+        }
+    } else /* BRIDGE_DANCE_WEST */ {
+        // West leg: turn east the instant we detect a leap START. The robot
+        // is mid-air during a leap and can't course-correct, so this is the
+        // safest window to reverse direction and slip past.
+        if (minDwellMet && justStartedLeaping) {
+            Log::Field("BridgeDance: WEST->EAST transition kani=(%d,%d) party=(%d,%d) "
+                       "kdx=%d (leap_start, leapCount=%d, dwell=%d)",
+                       (int)kX, (int)kY,
+                       gotParty ? (int)pX : 0, gotParty ? (int)pY : 0,
+                       (int)dX, (int)s_bridgeLeapCount, (int)s_bridgeTicksSinceXition);
+            s_engagedDirX            = +1;
+            s_engagedDirY            =  0;
+            s_bridgeDanceState       = BRIDGE_DANCE_EAST;
+            s_bridgeTicksSinceXition = 0;
+            s_bridgeConsecLandSamples = 0;
+            s_bridgeWasLeaping       = false;
+        } else if (s_bridgeTicksSinceXition >= kBridgeWestTimeoutTicks) {
+            // West-leg safety timeout. If we've been retreating for too long
+            // without any leap firing, force a transition back to east. The
+            // party then continues toward the east-edge SETLINE; in the worst
+            // case we get caught at X~2053 like we did before this dance
+            // existed, but at least the bridge progresses.
+            Log::Field("BridgeDance: WEST->EAST TIMEOUT (no leap detected after %d ticks) "
+                       "kani=(%d,%d) party=(%d,%d) kdx=%d",
+                       (int)s_bridgeTicksSinceXition,
+                       (int)kX, (int)kY,
+                       gotParty ? (int)pX : 0, gotParty ? (int)pY : 0,
+                       (int)dX);
+            s_engagedDirX            = +1;
+            s_engagedDirY            =  0;
+            s_bridgeDanceState       = BRIDGE_DANCE_EAST;
+            s_bridgeTicksSinceXition = 0;
+            s_bridgeConsecLandSamples = 0;
+            s_bridgeWasLeaping       = false;
+        }
+    }
+
+    // Per-sample diagnostic. Concise format; ~10 lines/sec while engaged.
+    const char* stateStr = (s_bridgeDanceState == BRIDGE_DANCE_EAST) ? "EAST" : "WEST";
+    const char* motionStr = isLeaping ? "LEAPING" : (isLanded ? "LANDED" : "CHASING");
+    Log::Field("BridgeDance: sample state=%s motion=%s kani=(%d,%d) party=(%d,%d) "
+               "kdx=%d consecLanded=%d wasLeaping=%d dwell=%d",
+               stateStr, motionStr,
+               (int)kX, (int)kY,
+               gotParty ? (int)pX : 0, gotParty ? (int)pY : 0,
+               (int)dX, (int)s_bridgeConsecLandSamples,
+               (int)s_bridgeWasLeaping, (int)s_bridgeTicksSinceXition);
+
+    s_bridgeLastKaniX     = kX;
+    s_bridgeLastKaniValid = true;
+}
+
+// ============================================================================
 // Engage / disengage
 // ============================================================================
 
@@ -1198,6 +1650,21 @@ static void Engage(const FieldConfig* cfg)
             Log::Field("ChaseAutoPilot: MODE_STAGED_DIRECTION on '%s' has no stages defined",
                        cfg->fieldName);
         }
+    } else if (cfg->mode == MODE_BRIDGE_DANCE) {
+        // v0.15.9.8.3: Bridge dance starts in EAST_LEG state, driving east
+        // at running speed via the existing direction-drive plumbing.
+        // UpdateBridgeDance() flips s_engagedDirX/Y when the state machine
+        // transitions, and the per-tick StartDirectionDrive refresh below
+        // picks up the new values via its already-running diff branch.
+        FieldNavigation::StartDirectionDrive(+1, 0, /*walk=*/false);
+        s_bridgeDanceState        = BRIDGE_DANCE_EAST;
+        s_bridgeLastKaniValid     = false;
+        s_bridgeSampleCounter     = 0;
+        s_bridgeConsecLandSamples = 0;
+        s_bridgeWasLeaping        = false;
+        s_bridgeTicksSinceXition  = 0;
+        s_bridgeLeapCount         = 0;
+        ok = true;
     } else if (cfg->mode == MODE_TARGET) {
         // v0.15.9.2: path-finding drive. StartChaseDrive validates state
         // (no F9 active, no dialog open, on field) and returns false on
@@ -1277,6 +1744,12 @@ static void Engage(const FieldConfig* cfg)
                    DirectionName(s_engagedDirX, s_engagedDirY),
                    s_engagedWalk ? "WALKING" : "running",
                    (int)s_engagedDirX, (int)s_engagedDirY, (int)s_engagedWalk);
+    } else if (cfg->mode == MODE_BRIDGE_DANCE) {
+        Log::Field("ChaseAutoPilot: ENGAGED on field='%s' mode=BRIDGE_DANCE "
+                   "initial state=EAST_LEG direction=east running (dirX=+1 dirY=0 walk=0). "
+                   "Will turn west when kani lands in front, east when kani leaps; "
+                   "west-leg timeout %d ticks (~5s) for safety.",
+                   cfg->fieldName, (int)kBridgeWestTimeoutTicks);
     } else {
         Log::Field("ChaseAutoPilot: ENGAGED on field='%s' mode=TARGET tgt=(%d,%d) "
                    "%s (walk=%d)",
@@ -1320,6 +1793,15 @@ static void Disengage(const char* reason)
     s_engagedTargetY   = 0;
     s_engagedWalk      = false;
     s_diagTickCounter  = 0;
+    s_bridgeDiagTick   = 0;  // v0.15.9.8.2
+    // v0.15.9.8.3: Reset bridge dance state.
+    s_bridgeDanceState        = BRIDGE_DANCE_EAST;
+    s_bridgeLastKaniValid     = false;
+    s_bridgeSampleCounter     = 0;
+    s_bridgeConsecLandSamples = 0;
+    s_bridgeWasLeaping        = false;
+    s_bridgeTicksSinceXition  = 0;
+    s_bridgeLeapCount         = 0;
     // v0.15.9.7: Reset staged-direction state.
     s_engagedStages     = nullptr;
     s_engagedStageCount = 0;
@@ -1351,6 +1833,14 @@ void Initialize()
     s_prevPosX            = 0;     // v0.15.9.3
     s_prevPosY            = 0;     // v0.15.9.3
     s_prevPosValid        = false; // v0.15.9.3
+    s_bridgeDiagTick      = 0;     // v0.15.9.8.2
+    s_bridgeDanceState        = BRIDGE_DANCE_EAST;  // v0.15.9.8.3
+    s_bridgeLastKaniValid     = false;              // v0.15.9.8.3
+    s_bridgeSampleCounter     = 0;                  // v0.15.9.8.3
+    s_bridgeConsecLandSamples = 0;                  // v0.15.9.8.3
+    s_bridgeWasLeaping        = false;              // v0.15.9.8.3
+    s_bridgeTicksSinceXition  = 0;                  // v0.15.9.8.3
+    s_bridgeLeapCount         = 0;                  // v0.15.9.8.3
     s_engagedStages       = nullptr;  // v0.15.9.7
     s_engagedStageCount   = 0;        // v0.15.9.7
     s_currentStageIdx     = -1;       // v0.15.9.7
@@ -1358,10 +1848,14 @@ void Initialize()
              "domt4_1 (DIRECTION run south-east, v0.15.9.4), "
              "domt3_2 (DIRECTION run east, v0.15.9.5), "
              "domt5_1 (STAGED_DIRECTION walk SW->S->SE by Y, v0.15.9.7), "
+             "domt1_1 (BRIDGE_DANCE east/west by kani X-velocity, v0.15.9.8.3), "
+             "doopen2a (TARGET south, v0.15.9.8), "
              "dotown_2/_1 (DIRECTION run south). "
              "Unknown chase fields fall back to MODE_TARGET via largest-cluster scan. "
              "Engagement gated on chase ASK being answered (v0.15.9.2.10). "
-             "Per-field completed marker prevents re-engagement loop (v0.15.9.2.11).",
+             "Per-field completed marker prevents re-engagement loop (v0.15.9.2.11). "
+             "v0.15.9.8.3: kani-slot override on domt1_1 -> Others slot 3 (SYM 'laguna'); "
+             "BridgeDiag still active for empirical confirmation.",
              FF8OPC_VERSION, kFieldConfigsCount);
 }
 
@@ -1541,11 +2035,34 @@ void Update()
                     }
                 }
             }
+            // v0.15.9.8.3: Bridge dance per-tick update. Owns the EAST/WEST
+            // state machine on domt1_1; updates s_engagedDirX/Y when it
+            // decides to flip direction, which the StartDirectionDrive
+            // refresh below picks up on the same tick.
+            if (s_engagedMode == MODE_BRIDGE_DANCE) {
+                UpdateBridgeDance(fieldName);
+            }
             FieldNavigation::StartDirectionDrive(s_engagedDirX, s_engagedDirY, s_engagedWalk);
         } else {
             if (!FieldNavigation::IsChaseDriveActive()) {
                 Disengage("chase-drive completed (target reached or stuck)");
                 return;
+            }
+        }
+
+        // v0.15.9.8.2: Bridge diagnostic. Per-tick log every 6 Update ticks
+        // (10Hz) on domt1_1 to find the actually-pursuing kani entity (and
+        // characterize Y-axis excursions during jumps for the v0.15.9.8.3
+        // dance thresholds). No-op on all other fields. The 10Hz cadence is
+        // chosen so a brief jump (estimated ~0.5s) reliably lands in at least
+        // 4-5 samples even if it's quick, while keeping log volume bounded
+        // (~17 active slots * 10Hz * ~10s of bridge transit = ~1700 lines max
+        // per BAT, filtered to non-zero positions).
+        if (std::strcmp(fieldName, "domt1_1") == 0) {
+            s_bridgeDiagTick++;
+            if (s_bridgeDiagTick >= 6) {
+                LogBridgeDiagnostic(fieldName);
+                s_bridgeDiagTick = 0;
             }
         }
 
@@ -1583,8 +2100,10 @@ void Update()
             if (IsDirectionLikeMode(s_engagedMode)) {
                 int32_t lX = (int32_t)s_engagedDirX * 1000;
                 int32_t lY = (int32_t)s_engagedDirY * 1000;
-                const char* modeStr = (s_engagedMode == MODE_STAGED_DIRECTION)
-                                          ? "STAGED" : "DIRECTION";
+                const char* modeStr =
+                    (s_engagedMode == MODE_STAGED_DIRECTION) ? "STAGED" :
+                    (s_engagedMode == MODE_BRIDGE_DANCE)     ? "BRIDGE_DANCE" :
+                                                               "DIRECTION";
                 if (gotPos) {
                     Log::Field("ChaseAutoPilot: tick=%d field='%s' mode=%s "
                                "dir=(%d,%d) walk=%d stage=%d pos=(%d,%d) lX=%d lY=%d%s",
