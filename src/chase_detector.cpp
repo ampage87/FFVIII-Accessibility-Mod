@@ -68,14 +68,44 @@ namespace ChaseDetector {
 // (IsInChaseField()=false), (3) any leftover pin state already
 // deactivated cleanly via the field-change branch, (4) the dotown_3
 // cutscene plays unimpeded.
+//
+// v0.15.9.2.16: dotown_3, dotown_2, dotown_1 RE-ADDED. The v0.15.2.11
+// removal was correct for chase_kani_freeze but wrong for
+// chase_auto_pilot (which didn't exist when v0.15.2.11 shipped).
+// v0.15.9.2.15 BAT exposed this: the auto-pilot drove the party
+// through 6 chase fields and then disengaged on entry to dotown_3,
+// leaving Aaron stranded for the final 2-3 fields up to the Lapin
+// Beach chase FMV (disc00_07h.avi). v0.15.9.2.15 manual exploration
+// BAT (2026-05-11) confirmed the post-bridge route: dotown_3 -> FMV
+// disc00_06h.avi (Dollet streets intro transition) -> dotown_2 ->
+// dotown_1 -> FMV disc00_07h.avi (the actual chase climax: party
+// flees through town, robot pursues across bridge, beach extraction).
+// Adding dotown_3/_2/_1 to the chase set lets chase_auto_pilot keep
+// driving through them. Risk analysis for the v0.15.2.11 failure
+// mode: it required a mode 4->1 transition (battle->field) inside
+// dotown_3 to trigger chase_kani_freeze.StartCapture. In AUTO mode
+// chase_battle_freeze caps battles at 0, so no battle ever fires
+// inside any chase field -> no mode 4->1 transition -> no
+// StartCapture -> no animation pin -> cutscene plays untouched. In
+// MANUAL mode the cap is 1, but the v0.15.9.2.15 manual exploration
+// BAT walked through dotown_3 without triggering any chase battle
+// or hang, suggesting the v0.15.2.10 crash required some specific
+// condition not present in current builds (or that condition was
+// fixed downstream). If a future MANUAL-mode BAT in these fields
+// surfaces the cutscene-fight regression, the right fix is to gate
+// chase_kani_freeze.StartCapture on a stricter predicate (e.g.
+// IsInKaniActiveChaseField()) while leaving CHASE_FIELD_NAMES
+// inclusive for chase_auto_pilot.
 static const char* CHASE_FIELD_NAMES[] = {
     "domt1_1",   // Mountain trail, entry/exit; second-pass = chase return
     "domt2_1",   // Mountain trail
     "domt3_2",   // Mountain trail (defensive include)
     "domt4_1",   // Mountain trail, post-tower exit; chase begins here
     "domt5_1",   // Mountain trail
-    "doopen2a",  // Bridge field; chase ends on transition to dotown_3
-    // v0.15.2.11: dotown_3/2/1 removed (chase-end cutscene fields).
+    "doopen2a",  // Bridge field; X-ATM092 leaps over the party here (AI rule #2)
+    "dotown_3",  // Town Square 10; chase enters town, kani cutscene + transition FMV
+    "dotown_2",  // Town Square 8; chase continues through town
+    "dotown_1",  // Town Square 6; chase climax FMV (disc00_07h.avi) fires here
 };
 static const int CHASE_FIELD_COUNT =
     (int)(sizeof(CHASE_FIELD_NAMES) / sizeof(CHASE_FIELD_NAMES[0]));

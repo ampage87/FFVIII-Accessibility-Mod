@@ -4,6 +4,1339 @@ Newest on top. Each entry begins with a `## vMAJOR.MINOR.BUILD` heading followed
 
 The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_accessibility.h`. The push utility refuses to push if they don't.
 
+## v0.15.9.7.8
+
+**BAT SUCCESS 2026-05-12.** Aaron: "BAT. It worked! We successfully made it down the west trail by walking and without triggering the robot."
+
+After 14 versions of investigation, the `domt5_1` (west trail) catch is fixed. Field log confirms the full chase route completed end-to-end: `domt4_1` → `domt3_2` → `domt5_1` → `domt2_1` → `domt1_1` → `doopen2a` → `dotown_3` → `dotown_2` → `dotown_1`. The chase progressing past `domt5_1` to `dotown_1` (the last chase field) is itself proof — every prior BAT either got caught and respawned or got stuck on the west trail.
+
+**Root cause finally found.** `InjectKey` in `field_nav_autodrive.inl` was setting `KEYEVENTF_EXTENDEDKEY` for every key. Arrow keys ARE extended (E0 prefix in hardware); letter keys like W are NOT. So every W injection from v0.15.9.7 onward produced a malformed scancode `E0+0x11` that FF8's DirectInput keyboard reader didn't recognize as W. **Arrows worked the whole time. W never did, since the day we first tried to inject it.**
+
+Full credit to Aaron for the diagnosis after the v0.15.9.7.7 BAT.
+
+### v0.15.9.7.7 BAT trace (2026-05-12 21:58:55 onward) -- the smoking gun
+
+All v0.15.9.7.7 markers confirmed present in `Logs/ff8_field.log`:
+
+- `FRESH START walk=1 -- keyboard-only path (no fake gamepad, no analog override)` ✓
+- `FRESH-START W KEYDOWN injected (scancode=0x11)` ✓
+- `STARTED dir=(-1,1) walk=1 lX=0 lY=0 arrows=0x6 override=0 gamepad=0` ✓
+- `walk modifier RE-PRESSED (tick #1 ..., period=1, override=0, gamepad=0)` through tick #1321 ✓
+
+v0.15.9.7.7 ran exactly as designed. Pure keyboard. No fake gamepad. No analog override. But:
+
+- `dmag=756` to `855` per second on the walking stages (your manual is `270-303`).
+- `[CBF] NO-OP chase BATTLE call` fired three times: at 21:59:00, 21:59:07, 21:59:13. The mod's freeze blocked the actual battles, but the chase script's catch trigger went off three times. "Robot showed up" was real.
+
+Aaron's verbatim diagnosis:
+
+> "I am quite certain it is W. I suspect the W key press is not making its way to the game. You also mentioned that we're repressing W on every tick, but we should be holding W down continuously."
+
+Both right.
+
+### The bug
+
+`field_nav_autodrive.inl`:
+
+```cpp
+static void InjectKey(WORD scanCode, bool down)
+{
+    INPUT inp      = {};
+    inp.type       = INPUT_KEYBOARD;
+    inp.ki.wVk     = 0;
+    inp.ki.wScan   = scanCode;
+    inp.ki.dwFlags = KEYEVENTF_SCANCODE | KEYEVENTF_EXTENDEDKEY  // <-- ALWAYS extended
+                   | (down ? 0 : KEYEVENTF_KEYUP);
+    SendInput(1, &inp, sizeof(INPUT));
+}
+```
+
+`KEYEVENTF_EXTENDEDKEY` unconditionally. Correct for arrows; wrong for W. Our own `world_map.cpp` v0.14.102 comment from earlier flagged this exact issue for car driving:
+
+> "CRUCIAL DETAIL: A and W are NOT extended keys (per v0.11.14: 'NOT extended keys (no KEYEVENTF_EXTENDEDKEY)'); arrow keys ARE extended. The key-injection helpers must handle both flag types."
+
+`world_map.cpp` has its own `PressKey`/`ReleaseKey` with an `extended` parameter that was fixed in v0.14.102. But the field-navigation `InjectKey` (a separate function) was never updated.
+
+### The fix
+
+Four parts:
+
+1. **`InjectKey` gains an `extended` parameter** (default `true` preserves backward compat for every existing arrow-key call site). When `false`, `KEYEVENTF_EXTENDEDKEY` is omitted.
+2. **W call sites in `field_nav_directiondrive.inl` now pass `extended=false`** — three sites: fresh-start, walk-state flip in the already-running branch, and `StopDirectionDrive`.
+3. **Defensive W re-press path REMOVED.** Per Aaron's holding-vs-tapping point. The re-press was added in v0.15.9.7.1 on an unverified theory that the chase intro choreography swallowed the initial KEYDOWN. The real reason it didn't reach the engine was the extended-key bug. With the bug fixed, one KEYDOWN should suffice and the OS holds the state until our `KEYUP` at `Disengage`. Re-pressing 60 times per second was potentially counterproductive in DirectInput buffered mode — 60 discrete "tap" events instead of one sustained hold.
+4. **`InjectKey` now logs SendInput failures** (return value != 1). Drops are silent today; future drops will surface in the field log.
+
+### Sequence summary
+
+| Version | Walk-mode input | Result |
+|---|---|---|
+| v0.15.9.7 - .7.4 | analog 1000 + W (broken: extended flag) | Caught (analog ran the show) |
+| v0.15.9.7.5 | analog 350 + W (broken) | Caught (still ran) |
+| v0.15.9.7.6 | analog 0 with fake gamepad + W (broken) | Caught (still ran) |
+| v0.15.9.7.7 | no fake gamepad + W (broken) | Caught (W never reached engine; ran at full keyboard speed) |
+| **v0.15.9.7.8 (this)** | **no fake gamepad + W (fixed extended=false, held continuously)** | **Predicted: walks, 0 catches** |
+
+### Predicted v0.15.9.7.8 BAT outcome
+
+- Field log: `FRESH-START W KEYDOWN injected (scancode=0x11, extended=0) -- will be held continuously until Disengage (no re-press)` once at engagement on `domt5_1`. **No subsequent W re-press lines.**
+- Audio: walking-speed footsteps on `domt5_1` from the first audible step.
+- `domt5_1` transit ~13-18s with dmag ~270-303 matching manual play.
+- **0 catches. No robot announcement.**
+- Full chase completes cleanly: domt4_1 → domt3_2 → domt5_1 → ... → dotown_1.
+- If a `[InjectKey] SendInput FAILED` line ever appears, we'd know our input was dropped at the OS level (separate from any FF8-side issue).
+
+If the catch STILL fires after this fix, the input speed isn't the trigger — some other chase-script predicate is at play, and the next investigation goes to FF8 disasm / FFNx source.
+
+### Risk
+
+Very low. `InjectKey` signature change is backward-compatible (default `extended=true`). All existing arrow-key callers behave identically (verified: `SetHeldDirections` and `ReleaseAllDirections` only call `InjectKey` with arrow scancodes). Only the three W sites are updated. The removed re-press code path was the noisy one; clean deletion. The `WALK_REPRESS_PERIOD` constant and `s_walkRepressCounter/Logged` statics remain in the file as vestigial documentation of the history but are no longer referenced.
+
+### Files
+
+- `src/field_nav_autodrive.inl` -- `InjectKey` gains `extended` parameter + SendInput failure logging.
+- `src/field_nav_directiondrive.inl` -- W call sites pass `extended=false` + defensive re-press path removed + comment block rewrite explaining the root cause.
+- `src/ff8_accessibility.h` -- version `0.15.9.7.8` with full comment trail.
+- `CHANGELOG.md` -- this entry.
+- `DEVNOTES.md` -- current state.
+- `NEXT_SESSION_PROMPT.md` -- BAT plan.
+
+## v0.15.9.7.7
+
+Walk mode uses pure keyboard input: no fake gamepad install, no analog override. Plus diagnostic logging. Aaron's challenge after v0.15.9.7.6 drove the change.
+
+### v0.15.9.7.6 BAT result (2026-05-12) -- FAILED
+
+Aaron: "Still triggered the robot on the west trail. It sounded like the party was running. Are you sure W was being held the whole time and that only directional keys were sent to the game?"
+
+Honest answer to his question: I wasn't 100% sure. The code calls `InjectKey(W, KEYDOWN)` at field entry and re-presses every tick. The only place that calls `KEYUP` is `StopDirectionDrive` which doesn't fire mid-field. So in theory W is held. But we never verified SendInput's return value, never logged subsequent re-presses (only the first), and never logged the engine's perceived keyboard state. Intent != evidence.
+
+### The likely cause
+
+Even with the analog magnitude at 0, the **fake gamepad was still installed**. FF8 PC likely has an input-mode flag that flips based on gamepad presence:
+
+- Gamepad attached: analog magnitude is the speed authority. W treated as a keyboard-only modifier the analog code path ignores.
+- No gamepad: keyboard + W is the speed authority. W applies.
+
+Aaron's manual play has no gamepad attached. Manual `domt5_1`: keyboard arrows + W, 13s, 0 catches every time. Our fake gamepad install (even with zeroed analog) may have flipped the engine into "gamepad mode", making it ignore W for speed determination while still reading keyboard for direction.
+
+### The fix
+
+In `src/field_nav_directiondrive.inl`'s `StartDirectionDrive`:
+
+- **Walk=true path**: skip `DD_InstallFakeGamepad()`, leave `s_analogOverrideActive=false`. Press keyboard arrows + W. Pure keyboard, exactly like manual play.
+- **Walk=false path**: unchanged (install fake gamepad, full analog deflection).
+- **Walk-state flip mid-engagement**: run → walk uninstalls the fake gamepad and disables override; walk → run reinstalls and re-enables.
+
+### Re-evaluating the v0.15.9 "keyboard alone doesn't work" finding
+
+The v0.15.9 BAT shipped keyboard-only injection with no fake gamepad. Party didn't move. v0.15.9.1 added the fake gamepad and party moved. We've assumed since then that the fake gamepad install is REQUIRED for any movement.
+
+But Aaron's manual play with no gamepad moves the party fine. So keyboard CAN drive movement in FF8 PC. The v0.15.9 failure was probably a different bug (timing, focus, scancode) that's since been fixed by other refinements (the keep-alive pulse, the `SetHeldDirections` diff mechanism). We didn't isolate at the time. v0.15.9.7.7 re-evaluates empirically.
+
+### Added diagnostic logging
+
+To stop guessing whether W is reaching the engine:
+
+- Every W press/release logs the scancode (`0x11`).
+- The fresh-start W KEYDOWN logs explicitly.
+- Walk-state flip logs the path swap (install/uninstall).
+- W re-press logs every 60 ticks (~once per second), including current override/gamepad flag state, instead of the v0.15.9.7.1 latched "first re-press only" log.
+- `STARTED` log now includes `override=N gamepad=N` to show input path.
+
+Noisy by design for this BAT. Restored to the latched form after diagnosis.
+
+### Risk
+
+Medium. If the v0.15.9-era finding is still operative (some path in FF8 needs a gamepad pointer present to dispatch keyboard input), the party won't move on `domt5_1` at all. Fallback: v0.15.9.7.8 re-installs the fake gamepad but freezes its state (no analog writes) so it has presence without influence.
+
+If the party walks and the catch still fires, the chase script overrides speed regardless of input. Next step: FF8 disassembly / FFNx source for the catch predicate.
+
+### Predicted v0.15.9.7.7 BAT outcome
+
+- **Success path**: `domt5_1` log shows `STARTED dir=(-1,+1) walk=1 lX=0 lY=0 arrows=0x06 override=0 gamepad=0`. Party walks. 0 catches. Per-second re-press log confirms W KEYDOWN firing throughout.
+- **Fallback path A**: party doesn't move on `domt5_1`. v0.15.9 finding still operative.
+- **Fallback path B**: party walks but catch still fires. Chase script ignores W; deeper investigation.
+
+### Files
+
+- `src/field_nav_directiondrive.inl` -- conditional fake-gamepad install + walk-state flip handler + diagnostic logging.
+- `src/ff8_accessibility.h` -- version `0.15.9.7.7` with full comment trail.
+- `CHANGELOG.md` -- this entry.
+- `DEVNOTES.md` -- current state.
+- `NEXT_SESSION_PROMPT.md` -- BAT plan.
+
+## v0.15.9.7.6
+
+Set `WALK_ANALOG_MAGNITUDE` from 350 to 0. Aaron's pivot after the v0.15.9.7.5 BAT cuts through everything.
+
+### v0.15.9.7.5 BAT result (2026-05-12) -- FAILED
+
+Aaron's report: "Still ran and triggered the robot. Should we consider just disabling analog navigation and using just directional keys when walking is required?"
+
+Magnitude 350 was still above whatever threshold triggers the catch. We don't actually know whether the threshold is a speed value (and our 350 is above it), or whether the catch evaluator reads something else entirely from the analog path (e.g., "is analog non-zero"). Either way, the fix is the same: don't write any analog when walking.
+
+### Aaron's suggestion
+
+Mirror manual play exactly. Aaron has no joystick. His manual play on `domt5_1` uses keyboard arrows + W only, no analog stick input at all. Reliably walks the field in 13 seconds with 0 catches every time. Our auto-pilot should do the same shape of input when walking.
+
+### The fix
+
+One-line constant change in `src/field_nav_directiondrive.inl`:
+
+```cpp
+static const int WALK_ANALOG_MAGNITUDE = 0;   // v0.15.9.7.6: zero deflection
+```
+
+When `walk=true`, both analog-write sites in `StartDirectionDrive` now write `lX=0, lY=0`. The fake gamepad stays installed (its presence is what activates FF8's input dispatch path -- v0.15.9 BAT without it showed the party didn't move at all). The engine sees "gamepad present, stick centered" and falls back to keyboard for direction.
+
+Keyboard arrows + W modifier do all the work. Same shape as Aaron's manual play.
+
+### Why this is more likely to work
+
+The sequence so far:
+
+| Version | Analog | W | Result |
+|---|---|---|---|
+| v0.15.9.7 - .7.4 | 1000 (run) | held | Caught (analog = run) |
+| v0.15.9.7.5 | 350 (partial) | held | Caught (still ran) |
+| **v0.15.9.7.6 (this)** | **0 (none)** | **held** | **Predicted: walks, no catch** |
+
+The trajectory says: every non-zero magnitude triggered the catch. Setting to zero is the only untested value, and it matches Aaron's known-working manual play.
+
+### Risk
+
+Very low. One-line constant change. The walk=false path is untouched -- `domt4_1`, `domt3_2`, `dotown_*`, and the fallback configs all keep running at full deflection.
+
+### Fallback if even magnitude=0 doesn't work
+
+If the party doesn't move at all (the centered gamepad + active analog override might block keyboard reading), v0.15.9.7.7 disables `s_analogOverrideActive` entirely for walk fields. The fake gamepad stays installed (presence matters for input dispatch) but the engine reads from the saved-pointer gamepad state instead of our zeroed fake. That should be functionally equivalent to no gamepad being active for input purposes.
+
+If v0.15.9.7.7 also fails, the next step is investigating FF8's actual input dispatch logic via the disassembly or FFNx source.
+
+### Predicted v0.15.9.7.6 BAT outcome
+
+- Field log: `[direction-drive] STARTED dir=(-1,+1) walk=1 lX=0 lY=0 arrows=0x06` (note `lX=0 lY=0`, with the arrow mask still showing the keyboard intent).
+- Audio: walking-speed footsteps on `domt5_1` from the first audible frame.
+- `domt5_1` transit ~13-18s.
+- **0 catches. No robot announcement.**
+- Full chase completes cleanly.
+
+### Files
+
+- `src/field_nav_directiondrive.inl` -- constant value change + comment block rewrite explaining the strategy pivot.
+- `src/ff8_accessibility.h` -- version bump to `0.15.9.7.6` with full comment trail.
+- `CHANGELOG.md` -- this entry.
+- `DEVNOTES.md` -- current state.
+- `NEXT_SESSION_PROMPT.md` -- v0.15.9.7.6 BAT plan.
+- `Plan & Research Documents/Auto-drive lessons from chase auto-pilot.md` -- Finding #32 updated with v0.15.9.7.5 result + the pivot rationale.
+
+## v0.15.9.7.5
+
+Reduce analog deflection magnitude when `walk=true`. This is the long-missing fix for the `domt5_1` (west trail) catch issue. Credit to Aaron for the diagnosis after the v0.15.9.7.4 BAT.
+
+### Aaron's insight (verbatim)
+
+> "Okay I think this was an improvement, at least for the second field in the chase, as I heard the party run across that field as expected now. We still somehow triggered the robot on the west trail. Are we emulating directional keys or the analog stick? Could it be that the way we are emulating the navigation is not respecting the W key being held down to walk? I know the directional keys respect that, but not sure if the analog stick does."
+
+He nailed it. FF8 PC walk/run determination depends on input source:
+
+- **Keyboard arrows + W (Cancel modifier)**: W asserts walking speed regardless of arrow deflection. This is the path Aaron uses in manual play.
+- **Analog stick**: speed is determined by **deflection magnitude**. Full deflection = run; partial deflection = walk. The W modifier doesn't apply (or barely applies) to the analog path -- the PSX original used analog magnitude exclusively, and the PC port inherited that code path.
+
+Our direction-drive emulates BOTH simultaneously:
+
+- Writes fake-gamepad analog at full deflection (`lX = dirX * 1000, lY = dirY * 1000`)
+- Injects keyboard arrows + W via SendInput
+
+The engine reads both, but the **catch evaluator on chase fields reads analog magnitude**. Full deflection = running, no matter how many W re-presses we fire on the keyboard.
+
+This is the actual root cause of every `domt5_1` catch since v0.15.9.7. Walking footstep audio (Aaron's main feedback signal) is driven by W + keyboard arrows, so it sounded correct. The catch evaluator was on a different code path.
+
+### v0.15.9.7.4 BAT result (2026-05-11/12)
+
+Aaron: "this was an improvement, at least for the second field in the chase, as I heard the party run across that field as expected now. We still somehow triggered the robot on the west trail."
+
+Good news on `domt3_2`: the direction fix (east -> west) landed correctly. Aaron heard the party running across the field as the recipe required. Per the v0.15.9.7.4 carryover-hypothesis test design, this rules carryover OUT as the cause of `domt5_1`'s catch. The catch is something else.
+
+Aaron's question then pinpointed the something else.
+
+### The fix
+
+Two constants added to `src/field_nav_directiondrive.inl`:
+
+```cpp
+static const int RUN_ANALOG_MAGNITUDE  = 1000;  // full deflection = running
+static const int WALK_ANALOG_MAGNITUDE = 350;   // ~35% deflection = walking
+```
+
+Both analog-write sites in `StartDirectionDrive` (the fresh-start branch and the already-running branch) select `walk ? WALK_ANALOG_MAGNITUDE : RUN_ANALOG_MAGNITUDE` instead of the hardcoded `1000`. No other changes to logic.
+
+### Magnitude calibration
+
+- PSX FF8 analog range was `-128..+127`. Walk threshold was around analog value 50.
+- Scaled to our DirectInput convention `-1000..+1000`: that's `50/127 * 1000 = ~394`.
+- **350** stays solidly below the threshold (with some margin for engine variance).
+- For diagonal directions like SW (`dirX=-1, dirY=+1`), the vector magnitude is `sqrt(350^2 * 2) = ~495`, still well below the run-threshold vector magnitude of `sqrt(394^2 * 2) = ~557`. Diagonals walk too.
+- The FF8 PC analog deadzone is small (~100 units), so 350 is well above it. Party should still move.
+
+If 350 doesn't move the party at all (deadzone hit), v0.15.9.7.6 bumps to 400-500. If 350 still results in running (catch fires), v0.15.9.7.6 drops to 250.
+
+### Why we still hold W
+
+Belt and suspenders:
+
+1. If FF8 does ANY walk-modifier consultation on the analog path (e.g., "W held forces walking regardless of magnitude"), we still cover that case.
+2. Walking animation and footstep audio are driven by W + keyboard arrows. Aaron's accessibility depends on audio cues to gauge speed and progress.
+
+### Why running fields are unchanged
+
+`domt4_1` SE, `domt3_2` W, `dotown_2/dotown_1` S, and the fallback configs all have `walk=false`. They continue to use `RUN_ANALOG_MAGNITUDE = 1000` and clear their fields quickly. No behavior change for any running field.
+
+### Predicted v0.15.9.7.5 BAT outcome
+
+- `[direction-drive] STARTED dir=(-1,+1) walk=1 lX=-350 lY=350 arrows=0x06` (note the new magnitudes in the log).
+- Audio: walking-speed footstep cadence (unchanged; was already correct).
+- `domt5_1` transit ~13-18s, matching Aaron's manual.
+- **0 catches on `domt5_1`.** No robot announcement.
+- Full chase completes cleanly: domt4_1 -> domt3_2 -> domt5_1 -> domt2_1 -> domt1_1 -> doopen2a -> dotown_3 -> dotown_2 -> dotown_1.
+
+If the catch still triggers at magnitude 350, it's something other than input speed entirely. v0.15.9.7.6 then investigates the chase script's actual catch predicate via FF8 disasm or FFNx source (both already in project knowledge).
+
+### Risk
+
+Very low. Two constants added; two write-site changes select the new constant when `walk=true`. Walk=false fields untouched. Existing log line continues to show `lX`/`lY` values, now reflecting the chosen magnitude.
+
+### Files
+
+- `src/field_nav_directiondrive.inl` -- WALK/RUN magnitude constants + two write-site changes + new header comment block documenting Aaron's insight and the fix rationale.
+- `src/ff8_accessibility.h` -- version bump to `0.15.9.7.5` with full comment trail.
+- `CHANGELOG.md` -- this entry.
+- `DEVNOTES.md` -- current state.
+- `NEXT_SESSION_PROMPT.md` -- v0.15.9.7.5 BAT plan.
+- `Plan & Research Documents/Auto-drive lessons from chase auto-pilot.md` -- Finding #32 (analog magnitude is the walk/run controller on the FF8 PC analog input path; W modifier doesn't apply there).
+
+## v0.15.9.7.4
+
+Revert v0.15.9.7.3's Y-axis flip on `domt5_1` (the west trail) AND fix `domt3_2` direction from east to west. Aaron's 2026-05-11 clarified recipe surfaced two distinct issues this version addresses together.
+
+### v0.15.9.7.3 BAT FAILED 2026-05-11
+
+Aaron's report: "AD got stuck when we reached the west trail. I tried to manually move to the next field but couldn't find it for some reason."
+
+v0.15.9.7.3 had set `domt5_1` to `MODE_DIRECTION` with `(dirX=-1, dirY=-1)` -- screen-up-left. The party stuck at spawn because that direction opposes the script's down-trail flee force in a way the walkmesh can't override.
+
+### Aaron's correction
+
+> "The first field, where the chase actually begins, is good to go.
+> The second field, between the starting field and the west trail, you said has the character going east when it should be west, northwest, west.
+> This latest build broke the AD on the west trail. It should be heading generally southwest, south, southeast."
+
+Aaron uses cardinal directions consistently in his terminology. Translation to our analog convention (DirectInput from `field_nav_input_hooks.inl`):
+
+| Aaron's word | Arrow keys | (dirX, dirY) |
+|---|---|---|
+| southwest | Down + Left | (-1, +1) |
+| south | Down | (0, +1) |
+| southeast | Down + Right | (+1, +1) |
+| west | Left | (-1, 0) |
+| northwest | Up + Left | (-1, -1) |
+| north | Up | (0, -1) |
+| northeast | Up + Right | (+1, -1) |
+| east | Right | (+1, 0) |
+
+Aaron's earlier "LEFT and slightly UP" message that I interpreted as screen-up-left was actually a description of position-on-the-trail (upper part of the trail toward spawn), not screen-direction. The cardinal-direction recipe he just clarified is the authoritative ground truth and I should have asked him to translate the earlier phrasing into cardinal directions before shipping v0.15.9.7.3.
+
+### v0.15.9.7.4 source changes (two config entries)
+
+**`domt3_2`**: flip dirX from `+1` (east) to `-1` (west).
+
+```cpp
+{ "domt3_2", MODE_DIRECTION,
+  /*dirX=*/-1, /*dirY=*/ 0,
+  /*targetX=*/0, /*targetY=*/0,
+  /*walk=*/false,
+  /*stages=*/nullptr, /*stageCount=*/0 },
+```
+
+The v0.15.9.5 BAT "success" on this field (5s / 1 catch) was misattributed in the v0.15.9.5 comments to script-forced kani co-location. We now think it was a direction-conflict catch firing in 5 seconds because we were pushing east while Aaron's actual recipe is west. Aaron's manual trace on `domt3_2` (2026-05-11 20:14-20:20): 2 seconds of travel, 851 world-units west, 0 catches.
+
+Aaron's full recipe is "west, northwest, west" -- a three-stage pattern. v0.15.9.7.4 ships single MODE_DIRECTION west to fix the gross direction error; if the NW middle stage matters for catch avoidance, v0.15.9.7.5 adds a staged direction table here too. The field is only ~2 seconds in Aaron's manual so single direction likely suffices.
+
+**`domt5_1`**: revert to `MODE_STAGED_DIRECTION` with `kStages_domt5_1[]` -- the exact v0.15.9.7 / .7.1 / .7.2 config.
+
+```cpp
+{ "domt5_1", MODE_STAGED_DIRECTION,
+  /*dirX=*/-1, /*dirY=*/+1,  // initial fallback direction (matches stage 0)
+  /*targetX=*/0, /*targetY=*/0,
+  /*walk=*/true,
+  /*stages=*/kStages_domt5_1, /*stageCount=*/kStages_domt5_1_count },
+```
+
+The stages encode SW=(-1,+1) -> S=(0,+1) -> SE=(+1,+1) with Y thresholds 2200 and 1100 -- exactly Aaron's recipe.
+
+### The carryover hypothesis now becomes testable
+
+Aaron's pushback after v0.15.9.7.2 was: "Did you check the possibility if the prior field is somehow carrying over?" At the time we dismissed it in favor of a direction-conflict theory; v0.15.9.7.3 was supposed to test that theory and failed.
+
+v0.15.9.7.4 sets up the actual carryover test:
+
+- `domt3_2` going east while Aaron presses west was a sustained direction conflict for ~5 seconds.
+- That may have primed some script state (kani aggression timer, chase-fighting flag, etc.) that carried into `domt5_1` and triggered the catch even with correct staged direction and walking.
+- Fixing `domt3_2` to go west removes the priming.
+- If `domt5_1` now gets 0 catches with the same staged-direction config that was failing in v0.15.9.7.2, carryover was the cause.
+- If catches still fire on `domt5_1` after both fixes, the catch trigger is independent of direction state. v0.15.9.7.5 would then investigate whether SendInput injection vs physical-key input is read differently by the catch script.
+
+### What v0.15.9.7.4 expects
+
+- `domt3_2`: transit ~2-3s (matching Aaron's manual) with 0 catches. Log shows `ENGAGED on field='domt3_2' mode=DIRECTION direction=WEST RUNNING (dirX=-1 dirY=0 walk=0)`.
+- `domt5_1`: transit ~13-18s. Ideally 0 catches if carryover hypothesis is right. Log shows `ENGAGED on field='domt5_1' mode=STAGED_DIRECTION ... starting stage 0/3 direction=SOUTHWEST WALKING (dirX=-1 dirY=+1 walk=1)`. Stage transitions log at Y=2200 and Y=1100.
+- No AD stuck. Party reaches each field's exit.
+
+### Risk
+
+Very low. Two config-table edits. domt3_2 is a single dirX sign flip. domt5_1 reverts to a config that has navigated successfully in three prior BATs (v0.15.9.7, .7.1, .7.2). The `kStages_domt5_1[]` table itself is unchanged. `WALK_REPRESS_PERIOD=1` from v0.15.9.7.2 stays in place as defensive coverage.
+
+### Files
+
+- `src/chase_auto_pilot.cpp` -- `domt3_2` dirX flip + `domt5_1` revert + comment trail.
+- `src/ff8_accessibility.h` -- version bump to `0.15.9.7.4` with full comment trail.
+- `CHANGELOG.md` -- this entry.
+- `DEVNOTES.md` -- current state.
+- `NEXT_SESSION_PROMPT.md` -- v0.15.9.7.4 BAT plan.
+- `Plan & Research Documents/Auto-drive lessons from chase auto-pilot.md` -- Finding #31 (terminology translation requirement) + Aaron's cardinal-direction table near the top.
+
+## v0.15.9.7.3
+
+Flip the Y axis on `domt5_1` (west trail). The v0.15.9.7.2 BAT confirmed walking reached the engine (audible footsteps from the first frame, walking cadence throughout) but the robot still triggered. Aaron's pushback surfaced the root cause: the analog direction was inverse of his manual recipe on the Y axis. His manual play uses screen-up-left; our config had screen-down-left. The walkmesh was narrow enough that the party navigated to the exit anyway (script-forced motion wins when analog disagrees with the script direction), so the BAT "looked like it worked" geometrically. But the engine evidently reads the analog-vs-script direction conflict as a catch trigger, independent of the W (walk) modifier state. Walking didn't help because the catch isn't on running.
+
+### v0.15.9.7.2 BAT result (2026-05-11) — PARTIAL
+
+Aaron heard walking-speed footsteps on `domt5_1` from the first audible frame. The defensive re-press at period=1 worked exactly as designed. But the robot still appeared. Aaron's framing:
+
+> "Still had the robot appear on the west trail. Did you check the possibility if the prior field is somehow carrying over? You mentioned that the mod is pushing east on that field, but when I played through manually I went mostly LEFT and slightly UP."
+
+The correction in his words: he physically presses LEFT + slightly UP on his keyboard. That maps to analog `(lX=-1000, lY=-1000)` = screen-up-left in the DirectInput convention from `field_nav_input_hooks.inl`. Our v0.15.9.7 stage 0 had `(dirX=-1, dirY=+1)` = screen-down-left. **The Y axis was flipped.**
+
+### Root cause analysis
+
+Reinterpreting Aaron's manual playthrough trace through this lens:
+
+- Aaron's keyboard input: LEFT + UP.
+- World position result: `(-1004, 3253) → (655, 123)`. ΔX = +1659 (world-east), ΔY = -3130 (world-Y-decreasing).
+- So screen-LEFT → world-X-increasing (east), and screen-UP → world-Y-decreasing (toward exit).
+
+This field's camera is **rotated/inverted on the Y axis**. Screen-UP maps to the direction the trail goes (Y-decreasing). The X-axis is also inverted (screen-LEFT = world-east), established in the v0.15.9.6 analysis.
+
+When our mod set `dirY=+1` (screen-down) it asked the engine to move the party AWAY from the exit (world-Y-increasing, back up the trail). The walkmesh is narrow, so the script's forced "flee down the trail" motion still drove the party to the exit. But the engine reads the analog-vs-script direction conflict as something equivalent to "player is fighting the chase" and triggers the robot.
+
+The v0.15.9.6 BAT looked different (got stuck on the east wall) because it had BOTH axes wrong: `(dirX=+1, dirY=+1)` = screen-down-right = world-west + world-Y-increasing. Stuck immediately, never reached exit. v0.15.9.7's flip to `dirX=-1` fixed the X-axis but left Y wrong; the walkmesh saved us geometrically but not from the catch trigger.
+
+### The fix
+
+Simplify `domt5_1`'s config from `MODE_STAGED_DIRECTION` (three stages with `dirY=+1`) to `MODE_DIRECTION` (single direction with `dirY=-1`):
+
+```cpp
+{ "domt5_1", MODE_DIRECTION,
+  /*dirX=*/-1, /*dirY=*/-1,
+  /*targetX=*/0, /*targetY=*/0,
+  /*walk=*/true,
+  /*stages=*/nullptr, /*stageCount=*/0 },
+```
+
+Aaron's manual trace shows ONE direction throughout the 13-second traversal (dmag 267-303 walking, no transitions, net world path X+/Y- which the walkmesh forces regardless of analog X sign). The `MODE_STAGED_DIRECTION` machinery from v0.15.9.7 stays in place (`enum FieldDriveMode`, `struct FieldStage`, `kStages_domt5_1[]`, branches in `Engage`/`Update`) but is unused for `domt5_1`. Other fields may need stages later.
+
+The `WALK_REPRESS_PERIOD=1` change from v0.15.9.7.2 stays in place as defensive coverage against W swallow on field-load.
+
+### Predicted v0.15.9.7.3 BAT outcome
+
+- `ENGAGED on field='domt5_1' mode=DIRECTION direction=NORTH-WEST WALKING (dirX=-1 dirY=-1 walk=1)` log (or however the direction-name lookup formats up-left).
+- `[direction-drive] STARTED dir=(-1,-1) walk=1` log.
+- `[direction-drive] walk modifier RE-PRESSED (defensive, period=1 ticks)` within ~17ms of STARTED.
+- Audio: walking footstep cadence from the first audible footstep.
+- Transit ~13-18s. **0 catches on domt5_1.**
+- No robot appearance.
+
+### Risk
+
+Low. One config-table entry edited: mode, dirY sign, stages pointer.
+
+If the X-axis interpretation was ALSO wrong (unlikely given v0.15.9.6 with `dirX=+1, dirY=+1` got stuck immediately while v0.15.9.7 with `dirX=-1, dirY=+1` navigated), v0.15.9.7.4 tries `(dirX=+1, dirY=-1)` or the remaining quadrants empirically. The stage machinery is available if a single direction can't cover the field after all, but Aaron's trace strongly suggests single direction works.
+
+### Files
+
+- `src/chase_auto_pilot.cpp` — `domt5_1` config rewritten; long header comment block updated with v0.15.9.7.3 rationale.
+- `src/ff8_accessibility.h` — version bump to `0.15.9.7.3` with full comment trail.
+- `CHANGELOG.md` — this entry.
+- `DEVNOTES.md` — current state.
+- `NEXT_SESSION_PROMPT.md` — v0.15.9.7.3 BAT plan.
+- `Plan & Research Documents/Auto-drive lessons from chase auto-pilot.md` — Finding #30 (analog-vs-script direction conflict triggers the catch; W modifier is orthogonal).
+
+## v0.15.9.7.2
+
+Reduce `WALK_REPRESS_PERIOD` from 30 to 1 in `field_nav_directiondrive.inl`. The v0.15.9.7.1 BAT shipped period=30 and Aaron heard walking footsteps on `domt5_1` (the defensive re-press worked from ~0.5s onwards), but the robot still triggered. Aaron's manual playthrough trace captured via the new `dump_chase_events` utility shows the engine commits the running-vs-walking decision in the very first frame or two of field-load, well before period=30 re-press fires.
+
+### v0.15.9.7.1 BAT result (2026-05-11) — PARTIAL
+
+Auto-pilot navigated the S-curve geometry on `domt5_1` correctly and the chase progressed through `dotown_2` and `dotown_1` (continuing the v0.15.9.7 result). Audio confirmed walking-speed footsteps on `domt5_1`. But the robot still appeared, indicating a catch fired despite the walking audio.
+
+Aaron's framing:
+
+> "It sounded like walking on the west trail, but somehow we still triggered the robot to appear."
+
+### Ground-truth manual playthrough trace
+
+A new `Utilities/dump_chase_events.vbs` utility filters the 100k+ line `ff8_field.log` (mostly SCRIPT-DUMP verbosity) down to chase-relevant lines only, writing `Logs/chase_events_extract.log`. Aaron ran a full manual chase playthrough at 20:14-20:20 with Original mode (no auto-pilot engagement), so the per-second `ChaseActiveDiag PRE-ENGAGE` lines captured his actual path.
+
+Key trace on `domt5_1` (20:19:05-20:19:18, 13 seconds, 0 catches):
+
+```
+20:19:05  pos=(-1004,3253)  START
+20:19:06  pos=(-988,2965)   delta=(16,-288)   dmag=288
+20:19:07  pos=(-949,2682)   delta=(39,-283)   dmag=285
+20:19:08  pos=(-806,2428)   delta=(143,-254)  dmag=291
+20:19:09  pos=(-787,2154)   delta=(19,-274)   dmag=274
+20:19:10  pos=(-737,1871)   delta=(50,-283)   dmag=287
+20:19:11  pos=(-575,1642)   delta=(162,-229)  dmag=280
+20:19:12  pos=(-356,1432)   delta=(219,-210)  dmag=303
+20:19:13  pos=(-236,1193)   delta=(120,-239)  dmag=267
+20:19:14  pos=(-142,936)    delta=(94,-257)   dmag=273
+20:19:15  pos=(63,721)      delta=(205,-215)  dmag=297
+20:19:16  pos=(261,533)     delta=(198,-188)  dmag=273
+20:19:17  pos=(497,362)     delta=(236,-171)  dmag=291
+20:19:18  pos=(655,123)     delta=(158,-239)  dmag=286   EXIT
+```
+
+**Every dmag is 267-303 — walking speed from the very first measured frame.** Aaron's physical W press is held BEFORE the engine evaluates running-vs-walking on field-load. Net path is roughly south-east throughout (ΔX=+1659, ΔY=-3130, ratio ~1:2 east-to-south), no SW→S→SE transitions — the field is one direction continuously in screen-coords (which with this field's inverted-X camera means world south-east, established v0.15.9.6). The v0.15.9.7 stage transitions are essentially harmless (the walkmesh forces the same path) but not what makes walking succeed.
+
+### Root cause refinement
+
+The engine commits the running-vs-walking decision very early on field-load — within the first frame or two after `Engage` fires. Aaron's physical W press is asserted BEFORE that decision point. v0.15.9.7.1's `InjectKey` at fresh-start was either queued behind the engine's first read OR the script's intro reset keyboard state before the press could land. First-frame keyboard state seen by the engine: "W up" = run. The re-press at t~500ms came too late — the catch flag was already set, even though the walking-speed motion that followed was audible to Aaron.
+
+### The fix
+
+One-line constant change in `field_nav_directiondrive.inl`:
+
+```cpp
+-static const int WALK_REPRESS_PERIOD = 30;
++static const int WALK_REPRESS_PERIOD = 1;  // v0.15.9.7.2: was 30 in v0.15.9.7.1
+```
+
+Re-press every tick (~17ms cadence at 60fps). Worst-case latency from field-entry to engine-sees-W-down drops from ~500ms to ~17ms. If the engine's catch-eval window is wider than one frame, this lands W press inside it. KEYDOWN on a held key is idempotent at the OS level (Windows treats as auto-repeat at the input layer; engine re-acknowledges press intent; no glitches).
+
+Cost: 60 SendInput calls per second while walking. SendInput is microsecond-cheap. Repeated KEYDOWN on a held key has no semantic effect at the engine layer — the keyboard state buffer reflects "W is currently down" regardless of how many times the KEYDOWN event fires.
+
+### Why other fields are unaffected
+
+The re-press branch is guarded by `else if (s_directionDriveWalk)` — it only fires when walk is currently held. All other chase fields (`domt4_1`, `domt3_2`, `dotown_2`, `dotown_1`, `domt2_1`, `domt1_1`, `doopen2a`) have `walk=false`, so `s_directionDriveWalk` stays `false` on those fields and the re-press branch is dead code. **No behavior change for any field other than `domt5_1`.**
+
+### Bonus: chase-event extraction utility
+
+New `Utilities/dump_chase_events.vbs` (and its `.ps1` worker) filter `Logs/ff8_field.log` down to chase-relevant lines only — `ChaseActiveDiag`, `ENGAGED`, `[CBF]`, `fieldId changed`, `walk modifier`, etc. — writing `Logs/chase_events_extract.log` (~100 KB, fits in a single tool call). Lets Claude read full chase traces without hitting the 1 MB tool-result ceiling against the SCRIPT-DUMP bulk. Reusable for any future BAT analysis.
+
+### Predicted v0.15.9.7.2 BAT outcome
+
+- `[direction-drive] walk modifier RE-PRESSED (defensive, period=1 ticks)` log within ~17ms of `STARTED` (vs ~500ms in v0.15.9.7.1).
+- Audio: walking-speed footstep cadence from the first audible footstep.
+- domt5_1 transit ~15-18s with 0 catches matching Aaron's manual (13s, 0 catches).
+- No robot appearance during `domt5_1`.
+
+If the robot still triggers despite period=1, the engine reads keyboard at the exact load frame BEFORE any SendInput dispatch can land — even 17ms is too late. v0.15.9.7.3 would then keep W held across chase-field transitions so the engine never sees a W-up frame on field-load (plumb `keepWalkModifier` param through `StopDirectionDrive`, change `ChaseAutoPilot::Disengage` at field-change to pass `true`).
+
+### Risk
+
+Very low. One-line constant change. All other behavior unchanged. Other fields' re-press branch is dead code.
+
+### Files
+
+- `src/field_nav_directiondrive.inl` — `WALK_REPRESS_PERIOD = 1`, expanded header comment block documenting v0.15.9.7.1 history and v0.15.9.7.2 rationale.
+- `src/ff8_accessibility.h` — version bump to `0.15.9.7.2` with full comment trail.
+- `CHANGELOG.md` — this entry.
+- `DEVNOTES.md` — current state.
+- `NEXT_SESSION_PROMPT.md` — v0.15.9.7.2 BAT plan.
+- `Plan & Research Documents/Auto-drive lessons from chase auto-pilot.md` — Finding #29 (engine commits running/walking decision on first frame; modifier-key timing).
+- `Utilities/dump_chase_events.vbs` + `Utilities/dump_chase_events.ps1` — chase event extraction utility (added 2026-05-11).
+
+## v0.15.9.7.1
+
+Defensive W (walk modifier) re-press in `field_nav_directiondrive.inl`'s `StartDirectionDrive` "already running" branch. The v0.15.9.7 BAT navigated the S-curve geometry on `domt5_1` correctly but the party ran instead of walked, the mountain shook, and the robot caught up. Aaron's audio confirmed running footsteps and quick robot arrival. The stage table and engage logic were correct; the W KEYDOWN never reached the engine.
+
+### v0.15.9.7 BAT result (2026-05-11 19:35) — wrong speed
+
+Build succeeded at 19:35:05. Chase fired and `MODE_STAGED_DIRECTION` engaged on `domt5_1`. The geometry was navigated (the BAT eventually reached `dotown_2` at 19:39:07 and `dotown_1` at 19:39:22, which means `domt5_1` was traversed). But Aaron heard the running-speed footstep cadence and the kani arrived on the timer. Aaron's exact framing:
+
+> "Somehow we triggered the robot on the west trail. Remember we need to be holding down the W key to walk on this field. The robot appeared quickly as if we'd run and running on this field triggers it to appear."
+
+### Root cause analysis
+
+Code review of the path the W press takes:
+
+1. `kStages_domt5_1[]` declares all three stages with `walk=true`. ✅
+2. `ChaseAutoPilot::Engage` MODE_STAGED_DIRECTION branch picks the active stage by Y, calls `FieldNavigation::StartDirectionDrive(stg->dirX, stg->dirY, stg->walk)`. With spawn Y≈3300 > 2200, stage 0 is picked with `walk=true`. ✅
+3. `StartDirectionDrive` fresh-start branch fires once on field entry. It calls `InjectKey(SC_W_CANCEL_DD, true)` and sets `s_directionDriveWalk = true`. ✅ (in theory)
+4. Every subsequent tick, `Update`'s per-tick refresh re-calls `StartDirectionDrive(s_engagedDirX, s_engagedDirY, s_engagedWalk)`. Now `s_directionDriveActive` is `true`, so we hit the "already running" branch.
+5. The W diff check there is `if (walk != s_directionDriveWalk)`. Both sides are `true`. **No-op**. ❌
+
+If the initial `InjectKey` at step 3 was swallowed (the chase script's intro choreography on `domt5_1` entry runs camera pan, mountain shake setup, and kani teleport during the first ~1 second of field life and can absorb keyboard events from the SendInput queue before the engine processes them), then the engine sees W as never-pressed for the entire field while our state insists it's held.
+
+The arrow keep-alive pulse (added v0.15.9.1.1) re-fires arrow KEYDOWNs every 30 ticks to keep "movement intent" fresh. The header comment block of this file already noted that W is NOT pulsed because toggling it would cause one frame of run-speed motion between release and re-press. The defensive fix below is press-only — it never releases — so the speed-glitch concern doesn't apply.
+
+### The fix
+
+In `field_nav_directiondrive.inl`:
+
+- New constants `WALK_REPRESS_PERIOD = 30` (matches the arrow keep-alive cadence, ~0.5s at 60fps).
+- New state vars `s_walkRepressCounter` and `s_walkRepressLogged`.
+- New `else if (s_directionDriveWalk)` clause in the "already running" branch's walk handling. Fires only when walk state is already true and didn't just flip. Increments the counter and re-fires `InjectKey(SC_W_CANCEL_DD, true)` every `WALK_REPRESS_PERIOD` ticks. **No release between presses** — KEYDOWN on a held key is idempotent at the OS level; Windows treats it as auto-repeat at the input layer; the engine re-acknowledges the modifier press intent.
+- The walk-state-flip branch also resets the counter and log latch (so future MODE_STAGED_DIRECTION fields with mixed walk/run stages work cleanly).
+- Counter and log latch reset on fresh-start and on `StopDirectionDrive`.
+
+### Logging
+
+First re-press logs once at INFO with the period value: `[direction-drive] walk modifier RE-PRESSED (defensive, period=30 ticks); suppressing further re-press logs until next walk-state flip`. Subsequent re-presses suppressed via `s_walkRepressLogged` latch. Avoids 60+ log lines per field for the diagnostic while still providing one definitive proof-of-fire signal.
+
+### Why this is safe for other fields
+
+Aaron confirmed only `domt5_1` should walk; every other chase field has `walk=false`. The re-press branch is guarded by `else if (s_directionDriveWalk)` — it only fires when walk is currently held. On `domt4_1`, `domt3_2`, `dotown_2`, and `dotown_1`, `s_directionDriveWalk` is `false` and the branch is dead code. **No behavior change for any field other than `domt5_1`.**
+
+### Predicted v0.15.9.7.1 BAT outcome
+
+- `ENGAGED on field='domt5_1' mode=STAGED_DIRECTION starting stage 0/3 direction=southwest WALKING (dirX=-1 dirY=1 walk=1)` log line.
+- `[direction-drive] STARTED dir=(-1,1) walk=1` log line.
+- `[direction-drive] walk modifier RE-PRESSED (defensive, period=30 ticks)` log line on the first re-press (~0.5s after engage).
+- Audio: walking-speed footstep cadence on the trail, not running cadence.
+- Transit under 18 seconds, target under 6 seconds (Aaron's manual play).
+- 0–2 catches depending on transit time.
+
+If the party still runs after this fix, the `InjectKey` path itself is being suppressed by something deeper — a different root cause requiring SendInput-layer investigation (e.g. check whether the engine has a keyboard-input lockout during chase script intro that affects only specific keys).
+
+### Risk
+
+Very low. Single file changed (`field_nav_directiondrive.inl`). All other fields are walk=false and never enter the re-press branch. Walk-state flips still work via the existing diff branch. Reverting is a single-edit operation.
+
+### Files
+
+- `src/field_nav_directiondrive.inl` — defensive re-press counter + state vars + branch.
+- `src/ff8_accessibility.h` — version bump to `0.15.9.7.1` with comment trail entry.
+- `CHANGELOG.md` — this entry.
+- `DEVNOTES.md` — current state.
+- `NEXT_SESSION_PROMPT.md` — v0.15.9.7.1 BAT plan.
+- `Plan & Research Documents/Auto-drive lessons from chase auto-pilot.md` — Finding #28 (input swallowing by chase script choreography).
+
+## v0.15.9.7
+
+Add `MODE_STAGED_DIRECTION` drive mode and apply it to `domt5_1` (west trail). The v0.15.9.6 BAT failed because the trail is S-shaped, not straight: held south-east at spawn drove the party into the east wall within one second, then froze for ~30 seconds. Single-direction `MODE_DIRECTION` cannot navigate the geometry — whatever direction is held is wrong for at least one of the three segments.
+
+### v0.15.9.6 BAT failure analysis (2026-05-11 18:31-18:34)
+
+Engaged at spawn `(-1057, 3301)` with held south-east analog `(+1000, +1000)`.
+
+- 18:34:08: moved 31 units east to `(-1026, 3301)` — drove into east wall immediately.
+- 18:34:09 through 18:34:14: frozen at `(-1026, 3301)` for 7 seconds.
+- 18:34:15: micro-shift to `(-1004, 3321)`, then frozen for 22 more seconds.
+- 18:34:37–41: brief bursts of motion ending at `(-751, 2325)`.
+- 18:34:42+: frozen at `(-751, 2325)` for the rest of the BAT.
+
+Party never reached the south exit. Aaron's keyboard recipe confirmed the trail geometry:
+
+> "very southwest initially, then go south, then south east at the end."
+>
+> "if you press down at first you won't move, you have to press both down and left."
+
+At spawn the trail runs south-west; pressing south-east drives into the east wall. After that the trail straightens to pure south through the middle, then bends east toward the south-east exit. Three segments, three different directions. No single fixed direction can navigate that.
+
+### MODE_STAGED_DIRECTION
+
+A new drive mode that switches direction part-way through a field based on the party's current Y position. Each staged field declares an array of `FieldStage` entries:
+
+```cpp
+struct FieldStage {
+    int8_t  dirX;        // screen-relative direction sign, {-1, 0, +1}
+    int8_t  dirY;        // screen-relative direction sign, {-1, 0, +1}
+    bool    walk;        // hold W (walk modifier) during this stage
+    int32_t activeMinY;  // stage is active when party Y >= this value
+};
+```
+
+Stages are listed in DECREASING `activeMinY` order. `PickStageIdx` walks the array and returns the first stage whose `activeMinY` is `<= party Y`. The last stage has `activeMinY = INT32_MIN` so it always matches as a fallback.
+
+At every Update tick the per-tick refresh re-picks the stage by current Y. If the picked index differs from the previously-active one, `s_engagedDirX/Y/Walk` are updated and the existing `StartDirectionDrive` call on the next line picks up the new analog/arrow values via its idempotent "already running" branch (diff-based `SendInput`, see `field_nav_directiondrive.inl`). No stop/restart needed; the keep-alive pulse cycle continues uninterrupted across transitions.
+
+### domt5_1 stages
+
+```cpp
+static const FieldStage kStages_domt5_1[] = {
+    { -1, +1, true, 2200 },        // SW until Y < 2200
+    {  0, +1, true, 1100 },        // S until Y < 1100
+    { +1, +1, true, INT32_MIN },   // SE for the rest
+};
+```
+
+Thresholds derived from BAT evidence:
+
+- v0.15.9.1.1 BAT showed pure south froze at Y=2217 — the trail bends out of the south-only corridor at that point. SW must extend past 2217; picked 2200 for the SW→S transition.
+- SETLINE call#14 center `(-366, 1110)` marks the final bend toward the south-east exit. South-only would fail past this point; picked 1100 for the S→SE transition.
+- Spawn cluster center Y~3500; exit cluster center Y~235.
+
+Aaron uses keyboard arrow keys (not analog). His "very southwest" is literally Down+Left pressed together. That maps directly to `(dirX=-1, dirY=+1)` — the arrow bitmask `DD_DirsToArrowMask` produces is exactly `DIR_DOWN | DIR_LEFT`.
+
+### Implementation summary
+
+All changes in `src/chase_auto_pilot.cpp`:
+
+- New enum value `MODE_STAGED_DIRECTION = 2`.
+- New `FieldStage` struct.
+- `FieldConfig` extended with `stages` pointer and `stageCount`. Existing config entries get explicit `nullptr, 0`.
+- `kStages_domt5_1[]` array (3 stages) inserted before `kFieldConfigs[]`.
+- `domt5_1` entry switched from `MODE_DIRECTION dirX=+1 dirY=+1` to `MODE_STAGED_DIRECTION` with `stages=kStages_domt5_1`.
+- New state: `s_engagedStages`, `s_engagedStageCount`, `s_currentStageIdx`.
+- New helpers: `IsDirectionLikeMode()` (treats `MODE_DIRECTION` and `MODE_STAGED_DIRECTION` together) and `PickStageIdx()` (finds active stage for a Y position).
+- `Engage()` extended with the `MODE_STAGED_DIRECTION` branch (reads Y, picks initial stage, calls `StartDirectionDrive`). State-assignment block updated to copy stage params into `s_engagedDirX/Y/Walk` and `stages/stageCount` into the cached engaged state. Third log branch added for staged-mode engagement message.
+- `Disengage()` converted to use `IsDirectionLikeMode` for the `StopDirectionDrive` call and resets stage state.
+- Per-tick refresh in `Update()` re-picks the stage from current Y and logs transitions when the index changes. Existing `StartDirectionDrive` call picks up the new values cleanly.
+- Diagnostic tick log shows `mode=STAGED` and the current `stage=N` index.
+- `LogChaseActiveDiagnostic` displays `ENGAGED-STG` for staged engagements.
+- `Initialize()` resets the new state and announces v0.15.9.7 with `domt5_1 STAGED_DIRECTION walk SW->S->SE by Y`.
+
+No other source changes. Drive mechanism (`StartDirectionDrive`) and its keep-alive pulse cycle are unchanged; staged mode is a thin selection layer above it.
+
+### Predicted v0.15.9.7 BAT outcome
+
+Party walks SW from spawn through the first bend, transitions to S at Y=2200, continues to Y=1100, transitions to SE for the final approach to the south-east exit. Transit under 18 seconds. Catches on this field fire roughly every 6 seconds while the party is still on the field, so:
+
+- Transit <6s → 0 catches.
+- Transit 6–12s → 1 catch.
+- Transit 12–18s → 2 catches.
+
+Aaron's manual play target is the under-6s bracket. If a stage's direction still freezes the party at a wall, adjust direction signs or Y threshold for that stage in v0.15.9.7.1 — stages are isolated, changing one doesn't affect the others.
+
+### Risk
+
+Low. Drive mechanism unchanged. New code is purely the stage-selection layer. Other fields (`domt4_1`, `domt3_2`, `dotown_2`, `dotown_1`) are unaffected. Reverting to v0.15.9.6 behavior is a one-line config change.
+
+### Files
+
+- `src/chase_auto_pilot.cpp` — enum value, struct, helpers, state, engagement/refresh/disengage branches, log updates.
+- `src/ff8_accessibility.h` — version bump to `0.15.9.7` with comment trail entry.
+- `CHANGELOG.md` — this entry.
+- `DEVNOTES.md` — current state.
+- `NEXT_SESSION_PROMPT.md` — v0.15.9.7 BAT plan.
+- `Plan & Research Documents/Auto-drive lessons from chase auto-pilot.md` — Finding #27 (S-curve trails require staged directions).
+
+## v0.15.9.6
+
+Switch `domt5_1` (west trail) from `MODE_TARGET` path-finding to `MODE_DIRECTION dirX=+1 dirY=+1 walk=1` (WALK SOUTH-EAST). The biggest remaining catch source on the chase route. Driven by Aaron's recipe for this field: walk straight through, head directly for next field exit, no hangups, no delay.
+
+### Aaron's recipe for domt5_1
+
+The west trail is governed by AI rule #1: running causes mountain shake which catches the party. But the field has a second mechanic on top: catches are TIME-based, not distance-based. If the party walks straight through fast enough, the robot doesn't catch up. If running OR taking too long on this field, the mountain shakes and catches fire.
+
+Four requirements distilled from Aaron's recipe:
+
+1. **Walk** (AI rule #1 -- running causes mountain shake catches).
+2. **Direct to exit** (sustained motion toward where the exit lives).
+3. **No hangups** (no velocity-stuck pauses, no waypoint re-evaluation).
+4. **No delay** (no startup overhead like CALIB).
+
+### Why the previous MODE_TARGET violated three of four
+
+v0.15.9.2 through v0.15.9.5 used `MODE_TARGET (382,235) walk=1`. Field log analysis from v0.15.9.5 BAT:
+
+- ✅ **Walked** (`walk=1` honored)
+- ❌ **Direct**: path-finder computed a 28-waypoint winding A* path with funnel smoothing. Each waypoint required steering, re-evaluation, possible re-routing.
+- ❌ **No hangups**: log shows `velocity-stuck (stuckDist=0 < 20), skipping wp X/28, advancing to wp Y/28` events at waypoints 11, 15, and 26. Each velocity-stuck event burns 1-2 seconds while the path-finder figures out the next waypoint.
+- ❌ **No delay**: CALIB on this field had both phases attempt calibration but produced inconsistent basis (`camRight=(0.07, 0.998)`, `camDown=(0, -1)` -- not orthogonal because script motion contaminated the measurement). The ~1 second of CALIB was wasted.
+
+Result: 30+ seconds total transit, 3 catches (each ~6 seconds apart, time-based).
+
+### Why MODE_DIRECTION walking south-east satisfies all four
+
+1. ✅ **Walk**: `walk=1` -- unchanged.
+2. ✅ **Direct to exit**: sustained analog `(+1000, +1000)` toward south-east where the exit lives. Spawn `(-1057, 3301)` to target `(382, 235)` is `+1439 east, -3066 south` -- mostly south with east component. Screen south-east is the natural mapping.
+3. ✅ **No hangups**: `MODE_DIRECTION` has no path-finder waypoint state machine. No `velocity-stuck` recoveries, no waypoint advancement, no re-routing.
+4. ✅ **No delay**: `MODE_DIRECTION` skips CALIB entirely. Engagement is immediate.
+
+### Direction choice: dirX=+1, dirY=+1 (screen south-east)
+
+Three reasons:
+
+1. **World direction is south-east.** Spawn-to-target vector `(+1439, -3066)`.
+2. **v0.15.9.1.1 BAT documented pure-south failure.** That earlier attempt used `dirX=0, dirY=+1` (screen pure south) and the party froze at `(-769, 2217)` -- about halfway down the trail. The trail bends east at that point in the walkmesh; pure south hits the wall. South-east adds an east component to push around the bend.
+3. **CALIB is unreliable on this field.** Script motion contaminates the measurement, producing a non-orthogonal basis. South-east is the best heuristic; BAT validates empirically.
+
+### Time-based catch math
+
+Catches on `domt5_1` fire roughly every 6 seconds while party is on the field. With 30+ seconds, 3 catches. To get to 0 catches, transit must be under ~6 seconds.
+
+- v0.15.9.5 baseline: 32s = 3 catches
+- v0.15.9.6 prediction:
+  - Best case (under 6s, matches Aaron's manual play target): **0 catches**
+  - Good case (6-12s): **1 catch**
+  - Acceptable case (12-18s): **2 catches**
+  - Worse case (18-24s): **3 catches** (no improvement, would revert)
+
+Given Finding #25's ~15x analog-as-force-multiplier observation on cooperating script-driven fields, the under-6s case is plausible. The chase script on `domt5_1` presumably wants the party to go south-east anyway (toward the exit); our analog reinforces that.
+
+### The fix
+
+One config-array entry edited in `src/chase_auto_pilot.cpp`. The `domt5_1` entry was previously `MODE_TARGET` with target `(382, 235)` walk=1. Now:
+
+```cpp
+{ "domt5_1", MODE_DIRECTION,
+  /*dirX=*/+1, /*dirY=*/+1,
+  /*targetX=*/0, /*targetY=*/0,
+  /*walk=*/true },
+```
+
+The comment block on the entry was rewritten (~50 lines) documenting Aaron's recipe, the four requirements, why each mode satisfies or violates them, the direction-choice rationale, and the time-based catch math. Top-of-file comment block gains v0.15.9.6 entry. v0.15.9.5 entry retroactively annotated with BAT result. Initialize log message text updated to reflect current config table.
+
+### What v0.15.9.6 does NOT change
+
+- Drive-mode logic unchanged.
+- v0.15.9.3's diagnostic instrumentation retained.
+- Other chase fields' configs untouched.
+- cap=0 safety net unchanged.
+
+### Risk and fallback
+
+**Risk:** the party may freeze at a different wall than the v0.15.9.1.1 pure-south freeze. The walkmesh has bends; if south-east hits a different bend's wall, the party stops and catches accumulate at the time-based rate.
+
+**Fallback plan for v0.15.9.7** if v0.15.9.6 BAT shows freezing:
+
+- Try `dirX=+1, dirY=0` (screen east only)
+- Try `dirX=0, dirY=+1` (pure south -- known to fail per v0.15.9.1.1, kept here for completeness)
+- Try `dirX=-1, dirY=+1` (screen south-west)
+- Revert to MODE_TARGET (last resort)
+
+Each experiment is one BAT and a one-line config edit.
+
+### Files changed
+
+- `src/chase_auto_pilot.cpp` -- one config-array entry switched mode and direction; entry's comment block rewritten with ~50 lines of v0.15.9.6 rationale; top-of-file comment block gains v0.15.9.6 entry; v0.15.9.5 entry retroactively marked BAT successful; Initialize log line updated.
+- `src/ff8_accessibility.h` -- version `0.15.9.6` with comment trail entry; v0.15.9.5 entry annotated with BAT result.
+- `CHANGELOG.md` -- this entry.
+- `DEVNOTES.md` -- v0.15.9.6 ready-to-BAT.
+- `NEXT_SESSION_PROMPT.md` -- v0.15.9.6 BAT plan.
+- `Plan & Research Documents/Auto-drive lessons from chase auto-pilot.md` -- Finding #26 (time-based catch fields + Aaron's recipe + four-requirement diagnostic).
+
+## v0.15.9.5
+
+Explicit `MODE_DIRECTION` config for `domt3_2` (RUN EAST). Second chase field refined with the three-signal pattern. v0.15.9.4 BAT was a major success on `domt4_1` (3 catches/16s → 0 catches/3s) and validated the pattern. Refinement continues chronologically.
+
+### v0.15.9.4 BAT result (2026-05-11 17:27-17:30, AUTO mode)
+
+**Primary success on domt4_1:** 3 catches / 16 seconds → **0 catches / 3 seconds**. The field is essentially trivialized.
+
+**Total chase: 2:35 / 11 catches → 2:06 / 7 catches.** 29 seconds faster, 4 catches eliminated. Cascade benefit on domt5_1 (44s → 30s) and domt2_1 (lost 1 catch) from auto-pilot arriving in better shape.
+
+**Empirical analog effectiveness on domt4_1 with SOUTH-EAST:**
+```
+[17:28:04] (engage) pos=(-578,3036) delta=(79,-96)   dmag=124  analog=(1000,1000)
+[17:28:05] (sec 1)  pos=(-226,2202) delta=(352,-834) dmag=905  analog=(1000,1000)
+[17:28:06] (sec 2)  pos=(-325,1319) delta=(-99,-883) dmag=888  analog=(1000,1000)
+[17:28:06] Field transition to domt3_2
+```
+
+~900 units/sec sustained motion in the analog direction. Compare v0.15.9.3 (WEST) where the cleanest between-catches sample was `dmag=61`. **The right direction is ~15x faster than the wrong direction on this field.** The script's flow is strong and cooperating with it dramatically multiplies analog effectiveness — the analog isn't subtle, it's a force multiplier on the script's choreography.
+
+### Three-signal analysis on domt3_2 from v0.15.9.4 BAT data
+
+The pattern validated on `domt4_1` is now applied to `domt3_2`:
+
+**Signal 1 — Camera: default.** CALIB on this field had both phases fail (`no movement (dist=0.0)`) but defaults were kept: `camRight=(1.000, 0.000)`, `camDown=(0.000, -1.000)`. With defaults, `dirX=+1` = world east, `dirY=+1` = world south.
+
+**Signal 2 — Kani approach: co-located.** First engaged tick: `kani=(-289,-3513)`, `party=(-211,-3461)`, `kdist=93`. The chase script teleports both to the south end of the field on entry, putting them in catch range immediately. **No clean flee direction from this signal** — the kani is essentially on top of the party. This is the field where 1 catch fires due to forced co-location regardless of our action.
+
+**Signal 3 — Field exit: east.** Trigger line endpoints `(-71,-3390)` and `(-139,-3562)`, nearly vertical, center `(-105,-3476)`. Party engage position `(-289,-3513)` is well west of the line. After the post-catch teleport at `(-1358,-3439)` is even further west. Both states need east-only motion to cross the line. The trigger line's verticality means north-south motion doesn't progress toward crossing.
+
+**Sanity check — script choreography:** the script teleports party from `(-367,1139)` to `(-289,-3513)` on field entry. Mostly south with negligible east-west bias (`+78 east`). The script doesn't impose a preferred east-west direction, so we're free to push east without fighting it.
+
+Two of three signals agree on east (camera + exit); kani is null. Plus an additional efficiency point:
+
+### CALIB-on-domt3_2 was wasted overhead
+
+v0.15.9.4 log shows:
+```
+[17:28:09] [CALIB] phase 1 FAILED: no movement (dist=0.0), keeping default camRight
+[17:28:09] [CALIB] phase 2 FAILED: no movement (dist=0.0), derived camDown=(0.000,-1.000) from camRight perpendicular
+```
+
+MODE_TARGET wasted ~1 second on a calibration that produced no useful data. `MODE_DIRECTION` skips CALIB entirely, recovering that second.
+
+### The fix
+
+New entry in `kFieldConfigs` (`src/chase_auto_pilot.cpp`), inserted between the `domt4_1` and `domt5_1` entries:
+
+```cpp
+{ "domt3_2", MODE_DIRECTION,
+  /*dirX=*/+1, /*dirY=*/ 0,
+  /*targetX=*/0, /*targetY=*/0,
+  /*walk=*/false },
+```
+
+The `Initialize` log line was updated to reflect the current config table (had been stale since v0.15.9.4 changed domt4_1's direction without updating the log text). Top-of-file comment block gains a v0.15.9.5 entry documenting the three-signal analysis. v0.15.9.4's entry retroactively marked BAT SUCCESSFUL with the result summary.
+
+### What v0.15.9.5 does NOT change
+
+- Drive-mode logic unchanged.
+- v0.15.9.3's diagnostic instrumentation retained — `ChaseActiveDiag` continues capturing data for the next refinement iteration.
+- Other chase fields' configs untouched.
+- cap=0 safety net unchanged.
+
+### Predicted v0.15.9.5 BAT outcome
+
+- `domt3_2`: at minimum ~1 second faster transit (CALIB removed). 6s → 5s.
+- Possibly 0 catches instead of 1 if party crosses the trigger line before the script forces the co-location catch.
+- If catch still fires (most likely outcome given the co-location is forced by the script), the post-catch teleport puts party further west and direction-drive continues pushing east to cross the line. Same catch count, slightly faster transit.
+- Other fields: identical behavior to v0.15.9.4.
+- Chase still completes end-to-end.
+
+The limit on this field is the script-forced co-location catch. v0.15.9.5 can't eliminate that without a structural change (e.g., pre-engage analog injection before the script's catch trigger fires). Saving the CALIB second is the available win.
+
+### Files changed
+
+- `src/chase_auto_pilot.cpp` — new `domt3_2` entry in `kFieldConfigs` with ~25-line comment documenting the three-signal analysis; top-of-file comment block gains v0.15.9.5 entry; v0.15.9.4 entry retroactively annotated with BAT result; Initialize log line text updated for current config table.
+- `src/ff8_accessibility.h` — version `0.15.9.5` with comment trail entry; v0.15.9.4 entry annotated with BAT result.
+- `CHANGELOG.md` — this entry.
+- `DEVNOTES.md` — v0.15.9.5 ready-to-BAT.
+- `NEXT_SESSION_PROMPT.md` — v0.15.9.5 BAT plan.
+- `Plan & Research Documents/Auto-drive lessons from chase auto-pilot.md` — Finding #25 (three-signal validation + ~15x analog effectiveness multiplier from v0.15.9.4 empirical data).
+
+### Risk
+
+Very low. One new config-array entry. `domt3_2`'s previous behavior (BuildFallbackConfig + trigger-line fallback to `(-105,-3476)`) was already aiming the path-finder in the same direction; we're switching to a simpler implementation with the same intent and saving the CALIB overhead.
+
+## v0.15.9.4
+
+`domt4_1` direction config changed from RUN WEST to RUN SOUTH-EAST. First fix produced by the v0.15.9.3 diagnostic build — three independent signals in the BAT data all pointed to south-east as the correct flee direction; the previous WEST config (inherited verbatim from Jegged's strategy guide at v0.15.9.1) was the worst possible direction.
+
+### v0.15.9.3 BAT data on domt4_1
+
+The new `ChaseActiveDiag` log lines captured the data we needed. Key samples:
+
+**Pre-engage phase** (chase ACTIVATED at 17:03:12, ASK answered at 17:03:31):
+
+```
+[17:03:13] state=PRE-ENGAGE pos=(-1230,3699) delta=N/A    kani=(-3143,4586) kdist=2108
+[17:03:14] state=PRE-ENGAGE pos=(-657,3132)  delta=(573,-567) dmag=806 kani=(-2793,4489) kdist=2530
+[17:03:15] state=PRE-ENGAGE pos=(-657,3132)  delta=(0,0)   dmag=0   kani=(-2455,4392) kdist=2195
+[17:03:18] state=PRE-ENGAGE pos=(-657,3132)  delta=(0,0)   dmag=0   kani=(-1645,4154) kdist=1421
+[17:03:22] state=PRE-ENGAGE pos=(-657,3132)  delta=(0,0)   dmag=0   kani=(-1645,4154) kdist=1421  (chase trigger MES fires)
+[17:03:31] (ASK answered, engagement)
+```
+
+Two observations from pre-engage:
+
+1. The chase script's own intro animation moves the party from spawn to (-657, 3132) over the first 2 seconds — a delta of `(+573, -567)`, mostly **south-east**. The script's natural choreography is south-east, not west.
+2. The kani has a 6-second scripted intro (moves from (-3143, 4586) toward party), then **freezes at (-1645, 4154)** until the ASK is answered. The kani does not have a 17-second head start as we feared; it has a 6-second intro then waits politely. The catches start because the kani moves fast once unfrozen, not because it had time to walk over.
+
+**Clean engaged sample** (between catches #2 and #3, sec 9):
+
+```
+[17:03:39] (catch #2 fires; party teleports to (-366,1365))
+[17:03:40] state=ENGAGED-DIR pos=(-427,1371) delta=(-61,+6) dmag=61 kani=(-548,2615) kdist=1249 analog=(-1000,0)
+```
+
+With `analog=(-1000,0)` (pure screen-left) held for one second, the party moved `(-61, +6)` — pure west with negligible north. **This is the camera-orientation answer.** camRight ≈ `(1, 0)`, camDown ≈ `(0, -1)`. The camera is approximately default; no significant rotation.
+
+### Three signals, one answer
+
+**Signal 1 — Camera:** default orientation. So `dirX=+1, dirY=+1` maps to world `(+east, +south) = south-east`.
+
+**Signal 2 — Kani direction:** Kani at (-1645, 4154), party at (-657, 3132). Kani is at `-988 X, +1022 Y` relative — **north-west** of party. Flee direction = `+X, -Y` = **south-east**.
+
+**Signal 3 — Field exit direction:** Party ended at (-404, 1117) from spawn region (-1230, 3699). Net direction to exit: `+826 east, -2582 south` — mostly south with east component. **South-east** again.
+
+Additionally, the script's intro animation pre-engage already moves the party south-east. Our analog now reinforces the script's flow instead of fighting it.
+
+### Why WEST was wrong
+
+The previous config (v0.15.9.1 through v0.15.9.3, Jegged-derived):
+
+- WEST sends the party toward the kani's approach column (kani is north-west).
+- WEST is perpendicular to the field exit direction (south).
+- WEST fights the chase script's own south-east movement.
+
+The config got into the codebase at v0.15.9.1 based on the Jegged strategy guide saying "run immediately to the left," and was confirmed only insofar as the party did transition to the next field. With cap=0 NO-OPing the catches, navigation quality was invisible. The config sat untouched through 17 subsequent versions.
+
+Jegged may have been correct for a different camera setup (or for a human player who can adjust mid-chase) but is wrong for our build with default-camera coordinates and a rigid auto-pilot direction.
+
+### The fix
+
+One edit to `src/chase_auto_pilot.cpp`:
+
+```cpp
+{ "domt4_1", MODE_DIRECTION,
+  /*dirX=*/+1, /*dirY=*/+1,     // was -1, 0 (RUN WEST)
+  /*targetX=*/0, /*targetY=*/0,
+  /*walk=*/false },
+```
+
+The comment block on the entry expanded to ~30 lines documenting the v0.15.9.3 BAT-derived rationale. The top-of-file comment block gains a v0.15.9.4 entry summarizing the change.
+
+### What v0.15.9.4 does NOT change
+
+- Drive-mode logic unchanged. MODE_DIRECTION still works as before.
+- The v0.15.9.3 diagnostic instrumentation is retained — `ChaseActiveDiag` lines continue firing once per second from chase ACTIVATED through chase end. These will keep capturing data on this field and subsequent fields as refinement progresses to `domt3_2`, `domt5_1`, etc.
+- Other chase fields' configs untouched.
+- cap=0 safety net stays in place.
+
+### Predicted v0.15.9.4 BAT outcome
+
+- `domt4_1`: substantially fewer catches (target 0-1, was 3 in v0.15.9.2.18 and v0.15.9.3 BATs). Faster transit (target under 10s, was 16s).
+- Other fields: identical behavior to v0.15.9.3. Other catches (#4-#11 in v0.15.9.2.18 BAT) remain on the other chase fields until those fields are refined.
+- Chase still completes end-to-end (already proven in v0.15.9.2.18).
+
+If the BAT does not reduce catches on `domt4_1` as expected, the data is still useful: it tells us the chase script overrides analog more than the delta data suggested, and the next direction-experiment becomes a fishing expedition (try pure south, pure east, etc.) or the fix has to be structural (pre-engage during ASK, MODE_TARGET with calibration, etc.).
+
+### Files changed
+
+- `src/chase_auto_pilot.cpp` — one config-array entry flipped (`dirX=-1 dirY=0` → `dirX=+1 dirY=+1`); comment on the entry rewritten with v0.15.9.3 BAT analysis (~30 lines); top-of-file comment block gains v0.15.9.4 entry.
+- `src/ff8_accessibility.h` — version `0.15.9.4` with comment trail entry.
+- `CHANGELOG.md` — this entry.
+- `DEVNOTES.md` — v0.15.9.4 ready-to-BAT.
+- `NEXT_SESSION_PROMPT.md` — v0.15.9.4 BAT plan.
+- `Plan & Research Documents/Auto-drive lessons from chase auto-pilot.md` — Finding #24 (default camera + script-cooperation direction selection).
+
+### Risk
+
+Very low. One config-array entry edited. Behavior change scoped to `domt4_1`. Reverting to WEST or trying another direction is a one-line edit if v0.15.9.4 BAT surprises us.
+
+## v0.15.9.3
+
+Diagnostic-only build to answer two open questions about `domt4_1` (chase start field) before designing the refinement fix. v0.15.9.2.18 BAT completed the chase end-to-end with 11 NO-OPed catches concentrated on the mountain trail and bridge. Aaron's framing: "our current battle nope system is a band-aid for poor navigation." Refinement starts with `domt4_1` since the chase starts there. This version captures the data needed to choose between competing fix strategies.
+
+### Why a diagnostic build first
+
+v0.15.9.2.18 BAT analysis of `domt4_1` (16 seconds total, 3 catches):
+
+- At engage moment (16:26:41) the kani has already been running its chase script for 17 seconds (since chase ACTIVATED at 16:26:25 while the player was reading/answering the ASK).
+- By tick=60 (16:26:42, 1 second after engage) kani is at `kdist=401` from party -- already within catch range.
+- First catch fires immediately. Each catch teleports the party slightly south and freezes them for 4-5 seconds, then another catch fires.
+- Despite analog being held at `lX=-1000, lY=0` (pure screen-left), the party drifts net `+710 east, -2157 south`. The chase script appears to be overriding our analog input -- our "RUN LEFT" config produces motion the script chose, not motion we requested.
+
+Two unknowns:
+
+- **Q1: Is the analog input doing ANYTHING on `domt4_1`?** Or is the chase script the sole motion source?
+- **Q2: What's the camera orientation on this field?** With default `camDown=(0,-1)` assumption, `lX=-1000` should drive screen-left = world `-X`. The actual party motion is mostly south (`-Y`) -- either camera is rotated, or script overrides explain the motion.
+
+Fix strategies hinge on these answers. If analog has effect, a different `dirX/dirY` config might cooperate with the script better. If script overrides entirely, we need a different lever (pre-engage analog injection during the ASK, or MODE_TARGET with explicit calibration).
+
+### What v0.15.9.3 ships
+
+Two pure-additive diagnostics in `src/chase_auto_pilot.cpp`:
+
+**1. Pre-engage chase-active per-second log.**
+
+New helper `LogChaseActiveDiagnostic()` is called once per second (60 `Update` ticks) while `ChaseDetector::IsChaseActive()` returns true, **regardless of whether chase_auto_pilot is engaged**. The existing per-second log only fires when engaged, so it goes dark during the ASK window. This new log fills that gap.
+
+Output format:
+
+```
+ChaseActiveDiag: field='X' state=PRE-ENGAGE|ENGAGED-DIR|ENGAGED-TGT
+  pos=(pX,pY) delta=(dX,dY) dmag=N kani=(kX,kY) kdist=K [analog=(lX,lY)|tgt=(tX,tY)]
+```
+
+Three states reported: `PRE-ENGAGE` (chase active but auto-pilot hasn't engaged), `ENGAGED-DIR` (engaged in MODE_DIRECTION), `ENGAGED-TGT` (engaged in MODE_TARGET).
+
+**2. Movement delta computation.**
+
+New state vars `s_prevPosX/Y/Valid` track the party position between log lines. Every diagnostic log line includes `delta=(dX,dY) dmag=N` -- the position change since the previous snapshot.
+
+This is the key data for answering Q1. If `dmag` is zero or doesn't correlate with our analog direction during engaged ticks, the chase script is in control. If `dmag` is positive and consistent with (a rotated version of) the analog direction, input is being applied and we can derive camera orientation from the world delta vector.
+
+### What v0.15.9.3 does NOT change
+
+- No behavior change to any drive mode. MODE_DIRECTION and MODE_TARGET work exactly as in v0.15.9.2.18.
+- The existing per-second engaged tick log (`s_diagTickCounter` based) is unchanged -- it continues firing as before. The new ChaseActiveDiag fires on an independent counter (`s_chaseActiveTickCounter`), so engaged fields get two log lines per second from different cadences. This is intentional: more samples, more data.
+- The `kFieldConfigs` table is unchanged (`domt4_1` still MODE_DIRECTION RUN LEFT).
+
+### v0.15.9.3 BAT plan
+
+Identical to v0.15.9.2.18: load save, walk to chase trigger, commit Auto, hands-off. The chase completes end-to-end (proven in v0.15.9.2.18). Diagnostic data accumulates in the field log throughout the chase.
+
+### Post-BAT analysis
+
+The key data points to extract:
+
+1. **Kani position during the ASK window.** Pre-engage logs at seconds 1-N (where N is the duration of the ASK + delay) show kani trajectory. Tells us when the kani enters catch range relative to when the auto-pilot engages.
+2. **Delta direction during engaged-state ticks early in `domt4_1`.** First few engaged ticks have less catch interference. If `delta=(dX,dY)` consistently points in some world direction, that's `-camRight` (since we're pressing `lX=-1000`). Camera orientation derived.
+3. **`dmag` during engaged ticks vs `dmag` during catch-freeze periods.** Distinguishes "input working slowly" from "script completely overriding".
+4. **`dmag` correlation with kani proximity.** Does the party move more when the kani is far away (kdist > 1000) and less when it's close? Would suggest the kani's catch animation is what's freezing motion.
+
+With these data points, v0.15.9.4 picks a fix:
+
+- **If analog works at expected magnitude** -> try alternate direction signs (south, south-east, etc.) to find one that cooperates with the script's natural flow.
+- **If analog works but slowly / partially** -> attempt to maximize analog magnitude or switch to MODE_TARGET with explicit calibration on this field.
+- **If analog has no effect during catches** -> investigate pre-engage analog injection (start direction-drive during the ASK so the party has built up momentum before the kani's catch range).
+- **If analog has no effect even between catches** -> deeper script investigation needed. Maybe the script's chase loop ignores analog by design and the auto-pilot must work around it differently (e.g., movement is purely script-timed and avoiding catches requires interrupting the script).
+
+### Files changed
+
+- `src/chase_auto_pilot.cpp` -- new state vars (`s_chaseActiveTickCounter`, `s_prevPosX`, `s_prevPosY`, `s_prevPosValid`); new helper function (`LogChaseActiveDiagnostic`); per-second call site in `Update()`; reset on chase-just-started and chase-just-ended transitions. Comment block at top extended with v0.15.9.3 rationale.
+- `src/ff8_accessibility.h` -- version `0.15.9.3` with comment trail entry.
+- `CHANGELOG.md` -- this entry.
+- `DEVNOTES.md` -- pivot to refinement noted; v0.15.9.3 ready-to-BAT state.
+- `NEXT_SESSION_PROMPT.md` -- v0.15.9.3 BAT plan and post-BAT analysis checklist.
+
+### Risk
+
+Very low. Pure additive diagnostic. No new tools, no API surface changes, no drive-mode behavior changes. Two SEH-guarded position reads (already-existing helpers `ReadSquallPosition` and `ReadKaniPosition`). One additional log line per second during chase-active state.
+
+## v0.15.9.2.18
+
+Explicit `MODE_DIRECTION` per-field config for `dotown_1`. Mirror of the v0.15.9.2.17 dotown_2 fix. v0.15.9.2.17 BAT showed AUTO mode auto-piloted the entire chase route and the disc00_07h.avi FMV did fire -- but the party got stuck at `~(89, 2297)` on dotown_1 for 24 seconds before the FMV triggered. Same CALIB-failure root cause as the v0.15.9.2.16 BAT on dotown_1, this time without manual interference, confirming the issue is intrinsic to dotown_1's first-second state.
+
+### v0.15.9.2.17 BAT result (2026-05-11 16:11-16:14)
+
+AUTO mode drove the chase end-to-end. dotown_2 fix worked perfectly:
+
+```
+[16:13:25] ChaseAutoPilot: ENGAGED on field='dotown_2' mode=DIRECTION direction=south running
+[16:13:26] pos=(-1363,3599)
+[16:13:27] pos=(-1102,2739)  -- 900 units/sec south
+[16:13:28] pos=(-779,1839)
+[16:13:39] dotown_1 transition (~14s vs 41s manual baseline)
+```
+
+But dotown_1 stuck:
+
+```
+[16:13:40] ChaseAutoPilot: ENGAGED on field='dotown_1' mode=TARGET tgt=(-246,-555) running
+[16:13:40] [CALIB] phase 1 FAILED: no movement (dist=0.0), keeping default camRight
+[16:13:41] [CALIB] phase 2 FAILED: no movement (dist=0.0), derived camDown=(0.000,-1.000) from camRight perpendicular
+[16:13:48] pos=(89,2297)  -- party moved 3300+ units from spawn (1629,6120) but now stuck
+[16:13:49] velocity-stuck, skipping wp 3/65, advancing to wp 4/65
+[16:13:50] velocity-stuck, skipping wp 4/65, advancing to wp 5/65
+... (24 seconds of velocity-stuck / wp-skipping cycle) ...
+[16:14:13] disc00_07h.avi FMV fires (party finally drifted into trigger zone)
+[16:14:19] chase-drive Arrived. (after FMV started)
+```
+
+Aaron's exact observation: "got right up to the trigger line to the beach fmv, then stopped for some reason before actually triggering it."
+
+### Root cause
+
+Same as dotown_2's root cause, presenting as a different symptom. dotown_1's walkmesh is connected (A* found 65 valid waypoints), so chase-drive doesn't fail at the engagement stage. But CALIB phase 1 fails on field entry -- the engine doesn't respond to the lX=+1000 test input during the first second of dotown_1. Without proper camera axes, the path-finding drive's analog steering is approximate; the party moves in the correct general direction but drifts off-course and gets stuck. The advance-on-stuck mechanism (v0.15.9.2.5) tries to skip waypoints but can't make real progress because the underlying steering is wrong.
+
+Not reproducible by retrying calibration (the engine's input-block lasts longer than the 0.4-second phase 1 window). The chase scene's scripted segment transitions (SETLINE-driven) dominate movement on these town fields regardless; A* path-finding isn't the right mechanism.
+
+### The fix
+
+One file: `src/chase_auto_pilot.cpp`. `kFieldConfigs` gains a fourth entry:
+
+```cpp
+{ "dotown_1", MODE_DIRECTION,
+  /*dirX=*/0, /*dirY=*/+1,
+  /*targetX=*/0, /*targetY=*/0,
+  /*walk=*/false },
+```
+
+Identical structure to the dotown_2 entry. MODE_DIRECTION bypasses CALIB entirely (screen-relative directions don't need camera axes for sign), and never reports arrival (no target), so the party walks continuously south until the field changes via the FMV trigger.
+
+`dirY=+1` (screen-down) with default camera assumption gives the correct general direction toward the FMV trigger zone -- the v0.15.9.2.17 BAT confirmed the party moved correctly south-west during the working phase, before getting stuck. Direction-mode removes the drift mechanism (no target chasing, no waypoint cycling) and just holds the analog south.
+
+If v0.15.9.2.18 BAT shows the party walks south but misses the trigger because it's slightly west, the next iteration adds `dirX=-1`. For now, mirror the minimal dotown_2 config.
+
+### Predicted v0.15.9.2.18 BAT outcome
+
+AUTO mode auto-pilots through the full chase, with both `dotown_2` and `dotown_1` now on direction-drive:
+
+- `domt4_1` (DIRECTION west) -> ASK -> Auto committed.
+- `domt3_2`, `domt5_1`, `domt2_1`, `domt1_1`, `doopen2a` via INF-gateway fallback.
+- `dotown_3` via INF-gateway fallback (30 waypoints, real arrival).
+- FMV `disc00_06h.avi`.
+- `dotown_2` (DIRECTION south, from v0.15.9.2.17). Cleared in ~14 seconds.
+- `dotown_1` (DIRECTION south, NEW v0.15.9.2.18). Cleared quickly (a few seconds), party reaches FMV trigger zone with no stuck cycling.
+- FMV `disc00_07h.avi` (chase climax).
+- `CHASE-END SUMMARY mode=auto battles_fired=0` after the FMV terminator field loads.
+
+Expected wall-clock time on dotown_1: under 10 seconds, not 24.
+
+### Files changed
+
+- `src/chase_auto_pilot.cpp` -- `kFieldConfigs` gains a fourth entry (5 lines); comment block above the array extended with v0.15.9.2.18 BAT findings (~25 lines).
+- `src/ff8_accessibility.h` -- version `0.15.9.2.18` with comment trail entry.
+- `CHANGELOG.md` -- this entry.
+- `DEVNOTES.md` -- v0.15.9.2.18 ready-to-BAT state.
+- `NEXT_SESSION_PROMPT.md` -- v0.15.9.2.18 BAT plan.
+
+### Risk
+
+Low. Same code path as the dotown_2 fix that worked perfectly in v0.15.9.2.17 BAT. One array gets one entry. No API changes, no behavior changes for fields other than `dotown_1`.
+
+## v0.15.9.2.17
+
+Explicit `MODE_DIRECTION` per-field config for `dotown_2`. v0.15.9.2.16 BAT auto-piloted one field further than v0.15.9.2.15 (reached and cleared `dotown_3`), then transition FMV `disc00_06h.avi` played, party loaded on `dotown_2`, and auto-pilot disengaged permanently for that field. The fix is a targeted explicit config that bypasses path-finding.
+
+### v0.15.9.2.16 BAT diagnosis (2026-05-11 15:21-15:24)
+
+Field log on `dotown_2`:
+
+```
+[15:23:49] [chase-drive] target on different walkmesh island (start tri 45, goal tri 137) -- searching for bridge trigger
+[15:23:49] [chase-drive] redirecting to trigger line 3 center=(-840,908) tri=77 dist=3699
+[15:23:49] [A*] No path from tri 45 to tri 77 (48 iterations)
+[15:23:49] [chase-drive] STARTED tgt=(-197,-600) walk=0 player=(-1642,4518) waypoints=0 startDist=3699 trigIdx=-1 crossLine=yes
+[15:23:49] ChaseAutoPilot: ENGAGED on field='dotown_2' mode=TARGET tgt=(-197,-600) running (walk=0)
+[15:23:49] [CALIB] phase 1 done: lX=+1000 moved (237,72) ...
+[15:23:50] [CALIB] phase 2 done: lY=+1000 moved (72,-237) ...
+[15:23:50] [drive] stopped: Arrived.
+[15:23:50] ChaseAutoPilot: DISENGAGED (chase-drive completed (target reached or stuck))
+[15:23:50] ChaseAutoPilot: field 'dotown_2' marked auto-pilot complete; won't re-engage until field changes
+```
+
+Three A* failures on the same field: player on tri 45, INF gateway target on tri 137, trigger-line bridge on tri 77 -- all separate walkmesh islands. `chase-drive STARTED` with `waypoints=0` because A* found no path. Calibration moved the player ~500 units across two phases; the arrival check fired trivially (zero waypoints means "all waypoints reached" is vacuously true); the v0.15.9.2.11 completion marker locked the field out. Aaron drove `dotown_2` manually for 39 seconds afterward.
+
+### Root cause
+
+Dollet town chase fields use SETLINE-triggered scripted animations to teleport the party between street segments. The walkmesh polygons aren't connected; A* fundamentally can't navigate this. `dotown_3` (where A* found a 30-waypoint path) and `dotown_1` (65 waypoints) work fine because their walkmeshes are connected. `dotown_2` is the outlier.
+
+### The fix
+
+One file: `src/chase_auto_pilot.cpp`. The `kFieldConfigs` array gains a third entry:
+
+```cpp
+{ "dotown_2", MODE_DIRECTION,
+  /*dirX=*/0, /*dirY=*/+1,
+  /*targetX=*/0, /*targetY=*/0,
+  /*walk=*/false },
+```
+
+`dirY=+1` is screen-down. From the v0.15.9.2.16 BAT calibration on dotown_2 (`camRight=(0.957,0.291)`, `camDown=(0.291,-0.957)`), screen-down maps to mostly world south (-Y, slight +X), which is the direction from spawn `(-1642, 4518)` toward the gateway at `(-198, -600)`. `MODE_DIRECTION` doesn't need A* -- it just holds the analog south, the party walks into the next SETLINE trigger line, the engine fires the segment-transition script, repeat until the field exit.
+
+`MODE_DIRECTION` also bypasses the v0.15.9.2.11 completion-marker trap entirely: there's no "target" to arrive at, so the drive never reports "completed" until the field changes.
+
+### Why only dotown_2
+
+BAT empirical data:
+
+- `dotown_3`: A* found 30 waypoints, real arrival, cleared the field correctly. No change.
+- `dotown_2`: A* found 0 waypoints (this fix).
+- `dotown_1`: A* found 65 waypoints. Calibration failed in the BAT (`no movement (dist=0.0)`) because Aaron was pressing keys to drive manually, fighting the fake gamepad. With a clean BAT where v0.15.9.2.17 reaches dotown_1 on auto-pilot (no manual interference), calibration should succeed and the generic INF-gateway fallback should drive cleanly. No change.
+
+### Part 2 deferred
+
+A general-purpose fix for the "A* fails -> completion marker traps re-engagement" pattern was discussed but not implemented this version. Aaron explicitly chose Part 1 only (the targeted dotown_2 fix). If future fields surface the same issue, implement Part 2 then: refuse to mark a field as completed when `StartChaseDrive` produced `waypoints=0`, so the next tick can retry (and pick up an explicit per-field config if one was added).
+
+### Predicted v0.15.9.2.17 BAT outcome
+
+AUTO mode auto-pilots through:
+
+- `domt4_1` (explicit DIRECTION RUN LEFT) -> ASK -> Auto committed.
+- `domt3_2`, `domt5_1`, `domt2_1`, `domt1_1`, `doopen2a` via INF-gateway fallback.
+- `dotown_3` via INF-gateway fallback (A* finds 30 waypoints, real arrival).
+- FMV `disc00_06h.avi` plays.
+- `dotown_2` engages with `MODE_DIRECTION dirY=+1 running` (NEW). LookupConfig hits the explicit entry, fallback path isn't reached. Auto-pilot holds screen-down on the analog. Party walks into SETLINE triggers, scripts teleport them through the field. Eventually transitions to `dotown_1`.
+- `dotown_1` engages via INF-gateway fallback (A* finds 65 waypoints).
+- FMV `disc00_07h.avi` (chase climax) fires.
+- Post-FMV: ChaseDetector deactivates on the non-chase field that follows. `CHASE-END SUMMARY mode=auto battles_fired=0` logged.
+
+### Files changed
+
+- `src/chase_auto_pilot.cpp` -- `kFieldConfigs` gains a third entry (5 lines); comment block above the array extended with v0.15.9.2.17 BAT findings (~25 lines).
+- `src/ff8_accessibility.h` -- version `0.15.9.2.17` with comment trail entry.
+- `CHANGELOG.md` -- this entry.
+- `DEVNOTES.md` -- v0.15.9.2.17 ready-to-BAT state.
+- `NEXT_SESSION_PROMPT.md` -- updated for v0.15.9.2.17 BAT plan.
+
+### Risk
+
+Low. One array gets one entry. No API changes, no behavior changes for fields other than `dotown_2`. The MODE_DIRECTION path is well-exercised (domt4_1 has used it since v0.15.9.1) so the code path itself is stable.
+
+## v0.15.9.2.16
+
+Extend `CHASE_FIELD_NAMES` (in `src/chase_detector.cpp`) to cover the full chase route through the Lapin Beach FMV. v0.15.9.2.15 BAT auto-piloted 6 chase fields end-to-end (`domt4_1 -> domt3_2 -> domt5_1 -> domt2_1 -> domt1_1 -> doopen2a`) then disengaged on entry to `dotown_3` because that field wasn't in the chase set. The in-game chase isn't over there — it continues for 2-3 more fields up to the chase climax FMV.
+
+### v0.15.9.2.15 manual exploration BAT (2026-05-11 14:54-15:01)
+
+With chase mode set to MANUAL, the BAT walked the full chase route and through the chase climax FMV. Field announces:
+
+```
+14:54:47  chase_mode set to 'manual'
+14:56:34  domt3_2  (Mountain Hideout 3)
+14:56:38  domt5_1  (Mountain Hideout 7)
+14:56:54  domt2_1  (Mountain Hideout 1)
+14:57:16  domt1_1  (Town Square 1, internal name)
+14:57:30  doopen2a (bridge; ~101s spent here doing AI rule #2 reverse-direction trick)
+14:59:11  dotown_3 (Town Square 10)
+14:59:23  FMV disc00_06h.avi (transition intro: 'ornate car drives through Dollet streets')
+14:59:26  dotown_2 (Town Square 8)
+14:59:42  dotown_1 (Town Square 6)
+14:59:51  FMV disc00_07h.avi (chase climax: X-ATM092 enters town, party flees, robot slams onto bridge, beach extraction by Quistis)
+```
+
+`disc00_07h.avi` is the chase terminator FMV. Three new chase fields confirmed: `dotown_3`, `dotown_2`, `dotown_1`.
+
+### The change
+
+One file: `src/chase_detector.cpp`. The `CHASE_FIELD_NAMES` array gains three entries:
+
+```cpp
+static const char* CHASE_FIELD_NAMES[] = {
+    "domt1_1",
+    "domt2_1",
+    "domt3_2",
+    "domt4_1",
+    "domt5_1",
+    "doopen2a",
+    "dotown_3",  // NEW
+    "dotown_2",  // NEW
+    "dotown_1",  // NEW
+};
+```
+
+The comment block above the array gains a v0.15.9.2.16 rationale explaining the re-add and the risk analysis (v0.15.2.11 had removed these fields to protect the dotown_3 cutscene from `chase_kani_freeze`'s animation pin).
+
+### Risk analysis: v0.15.2.11's documented failure mode
+
+v0.15.2.10 hung ~16 seconds after entering `dotown_3` because `chase_kani_freeze.StartCapture` pinned the dotown_3 kani's animation against its cutscene script. That failure mode required a mode 4->1 (battle->field) transition inside `dotown_3` to trigger `StartCapture`.
+
+In **AUTO mode**, `chase_battle_freeze` caps battles at 0 -> no battle ever fires inside any chase field -> no mode 4->1 transition -> no `StartCapture` -> no animation pin -> cutscene plays untouched.
+
+In **MANUAL mode**, the cap is 1, but the v0.15.9.2.15 manual exploration BAT walked through `dotown_3` (and `dotown_2`, and `dotown_1`) without any chase battle firing or hang, suggesting the v0.15.2.10 crash condition isn't reproducible in current builds. Aaron's instinct on this call was: "if auto-pilot simply moves to the next gateway as expected then the robot animation will play normally and we don't need to nope a battle or anything else."
+
+**Fallback plan if a future MANUAL-mode BAT regresses:** gate `chase_kani_freeze.StartCapture` on a stricter predicate (e.g. `IsInKaniActiveChaseField()`) while leaving `CHASE_FIELD_NAMES` inclusive for `chase_auto_pilot`. Not implemented in v0.15.9.2.16 because the empirical evidence says it's not needed.
+
+### Predicted v0.15.9.2.16 BAT outcome
+
+AUTO mode auto-pilots through the full sequence:
+
+- `domt4_1` (explicit config, RUN LEFT) -> ASK -> Auto committed.
+- Chase progresses through `domt3_2`, `domt5_1`, `domt2_1`, `domt1_1`, `doopen2a` via the generic INF-gateway fallback from v0.15.9.2.15.
+- **NEW:** auto-pilot stays engaged on entry to `dotown_3`. INF gateway fallback computes the south-exit gateway center, builds a chase-drive route through dotown_3's walkmesh.
+- Transition FMV `disc00_06h.avi` plays during dotown_3 -> dotown_2 transition.
+- Auto-pilot re-engages on `dotown_2`. Continues driving.
+- Transition to `dotown_1`. Auto-pilot re-engages.
+- Chase climax FMV `disc00_07h.avi` fires (party reaches the trigger position).
+- ChaseDetector deactivates on entry to whatever non-chase field comes after dotown_1 (likely `dotown1a` Town Square 7).
+- `CHASE-END SUMMARY mode=auto` logged with `battles_fired=0`.
+
+`battles_suppressed` count will likely be even higher than v0.15.9.2.15's 11 since the chase route is now longer. Steering speed is slow (Finding #21 in `Plan & Research Documents/Auto-drive lessons from chase auto-pilot.md`), so X-ATM092 catches the party multiple times per chase field. Each catch is NO-OP'd by cap=0. Steering speed refinement is deferred to a separate version.
+
+### Bridge trick deferred
+
+Aaron's AI rule #2 — reverse direction when X-ATM092 leaps over the party on the `doopen2a` bridge — remains unimplemented. The v0.15.9.2.15 manual exploration BAT confirmed Aaron successfully performed the trick manually, but v0.15.9.2.15's build doesn't log PJUMPA opcodes or per-tick kani position, so the field log doesn't contain enough data to reverse-engineer the pattern automatically. A diagnostic-instrumented build is needed:
+
+1. Hook the PJUMPA opcode in field script execution; log every firing with timestamp, source entity (kani vs party), and target position.
+2. Add per-tick player + kani position diff logging during `doopen2a` (mirrors the v0.15.9.2.8 diagnostic pattern for kani position).
+3. BAT focused on the bridge: Aaron performs the trick manually, full telemetry captured.
+4. Analyze the pattern: leap-to-reversal delay, reversal duration, recovery direction.
+5. Design and implement state machine. Test.
+
+This is a separate task, probably v0.15.9.3 or v0.15.9.4. Until it ships, AUTO mode on the bridge will get caught by X-ATM092's leaps. Each catch is NO-OP'd by cap=0, so the chase continues, but the steering inefficiency is real.
+
+### Files changed
+
+- `src/chase_detector.cpp` -- `CHASE_FIELD_NAMES` array gains three entries; comment block extended with v0.15.9.2.16 rationale (~36 new lines).
+- `src/ff8_accessibility.h` -- version `0.15.9.2.16` with comment trail entry.
+- `CHANGELOG.md` -- this entry.
+- `DEVNOTES.md` -- v0.15.9.2.16 ready-to-BAT state.
+- `NEXT_SESSION_PROMPT.md` -- updated for v0.15.9.2.16 BAT plan.
+
+### Risk
+
+Low. One array gets three entries. No API changes, no signature changes, no behavior changes for fields other than the three additions. The `chase_kani_freeze` failure mode from v0.15.2.10 is gated on a condition (battle inside dotown_3) that doesn't occur in either AUTO or MANUAL gameplay per empirical evidence.
+
 ## v0.15.9.2.15
 
 Use INF gateways as the chase-drive crossing target. v0.15.9.2.14's trigger-line crossing detection works, but the SETLINE entities on domt2_1 are Event Triggers (kani battle calls), not screen boundaries. The actual screen-transition exit is the INF gateway, which the engine already parses but the auto-pilot wasn't using.

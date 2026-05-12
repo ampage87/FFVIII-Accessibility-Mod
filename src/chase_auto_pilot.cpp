@@ -1,6 +1,210 @@
 // chase_auto_pilot.cpp -- Dollet/X-ATM092 chase auto-drive
 // See chase_auto_pilot.h for design notes.
 //
+// v0.15.9.6: Switch domt5_1 (west trail) from MODE_TARGET path-finding to
+// MODE_DIRECTION dirX=+1, dirY=+1, walk=1 (WALK SOUTH-EAST). The previous
+// MODE_TARGET path-finding with 28 waypoints, velocity-stuck recoveries,
+// and CALIB overhead violated Aaron's recipe for this field. Aaron's
+// recipe for domt5_1 (per 2026-05-11): walk straight through, head
+// directly for next field exit, no hangups, no delay. The robot doesn't
+// catch the party if walked straight through; running or delays cause
+// mountain shake / catches.
+//
+// v0.15.9.5 BAT result (2026-05-11 18:11-18:14) summary:
+//   domt4_1: 0 catches/3s (reproducible from v0.15.9.4)
+//   domt3_2: 1 catch/5s (-1s from CALIB skip, catch is script-forced)
+//   domt5_1: 3 catches/32s (UNCHANGED, biggest remaining problem)
+//   Total chase: 2:09/7 catches
+//   Three-signal pattern reproducible. Time to apply to domt5_1.
+//
+// Analysis on domt5_1 catches (from v0.15.9.5 BAT field log):
+//   Catch #2 at 12s after entry, #3 at 18s, #4 at 25s -- catches fire
+//   roughly every 6 seconds while party is on the field, regardless of
+//   position. Kani entity reads as (0,0) static. This is a TIME-BASED
+//   catch trigger, not a distance-based one. To get to 0 catches we
+//   need field transit time under ~6 seconds. Current 32s = 3 catches
+//   (each catch ~4s freeze + 6s timer interval).
+//
+// The previous MODE_TARGET approach (v0.15.9.2 through .5) violated all
+// four of Aaron's requirements except walk: 28 waypoints (not direct),
+// velocity-stuck pauses (hangups), CALIB delay (delay). Producing the
+// observed 30+ seconds and 3 catches.
+//
+// MODE_DIRECTION walking south-east satisfies all four:
+//   1. walk=true -- AI rule #1 (running shakes mountain) satisfied.
+//   2. Direct: sustained analog toward south-east where the exit lives.
+//   3. No hangups: no path-finder state machine.
+//   4. No delay: skips CALIB.
+//
+// Risk: party may freeze at a wall. v0.15.9.1.1 BAT tried pure-south
+// direction-drive and froze at (-769, 2217) -- the trail bends east at
+// that point. South-east adds an east component to push around the bend.
+// The CALIB-derived camera basis on this field is unreliable (script
+// motion contaminates the measurement); south-east is the best heuristic.
+// If south-east also freezes, v0.15.9.7 tries alternate directions
+// empirically.
+//
+// Prediction: domt5_1 transit drops from 32s to under 18s. 0-1 catches.
+// If under 6s, 0 catches. If 6-12s, 1 catch. Best case (Aaron's manual
+// target): under 6s with 0 catches. The chase script's natural flow on
+// this field plus our analog should produce running-speed-equivalent
+// motion while still walking (per Finding #25's analog-as-force-multiplier
+// observation), comfortably under the 6s threshold.
+//
+// v0.15.9.5: Explicit MODE_DIRECTION config for domt3_2 (RUN EAST).
+// **BAT SUCCESSFUL 2026-05-11 18:11-18:14.** domt3_2 went from 6s/1 catch
+// to 5s/1 catch (-1s from CALIB skip). Catch is script-forced co-location
+// (cannot be eliminated without structural change). v0.15.9.4 result on
+// domt4_1 reproduced: 0 catches/3s. Pre-BAT rationale follows:
+// v0.15.9.4 BAT was a major success on domt4_1 (3 catches/16s -> 0 catches/3s)
+// validated the three-signal direction-selection pattern. Refinement
+// continues to the next chase field in chronological order: domt3_2.
+//
+// v0.15.9.4 BAT result (2026-05-11 17:27-17:30) summary:
+//   domt4_1: 3 catches/16s -> 0 catches/3s (PRIMARY FIX)
+//   domt5_1: 44s -> 30s (cascade: arriving in better shape)
+//   domt2_1: ~1-2 catches -> 0 catches (cascade)
+//   Total chase: 2:35/11 catches -> 2:06/7 catches
+//   On domt4_1's first engaged second, party motion was dmag=905 in the
+//   analog direction. Compare v0.15.9.3 (WEST) where the cleanest between-
+//   catches sample was dmag=61. Pressing the right direction is ~15x faster
+//   than pressing the wrong direction. The script's flow on these fields is
+//   strong; cooperating multiplies our analog effectiveness dramatically.
+//
+// Three-signal analysis on domt3_2 from v0.15.9.4 BAT data:
+//
+//   (1) Camera orientation: default. CALIB on this field at 17:28:09 had
+//       both phases fail ("no movement (dist=0.0)") but defaults were kept:
+//       camRight=(1.000,0.000) camDown=(0.000,-1.000). With these defaults,
+//       dirX=+1 = world east, dirY=+1 = world south.
+//
+//   (2) Kani approach: co-located with party at engage. First engaged tick
+//       showed kani=(-289,-3513), party=(-211,-3461), kdist=93. The chase
+//       script teleports both party and kani to the south end of the field
+//       on entry, putting them in catch range immediately. No clean flee
+//       direction from this signal -- kani is essentially on top of party.
+//
+//   (3) Field exit: east. Trigger line endpoints (-71,-3390) and
+//       (-139,-3562), nearly vertical, center (-105,-3476). Party engage
+//       position (-289,-3513) is well west of the line. After the post-
+//       catch teleport, party position (-1358,-3439) is even further west.
+//       Both states need east-only motion to cross the line. The trigger
+//       line's verticality means north-south motion doesn't progress toward
+//       crossing -- only east matters.
+//
+//   Sanity check (script choreography): on field entry the script teleports
+//   party from (-367,1139) to (-289,-3513) -- mostly south, with negligible
+//   east-west bias (+78 east). The script doesn't impose a preferred east-
+//   west direction; we're free to push east without fighting it.
+//
+// Two of three signals point east (camera + exit); kani is null. Plus the
+// CALIB phase 1 and 2 BOTH failed on this field in v0.15.9.4 -- MODE_TARGET
+// wasted ~1 second on a calibration that produced no useful data. MODE_
+// DIRECTION skips CALIB entirely, saving that overhead.
+//
+// v0.15.9.5 prediction: at minimum, ~1 second faster transit (CALIB removed).
+// Possibly 0 catches instead of 1 if the party crosses the trigger line
+// before the script forces the co-location catch. If catch still fires, the
+// post-catch teleport puts party further west; direction-drive continues
+// pushing east and party crosses the trigger line. Either way no slower
+// than current behavior.
+//
+// Risk: very low. One new config-array entry. domt3_2's previous behavior
+// (BuildFallbackConfig + INF-gateway/trigger-line fallback) was already
+// doing essentially the same thing in MODE_TARGET; we're switching to a
+// simpler implementation with the same intent.
+//
+// v0.15.9.4: domt4_1 direction config flipped from RUN WEST to RUN SOUTH-EAST.
+// **BAT SUCCESSFUL 2026-05-11 17:27-17:30.** domt4_1 went from 3 catches/16s
+// to 0 catches/3s. Three-signal direction-selection pattern validated. Total
+// chase 2:06/7 catches (was 2:35/11 catches). Pre-BAT rationale:
+// v0.15.9.3 BAT diagnostic data showed our previous WEST direction (inherited
+// from Jegged's strategy guide at v0.15.9.1) was actively wrong for our
+// build: WEST points toward the kani's approach column, away from the field
+// exit, and perpendicular to the chase script's natural choreography.
+//
+// v0.15.9.3 BAT findings on domt4_1:
+//   - Camera orientation is approximately default. Clean analog sample
+//     between catches #2 and #3 (sec 9 post-engage) showed analog=(-1000,0)
+//     producing world delta=(-61,+6) -- camRight ≈ (1,0), camDown ≈ (0,-1).
+//     So dirX=+1 = world east, dirY=+1 = world south.
+//   - Kani approaches from the north-west of the party at engage moment
+//     (kani at (-1645,4154), party at (-657,3132); kani is -988 X, +1022 Y
+//     relative). Flee direction is SOUTH-EAST.
+//   - Field exit is south-east of spawn. Party ended at (-404,1117) having
+//     started near (-1230,3699); net direction is SOUTH-EAST.
+//   - The chase script's own intro animation moves the party south-east
+//     during the first 2 seconds of chase activation. Our analog now
+//     reinforces the script's flow instead of fighting it.
+//
+// v0.15.9.4 changes one config entry: domt4_1's dirX from -1 to +1, dirY
+// from 0 to +1. No other changes. v0.15.9.3's pre-engage diagnostic and
+// delta logging are retained -- they'll keep capturing data on this and
+// subsequent fields as refinement continues down the chase route.
+//
+// Prediction: substantially fewer catches on domt4_1 (target 0-1 vs the
+// 3 catches recorded in v0.15.9.2.18 and v0.15.9.3 BATs). Faster transit
+// to domt3_2 (target <10s vs the 16s recorded).
+//
+// Risk: very low. One config-array entry edited. Behavior change scoped
+// to one field. Easy to revert to WEST or try other directions if the BAT
+// surprises us.
+//
+// v0.15.9.3: Diagnostic-only build for refinement work, starting with
+// domt4_1 (chase start field). v0.15.9.2.18 BAT completed the full chase
+// end-to-end with 11 NO-OPed catches (cap=0 band-aid). Aaron's framing:
+// "our current battle nope system is a band-aid for poor navigation. We
+// need to streamline navigation in each field." Refinement starts with
+// domt4_1 since the chase starts there.
+//
+// v0.15.9.2.18 BAT analysis of domt4_1 (16 seconds total, 3 catches):
+//   - At engage moment (16:26:41) the kani has already been running its
+//     chase script for 17 seconds (since chase ACTIVATED at 16:26:25
+//     while the player was reading/answering the ASK). By tick=60
+//     (16:26:42) kani is at kdist=401 from party -- already within catch
+//     range.
+//   - First catch fires 1 second after engage. Each catch teleports the
+//     party slightly south and freezes them for 4-5 seconds while the
+//     kani repositions, then another catch fires.
+//   - Despite analog=lX=-1000 (pure screen-left) the party drifts net
+//     +710 east, -2157 south. The chase script appears to be overriding
+//     our analog input -- our "RUN LEFT" config produces motion the
+//     script chose, not motion we requested.
+//
+// Two open questions before designing a fix:
+//   (Q1) Is the analog input doing ANYTHING on domt4_1, or is the chase
+//        script the sole motion source? -> Look at delta-vs-analog. If
+//        the party moves consistently in (a rotated version of) the
+//        analog direction, input is being applied. If movement is
+//        completely independent of analog (or zero), script overrides.
+//   (Q2) What's the camera orientation on this field? -> Derive from the
+//        delta. With lX=-1000 lY=0 known, the actual world delta gives
+//        us camRight (its negative). Tells us whether "RUN LEFT" actually
+//        points toward the field exit or somewhere else.
+//
+// v0.15.9.3 adds two diagnostics:
+//   1. Pre-engage / chase-active per-second log. Fires once per second
+//      while chase_active is true, regardless of whether chase_auto_pilot
+//      is engaged. Captures party + kani positions and kdist from the
+//      moment chase activates (entering the chase field) through the
+//      ASK and into the engaged state. Lets us see where the kani is
+//      and how it's moving DURING the ASK -- data we don't currently
+//      have because the existing per-second log only fires when engaged.
+//   2. Movement delta computation. Both the new pre-engage log and the
+//      existing engaged tick log now include `delta=(dX,dY) dmag=N` --
+//      the party position change since the last per-second snapshot.
+//      This is what lets us answer Q1 above: if the party isn't moving
+//      (dmag=0) while we're injecting analog, the chase script is in
+//      control. If dmag is positive and consistent with the analog
+//      direction (modulo camera rotation), input is being applied.
+//
+// Risk: very low. Pure additive logging. No behavior change. Two new
+// module-static state variables (s_prevPosX/Y, s_prevPosValid) plus a
+// counter (s_chaseActiveTickCounter). One new static helper function
+// (LogChaseActiveDiagnostic). The existing per-second log in the engaged
+// branch is left intact; the new pre-engage log adds delta computation
+// to its output and the engaged log gets the same delta info appended.
+//
 // v0.15.9.2.8: Diagnostic-only -- log kani position and squall-kani distance
 // every second to test Aaron's collision-push hypothesis (raised after the
 // v0.15.9.2.7 BAT). v0.15.9.2.7 BAT showed: clean logs (spam gone), but the
@@ -148,8 +352,33 @@ namespace ChaseAutoPilot {
 // running shakes the mountain and the party gets caught.
 
 enum FieldDriveMode {
-    MODE_DIRECTION = 0,
-    MODE_TARGET    = 1,
+    MODE_DIRECTION        = 0,
+    MODE_TARGET           = 1,
+    MODE_STAGED_DIRECTION = 2,  // v0.15.9.7
+};
+
+// v0.15.9.7: Stage descriptor for MODE_STAGED_DIRECTION. Stages let a single
+// engagement switch direction part-way through the field based on the
+// party's current Y position. Used for S-shaped trails like domt5_1 where
+// one constant direction can't navigate the geometry (the trail bends
+// from SW to S to SE, so the analog input has to follow).
+//
+// Stages are listed in DECREASING activeMinY order. PickStage walks the
+// array and returns the first stage whose activeMinY is <= the party's
+// current Y. The last stage MUST have activeMinY = INT32_MIN so it always
+// matches as a fallback.
+//
+// Mid-engagement transitions are handled by FieldNavigation::StartDirectionDrive's
+// "already running" branch (see field_nav_directiondrive.inl): when called
+// with a new (dirX, dirY, walk), it updates s_analogDesiredLX/LY in place
+// and fires diff-based KEYUP/KEYDOWN events only when the arrow bitmask
+// actually changes. So changing s_engagedDirX/Y/Walk between Update ticks
+// is enough -- the existing per-tick refresh call picks up the new values.
+struct FieldStage {
+    int8_t  dirX;        // screen-relative direction sign, {-1, 0, +1}
+    int8_t  dirY;        // screen-relative direction sign, {-1, 0, +1}
+    bool    walk;        // hold W (walk modifier) during this stage
+    int32_t activeMinY;  // stage is active when party Y >= this value
 };
 
 struct FieldConfig {
@@ -160,6 +389,9 @@ struct FieldConfig {
     int32_t         targetX;    // MODE_TARGET: walkmesh world X
     int32_t         targetY;    // MODE_TARGET: walkmesh world Y
     bool            walk;
+    // v0.15.9.7: MODE_STAGED_DIRECTION fields. Null/0 for other modes.
+    const FieldStage* stages;
+    int               stageCount;
 };
 
 // Per-field auto-drive configuration. v0.15.9.2 adds MODE_TARGET to
@@ -177,22 +409,291 @@ struct FieldConfig {
 //
 // domt3_2 (between MH-6 and MH-7) is still unconfigured -- v0.15.9.2+
 // will fill it in based on next BAT log evidence.
+//
+// v0.15.9.2.17 BAT empirical findings (from v0.15.9.2.16 BAT 15:21-15:24):
+//   - dotown_2 (Town Square 8, post-FMV): generic INF-gateway fallback
+//     picked the south-exit gateway center (-198, -600) as target, but
+//     A* could not find a path -- the walkmesh is fragmented into
+//     disconnected islands (player spawn on tri 45, gateway target on
+//     tri 137, trigger-line bridge on tri 77, all separate). chase-drive
+//     STARTED with waypoints=0; CALIB moved the player ~500 units, the
+//     arrival check fired trivially (no waypoints to traverse), and the
+//     v0.15.9.2.11 completion marker prevented re-engagement. Auto-pilot
+//     permanently disengaged for this field. Aaron drove dotown_2
+//     manually for 39 seconds.
+//     Root cause: Dollet town chase fields use SETLINE-triggered scripted
+//     animations to teleport the party between street segments. The
+//     walkmesh polygons aren't connected; A*'s view of the field is
+//     incomplete. Path-finding fundamentally can't solve this.
+//     Fix: explicit MODE_DIRECTION config that pushes the party south.
+//     Calibration data from the BAT: camRight=(0.957,0.291),
+//     camDown=(0.291,-0.957). Screen-down (dirY=+1) maps to world south
+//     in the +X/-Y quadrant, which is the direction from spawn
+//     (-1642, 4518) toward the gateway (-198, -600). The party walks
+//     into the next trigger line, the SETLINE script teleports them to
+//     the next segment, repeat until field exit. Running (walk=false)
+//     since no AI-rule slowdown applies to this field.
+//
+// v0.15.9.2.18 BAT empirical findings (from v0.15.9.2.17 BAT 16:11-16:14):
+//   - dotown_2: MODE_DIRECTION south worked beautifully. Party moved
+//     900 units/sec south, cleared the field in ~14 seconds (vs 41
+//     seconds manually). v0.15.9.2.18 keeps this config unchanged.
+//   - dotown_1 (Town Square 6, last chase field before chase climax
+//     FMV disc00_07h.avi): same problem as dotown_2 but in a different
+//     guise. A* found 65 valid waypoints (walkmesh connected), but
+//     CALIB phase 1 FAILED on field entry (no movement during the
+//     24-tick lX=+1000 test). Without proper camera axes, the
+//     path-finding drive's analog steering was approximate. The party
+//     moved ~3300 units in the correct general direction (south +
+//     west from spawn) but then drifted off-course at ~(89, 2297)
+//     and cycled velocity-stuck / wp-skipping for 24 seconds before
+//     eventually drifting into the FMV trigger zone. Aaron's exact
+//     observation: 'got right up to the trigger line to the beach
+//     fmv, then stopped for some reason before actually triggering it.'
+//     Same root cause as dotown_2 (chase scene scripts dominate;
+//     path-finding can't track) but presents as 'stuck near trigger'
+//     rather than 'never engages'. The CALIB failure is intrinsic to
+//     dotown_1's first-second state -- not Aaron's manual input.
+//     Fix: same approach as dotown_2 -- explicit MODE_DIRECTION south
+//     bypasses CALIB entirely. The party walks continuously south;
+//     SETLINE-triggered chase scripts route the actual movement;
+//     party reaches the FMV trigger naturally.
+// v0.15.9.7: Stage table for domt5_1 (west trail). S-shaped trail requires
+// three sequenced directions. See the domt5_1 entry comment in kFieldConfigs
+// below for the full rationale and threshold derivation.
+static const FieldStage kStages_domt5_1[] = {
+    // Stage 0: Y > 2200 -- WALK SOUTH-WEST. Spawn at Y~3300; trail bends
+    // from the spawn cluster (Y~3500) down through the first bend toward
+    // SETLINE call#13 center (-737, 1597). Aaron's recipe: "very southwest
+    // initially" and "if you press down at first you won't move, you have
+    // to press both down and left." The v0.15.9.1.1 BAT showed pure south
+    // froze at Y=2217 -- SW must extend past that point.
+    { -1, +1, true, 2200 },
+    // Stage 1: 1100 < Y <= 2200 -- WALK SOUTH. Middle straight section
+    // between the SW bend and the final SE bend. Pure south works through
+    // this segment.
+    {  0, +1, true, 1100 },
+    // Stage 2: Y <= 1100 -- WALK SOUTH-EAST. Final approach to the south-
+    // east exit. SETLINE call#14 center (-366, 1110) marks this transition;
+    // the trail bends east toward the south exit cluster (Y~235).
+    { +1, +1, true, INT32_MIN },
+};
+static const int kStages_domt5_1_count =
+    (int)(sizeof(kStages_domt5_1) / sizeof(kStages_domt5_1[0]));
+
 static const FieldConfig kFieldConfigs[] = {
     // domt4_1 = Mountain Hideout 6 (chase start, Selphie cliff).
-    // Per Jegged: run immediately to the left (west). RUN, not walk.
-    // v0.15.9.1 BAT: direction-drive cleared this field cleanly.
+    // v0.15.9.4: RUN SOUTH-EAST (was RUN WEST per Jegged's guide, but
+    // Jegged was wrong for our build, or wrong period). v0.15.9.3 BAT
+    // diagnostic data showed three independent signals all pointing to
+    // south-east as the correct flee direction:
+    //   (1) Camera orientation is approximately default: camRight=(1,0),
+    //       camDown=(0,-1). Clean analog-effect sample at engaged sec 9
+    //       (between catches #2 and #3): pos went from (-366,1365) to
+    //       (-427,1371) with analog=(-1000,0) -- delta=(-61,+6), pointing
+    //       mostly west with negligible north component. Confirms default
+    //       camera mapping with no significant rotation.
+    //   (2) Kani approaches from the north-west. At engage moment kani
+    //       was at (-1645,4154), party at (-657,3132) -- kani is at
+    //       -988 X, +1022 Y relative to party (north-west). Direction
+    //       to flee = +X, -Y = world east-south = SOUTH-EAST.
+    //   (3) Field exit is south-east of spawn. Party ended at (-404,1117)
+    //       at field-transition moment, having started near (-1230,3699).
+    //       Net direction to exit: +826 east, -2582 south = mostly south,
+    //       with east component. SOUTH-EAST again.
+    //   Additionally: pre-engage data showed the chase script's own intro
+    //   animation moves the party south-east during seconds 1-2 of chase
+    //   activation (party walked from spawn to (-657,3132) -- a delta of
+    //   roughly +573 east, -567 south). Our analog now COOPERATES with
+    //   the script's natural choreography instead of fighting it.
+    //
+    // The previous WEST config (v0.15.9.1 through v0.15.9.3, Jegged-derived)
+    // was the worst possible direction: toward the kani's column, away
+    // from the field exit, and perpendicular to the script's natural flow.
+    // v0.15.9.2.18 BAT recorded 3 catches on this field in 16 seconds.
+    // v0.15.9.4 prediction: substantially fewer catches (target 0-1) and
+    // faster field transit.
     { "domt4_1", MODE_DIRECTION,
+      /*dirX=*/+1, /*dirY=*/+1,
+      /*targetX=*/0, /*targetY=*/0,
+      /*walk=*/false,
+      /*stages=*/nullptr, /*stageCount=*/0 },
+    // domt3_2 = Mountain Hideout 3 (chase field 2, immediately after domt4_1).
+    // v0.15.9.5: RUN EAST. Three-signal analysis on v0.15.9.4 BAT data:
+    //   (1) Camera default: CALIB on this field had both phases fail (no
+    //       movement during the calibration window), defaults kept --
+    //       camRight=(1,0), camDown=(0,-1). dirX=+1 = world east.
+    //   (2) Kani co-located with party at engage (kdist=93 at first engaged
+    //       tick). The chase script teleports party from (-367,1139) to
+    //       (-289,-3513) on field entry, spawning kani at the same place.
+    //       No clean flee direction from this signal.
+    //   (3) Field exit: east. Trigger line endpoints (-71,-3390) and
+    //       (-139,-3562), nearly vertical, center (-105,-3476). Party at
+    //       engage (-289,-3513) is well west; after post-catch teleport at
+    //       (-1358,-3439) is even further west. East-only motion crosses
+    //       the line from both states; north-south motion doesn't help.
+    // Plus: v0.15.9.4 MODE_TARGET path on this field had CALIB phase 1 +
+    // phase 2 BOTH fail with dist=0.0 -- wasted ~1 second on calibration
+    // that produced no useful data. MODE_DIRECTION skips CALIB entirely.
+    // The previous fallback path (BuildFallbackConfig -> trigger-line
+    // target (-105,-3476)) was already aiming the path-finder at the same
+    // direction; we're switching to a simpler implementation with the same
+    // intent. Catch on this field may still fire (kani co-location is
+    // outside our control) but transit should be faster.
+    // v0.15.9.7.4: dirX flipped from +1 (east) to -1 (west). Aaron's
+    // 2026-05-11 clarification on the chase route directions: domt3_2 should
+    // run "west, northwest, west" -- not east as v0.15.9.5 had it. The
+    // v0.15.9.5 BAT "success" on this field (5s / 1 catch) was actually a
+    // direction-conflict catch firing in 5 seconds rather than the
+    // "script-forced co-location" we attributed it to in the comments at
+    // the time. Aaron's manual trace on this field (2026-05-11 20:14-20:20):
+    // 2 seconds of travel, ~851 world-units west, no catches. He pressed
+    // west; we were pressing east.
+    //
+    // For domt3_2 the world-coord camera is approximately default (the
+    // v0.15.9.4 three-signal CALIB data showed camRight=(1,0) camDown=(0,-1)
+    // for this field). So dirX=-1 (screen-left) maps to world-west.
+    // Aaron's manual went from (-616,-3351) to (-1467,-3385), i.e.
+    // world-west, matching the screen-left input.
+    //
+    // Aaron's full recipe is "west, northwest, west" -- a three-stage
+    // pattern. For v0.15.9.7.4 we ship single MODE_DIRECTION west to fix
+    // the gross direction error; if the NW middle stage matters for
+    // efficiency or catch avoidance, v0.15.9.7.5 adds a staged direction
+    // table here too. The field is short (~2s in Aaron's manual) so
+    // single direction likely suffices.
+    //
+    // The previous v0.15.9.5 rationale (run east toward the trigger line
+    // at (-105,-3476)) was based on the trigger-line position alone
+    // without consulting Aaron's actual play. Lesson: the trigger line
+    // tells us where the geometric exit is, but the chase script may
+    // advance the field on a different condition (e.g., reaching a west-
+    // side INF gateway, or a time-based script advance). The player's
+    // actual recipe is the only ground truth. See Finding #30 in the
+    // lessons doc.
+    { "domt3_2", MODE_DIRECTION,
       /*dirX=*/-1, /*dirY=*/ 0,
       /*targetX=*/0, /*targetY=*/0,
-      /*walk=*/false },
-    // domt5_1 = Mountain Hideout 7 (west trail). Walk south via path-finding.
-    // Aaron's AI rule #1: running causes mountain shake / party caught.
-    // v0.15.9.1 / v0.15.9.1.1 BAT: pure-south direction-drive froze at
-    // (-769, 2217). Use path-finding with target near south corridor exit.
-    { "domt5_1", MODE_TARGET,
-      /*dirX=*/0, /*dirY=*/0,
-      /*targetX=*/382, /*targetY=*/235,
-      /*walk=*/true },
+      /*walk=*/false,
+      /*stages=*/nullptr, /*stageCount=*/0 },
+    // domt5_1 = Mountain Hideout 7 (west trail). MODE_STAGED_DIRECTION:
+    // southwest -> south -> southeast, walking throughout.
+    //
+    // v0.15.9.7.4: REVERT the v0.15.9.7.3 Y-axis-flip back to the v0.15.9.7.2
+    // staged config. Aaron's 2026-05-11 clarification confirmed that the
+    // west trail recipe is "generally southwest, south, southeast" -- exactly
+    // what kStages_domt5_1[] encodes (SW=(-1,+1) -> S=(0,+1) -> SE=(+1,+1)).
+    //
+    // v0.15.9.7.3's interpretation of "LEFT and slightly UP" as screen-up-left
+    // (dirY=-1) was a translation error. "Up" in that earlier message referred
+    // to position-on-the-trail (toward the spawn end / upper part of the trail),
+    // not screen-direction. The BAT result was definitive: dirY=-1 stuck the
+    // party at spawn with the AD unable to make progress, while dirY=+1
+    // (v0.15.9.7, .7.1, .7.2) reliably navigated the field every time.
+    //
+    // The v0.15.9.7.4 restoration of staged SW->S->SE means we go back to the
+    // pre-fix problem: party walks correctly (period=1 W re-press from
+    // v0.15.9.7.2 confirmed working) but the robot still triggers. That
+    // remains to be solved. Hypothesis worth testing first: Aaron raised
+    // "did you check if the prior field is carrying over" -- the v0.15.9.5
+    // domt3_2 config was running east when Aaron presses west on that field.
+    // If the engine carries some state (kani aggression timer, script chase
+    // mode flag, etc.) from one chase field to the next, fighting the script
+    // direction on domt3_2 might be priming the catch on domt5_1. v0.15.9.7.4
+    // also fixes domt3_2 to go west (matching Aaron's recipe). If the
+    // domt5_1 catch disappears once domt3_2 is fixed, carryover was the cause.
+    //
+    // === Previous attempts on this field ===
+    //
+    // v0.15.9.7.3 (MODE_DIRECTION -1,-1): stuck at spawn. The Y direction was
+    // wrong; the analog opposed the script's down-trail flee force enough that
+    // the walkmesh couldn't push the party past the spawn wall. Reverted here.
+    //
+    // v0.15.9.7 / .7.1 / .7.2 (MODE_STAGED_DIRECTION, SW->S->SE): geometry
+    // navigated. Party reaches exit cleanly. v0.15.9.7.1 added a defensive
+    // W re-press at period=30 to land the walk modifier despite chase-script
+    // input swallow. v0.15.9.7.2 reduced period to 1 and Aaron confirmed
+    // walking audio from the first frame. But the robot still triggered,
+    // which we now think may be a carryover effect from domt3_2 going east.
+    //
+    // v0.15.9.6 (MODE_DIRECTION +1,+1): stuck on east wall at spawn. Both
+    // axes wrong; party never moved more than ~30 units before freezing.
+    //
+    // v0.15.9.2 through .5 (MODE_TARGET path-finding to (382,235)): 28-
+    // waypoint path with velocity-stuck recoveries and CALIB delay. 30+
+    // seconds and 3 catches. Violated all of Aaron's recipe requirements
+    // except walk.
+    //
+    // === What v0.15.9.7.4 expects ===
+    //
+    // Party walks SW->S->SE through the field. Aaron's manual transit on
+    // this field at walking speed: 13 seconds, 0 catches. Target: same or
+    // better. WALK_REPRESS_PERIOD=1 from v0.15.9.7.2 still defends against
+    // any W swallow on field-load. The combined fix to domt3_2 (running west
+    // instead of east) tests the carryover hypothesis: if catches on domt5_1
+    // go to 0, carryover was the issue. If catches still fire, we have a
+    // different problem to solve and the v0.15.9.7.5 investigation looks at
+    // whether SendInput vs physical-key inputs are read differently by the
+    // catch trigger.
+    //
+    // === Old v0.15.9.7.3 commentary kept below for context ===
+    //
+    // The pre-v0.15.9.7.4 reasoning thought Aaron's "LEFT and slightly UP"
+    // was screen-relative-up, which made:
+    // (dirX=-1, dirY=-1) = screen-up-left in the DirectInput convention from
+    // field_nav_input_hooks.inl.
+    //
+    // The Y-axis interpretation was wrong (v0.15.9.7.3 BAT proved it: stuck).
+    // Aaron's 2026-05-11 clarification: the west trail recipe is
+    // southwest -> south -> southeast (down+left, then down, then down+right),
+    // which is the v0.15.9.7 staged config. (Restored above.)
+    //
+    { "domt5_1", MODE_STAGED_DIRECTION,
+      /*dirX=*/-1, /*dirY=*/+1,  // initial fallback direction (matches stage 0)
+      /*targetX=*/0, /*targetY=*/0,
+      /*walk=*/true,
+      /*stages=*/kStages_domt5_1, /*stageCount=*/kStages_domt5_1_count },
+    // dotown_2 = Town Square 8 (Dollet streets, between dotown_3 and
+    // dotown_1, post-FMV disc00_06h). v0.15.9.2.16 BAT proved
+    // path-finding can't navigate this field -- the walkmesh has
+    // disconnected islands and A* fails. Use MODE_DIRECTION south
+    // (screen-down) at running speed. The party walks into the next
+    // SETLINE trigger which scripts the segment-to-segment transition.
+    // dirY=+1 maps to world south via the field's camera (per BAT
+    // calibration camDown=(0.291,-0.957)). Running -- no AI rule
+    // restricts pace on this field; the chase is at top speed.
+    { "dotown_2", MODE_DIRECTION,
+      /*dirX=*/0, /*dirY=*/+1,
+      /*targetX=*/0, /*targetY=*/0,
+      /*walk=*/false,
+      /*stages=*/nullptr, /*stageCount=*/0 },
+    // dotown_1 = Town Square 6 (Dollet streets, last chase field before
+    // disc00_07h.avi chase climax FMV). v0.15.9.2.17 BAT (2026-05-11
+    // 16:13:40-16:14:13) showed CALIB phase 1 FAILED on field entry
+    // (no movement during the 24-tick lX=+1000 test) -- same symptom
+    // as v0.15.9.2.16 BAT but without Aaron's manual interference,
+    // confirming the failure is intrinsic to dotown_1's first-second
+    // state. Without proper camera axes, the path-finding drive's
+    // analog steering was approximate; party moved ~3300 units in the
+    // right direction (spawn (1629,6120) -> ~(89,2297)) then drifted
+    // off-course and cycled velocity-stuck / wp-skipping for 24
+    // seconds until eventually drifting into the FMV trigger zone
+    // and firing disc00_07h.avi. Fix: same approach as dotown_2 --
+    // explicit MODE_DIRECTION south (screen-down) bypasses CALIB
+    // entirely. The party walks continuously south; SETLINE-triggered
+    // chase scripts route the actual movement; eventually the party
+    // crosses the FMV trigger. dirY=+1 alone (no horizontal
+    // component) -- v0.15.9.2.17 BAT confirmed default-camera south
+    // moves the party in the correct general direction (the
+    // path-finding drive made progress in that direction before
+    // getting stuck). If the v0.15.9.2.18 BAT shows the party walks
+    // south but misses the trigger because it's slightly west,
+    // add dirX=-1 in v0.15.9.2.19. Running -- no AI rule applies.
+    { "dotown_1", MODE_DIRECTION,
+      /*dirX=*/0, /*dirY=*/+1,
+      /*targetX=*/0, /*targetY=*/0,
+      /*walk=*/false,
+      /*stages=*/nullptr, /*stageCount=*/0 },
 };
 static const int kFieldConfigsCount =
     (int)(sizeof(kFieldConfigs) / sizeof(kFieldConfigs[0]));
@@ -275,6 +776,28 @@ static char s_completedField[32] = {0};
 // Engage() so each fresh engagement gets a clean count.
 static int s_diagTickCounter = 0;
 
+// v0.15.9.3: Pre-engage chase-active diagnostic state.
+//
+// s_chaseActiveTickCounter: separate counter for the once-per-second
+// pre-engage log. Increments every Update() call while chaseActive is true,
+// regardless of engagement state. Lets us log party + kani positions during
+// the chase-ASK window (when the existing s_diagTickCounter is dormant
+// because chase_auto_pilot hasn't engaged yet).
+//
+// s_prevPosX, s_prevPosY, s_prevPosValid: party position from the previous
+// per-second snapshot. Used to compute `delta=(dX,dY)` -- the party motion
+// since the last log line. This is the v0.15.9.3 key diagnostic: it tells
+// us whether the analog input we're injecting is actually moving the party,
+// or whether the chase script is overriding it. On engaged fields, dX/dY
+// should correlate (modulo camera rotation) with the analog direction; on
+// fields where the script overrides, dX/dY will be inconsistent with analog.
+// s_prevPosValid is false on the first tick of a chase (no previous sample)
+// and is reset when the chase deactivates.
+static int     s_chaseActiveTickCounter = 0;
+static int32_t s_prevPosX                = 0;
+static int32_t s_prevPosY                = 0;
+static bool    s_prevPosValid            = false;
+
 // Cached config for the engaged field (so the per-second log can read
 // dir/walk values without re-running LookupConfig).
 static FieldDriveMode s_engagedMode = MODE_DIRECTION;
@@ -283,6 +806,42 @@ static int8_t  s_engagedDirY    = 0;
 static int32_t s_engagedTargetX = 0;
 static int32_t s_engagedTargetY = 0;
 static bool    s_engagedWalk    = false;
+
+// v0.15.9.7: MODE_STAGED_DIRECTION state.
+//
+// s_engagedStages / s_engagedStageCount: pointer + count copied from the
+// FieldConfig at engagement time. Per-tick refresh uses this without
+// having to re-look-up the config.
+//
+// s_currentStageIdx: index of the currently-active stage. -1 means
+// uninitialized (set in Engage()); each tick the refresh code re-picks
+// the stage by current Y position, and logs a transition message when
+// the index changes.
+static const FieldStage* s_engagedStages     = nullptr;
+static int               s_engagedStageCount = 0;
+static int               s_currentStageIdx   = -1;
+
+// v0.15.9.7: Helper -- does this mode use direction-drive plumbing?
+// MODE_DIRECTION and MODE_STAGED_DIRECTION both call StartDirectionDrive /
+// StopDirectionDrive. MODE_TARGET uses StartChaseDrive instead.
+static inline bool IsDirectionLikeMode(FieldDriveMode mode)
+{
+    return mode == MODE_DIRECTION || mode == MODE_STAGED_DIRECTION;
+}
+
+// v0.15.9.7: Helper -- find the active stage for a given Y position.
+// Walks the stage array (DECREASING activeMinY order) and returns the
+// index of the first stage whose activeMinY is <= posY. The last stage
+// must have activeMinY = INT32_MIN so this always returns a valid index
+// (count - 1 worst case).
+static int PickStageIdx(const FieldStage* stages, int count, int32_t posY)
+{
+    if (stages == nullptr || count <= 0) return -1;
+    for (int i = 0; i < count; ++i) {
+        if (posY >= stages[i].activeMinY) return i;
+    }
+    return count - 1;  // fallback (last stage matches anything if activeMinY=INT32_MIN)
+}
 
 // FF8 entity-array stride for "others" (party slots). Same value
 // field_navigation.cpp uses internally. Squall in the chase scene is
@@ -495,6 +1054,102 @@ static int32_t IntSqrt(int32_t v)
 }
 
 // ============================================================================
+// v0.15.9.3: Chase-active diagnostic helper
+// ============================================================================
+//
+// Pre-engage logging: runs once per second from the moment ChaseDetector
+// reports chase_active = true (typically on entry to a chase field) through
+// chase deactivation. Independent of chase_auto_pilot engagement state, so
+// it covers the ASK window (where the existing engaged tick log is silent
+// because chase_auto_pilot hasn't engaged yet).
+//
+// Output format:
+//   ChaseActiveDiag: field='X' state=PRE-ENGAGE|ENGAGED-DIR|ENGAGED-TGT
+//     pos=(pX,pY) delta=(dX,dY) dmag=N kani=(kX,kY) kdist=K [analog=(lX,lY)]
+//
+// `delta` is the difference between this tick's pos and the previous tick's
+// pos (s_prevPosX/Y). `dmag` is the magnitude of that delta. `kdist` is the
+// squall-kani distance. When the auto-pilot is engaged, `analog=(lX,lY)`
+// reports the analog values we're injecting (so the post-BAT analysis can
+// correlate analog -> world delta).
+static void LogChaseActiveDiagnostic(const char* fieldName)
+{
+    int32_t pX = 0, pY = 0;
+    bool gotPos = ReadSquallPosition(pX, pY);
+
+    int32_t kX = 0, kY = 0;
+    bool gotKani = ReadKaniPosition(kX, kY);
+
+    // Compose the delta substring from previous-tick pos. First tick of
+    // chase: s_prevPosValid is false, delta is "N/A".
+    char deltaBuf[64];
+    if (gotPos && s_prevPosValid) {
+        int32_t dX = pX - s_prevPosX;
+        int32_t dY = pY - s_prevPosY;
+        int32_t dMag = IntSqrt(DistSquared(0, 0, dX, dY));
+        std::snprintf(deltaBuf, sizeof(deltaBuf),
+                      " delta=(%d,%d) dmag=%d", (int)dX, (int)dY, (int)dMag);
+    } else {
+        std::snprintf(deltaBuf, sizeof(deltaBuf), " delta=N/A");
+    }
+
+    // Compose the kani substring.
+    char kaniBuf[96];
+    if (gotKani && gotPos) {
+        int32_t kdist = IntSqrt(DistSquared(kX, kY, pX, pY));
+        std::snprintf(kaniBuf, sizeof(kaniBuf),
+                      " kani=(%d,%d) kdist=%d", (int)kX, (int)kY, (int)kdist);
+    } else if (gotKani) {
+        std::snprintf(kaniBuf, sizeof(kaniBuf),
+                      " kani=(%d,%d) kdist=?", (int)kX, (int)kY);
+    } else {
+        std::snprintf(kaniBuf, sizeof(kaniBuf), " kani=UNRESOLVED");
+    }
+
+    // Compose the state and (if engaged) analog substring.
+    const char* stateStr;
+    char analogBuf[64];
+    analogBuf[0] = '\0';
+    if (s_engaged) {
+        if (IsDirectionLikeMode(s_engagedMode)) {
+            stateStr = (s_engagedMode == MODE_STAGED_DIRECTION) ? "ENGAGED-STG" : "ENGAGED-DIR";
+            int32_t lX = (int32_t)s_engagedDirX * 1000;
+            int32_t lY = (int32_t)s_engagedDirY * 1000;
+            std::snprintf(analogBuf, sizeof(analogBuf),
+                          " analog=(%d,%d)", (int)lX, (int)lY);
+        } else {
+            stateStr = "ENGAGED-TGT";
+            // MODE_TARGET doesn't have a stable analog -- the path-finder
+            // changes it per tick to steer toward the current waypoint.
+            // The [drive] log line elsewhere captures per-tick analog.
+            std::snprintf(analogBuf, sizeof(analogBuf),
+                          " tgt=(%d,%d)",
+                          (int)s_engagedTargetX, (int)s_engagedTargetY);
+        }
+    } else {
+        stateStr = "PRE-ENGAGE";
+    }
+
+    if (gotPos) {
+        Log::Field("ChaseActiveDiag: field='%s' state=%s pos=(%d,%d)%s%s%s",
+                   fieldName, stateStr, (int)pX, (int)pY,
+                   deltaBuf, kaniBuf, analogBuf);
+    } else {
+        Log::Field("ChaseActiveDiag: field='%s' state=%s pos=READ_FAILED%s%s%s",
+                   fieldName, stateStr, deltaBuf, kaniBuf, analogBuf);
+    }
+
+    // Update prev-pos for the NEXT tick's delta computation. Done last so
+    // any future logging on this same tick (e.g. the engaged-branch tick log)
+    // sees the pre-update value of s_prevPos.
+    if (gotPos) {
+        s_prevPosX = pX;
+        s_prevPosY = pY;
+        s_prevPosValid = true;
+    }
+}
+
+// ============================================================================
 // Engage / disengage
 // ============================================================================
 
@@ -509,6 +1164,40 @@ static void Engage(const FieldConfig* cfg)
         // log evidence proves otherwise. F9 mutex is the only known refusal
         // cause and chase auto-pilot doesn't engage while F9 runs.
         ok = true;
+    } else if (cfg->mode == MODE_STAGED_DIRECTION) {
+        // v0.15.9.7: Multi-stage direction drive. Pick the initial stage by
+        // current Y position and start direction-drive with that stage's
+        // params. Per-tick refresh in Update() re-picks the stage each tick
+        // and updates s_engagedDirX/Y/Walk when the active stage changes.
+        if (cfg->stages != nullptr && cfg->stageCount > 0) {
+            int32_t pX = 0, pY = 0;
+            bool gotPos = ReadSquallPosition(pX, pY);
+            if (!gotPos) {
+                Log::Field("ChaseAutoPilot: MODE_STAGED_DIRECTION on '%s' pos read failed at "
+                           "engage; defaulting to first stage", cfg->fieldName);
+                pY = INT32_MAX;
+            }
+            int idx = PickStageIdx(cfg->stages, cfg->stageCount, pY);
+            if (idx >= 0 && idx < cfg->stageCount) {
+                const FieldStage* stg = &cfg->stages[idx];
+                FieldNavigation::StartDirectionDrive(stg->dirX, stg->dirY, stg->walk);
+                s_currentStageIdx = idx;
+                Log::Field("ChaseAutoPilot: MODE_STAGED_DIRECTION on '%s' initial pos=(%d,%d) -> "
+                           "stage %d/%d dir=(%d,%d) walk=%d (activeMinY=%d)",
+                           cfg->fieldName, (int)pX, (int)pY,
+                           idx, (int)cfg->stageCount,
+                           (int)stg->dirX, (int)stg->dirY, (int)stg->walk,
+                           (int)stg->activeMinY);
+                ok = true;
+            } else {
+                Log::Field("ChaseAutoPilot: MODE_STAGED_DIRECTION on '%s' PickStageIdx "
+                           "failed for posY=%d (stageCount=%d)",
+                           cfg->fieldName, (int)pY, (int)cfg->stageCount);
+            }
+        } else {
+            Log::Field("ChaseAutoPilot: MODE_STAGED_DIRECTION on '%s' has no stages defined",
+                       cfg->fieldName);
+        }
     } else if (cfg->mode == MODE_TARGET) {
         // v0.15.9.2: path-finding drive. StartChaseDrive validates state
         // (no F9 active, no dialog open, on field) and returns false on
@@ -552,12 +1241,28 @@ static void Engage(const FieldConfig* cfg)
     s_engagedField[sizeof(s_engagedField) - 1] = '\0';
     s_engaged          = true;
     s_engagedMode      = cfg->mode;
-    s_engagedDirX      = cfg->dirX;
-    s_engagedDirY      = cfg->dirY;
     s_engagedTargetX   = cfg->targetX;
     s_engagedTargetY   = cfg->targetY;
-    s_engagedWalk      = cfg->walk;
     s_diagTickCounter  = 0;
+
+    if (cfg->mode == MODE_STAGED_DIRECTION) {
+        // v0.15.9.7: For STAGED mode, s_engagedDirX/Y/Walk track the active
+        // stage (set by the engagement branch above), not cfg->dirX/Y/Walk.
+        // s_currentStageIdx was set by the staged branch in the if/else.
+        const FieldStage* stg = &cfg->stages[s_currentStageIdx];
+        s_engagedDirX       = stg->dirX;
+        s_engagedDirY       = stg->dirY;
+        s_engagedWalk       = stg->walk;
+        s_engagedStages     = cfg->stages;
+        s_engagedStageCount = cfg->stageCount;
+    } else {
+        s_engagedDirX       = cfg->dirX;
+        s_engagedDirY       = cfg->dirY;
+        s_engagedWalk       = cfg->walk;
+        s_engagedStages     = nullptr;
+        s_engagedStageCount = 0;
+        s_currentStageIdx   = -1;
+    }
 
     if (cfg->mode == MODE_DIRECTION) {
         Log::Field("ChaseAutoPilot: ENGAGED on field='%s' mode=DIRECTION direction=%s "
@@ -565,6 +1270,13 @@ static void Engage(const FieldConfig* cfg)
                    cfg->fieldName, DirectionName(cfg->dirX, cfg->dirY),
                    cfg->walk ? "WALKING" : "running",
                    (int)cfg->dirX, (int)cfg->dirY, (int)cfg->walk);
+    } else if (cfg->mode == MODE_STAGED_DIRECTION) {
+        Log::Field("ChaseAutoPilot: ENGAGED on field='%s' mode=STAGED_DIRECTION "
+                   "starting stage %d/%d direction=%s %s (dirX=%d dirY=%d walk=%d)",
+                   cfg->fieldName, (int)s_currentStageIdx, (int)cfg->stageCount,
+                   DirectionName(s_engagedDirX, s_engagedDirY),
+                   s_engagedWalk ? "WALKING" : "running",
+                   (int)s_engagedDirX, (int)s_engagedDirY, (int)s_engagedWalk);
     } else {
         Log::Field("ChaseAutoPilot: ENGAGED on field='%s' mode=TARGET tgt=(%d,%d) "
                    "%s (walk=%d)",
@@ -577,7 +1289,7 @@ static void Engage(const FieldConfig* cfg)
 static void Disengage(const char* reason)
 {
     if (!s_engaged) return;
-    if (s_engagedMode == MODE_DIRECTION) {
+    if (IsDirectionLikeMode(s_engagedMode)) {
         FieldNavigation::StopDirectionDrive();
     } else {
         FieldNavigation::StopChaseDrive();
@@ -608,6 +1320,10 @@ static void Disengage(const char* reason)
     s_engagedTargetY   = 0;
     s_engagedWalk      = false;
     s_diagTickCounter  = 0;
+    // v0.15.9.7: Reset staged-direction state.
+    s_engagedStages     = nullptr;
+    s_engagedStageCount = 0;
+    s_currentStageIdx   = -1;
 }
 
 // ============================================================================
@@ -631,8 +1347,18 @@ void Initialize()
     s_askWasActive     = false;  // v0.15.9.2.10
     s_askAnswered      = false;  // v0.15.9.2.10
     s_completedField[0] = '\0';  // v0.15.9.2.11
+    s_chaseActiveTickCounter = 0;  // v0.15.9.3
+    s_prevPosX            = 0;     // v0.15.9.3
+    s_prevPosY            = 0;     // v0.15.9.3
+    s_prevPosValid        = false; // v0.15.9.3
+    s_engagedStages       = nullptr;  // v0.15.9.7
+    s_engagedStageCount   = 0;        // v0.15.9.7
+    s_currentStageIdx     = -1;       // v0.15.9.7
     Log::Mod("ChaseAutoPilot: Initialized v%s. %d field configs ready: "
-             "domt4_1 (DIRECTION run west), domt5_1 (TARGET path-find south). "
+             "domt4_1 (DIRECTION run south-east, v0.15.9.4), "
+             "domt3_2 (DIRECTION run east, v0.15.9.5), "
+             "domt5_1 (STAGED_DIRECTION walk SW->S->SE by Y, v0.15.9.7), "
+             "dotown_2/_1 (DIRECTION run south). "
              "Unknown chase fields fall back to MODE_TARGET via largest-cluster scan. "
              "Engagement gated on chase ASK being answered (v0.15.9.2.10). "
              "Per-field completed marker prevents re-engagement loop (v0.15.9.2.11).",
@@ -661,13 +1387,38 @@ void Update()
         // required for this chase session.
         s_askWasActive = false;
         s_askAnswered  = false;
+        // v0.15.9.3: Reset diagnostic state. First tick of chase has no
+        // previous-position sample (delta will print "N/A").
+        s_chaseActiveTickCounter = 0;
+        s_prevPosValid           = false;
         Log::Field("ChaseAutoPilot: chase activated, waiting for ASK to fire and be answered before engaging");
     } else if (!chaseActive && s_prevChaseActive) {
         // Chase just ended. Clear the gate state for next session.
         s_askWasActive = false;
         s_askAnswered  = false;
+        // v0.15.9.3: Reset diagnostic state for next chase session.
+        s_chaseActiveTickCounter = 0;
+        s_prevPosValid           = false;
     }
     s_prevChaseActive = chaseActive;
+
+    // v0.15.9.3: Pre-engage chase-active diagnostic. Fires once per second
+    // (60 Update ticks) while chaseActive is true, regardless of engagement
+    // state. Captures the ASK window plus the engaged-state ticks. Field
+    // name from ChaseDetector's debounced name; uses "(name not settled)"
+    // during the 2-second post-transition debounce so the log line still
+    // appears even before the name resolves.
+    if (chaseActive) {
+        s_chaseActiveTickCounter++;
+        if (s_chaseActiveTickCounter >= 60) {
+            const char* fnameForDiag = ChaseDetector::GetDebouncedFieldName();
+            if (fnameForDiag == nullptr || *fnameForDiag == '\0') {
+                fnameForDiag = "(name not settled)";
+            }
+            LogChaseActiveDiagnostic(fnameForDiag);
+            s_chaseActiveTickCounter = 0;
+        }
+    }
 
     if (chaseActive) {
         bool askActiveNow = ChaseAskOverlay::IsAskActive();
@@ -762,7 +1513,34 @@ void Update()
         // at target or stuck-detection gave up), disengage so the player
         // knows we're done. The field-change branch above handles the
         // happy case where reaching the target triggered a field exit.
-        if (s_engagedMode == MODE_DIRECTION) {
+        if (IsDirectionLikeMode(s_engagedMode)) {
+            // v0.15.9.7: For MODE_STAGED_DIRECTION, re-pick the active stage
+            // based on current Y position. If it differs from the previously-
+            // active stage, update s_engagedDirX/Y/Walk to the new stage's
+            // values and log the transition. StartDirectionDrive's already-
+            // running branch (see field_nav_directiondrive.inl) then picks up
+            // the new analog/arrow values cleanly on the call below.
+            if (s_engagedMode == MODE_STAGED_DIRECTION &&
+                s_engagedStages != nullptr && s_engagedStageCount > 0) {
+                int32_t pX = 0, pY = 0;
+                if (ReadSquallPosition(pX, pY)) {
+                    int newIdx = PickStageIdx(s_engagedStages, s_engagedStageCount, pY);
+                    if (newIdx >= 0 && newIdx < s_engagedStageCount &&
+                        newIdx != s_currentStageIdx) {
+                        const FieldStage* stg = &s_engagedStages[newIdx];
+                        Log::Field("ChaseAutoPilot: STAGED stage transition %d->%d at "
+                                   "pos=(%d,%d) new dir=(%d,%d) walk=%d (activeMinY=%d)",
+                                   (int)s_currentStageIdx, (int)newIdx,
+                                   (int)pX, (int)pY,
+                                   (int)stg->dirX, (int)stg->dirY, (int)stg->walk,
+                                   (int)stg->activeMinY);
+                        s_engagedDirX     = stg->dirX;
+                        s_engagedDirY     = stg->dirY;
+                        s_engagedWalk     = stg->walk;
+                        s_currentStageIdx = newIdx;
+                    }
+                }
+            }
             FieldNavigation::StartDirectionDrive(s_engagedDirX, s_engagedDirY, s_engagedWalk);
         } else {
             if (!FieldNavigation::IsChaseDriveActive()) {
@@ -802,20 +1580,24 @@ void Update()
                 std::snprintf(kaniBuf, sizeof(kaniBuf), " kani=UNRESOLVED");
             }
 
-            if (s_engagedMode == MODE_DIRECTION) {
+            if (IsDirectionLikeMode(s_engagedMode)) {
                 int32_t lX = (int32_t)s_engagedDirX * 1000;
                 int32_t lY = (int32_t)s_engagedDirY * 1000;
+                const char* modeStr = (s_engagedMode == MODE_STAGED_DIRECTION)
+                                          ? "STAGED" : "DIRECTION";
                 if (gotPos) {
-                    Log::Field("ChaseAutoPilot: tick=%d field='%s' mode=DIRECTION "
-                               "dir=(%d,%d) walk=%d pos=(%d,%d) lX=%d lY=%d%s",
-                               s_diagTickCounter, fieldName,
+                    Log::Field("ChaseAutoPilot: tick=%d field='%s' mode=%s "
+                               "dir=(%d,%d) walk=%d stage=%d pos=(%d,%d) lX=%d lY=%d%s",
+                               s_diagTickCounter, fieldName, modeStr,
                                (int)s_engagedDirX, (int)s_engagedDirY, (int)s_engagedWalk,
+                               (int)s_currentStageIdx,
                                pX, pY, lX, lY, kaniBuf);
                 } else {
-                    Log::Field("ChaseAutoPilot: tick=%d field='%s' mode=DIRECTION "
-                               "dir=(%d,%d) walk=%d pos=READ_FAILED lX=%d lY=%d%s",
-                               s_diagTickCounter, fieldName,
+                    Log::Field("ChaseAutoPilot: tick=%d field='%s' mode=%s "
+                               "dir=(%d,%d) walk=%d stage=%d pos=READ_FAILED lX=%d lY=%d%s",
+                               s_diagTickCounter, fieldName, modeStr,
                                (int)s_engagedDirX, (int)s_engagedDirY, (int)s_engagedWalk,
+                               (int)s_currentStageIdx,
                                lX, lY, kaniBuf);
                 }
             } else {

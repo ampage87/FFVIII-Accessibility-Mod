@@ -12,15 +12,36 @@
 // DirectInput reads raw hardware scan codes, so we must use KEYEVENTF_SCANCODE
 // rather than KEYEVENTF_EXTENDEDKEY+VK.  Arrow keys have the E0 extended prefix,
 // indicated by KEYEVENTF_EXTENDEDKEY alongside KEYEVENTF_SCANCODE.
-static void InjectKey(WORD scanCode, bool down)
+//
+// v0.15.9.7.8: The 'extended' parameter (default true preserves backward
+// compatibility for arrow-key callers) controls whether KEYEVENTF_EXTENDEDKEY
+// is set. Arrow keys are extended (E0-prefixed scancodes); letter keys like
+// W (the walk modifier for chase auto-pilot) are NOT extended. Setting the
+// flag for a non-extended key causes the OS to inject a malformed scancode
+// (E0 + the letter scancode) that the game's DirectInput keyboard reader
+// doesn't recognize as the actual key. This bug was present since the
+// function was first written but only manifested in v0.15.9.7+ when chase
+// auto-pilot started using InjectKey for W. world_map.cpp's separate car-
+// control PressKey/ReleaseKey was already fixed in v0.14.102 -- the same
+// fix was just never applied to the field-navigation InjectKey.
+//
+// v0.15.9.7.8 also logs SendInput failures (return value != 1) so future
+// dropped-input issues surface in the field log.
+static void InjectKey(WORD scanCode, bool down, bool extended = true)
 {
     INPUT inp      = {};
     inp.type       = INPUT_KEYBOARD;
     inp.ki.wVk     = 0;      // must be 0 when using KEYEVENTF_SCANCODE
     inp.ki.wScan   = scanCode;
-    inp.ki.dwFlags = KEYEVENTF_SCANCODE | KEYEVENTF_EXTENDEDKEY
-                   | (down ? 0 : KEYEVENTF_KEYUP);
-    SendInput(1, &inp, sizeof(INPUT));
+    DWORD flags    = KEYEVENTF_SCANCODE | (down ? 0 : KEYEVENTF_KEYUP);
+    if (extended) flags |= KEYEVENTF_EXTENDEDKEY;
+    inp.ki.dwFlags = flags;
+    UINT sent = SendInput(1, &inp, sizeof(INPUT));
+    if (sent != 1) {
+        Log::Field("FieldNavigation: [InjectKey] SendInput FAILED (sent=%u, expected=1) "
+                   "scancode=0x%02X down=%d extended=%d -- input event dropped by OS",
+                   sent, (unsigned)scanCode, down ? 1 : 0, extended ? 1 : 0);
+    }
 }
 
 // Release all held direction keys and clear the held bitmask.
