@@ -4,13 +4,154 @@ Aaron is the sole developer of the FF8 Accessibility Mod -- a `dinput8.dll` inje
 
 **Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
 
-GitHub: `ampage87/FFVIII-Accessibility-Mod`. **HEAD = v0.15.9.7.8** (pushed 2026-05-12, commit `64f3b736`). Local tree matches HEAD. Push utility squashed v0.15.9.2.16-.18, .3, .4, .5, .6, .7, .7.1-.7.8 into a single commit using the top CHANGELOG section as commit message (expected behavior).
+GitHub: `ampage87/FFVIII-Accessibility-Mod`. **HEAD = v0.15.9.8.3** (pushed 2026-05-12). Local tree matches HEAD. v0.15.9.8.3 push squashed v0.15.9.8 / .8.1 / .8.2 / .8.3 into a single commit using the top CHANGELOG section as commit message.
 
 ---
 
-## Current state: v0.15.9.8.3 READY-TO-BAT -- bridge dance + kani-slot override
+## Current state: v0.15.9.9.1 BAT SUCCESS -- duplicate "Let's go!" eliminated ✨
 
-**v0.15.9.8.3 READY-TO-BAT 2026-05-12.** Two coordinated changes targeting the bridge's remaining 1 catch from v0.15.9.8.1 / .8.2 BATs: (1) ChaseDetector per-field kani-slot override routes `domt1_1` to Others slot 3 (SYM 'laguna') -- empirically confirmed as the actually-pursuing X-ATM092 in v0.15.9.8.2 BAT. (2) `MODE_BRIDGE_DANCE` state machine in chase_auto_pilot.cpp drives the EAST/WEST dance using kani X-velocity classification.
+**v0.15.9.9.1 BAT SUCCESS 2026-05-12.** Aaron: "That worked! Only heard Squall's let's go message once." The `firstQ == 0xFF || lastQ == 0xFF` predicate in `ScanAndSpeakChoiceWindows` correctly skipped the stale slot-0 MES text on chase ASK open. Sequence works as designed: AMESW speaks "Forget it! Let's go!" once, deferred-open elapses 3s, new ASK prompt + option labels read out, no duplicate.
+
+### Chase scene status
+
+Three of Aaron's four chase-scene items (2026-05-12 list) are now complete:
+- [x] **#4** (ASK dialog text revisions): shipped in v0.15.9.9, BAT-confirmed.
+- [x] **#1** (verify auto-pilot self-sufficient): v0.15.9.9 with cap=INT_MAX, 0 battles fired -- proved auto-pilot does all the work without the suppressor band-aid.
+- [x] **(post-BAT cleanup)** duplicate "Let's go!" line: fixed in v0.15.9.9.1.
+- [ ] **#2** (MODE_ORIGINAL): scheduled for v0.15.9.10.
+- [ ] **#3** (keyboard suppressor during Auto chase): scheduled for v0.15.9.11.
+
+### Push state
+
+Local tree is two versions ahead of GitHub HEAD (v0.15.9.8.3). Once Aaron pushes, v0.15.9.9 + v0.15.9.9.1 will squash into a single commit with v0.15.9.9.1's CHANGELOG entry as the commit message. The push utility validates CHANGELOG heading matches `FF8OPC_VERSION` -- both currently show `0.15.9.9.1` so the push is ready.
+
+---
+
+## Pre-v0.15.9.9.1 history (kept for context)
+
+## v0.15.9.9.1 READY-TO-BAT context (now resolved)
+
+### Root cause traced from Logs/ff8_dialog.log @ 10:27:54-57
+
+The chase-trigger MES fires once correctly through AMESW (win[0]). Three seconds later, when chase_ask_overlay opens the chase ASK in slot 2, `ScanAndSpeakChoiceWindows` iterates over ALL 8 slots. Slot 0 still holds Squall's "Let's go!" with firstQ=0xFF lastQ=0xFF. The existing skip predicates catch (0,0) and inverted ranges but miss (0xFF, 0xFF). The slot gets decoded as a 0-choice dialog with non-empty prompt and the prompt is spoken as a duplicate.
+
+The v0.15.9.9 prompt change only affected slot 2, so it couldn't have eliminated this duplicate (which lives in slot 0).
+
+### Fix
+
+`src/field_dialog.cpp` around line 681, added after the existing sentinel checks:
+
+```cpp
+if (firstQ == 0xFF || lastQ == 0xFF) continue;
+```
+
+With extensive comments documenting the v0.15.9.9 BAT-traced rationale so the predicate's purpose is clear to future-Claude.
+
+### Expected v0.15.9.9.1 BAT
+
+Trigger the chase, hear Squall's "Forget it! Let's go!" once via AMESW, then 3 seconds later the new ASK prompt + three option labels with no duplicate Squall line. Everything else from v0.15.9.9 stays the same: 0 chase battles, full chase completion in Auto mode.
+
+If the duplicate persists, the [ASK] handler isn't the source; the next candidates are `Hook_show_dialog`'s slot-paint re-read or `DialogInject::OpenAsk`'s render path. Both can be traced via dialog log; same diagnostic approach.
+
+### Risk
+
+Very low. One-line additive predicate. Worst case (we missed a legitimate ASK with one of the fields set to 0xFF): the slot's text won't be read out, which is a quieter regression than the duplicate.
+
+---
+
+## Pre-v0.15.9.9.1 history (kept for context)
+
+## v0.15.9.9 BAT SUCCESS -- auto-pilot proven self-sufficient ✨
+
+**v0.15.9.9 BAT SUCCESS 2026-05-12.** Auto-pilot proven self-sufficient in AUTO mode. With cap=INT_MAX (suppressor inert), **zero battles fired during the chase**. This proves chase_auto_pilot is doing all the work in v0.15.9.8.3 -- the cap=0 band-aid was never needed. The suppressor can be removed entirely in v0.15.10. ASK option-label rewrite also confirmed working (Aaron heard the new descriptive labels). One remaining issue from this BAT was the duplicate Squall "Let's go!" line, which v0.15.9.9.1 above fixes.
+
+## Pre-BAT context
+
+v0.15.9.9 combined Aaron's items #4 (ASK dialog text revisions) and #1 (disable battle suppressor in Auto mode for verification) in a single build.
+
+### Why we needed this BAT (now answered)
+
+The v0.15.9.8.3 BAT recorded **0 `[CBF] NO-OP` lines** on the whole chase -- a 100% reduction from baseline 11. That number proved the suppressor didn't fire, but it didn't prove WHY. Two possibilities existed:
+
+1. **Auto-pilot self-sufficient.** The underlying chase battle calls were 0 because chase_auto_pilot routed the party perfectly. The cap=0 band-aid was inert.
+2. **Suppressor doing the work.** Battle calls were N>0 but cap=0 forced NO-OP before any PASS could be logged. The auto-pilot was steering well, but a few battles slipped through and the band-aid silently caught them.
+
+v0.15.9.9 raised the AUTO cap from 0 to `INT_MAX` so any battle the auto-pilot fails to avoid would PASS through to a real battle screen instead of being silently NO-OP'd. **The BAT confirmed case #1: zero battles fired in AUTO mode with the suppressor inert.** Auto-pilot is genuinely self-sufficient; the cap=0 was never doing anything in v0.15.9.8.3.
+
+### What ships in v0.15.9.9
+
+**1. chase_battle_freeze.cpp AUTO cap raised.** One-line constant change in `Hook_opcode_battle`:
+
+```cpp
+int cap = (mode == ChaseDetector::MODE_AUTO) ? INT_MAX : 1;  // was 0, raised for verification
+```
+
+`<climits>` added to the include list. Initialize log message updated to mention "cap=INT_MAX in AUTO (VERIFICATION BUILD)" so the field log surfaces the change at startup. MANUAL cap unchanged at 1.
+
+**2. chase_ask_overlay.cpp text revisions.** Four string changes:
+
+- Prompt: `"Mode?"` -> `"X-ATM092 is heading right for you. How do you want to run?"`. Replaces the redundant Squall "Let's go!" line at ASK open with situational context.
+- `kChaseChoices` labels:
+  - `"Manual: drive yourself, one battle per field"`
+  - `"Auto: mod drives, no battles or shake"`
+  - `"Original: vanilla chase, no mod help"`
+
+Original label promises v0.15.9.10's MODE_ORIGINAL behavior (the option still falls back to MODE_MANUAL in this build). Aaron's UX call to ship the descriptive label now rather than the honest `"falls back to manual"` label.
+
+### v0.15.9.9 BAT result (2026-05-12)
+
+- **Battle verification: PASSED.** Aaron: "no battles were triggered during the chase." With the suppressor cap raised to INT_MAX, any chase battle that the auto-pilot failed to avoid would have PASSED through to a real battle screen. None did. v0.15.10 can confidently remove the cap=0 path from chase_battle_freeze.
+- **ASK option labels: WORKING.** Aaron: "Updated ASK options read out." The new descriptive labels render and read correctly via TTS.
+- **Duplicate Squall "Let's go!" line: STILL PRESENT.** Replacing the prompt from "Mode?" to the new explainer did NOT eliminate the duplication. The second reading is coming from somewhere other than the ASK slot text. Investigation candidates above.
+
+### Risk retrospective
+
+As predicted: low. No regression. Verification answered the question cleanly.
+
+---
+
+## Pre-v0.15.9.9 history (kept for context)
+
+## v0.15.9.8.3 BAT SUCCESS -- 0 catches across entire chase ✨
+
+**v0.15.9.8.3 BAT SUCCESS 2026-05-12 09:50-09:56.** Bridge dance worked perfectly. **ZERO `[CBF]` catches across the entire chase route, end-to-end.** 100% reduction from v0.15.9.2.18 baseline of 11 catches. Pushed to GitHub.
+
+### v0.15.9.8.3 BAT [CBF] catch counts by field
+
+| Field | Aaron's name | Time | Catches | Notes |
+|---|---|---|---|---|
+| domt4_1 | chase start | 3s | **0** | SE run, clean |
+| domt3_2 | intermediate | 1s | **0** | west run, transitions instantly |
+| domt5_1 | west trail | 15s | **0** | staged SW→S→SE walk |
+| domt2_1 | pre-bridge | 14s | **0** | INF-gateway TARGET |
+| **domt1_1** | **THE BRIDGE** | **13s** | **0** ✨ | **BRIDGE_DANCE worked** |
+| doopen2a | town square | 9s | **0** | TARGET south to -3800 |
+| dotown_3 | post-square | 16s | **0** | INF-gateway TARGET |
+| dotown_2 | town street | 14s | **0** | DIRECTION south |
+| dotown_1 | pre-FMV | 60s+ stall | **0** | pre-FMV stall at (-210,-1000) as expected |
+| **Total** | | **~2:25** | **0** | 🎯 |
+
+### Bridge dance trace from the BAT (the win)
+
+From 09:54:13 to 09:54:26 (13 seconds, 0 catches), the asymmetric state machine fired exactly as designed:
+
+- **09:54:13**: ChaseDetector OVERRIDE log line confirmed `Others slot 3 (SYM 'laguna')` resolved at field-debounce settle. ENGAGED mode=BRIDGE_DANCE.
+- **09:54:13–18**: Party drives east. laguna pursues at chase speed (X-velocity 106-203 units/100ms).
+- **09:54:19**: laguna LEAP detected. X jumped from -340 to 3239 in 1 second (~358 units/100ms, well above the 200 threshold). Lands at X=3835, ahead of party at X=1310.
+- **09:54:20**: **EAST→WEST transition fires.** Analog flips from (+1000, 0) to (-1000, 0). Party retreats west.
+- **09:54:21**: Party at X=9 moving west, laguna at X=2535. kdist gained, party clear of the blocking position.
+- **09:54:22**: **WEST→EAST transition fires.** laguna at X=-1845 (it leaped west, ~4380 units in 1 second). The dance detected the leap-start the moment the new leap began and flipped analog back to (+1000, 0) instantly -- while the robot was airborne and couldn't course-correct.
+- **09:54:23–26**: Party runs east unobstructed at full speed (delta=898/sec). laguna far west and never catches up. East-edge SETLINE crossing fires at X=4159 -> doopen2a.
+
+This is exactly the asymmetric mechanic Aaron described: wait for landing on the east leg, turn-on-leap-start on the west leg. The party tricked the robot into a wasted westward leap.
+
+---
+
+## Pre-v0.15.9.8.3 BAT (kept briefly for the design context that drove the fix)
+
+### v0.15.9.8.3 design (still relevant for future bridge work or similar fields)
+
+Two coordinated changes targeted the bridge's remaining 1 catch: (1) ChaseDetector per-field kani-slot override routes `domt1_1` to Others slot 3 (SYM 'laguna') -- empirically confirmed via v0.15.9.8.2 BAT BridgeDiag. (2) `MODE_BRIDGE_DANCE` state machine in chase_auto_pilot.cpp drives the EAST/WEST dance using kani X-velocity classification.
 
 ### v0.15.9.8.2 BAT findings (the empirical foundation)
 
@@ -101,9 +242,9 @@ The walkmesh DID extend further south than v0.15.9.8's stop point; A* was conser
 | v0.15.9.8 (town square south-target fix) | 2 | -1 |
 | v0.15.9.8.1 (town square targetY -3800) | 1 | -1 |
 | v0.15.9.8.2 (diagnostic-only, no behavior change) | 1 | 0 |
-| **v0.15.9.8.3 target (bridge dance)** | **0** | **-1** |
+| **v0.15.9.8.3 (bridge dance + kani-slot override)** | **0** ✨ | **-1** |
 
-**91% reduction from baseline as of v0.15.9.8.1. v0.15.9.8.3 targets the final catch.**
+**100% reduction from baseline. Chase auto-pilot is now catch-free across the entire playable route.**
 
 ### Open questions
 
@@ -704,7 +845,9 @@ The INF gateway insight from v0.15.9.2.14's failure: SETLINE Line entities can b
 
 ## Recent history
 
-- **v0.15.9.8.3** -- READY-TO-BAT 2026-05-12. Bridge dance + kani-slot override.
+- **v0.15.9.9.1** -- **BAT SUCCESS 2026-05-12.** Duplicate Squall "Let's go!" line at chase ASK open eliminated. 0xFF sentinel skip predicate in `ScanAndSpeakChoiceWindows` did exactly what the dialog-log trace predicted.
+- **v0.15.9.9** -- BAT SUCCESS 2026-05-12 (auto-pilot proven self-sufficient). Cap=INT_MAX verification + ASK text revisions. Local; not yet pushed.
+- **v0.15.9.8.3** -- **BAT SUCCESS 2026-05-12.** Pushed. 0 catches across the entire chase route. Bridge dance + kani-slot override worked exactly as designed. The asymmetric EAST/WEST state machine tricked X-ATM092 into a wasted westward leap during which the party slipped past to the east-edge SETLINE.
 - **v0.15.9.8.2** -- BAT 2026-05-11/12. Diagnostic-only; BridgeDiag identified laguna at Others slot 3 as the moving kani on the bridge. Drove v0.15.9.8.3 thresholds.
 - **v0.15.9.8.1** -- BAT SUCCESS 2026-05-12. targetY -3800 on doopen2a, zero catches.
 - **v0.15.9.7.8** -- **BAT SUCCESS 2026-05-12.** West trail walked, full chase completed end-to-end. ROOT CAUSE was InjectKey's unconditional KEYEVENTF_EXTENDEDKEY for non-extended W. Fixed + defensive re-press removed.
@@ -743,17 +886,17 @@ The INF gateway insight from v0.15.9.2.14's failure: SETLINE Line entities can b
 
 ### Next development priorities
 
-1. **BAT v0.15.9.8.3 on the bridge.** Expected markers: `ChaseDetector ... v0.15.9.8.3 OVERRIDE ... Others slot 3 (SYM 'laguna')` at field-debounce settle, `ChaseAutoPilot: ENGAGED ... mode=BRIDGE_DANCE` after ASK answered, `BridgeDance: sample state=... motion=...` at 10Hz throughout transit, `BridgeDance: leap #1 STARTED state=EAST ...` ~5s in, `BridgeDance: EAST->WEST transition` ~1s after that. Best case: `BridgeDance: WEST->EAST transition` on second leap with 0 catches recorded for `domt1_1` in `[CBF] count by field`. Acceptable: `BridgeDance: WEST->EAST TIMEOUT` after 5s with 0-1 catches.
-2. **Bridge dance refinement** based on v0.15.9.8.3 BAT data. If west-leg timeout fires, characterize laguna's west-leg behavior and update detection. If the dance works, cleanup pass: trim BridgeDiag verbosity, consider removing BridgeDiag entirely.
-3. **`dotown_1` south-exit / FMV completion.** UNBLOCKED 2026-05-12: Aaron confirmed the Lapin Beach FMV does fire after the extract is generated. The stuck-at-(-210,-1000) is the pre-FMV stall, not a real problem.
-4. **Stall recovery improvements** on `domt2_1`, `dotown_3`, `dotown_2` -- brief stalls of 5-7 s each. Lower priority than catch elimination.
-5. **Push v0.15.9.8.x to GitHub** after the bridge work is complete. Aaron runs `Utilities/push_to_github.vbs`. Claude does NOT push.
-2. **Add Finding #33 to the lessons doc.** Already done during the v0.15.9.7.8 checkpoint.
-3. **Clean up the vestigial re-press state.** `WALK_REPRESS_PERIOD` constant, `s_walkRepressCounter`, `s_walkRepressLogged` in `field_nav_directiondrive.inl` are no longer referenced. Safe to delete after a confidence cycle.
-4. **v0.15.10 -- Original = chase-mod-active flag.** Vanilla-engine chase behavior for the Original choice. Not blocking on full-chase completion.
-5. **Consolidate key-injection helpers** (lower priority, per Finding #33). Unify `world_map.cpp`'s `PressKey`/`ReleaseKey` with field-nav's `InjectKey`.
-6. **F9 path-finding cleanup.** Apply v0.15.9.2.4's kb-from-analog and v0.15.9.2.5's advance-on-stuck to F9 path-finding by dropping the `s_chaseDriveActive`-only gates.
-7. **v0.15.x cleanup** -- remove `Phase2_TestAsk` + Shift+F12 diagnostic.
+Chase auto-pilot catch elimination is COMPLETE (v0.15.9.8.3 pushed). Remaining chase scene work focuses on verification, the third ASK option, input safety, and ASK dialog polish.
+
+1. **Push v0.15.9.9 + v0.15.9.9.1 to GitHub.** Aaron runs `Utilities/push_to_github.vbs`. Will squash both into one commit using v0.15.9.9.1's CHANGELOG entry as the message.
+2. **v0.15.9.10 -- Third ASK option: 'Original' = no mod modifications to chase.** Per project memory, the chase ASK currently offers Manual/Auto/Original options but Original routes to `MODE_MANUAL`. Implement Original as a real third mode: don't engage chase_auto_pilot AND disable chase_battle_freeze (no cap, no freeze, no NO-OP, no agent register). Vanilla-engine chase behavior for users who want it. Touches `ChaseDetector::Mode` (add MODE_ORIGINAL), `ChaseAskOverlay::CommitChoice` routing, top-of-hook short-circuit in `chase_battle_freeze::Hook_opcode_battle` and `chase_kani_freeze`.
+3. **v0.15.9.11 -- Keyboard suppressor during Auto chase.** Stop the player from accidentally pressing direction keys during an engaged Auto chase. Currently if the player presses arrow keys, those events fight the analog override and could disrupt the route. Need to gate the suppressor narrowly: only during chase_auto_pilot ENGAGED state in Auto mode, only direction keys (arrows + W) -- preserve all F-key accessibility hotkeys, V (version), G/T/L/R, slash (help), backslash (world map AD), ASK navigation keys, etc. Existing `HookedGetKeyState` already zeros arrows when `s_analogOverrideActive` is true; extend to W (0x11), ESC (0x01), and FF8 confirm/cancel/menu keys.
+
+5. **Push v0.15.9.9+ to GitHub** after each verification cycle. Aaron runs `Utilities/push_to_github.vbs`. Claude does NOT push.
+6. **Cleanup of BridgeDiag verbosity** (low priority, can fold into v0.15.10). With the dance proven, the 10Hz per-sample BridgeDance log + the 10Hz BridgeDiag all-slots dump is noise on every BAT. Trim to transition-only events.
+7. **Add Finding #35 to the lessons doc**: SYM-name-resolution-fallback insight. When ChaseDetector's default SYM-name match resolves to an empty slot, the field may be reusing a generic NPC SYM template for the chase agent. The per-field override pattern in `ApplyPerFieldKaniOverride` is the model for similar fixes if they arise elsewhere.
+8. **Clean up the vestigial re-press state** in `field_nav_directiondrive.inl` (`WALK_REPRESS_PERIOD` constant, `s_walkRepressCounter`, `s_walkRepressLogged`). Already noted from v0.15.9.7.8.
+9. **v0.15.10 candidates**: removal of cap=0 battle suppressor (if v0.15.9.9 verification clean), consolidation of `world_map.cpp`'s `PressKey`/`ReleaseKey` with field-nav's `InjectKey` (Finding #33), F9 path-finding cleanup, removal of `Phase2_TestAsk` + Shift+F12 diagnostic.
 
 ### Standalone
 

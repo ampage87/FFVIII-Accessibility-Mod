@@ -4,6 +4,110 @@ Newest on top. Each entry begins with a `## vMAJOR.MINOR.BUILD` heading followed
 
 The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_accessibility.h`. The push utility refuses to push if they don't.
 
+## v0.15.9.9.1
+
+Fix duplicate Squall "Let's go!" line at chase ASK open.
+
+### Root cause
+
+v0.15.9.9 BAT confirmed the auto-pilot is fully self-sufficient (0 chase battles fired with `cap=INT_MAX`) and that the new ASK option labels read out correctly, but Aaron still heard the chase-trigger MES `"Forget it!  Let's go!"` announced twice when the ASK opened.
+
+Tracing `Logs/ff8_dialog.log` from the BAT identified the source. At 10:27:54 the chase-trigger MES fires through the AMESW path:
+
+```
+[10:27:54] FieldDialog: [AMESW] win[0] Speaking: "Squall "Forget it!  Let's go!""
+[10:27:54] FieldDialog: [SHOW_DIALOG-TEXT] win[0] (already spoken by opcode hook)   <- correctly suppressed
+```
+
+Three seconds later, when `chase_ask_overlay` opens the chase ASK in slot 2, `field_dialog.cpp`'s `ScanAndSpeakChoiceWindows` (which runs for every `opcode_ask`) iterates over ALL 8 dialog window slots looking for valid ASK choice fields. Slot 2 contains the new chase ASK. Slot 0 still holds Squall's chase-trigger MES from 3 seconds earlier with `firstQ=0xFF lastQ=0xFF` (FF8's "no ASK fields set" sentinel). The existing skip predicates `if (firstQ == 0 && lastQ == 0) continue;` and `if (lastQ < firstQ) continue;` correctly catch the all-zeros sentinel and inverted ranges respectively but miss the `(0xFF, 0xFF)` case. Slot 0 got decoded as a 0-choice dialog with non-empty prompt, and the prompt was spoken as if it were the ASK:
+
+```
+[10:27:57] FieldDialog: [ASK] win[0] Parsed 0 choices (firstQ=255 lastQ=255 curChoice=0)
+[10:27:57] FieldDialog: [ASK] win[0] Speaking: "Squall "Forget it! Let's go!""   <- THE DUPLICATE
+[10:27:57] FieldDialog: [ASK] win[2] Parsed 3 choices (firstQ=1 lastQ=3 curChoice=1)
+[10:27:57] FieldDialog: [ASK] win[2] Speaking: "X-ATM092 is heading right for you..."
+```
+
+The v0.15.9.9 prompt change only affected slot 2; the duplicate was always coming from slot 0, which is why the new explainer prompt couldn't eliminate it.
+
+### Fix
+
+One-line additive predicate in `src/field_dialog.cpp::ScanAndSpeakChoiceWindows` (around line 681):
+
+```cpp
+if (firstQ == 0xFF || lastQ == 0xFF) continue;
+```
+
+Windows where either choice-field is FF8's "unset" sentinel are not real ASKs and should be skipped. `0xFF` is unambiguously a sentinel (FF8 dialogs cap at ~16 choices, so neither `firstQ` nor `lastQ` can be `0xFF` in a real ASK).
+
+### Expected v0.15.9.9.1 BAT outcome
+
+Aaron triggers the chase, hears Squall's `"Forget it!  Let's go!"` line **once** via the AMESW opcode hook, then 3 seconds later hears the new ASK prompt + the three option labels with **no duplicate Squall line in between**. Everything else from v0.15.9.9 stays the same: 0 chase battles, full chase completion in Auto mode.
+
+If the duplicate persists, the source isn't the [ASK] handler; investigate `Hook_show_dialog` or `DialogInject::OpenAsk` next.
+
+### Risk
+
+Very low. One-line additive predicate. Worst case (we missed a legitimate ASK with one of the fields set to `0xFF`): the slot's text won't be read out, which is a quieter regression than the duplicate.
+
+### Files
+
+- `src/field_dialog.cpp`: sentinel check in `ScanAndSpeakChoiceWindows` around line 681 with the v0.15.9.9.1 BAT-traced rationale in comments.
+- `src/ff8_accessibility.h`: version bump to `0.15.9.9.1` with full top-comment.
+- `CHANGELOG.md`: this entry.
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`: current state + BAT plan.
+
+## v0.15.9.9
+
+VERIFICATION BUILD. Combines two coordinated changes (Aaron's chase-scene items #4 and #1, 2026-05-12):
+
+### Change 1: chase_battle_freeze AUTO cap raised to INT_MAX
+
+The v0.15.9.8.3 BAT recorded 0 `[CBF] NO-OP` lines on the whole chase. That number proves the suppressor didn't fire, but it doesn't prove WHY -- the underlying chase battle calls might have been 0 (chase_auto_pilot doing all the work) or N>0 (suppressor band-aid doing the work, just not recording NO-OPs because cap=0 forces NO-OP before the count is logged).
+
+v0.15.9.9 raises the AUTO-mode cap from 0 to `INT_MAX`, removing the band-aid for one BAT cycle. Any chase battle the auto-pilot fails to avoid will now PASS through to a real battle screen instead of being silently NO-OP'd.
+
+Expected BAT outcomes:
+
+- **Best (proves auto-pilot self-sufficient)**: 0 `[CBF] PASS chase BATTLE call` lines AND 0 NO-OPs on any chase field. The suppressor is provably vestigial in AUTO and can be removed entirely in v0.15.10.
+- **Worst (real regression to fix)**: 1+ `[CBF] PASS chase BATTLE call` lines. The log identifies the field and timing; we fix the auto-pilot before retiring the band-aid. Revert the cap constant to 0 in v0.15.9.9.1 to restore the band-aid while investigating.
+
+MANUAL cap stays at 1 (the scripted first-battle-per-field pass-through preserves vanilla MANUAL behavior).
+
+Implementation: one-line constant change in `Hook_opcode_battle` (`int cap = (mode == ChaseDetector::MODE_AUTO) ? INT_MAX : 1;`), `<climits>` added to the include list for `INT_MAX`, and the Initialize log message updated to reflect the new cap value so the field log shows "cap=INT_MAX in AUTO (VERIFICATION BUILD)" at startup.
+
+### Change 2: chase_ask_overlay text revisions
+
+Four string changes in `chase_ask_overlay.cpp` to address Aaron's BAT feedback that the ASK opens with a redundant Squall "Let's go!" announcement (probably the engine re-reading the prior field-dialog slot text when DialogInject's ASK opens in that slot):
+
+- Prompt changed from `"Mode?"` to `"X-ATM092 is heading right for you. How do you want to run?"`. Replaces the redundant Squall line with situational context. If the duplication was coming from the slot's pre-existing text, the new prompt overwrites it. If it's coming from somewhere else (DialogInject internals, field_dialog's show_dialog hook), the new prompt at least replaces the wasted reading time with useful information.
+- `kChaseChoices` labels updated to describe what each option does:
+  - `"Manual: drive yourself, one battle per field"` (was `"Manual: one battle per field"`).
+  - `"Auto: mod drives, no battles or shake"` (was `"Auto: falls back to manual"`, now accurate).
+  - `"Original: vanilla chase, no mod help"` (was `"Original: falls back to manual"`).
+
+The Original label promises behavior that requires v0.15.9.10's `MODE_ORIGINAL` to actually deliver. Aaron's call: ship the descriptive label now (sets expectations for the eventual implementation) versus keeping the honest `"falls back to manual"` label until v0.15.9.10. v0.15.9.9 ships the descriptive label; if Aaron changes his mind during BAT, we revert one string in v0.15.9.9.1.
+
+The brief commit announces in `CommitChoice` (`"Manual selected"` / `"Automatic selected"` / `"Original selected"`) stay unchanged -- they were already concise and the new descriptive labels carry the explanation during cursor navigation.
+
+### Verification log markers
+
+- `ChaseBattleFreeze: Initialized v0.15.9.9 (... cap=INT_MAX in AUTO (VERIFICATION BUILD) ...)` at startup.
+- `ChaseAskOverlay: chase ASK opened via DialogInject (slot=2, 3 choices, default cursor=1)` when the ASK fires.
+- During the chase: ZERO `[CBF]` lines (PASS or NO-OP) on chase fields. If any PASS fires, it's a regression to investigate.
+
+### Risk
+
+Low. Single constant change in chase_battle_freeze, four strings in chase_ask_overlay. Worst case is a real chase battle firing during the BAT, in which case we revert the cap constant to 0 in v0.15.9.9.1.
+
+### Files
+
+- `src/chase_battle_freeze.cpp`: cap constant, log message, `<climits>` include.
+- `src/chase_ask_overlay.cpp`: prompt string, `kChaseChoices` labels.
+- `src/ff8_accessibility.h`: version bump to `0.15.9.9` with full top-comment.
+- `CHANGELOG.md`: this entry.
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`: current state + BAT plan.
+
 ## v0.15.9.8.3
 
 Bridge dance (`domt1_1`) + kani-slot override. Ships two coordinated changes targeting the bridge's remaining catch at X~2053 reported by every BAT from v0.15.9.7.8 onward through v0.15.9.8.2.

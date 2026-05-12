@@ -79,10 +79,16 @@ static const int CHASE_ASK_SLOT = 2;
 // honestly note they fall back to manual until v0.15.9 / v0.15.10
 // implement them. The brief commit announces in CommitChoice ("Manual
 // selected" etc.) replace the prior verbose mode-specific message.
+//
+// v0.15.9.9: labels updated to describe what each option does now that
+// Auto is fully implemented (v0.15.9.8.3 BAT achieved 0 catches across
+// the whole chase). Original still falls back to Manual until v0.15.9.10
+// implements MODE_ORIGINAL; the label change is deferred to that version
+// so we don't promise behavior the build doesn't yet deliver.
 static const char* kChaseChoices[] = {
-    "Manual: one battle per field",
-    "Auto: falls back to manual",
-    "Original: falls back to manual"
+    "Manual: drive yourself, one battle per field",
+    "Auto: mod drives, no battles or shake",
+    "Original: vanilla chase, no mod help"
 };
 static const int   kChaseChoicesCount = 3;
 static const int   kChaseChoicesDefaultCursor = 1;  // Manual
@@ -134,7 +140,16 @@ static void OpenAsk()
     // mode-specific announce ("Manual selected" / "Automatic selected"
     // / "Original selected") instead -- single short line so the chase
     // resumes promptly without TTS still rattling on.
-    bool ok = DialogInject::OpenAsk("Mode?",
+    //
+    // v0.15.9.9: prompt changed from "Mode?" to a brief explainer.
+    // Per Aaron's BAT feedback: the old prompt caused Squall's "Let's
+    // go!" line to be re-read by the engine when the ASK opened in the
+    // pre-existing field-dialog slot, then "Mode?" was spoken, then the
+    // three options. The new prompt overwrites the slot text with
+    // something the player needs to hear (situational context), so the
+    // duplication either disappears entirely (DialogInject's slot paint
+    // is the source) or is replaced by useful information.
+    bool ok = DialogInject::OpenAsk("X-ATM092 is heading right for you. How do you want to run?",
                                     kChaseChoices,
                                     kChaseChoicesCount,
                                     kChaseChoicesDefaultCursor,

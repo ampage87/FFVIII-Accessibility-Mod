@@ -678,6 +678,23 @@ static void ScanAndSpeakChoiceWindows(const char* opcodeLabel)
         // Only process this window as a choice dialog if it has valid choice fields
         if (firstQ == 0 && lastQ == 0) continue;
         if (lastQ < firstQ) continue;
+        // v0.15.9.9.1: FF8's "no ASK fields set" sentinel is 0xFF (255).
+        // When a previous MES leaves text in a window slot but the slot
+        // never had ASK fields set (e.g. slot 0 holding Squall's chase-
+        // trigger "Let's go!" line while chase_ask_overlay opens its ASK
+        // in slot 2), this hook iterates over slot 0 and treats it as a
+        // choice dialog -- speaking the stale prompt as a duplicate. The
+        // (0, 0) check above only catches the all-zeros sentinel; the
+        // (lastQ < firstQ) check only catches inverted ranges; (0xFF,
+        // 0xFF) slipped through both. v0.15.9.9 BAT confirmed this is
+        // the source of the duplicate "Let's go!" that the ASK prompt
+        // change couldn't eliminate (since the prompt change only
+        // affected slot 2, while the duplicate was coming from slot 0).
+        // 0xFF is FF8's universal "unset" sentinel for these uint8_t
+        // fields and cannot represent a legitimate ASK (FF8 dialogs cap
+        // at ~16 choices, so neither firstQ nor lastQ is ever 0xFF in
+        // a real ASK).
+        if (firstQ == 0xFF || lastQ == 0xFF) continue;
 
         FF8TextDecode::ChoiceDialog dialog =
             FF8TextDecode::DecodeChoices((const uint8_t*)text1, 512, firstQ, lastQ);

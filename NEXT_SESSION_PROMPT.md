@@ -1,157 +1,73 @@
-# Next Session Prompt -- v0.15.9.8.3 READY-TO-BAT; bridge dance + kani-slot override
+# Next Session Prompt -- v0.15.9.9.1 READY-TO-BAT (duplicate "Let's go!" fix)
 
-**Build state:** v0.15.9.8.3 implemented 2026-05-12, awaiting build. Two coordinated changes targeting the bridge's remaining catch from v0.15.9.8.1 / .8.2 BATs:
+**Build state:** v0.15.9.9.1 implemented 2026-05-12, awaiting build. One-line predicate added to `src/field_dialog.cpp::ScanAndSpeakChoiceWindows` to skip windows whose `firstQ`/`lastQ` is `0xFF` (FF8's "no ASK fields set" sentinel).
 
-1. **ChaseDetector per-field kani-slot override** for `domt1_1`. Routes the kani entity pointer to Others slot 3 (SYM 'laguna'), which v0.15.9.8.2 BAT BridgeDiag (416 samples / 6.7 seconds) empirically proved is the actually-pursuing X-ATM092. The default `"kani"` SYM resolves to Others slot 6 which reads `(0, 0)` the entire transit -- the bridge field reuses the `laguna` template for its chase agent.
-2. **MODE_BRIDGE_DANCE state machine** in chase_auto_pilot.cpp, used only on `domt1_1`. Per-tick (10Hz) classification of the kani's X-velocity as LEAPING (>200 units/tick), LANDED (<50 units/tick), or CHASING (everything between). Two states (EAST_LEG / WEST_LEG) with asymmetric transition rules: turn west when kani lands ahead AFTER observing a leap; turn east the instant a new leap STARTS mid-air. 5-second west-leg timeout safety net.
-
-**HEAD on GitHub:** v0.15.9.7.8 (pushed 2026-05-12, commit `64f3b736`). Local tree is several versions ahead at v0.15.9.8.3 awaiting BAT.
+**HEAD on GitHub:** v0.15.9.8.3 (pushed 2026-05-12). Local tree is two versions ahead at v0.15.9.9.1 awaiting BAT. After this BAT succeeds, Aaron pushes v0.15.9.9 + v0.15.9.9.1 in a single cumulative push to GitHub.
 
 ## Read first
 
-1. `DEVNOTES.md` -- current state (v0.15.9.8.3 READY-TO-BAT section at top, with full v0.15.9.8.2 BAT findings that drove the v0.15.9.8.3 thresholds).
+1. `DEVNOTES.md` -- current state (v0.15.9.9.1 READY-TO-BAT section at top, plus v0.15.9.9 BAT success preserved for context).
 2. This file -- BAT plan and verification markers.
-3. The top of `src/chase_auto_pilot.cpp` -- inline rationale for the MODE_BRIDGE_DANCE implementation and threshold derivation.
 
-## What just landed
+## What just landed (v0.15.9.9.1)
 
-**v0.15.9.8.2 BAT (2026-05-11/12) identified laguna at Others slot 3 as the bridge's chase agent.** 416 BridgeDiag samples over 6.7 seconds documented:
+Targeted fix for the duplicate Squall "Let's go!" line that v0.15.9.9 BAT identified as the one remaining issue.
 
-- Y is **constant** at -446 on the bridge -- jumps are X-axis only in walkmesh coords (visual jump is the 3D Z axis). This refuted the pre-BAT Y-axis-divergence hypothesis.
-- Normal pursuit: ~106 units / 100ms tick.
-- Leap: ~372 units / 100ms tick (3.5x normal).
-- Landed: 0-1 units / tick.
+### Root cause from Logs/ff8_dialog.log at 10:27:54-57
 
-The catch fires at tick ~67 when the party reaches X=2053 with laguna landed 1747u east at X=3836. v0.15.9.8.2 BAT recorded the same 1 catch as v0.15.9.8.1 (diagnostic-only build, no behavior change).
+The chase-trigger MES fires once correctly through AMESW (win[0]). Three seconds later, when `chase_ask_overlay` opens the chase ASK in slot 2, `ScanAndSpeakChoiceWindows` iterates over ALL 8 dialog window slots. Slot 0 still holds Squall's "Let's go!" with `firstQ=0xFF lastQ=0xFF` (FF8's "no ASK fields set" sentinel). The existing skip predicates `if (firstQ == 0 && lastQ == 0) continue;` and `if (lastQ < firstQ) continue;` correctly catch the all-zeros sentinel and inverted ranges but miss the `(0xFF, 0xFF)` case. Slot 0 got decoded as a 0-choice dialog with non-empty prompt, and the prompt was spoken as a duplicate.
 
-**v0.15.9.8.3 ships two coordinated changes** to break the catch:
+The v0.15.9.9 prompt change only affected slot 2; the duplicate was always coming from slot 0, which is why the new explainer prompt couldn't have eliminated it.
 
-### Change 1: ChaseDetector::ApplyPerFieldKaniOverride (chase_detector.cpp)
+### Fix
 
-Called from `OnDebouncedFieldChange` after `ResolveKaniLocation`. For `domt1_1`, overwrites `s_kaniLoc` with arrayKind=2 (Others), arraySlot=3, symIdx=9, symName='laguna'. After the override, `ReadKaniPosition()` returns laguna's real position instead of slot 6's (0, 0).
+`src/field_dialog.cpp` around line 681, added after the existing sentinel checks:
 
-### Change 2: MODE_BRIDGE_DANCE (chase_auto_pilot.cpp)
+```cpp
+if (firstQ == 0xFF || lastQ == 0xFF) continue;
+```
 
-New drive mode (`MODE_BRIDGE_DANCE = 3`), explicit `kFieldConfigs` entry for `domt1_1`, `UpdateBridgeDance(fieldName)` helper runs at 10Hz.
+`0xFF` is unambiguously a sentinel (FF8 dialogs cap at ~16 choices, so neither `firstQ` nor `lastQ` can be `0xFF` in a real ASK). Comments document the v0.15.9.9 BAT-traced rationale so future-Claude understands why the predicate is there.
 
-**State machine:**
+## BAT plan for v0.15.9.9.1
 
-- **EAST_LEG (initial)**: drive east. When kani lands in front of party (`isLanded && kX > pX`) for 2 consecutive samples AND `wasLeaping` latch is true AND minDwell (1s) met -> turn west. The latch is essential because laguna's pre-chase 12-sample stationary phase would otherwise trip the landed-ahead detector on sample 1.
-- **WEST_LEG**: drive west. When a new leap STARTS (`justStartedLeaping` edge) AND minDwell met -> turn east. Asymmetric rule from Aaron's mechanic: turn the instant the robot is mid-air, before it can course-correct.
-- **WEST_LEG timeout**: 5 seconds with no leap fires -> bail back to east. Worst-case behavior = identical to v0.15.9.8.2 (1 catch).
-
-**Thresholds:** `kBridgeLeapThreshold=200`, `kBridgeLandThreshold=50`, `kBridgeLandConsec=2`, `kBridgeMinDwellTicks=60`, `kBridgeWestTimeoutTicks=300`.
-
-BridgeDiag from v0.15.9.8.2 remains active for one more BAT cycle to confirm slot-3 consistency and capture west-leg robot behavior (which is empirically unknown).
-
-## BAT plan for v0.15.9.8.3
-
-Aaron's BAT cycle:
-
-1. `deploy.vbs` -> `src/deploy.ps1` -> `src/deploy.bat`
+1. `deploy.vbs` -> `src/deploy.ps1` -> `src/deploy.bat`.
 2. Launch FF8, load the save near chase start.
-3. Trigger the chase. Choose **Auto** mode at the chase ASK.
-4. Go hands-off through the whole chase, especially the bridge. Pay attention to whether the party AUDIBLY changes direction (footsteps reversing) when the robot lands in front, and again when the robot leaps.
-5. After the chase climax FMV, exit FF8 and regenerate `Logs/chase_events_extract.log` via `Utilities/dump_chase_events.vbs`.
+3. Trigger the chase. Listen for the sequence:
+   - Squall's "Forget it! Let's go!" line speaks ONCE via AMESW.
+   - 3 seconds elapse (chase_ask_overlay's deferred-open timer).
+   - The new ASK prompt reads: "X-ATM092 is heading right for you. How do you want to run?"
+   - The three option labels read on cursor navigation, NO duplicate Squall line in between.
+4. Choose **Auto** at the ASK.
+5. Confirm chase completes hands-off with 0 battles (same as v0.15.9.9).
 
-### Verification markers (in `Logs/ff8_field.log`)
+### Verification markers in Logs/ff8_dialog.log
 
-**On `domt1_1` entry (field-debounce settle), expect:**
-
-```
-ChaseDetector: field='domt1_1' kani symIdx=12 -> Others slot 6 (...)
-ChaseDetector: field='domt1_1' v0.15.9.8.3 OVERRIDE -> kani -> Others slot 3 (SYM 'laguna'), ...
-```
-
-The default SYM resolution fires first, then the override fires. **If the OVERRIDE line is absent, the override path didn't run -- investigate `ApplyPerFieldKaniOverride` call site in `OnDebouncedFieldChange`.**
-
-**On engagement (after ASK answered), expect:**
+**Expected sequence after fix:**
 
 ```
-ChaseAutoPilot: ENGAGED on field='domt1_1' mode=BRIDGE_DANCE initial state=EAST_LEG direction=east running (dirX=+1 dirY=0 walk=0). ...
+FieldDialog: [AMESW] win[0] Speaking: "Squall "Forget it!  Let's go!""
+... 3s elapse ...
+[DLG-INJ] v0.15.7 cursor-change slot=2 curQ 255->1 announce="Manual: ... selected"
 ```
 
-**Per-sample at 10Hz throughout transit, expect:**
+**No longer expected (was the duplicate in v0.15.9.9):**
 
 ```
-BridgeDance: sample state=EAST motion=CHASING|LEAPING|LANDED kani=(X,Y) party=(X,Y) kdx=N consecLanded=N wasLeaping=0|1 dwell=N
+FieldDialog: [ASK] win[0] Parsed 0 choices (firstQ=255 lastQ=255 curChoice=0)
+FieldDialog: [ASK] win[0] Speaking: "Squall "Forget it! Let's go!""
 ```
 
-**Around the leap moment (~5s into transit), expect:**
+If the `[ASK] win[0] Parsed 0 choices` line is gone from the log, the fix worked. If it's still there, the predicate didn't catch the case and we need to investigate further.
 
-```
-BridgeDance: leap #1 STARTED state=EAST kani=(X,Y) party=(X,Y) kdx=~400
-... [several LEAPING samples] ...
-... [LANDED samples with kani.X > party.X] ...
-BridgeDance: EAST->WEST transition kani=(~3836,-446) party=(~1500,-607) kdx=~0 (landed_in_front for 2 samples, leapCount=1, dwell=N)
-```
+### Outcomes
 
-**After the turn, watch for what laguna does:**
+- **Best (duplicate eliminated):** Aaron hears Squall's line once, then the new ASK prompt + option labels cleanly. Aaron pushes v0.15.9.9 + v0.15.9.9.1 cumulatively to GitHub.
+- **Partial (duplicate still present but log shows slot 0 skipped):** The duplicate is coming from a different code path. Next candidates: `Hook_show_dialog`'s slot-paint re-read or `DialogInject::OpenAsk`'s render path. v0.15.9.9.2 traces those.
+- **Worst (something we didn't anticipate):** Revert the predicate in v0.15.9.9.2 and re-diagnose.
 
-- **Best case**: laguna leaps again (westward, or some other re-engagement) -> `BridgeDance: leap #2 STARTED state=WEST ...` -> `BridgeDance: WEST->EAST transition ...`. Party then runs east unobstructed across the rest of the bridge. **0 catches on domt1_1.**
-- **Acceptable**: no second leap fires within 5 seconds -> `BridgeDance: WEST->EAST TIMEOUT ...`. Party reverts to east, may get caught at X=2053 like v0.15.9.8.2 (0-1 catches).
-- **Worst**: unforeseen failure mode. BridgeDiag captures the slot trajectories during the west leg; post-BAT analysis tells us what laguna did.
+## Outstanding chase-scene items (after v0.15.9.9.1 BAT)
 
-**On field exit (east-edge SETLINE crossing into doopen2a), expect:**
-
-```
-ChaseDetector: fieldId changed to 0x... -- starting 2000 ms name-debounce
-ChaseAutoPilot: DISENGAGED (field changed) was on field='domt1_1' mode=3
-ChaseDetector: name debounce settled: id=0x... name='doopen2a'
-```
-
-Bridge transit time goal: 10-15 seconds (vs 9 seconds in v0.15.9.8.2 -- the dance adds a west-leg detour). Catch count goal: 0.
-
-### Three-way outcome triage
-
-**SUCCESS (the dance works):**
-
-- 0 `[CBF]` catches on `domt1_1` in the BAT extract's `[CBF] count by field` table.
-- Log shows `EAST->WEST transition` followed by `WEST->EAST transition` (no TIMEOUT).
-- Bridge transit 10-15 seconds.
-- Total chase catch count drops to 0.
-- Cleanup pass in v0.15.9.8.4: trim BridgeDiag verbosity (it's served its purpose), shrink per-sample logging to transition-only.
-
-**ACCEPTABLE (timeout fires, partial improvement):**
-
-- `BridgeDance: WEST->EAST TIMEOUT` appears in log.
-- 0-1 catches on `domt1_1`.
-- v0.15.9.8.4 characterizes laguna's west-leg behavior from BridgeDiag samples and tightens the WEST->EAST detection. Possibly add an additional turn-east criterion (e.g., "laguna sufficiently west of party with no recent leap, safe to resume east").
-
-**FAIL (something broke or got worse):**
-
-- More than 1 catch on `domt1_1`, OR the dance oscillates (multiple EAST->WEST and WEST->EAST transitions per second despite `kBridgeMinDwellTicks=60` debounce), OR `BridgeDance: kani read FAILED` lines appear (override didn't work).
-- For oscillation: thresholds were misjudged; v0.15.9.8.4 widens the leap/land gap and bumps minDwell.
-- For kani read failure: investigate `ApplyPerFieldKaniOverride` -- maybe Others slot 3 is null at the moment of engagement, or arrayKind=2 doesn't resolve correctly on this field.
-- For more catches: the dance is actively making things worse (e.g., turning west blocks party from making progress, or the chase script penalizes direction changes); rollback v0.15.9.8.3 to v0.15.9.8.2's no-behavior-change state and rethink.
-
-## Cumulative chase catch progression
-
-| Version | Total chase catches | Delta |
-|---|---|---|
-| v0.15.9.2.18 (baseline) | 11 | -- |
-| v0.15.9.7.8 (west trail) | 3 | -8 |
-| v0.15.9.8 (town square) | 2 | -1 |
-| v0.15.9.8.1 (town square refinement) | 1 | -1 |
-| v0.15.9.8.2 (diagnostic) | 1 | 0 |
-| **v0.15.9.8.3 target** | **0** | **-1** |
-
-A successful v0.15.9.8.3 BAT closes out the chase-scene catch elimination work.
-
-## Outstanding items after v0.15.9.8.3 BAT
-
-Pending BAT outcome:
-
-1. **`dotown_1` south-exit / FMV completion.** UNBLOCKED 2026-05-12: Aaron confirmed Lapin Beach FMV fires after extract ends. Stall is pre-FMV, not a problem.
-2. **Stall recovery improvements** on `domt2_1`, `dotown_3`, `dotown_2` -- brief stalls of 5-7s each. Lower priority than catch elimination.
-3. **Aaron pushes v0.15.9.8.x to GitHub** after the bridge work is complete via `Utilities/push_to_github.vbs`. Claude does NOT push. Every version bump from v0.15.9.7.8 onward must have a matching top-of-CHANGELOG entry; the push utility validates this.
-4. **Lessons doc** -- add Finding #35 (or whatever number) capturing the SYM-name-resolution-fallback insight: when the default SYM-name match resolves to an empty slot, the field may be reusing a generic NPC SYM template for the chase agent. The per-field override pattern in `ApplyPerFieldKaniOverride` is the model for similar fixes if they arise elsewhere.
-5. **Cleanup** of BridgeDiag once the dance is proven (v0.15.9.8.4 candidate).
-
-## What happens if v0.15.9.8.3 BAT succeeds
-
-Update DEVNOTES + CHANGELOG to capture the BAT result. The chase auto-pilot is then complete for catch elimination across the playable route. Aaron can choose to ship v0.15.9.8.3 to GitHub before moving on to v0.15.10 (Original = chase-mod-active flag) or other backlog items.
-
-## What happens if v0.15.9.8.3 BAT returns ACCEPTABLE or FAIL
-
-Iterate on thresholds / detection logic. v0.15.9.8.4 either tightens the WEST->EAST detection for the timeout-fire case, or rolls back to v0.15.9.8.2 for the FAIL case and rethinks the bridge mechanic from scratch using the new west-leg BridgeDiag data.
+2. **v0.15.9.10 -- Original = MODE_ORIGINAL** (Aaron's item #2). Add `MODE_ORIGINAL = 2` to `ChaseDetector::Mode`. `chase_battle_freeze` short-circuits at top of hook for MODE_ORIGINAL (no PASS log, no NO-OP, no agent register, full pass-through to original). `chase_kani_freeze` similarly short-circuits. `chase_ask_overlay::CommitChoice` routes `ANSWER_ORIGINAL` to MODE_ORIGINAL instead of MODE_MANUAL. Vanilla-engine chase for users who want it.
+3. **v0.15.9.11 -- Keyboard suppressor during Auto chase** (Aaron's item #3). Extend `HookedGetKeyState` in `field_nav_input_hooks.inl` to zero W (0x11), ESC (0x01), and FF8 confirm/cancel/menu scancodes when `ChaseAutoPilot::IsEngaged() && ChaseDetector::GetChaseMode() == MODE_AUTO`. Accessibility hotkeys (read via `GetAsyncKeyState` in mod-owned code) bypass the keyboard buffer entirely so they're unaffected.
+4. **Aaron pushes v0.15.9.9 + v0.15.9.9.1 to GitHub** after BAT success. Push utility validates CHANGELOG heading matches `FF8OPC_VERSION`; refuses if mismatched. With v0.15.9.9.1 as the top heading, the push will create one cumulative commit from v0.15.9.8.3 to v0.15.9.9.1.

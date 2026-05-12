@@ -31,6 +31,7 @@
 #include "minhook/include/MinHook.h"
 
 #include <windows.h>
+#include <climits>     // v0.15.9.9: INT_MAX for the Auto-mode verification cap
 #include <cstdio>
 #include <cstring>
 
@@ -85,7 +86,24 @@ static int __cdecl Hook_opcode_battle(int entityPtr)
         // if chase_auto_pilot's W-press hasn't engaged in time on the
         // west trail (race window at field entry), the ground-shake
         // battle that would fire from running gets NO-OP'd anyway.
-        int  cap    = (mode == ChaseDetector::MODE_AUTO) ? 0 : 1;
+        //
+        // v0.15.9.9: AUTO-mode cap RAISED to INT_MAX for verification.
+        // The v0.15.9.8.3 BAT showed 0 [CBF] NO-OPs on the whole chase --
+        // but that doesn't tell us whether the underlying chase battle
+        // calls were 0 (chase_auto_pilot doing all the work) or N>0
+        // (suppressor doing the work as a band-aid). To find out, raise
+        // the AUTO cap so any battle the auto-pilot fails to avoid will
+        // PASS through to a real battle screen. Expected v0.15.9.9 BAT
+        // outcome: 0 [CBF] PASS lines on chase fields AND 0 NO-OPs --
+        // proves the suppressor is provably vestigial in AUTO mode and
+        // can be removed entirely in v0.15.10. If any [CBF] PASS line
+        // appears, the chase battle is a real regression we need to fix
+        // in chase_auto_pilot before the suppressor can be retired;
+        // revert this constant to 0 to restore the band-aid until the
+        // regression is addressed. MANUAL cap stays at 1 (the scripted
+        // first-battle-per-field pass-through preserves vanilla MANUAL
+        // behavior).
+        int  cap    = (mode == ChaseDetector::MODE_AUTO) ? INT_MAX : 1;
         bool freeze = (battleCount >= cap);
 
         if (freeze) {
@@ -101,13 +119,25 @@ static int __cdecl Hook_opcode_battle(int entityPtr)
             return JSM_RC_ADVANCE;
         }
 
-        // PASS: first chase battle in field (only reachable in MANUAL
-        // mode at battleCount==0; AUTO caps at 0 so this branch never
-        // fires there). Log it AND (in most fields) register the
-        // calling entity as the field's chase agent so chase_kani_freeze
-        // can pin it post-battle. RegisterChaseAgent is idempotent, so
-        // subsequent PASS events with the same entityPtr in the same
-        // field are no-ops.
+        // PASS: first chase battle in field. In MANUAL mode (cap=1)
+        // this is the scripted opening encounter; subsequent battles
+        // on the same field hit the NO-OP branch above. In AUTO mode
+        // (cap=INT_MAX per v0.15.9.9 verification build) this branch
+        // fires for ANY chase battle the auto-pilot fails to avoid --
+        // and emits the [CBF] PASS log line we're looking for as proof
+        // of v0.15.9.8.3 catch elimination. v0.15.9.9 expected: 0 PASS
+        // lines on chase fields (auto-pilot self-sufficient). If a PASS
+        // line fires, that's a real chase battle the auto-pilot let
+        // through; the log identifies the field/timing for diagnosis.
+        // Pre-v0.15.9.9 AUTO mode had cap=0 (this branch was unreachable
+        // in AUTO); the band-aid is on hold for one BAT cycle so we can
+        // verify whether the auto-pilot is sufficient on its own.
+        //
+        // Log it AND (in most fields) register the calling entity as
+        // the field's chase agent so chase_kani_freeze can pin it
+        // post-battle. RegisterChaseAgent is idempotent, so subsequent
+        // PASS events with the same entityPtr in the same field are
+        // no-ops.
         const char* fieldName = ChaseDetector::GetDebouncedFieldName();
         Log::Field("[CBF] PASS chase BATTLE call #%ld (total #%ld) "
                    "field='%s' mode=%s battleCount=%d cap=%d "
@@ -182,11 +212,13 @@ void Initialize()
         return;
     }
 
-    Log::Mod("ChaseBattleFreeze: Initialized v0.15.9 (opcode_battle hooked at "
+    Log::Mod("ChaseBattleFreeze: Initialized v0.15.9.9 (opcode_battle hooked at "
              "0x%08X, trampoline=0x%08X). Gates: cap=1 in MANUAL (PASS at "
-             "battleCount==0, NO-OP at >=1), cap=0 in AUTO (NO-OP all "
-             "chase battles); skip register-agent in doopen2a only; "
-             "all NO-OPs return %d. "
+             "battleCount==0, NO-OP at >=1), cap=INT_MAX in AUTO "
+             "(VERIFICATION BUILD -- chase battles PASS through to real "
+             "battle screen; v0.15.9.8.3 catch elimination is proven if "
+             "BAT shows 0 PASS lines on chase fields); skip register-agent "
+             "in doopen2a only; all NO-OPs return %d. "
              "Hook activated by global MH_EnableHook(ALL).",
              s_battleAddr, (uint32_t)(uintptr_t)s_origBattle, JSM_RC_ADVANCE);
     s_initialized = true;
