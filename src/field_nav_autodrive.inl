@@ -29,6 +29,46 @@
 // dropped-input issues surface in the field log.
 static void InjectKey(WORD scanCode, bool down, bool extended = true)
 {
+    // v0.15.9.11.3.4: During chase Auto, FF8's keyboard input comes
+    // EXCLUSIVELY from chase_keyboard's synthetic buffer -- so we drive the
+    // synthetic buffer directly and skip SendInput entirely.
+    //
+    // Disassembly of FF8_EN.exe's input pipeline (engine_eval_keyboard_gamepad_input
+    // @0x00467D10, get_key_state @0x004685F0, ctrl_keyboard_actions @0x004A2E50)
+    // confirmed FF8 reads keyboard state ONLY from the 256-byte DirectInput
+    // device buffer whose pointer lives at *0x01CD02D8. engine_eval makes one
+    // call per frame to get_keyboard_state (which FFNx replaces with
+    // GetGameKeyState -> GetDeviceState, the call chase_keyboard hooks), stores
+    // the returned buffer pointer, and every downstream reader -- engine_eval
+    // itself, get_key_state, ctrl_keyboard_actions -- reads only that buffer.
+    // There is NO path that reads OS-level key state for movement: no
+    // GetAsyncKeyState, no GetKeyboardState, no WM_KEYDOWN consumption. (The
+    // lone GetAsyncKeyState import is a Ctrl+Q WndProc hotkey, unrelated.)
+    //
+    // Consequence: while chase_keyboard is active, the SendInput() path below
+    // reaches NOTHING in FF8 -- FF8 sees only the synthetic buffer. All
+    // SendInput did was dump synthetic key events into the shared OS input
+    // queue, where they interleaved with the user's physical key presses and
+    // desynced SetHeldDirections' diff model. That is the root cause of the
+    // v0.15.9.11.3.1/.2/.3 BAT failures (chase clean hands-off, caught when
+    // keys pressed). Removing the SendInput call during chase Auto eliminates
+    // the OS-queue collision by construction; the synthetic-buffer write below
+    // is the complete and sufficient delivery path -- it produces the same
+    // 0x80<->0x00 byte transitions the engine's edge detection needs, including
+    // for the keep-alive pulse.
+    //
+    // Outside chase Auto (F9 path-finding, world-map AD): ChaseKeyboard::
+    // IsActive() returns false; SendInput is the only delivery path and
+    // behavior is unchanged.
+    if (::ChaseKeyboard::IsActive()) {
+        if (down) {
+            ::ChaseKeyboard::SetScancodeDown((uint8_t)scanCode, extended);
+        } else {
+            ::ChaseKeyboard::SetScancodeUp((uint8_t)scanCode, extended);
+        }
+        return;
+    }
+
     INPUT inp      = {};
     inp.type       = INPUT_KEYBOARD;
     inp.ki.wVk     = 0;      // must be 0 when using KEYEVENTF_SCANCODE

@@ -9,12 +9,15 @@
 // v02.00: First production build. Title screen TTS with direct memory
 //         read of cursor position at pMenuStateA + 0x1F6.
 
+#include <dinput.h>
+
 #include "chase_diag.h"
 #include "chase_detector.h"
 #include "chase_ask_overlay.h"
 #include "chase_auto_pilot.h"
-#include "chase_kani_freeze.h"
 #include "chase_battle_freeze.h"
+#include "chase_keyboard.h"
+#include "chase_kani_freeze.h"
 #include "dialog_inject.h"
 #include "ff8_accessibility.h"
 #include "ff8_addresses.h"
@@ -55,7 +58,380 @@ static DirectInput8Create_t pDirectInput8Create = nullptr;
 static HMODULE hOriginalDll = nullptr;
 static HMODULE hOurModule = nullptr;  // Our DLL's HMODULE, for locating Audio Descriptions folder
 
-extern "C" __declspec(dllexport) HRESULT WINAPI DirectInput8Create(
+// ============================================================================
+// v0.15.9.11.3: IDirectInput8A::CreateDevice vtable hook
+// ============================================================================
+//
+// To install chase_keyboard's GetDeviceState detour on the keyboard device,
+// we need a pointer to that device. FF8/FFNx obtains it via
+// IDirectInput8::CreateDevice(GUID_SysKeyboard, ...). We hook CreateDevice
+// on the IDirectInput8 instance returned by our DirectInput8Create proxy,
+// then forward the device pointer to chase_keyboard::OnDeviceCreated when
+// the keyboard is requested.
+//
+// Vtable layout for IDirectInput8A (from dinput.h):
+//   [0] QueryInterface  [1] AddRef        [2] Release
+//   [3] CreateDevice    [4] EnumDevices   [5] GetDeviceStatus
+//   [6] RunControlPanel [7] Initialize    [8] FindDevice
+//   [9] EnumDevicesBySemantics [10] ConfigureDevices
+//
+// CreateDevice is index 3. Standard COM vtable patching: read the slot,
+// MH_CreateHook it, MH_EnableHook. We hook the IDirectInput8A vtable
+// directly (not per-instance), so the hook persists for the life of the
+// process and covers any subsequent CreateDevice calls regardless of
+// which IDirectInput8A pointer makes them.
+
+typedef HRESULT (__stdcall *CreateDevice_t)(IDirectInput8A*,
+                                            REFGUID,
+                                            LPDIRECTINPUTDEVICE8A*,
+                                            LPUNKNOWN);
+static CreateDevice_t s_origCreateDevice = nullptr;
+static bool s_createDeviceHookInstalled = false;
+
+static HRESULT __stdcall HookedCreateDevice(IDirectInput8A* di,
+                                            REFGUID rguid,
+                                            LPDIRECTINPUTDEVICE8A* lplpDevice,
+                                            LPUNKNOWN pUnkOuter)
+{
+    HRESULT hr = s_origCreateDevice(di, rguid, lplpDevice, pUnkOuter);
+    if (SUCCEEDED(hr) && lplpDevice != nullptr && *lplpDevice != nullptr) {
+        // Hand off to chase_keyboard. It checks the GUID itself and only
+        // installs the GetDeviceState detour for GUID_SysKeyboard.
+        ChaseKeyboard::OnDeviceCreated(rguid, *lplpDevice);
+    }
+    return hr;
+}
+
+static void InstallCreateDeviceHook(IDirectInput8A* di)
+{
+    if (s_createDeviceHookInstalled || di == nullptr) return;
+
+    void** vtable = *reinterpret_cast<void***>(di);
+    void* targetCreateDevice = vtable[3];
+
+    MH_STATUS st = MH_CreateHook(targetCreateDevice,
+                                 reinterpret_cast<void*>(&HookedCreateDevice),
+                                 reinterpret_cast<void**>(&s_origCreateDevice));
+    if (st != MH_OK) {
+        Log::Mod("DllMain: MH_CreateHook(IDirectInput8A::CreateDevice) FAILED "
+                 "(status=%d) -- chase_keyboard cannot capture the keyboard "
+                 "device pointer; chase Auto keyboard suppression DISABLED "
+                 "(graceful degradation, chase still works without it).",
+                 (int)st);
+        return;
+    }
+    st = MH_EnableHook(targetCreateDevice);
+    if (st != MH_OK) {
+        Log::Mod("DllMain: MH_EnableHook(IDirectInput8A::CreateDevice) FAILED "
+                 "(status=%d) -- chase Auto keyboard suppression DISABLED.",
+                 (int)st);
+        MH_RemoveHook(targetCreateDevice);
+        return;
+    }
+    s_createDeviceHookInstalled = true;
+    Log::Mod("DllMain: IDirectInput8A::CreateDevice hooked at 0x%08X (vtable[3] "
+             "on IDirectInput8A=0x%08X). chase_keyboard will receive device "
+             "creation callbacks; GetDeviceState detour will install when "
+             "GUID_SysKeyboard device is created.",
+             (uint32_t)(uintptr_t)targetCreateDevice,
+             (uint32_t)(uintptr_t)di);
+}
+
+// ============================================================================
+// v0.15.9.11.3.1: IDirectInputA (DirectInput 7) CreateDevice hook chain
+// ============================================================================
+//
+// v0.15.9.11.3 BAT (2026-05-13) showed the IDirectInput8A path captures no
+// keyboard device -- FFNx logs at startup confirmed CreateDevice was hooked
+// but no GUID_SysKeyboard callback ever arrived, and on chase Auto engage the
+// graceful-degradation path fired ("ACTIVATED but hook NOT installed"). Aaron's
+// physical arrows then disrupted the auto-pilot, proving keys still reached
+// the engine.
+//
+// Root cause: FF8 (FF8_EN.exe) imports DirectInputCreateA from DINPUT.dll, NOT
+// DirectInput8Create from dinput8.dll. FF8 is a 2013 Steam port of a 1999
+// game using the original DirectInput 7 API. FFNx's input.cpp source confirms:
+// `IDirectInputDeviceA* keyboard_device = *common_externals.keyboard_device`
+// -- old-API interface type. FFNx's GetGameKeyState polls that device every
+// frame; FFNx replaces FF8's get_keyboard_state with its own version, but the
+// underlying device is FF8's IDirectInputDeviceA created via DirectInputCreateA.
+//
+// Our IDirectInput8A::CreateDevice hook only sees FFNx's own DirectInput 8
+// devices (whatever FFNx creates for itself -- probably gamepad or overlay UI
+// polling). The keyboard FF8 reads is on the v7 chain.
+//
+// Fix: install a parallel chain of hooks for the v7 API. Same logic:
+// DirectInputCreateA returns IDirectInputA*; vtable[3] is CreateDevice;
+// CreateDevice returns IDirectInputDeviceA*; vtable[9] on the device is
+// GetDeviceState. The COM vtable layouts of IDirectInputDevice and
+// IDirectInputDevice8 are compatible up through GetDeviceState (the v8
+// interface ADDS methods at later vtable slots), so chase_keyboard's existing
+// vtable[9] hook works for both kinds of device pointers without changes.
+// We just reinterpret_cast the IDirectInputDeviceA* to IDirectInputDevice8A*
+// when calling OnDeviceCreated -- a no-op at the binary level since both are
+// just pointers to COM objects whose vtable[9] points to GetDeviceState.
+
+typedef HRESULT (WINAPI *DirectInputCreateA_t)(HINSTANCE,
+                                               DWORD,
+                                               LPDIRECTINPUTA*,
+                                               LPUNKNOWN);
+static DirectInputCreateA_t s_origDirectInputCreateA = nullptr;
+
+typedef HRESULT (__stdcall *CreateDeviceA_t)(IDirectInputA*,
+                                             REFGUID,
+                                             LPDIRECTINPUTDEVICEA*,
+                                             LPUNKNOWN);
+static CreateDeviceA_t s_origCreateDeviceA = nullptr;
+static bool s_createDeviceAHookInstalled = false;
+
+static HRESULT __stdcall HookedCreateDeviceA(IDirectInputA* di,
+                                             REFGUID rguid,
+                                             LPDIRECTINPUTDEVICEA* lplpDevice,
+                                             LPUNKNOWN punkOuter)
+{
+    HRESULT hr = s_origCreateDeviceA(di, rguid, lplpDevice, punkOuter);
+    if (SUCCEEDED(hr) && lplpDevice != nullptr && *lplpDevice != nullptr) {
+        // Cast: chase_keyboard takes IDirectInputDevice8A* but only calls
+        // vtable[9] (GetDeviceState), which exists at the same slot in both
+        // IDirectInputDeviceA and IDirectInputDevice8A. The reinterpret_cast
+        // is safe for our specific use; we are NOT calling any v8-only methods.
+        ChaseKeyboard::OnDeviceCreated(
+            rguid,
+            reinterpret_cast<IDirectInputDevice8A*>(*lplpDevice));
+    }
+    return hr;
+}
+
+static void InstallCreateDeviceAHook(IDirectInputA* di)
+{
+    if (s_createDeviceAHookInstalled || di == nullptr) return;
+
+    void** vtable = *reinterpret_cast<void***>(di);
+    void* targetCreateDevice = vtable[3];
+
+    MH_STATUS st = MH_CreateHook(targetCreateDevice,
+                                 reinterpret_cast<void*>(&HookedCreateDeviceA),
+                                 reinterpret_cast<void**>(&s_origCreateDeviceA));
+    if (st != MH_OK) {
+        Log::Mod("DllMain: MH_CreateHook(IDirectInputA::CreateDevice) FAILED "
+                 "(status=%d) -- DirectInput 7 keyboard device cannot be "
+                 "captured; chase Auto keyboard suppression DISABLED "
+                 "(graceful degradation).",
+                 (int)st);
+        return;
+    }
+    st = MH_EnableHook(targetCreateDevice);
+    if (st != MH_OK) {
+        Log::Mod("DllMain: MH_EnableHook(IDirectInputA::CreateDevice) FAILED "
+                 "(status=%d) -- chase Auto keyboard suppression DISABLED.",
+                 (int)st);
+        MH_RemoveHook(targetCreateDevice);
+        return;
+    }
+    s_createDeviceAHookInstalled = true;
+    Log::Mod("DllMain: IDirectInputA::CreateDevice hooked at 0x%08X (vtable[3] "
+             "on IDirectInputA=0x%08X). chase_keyboard will receive v7 device "
+             "creation callbacks; GetDeviceState detour will install when "
+             "GUID_SysKeyboard device is created via the v7 path.",
+             (uint32_t)(uintptr_t)targetCreateDevice,
+             (uint32_t)(uintptr_t)di);
+}
+
+static HRESULT WINAPI HookedDirectInputCreateA(HINSTANCE hinst,
+                                               DWORD dwVersion,
+                                               LPDIRECTINPUTA* lplpDirectInput,
+                                               LPUNKNOWN punkOuter)
+{
+    HRESULT hr = s_origDirectInputCreateA(hinst, dwVersion, lplpDirectInput, punkOuter);
+    if (SUCCEEDED(hr) && lplpDirectInput != nullptr && *lplpDirectInput != nullptr) {
+        InstallCreateDeviceAHook(*lplpDirectInput);
+    }
+    return hr;
+}
+
+// Install the DirectInputCreateA function-level hook. Called from DllMain
+// DLL_PROCESS_ATTACH so the hook is in place before FF8 ever calls the
+// function. FF8's static imports are resolved by the Windows loader before
+// any DllMain runs, but FF8 doesn't actually CALL DirectInputCreateA until
+// later in its init path (post-WinMain entry), so installing the hook in
+// DllMain (which runs after FF8.exe's static load but before WinMain) puts
+// us in place to catch FF8's first call.
+// ============================================================================
+// v0.15.9.11.3.2: GetAsyncKeyState hook for chase Auto arrow suppression
+// ============================================================================
+//
+// v0.15.9.11.3.1 BAT (2026-05-13 19:39-19:40) showed the DirectInput 7
+// keyboard hook IS installed correctly (startup logs confirm all three
+// hooks: DirectInputCreateA, IDirectInputA::CreateDevice, and
+// IDirectInputDevice::GetDeviceState). On chase Auto engage, the field log
+// shows the GOOD activation message ("synthetic keyboard buffer now
+// substituted for GetDeviceState reads. Physical key presses will NOT reach
+// the engine"), CALIB succeeded (party moved 228 units on lX, 247 units on
+// lY), and the auto-pilot drove through early fields with Aaron pressing
+// keys -- suppression worked.
+//
+// BUT on doopen2a (the first MODE_TARGET / path-finding chase field),
+// Aaron's arrow presses started reaching the engine and disrupted the
+// auto-pilot, triggering the chase-progress director (entityPtr=0x0188CA04)
+// to fire BATTLE at waypoint 6/28 of 28 -- the exact same failure pattern
+// as v0.15.9.11.1 / .11.2 (which used WH_KEYBOARD_LL). Test 1 with no key
+// presses completed cleanly through doopen2a; test 2 with key presses
+// failed at doopen2a -- the failure correlates with Aaron's key presses,
+// not with the field itself.
+//
+// Root cause hypothesis: FF8 has TWO keyboard read paths:
+//   1. DirectInput 7 GetDeviceState (via FFNx's GetGameKeyState which
+//      replace_function-replaces FF8's get_keyboard_state). This path is
+//      now correctly suppressed by chase_keyboard's synthetic buffer hook.
+//   2. GetAsyncKeyState from USER32.dll. FF8_EN.exe imports this directly
+//      (FF8_EN_imports.txt line 227). GetAsyncKeyState reads OS-level
+//      keyboard state, which is updated by the Windows kernel when any
+//      keyboard event occurs (physical key press OR SendInput call). This
+//      path completely bypasses DirectInput and any function-pointer
+//      replacement done by FFNx.
+//
+// On doopen2a specifically, the chase-progress director's JSM script
+// appears to poll GetAsyncKeyState for arrow keys to decide when to fire
+// the catch BATTLE. Earlier chase fields (MODE_DIRECTION, MODE_STAGED,
+// MODE_BRIDGE_DANCE) use simpler progression logic that doesn't poll
+// keyboard via this path. doopen2a uses MODE_TARGET (path-finding) with
+// a chase-progress director that's keyboard-sensitive.
+//
+// Fix: hook GetAsyncKeyState from USER32.dll. During ChaseKeyboard::
+// IsActive(), return 0 for ARROW key queries (VK_UP / VK_DOWN / VK_LEFT /
+// VK_RIGHT). For all other VKs, pass through to the real OS implementation
+// so the mod's F-key handlers (F1-F12 voice cycling, F5/F6 SFX volume,
+// F7/F8 BGM volume, F11 screenshot, F12 diagnostic), V/G/T/L/R info
+// readout keys, /, =, -, \ navigation toggles, and Backspace GPS toggle
+// continue to work normally during chase Auto.
+//
+// Why return 0 instead of routing through the synthetic buffer: the
+// auto-pilot's own arrow presses are NOT consumed via GetAsyncKeyState by
+// any path that matters (test 1 with no keys pressed completed the chase
+// successfully, so the auto-pilot's keys reach FF8 via DirectInput only).
+// Returning 0 for ALL arrow queries during chase Auto -- including the
+// auto-pilot's own injected keys -- is safe and simple. If a future
+// regression shows FF8 also needs to see the auto-pilot's arrows via
+// GetAsyncKeyState, we can switch to a VK->DIK mapped read from
+// ChaseKeyboard::s_keyBuf at that point.
+//
+// The mod's own arrow handler in field_nav_handlekeys.inl is already
+// gated on `s_driveActive && !s_chaseDriveActive` (v0.15.9.2), so it
+// doesn't query arrow VKs during chase Auto -- no mod-side regression.
+
+typedef SHORT (WINAPI *GetAsyncKeyState_t)(int);
+static GetAsyncKeyState_t s_origGetAsyncKeyState = nullptr;
+
+static SHORT WINAPI HookedGetAsyncKeyState(int vKey)
+{
+    // Defensive: if the hook is somehow called before s_origGetAsyncKeyState
+    // is populated (impossible in normal flow but possible during teardown),
+    // return 0. Better than dereferencing a null function pointer.
+    if (s_origGetAsyncKeyState == nullptr) {
+        return 0;
+    }
+
+    // During chase Auto, suppress arrow keys at the OS level so FF8's
+    // GetAsyncKeyState-polling chase logic (e.g., the chase-progress
+    // director on doopen2a) cannot see Aaron's physical key presses.
+    // The auto-pilot's input still reaches FF8 via the DirectInput
+    // synthetic-buffer path, which is independent of GetAsyncKeyState.
+    if (ChaseKeyboard::IsActive()) {
+        switch (vKey) {
+            case VK_UP:
+            case VK_DOWN:
+            case VK_LEFT:
+            case VK_RIGHT:
+                return 0;
+            default:
+                break;
+        }
+    }
+
+    return s_origGetAsyncKeyState(vKey);
+}
+
+static void InstallGetAsyncKeyStateHook()
+{
+    HMODULE hUser32 = GetModuleHandleA("user32.dll");
+    if (hUser32 == nullptr) {
+        // user32.dll is part of every Win32 process; if this fails, the
+        // process is in trouble already. Log and continue without the hook.
+        Log::Mod("DllMain: GetModuleHandleA(\"user32.dll\") FAILED -- "
+                 "GetAsyncKeyState chase Auto suppression unavailable.");
+        return;
+    }
+    auto pGetAsyncKeyState = reinterpret_cast<GetAsyncKeyState_t>(
+        GetProcAddress(hUser32, "GetAsyncKeyState"));
+    if (pGetAsyncKeyState == nullptr) {
+        Log::Mod("DllMain: GetProcAddress(user32, \"GetAsyncKeyState\") FAILED "
+                 "-- GetAsyncKeyState chase Auto suppression unavailable.");
+        return;
+    }
+    MH_STATUS st = MH_CreateHook(
+        reinterpret_cast<void*>(pGetAsyncKeyState),
+        reinterpret_cast<void*>(&HookedGetAsyncKeyState),
+        reinterpret_cast<void**>(&s_origGetAsyncKeyState));
+    if (st != MH_OK) {
+        Log::Mod("DllMain: MH_CreateHook(GetAsyncKeyState) FAILED (status=%d) "
+                 "-- chase Auto arrow suppression unavailable.",
+                 (int)st);
+        return;
+    }
+    st = MH_EnableHook(reinterpret_cast<void*>(pGetAsyncKeyState));
+    if (st != MH_OK) {
+        Log::Mod("DllMain: MH_EnableHook(GetAsyncKeyState) FAILED (status=%d) "
+                 "-- chase Auto arrow suppression unavailable.",
+                 (int)st);
+        MH_RemoveHook(reinterpret_cast<void*>(pGetAsyncKeyState));
+        return;
+    }
+    Log::Mod("DllMain: GetAsyncKeyState hooked at 0x%08X (from user32.dll). "
+             "During chase Auto, arrow VK queries return 0; all other VKs "
+             "pass through. Closes the non-DirectInput keyboard leak path "
+             "that affected doopen2a in v0.15.9.11.3.1 BAT.",
+             (uint32_t)(uintptr_t)pGetAsyncKeyState);
+}
+
+static void InstallDirectInputCreateAHook()
+{
+    HMODULE hDinput = LoadLibraryA("dinput.dll");
+    if (hDinput == nullptr) {
+        Log::Mod("DllMain: LoadLibraryA(\"dinput.dll\") FAILED -- DirectInput 7 "
+                 "chain unavailable; chase Auto keyboard suppression DISABLED.");
+        return;
+    }
+    auto pDirectInputCreateA = reinterpret_cast<DirectInputCreateA_t>(
+        GetProcAddress(hDinput, "DirectInputCreateA"));
+    if (pDirectInputCreateA == nullptr) {
+        Log::Mod("DllMain: GetProcAddress(dinput.dll, \"DirectInputCreateA\") FAILED "
+                 "-- DirectInput 7 chain unavailable; chase Auto keyboard suppression DISABLED.");
+        return;
+    }
+    MH_STATUS st = MH_CreateHook(reinterpret_cast<void*>(pDirectInputCreateA),
+                                 reinterpret_cast<void*>(&HookedDirectInputCreateA),
+                                 reinterpret_cast<void**>(&s_origDirectInputCreateA));
+    if (st != MH_OK) {
+        Log::Mod("DllMain: MH_CreateHook(DirectInputCreateA) FAILED (status=%d) "
+                 "-- chase Auto keyboard suppression DISABLED.",
+                 (int)st);
+        return;
+    }
+    st = MH_EnableHook(reinterpret_cast<void*>(pDirectInputCreateA));
+    if (st != MH_OK) {
+        Log::Mod("DllMain: MH_EnableHook(DirectInputCreateA) FAILED (status=%d) "
+                 "-- chase Auto keyboard suppression DISABLED.",
+                 (int)st);
+        MH_RemoveHook(reinterpret_cast<void*>(pDirectInputCreateA));
+        return;
+    }
+    Log::Mod("DllMain: DirectInputCreateA hooked at 0x%08X (from dinput.dll). "
+             "FF8's keyboard creation via the DirectInput 7 path will now "
+             "route through chase_keyboard's OnDeviceCreated.",
+             (uint32_t)(uintptr_t)pDirectInputCreateA);
+}
+
+extern "C" HRESULT WINAPI DirectInput8Create(
     HINSTANCE hinst,
     DWORD dwVersion,
     REFIID riidltf,
@@ -64,7 +440,28 @@ extern "C" __declspec(dllexport) HRESULT WINAPI DirectInput8Create(
 {
     if (pDirectInput8Create == nullptr)
         return E_FAIL;
-    return pDirectInput8Create(hinst, dwVersion, riidltf, ppvOut, punkOuter);
+    HRESULT hr = pDirectInput8Create(hinst, dwVersion, riidltf, ppvOut, punkOuter);
+
+    // v0.15.9.11.3: Hook CreateDevice on the returned IDirectInput8A so we
+    // can capture the keyboard device pointer when FF8/FFNx creates it.
+    // Only attempted once; subsequent DirectInput8Create calls (if any)
+    // skip via s_createDeviceHookInstalled. The hook patches the vtable,
+    // which is shared across all IDirectInput8A instances in this module,
+    // so one install covers the lifetime of the process.
+    //
+    // v0.15.9.11.3 build fix: __declspec(dllexport) is INTENTIONALLY OMITTED
+    // here. dinput.h (now included to get IDirectInput8A type) already
+    // declares DirectInput8Create without dllexport; adding dllexport on
+    // our implementation creates a C2375 linkage mismatch. Export is
+    // handled instead by src/dinput8.def, which lists DirectInput8Create
+    // explicitly. Behavior is identical (function is still exported); the
+    // .def file is the standard mechanism for DLL-proxy projects.
+    if (SUCCEEDED(hr) && ppvOut != nullptr && *ppvOut != nullptr &&
+        IsEqualIID(riidltf, IID_IDirectInput8A))
+    {
+        InstallCreateDeviceHook(reinterpret_cast<IDirectInput8A*>(*ppvOut));
+    }
+    return hr;
 }
 
 // ============================================================================
@@ -389,6 +786,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     DialogInject::Shutdown();     // v0.15.4: Dialog inject Phase 1 cleanup
     ChaseBattleFreeze::Shutdown();// v0.15.2.13: active opcode_battle freeze
     ChaseAutoPilot::Shutdown();   // v0.15.9: release any held auto-drive keys
+    ChaseKeyboard::Shutdown();    // v0.15.9.11.3: remove GetDeviceState detour
     ChaseKaniFreeze::Shutdown();  // v0.15.2.3: kani-wakeup diagnostic cleanup
     ChaseAskOverlay::Shutdown();  // v0.15.1: close ASK if open + reset state
     ChaseDiag::Shutdown();        // v0.15.0: Chase diagnostic cleanup
@@ -454,7 +852,40 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         }
         
         Log::Write("DllMain: System dinput8.dll loaded, proxy ready.");
-        
+
+        // v0.15.9.11.3.1: Install the DirectInput 7 (DirectInputCreateA) hook
+        // chain BEFORE the accessibility thread starts. FF8 uses the DirectInput 7
+        // API for its keyboard (proven by FF8_EN.exe import table showing
+        // DirectInputCreateA from DINPUT.dll, no DirectInput8Create import).
+        //
+        // MinHook is normally initialized inside the AccessibilityThread, which
+        // runs concurrently with FF8's WinMain. We initialize MinHook HERE in
+        // DllMain instead so the hook is installed synchronously before any
+        // user code runs. MH_Initialize is idempotent: the later call in
+        // AccessibilityThread returns MH_ERROR_ALREADY_INITIALIZED, which is
+        // logged as a non-fatal status and execution continues normally.
+        //
+        // FF8 has not yet called DirectInputCreateA when DllMain runs --
+        // FF8.exe's static imports are resolved by the Windows loader, but
+        // the actual call to DirectInputCreateA happens later during FF8's
+        // init sequence, well after DllMain has finished. The hook lands in
+        // time to capture FF8's first keyboard device creation.
+        //
+        // The IDirectInput8A path is set up separately when FFNx calls
+        // DirectInput8Create through our proxy.
+        {
+            MH_STATUS mhInit = MH_Initialize();
+            Log::Mod("DllMain: MH_Initialize for DirectInputCreateA hook = %d",
+                     (int)mhInit);
+            InstallDirectInputCreateAHook();
+            // v0.15.9.11.3.2: GetAsyncKeyState hook -- closes the non-
+            // DirectInput keyboard leak path that affected doopen2a in the
+            // v0.15.9.11.3.1 BAT. See block comment above for full rationale.
+            // Order doesn't matter relative to InstallDirectInputCreateAHook;
+            // both hooks share MinHook's global state, both are independent.
+            InstallGetAsyncKeyStateHook();
+        }
+
         // Start accessibility thread
         s_running = true;
         s_thread = CreateThread(nullptr, 0, AccessibilityThread, nullptr, 0, nullptr);

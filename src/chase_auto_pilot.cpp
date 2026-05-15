@@ -311,6 +311,7 @@
 #include "chase_auto_pilot.h"
 #include "chase_ask_overlay.h"
 #include "chase_detector.h"
+#include "chase_keyboard.h"
 #include "ff8_accessibility.h"
 #include "ff8_addresses.h"
 #include "field_navigation.h"
@@ -1609,6 +1610,16 @@ static void Engage(const FieldConfig* cfg)
 {
     if (cfg == nullptr) return;
 
+    // v0.15.9.11.3: Activate the synthetic keyboard buffer BEFORE installing
+    // the analog override + injecting keys. Once active, our GetDeviceState
+    // detour returns the synthetic buffer instead of real DirectInput state,
+    // so the user's physical key presses no longer reach the engine. The
+    // auto-pilot's InjectKey calls below ALSO update the synthetic buffer
+    // (gated by ChaseKeyboard::IsActive() inside InjectKey itself), so the
+    // engine sees exactly the keys the auto-pilot wants pressed -- no more,
+    // no less. Activate clears the buffer to known-empty state.
+    ChaseKeyboard::Activate();
+
     bool ok = false;
     if (cfg->mode == MODE_DIRECTION) {
         FieldNavigation::StartDirectionDrive(cfg->dirX, cfg->dirY, cfg->walk);
@@ -1767,6 +1778,14 @@ static void Disengage(const char* reason)
     } else {
         FieldNavigation::StopChaseDrive();
     }
+
+    // v0.15.9.11.3: Deactivate the synthetic keyboard buffer. From here on,
+    // GetDeviceState pass-through is restored; any physical key presses from
+    // the user reach FF8 again. Note that the auto-pilot's StopDirectionDrive
+    // / StopChaseDrive above already released arrow keys via SendInput, so
+    // the engine sees a clean key-up transition for anything that was held.
+    ChaseKeyboard::Deactivate();
+
     Log::Field("ChaseAutoPilot: DISENGAGED (%s) was on field='%s' mode=%d",
                reason ? reason : "?", s_engagedField, (int)s_engagedMode);
 

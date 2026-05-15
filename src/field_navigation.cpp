@@ -47,6 +47,15 @@
 #include "field_display_names.h"
 #include "entity_classifications.h"
 
+// v0.15.9.11.3: chase_keyboard header included BEFORE the FieldNavigation
+// namespace opens so its global-scope namespace (::ChaseKeyboard) is
+// reachable from the .inl files included inside FieldNavigation below.
+// The chase keyboard buffer substitution is called from InjectKey in
+// field_nav_autodrive.inl during chase Auto, and only during chase Auto --
+// F9 path-finding and world-map AD are unaffected (ChaseKeyboard::IsActive()
+// returns false for them).
+#include "chase_keyboard.h"
+
 // Forward declarations for cross-module namespaces (restored in v0.14.28 build recovery).
 namespace Log { void Field(const char* format, ...); }
 namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); }

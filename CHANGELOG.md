@@ -4,6 +4,371 @@ Newest on top. Each entry begins with a `## vMAJOR.MINOR.BUILD` heading followed
 
 The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_accessibility.h`. The push utility refuses to push if they don't.
 
+## v0.15.9.11.3.6
+
+Install a WndProc subclass that drops arrow-key `WM_KEY*` messages during chase Auto. Closes the last untreated keyboard delivery path to FF8's own WndProc — the `[+0xb48]` per-message handler dispatch invoked from FF8_EN.exe's window procedure at `0x0040AC5B`.
+
+### Why this build
+
+Across v0.15.9.11.3.1 through .11.3.5 the chase still got caught on `doopen2a` whenever arrow keys were pressed, even after the .11.3.4 SendInput-collision fix and the .11.3.5 leak-probe removal. Synthetic buffer masking confirmed working, GetAsyncKeyState arrow queries returning 0 confirmed working, leak-probe gone, no SendInput collision — yet the catch reproduced reliably with keys pressed.
+
+That narrows the disruption to a path that none of those hooks touch. The v0.15.9.11.3.5 disassembly walk through FF8's WndProc at `0x0040AC5B` (the function containing the Ctrl+Q `GetAsyncKeyState` call at `0x0040AE14`, confirmed to be a WndProc by structure — switch on `uMsg` with `WM_KEY*` branches that route into a `[+0xb48]` per-message-handler dispatch table) showed that arrow `WM_KEYDOWN`/`WM_KEYUP` messages reach that `[+0xb48]` dispatch. The synthetic-buffer `GetDeviceState` detour, the `GetAsyncKeyState` hook, and the v0.15.9.11.3.4 fix all leave that path alone.
+
+Either `[+0xb48]` writes a global the chase-progress director script polls ("is the player struggling against the chase"), or the sheer volume of `WM_KEY*` dispatch on the user's keypresses shifts the main thread's frame timing relative to the chase director's catch evaluator. Both are addressed by stopping the messages before FF8's WndProc sees them.
+
+### The fix
+
+New module `src/chase_wndproc.cpp` with `EnsureInstalled()` that enumerates top-level visible windows owned by FF8_EN.exe (`EnumWindows` + `GetCurrentProcessId` + `GetWindowThreadProcessId` filter) and `SetWindowLongPtrW(GWLP_WNDPROC)` subclasses each. The subclass runs on whichever thread pumps the message — for FF8's main game window that's the main thread, the same thread that runs the chase script's catch evaluator.
+
+When `ChaseKeyboard::IsActive()` AND `msg` is in `{WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP}` AND `wParam` is in `{VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT}`: return 0 (the documented `WM_KEY*` "handled" reply) without forwarding. FF8's WndProc and its `[+0xb48]` dispatch never see the message. No global is written, no main-thread cycles spent on it, no message-pump volume effect.
+
+Everything else (mouse, paint, timer, non-arrow keys, all messages when chase is inactive) forwards via `CallWindowProcW`/`CallWindowProcA` so FF8's behavior is bit-for-bit identical outside the narrow arrow-key / chase-Auto window. Character set matched per-window via `IsWindowUnicode`.
+
+### Why not WH_KEYBOARD_LL
+
+v0.15.9.11.1/.11.2 used `WH_KEYBOARD_LL` and the chase broke on `doopen2a` at waypoint 5–6 of 26, ~2 seconds after engagement. `WH_KEYBOARD_LL` forces every `SendInput` call from any thread to synchronously round-trip through the main thread's message pump — fatal for per-tick path-finding timing.
+
+WndProc subclassing has no such cost. It runs *inline* in the existing message pump on the existing thread — no extra synchronization, no cross-thread round-trip, no per-tick latency penalty.
+
+Also: the mod's own `SendInput` from `field_nav_autodrive.inl::InjectKey` is already gated on `ChaseKeyboard::IsActive()` (v0.15.9.11.3.4) — during chase Auto the auto-pilot writes directly to the synthetic DirectInput buffer and skips `SendInput` entirely. So the new subclass only suppresses *the user's* physical keypresses, never the auto-pilot's own arrows.
+
+### Architecture now
+
+Four coordinated hooks during chase Auto:
+
+1. `DirectInputCreateA` chain (`dinput8.cpp`) → catches FF8's v7 keyboard device creation
+2. `IDirectInputDeviceA::GetDeviceState` vtable detour (`chase_keyboard.cpp`) → returns synthetic buffer
+3. `user32::GetAsyncKeyState` MinHook (`dinput8.cpp`) → arrow VK queries return 0
+4. **WndProc subclass on every top-level window (`chase_wndproc.cpp`) → arrow `WM_KEY*` return 0** — NEW
+
+Together they make every documented and undocumented keyboard delivery path to FF8 return "no arrow pressed" for the duration of `ChaseKeyboard::IsActive()`.
+
+### Install timing
+
+`ChaseKeyboard::Activate()` lazy-calls `ChaseWndProc::EnsureInstalled()` on first chase activation. `EnsureInstalled` is idempotent on subsequent calls. We do this at Activate rather than at module init because `EnumWindows` needs FF8/FFNx to have created its main game window first; the first chase Auto happens many seconds after launch (the player has to reach the Dollet chase scene), so the window is guaranteed to exist.
+
+Permanent install — never uninstalled during gameplay. `SetWindowLongPtrW` is documented as cross-thread safe for install, but a mid-gameplay uninstall would race against in-flight `DispatchMessage` on the main thread. Outside chase Auto the subclass is a cheap pass-through (one `volatile bool` read per message, false short-circuit), so leaving it permanently installed costs nothing.
+
+### BAT plan
+
+Trigger the chase, pick Auto, ride it **while pressing arrow keys**. Two outcomes:
+
+- **Clean** — full route (`domt4_1` → `domt3_2` → `domt5_1` → `domt2_1` → `domt1_1` → `doopen2a` → `dotown_3` → `dotown_2` → `dotown_1`) completes, 0 `[CBF] PASS` lines, matching the v0.15.9.8.3 hands-off result. Mod log near first chase Auto activation shows `ChaseWndProc: WndProc subclass INSTALLED on HWND 0x...` for each FF8 window discovered. Chase scene item #3 done; push the squash.
+- **Still caught on `doopen2a`** — the disruption is happening *below* the WndProc layer. Next suspects: raw input messages (`WM_INPUT` via `RegisterRawInputDevices`), DirectInput buffered mode rather than immediate state, or some other delivery path we haven't traced. Next step then is diagnostic: per-message WM type/wParam logging from inside the subclass to find any arrow-bearing message getting through.
+
+### Risk
+
+Low. WndProc subclassing is a textbook Win32 pattern that has shipped in countless mods, tools, and screen readers; `SetWindowLongPtrW` is documented as cross-thread safe. The `CallWindowProc` forward keeps FF8's WndProc behavior bit-for-bit identical outside the narrow arrow-key/chase-Auto window. The only real fragility is the install-time race (window must exist when `EnumWindows` runs), mitigated by lazy install at `Activate` — the first chase happens many seconds after launch, so the window definitely exists.
+
+### Files
+
+- `src/chase_wndproc.h` (new)
+- `src/chase_wndproc.cpp` (new)
+- `src/chase_keyboard.cpp` — `#include "chase_wndproc.h"`, call `ChaseWndProc::EnsureInstalled()` from `Activate`
+- `src/deploy.bat` — add `chase_wndproc.cpp` to the compile list
+- `src/ff8_accessibility.h` — version bump
+- `CHANGELOG.md`, `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`
+
+## v0.15.9.11.3.5
+
+Remove the v0.15.9.11.3.3 leak-probe from `chase_keyboard.cpp`. It was diagnostic-only code that has served its purpose — and it's now a confirmed confound.
+
+### What the v0.15.9.11.3.4 BAT showed
+
+The v0.15.9.11.3.4 BAT (2026-05-13 23:33) proved the .11.3.4 input-layer fix **works**. The `[LEAK-PROBE]` lines showed FF8 receiving the synthetic buffer with the physical arrows masked (`PHYSICAL KEY MASKED` on every state change), and the party moved correctly — waypoints 0 through 6 reached on `doopen2a`, running south at normal pace, synthetic buffer coherent.
+
+But the chase **still got caught** at wp 6/28 on `doopen2a` — the chase-progress director (`battleyarou`, `entityPtr=0x0188CA04`) fired BATTLE, `[CBF] PASS` let it through, real catch. That's the same failure location as v0.15.9.11.3.1 and .2.
+
+So across four builds (.11.3.1 through .11.3.4), all with the keyboard-device `GetDeviceState` masking confirmed working, keys-pressed still causes a catch. The .11.3.4 disassembly already proved FF8's movement reads **only** that masked device buffer — so the user's keys are not reaching FF8's movement code. The disruption is something else that pressing keys triggers.
+
+### Why the probe has to go
+
+The leak-probe (added in .11.3.3, never removed) is now pure liability. `HookedGetDeviceState` polled the real device an **extra** time per frame and wrote a `[LEAK-PROBE]` log line on **every** physical-key state change. During key-mashing that is roughly 20 file-I/O writes per second on the field thread — and zero hands-off. That asymmetric logging load is itself a candidate disruptor of chase Auto timing.
+
+Critically: **no build has ever run with both the SendInput-collision bug fixed *and* the probe I/O storm absent.** v0.15.9.11.3.1/.2 had the SendInput collision (fixed in .11.3.4); v0.15.9.11.3.3/.4 have the probe. Removing the probe makes this the first genuinely clean test of the .11.3.4 fix.
+
+### The change
+
+`HookedGetDeviceState` is now just the synthetic-buffer `memcpy` + `return DI_OK` — the part FF8 actually sees is byte-for-byte identical to .11.3.4. The extra real-device poll, the `DIAG_ARROW_DIK` array, the `s_diag*` statics, and the diag-state reset in `Activate()` are all gone.
+
+### BAT plan
+
+Trigger the chase, pick Auto, ride it **while pressing arrow keys**. If the probe's I/O storm was the remaining disruptor, the chase now completes the full route (`domt4_1` → `domt3_2` → `domt5_1` → `domt2_1` → `domt1_1` → `doopen2a` → `dotown_3` → `dotown_2` → `dotown_1`) clean, 0 `[CBF] PASS` lines, matching the v0.15.9.8.3 hands-off result. The field log will also be much quieter — no `[LEAK-PROBE]` lines at all.
+
+If it **still** catches on `doopen2a` with keys pressed, the probe is ruled out and the remaining suspect is the Windows message queue: the user's physical keypresses flood FF8's window with `WM_KEYDOWN`/`WM_KEYUP` messages, and either FF8's WndProc does something with them beyond the known Ctrl+Q hotkey, or the message-pump volume shifts the main thread's frame timing relative to the chase director's catch clock. Next step then is to read FF8's WndProc (function at `0x0040AC5B`, which contains the `GetAsyncKeyState` call at `0x0040AE14`) in the disassembly.
+
+### Risk
+
+Very low. Pure removal of diagnostic-only code. No signature changes, no new dependencies. The substitution behavior FF8 sees is unchanged from .11.3.4.
+
+### Files
+
+- `src/chase_keyboard.cpp` — leak-probe removed: comment block, `DIAG_ARROW_DIK`, `s_diag*` statics, the probe block in `HookedGetDeviceState`, and the diag-reset in `Activate()`
+- `src/ff8_accessibility.h` — version bump
+- `CHANGELOG.md`, `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`
+
+## v0.15.9.11.3.4
+
+Stop `SendInput` during chase Auto — drive FF8 purely through chase_keyboard's synthetic buffer. This is **the fix** for the v0.15.9.11.3.1/.2/.3 BAT failures: the chase completes clean hands-off, but gets caught when arrow keys are pressed.
+
+### What the investigation established
+
+v0.15.9.11.3.3's leak-probe BAT came back **Outcome #1** — `[LEAK-PROBE]` lines tagged `PHYSICAL KEY MASKED`. chase_keyboard's `GetDeviceState` hook *is* being called for FF8 field input and *is* masking the physical arrows. The DirectInput keyboard-state path is clean.
+
+Two follow-up disassembly investigations then explained why the chase still broke:
+
+- **FFNx source** (`input.cpp`, `joystick.cpp`, `gamepad.cpp`, `gamehacks.cpp`): FFNx does not bridge the keyboard into gamepad or joystick input anywhere. `GetGameKeyState()` only reads the keyboard device; the joystick and gamepad code polls real physical hardware; `gamehacks.cpp` is the sole consumer and uses them only for FFNx's own speedhack/debug shortcuts.
+- **FF8_EN.exe input pipeline** (`engine_eval_keyboard_gamepad_input` @0x00467D10, `get_key_state` @0x004685F0, `ctrl_keyboard_actions` @0x004A2E50, `dinput_update_gamepad_status` @0x004692B0): FF8 reads keyboard state **only** from the 256-byte DirectInput device buffer whose pointer lives at `*0x01CD02D8`. `engine_eval` makes exactly one call per frame to `get_keyboard_state` — the function FFNx replaces with `GetGameKeyState` → `GetDeviceState(256,...)`, the call chase_keyboard hooks — stores the returned buffer pointer, and every downstream reader (engine_eval's own direct reads, `get_key_state`'s per-scancode accessor, `ctrl_keyboard_actions`) reads only that buffer. There is **no path** in FF8's field-input pipeline that reads OS-level key state: no `GetAsyncKeyState`, no `GetKeyboardState`, no `WM_KEYDOWN` consumption for movement. The lone `GetAsyncKeyState` import is called from exactly one place — inside FF8's WndProc, handling `WM_KEYUP` for 'Q' while Ctrl is held — a Ctrl+Q hotkey, which is why hooking it in v0.15.9.11.3.2 changed nothing.
+
+### Root cause
+
+Once chase_keyboard substitutes the keyboard device buffer (which the probe proved it does), FF8's keyboard input is *entirely* the synthetic buffer. The mod's `SendInput` calls in `InjectKey` reached **nothing** in FF8 during chase Auto — they only dumped synthetic key events into the shared OS input queue, where they interleaved with the user's physical key events and desynced the diff-based `SetHeldDirections` model (it tracks what it *thinks* is held; pressing/releasing the same scancodes corrupts that). The bridge dance + keep-alive pulse is the most `SendInput`-edge-sensitive chase code — deliberate release/re-press every 30 ticks, direction flips on transitions — which fits `domt1_1` being where v0.15.9.11.3.3 broke.
+
+### The fix
+
+`InjectKey` (`field_nav_autodrive.inl`) now checks `ChaseKeyboard::IsActive()` first. When active (chase Auto only), it writes **only** to the synthetic buffer via `SetScancodeDown`/`SetScancodeUp` and returns immediately — `SendInput` is skipped entirely. The synthetic-buffer write is the complete and sufficient delivery path: it produces the same `0x80`↔`0x00` byte transitions the engine's edge detection needs, including for the keep-alive pulse's deliberate KEYUP→KEYDOWN edge.
+
+Outside chase Auto (F9 path-finding, world-map AD), `ChaseKeyboard::IsActive()` is false and `InjectKey` falls through to the original `SendInput` path completely unchanged. ChaseKeyboard is Activated at chase auto-pilot Engage and Deactivated at Disengage, so the entire engaged window — keep-alive pulses and key releases included — goes through the synthetic-buffer path; the release calls clear the synthetic buffer bytes, then `ChaseKeyboard::Deactivate()` clears the whole buffer. This replaces the v0.15.9.11.3 dual-write (SendInput *then* synthetic-buffer write) with synthetic-buffer-only during chase Auto.
+
+### BAT plan
+
+Trigger the chase, pick Auto, ride it **while pressing arrow keys**. Expected: the party drives through every chase field (`domt4_1` → `domt3_2` → `domt5_1` → `domt2_1` → `domt1_1` → `doopen2a` → `dotown_3` → `dotown_2` → `dotown_1`) without disruption, the bridge dance fires its EAST/WEST transitions cleanly, `domt5_1` walks rather than runs (listen for walking-speed audio — the W-key synthetic-buffer delivery wasn't explicitly exercised in a passing .11.3.x BAT), 0 `[CBF] PASS` lines, chase completes to the Lapin Beach FMV — matching the v0.15.9.8.3 hands-off result but now with keys pressed. Also confirm there are no `[InjectKey] SendInput FAILED` lines (there should be none — `SendInput` isn't called during chase Auto anymore).
+
+### Risk
+
+Low. Single-function change, surgically gated on `ChaseKeyboard::IsActive()`. The synthetic-buffer write path is unchanged from v0.15.9.11.3 — only `SendInput` is now skipped. No new dependencies. If the chase still breaks with keys pressed, the next suspect is the W-key synthetic-buffer delivery specifically (the probe verified the four arrow DIK slots, not `DIK_W` = 0x11) or a timing interaction between the synthetic-buffer write and the engine's per-frame read. If non-chase auto-drives regress, `ChaseKeyboard::IsActive()` is somehow returning true outside chase Auto — check the Activate/Deactivate call sites.
+
+### Files
+
+- `src/field_nav_autodrive.inl` — `InjectKey`: `ChaseKeyboard::IsActive()` early-return with synthetic-buffer-only write; `SendInput` path now reached only when chase_keyboard is inactive
+- `src/ff8_accessibility.h` — version bump
+- `CHANGELOG.md`, `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`
+
+## v0.15.9.11.3.3
+
+Keyboard-leak probe — a diagnostic-only build that instruments `HookedGetDeviceState` to find why physical arrow presses still corrupt chase Auto navigation on doopen2a, after v0.15.9.11.3.2's GetAsyncKeyState hook failed to stop it. This build fixes nothing; it produces the log evidence that pins the leak path.
+
+### What v0.15.9.11.3.2 BAT revealed
+
+The mod log head confirmed all four keyboard hooks installed at startup:
+
+```
+DirectInputCreateA hooked at 0x71BCC390 (from dinput.dll)
+GetAsyncKeyState hooked at 0x75DD9150 (from user32.dll)
+IDirectInputA::CreateDevice hooked at 0x71BCC6E0
+ChaseKeyboard: IDirectInputDevice8A::GetDeviceState hooked at 0x71BC7680
+```
+
+The field log confirmed `ChaseKeyboard: ACTIVATED` fired on doopen2a engage and stayed active for the whole drive. Yet with Aaron pressing arrow keys, the party was still caught at waypoint 7/28: `battleyarou` (entityPtr=0x0188CA04) fired BATTLE, `[CBF] PASS` let it through (AUTO cap=INT_MAX), `game-mode 0x0001 -> 0x0003` — a real catch battle. Same hands-off-clean / keys-pressed-caught split as v0.15.9.11.3.1. The GetAsyncKeyState hook installed and was active, so that path is ruled out as the leak.
+
+### The paradox
+
+FF8_EN.exe imports exactly two keyboard functions — `DirectInputCreateA` (v7) and `GetAsyncKeyState` — and both are hooked. FFNx replaces FF8's internal `get_keyboard_state` with its own `GetGameKeyState()`, which calls `keyboard_device->GetDeviceState(256, keys)` on FF8's keyboard device. The mod hooks `GetDeviceState` at the function level via MinHook, and `HookedGetDeviceState` cleanly `memcpy`s the synthetic buffer and returns `DI_OK` without ever polling the real device. By static analysis, that chain *should* already mask physical keys during chase Auto — but it doesn't. The leak is a path static analysis can't see.
+
+### The probe
+
+`HookedGetDeviceState`, when `s_active`, now also polls the real device into a scratch buffer and compares the four arrow DIK slots against the synthetic buffer. Logging is transition-gated — a first-call marker, then a line only when the physical-vs-synthetic arrow state changes, plus a ~2-second heartbeat — so the field log stays readable. Three conclusive outcomes:
+
+- **`state-change ... PHYSICAL KEY MASKED`** → the hook *is* catching FFNx's reads and *is* masking physical arrows. The leak is a different path; hunt that next.
+- **first-call + heartbeats, but `physMask` never exceeds `synthMask`** → physical arrows aren't even reaching the real device while we substitute.
+- **no `[LEAK-PROBE]` logs at all during a chase Auto drive** → FFNx is not calling this hooked `GetDeviceState` for field input; look at FFNx's wiring.
+
+Diagnostic state is reset in `Activate()` so each chase Auto engagement starts clean.
+
+### Why a probe instead of a fix
+
+Aaron's directive: do not paper over this with battle suppression. v0.15.9.8.3 proved the chase completes with zero encounters hands-off, so key presses are corrupting working navigation — that corruption has to be found and stopped, not hidden behind the `[CBF]` band-aid.
+
+### BAT plan
+
+Trigger the chase, pick Auto, ride it while pressing arrow keys. The doopen2a catch is expected to still happen. Read back the `[LEAK-PROBE]` lines from `ff8_field.log` — they identify which of the three outcomes holds, and therefore where the leak is.
+
+### Risk
+
+Very low. Pure-additive instrumentation inside the existing hook, gated on `s_active` (chase Auto only). The extra real-device poll is an immediate-mode read — idempotent and cheap. What FF8 receives is unchanged: still the synthetic buffer.
+
+### Files
+
+- `src/chase_keyboard.cpp` — `[LEAK-PROBE]` instrumentation in `HookedGetDeviceState`, diagnostic-state reset in `Activate()`
+- `src/ff8_accessibility.h` — version bump
+- `CHANGELOG.md`, `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`
+
+## v0.15.9.11.3.2
+
+GetAsyncKeyState hook to close the non-DirectInput keyboard leak path. v0.15.9.11.3.1 got the DirectInput hook installed correctly but Aaron's physical arrows still reached FF8 on doopen2a — through a path the synthetic buffer doesn't cover.
+
+### What v0.15.9.11.3.1 BAT revealed
+
+Startup log confirmed all three hooks installed successfully:
+
+```
+DirectInputCreateA hooked at 0x... (from dinput.dll)
+IDirectInputA::CreateDevice hooked at 0x... (vtable[3] on IDirectInputA=0x...)
+ChaseKeyboard: IDirectInputDevice8A::GetDeviceState hooked at 0x...
+```
+
+Field log on chase Auto engage showed the GOOD activation:
+
+```
+ChaseKeyboard: ACTIVATED -- synthetic keyboard buffer now substituted for
+GetDeviceState reads. Physical key presses will NOT reach the engine
+until Deactivate.
+```
+
+Aaron's two-test sequence:
+- **Test 1 (no keys pressed):** chase completed successfully through all fields.
+- **Test 2 (arrow keys pressed):** suppression worked through domt4_1 / domt3_2 / domt5_1 / domt2_1 / domt1_1, but on doopen2a Aaron's arrows started reaching the engine, disrupted the auto-pilot, and triggered the chase-progress director (entityPtr=0x0188CA04) to fire BATTLE at waypoint 6/28.
+
+The failure pattern is identical to v0.15.9.11.1 / .11.2 (the WH_KEYBOARD_LL builds): same field, same director, same waypoint range. But the synthetic buffer hook IS confirmed active. So Aaron's keys must be taking a different path that bypasses DirectInput entirely.
+
+### Root cause
+
+FF8_EN.exe imports `GetAsyncKeyState` from USER32.dll (FF8_EN_imports.txt line 227). `GetAsyncKeyState` reads OS-level keyboard state directly — it doesn't go through DirectInput at all, and FFNx's `replace_function` redirect on `get_keyboard_state` doesn't touch it.
+
+On doopen2a specifically, the chase-progress director's JSM script polls `GetAsyncKeyState` for arrow keys to decide when to fire the catch BATTLE. Aaron's physical presses go straight to the OS keyboard state where `GetAsyncKeyState` reads them, completely bypassing our synthetic buffer. Earlier chase fields use simpler progression logic that doesn't poll this path, which is why suppression worked there.
+
+### Fix
+
+Hook `GetAsyncKeyState` from `user32.dll` via MinHook. During `ChaseKeyboard::IsActive()`, return 0 for `VK_UP` / `VK_DOWN` / `VK_LEFT` / `VK_RIGHT` queries; pass through all other VK queries to the real implementation. This blocks Aaron's physical arrow presses from reaching FF8 via the non-DirectInput path while leaving F1-F12, V/G/T/L/R info-readout keys, /, =, -, \, Backspace, ` repeat, and all other mod-handled keys fully functional.
+
+Why return 0 (not the synthetic buffer state): the auto-pilot's own arrows are NOT consumed via `GetAsyncKeyState` by any path that matters — test 1 (no keys pressed) completed the chase successfully with the auto-pilot driving via DirectInput alone — so returning 0 for ALL arrow queries during chase Auto is safe and simple. If a future regression shows FF8 also needs to see the auto-pilot's arrows via `GetAsyncKeyState`, we can switch to a VK→DIK mapped read from `ChaseKeyboard::s_keyBuf` at that point.
+
+The mod's own arrow handler in `field_nav_handlekeys.inl` is already gated on `s_driveActive && !s_chaseDriveActive` (since v0.15.9.2), so it doesn't query arrow VKs during chase Auto — no mod-side regression.
+
+### Expected v0.15.9.11.3.2 BAT outcome
+
+Mod log near startup should show a new line:
+
+```
+DllMain: GetAsyncKeyState hooked at 0x... (from user32.dll). During chase
+Auto, arrow VK queries return 0; all other VKs pass through. Closes the
+non-DirectInput keyboard leak path that affected doopen2a in v0.15.9.11.3.1 BAT.
+```
+
+On chase Auto engage: existing `ChaseKeyboard: ACTIVATED` line. Aaron tests with arrow key presses during chase Auto — party drives through ALL fields including doopen2a / dotown_3 / dotown_2 / dotown_1 without disruption, 0 [CBF] PASS lines, chase completes successfully to Lapin Beach FMV.
+
+### Files
+
+- `src/dinput8.cpp` — `HookedGetAsyncKeyState` + `InstallGetAsyncKeyStateHook` (full implementation with rationale comments) + DllMain wiring after `InstallDirectInputCreateAHook`.
+- `src/ff8_accessibility.h` — version bump
+- `CHANGELOG.md`, `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`
+
+### Risk
+
+Low. Single new hook on a well-known Win32 API. Hook is gated on `ChaseKeyboard::IsActive()` so it only affects behavior during chase Auto — F9 path-finding, world-map AD, all other gameplay unchanged. Graceful degradation if install fails (chase Auto still works without arrow suppression, falling back to v0.15.9.11.3.1 behavior).
+
+If suppression STILL leaves Aaron's keys reaching FF8 after this, the next leak paths to investigate are WM_KEYDOWN messages (unlikely since FFNx's `HandleInputEvents` consumes them) and `GetKeyState` (not imported by FF8 per the import table, but worth confirming).
+
+## v0.15.9.11.3.1
+
+Add DirectInputCreateA hook chain for FF8's DirectInput 7 keyboard. The v0.15.9.11.3 synthetic-buffer approach was structurally correct but hooked the wrong DirectInput version.
+
+### What v0.15.9.11.3 BAT revealed
+
+Field log at chase Auto engage (2026-05-13 19:05:07):
+
+```
+ChaseKeyboard: ACTIVATED but hook NOT installed -- synthetic buffer set but
+GetDeviceState detour absent; physical key presses will continue to reach the
+engine. This is the v0.15.9.11.3 graceful-degradation path.
+```
+
+The synthetic buffer was set up but no GetDeviceState detour was installed. Aaron's physical arrow presses then disrupted the auto-pilot, confirming keys still reached the engine.
+
+### Root cause
+
+FF8_EN.exe imports `DirectInputCreateA` from `DINPUT.dll`, NOT `DirectInput8Create` from `dinput8.dll`. FF8 is a 2013 Steam port of a 1999 game and uses the original DirectInput 7 API for its keyboard. FFNx's `input.cpp` source confirms: `IDirectInputDeviceA* keyboard_device = *common_externals.keyboard_device` — old-API interface type, no `8`.
+
+Our v0.15.9.11.3 `IDirectInput8A::CreateDevice` hook only caught FFNx's own DirectInput 8 device creations (FFNx uses DirectInput 8 for its own internal polling, gamepad, overlay UI). FF8's keyboard is on the v7 chain entirely separate from anything we were hooking.
+
+### Fix
+
+Install a parallel hook chain on the DirectInput 7 API:
+
+1. `LoadLibraryA("dinput.dll")` + `GetProcAddress("DirectInputCreateA")` and MinHook the result.
+2. `HookedDirectInputCreateA` vtable-hooks `IDirectInputA::CreateDevice` (vtable[3]) on the returned `IDirectInputA*`.
+3. `HookedCreateDeviceA` forwards the returned `IDirectInputDeviceA*` to `ChaseKeyboard::OnDeviceCreated` (via `reinterpret_cast` to `IDirectInputDevice8A*`; the COM vtable layouts are binary-compatible through `GetDeviceState` at vtable[9]).
+
+From there, the existing v0.15.9.11.3 logic takes over unchanged — `OnDeviceCreated` checks the GUID and vtable-hooks `GetDeviceState` on keyboard devices. The chase auto-pilot's `InjectKey` dual-write path was already correct; it just had no synthetic buffer to write into because the hook never installed.
+
+Also moves `MH_Initialize` from `AccessibilityThread` to `DllMain` so the hook is installed synchronously before any FF8 code runs. `MH_Initialize` is idempotent — the later call in `AccessibilityThread` returns `MH_ERROR_ALREADY_INITIALIZED`, which is logged and execution continues normally. This eliminates any race condition with FF8's init-time `DirectInputCreateA` call.
+
+### Expected v0.15.9.11.3.1 BAT outcome
+
+Mod log near startup shows both:
+- `DirectInputCreateA hooked at 0x... (from dinput.dll)`
+- `IDirectInputA::CreateDevice hooked at 0x... (vtable[3] on IDirectInputA=0x...)`
+
+Then on FF8's keyboard device creation (during FF8 init):
+- `ChaseKeyboard: IDirectInputDevice8A::GetDeviceState hooked at 0x... (vtable[9] on keyboard device 0x...). Synthetic buffer path armed`
+
+On chase Auto engage:
+- `ChaseKeyboard: ACTIVATED -- synthetic keyboard buffer now substituted for GetDeviceState reads. Physical key presses will NOT reach the engine until Deactivate`
+
+Aaron presses arrow keys during chase Auto — auto-pilot continues uninterrupted because physical state is never polled.
+
+### Files
+
+- `src/dinput8.cpp` — DirectInputCreateA + IDirectInputA::CreateDevice hook chain + `InstallDirectInputCreateAHook` called from DllMain. MH_Initialize moved earlier to DllMain.
+- `src/ff8_accessibility.h` — version bump
+- `CHANGELOG.md`, `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`
+
+### Risk
+
+Low-medium. The new hook chain mirrors the v0.15.9.11.3 IDirectInput8A path exactly; the only differences are the entry point (`DirectInputCreateA` instead of our `DirectInput8Create` proxy) and the C type names (`IDirectInputA*`/`IDirectInputDeviceA*` vs the v8 versions). Standard MinHook patterns throughout. Graceful degradation if any install step fails (chase Auto still works without suppression).
+
+## v0.15.9.11.3
+
+Synthetic keyboard buffer substitution for chase Auto. Replaces three failed `WH_KEYBOARD_LL` approaches (v0.15.9.11 / .11.1 / .11.2) that all broke the chase auto-pilot on doopen2a (caught at waypoint 5-6/26 of the 26-waypoint chase path, dmag=825 running speed, ~2s after engagement, by the chase-progress director entity).
+
+### Why the LL hook failed
+
+`WH_KEYBOARD_LL` is a global Windows hook installed on the calling thread's message pump. SendInput-generated keyboard events become synchronous round-trips through that thread's message pump before SendInput returns to the caller. The chase auto-pilot calls SendInput from the accessibility worker thread; with the LL hook installed on the main thread (the only thread with a message pump), every InjectKey from the worker thread waits on the main thread to service the message before continuing.
+
+That per-call latency was enough to break the auto-pilot's per-tick path-finding on doopen2a. v0.15.9.11.2 was an isolation build (LL hook only, no other suppression layers) and reproduced the failure exactly — proving the LL hook itself, not any other layer, was the cause.
+
+### What v0.15.9.11.3 does instead
+
+New architecture using a function-level vtable detour on `IDirectInputDevice8::GetDeviceState`:
+
+1. Our DirectInput8Create proxy hooks `IDirectInput8::CreateDevice` (vtable[3]) via MinHook.
+2. When FF8/FFNx creates the keyboard device (GUID_SysKeyboard), our hooked CreateDevice forwards the device pointer to `chase_keyboard::OnDeviceCreated`, which vtable-hooks `IDirectInputDevice8::GetDeviceState` (vtable[9]) on that specific device.
+3. The mod owns a 256-byte synthetic DirectInput keyboard buffer.
+4. When chase Auto engages, `ChaseKeyboard::Activate()` is called. From that point, the GetDeviceState detour returns the synthetic buffer instead of polling the real keyboard device. Physical key presses never reach FF8.
+5. The chase auto-pilot's `InjectKey` in `field_nav_autodrive.inl` dual-writes its arrow + W events into the synthetic buffer (via `ChaseKeyboard::SetScancodeDown/Up`) when `ChaseKeyboard::IsActive()` is true. So the engine still sees the auto-pilot's intended input.
+6. On `Disengage()`, `ChaseKeyboard::Deactivate()` restores pass-through behavior.
+
+Outside chase Auto (F9 path-finding, world-map AD), `IsActive()` returns false and the hook is a pure pass-through to the real device. F9 and world-map AD behavior is fully preserved.
+
+### FFNx source dive (2026-05-13)
+
+FFNx's `common.cpp` line ~950: `replace_function(common_externals.get_keyboard_state, &GetGameKeyState)`. FFNx replaces FF8's `get_keyboard_state` entirely. FFNx's `GetGameKeyState` calls `keyboard_device->GetDeviceState(256, keys)` and returns the buffer to FF8. FFNx also has a built-in `SetBlockKeysFromGame(bool)` that conceptually zeros the buffer — but using it directly would also block the auto-pilot's keys (no injected-vs-physical distinction at that level).
+
+Hooking `GetDeviceState` one layer deeper than FFNx's block path lets us substitute the buffer entirely while controlling exactly what the engine reads.
+
+### Future use cases
+
+The same Activate / Deactivate mechanism can be reused for any scripted-sequence accessibility feature where user input needs to be suppressed: cutscene playback, walk-and-talk dialog gap, timed events, etc. Chase Auto is the first user.
+
+### Files
+
+- NEW: `src/chase_keyboard.h`, `src/chase_keyboard.cpp`
+- `src/dinput8.cpp` (CreateDevice vtable hook + ChaseKeyboard::Shutdown wiring)
+- `src/chase_auto_pilot.cpp` (Activate at Engage + Deactivate at Disengage)
+- `src/field_nav_autodrive.inl` (InjectKey dual-write)
+- `src/field_navigation.cpp` (chase_keyboard.h include before namespace opens)
+- `src/deploy.bat` (chase_keyboard.cpp added to compile list)
+- `src/ff8_accessibility.h` (version bump)
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`, `CHANGELOG.md`
+
+### Risk
+
+Medium. The CreateDevice + GetDeviceState vtable hooks are new ground for the mod — previously we only MinHook'd FF8 engine functions, not COM interface methods. Both hooks are standard MinHook patterns. Graceful degradation: if MH_CreateHook or MH_EnableHook fails at either site, the mod logs a warning and continues with normal pass-through. Chase Auto still works; physical key presses just reach the engine. Suppression is the only thing disabled.
+
+### Expected BAT outcome
+
+Chase Auto plays through end-to-end identical to v0.15.9.10 Auto BAT (clean transit, 0 [CBF] PASS, full completion to Lapin Beach FMV). With Aaron pressing arrow keys during the chase, the auto-pilot continues uninterrupted — proving suppression works. Verification markers in mod log: `ChaseKeyboard: IDirectInputDevice8A::GetDeviceState hooked at 0x...` near startup. In field log on chase engage: `ChaseKeyboard: ACTIVATED -- synthetic keyboard buffer now substituted...`. On disengage: `ChaseKeyboard: DEACTIVATED`.
+
 ## v0.15.9.10
 
 MODE_ORIGINAL implementation (Aaron's chase-scene item #2). The third ASK option is now a real third mode that bypasses all mod chase machinery, letting the vanilla FF8 chase play out unmodified.
