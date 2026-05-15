@@ -7,13 +7,22 @@ REM Lives in src\ — invoked by deploy.vbs in project root.
 REM ============================================================
 
 :: Extract version from ff8_accessibility.h
-:: v0.15.3 fix: tighten findstr to /C:"#define FF8OPC_VERSION " so only the
-:: actual #define line matches. The previous /C:"FF8OPC_VERSION " pattern
-:: matched comment-trail lines too and the for /f loop's last-iteration-wins
-:: behavior left VERSION set to token 3 of an unrelated comment line
-:: ("World"). The %%~V modifier strips surrounding quotes from "X.Y.Z".
+:: v0.15.10.1 fix: add /B (begin-of-line anchor) so findstr matches only the
+:: actual #define line, not historical comment entries that mention the macro
+:: by name. v0.15.3 tightened the literal from "FF8OPC_VERSION " to
+:: "#define FF8OPC_VERSION " (with trailing space) but did not anchor to BOL.
+:: As version history accumulated in line 12's trailing comment, the v0.15.3
+:: entry's own commentary embedded the literal string "#define FF8OPC_VERSION"
+:: while describing what its fix matches -- ironically re-breaking the
+:: regex. findstr matched that comment line too, and for /f's
+:: last-iteration-wins behavior left VERSION set to token 3 of the comment
+:: line ("SINGLE-PRONGED" from "// v0.15.3: SINGLE-PRONGED CLEANUP..."),
+:: producing "Version: SINGLE-PRONGED" in deploy logs from v0.15.3 onward.
+:: Adding /B fixes it: the real #define starts at column 0; all historical
+:: mentions are indented "  // ..." so they no longer false-positive.
+:: The %%~V modifier strips surrounding quotes from "X.Y.Z".
 set "VERSION=unknown"
-for /f "tokens=3 delims= " %%V in ('findstr /C:"#define FF8OPC_VERSION " "%~dp0ff8_accessibility.h"') do (
+for /f "tokens=3 delims= " %%V in ('findstr /B /C:"#define FF8OPC_VERSION " "%~dp0ff8_accessibility.h"') do (
     set "VERSION=%%~V"
 )
 

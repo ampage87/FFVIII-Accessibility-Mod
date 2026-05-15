@@ -4,6 +4,56 @@ Newest on top. Each entry begins with a `## vMAJOR.MINOR.BUILD` heading followed
 
 The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_accessibility.h`. The push utility refuses to push if they don't.
 
+## v0.15.10.1
+
+Fix the `deploy.bat` regex regression that has printed `Version: SINGLE-PRONGED` instead of the actual version string in every build log since v0.15.3. Cosmetic-only — the deployed DLL has always carried the real version from `FF8OPC_VERSION`; only the deploy script's text output was wrong.
+
+### Root cause
+
+The version-extract logic in `src/deploy.bat` does:
+
+```batch
+for /f "tokens=3 delims= " %%V in ('findstr /C:"#define FF8OPC_VERSION " "%~dp0ff8_accessibility.h"') do (
+    set "VERSION=%%~V"
+)
+```
+
+v0.15.3 had previously tightened the literal from `FF8OPC_VERSION ` to `#define FF8OPC_VERSION ` (with trailing space) to stop matching comment-trail lines. That fix worked at the time. Three things then conspired to re-break it as version history accumulated:
+
+1. `src/ff8_accessibility.h` accumulates each release's full rationale as a `// vX.Y.Z: ...` comment block appended after the `#define`. Line 12 is the real macro plus the most recent version's comment; lines 13+ are older version comments, each indented `  // ...`.
+2. The v0.15.3 entry's own commentary, in its description of the findstr-tightening fix, embeds the literal substring `#define FF8OPC_VERSION` — quoting the exact pattern its fix matches. That comment now lives at line 63 of the header (5,278 chars long).
+3. `findstr /C:` matches literal substrings *anywhere on a line*. Without a begin-of-line anchor, it matches both line 12 (real macro) AND line 63 (the historical comment). `for /f`'s last-iteration-wins behavior puts token 3 of line 63 into `VERSION`. With `delims= ` and the leading-whitespace-indented `  // ...` prefix, tokens parse as `1=//, 2=v0.15.3:, 3=SINGLE-PRONGED` (from `// v0.15.3: SINGLE-PRONGED CLEANUP...`).
+
+So every build deploy from v0.15.3 onward printed `Version: SINGLE-PRONGED`. The v0.15.3 entry's own meta-commentary about its findstr-tightening fix is what re-broke the same regex. Beautifully ironic.
+
+### The fix
+
+Add `/B` (begin-of-line anchor) to findstr. The real `#define` is at column 0; all historical mentions inside comment continuations are indented `  // ...` so they no longer false-positive.
+
+Three `#define`-prefixed substrings exist in the header overall:
+
+- **Line 12** — `#define FF8OPC_VERSION "0.15.10.1"` — the real macro. Starts at column 0, has the trailing space after `VERSION`. **Matches.**
+- **Line 63** — `  // v0.15.3: SINGLE-PRONGED CLEANUP...` comment block which contains `#define FF8OPC_VERSION` embedded in its description text. Does NOT start at column 0 (indented `  //`). **No longer matches with /B.**
+- **Line 212** — `#define FF8OPC_VERSION_DATE "2026-05-07"`. Starts at column 0, but has an underscore where the trailing-space literal expects a space. Did not match before, still does not match.
+
+So `VERSION` resolves uniquely to `0.15.10.1`. No runtime behavior changes; deploy-script-only.
+
+### Files
+
+- `src/deploy.bat` — add `/B` to findstr, rewrite comment block with full root-cause explanation.
+- `src/ff8_accessibility.h` — version bump.
+- `CHANGELOG.md`, `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`
+
+### Risk
+
+Trivial. One flag added to one batch command. Worst case: `findstr` somehow doesn't accept `/B` combined with `/C:` (it does — documented combination that has worked since Windows 2000). Fallback would be to use a more elaborate parsing approach, but `/B /C:` is the standard idiom.
+
+### Predicted BAT
+
+- `Logs/build_latest.log` opens with `Building FF8 Original PC Accessibility Mod Version 0.15.10.1` (top of log) and the `Deployment Complete` block reads `Version: 0.15.10.1`. No `SINGLE-PRONGED` anywhere.
+- DLL identifies itself as `Initialized v0.15.10.1` in `ff8_battle.log`, `ff8_field.log`, etc.
+- No runtime regressions anywhere — no source files outside the version macro changed.
+
 ## v0.15.10.0
 
 Fix the X-ATM092 enemy-name decoder bug and consolidate two FF8 text decoders down to one. Battle TTS announced "X-ATM?6?" instead of "X-ATM092" because `src/battle_tts_helpers.inl` had a standalone v0.10.08 decoder (`DecodeFF8Char` + `DecodeFF8String`) whose character table was marked "estimated, not yet confirmed" since v0.10.07. Its digit range was off by `0x03` — it mapped `0x24-0x2D → '0'-'9'` when the canonical Ifrit-textformat.ifr range is `0x21-0x2A → '0'-'9'`.

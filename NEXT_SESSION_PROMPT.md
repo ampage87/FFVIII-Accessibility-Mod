@@ -1,77 +1,74 @@
-# Next Session Prompt: v0.15.10.0 BAT results
+# Next Session Prompt: v0.15.10.1 BAT (deploy.bat regex regression)
 
 ## Where we are
 
-**v0.15.10.0 built locally on 2026-05-14, BAT pending.** This build retires the v0.10.08 standalone decoder (`DecodeFF8Char` + `DecodeFF8String`) in `src/battle_tts_helpers.inl` and reroutes `DecodeFF8String` through the canonical `FF8TextDecode::Decode` in `src/ff8_text_decode.cpp`. Public signature preserved so all five battle-module call sites (helpers.inl::GetEnemyName, hp.inl, menu.inl, victory.inl x5) keep working unchanged.
+**v0.15.10.1 code complete, BAT pending.** Backlog #3 — fix the `Version: SINGLE-PRONGED` regression in `deploy.bat`'s build log output. Three source-tree changes:
 
-GitHub HEAD is still v0.15.9.11.3.9 (`9c8af9c3`). When Aaron pushes after this BAT, the bundle is just v0.15.10.0 atop that.
+1. `src/deploy.bat` — `findstr /C:"#define FF8OPC_VERSION "` gains `/B` (begin-of-line anchor). Comment block above rewritten with full root-cause explanation.
+2. `src/ff8_accessibility.h` — `FF8OPC_VERSION` bumped from `"0.15.10.0"` to `"0.15.10.1"`. New v0.15.10.1 history comment prepended on line 12 ahead of the v0.15.10.0 comment.
+3. `CHANGELOG.md` — new top entry above `## v0.15.10.0`.
+
+**GitHub HEAD: v0.15.10.0** (`d198b947`, pushed 2026-05-15 05:22 UTC, BAT-confirmed). v0.15.10.1 is local-only until Aaron pushes after BAT.
+
+## Root cause recap
+
+`findstr /C:"#define FF8OPC_VERSION "` matched not only line 12 of the header (the real `#define`) but also line 63 — the historical v0.15.3 comment block, which embedded the literal substring `#define FF8OPC_VERSION` while documenting the v0.15.3 fix. For-loop's last-iteration-wins put token 3 of line 63 into `VERSION`: with `delims= ` and the leading-whitespace-indented `  // ...` prefix, tokens parsed as `1=//, 2=v0.15.3:, 3=SINGLE-PRONGED` (from `// v0.15.3: SINGLE-PRONGED CLEANUP...`). The v0.15.3 entry's own meta-commentary about its findstr-tightening fix is what re-broke the same regex. `/B` anchors to start of line — only line 12 (column 0) matches now.
 
 ## BAT plan
 
-Aaron needs to trigger any battle with X-ATM092 in scope. The most natural spots:
+Aaron runs `deploy.vbs` (no special steps required — this is just a normal rebuild). 
 
-- The chase-scene battle path. The chase fields don't normally enter chase battles when Auto is engaged (v0.15.9.11.3.x suppression), so the easiest way to get X-ATM092 to actually announce is to pick **Manual** at the chase ASK and let one of the chase battles fire on `domt4_1` / `domt3_2` etc. Alternative: pick **Original** to play vanilla.
-- Or load any save where X-ATM092 has already appeared (boss fight on the harbor approach).
-
-### What to verify in `Logs/ff8_battle.log`
+### What to verify in `Logs/build_latest.log`
 
 **Pass conditions:**
 
-1. `[NAME-CACHE] slot3 = "X-ATM092" (base="X-ATM092")` \u2014 no `?`, no `6`.
-2. `[TARGET] Entry announce: X-ATM092` when Aaron cursors over the boss.
-3. Aaron hears NVDA say "X-ATM092" (or its expansion if TTS reads digits as words).
+1. Top of log reads `Building FF8 Original PC Accessibility Mod Version 0.15.10.1` (not `SINGLE-PRONGED`, not `unknown`).
+2. The Deployment Complete block near the bottom reads `Version: 0.15.10.1`.
+3. Build itself succeeds (no new compile errors — the deploy.bat changes don't touch the compile command at all, so build should be byte-for-byte identical to v0.15.10.0 except for the version macro).
 
-**Regression checks** (any other recent encounter):
+**Regression checks:**
 
-1. A normal-name enemy (Bite Bug, Grat, T-Rexaur, Glacial Eye, Caterchipillar, etc.) still announces correctly in the `[NAME-CACHE]` / `[TARGET]` paths.
-2. GF names announced from savemap (Quezacotl, Shiva, Ifrit during summon menu navigation or Draw lookups) still announce correctly through the hp.inl + menu.inl + victory.inl paths.
-3. Victory phase entity names (the post-battle EXP / item / ability lines) still announce correctly \u2014 they share the same decoder via the victory.inl call sites.
+1. After Aaron starts FF8, `ff8_battle.log` / `ff8_field.log` etc. all show `Initialized v0.15.10.1` (or whatever each subsystem's init banner is) — confirms the DLL on disk actually deployed.
+2. Any runtime feature exercise (open the menu, walk into a field, trigger a battle) — should be identical to v0.15.10.0 since no source files outside the version macro changed.
 
-## Decision tree for the BAT result
+## Decision tree
 
 ### Case A: clean pass
 
-Aaron reports X-ATM092 announces correctly AND no regressions. Action items:
+Aaron reports `Version: 0.15.10.1` in both log spots, no regressions. Action items:
 
-1. Update CHANGELOG.md, DEVNOTES.md, and this file to note BAT success and Aaron's confirmation quote.
-2. Aaron pushes v0.15.10.0 via `Utilities/push_to_github.vbs`.
-3. Pick the next backlog item. Recommended next picks in priority order from `DEVNOTES.md`:
-   - **#1 WALK_REPRESS_PERIOD cleanup** \u2014 smallest task, zero risk.
-   - **#3 deploy.bat regex regression** \u2014 cosmetic but visible every build.
-   - **#5 unify all three FF8 text decoders** \u2014 directly continues v0.15.10.0's consolidation work; migrates `DecodeFF8TextPreview` in victory.inl. Higher risk (touches victory phase) but the architectural reward is single source of truth.
-   - **#2 BridgeDiag verbosity trim** \u2014 log volume housekeeping.
+1. Update CHANGELOG.md, DEVNOTES.md, and this file to note BAT success.
+2. Aaron pushes v0.15.10.1 via `Utilities/push_to_github.vbs`.
+3. Pick the next backlog item. Recommended priority from DEVNOTES.md backlog:
+   - **#1 WALK_REPRESS_PERIOD cleanup** — smallest task, zero risk, clears v0.15.9.7.x vestigial state.
+   - **#4 unify all three FF8 text decoders** — directly continues v0.15.10.0's consolidation work; migrates `DecodeFF8TextPreview` in `battle_tts_victory.inl`. Higher risk (touches victory phase machinery) but the architectural reward is single source of truth.
+   - **#2 BridgeDiag verbosity trim** — log volume housekeeping, transition-only events on `domt1_1`.
 
-### Case B: X-ATM092 still wrong
+### Case B: still `SINGLE-PRONGED` or some other wrong value
 
-Aaron reports X-ATM092 still announces with `?` or a substituted digit. This would mean the decoder swap didn't deploy, OR the canonical decoder has a different bug, OR the input bytes are coming from a different source than we think.
+Aaron reports the build log still shows a wrong version. This would be very surprising given `findstr /B /C:` is a documented combination. Diagnostics:
 
-1. Read `Logs/build_latest.log` tail to confirm the build picked up the changes (look for compile of `battle_tts.cpp` after the include addition).
-2. Check `ff8_battle.log` for the exact `[NAME-CACHE]` line. If the new value differs from `"X-ATM?6?"` but is still wrong, the input bytes aren't what we predicted \u2014 add a one-time `Log::Battle` hex dump in `GetEnemyName` showing the bytes and re-BAT to see them.
-3. Fallback Option B (one-line digit range patch) is still on the table: revert to the old decoder structure and just change `if (b >= 0x24 && b <= 0x2D)` to `if (b >= 0x21 && b <= 0x2A)`. But the canonical decoder is empirically known to work for this exact input source via `scan_tts.cpp`, so a fail here is more likely a build / include issue than a decoder issue.
+1. Re-read the deploy.bat — confirm the `/B` flag actually made it into the file (filesystem MCP sync issue? OneDrive lag?).
+2. Open a shell on Aaron's machine and run the findstr command directly:
+   `findstr /B /C:"#define FF8OPC_VERSION " "src\ff8_accessibility.h"`
+   It should print exactly one line: `#define FF8OPC_VERSION "0.15.10.1"  // v0.15.10.1: ...`
+3. If it prints zero lines, the begin-of-line whitespace situation is different than expected (maybe a BOM, maybe tab indentation, etc.).
+4. If it prints multiple lines, something else has the literal pattern at column 0 — a new historical entry maybe? Diagnose accordingly.
 
-### Case C: regression on some other name
+### Case C: build fails
 
-Aaron reports a previously-working enemy name now sounds wrong. This is the predicted-low-probability "0x06 case" caveat or a different unmapped byte. Action:
+The deploy.bat changes don't touch the compile-and-link command at all. If the build fails for some unrelated reason (Visual Studio update broke something, etc.), it's not caused by this change. Read `build_latest.log` tail for the actual error and triage.
 
-1. Add a one-time hex dump in `GetEnemyName` (and/or the relevant victory.inl call site) for the affected name. Confirm the byte sequence.
-2. If 0x06 is in the bytes and the old behavior was correct: add a targeted override in the canonical decoder for the battle-name context, OR add a battle-module-specific post-process pass.
-3. If it's some other byte the canonical decoder mishandles: fix `FF8TextDecode::Decode` itself (also benefits scan_tts and field dialog).
+### Case D: regression in some other behavior
 
-### Case D: build failure
-
-The most likely build failure is `<string>` not in scope. `ff8_text_decode.h` already includes `<string>`, so adding `#include "ff8_text_decode.h"` to battle_tts.cpp should bring it in transitively. If the build fails for that reason anyway:
-
-1. Add `#include <string>` explicitly to battle_tts.cpp near the existing `#include <cstring>`.
-2. Re-BAT.
-
-Less likely but possible: `FF8TextDecode::Decode` link error if the helper file's translation unit isn't part of the build. Check `src/deploy.bat` for `ff8_text_decode.cpp` in the compile list. It should already be there (scan_tts uses it), but worth verifying if linking fails.
+Theoretically impossible — no source files outside the version macro changed. If something does regress, it's not from v0.15.10.1; it's something else surfacing (OneDrive sync staleness, accidental DLL replacement, etc.). Verify the DLL on disk via timestamp and init banner before assuming regression.
 
 ## Hard constraints (unchanged)
 
 - **Do NOT revert the AUTO `[CBF]` battle-suppressor cap to 0.** Aaron's 2026-05-13 directive stands.
 - **Filesystem MCP for all Windows project files.** Bash runs in a Linux container that can't reach the OneDrive mod directory.
 - **Aaron pushes via `Utilities/push_to_github.vbs`.** Claude NEVER pushes.
-- **NEVER re-enable SET3 opcode hook (0x1E)** \u2014 CI guard in `.github/workflows/safety-checks.yml`.
+- **NEVER re-enable SET3 opcode hook (0x1E)** — CI guard in `.github/workflows/safety-checks.yml`.
 
 ## Session ritual reminder
 
