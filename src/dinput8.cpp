@@ -860,7 +860,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         NavLog::SessionStart();
         Log::Write("========================================");
         Log::Write("FF8 Original PC Accessibility Mod");
-        Log::Write("Version: %s (%s)", FF8OPC_VERSION, FF8OPC_VERSION_DATE);
+        Log::Write("Version: %s", FF8OPC_VERSION);
         Log::Write("Build:   " __DATE__ " " __TIME__);
         Log::Write("========================================");
         Log::Write("DllMain: DLL_PROCESS_ATTACH");

@@ -910,17 +910,6 @@ static int32_t s_prevPosX                = 0;
 static int32_t s_prevPosY                = 0;
 static bool    s_prevPosValid            = false;
 
-// v0.15.9.8.2: Bridge (domt1_1) all-slots diagnostic tick counter. Fires
-// LogBridgeDiagnostic every 6 Update ticks (10Hz) when engaged on the
-// bridge field. v0.15.9.8.1 BAT found ChaseDetector resolves kani symIdx=12
-// to Others slot 6 on domt1_1, but that slot reads pos=(0,0) on every tick
-// throughout the bridge traversal -- so the actually-pursuing kani is
-// either in a different slot or in the Backgrounds array. The diagnostic
-// enumerates every non-zero slot of both arrays and dumps slot index +
-// SYM name + pos + Y-delta-vs-party so v0.15.9.8.3 can route the dance
-// logic to the right entity.
-static int     s_bridgeDiagTick = 0;
-
 // v0.15.9.8.3: Bridge dance state machine. The bridge (domt1_1) has an
 // interactive feedback loop with X-ATM092:
 //
@@ -1361,118 +1350,6 @@ static void LogChaseActiveDiagnostic(const char* fieldName)
 }
 
 // ============================================================================
-// v0.15.9.8.2: Bridge (domt1_1) all-slots diagnostic
-// ============================================================================
-//
-// Per-tick (10Hz when called every 6 ticks) dump of every non-zero entity
-// slot in both pFieldStateOthers and pFieldStateBackgrounds when engaged on
-// the bridge. v0.15.9.8.1 BAT confirmed ChaseDetector resolved kani symIdx=12
-// to Others slot 6 but that slot reads (0, 0) the entire bridge traversal --
-// the real moving kani entity is somewhere else. Output identifies which
-// slot is actually tracking the chase so v0.15.9.8.3 can route the bridge
-// dance logic to it.
-//
-// Output format (one line per non-zero slot):
-//   BridgeDiag: field='X' party=(pX,pY) array=Others|Backgrounds
-//     slot=I sym='Y' pos=(eX,eY) ydelta=N
-//
-// Hard-gated to fieldName == "domt1_1". Skips slots whose computed position
-// is (0, 0) so the log is concise -- the absence of a slot in the output
-// indicates it's empty or unset. SEH-guarded per array.
-//
-// SYM-name lookup: ChaseDetector caches the field's SYM names at field-
-// transition time. The map from (arrayKind, slot) to symIdx is:
-//   Backgrounds slot I -> symIdx = doorsLines + I
-//   Others      slot I -> symIdx = doorsLines + backgrounds + I
-// where doorsLines = doors + lines. For domt1_1 the v0.15.9.8.1 BAT logged
-// doors=0, lines=4, bgs=2, others=17, so:
-//   kBridgeBgStart     = 4   (doors(0) + lines(4))
-//   kBridgeOthersStart = 6   (doors(0) + lines(4) + bgs(2))
-// These are hard-coded here because the diagnostic only runs on domt1_1
-// and avoiding FieldArchive::LoadJSMCounts keeps the include surface small.
-// If the counts ever differ in another game version the sym names will be
-// off-by-N -- not a correctness problem (we'd still see which SLOT is moving)
-// but it would mislabel the SYM string in the log.
-static void LogBridgeDiagnostic(const char* fieldName)
-{
-    // v0.15.9.11.3.7: per-sample bridge dump retired. v0.15.9.8.2 used
-    // this 10Hz all-slots enumerator to identify which entity slot tracked
-    // the actually-pursuing X-ATM092 on domt1_1 (answer: Others slot 3,
-    // SYM 'laguna'). v0.15.9.8.3 shipped the kani-slot override and the
-    // bridge dance state machine; the per-sample dump is no longer useful.
-    // The bridge dance's own state-transition log lines (EAST->WEST,
-    // WEST->EAST, WEST->EAST TIMEOUT, leap STARTED) remain in
-    // UpdateBridgeDance and continue to fire on transitions only.
-    (void)fieldName;
-    return;
-
-    if (fieldName == nullptr || std::strcmp(fieldName, "domt1_1") != 0) return;
-
-    int32_t pX = 0, pY = 0;
-    bool gotPos = ReadSquallPosition(pX, pY);
-
-    const int kBridgeBgStart     = 4;
-    const int kBridgeOthersStart = 6;
-    const uint32_t STRIDE_BG     = 0x1B4;
-
-    // --- Others array ---
-    if (FF8Addresses::pFieldStateOthers != nullptr &&
-        FF8Addresses::pFieldStateOtherCount != nullptr)
-    {
-        __try {
-            uint8_t* base  = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
-            int      count = (int)*FF8Addresses::pFieldStateOtherCount;
-            if (base != nullptr && count > 0) {
-                if (count > 32) count = 32;
-                for (int i = 0; i < count; ++i) {
-                    uint8_t* block = base + (uintptr_t)i * ENTITY_STRIDE_OTHERS;
-                    int32_t fpX = *(int32_t*)(block + 0x190);
-                    int32_t fpY = *(int32_t*)(block + 0x194);
-                    int32_t x   = fpX / 4096;
-                    int32_t y   = fpY / 4096;
-                    if (x == 0 && y == 0) continue;
-                    int32_t ydelta = gotPos ? (y - pY) : 0;
-                    const char* sym = ChaseDetector::GetSymName(kBridgeOthersStart + i);
-                    Log::Field("BridgeDiag: field='%s' party=(%d,%d) array=Others "
-                               "slot=%d sym='%s' pos=(%d,%d) ydelta=%d",
-                               fieldName, (int)pX, (int)pY,
-                               i, (sym && sym[0]) ? sym : "?",
-                               (int)x, (int)y, (int)ydelta);
-                }
-            }
-        } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    }
-
-    // --- Backgrounds array ---
-    if (FF8Addresses::pFieldStateBackgrounds != nullptr &&
-        FF8Addresses::pFieldStateBackgroundCount != nullptr)
-    {
-        __try {
-            uint8_t* base  = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateBackgrounds);
-            int      count = (int)*FF8Addresses::pFieldStateBackgroundCount;
-            if (base != nullptr && count > 0) {
-                if (count > 32) count = 32;
-                for (int i = 0; i < count; ++i) {
-                    uint8_t* block = base + (uintptr_t)i * STRIDE_BG;
-                    int32_t fpX = *(int32_t*)(block + 0x190);
-                    int32_t fpY = *(int32_t*)(block + 0x194);
-                    int32_t x   = fpX / 4096;
-                    int32_t y   = fpY / 4096;
-                    if (x == 0 && y == 0) continue;
-                    int32_t ydelta = gotPos ? (y - pY) : 0;
-                    const char* sym = ChaseDetector::GetSymName(kBridgeBgStart + i);
-                    Log::Field("BridgeDiag: field='%s' party=(%d,%d) array=Backgrounds "
-                               "slot=%d sym='%s' pos=(%d,%d) ydelta=%d",
-                               fieldName, (int)pX, (int)pY,
-                               i, (sym && sym[0]) ? sym : "?",
-                               (int)x, (int)y, (int)ydelta);
-                }
-            }
-        } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    }
-}
-
-// ============================================================================
 // v0.15.9.8.3: Bridge dance per-tick update
 // ============================================================================
 //
@@ -1609,17 +1486,6 @@ static void UpdateBridgeDance(const char* fieldName)
             s_bridgeWasLeaping       = false;
         }
     }
-
-    // Per-sample diagnostic. Concise format; ~10 lines/sec while engaged.
-    const char* stateStr = (s_bridgeDanceState == BRIDGE_DANCE_EAST) ? "EAST" : "WEST";
-    const char* motionStr = isLeaping ? "LEAPING" : (isLanded ? "LANDED" : "CHASING");
-    Log::Field("BridgeDance: sample state=%s motion=%s kani=(%d,%d) party=(%d,%d) "
-               "kdx=%d consecLanded=%d wasLeaping=%d dwell=%d",
-               stateStr, motionStr,
-               (int)kX, (int)kY,
-               gotParty ? (int)pX : 0, gotParty ? (int)pY : 0,
-               (int)dX, (int)s_bridgeConsecLandSamples,
-               (int)s_bridgeWasLeaping, (int)s_bridgeTicksSinceXition);
 
     s_bridgeLastKaniX     = kX;
     s_bridgeLastKaniValid = true;
@@ -1835,7 +1701,6 @@ static void Disengage(const char* reason)
     s_engagedTargetY   = 0;
     s_engagedWalk      = false;
     s_diagTickCounter  = 0;
-    s_bridgeDiagTick   = 0;  // v0.15.9.8.2
     // v0.15.9.8.3: Reset bridge dance state.
     s_bridgeDanceState        = BRIDGE_DANCE_EAST;
     s_bridgeLastKaniValid     = false;
@@ -1875,7 +1740,6 @@ void Initialize()
     s_prevPosX            = 0;     // v0.15.9.3
     s_prevPosY            = 0;     // v0.15.9.3
     s_prevPosValid        = false; // v0.15.9.3
-    s_bridgeDiagTick      = 0;     // v0.15.9.8.2
     s_bridgeDanceState        = BRIDGE_DANCE_EAST;  // v0.15.9.8.3
     s_bridgeLastKaniValid     = false;              // v0.15.9.8.3
     s_bridgeSampleCounter     = 0;                  // v0.15.9.8.3
@@ -1896,8 +1760,7 @@ void Initialize()
              "Unknown chase fields fall back to MODE_TARGET via largest-cluster scan. "
              "Engagement gated on chase ASK being answered (v0.15.9.2.10). "
              "Per-field completed marker prevents re-engagement loop (v0.15.9.2.11). "
-             "v0.15.9.8.3: kani-slot override on domt1_1 -> Others slot 3 (SYM 'laguna'); "
-             "BridgeDiag still active for empirical confirmation.",
+             "v0.15.9.8.3: kani-slot override on domt1_1 -> Others slot 3 (SYM 'laguna').",
              FF8OPC_VERSION, kFieldConfigsCount);
 }
 
@@ -2089,22 +1952,6 @@ void Update()
             if (!FieldNavigation::IsChaseDriveActive()) {
                 Disengage("chase-drive completed (target reached or stuck)");
                 return;
-            }
-        }
-
-        // v0.15.9.8.2: Bridge diagnostic. Per-tick log every 6 Update ticks
-        // (10Hz) on domt1_1 to find the actually-pursuing kani entity (and
-        // characterize Y-axis excursions during jumps for the v0.15.9.8.3
-        // dance thresholds). No-op on all other fields. The 10Hz cadence is
-        // chosen so a brief jump (estimated ~0.5s) reliably lands in at least
-        // 4-5 samples even if it's quick, while keeping log volume bounded
-        // (~17 active slots * 10Hz * ~10s of bridge transit = ~1700 lines max
-        // per BAT, filtered to non-zero positions).
-        if (std::strcmp(fieldName, "domt1_1") == 0) {
-            s_bridgeDiagTick++;
-            if (s_bridgeDiagTick >= 6) {
-                LogBridgeDiagnostic(fieldName);
-                s_bridgeDiagTick = 0;
             }
         }
 

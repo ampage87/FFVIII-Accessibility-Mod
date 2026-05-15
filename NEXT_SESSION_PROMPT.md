@@ -1,75 +1,69 @@
-# Next Session Prompt: v0.15.10.1 BAT (deploy.bat regex regression)
+# Next Session Prompt: BAT v0.15.10.2, then pick next backlog item
 
 ## Where we are
 
-**v0.15.10.1 code complete, BAT pending.** Backlog #3 — fix the `Version: SINGLE-PRONGED` regression in `deploy.bat`'s build log output. Three source-tree changes:
+**GitHub HEAD = v0.15.10.1**, pushed 2026-05-15 21:38 UTC, commit `e934484e`.
 
-1. `src/deploy.bat` — `findstr /C:"#define FF8OPC_VERSION "` gains `/B` (begin-of-line anchor). Comment block above rewritten with full root-cause explanation.
-2. `src/ff8_accessibility.h` — `FF8OPC_VERSION` bumped from `"0.15.10.0"` to `"0.15.10.1"`. New v0.15.10.1 history comment prepended on line 12 ahead of the v0.15.10.0 comment.
-3. `CHANGELOG.md` — new top entry above `## v0.15.10.0`.
+**Local tree = v0.15.10.2**, built but NOT YET BAT'd or pushed. Three-item cleanup pass combining backlog items #1/#2/#3 from the v0.15.10.1 era. All three changes are dead-code/dead-data removal or log-line removal — zero runtime behavior change. Aaron approved combining them into one build rather than three separate ones.
 
-**GitHub HEAD: v0.15.10.0** (`d198b947`, pushed 2026-05-15 05:22 UTC, BAT-confirmed). v0.15.10.1 is local-only until Aaron pushes after BAT.
+## Step 1: BAT v0.15.10.2
 
-## Root cause recap
+Aaron runs `deploy.vbs`.
 
-`findstr /C:"#define FF8OPC_VERSION "` matched not only line 12 of the header (the real `#define`) but also line 63 — the historical v0.15.3 comment block, which embedded the literal substring `#define FF8OPC_VERSION` while documenting the v0.15.3 fix. For-loop's last-iteration-wins put token 3 of line 63 into `VERSION`: with `delims= ` and the leading-whitespace-indented `  // ...` prefix, tokens parsed as `1=//, 2=v0.15.3:, 3=SINGLE-PRONGED` (from `// v0.15.3: SINGLE-PRONGED CLEANUP...`). The v0.15.3 entry's own meta-commentary about its findstr-tightening fix is what re-broke the same regex. `/B` anchors to start of line — only line 12 (column 0) matches now.
+### Expected build-log signals (read `Logs/build_latest.log` first)
 
-## BAT plan
+- Top of file: `Building FF8 Original PC Accessibility Mod Version 0.15.10.2` (not `SINGLE-PRONGED`, not `0.15.10.1`).
+- Deployment Complete block: `Version: 0.15.10.2`.
+- No compile errors. The risky surface area is just three name-removal sites — pre-flight `edit_file` dryRun-greps confirmed `WALK_REPRESS_PERIOD`, `s_walkRepressCounter`, `s_walkRepressLogged`, `LogBridgeDiagnostic`, and `s_bridgeDiagTick` are all fully unreferenced after the edits. If a build error nevertheless surfaces, the message will be a clear `undeclared identifier` pointing at the missed reference; add the cleanup site and rebuild.
 
-Aaron runs `deploy.vbs` (no special steps required — this is just a normal rebuild). 
+### Expected runtime signals (read domain logs after Aaron launches the game)
 
-### What to verify in `Logs/build_latest.log`
+- `ff8_mod.log` init banner reads `=== FF8 Accessibility Mod v0.15.10.2 — Log opened <timestamp> ===` followed by `Version: 0.15.10.2` and `Build:   <__DATE__> <__TIME__>` on two consecutive lines. **No parenthesized hard-coded date** between them.
+- `ChaseAutoPilot: Initialized v0.15.10.2 ...` log line ends with `v0.15.9.8.3: kani-slot override on domt1_1 -> Others slot 3 (SYM 'laguna').` — no trailing "BridgeDiag still active for empirical confirmation" sentence.
 
-**Pass conditions:**
+### Functional regression check (low priority — no behavior changed)
 
-1. Top of log reads `Building FF8 Original PC Accessibility Mod Version 0.15.10.1` (not `SINGLE-PRONGED`, not `unknown`).
-2. The Deployment Complete block near the bottom reads `Version: 0.15.10.1`.
-3. Build itself succeeds (no new compile errors — the deploy.bat changes don't touch the compile command at all, so build should be byte-for-byte identical to v0.15.10.0 except for the version macro).
+If Aaron is willing to trigger the chase to validate v0.15.10.2 didn't break anything:
 
-**Regression checks:**
+- Trigger the X-ATM092 chase, pick Auto.
+- On `domt1_1` (the bridge): chase still completes with 0 catches. `ff8_field.log` shows the transition-only logs (`BridgeDance: leap #N STARTED`, `BridgeDance: EAST->WEST transition`, `BridgeDance: WEST->EAST transition`) but **no** `BridgeDance: sample state=...` lines at 10 Hz, and **no** `BridgeDiag: ... slot=I sym='Y' ...` lines anywhere.
+- Other chase fields (domt4_1, domt3_2, domt5_1, doopen2a, dotown_2/_1) behave identically to v0.15.9.11.3.9.
 
-1. After Aaron starts FF8, `ff8_battle.log` / `ff8_field.log` etc. all show `Initialized v0.15.10.1` (or whatever each subsystem's init banner is) — confirms the DLL on disk actually deployed.
-2. Any runtime feature exercise (open the menu, walk into a field, trigger a battle) — should be identical to v0.15.10.0 since no source files outside the version macro changed.
+If Aaron prefers to skip the chase regression check since no behavior changed (acceptable given the trivial risk profile), just verify the build/init banner signals above and push.
 
-## Decision tree
+## Step 2: Push (only if BAT passes)
 
-### Case A: clean pass
+Aaron runs `Utilities/push_to_github.vbs`. The script auto-reads `FF8OPC_VERSION` from `src/ff8_accessibility.h` and the top CHANGELOG entry; both already say `0.15.10.2`.
 
-Aaron reports `Version: 0.15.10.1` in both log spots, no regressions. Action items:
+## Step 3: Pick next backlog item
 
-1. Update CHANGELOG.md, DEVNOTES.md, and this file to note BAT success.
-2. Aaron pushes v0.15.10.1 via `Utilities/push_to_github.vbs`.
-3. Pick the next backlog item. Recommended priority from DEVNOTES.md backlog:
-   - **#1 WALK_REPRESS_PERIOD cleanup** — smallest task, zero risk, clears v0.15.9.7.x vestigial state.
-   - **#4 unify all three FF8 text decoders** — directly continues v0.15.10.0's consolidation work; migrates `DecodeFF8TextPreview` in `battle_tts_victory.inl`. Higher risk (touches victory phase machinery) but the architectural reward is single source of truth.
-   - **#2 BridgeDiag verbosity trim** — log volume housekeeping, transition-only events on `domt1_1`.
+After the push, Aaron picks the next item. Recommended priority order from `DEVNOTES.md`:
 
-### Case B: still `SINGLE-PRONGED` or some other wrong value
+### Top remaining picks
 
-Aaron reports the build log still shows a wrong version. This would be very surprising given `findstr /B /C:` is a documented combination. Diagnostics:
+1. **#1 Unify all three FF8 text decoders** (medium risk, continues v0.15.10.0's consolidation)
+   - Files: `src/battle_tts_victory.inl::DecodeFF8TextPreview` + the small inline ability-name decoder in `HookedBtCandidate8` (sub_47E710 hook in victory.inl).
+   - The third decoder has the same wrong digit range as the one retired in v0.15.10.0, plus a slightly different 0x06 mismap, but DOES have 0xE8-0xFF compression-sequence coverage. Item names with digits are quietly broken on the victory phase path.
+   - Recommended approach: same SEH-split pattern from v0.15.10.0 (wrap `FF8TextDecode::Decode` because `std::string` inside a `__try` block triggers C2712 in `/EHsc`). Migrate `DecodeFF8TextPreview` callers cluster by cluster — diagnostic logging hooks first (low risk), then the item-announce path (player-facing), then the inline ability decoder.
+   - Risk surfaces: touches victory phase machinery; the diagnostic logging paths are noisy but the item announce path is player-facing during every battle win.
 
-1. Re-read the deploy.bat — confirm the `/B` flag actually made it into the file (filesystem MCP sync issue? OneDrive lag?).
-2. Open a shell on Aaron's machine and run the findstr command directly:
-   `findstr /B /C:"#define FF8OPC_VERSION " "src\ff8_accessibility.h"`
-   It should print exactly one line: `#define FF8OPC_VERSION "0.15.10.1"  // v0.15.10.1: ...`
-3. If it prints zero lines, the begin-of-line whitespace situation is different than expected (maybe a BOM, maybe tab indentation, etc.).
-4. If it prints multiple lines, something else has the literal pattern at column 0 — a new historical entry maybe? Diagnose accordingly.
+2. **#2 Generalized countdown-timer hook** — Dollet 30-min countdown is TTS'd via a chase-specific path; generalize for future timers.
 
-### Case C: build fails
+3. **#3 Remove party members from field entity catalog** — Squall/Zell/Selphie appear as targetable entities; filter them out.
 
-The deploy.bat changes don't touch the compile-and-link command at all. If the build fails for some unrelated reason (Visual Studio update broke something, etc.), it's not caused by this change. Read `build_latest.log` tail for the actual error and triage.
+### Deferred (don't pick without explicit Aaron direction)
 
-### Case D: regression in some other behavior
-
-Theoretically impossible — no source files outside the version macro changed. If something does regress, it's not from v0.15.10.1; it's something else surfacing (OneDrive sync staleness, accidental DLL replacement, etc.). Verify the DLL on disk via timestamp and init banner before assuming regression.
+See `DEVNOTES.md` Deferred section: SeeD rank bug #27, walk-and-talk dialog gap, refined-coord narrow-gate steering, Fire Cavern entry, chase_diag::OnAskOpcodeFired snprintf bug, CHASE-AGENT FINAL SUMMARY log regression.
 
 ## Hard constraints (unchanged)
 
-- **Do NOT revert the AUTO `[CBF]` battle-suppressor cap to 0.** Aaron's 2026-05-13 directive stands.
+- **Do NOT revert the AUTO `[CBF]` battle-suppressor cap to 0.** Aaron's 2026-05-13 directive stands. v0.15.9.11.3.6 BAT vindicated the input-layer fix.
 - **Filesystem MCP for all Windows project files.** Bash runs in a Linux container that can't reach the OneDrive mod directory.
 - **Aaron pushes via `Utilities/push_to_github.vbs`.** Claude NEVER pushes.
 - **NEVER re-enable SET3 opcode hook (0x1E)** — CI guard in `.github/workflows/safety-checks.yml`.
+- **F-key handlers gated** on `!(GetAsyncKeyState(VK_MENU) & 0x8000)` to prevent Alt+Fx interception.
+- **F12 reserved** for per-session diagnostics — search source for existing F12 refs and REMOVE old code before re-binding.
 
 ## Session ritual reminder
 
-Read `DEVNOTES.md` and this file at session start. Update both at every version bump AND after every BAT result. Every Claude response starts with `## Claude Says`.
+Read `DEVNOTES.md` and this file at session start, before any work. Update both at every version bump AND after every BAT result. Every Claude response starts with `## Claude Says`.

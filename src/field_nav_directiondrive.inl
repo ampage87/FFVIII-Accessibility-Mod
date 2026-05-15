@@ -142,101 +142,15 @@ static const int KEEPALIVE_PERIOD = 30;
 // read by the game thread (HookedEngineEvalInput).
 static volatile int s_keepAliveCounter = 0;
 
-// v0.15.9.7.1 / v0.15.9.7.2: Defensive W (walk modifier) re-press counter.
-//
-// === v0.15.9.7.1 history ===
-//
-// v0.15.9.7 BAT (2026-05-11) on domt5_1 fired the W KEYDOWN once in
-// the fresh-start branch but Aaron heard the party running, not
-// walking, and the robot caught up. The chase script on domt5_1 entry
-// runs heavy intro choreography during the first ~1 second of field
-// life (camera pan, mountain shake setup, kani teleport) which can
-// swallow keyboard input from the SendInput queue. Once the engine
-// loses the initial W press, our diff check (`walk != s_directionDriveWalk`)
-// in the "already running" branch short-circuits any re-press because
-// both sides remain true forever, and the party runs through the
-// entire field.
-//
-// v0.15.9.7.1 fix: in the "already running" branch, when
-// s_directionDriveWalk is true, re-fire InjectKey(W, KEYDOWN) every
-// WALK_REPRESS_PERIOD ticks. KEYDOWN events on a held key are
-// idempotent at the OS level (Windows treats them as auto-repeat at
-// the input layer; the engine just re-acknowledges the modifier press
-// intent). Unlike the arrow keep-alive pulse, we do NOT release W
-// between presses -- the header comment warns that toggling W
-// mid-walk causes one frame of run-speed motion between release and
-// re-press. Press-only re-assert is safe.
-//
-// === v0.15.9.7.2: aggressive cadence to defeat first-frame swallow ===
-//
-// v0.15.9.7.1 BAT (2026-05-11) shipped period=30. Aaron heard walking
-// (re-press worked from ~0.5s onwards) but the robot still appeared.
-// Aaron's manual playthrough (2026-05-11 20:14-20:20) captured a
-// ground-truth trace via ChaseActiveDiag PRE-ENGAGE: every 1-second
-// sample on domt5_1 showed dmag 267-303 (walking speed) from the first
-// measured frame. He walks the entire field, 13 seconds, 0 catches.
-//
-// Implication: the engine commits the "running vs walking" decision
-// VERY early on field-load -- likely within the first frame or two
-// after Engage fires. Aaron's physical W press is asserted BEFORE that
-// decision point. Our v0.15.9.7.1 InjectKey at fresh-start was either
-// queued behind the engine's first read, OR the script's intro reset
-// keyboard state before our press could land. Either way, the
-// first-frame keyboard state seen by the engine was "W up" = run.
-// The re-press at t~500ms came too late -- the catch flag was already
-// set by then, even though the walking-speed motion that followed was
-// audible to Aaron.
-//
-// v0.15.9.7.2 fix: reduce WALK_REPRESS_PERIOD from 30 to 1.  Re-press
-// every tick (~17ms cadence at 60fps). Worst-case latency from
-// field-entry to engine-sees-W-down drops from ~500ms to ~17ms. If
-// the engine's catch-eval window is wider than one frame, this lands
-// W press inside it. If even 17ms is too late (engine reads at the
-// exact load frame before any SendInput dispatch), v0.15.9.7.3 will
-// keep W held across chase-field transitions so the engine never sees
-// a W-up frame on field-load.
-//
-// Cost of period=1: 60 SendInput calls per second while walking.
-// SendInput is cheap (~microseconds per call). Repeated KEYDOWN on a
-// held key has no semantic effect at the engine layer -- the keyboard
-// state buffer reflects "W is currently down" regardless of how many
-// times the KEYDOWN event fires. No glitches.
-static const int WALK_REPRESS_PERIOD = 1;  // v0.15.9.7.2: was 30 in v0.15.9.7.1
-static volatile int s_walkRepressCounter = 0;
-static volatile bool s_walkRepressLogged = false;  // log first re-press at INFO, suppress spam after
-
-// v0.15.9.7.8: ROOT CAUSE FOUND -- InjectKey was setting KEYEVENTF_EXTENDEDKEY
-// for all keys including W. Arrow keys ARE extended (E0 prefix in hardware);
-// letter keys are NOT. So every W injection from v0.15.9.7 through v0.15.9.7.7
-// produced a malformed scancode (E0 + 0x11) that FF8's DirectInput keyboard
-// reader didn't recognize as W. The arrows worked the whole time because they
-// were supposed to be extended; the W never worked because it wasn't. Fix is
-// in InjectKey itself (field_nav_autodrive.inl) -- new 'extended' parameter
-// (default true for backward compat with arrow callers). W call sites here
-// pass extended=false.
-//
-// **AARON'S OTHER POINT (2026-05-12):** "we should be holding W down
-// continuously, not re-pressing every tick." He's right. The defensive
-// re-press in v0.15.9.7.1 was added on the theory that the chase intro
-// choreography swallowed the initial W KEYDOWN. That theory was never
-// verified; with the extended-key bug fix, the initial KEYDOWN should
-// reach the engine and stick. Continuous holding is the correct semantic:
-// one KEYDOWN at engagement, no KEYUP until Disengage. Re-pressing creates
-// ambiguity (DirectInput buffered mode would see N separate "tap" events
-// per second instead of one continuous hold). v0.15.9.7.8 REMOVES the
-// defensive re-press path entirely. WALK_REPRESS_PERIOD constant remains
-// for now as vestigial documentation of the history but is no longer used.
-//
-// === Sequence with fix ===
-//
-// v0.15.9.7.7: pure keyboard input via InjectKey with KEYEVENTF_EXTENDEDKEY
-// always set. W never reached engine. Party ran. dmag 750-855. 3 catches.
-//
-// v0.15.9.7.8 [BAT SUCCESS 2026-05-12]: InjectKey fix + remove re-press.
-// W now reaches engine as proper scancode 0x11. Aaron's report: "BAT. It
-// worked! We successfully made it down the west trail by walking and
-// without triggering the robot." Field log confirms full chase completed
-// end-to-end through every chase field. 14 versions of investigation closed.
+// v0.15.9.7.8: W (walk modifier) call sites below pass extended=false to
+// InjectKey. Arrow keys are extended (E0 prefix); letter keys are NOT.
+// Setting KEYEVENTF_EXTENDEDKEY on W produces a malformed scancode E0+0x11
+// that FF8's DirectInput keyboard reader doesn't recognize, so every W
+// press is silently dropped. See the v0.15.9.7.8 CHANGELOG entry for the
+// full history of the bug, the 14-version investigation, and Aaron's BAT
+// success confirmation. W is held continuously (one KEYDOWN at engagement,
+// one KEYUP at Disengage) -- the OS retains the keyboard state for the
+// engaged window without any need to re-press.
 static const int RUN_ANALOG_MAGNITUDE  = 1000;  // full deflection = running (walk=false fields)
 static const int WALK_ANALOG_MAGNITUDE = 0;     // unused in v0.15.9.7.7+ (walk=true skips analog entirely)
 
@@ -387,13 +301,6 @@ void StartDirectionDrive(int8_t dirX, int8_t dirY, bool walk)
             Log::Field("FieldNavigation: [direction-drive] walk modifier %s (W scancode=0x%02X, extended=0)",
                        walk ? "PRESSED" : "released", (unsigned)SC_W_CANCEL_DD);
         }
-        // v0.15.9.7.8: Defensive W re-press path REMOVED. Per Aaron 2026-05-12:
-        // "we should be holding W down continuously, not re-pressing every tick."
-        // With the extended-key fix above, one KEYDOWN at engagement is enough
-        // and the OS holds the key state until our KEYUP at Disengage.
-        // The WALK_REPRESS_PERIOD constant and s_walkRepressCounter/Logged
-        // statics remain in the file as vestigial documentation of the history
-        // but are no longer referenced.
         return;
     }
 
@@ -437,12 +344,6 @@ void StartDirectionDrive(int8_t dirX, int8_t dirY, bool walk)
     // could land mid-cycle and immediately fire a release pulse.
     s_keepAliveCounter = 0;
 
-    // v0.15.9.7.1: Reset defensive walk re-press counter + log latch on
-    // fresh engagement. The initial W KEYDOWN above counts as press #0;
-    // re-press fires WALK_REPRESS_PERIOD ticks later.
-    s_walkRepressCounter = 0;
-    s_walkRepressLogged  = false;
-
     s_directionDriveActive = true;
     Log::Field("FieldNavigation: [direction-drive] STARTED dir=(%d,%d) walk=%d "
                "lX=%d lY=%d arrows=0x%X override=%d gamepad=%d",
@@ -469,8 +370,6 @@ void StopDirectionDrive()
 
     s_directionDriveActive = false;
     s_keepAliveCounter = 0;  // v0.15.9.1.1
-    s_walkRepressCounter = 0;  // v0.15.9.7.1
-    s_walkRepressLogged  = false;  // v0.15.9.7.1
     Log::Field("FieldNavigation: [direction-drive] STOPPED");
 }
 

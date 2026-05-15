@@ -4,6 +4,78 @@ Newest on top. Each entry begins with a `## vMAJOR.MINOR.BUILD` heading followed
 
 The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_accessibility.h`. The push utility refuses to push if they don't.
 
+## v0.15.10.2
+
+Three-item cleanup pass picked from the post-chase backlog. All three changes are dead-code/dead-data removal or log-line removal with zero runtime behavior change.
+
+### (1) Vestigial `WALK_REPRESS_PERIOD` cleanup in `src/field_nav_directiondrive.inl`
+
+The v0.15.9.7.1 defensive W re-press path was retired in v0.15.9.7.8 (with the InjectKey extended-key fix). That v0.15.9.7.8 commit's own comment block explicitly stated the `WALK_REPRESS_PERIOD` constant + `s_walkRepressCounter` + `s_walkRepressLogged` statics "remain in the file as vestigial documentation of the history but are no longer referenced" — they were left in deliberately at the time so the history of the 14-version investigation would stay close to the code that almost-needed them.
+
+Three months and seven backlog items later, the vestigial reminders are pure noise. Cleanup removes:
+
+- The `WALK_REPRESS_PERIOD` constant (was `1` in v0.15.9.7.2 down from `30` in v0.15.9.7.1).
+- The `s_walkRepressCounter` and `s_walkRepressLogged` statics + their initializers in the fresh-start branch of `StartDirectionDrive` and in `StopDirectionDrive`.
+- The entire two-part historical narrative (the v0.15.9.7.1 / v0.15.9.7.2 "Defensive W re-press counter" comment + the v0.15.9.7.8 "ROOT CAUSE FOUND" follow-up).
+- The orphaned "v0.15.9.7.8: Defensive W re-press path REMOVED" comment inside `StartDirectionDrive`'s already-running branch (it described a removal that's now plain absence).
+
+What stays in place: a short ~10-line comment immediately above the `RUN_ANALOG_MAGNITUDE` constant that explains the extended-key fix (still current behavior — every W call site continues to pass `extended=false` to `InjectKey`) and points readers at the v0.15.9.7.8 CHANGELOG entry for the full 14-version history.
+
+### (2) Stale `FF8OPC_VERSION_DATE` macro removal
+
+Surfaced by the v0.15.10.1 BAT: the DLL init banner read `Version: 0.15.10.1 (2026-05-07)` even though today is 2026-05-15, because `FF8OPC_VERSION_DATE` is a manually-maintained `#define` and the last ten version bumps have not touched it. The macro lives at line 212 of `src/ff8_accessibility.h`; the line below it in the init banner — `Log::Write("Build:   " __DATE__ " " __TIME__)` in `src/dinput8.cpp` — already surfaces the actual compile timestamp via `__DATE__`/`__TIME__`, making the manual macro redundant.
+
+Cleanup:
+
+- Deleted the `#define FF8OPC_VERSION_DATE "2026-05-07"` line from `src/ff8_accessibility.h`.
+- Shortened the banner line in `src/dinput8.cpp` from `Log::Write("Version: %s (%s)", FF8OPC_VERSION, FF8OPC_VERSION_DATE)` to `Log::Write("Version: %s", FF8OPC_VERSION)`. The `Build:` line directly below it is unchanged.
+- Dropped the `FF8OPC_VERSION_DATE` column from the `SessionStart` TSV row in `src/nav_log.cpp` (`WriteBoth("SESSION\t" FF8OPC_VERSION "\t" FF8OPC_VERSION_DATE)` -> `WriteBoth("SESSION\t" FF8OPC_VERSION)`). The `[YYYY-MM-DD HH:MM:SS]` prefix that `WriteBoth` prepends to every line already supplies wall-clock context. Caught by the v0.15.10.2 first BAT attempt — the pre-flight grep checked the obvious banner-bearing `.cpp` files (`dinput8.cpp`, `log.cpp`, `chase_auto_pilot.cpp`) but missed `nav_log.cpp`'s second use of the macro in a persistent TSV writer. The compiler caught it with a clear `C2065: undeclared identifier` at line 101; one-line fix and rebuild.
+
+Result: DLL init banner now reads `Version: 0.15.10.2` followed by `Build:   <__DATE__> <__TIME__>` which always reflects the current build. `ff8_nav_data.log` SESSION rows are now one-field (just the version string) instead of two.
+
+The v0.15.10.1 CHANGELOG entry's historical mention of "line 212 (#define FF8OPC_VERSION_DATE) -- only line 12 matches the trailing-space + BOL combined pattern" stays in place as accurate history of why the deploy.bat `/B` fix is robust. With the macro gone, the `/B` anchor protects only against the indented `// v0.15.3: SINGLE-PRONGED CLEANUP...` comment at line 63, but the protection is still correct and harmless.
+
+### (3) BridgeDance log verbosity trim in `src/chase_auto_pilot.cpp`
+
+The bridge dance state machine shipped in v0.15.9.8.3 with two diagnostics that have outlived their usefulness now that the dance is proven (v0.15.9.8.3 BAT was Aaron's chase-closer success: 0 catches on `domt1_1` with the EAST<->WEST flip):
+
+- **Per-sample log at the bottom of `UpdateBridgeDance`** (`"BridgeDance: sample state=%s motion=%s ..."`). Fired at 10 Hz throughout the bridge transit (~70 lines per ~7s bridge crossing). Removed entirely. The `s_bridgeLastKaniX` / `s_bridgeLastKaniValid` assignments at the end of the function stay in place since they update the previous-sample state for the next tick's delta computation.
+- **`LogBridgeDiagnostic` function** (all-slots dump for `domt1_1`). Was already early-returned in v0.15.9.11.3.7 but its ~120-line dead body remained in the file. Function deleted entirely along with its ~30-line header comment block (the `v0.15.9.8.2: Bridge (domt1_1) all-slots diagnostic` documentation).
+- **Call site in `Update()`** that incremented `s_bridgeDiagTick` and called `LogBridgeDiagnostic` every 6 ticks on `domt1_1`. Removed entirely along with its header comment.
+- **`s_bridgeDiagTick` counter** + its declaration (with the v0.15.9.8.2 header comment that described its purpose) + the corresponding initializers in `Initialize()` (`s_bridgeDiagTick = 0;  // v0.15.9.8.2`) and `Disengage()` (same).
+- **Trailing sentence in the `Initialize` log message**: was `"... BridgeDiag still active for empirical confirmation."`, shortened to just `"... v0.15.9.8.3: kani-slot override on domt1_1 -> Others slot 3 (SYM 'laguna')."` since BridgeDiag is no longer active.
+
+What stays in place:
+
+- All transition logs in `UpdateBridgeDance`: `BridgeDance: leap #N STARTED`, `BridgeDance: EAST->WEST transition`, `BridgeDance: WEST->EAST transition`, `BridgeDance: WEST->EAST TIMEOUT`. These fire on actual state changes only and are the meaningful diagnostic signal for understanding what the dance did during a chase.
+- The `BridgeDance: kani read FAILED -- holding state=%s` log near the top of `UpdateBridgeDance`. This indicates a real failure mode (the kani entity pointer didn't resolve) worth catching if it ever happens.
+- All bridge-dance state machinery: thresholds, dwell counters, state transitions, `s_bridge*` state variables apart from `s_bridgeDiagTick`.
+
+### Files touched
+
+- `src/ff8_accessibility.h` — version bump to `0.15.10.2`; `FF8OPC_VERSION_DATE` macro deleted.
+- `src/dinput8.cpp` — banner line shortened (drop the `(%s)` and the `FF8OPC_VERSION_DATE` argument).
+- `src/nav_log.cpp` — `SessionStart` TSV record shortened to one field (just the version); `FF8OPC_VERSION_DATE` column dropped.
+- `src/field_nav_directiondrive.inl` — vestigial walk-repress comment block + constants + counter resets removed; replaced with a short note about the still-current `extended=false` convention for W call sites.
+- `src/chase_auto_pilot.cpp` — `LogBridgeDiagnostic` function + header comment + call site + `s_bridgeDiagTick` counter + initializers removed; per-sample `BridgeDance: sample ...` log removed; Initialize log message trimmed.
+- `CHANGELOG.md`, `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`.
+
+### Risk
+
+Trivial. All three changes are dead-code/dead-data removal or log-line removal. No semantics changed, no constants introduced, no public API touched.
+
+**Process note on the first BAT attempt**: pre-flight grep for `FF8OPC_VERSION_DATE` covered the obvious banner-bearing `.cpp` files (`dinput8.cpp`, `log.cpp`, `chase_auto_pilot.cpp`) but missed `nav_log.cpp`, which had a second reference in its persistent TSV writer. The compiler caught the missed reference with a single clean `C2065: undeclared identifier` at `nav_log.cpp:101`; fix was one line. Lesson for future symbol-removal passes: when removing a macro, grep the entire `src/` tree (not just the files containing the most likely use sites) before running the build. The build log from MSVC is a reliable backstop — it continues compiling all translation units past the first error, so any other remaining references would have surfaced in the same build log.
+
+The one place where a build error could STILL surface (post-nav_log fix) is if a `.inl` outside `field_nav_directiondrive.inl` referenced `WALK_REPRESS_PERIOD` or `s_walkRepressCounter` / `s_walkRepressLogged` — pre-flight `edit_file` dryRun-grep across `field_navigation.cpp`, `field_nav_autodrive.inl`, and `field_nav_directiondrive.inl` confirmed all three names are now fully unreferenced. Similarly, `LogBridgeDiagnostic` and `s_bridgeDiagTick` were both `static` to `chase_auto_pilot.cpp` and are no longer referenced anywhere in the file (verified the same way).
+
+### Predicted BAT
+
+- `Logs/build_latest.log` opens with `Building FF8 Original PC Accessibility Mod Version 0.15.10.2`.
+- `Deployment Complete` block reads `Version: 0.15.10.2`.
+- DLL init banner reads `Version: 0.15.10.2` followed immediately by `Build:   <current date> <current time>` (no parenthesized hard-coded date between them).
+- `ChaseAutoPilot: Initialized v0.15.10.2 ...` no longer mentions BridgeDiag.
+- Functional regression check (low-priority since no behavior changed): if Aaron triggers the chase and picks Auto, the bridge (`domt1_1`) still flips EAST<->WEST cleanly with the `BridgeDance: leap #N STARTED` / `BridgeDance: EAST->WEST transition` / `BridgeDance: WEST->EAST transition` logs but **no** `BridgeDance: sample ...` lines and **no** `BridgeDiag: ... slot=I sym='Y' ...` lines anywhere in `ff8_field.log`.
+
 ## v0.15.10.1
 
 Fix the `deploy.bat` regex regression that has printed `Version: SINGLE-PRONGED` instead of the actual version string in every build log since v0.15.3. Cosmetic-only — the deployed DLL has always carried the real version from `FF8OPC_VERSION`; only the deploy script's text output was wrong.

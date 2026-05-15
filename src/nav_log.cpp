@@ -98,7 +98,12 @@ void Close()
 
 void SessionStart()
 {
-    WriteBoth("SESSION\t" FF8OPC_VERSION "\t" FF8OPC_VERSION_DATE);
+    // v0.15.10.2: dropped FF8OPC_VERSION_DATE column from the SESSION row.
+    // The macro is gone; the [YYYY-MM-DD HH:MM:SS] prefix that WriteBoth
+    // prepends to every line already provides wall-clock context. If
+    // analysis tools were parsing this row expecting 2 tab-separated
+    // fields, they now see 1 (version string only).
+    WriteBoth("SESSION\t" FF8OPC_VERSION);
 }
 
 void FieldLoad(const char* fieldName, int fieldId, int numTris,
