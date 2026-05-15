@@ -4,6 +4,55 @@ Newest on top. Each entry begins with a `## vMAJOR.MINOR.BUILD` heading followed
 
 The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_accessibility.h`. The push utility refuses to push if they don't.
 
+## v0.15.10.0
+
+Fix the X-ATM092 enemy-name decoder bug and consolidate two FF8 text decoders down to one. Battle TTS announced "X-ATM?6?" instead of "X-ATM092" because `src/battle_tts_helpers.inl` had a standalone v0.10.08 decoder (`DecodeFF8Char` + `DecodeFF8String`) whose character table was marked "estimated, not yet confirmed" since v0.10.07. Its digit range was off by `0x03` — it mapped `0x24-0x2D → '0'-'9'` when the canonical Ifrit-textformat.ifr range is `0x21-0x2A → '0'-'9'`.
+
+### Why this build
+
+Tracing "X-ATM092" byte-by-byte through the broken decoder reproduced exactly the observed output:
+
+- `'0'` is byte `0x21` — outside the wrong range → `'?'`.
+- `'9'` is byte `0x2A` — inside the wrong range, decoded as `'0' + (0x2A - 0x24) = '6'`.
+- `'2'` is byte `0x23` — outside the wrong range → `'?'`.
+
+The v0.15.9.11.3.6 BAT log line `[NAME-CACHE] slot3 = "X-ATM?6?"` matched the prediction exactly. Affected enemies beyond X-ATM092: any monster name containing digits (GIM47N, GIM52A, BGH251F2, NORG II) and — because the same decoder also lacked the 24 two-character compression sequences in the `0xE8-0xFF` range that FF8 packs into kernel.bin to save space — any monster name using a compressed pair, silently mangled long before X-ATM092 surfaced the issue.
+
+### The fix
+
+The canonical `FF8TextDecode::Decode` in `src/ff8_text_decode.cpp` has been the Ifrit-based authoritative decoder since v04.00, and `scan_tts.cpp` has been piping the same engine name accessor `sub_495100` through it correctly since v0.14.50 across many scanned enemies — empirical proof that the canonical decoder works for this exact input source. Migration:
+
+- **`src/battle_tts_helpers.inl`** — `DecodeFF8String` body replaced with a thin SEH-safe wrapper around `FF8TextDecode::Decode` using the split-function pattern from `scan_tts.cpp::DecodeNameSafe` / `DecodeNameToBuf` (MSVC `/EHsc` forbids `__try` inside a function holding non-trivial destructors per C2712, and `std::string` inside `FF8TextDecode::Decode` triggers that). `DecodeFF8Char` deleted entirely. The function signature on `DecodeFF8String` is preserved so all five existing battle-module call sites keep working unchanged — only the implementation moved.
+- **`src/battle_tts.cpp`** — added `#include "ff8_text_decode.h"` before the `battle_tts_helpers.inl` textual include so `std::string` and `FF8TextDecode::Decode` are in scope across the battle module.
+
+### Pre-flight verification
+
+`DecodeFF8Char` and `DecodeFF8String` are `static` inside `battle_tts_helpers.inl`, so all consumers live in `battle_tts.cpp` plus the 18 textually-included `battle_tts_*.inl` files. DryRun grep across that whole set confirmed:
+
+- `DecodeFF8Char` — zero external callers; only used internally by `DecodeFF8String`. Safe to delete.
+- `DecodeFF8String` — three external callers: `battle_tts_hp.inl` (one savemap GF-name decode), `battle_tts_menu.inl` (one savemap GF-name decode), `battle_tts_victory.inl` (five sites covering entity name retrieval, GF name retrieval, junctioned-GF fallback, GF-by-index lookup, and two naming-bypass paths inside the victory thread). All are inside existing `__try` blocks; all keep working unchanged because the public function signature is preserved.
+
+### Caveat to listen for
+
+The one genuine behavioral difference between the two decoders is byte `0x06`: the old decoder mapped it to apostrophe; the canonical Ifrit table says `0x06` is a color code that consumes the next byte. If any FF8 enemy or character name actually uses `0x06` for an apostrophe (no canonical example known), post-migration that name will lose its apostrophe and eat the following byte, sounding one byte short. Character names like "Quistis"/"Squall" decode cleanly using just the letter table, so this is theoretical — worst case is one name reads slightly worse than before, easily patched with a targeted override.
+
+### Out of scope (added to backlog)
+
+A third local decoder lives in `battle_tts_victory.inl`: `DecodeFF8TextPreview`. It has the same wrong digit range as the one being retired, plus a slightly different mismap for `0x06`, but it also has 0xE8-0xFF compression-sequence coverage that the v0.10.08 decoder lacked. Its call sites are mostly diagnostic logging (battle-text hooks) plus item-name announcements during victory phases. Item names rarely contain digits, so the practical impact is low. Expanding scope to migrate `DecodeFF8TextPreview` this build would dramatically widen the BAT surface area into the victory phase machinery, so it was deferred. Added as backlog item "fully unify all three FF8 text decoders" for a separate session.
+
+### Risk
+
+Low. The canonical decoder is already battle-tested on identical inputs via `scan_tts`. All five call sites stay unchanged because the public function signature is preserved. The SEH-split pattern is proven in `scan_tts`. If something goes wrong, a one-line fallback (patching just the digit range in the old table) is the documented escape hatch.
+
+### Files
+
+- `src/battle_tts.cpp` — added `ff8_text_decode.h` include.
+- `src/battle_tts_helpers.inl` — retired `DecodeFF8Char`, rewrote `DecodeFF8String` as SEH wrapper.
+- `src/ff8_accessibility.h` — version bump.
+- `CHANGELOG.md`
+- `DEVNOTES.md`
+- `NEXT_SESSION_PROMPT.md`
+
 ## v0.15.9.11.3.9
 
 Fix the chase ASK pre-open race window. Aaron reported that pressing confirm during the ~3-second gap between Squall's "Forget it! Let's go!" MES and the chase-mode ASK opening would advance Squall's MES to the chase-start opcode, bypassing the ASK entirely. Lowering `TRIGGER_DELAY_MS` from 3000 to 0 in `chase_ask_overlay.cpp` closes the race: the deferred-open check now resolves on the next AccessibilityThread tick (~16 ms after `OnDialogText` fires), so the ASK is visible and accepting input before any human reaction time. NVDA's speech queue still serialises the utterances — Squall's line plays, then the ASK prompt, then the default-cursor option label — just without a multi-second silent gap. Default cursor on Auto means a button-mashing player still commits the safest option.

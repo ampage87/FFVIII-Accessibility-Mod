@@ -37,6 +37,7 @@
 #include "ff8_addresses.h"
 #include "battle_tts.h"
 #include "ff8_item_names.h"
+#include "ff8_text_decode.h"
 #include "minhook/include/MinHook.h"
 
 // Forward declarations for namespaces used in .inl files
