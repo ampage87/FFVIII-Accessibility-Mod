@@ -23,7 +23,8 @@
 // keys to select. DialogInject owns rendering, cursor input, and answer
 // detection. chase_ask_overlay's job shrinks to:
 //   - Match the trigger MES, defer-open by 3s.
-//   - Call DialogInject::OpenAsk("Mode?", {"Manual","Auto","Original"},...).
+//   - Call DialogInject::OpenAsk("X-ATM092 is heading right for you...",
+//     {"Auto","Manual","Original"},...).
 //   - Per-frame poll DialogInject::GetLastAnswer() for the user's choice.
 //   - Dispatch to ChaseDetector::SetChaseMode based on the answer.
 //
@@ -57,11 +58,27 @@ namespace ChaseAskOverlay {
 // double-space — v0.15.0 dialog log capture preserved it.
 static const char* CHASE_TRIGGER_TEXT = "Forget it!  Let's go!";
 
-// v0.15.1.2: Delay between trigger detection and ASK open. Gives the
-// engine + NVDA time to display and speak Squall's chase-trigger line
-// before we preempt with our own prompt. 3000 ms covers a 5-word line
-// at any reasonable TTS rate.
-static const DWORD TRIGGER_DELAY_MS = 3000;
+// v0.15.1.2: Delay between trigger detection and ASK open. Originally
+// 3000 ms to let the engine + NVDA display and speak Squall's chase-
+// trigger line before we preempted with our own prompt.
+//
+// v0.15.9.11.3.9: lowered to 0 ms to fix a race window where the player's
+// confirm key during the 3-second wait advanced Squall's MES to the next
+// script opcode (the chase start), bypassing the ASK entirely. With
+// TRIGGER_DELAY_MS = 0, the deferred-open check in Update() resolves on
+// the very next AccessibilityThread tick (~16 ms later, since OnDialogText
+// only sets s_triggerPending; the actual OpenAsk call runs in Update),
+// so the ASK is visible and the active dialog before any human reaction
+// time can fire. Three NVDA utterances now queue back-to-back: Squall's
+// line, the ASK prompt, then the default-cursor option label. The default
+// cursor lands on Auto (kChaseChoicesDefaultCursor=1 since v0.15.9.11.3.7),
+// so a button-mashing player committing without listening still gets the
+// safest option. A patient player hears Squall's line under the ASK
+// prompt instead of cleanly before it -- the UX trade. If this proves
+// annoying, switch to Option A (suppress confirm keys via ChaseKeyboard
+// for just the dialog-settle window) or Option B (gate on
+// ScreenReader::IsSpeaking() instead of a fixed timer).
+static const DWORD TRIGGER_DELAY_MS = 0;
 
 // v0.15.8: target slot for our injected ASK. Slot 2 is what
 // Phase2_TestAsk uses; matches the v0.15.6.2 and v0.15.7.1 BAT layouts.
@@ -85,17 +102,29 @@ static const int CHASE_ASK_SLOT = 2;
 // the whole chase). Original still falls back to Manual until v0.15.9.10
 // implements MODE_ORIGINAL; the label change is deferred to that version
 // so we don't promise behavior the build doesn't yet deliver.
+//
+// v0.15.9.11.3.7: reorder to most-to-least support (Auto, Manual,
+// Original) so the default cursor lands on the option with the most
+// assistance — protects button-mashers who confirm without reading.
+// ANSWER_* constants updated to match the new 1-based positions; the
+// CommitChoice switch body is unchanged (it still routes each ANSWER_*
+// to its corresponding mode). Original description rewritten to convey
+// the vanilla chase mechanic where the X-ATM092 gets back up after each
+// battle and resumes pursuit within the same field — the previous
+// "no mod help" label was technically correct but didn't capture what
+// the player actually experiences.
 static const char* kChaseChoices[] = {
-    "Manual: drive yourself, one battle per field",
     "Auto: mod drives, no battles or shake",
-    "Original: vanilla chase, no mod help"
+    "Manual: drive yourself, one battle per field",
+    "Original: vanilla, robot keeps getting up to pursue"
 };
 static const int   kChaseChoicesCount = 3;
-static const int   kChaseChoicesDefaultCursor = 1;  // Manual
+static const int   kChaseChoicesDefaultCursor = 1;  // Auto (most support; protects button-mashers)
 
 // Answer values returned by DialogInject::GetLastAnswer (1-based).
-static const int ANSWER_MANUAL   = 1;
-static const int ANSWER_AUTO     = 2;
+// v0.15.9.11.3.7: renumbered to match the new Auto/Manual/Original order.
+static const int ANSWER_AUTO     = 1;
+static const int ANSWER_MANUAL   = 2;
 static const int ANSWER_ORIGINAL = 3;
 
 // ============================================================================

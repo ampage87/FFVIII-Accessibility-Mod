@@ -1273,6 +1273,18 @@ static int32_t IntSqrt(int32_t v)
 // correlate analog -> world delta).
 static void LogChaseActiveDiagnostic(const char* fieldName)
 {
+    // v0.15.9.11.3.7: function retired. Originally added in v0.15.9.3 to
+    // derive camera orientation for the v0.15.9.4 domt4_1 / v0.15.9.5
+    // domt3_2 / v0.15.9.6 domt5_1 direction configs by capturing the
+    // (analog, world-delta) pairs during chase Auto. That research is
+    // complete; the per-second log is now pure noise (especially during
+    // the post-chase disc00_07h FMV where it fires for 74s with delta=0).
+    // Early-return keeps the call sites compiling without modification.
+    // If future camera research is needed, remove this gate and the data
+    // capture comes back online.
+    (void)fieldName;
+    return;
+
     int32_t pX = 0, pY = 0;
     bool gotPos = ReadSquallPosition(pX, pY);
 
@@ -1383,6 +1395,17 @@ static void LogChaseActiveDiagnostic(const char* fieldName)
 // but it would mislabel the SYM string in the log.
 static void LogBridgeDiagnostic(const char* fieldName)
 {
+    // v0.15.9.11.3.7: per-sample bridge dump retired. v0.15.9.8.2 used
+    // this 10Hz all-slots enumerator to identify which entity slot tracked
+    // the actually-pursuing X-ATM092 on domt1_1 (answer: Others slot 3,
+    // SYM 'laguna'). v0.15.9.8.3 shipped the kani-slot override and the
+    // bridge dance state machine; the per-sample dump is no longer useful.
+    // The bridge dance's own state-transition log lines (EAST->WEST,
+    // WEST->EAST, WEST->EAST TIMEOUT, leap STARTED) remain in
+    // UpdateBridgeDance and continue to fire on transitions only.
+    (void)fieldName;
+    return;
+
     if (fieldName == nullptr || std::strcmp(fieldName, "domt1_1") != 0) return;
 
     int32_t pX = 0, pY = 0;
@@ -2086,12 +2109,45 @@ void Update()
         }
 
         // Per-second diagnostic, using cached engaged state (no cfg lookup).
+        // v0.15.9.11.3.7: delta-zero suppression. The post-chase disc00_07h
+        // FMV holds ChaseAutoPilot ENGAGED for ~74s with party position
+        // frozen at (-210,-1000) -- the original tick logger fired 74 identical
+        // lines, dominating ff8_field.log. New behavior: log the first idle
+        // sample so the freeze is recorded, suppress subsequent identical
+        // samples, log a RESUMED line on first motion after >=2 idle samples.
+        static int32_t s_lastTickLogX     = 0;
+        static int32_t s_lastTickLogY     = 0;
+        static bool    s_lastTickLogValid = false;
+        static int     s_idleTickCount    = 0;
         s_diagTickCounter++;
         if (s_diagTickCounter >= 60) {
             // v0.15.9.1.1: log first, THEN reset, so the printed tick
             // value matches the trigger (60) rather than always reading 0.
             int32_t pX = 0, pY = 0;
             bool gotPos = ReadSquallPosition(pX, pY);
+
+            // v0.15.9.11.3.7: classify this sample for delta-zero
+            // suppression. Update the cached prev-pos AFTER deciding
+            // whether to suppress so the diff check fires correctly.
+            bool isSameAsLast = gotPos && s_lastTickLogValid &&
+                                pX == s_lastTickLogX && pY == s_lastTickLogY;
+            bool suppressLog  = false;
+            if (isSameAsLast) {
+                s_idleTickCount++;
+                if (s_idleTickCount > 1) suppressLog = true;
+            } else {
+                if (s_idleTickCount > 1 && gotPos && s_lastTickLogValid) {
+                    Log::Field("ChaseAutoPilot: tick log RESUMED after %d idle samples "
+                               "at field='%s' pos=(%d,%d)",
+                               (int)s_idleTickCount, fieldName, (int)pX, (int)pY);
+                }
+                s_idleTickCount = 0;
+            }
+            if (gotPos) {
+                s_lastTickLogX     = pX;
+                s_lastTickLogY     = pY;
+                s_lastTickLogValid = true;
+            }
 
             // v0.15.9.2.8: also read the kani's position and compute the
             // squall-kani distance. This is purely diagnostic -- no behavior
@@ -2116,7 +2172,9 @@ void Update()
                 std::snprintf(kaniBuf, sizeof(kaniBuf), " kani=UNRESOLVED");
             }
 
-            if (IsDirectionLikeMode(s_engagedMode)) {
+            if (suppressLog) {
+                // v0.15.9.11.3.7: idle sample - log suppressed.
+            } else if (IsDirectionLikeMode(s_engagedMode)) {
                 int32_t lX = (int32_t)s_engagedDirX * 1000;
                 int32_t lY = (int32_t)s_engagedDirY * 1000;
                 const char* modeStr =

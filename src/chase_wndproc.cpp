@@ -76,7 +76,52 @@ static LRESULT CALLBACK SubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     }
 
     // Drop arrow-key WM_KEY* when chase Auto is driving. Outside chase Auto,
-    // and for all non-arrow keys at all times, fall through.
+    // and for all non-game keys at all times, fall through.
+    //
+    // v0.15.9.11.3.8: drop list extended beyond arrow keys. v0.15.9.11.3.7
+    // BAT confirmed arrow-key suppression was working end-to-end on the
+    // first five chase fields (domt4_1 -> domt1_1 bridge), then the chase
+    // got caught on doopen2a after ~10 auto-pilot waypoints reached. The
+    // doopen2a field log showed one [CBF] PASS BATTLE call from
+    // `caller=other entityPtr=0x0188CA04` -- the JSM scan lists
+    // `ent11 cat=3 type=Interactive Object sym='battleyarou'` on this
+    // field, an Interactive Object that fires the catch when the player
+    // presses an action key while adjacent. Aaron reported he was mashing
+    // arrows and "may have accidentally hit the right CTRL key" -- which
+    // in FF8 PC's default keyboard binding is one of the action-key
+    // bindings that triggers Interactive Objects.
+    //
+    // The original drop-list (arrows only) covered the v0.15.9.11.3.6
+    // arrow-mashing test perfectly: Aaron's arrow presses never reached
+    // FF8 because both this WndProc subclass and the GetAsyncKeyState
+    // hook suppressed them. But Ctrl WM_KEYDOWN slipped through this
+    // subclass (it wasn't in the drop-list), and FF8's WndProc dispatched
+    // it to the action-key handler, which triggered `battleyarou`.
+    //
+    // The extended drop-list adds the primary FF8 PC action / menu keys
+    // that sit close to the arrow cluster on a standard keyboard and are
+    // easy to brush accidentally:
+    //   - VK_CONTROL: right Ctrl literally borders the right arrow on
+    //     most layouts. Default FF8 PC action-key binding.
+    //   - VK_RETURN: numpad Enter borders the arrow keys; main Enter is
+    //     a common alternate OK binding.
+    //   - VK_SPACE: common alternate OK / advance-dialog binding.
+    //   - VK_TAB / VK_ESCAPE: open menu / cancel; not action-key triggers
+    //     for `battleyarou` directly, but pause / state-change keys that
+    //     could also disrupt the chase loop. Included for completeness.
+    //   - VK_SHIFT: modifier; some FF8 / FFNx bindings use it. Cheap to
+    //     drop since the mod reads its own Shift+F3/F4 modifier state via
+    //     GetAsyncKeyState (which is independent of WM_KEYDOWN).
+    //
+    // Explicitly NOT in the drop-list: VK_MENU (Alt), F1-F12, and letter
+    // keys. Alt is preserved so Alt+F4 close-window still works during a
+    // chase. F-keys and letter keys are mod hotkeys (TTS adjustments,
+    // version readout, info queries) -- they go through the mod's own
+    // GetAsyncKeyState poll loop, not via FF8's WndProc, so dropping their
+    // WM_KEY* here would not break them functionally, but the mod's own
+    // F-key handler path is the simpler reference: leave WM_KEY for those
+    // alone so any future engine-level handling of those keys is also
+    // unaffected.
     //
     // ChaseKeyboard::IsActive() reads its s_active volatile bool -- atomic on
     // x86, no lock needed. Worst-case race (Activate fires between our read
@@ -86,12 +131,23 @@ static LRESULT CALLBACK SubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     if (ChaseKeyboard::IsActive()) {
         if (msg == WM_KEYDOWN || msg == WM_KEYUP ||
             msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP) {
-            if (wParam == VK_UP || wParam == VK_DOWN ||
-                wParam == VK_LEFT || wParam == VK_RIGHT) {
-                // Consume. Return 0 per MSDN's documented "handled" reply for
-                // WM_KEYDOWN/KEYUP. FF8's WndProc and its [+0xb48] dispatch
-                // table at 0x0040AC5B never see the message.
-                return 0;
+            switch (wParam) {
+                case VK_UP:
+                case VK_DOWN:
+                case VK_LEFT:
+                case VK_RIGHT:
+                case VK_CONTROL:    // v0.15.9.11.3.8: Aaron's accidental right-Ctrl press
+                case VK_RETURN:     // v0.15.9.11.3.8: numpad-Enter borders arrows
+                case VK_SPACE:      // v0.15.9.11.3.8: alternate OK / advance
+                case VK_TAB:        // v0.15.9.11.3.8: pause / menu
+                case VK_ESCAPE:     // v0.15.9.11.3.8: cancel / menu
+                case VK_SHIFT:      // v0.15.9.11.3.8: modifier
+                    // Consume. Return 0 per MSDN's documented "handled" reply for
+                    // WM_KEYDOWN/KEYUP. FF8's WndProc and its [+0xb48] dispatch
+                    // table at 0x0040AC5B never see the message.
+                    return 0;
+                default:
+                    break;
             }
         }
     }

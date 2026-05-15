@@ -336,12 +336,46 @@ static SHORT WINAPI HookedGetAsyncKeyState(int vKey)
     // director on doopen2a) cannot see Aaron's physical key presses.
     // The auto-pilot's input still reaches FF8 via the DirectInput
     // synthetic-buffer path, which is independent of GetAsyncKeyState.
+    //
+    // v0.15.9.11.3.8: mask list extended beyond arrows. See chase_wndproc.cpp
+    // for the full rationale -- v0.15.9.11.3.7 BAT confirmed arrow
+    // suppression end-to-end on every chase field, then doopen2a fired one
+    // [CBF] PASS BATTLE call from `caller=other entityPtr=0x0188CA04`
+    // (the `battleyarou` Interactive Object at JSM ent11). Aaron reported
+    // he was mashing arrows and "may have accidentally hit the right CTRL
+    // key" -- which in FF8 PC's default keyboard binding is an action-key
+    // alternate that triggers Interactive Objects.
+    //
+    // Both the WndProc subclass and this GetAsyncKeyState hook need the
+    // extended drop-list because the two hooks cover independent code
+    // paths into FF8's input system, and the original v0.15.9.11.3.6
+    // architecture comment is explicit that BOTH are needed to fully
+    // suppress a given VK -- one alone is not enough.
+    //
+    // Keys masked here: arrows + the FF8 PC action / menu keys near the
+    // arrow cluster on a standard keyboard. VK_CONTROL plus the explicit
+    // VK_LCONTROL / VK_RCONTROL so callers that poll a specific side of
+    // Ctrl (e.g., the chase-progress director on doopen2a) also get 0.
+    //
+    // Explicitly NOT masked: VK_SHIFT / VK_LSHIFT / VK_RSHIFT (mod's own
+    // Shift+F3/F4 hotkey reads this -- masking would silently break the
+    // speech-volume modifier during chase Auto) and VK_MENU / VK_LMENU /
+    // VK_RMENU (mod's F-key handlers gate on Alt via
+    // `GetAsyncKeyState(VK_MENU) & 0x8000` -- masking would let F-keys
+    // fire even when the user holds Alt, e.g. defeating Alt+F4 gating).
     if (ChaseKeyboard::IsActive()) {
         switch (vKey) {
             case VK_UP:
             case VK_DOWN:
             case VK_LEFT:
             case VK_RIGHT:
+            case VK_CONTROL:        // v0.15.9.11.3.8
+            case VK_LCONTROL:       // v0.15.9.11.3.8
+            case VK_RCONTROL:       // v0.15.9.11.3.8
+            case VK_RETURN:         // v0.15.9.11.3.8
+            case VK_SPACE:          // v0.15.9.11.3.8
+            case VK_TAB:            // v0.15.9.11.3.8
+            case VK_ESCAPE:         // v0.15.9.11.3.8
                 return 0;
             default:
                 break;

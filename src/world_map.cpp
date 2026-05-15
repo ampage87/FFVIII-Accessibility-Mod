@@ -2508,9 +2508,24 @@ static void BuildDistanceCatalog()
     // (segment col 16, row 0) that is almost always wrong, so defer until we
     // see a non-zero position. s_catalogBuilt stays false, Poll() retries us
     // each frame until success.
+    // v0.15.9.11.3.7: throttle the [DEFER] log to one line per stuck-
+    // state. Previously logged every frame while position read (0,0)
+    // (typical during field mode / chase scene), filling ff8_world.log
+    // with tens of thousands of identical lines. Now logs once when
+    // deferral starts and once when it ends, leaving the polling
+    // behavior unchanged. Function-local static is fine for this — the
+    // catalog is built from a single thread and a single defer cycle.
+    static bool s_deferLogged = false;
     if (px == 0 && py == 0) {
-        Log::World("WorldMap: [DEFER] Position is (0,0), retrying catalog build next poll");
+        if (!s_deferLogged) {
+            Log::World("WorldMap: [DEFER] Position is (0,0); retrying each tick until valid (one log per defer cycle)");
+            s_deferLogged = true;
+        }
         return;
+    }
+    if (s_deferLogged) {
+        Log::World("WorldMap: [DEFER] Position became valid (%d,%d); proceeding with catalog build", px, py);
+        s_deferLogged = false;
     }
 
     // Copy all locations and compute distances

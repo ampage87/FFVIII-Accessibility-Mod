@@ -4,6 +4,147 @@ Newest on top. Each entry begins with a `## vMAJOR.MINOR.BUILD` heading followed
 
 The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_accessibility.h`. The push utility refuses to push if they don't.
 
+## v0.15.9.11.3.9
+
+Fix the chase ASK pre-open race window. Aaron reported that pressing confirm during the ~3-second gap between Squall's "Forget it! Let's go!" MES and the chase-mode ASK opening would advance Squall's MES to the chase-start opcode, bypassing the ASK entirely. Lowering `TRIGGER_DELAY_MS` from 3000 to 0 in `chase_ask_overlay.cpp` closes the race: the deferred-open check now resolves on the next AccessibilityThread tick (~16 ms after `OnDialogText` fires), so the ASK is visible and accepting input before any human reaction time. NVDA's speech queue still serialises the utterances — Squall's line plays, then the ASK prompt, then the default-cursor option label — just without a multi-second silent gap. Default cursor on Auto means a button-mashing player still commits the safest option.
+
+### Why this build
+
+The 3-second defer was introduced in v0.15.1.2 so NVDA could speak Squall's chase-trigger line cleanly before our ASK preempted with its own prompt. It worked for that goal but left a window where the player's reflex-confirm landed on Squall's dialog (not the not-yet-open ASK), and FF8 advanced Squall's MES to the next opcode — the chase start. By the time `Update()` finally opened the ASK, the chase script had already kicked off, `s_askAnswered` was never set on a fresh trigger, and the player was driving manually in whatever mode the INI carried.
+
+### The fix
+
+**`src/chase_ask_overlay.cpp`** — `TRIGGER_DELAY_MS` changed from `3000` to `0`. `OnDialogText` still sets `s_triggerPending` synchronously on the MES detection; `Update()` still polls and calls `OpenAsk` in its own tick. With the delay zeroed, the gap collapses to one AccessibilityThread tick (~16 ms), which beats any human reaction time. The pre-existing 60-second `DialogInject` ASK timeout and the existing chase-end cleanup path are unaffected.
+
+### What changes for the player
+
+A *patient* player now hears Squall's "Forget it! Let's go!" line overlapping with the ASK prompt "X-ATM092 is heading right for you. How do you want to run?" rather than cleanly before it — NVDA queues the two utterances back-to-back. The ASK is still navigable while either is speaking. A *button-mashing* player commits Auto (the default cursor) before hearing any of it, which is the intended behavior since v0.15.9.11.3.7.
+
+### Out of scope
+
+If overlapping speech proves annoying, the two layered fixes documented in the code comment are still available:
+
+- **Option A**: extend `ChaseKeyboard` to suppress confirm keys during the dialog-settle window only (activate at `OnDialogText`, deactivate at `OpenAsk` so the ASK itself stays interactive).
+- **Option B**: gate on `ScreenReader::IsSpeaking()` instead of a fixed timer.
+
+### Risk
+
+Very low. One constant edit. Worst case (the ASK and Squall's MES collide in script-VM ways we haven't foreseen): revert to a small nonzero delay like 100 ms that still beats human reaction time, or fall back to Option A.
+
+### BAT plan
+
+Aaron triggers the chase and mashes confirm immediately when Squall's line starts. Expected outcome: the ASK opens essentially instantly, the mashed confirm commits Auto in the ASK, and the chase auto-pilots cleanly through every field as in v0.15.9.11.3.8 — zero `[CBF] PASS` lines anywhere.
+
+### Files
+
+- `src/chase_ask_overlay.cpp` — `TRIGGER_DELAY_MS = 0` plus rationale comment.
+- `src/ff8_accessibility.h` — version bump.
+- `CHANGELOG.md` — this entry.
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md` — current state + BAT plan.
+
+## v0.15.9.11.3.8
+
+Extend chase Auto keyboard suppression beyond arrow keys. v0.15.9.11.3.7 BAT confirmed the auto-pilot drove the full chase route cleanly until a single `[CBF] PASS` BATTLE fired on `doopen2a` after Aaron accidentally brushed right Ctrl while mashing arrows. Right Ctrl is FF8 PC's action-key binding and triggered the `battleyarou` Interactive Object listed in the field's JSM. This build adds Ctrl plus the other action / menu keys near the arrow cluster to both the WndProc subclass drop-list and the GetAsyncKeyState mask-list so a finger slip onto Ctrl, Enter, Space, Tab, or Escape during chase Auto no longer reaches FF8.
+
+### Why this build
+
+The v0.15.9.11.3.7 BAT logged a chase that engaged correctly (Auto routing, WndProc subclass installed, ChaseKeyboard activated) and auto-piloted from `domt4_1` through every chase field to `doopen2a` waypoint 10/27 — a clean ~56 seconds of suppressed-arrow play. Then at 20:25:21 the field log fired:
+
+```
+[CBF] PASS chase BATTLE call #1 (total #2) field='doopen2a' mode=auto battleCount=0 cap=2147483647 caller=other entityPtr=0x0188CA04
+[CBF] PASS in doopen2a -- skipping RegisterChaseAgent (agent is chase-progress director; pin would block transition to dotown_3). BATTLE NO-OP carries the load.
+ChaseDetector: battle entered (game-mode 0x0001 -> 0x0003)
+```
+
+The JSM scan at field load lists `ent11 cat=3 type=Interactive Object sym='battleyarou'` on `doopen2a`. Interactive Objects fire when the player presses an action key while adjacent. Aaron's verbatim report: *"All I pressed were arrow keys, though I may have accidentally hit the right CTRL key while hitting arrow keys."* Right Ctrl borders the right arrow on standard keyboard layouts. FF8 PC's default keyboard binding uses Ctrl as an action-key alternate. The press fired `battleyarou`, the chase BATTLE fired, the freeze let it through (`caller=other` plus `cap=INT_MAX` semantics), `ChaseDetector` saw the battle entered, the chase ended.
+
+This was not a v0.15.9.11.3.7 regression — the v0.15.9.11.3.6 BAT happened not to brush Ctrl. Both BATs would have produced the same outcome with the same key glance.
+
+### The fix
+
+Two file edits, mirror-extending the drop-lists in the two existing hooks:
+
+**`src/chase_wndproc.cpp`** — `SubclassProc`'s drop-list expanded from `{VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT}` to also include `VK_CONTROL`, `VK_RETURN`, `VK_SPACE`, `VK_TAB`, `VK_ESCAPE`, and `VK_SHIFT`. WM_KEYDOWN / WM_KEYUP / WM_SYSKEYDOWN / WM_SYSKEYUP for these VKs return 0 without forwarding while `ChaseKeyboard::IsActive()`.
+
+**`src/dinput8.cpp`** — `HookedGetAsyncKeyState`'s mask-list extended to include `VK_CONTROL` plus `VK_LCONTROL` and `VK_RCONTROL` explicitly (a polling caller can ask for a specific side, so we mask all three), `VK_RETURN`, `VK_SPACE`, `VK_TAB`, `VK_ESCAPE`. Polls for these VKs return 0 while chase Auto is active. The Shift family (`VK_SHIFT` / `VK_LSHIFT` / `VK_RSHIFT`) and the Alt family (`VK_MENU` / `VK_LMENU` / `VK_RMENU`) are deliberately omitted because the mod's own hotkey path in `dinput8.cpp` reads them via `GetAsyncKeyState` for the Shift+F3/F4 speech-volume modifier and the Alt-gate on every F-key handler. Masking either would silently break those mod hotkeys during chase Auto.
+
+The WndProc subclass does drop `VK_SHIFT` because FF8's WndProc reads Shift via WM_KEYDOWN dispatch, not via `GetAsyncKeyState`. Dropping the messages doesn't affect the mod's own Shift detection (which uses `GetAsyncKeyState` and bypasses WM_KEYDOWN entirely). Alt remains forwarded by the WndProc so Alt+F4 close-window still works during a chase.
+
+### Out of scope
+
+Letter keys (Z, X, C, V, A, W, M, O, G, T, L, R, H), the digit row, and the F-key row are left alone in both hooks. Many overlap with mod hotkeys (V/M/O/A/W/G/T/L/R/H/digits/F1–F12), and the mod's hotkey poller reads them via `GetAsyncKeyState` — masking them would break the mod's own version readout, info queries, and TTS controls.
+
+### Risk
+
+Low. Both hooks already exist and work; this just lengthens their drop-list. The added `VK_SHIFT` in the WndProc drop-list could in theory affect FF8 or FFNx if either has a Shift-based input handler that consumes WM_KEYDOWN — mitigated by the mod's `GetAsyncKeyState` pass-through for Shift (engine-level polling reads still work; only WM_KEYDOWN dispatch is dropped). `VK_CONTROL` similarly: any FF8 path that consumes Ctrl WM_KEYDOWN for non-chase functionality is briefly suppressed during the ~60-second chase window, vs the alternative of `battleyarou` getting triggered on a finger slip.
+
+### BAT plan
+
+Aaron triggers the chase, picks Auto, rides through every chase field while pressing arrow keys — and ideally also intentionally brushing right Ctrl to specifically verify this fix. Expected outcome: zero `[CBF] PASS` lines on `doopen2a` regardless of which keys near the arrow cluster get glanced. Chase completes to the `disc00_07h` FMV. Field log shows the same install lines as v0.15.9.11.3.7 (`ChaseKeyboard ACTIVATED` per chase field, `ChaseWndProc subclass INSTALLED` at first activate).
+
+### Files
+
+- `src/chase_wndproc.cpp` — extended VK drop-list with switch statement plus rationale block comment.
+- `src/dinput8.cpp` — extended `HookedGetAsyncKeyState` VK mask-list plus rationale block comment.
+- `src/ff8_accessibility.h` — version bump.
+- `CHANGELOG.md` — this entry.
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md` — current state + BAT plan.
+
+## v0.15.9.11.3.7
+
+Chase ASK dialog polish (Auto/Manual/Original reorder, Auto as default cursor, Original description rewrite) bundled with log diagnostic cleanup (retire stale per-second instrumentation that survived past its research purpose and was dominating the post-chase BAT logs).
+
+### Why this build
+
+The v0.15.9.11.3.6 push (commit `30bc7469`) closed the chase scene. After living with the ASK as it shipped, two small UX issues were apparent:
+
+1. The option order — Manual, Auto, Original — put the most-assistance option in the middle. A blind player who hammers X to commit without listening lands on Manual, the more demanding option. The natural ordering is most-to-least support, with Auto first.
+2. The Original description ("Original: vanilla chase, no mod help") was technically accurate but didn't capture the key gameplay difference from Manual. In Manual, `chase_battle_freeze` caps catches at 1 per field; in Original, the vanilla X-ATM092 chase plays out unmodified, which means the robot gets back up after each battle and resumes pursuit within the same field — leading to multiple battles per field.
+
+### The change
+
+Three edits to `src/chase_ask_overlay.cpp`:
+
+- **`kChaseChoices[]`** reordered to `{Auto, Manual, Original}`. The labels themselves are unchanged for Auto and Manual; Original's label is rewritten to `"Original: vanilla, robot keeps getting up to pursue"` — parallel to Manual's `"one battle per field"` framing and conveys the rise-and-pursue mechanic.
+- **`ANSWER_AUTO`** and **`ANSWER_MANUAL`** swap values (1 ↔ 2) so the 1-based answer slots match the new positions. `ANSWER_ORIGINAL` stays at 3. The `CommitChoice` switch body is unchanged — it still routes each `ANSWER_*` to its corresponding `ChaseDetector::MODE_*`.
+- **`kChaseChoicesDefaultCursor`** stays at 1, but now points to Auto (the new slot 1) instead of Manual. Protects button-mashers: a player who confirms without navigating commits Auto and gets full mod assistance through the chase, rather than committing Manual.
+
+Also fixes a stale comment in the top-of-file design block that referenced the old prompt `"Mode?"` (replaced in v0.15.9.9) and the old option order.
+
+### Bundled log diagnostic cleanup
+
+A review of the v0.15.9.11.3.6 BAT logs (8.30 MB total) found four sources of stale instrumentation spam dominating the volume:
+
+1. **`ff8_world.log` (1.79 MB)** — `WorldMap: [DEFER] Position is (0,0)` fired every frame while the player was in field mode (chase scene). Fix in `src/world_map.cpp::BuildDistanceCatalog`: one-shot static latch logs the first defer line, suppresses subsequent identical defers, and emits a `Position became valid` line when the position recovers. Polling behavior unchanged.
+
+2. **`ff8_field.log` ChaseActiveDiag spam** — v0.15.9.3 added a per-second pre-engage/engage diagnostic to derive camera orientation for the v0.15.9.4 domt4_1 / v0.15.9.5 domt3_2 / v0.15.9.6 domt5_1 direction configs. That research is complete; the post-chase disc00_07h FMV pinned the log at 74 identical lines with `delta=(0,0)`. Fix in `src/chase_auto_pilot.cpp::LogChaseActiveDiagnostic`: early-return retirement. The function body is kept (skipped via early-return) so existing call sites compile without modification.
+
+3. **`ff8_field.log` BridgeDiag per-sample spam** — v0.15.9.8.2 added a 10 Hz all-slots enumerator on `domt1_1` to identify the actually-pursuing X-ATM092 entity (Others slot 3, SYM `laguna`). v0.15.9.8.3 shipped the kani-slot override and the bridge dance state machine; the per-sample dump is no longer useful. Fix in `src/chase_auto_pilot.cpp::LogBridgeDiagnostic`: early-return retirement. The bridge dance's own state-transition log lines (EAST→WEST, WEST→EAST, WEST→EAST TIMEOUT, leap STARTED) remain in `UpdateBridgeDance` and continue to fire on transitions only.
+
+4. **`ff8_field.log` per-second `ChaseAutoPilot: tick=60` spam** — same root cause as #2: during the post-chase FMV the auto-pilot is technically engaged but the party is frozen at `pos=(-210,-1000)`, and the per-second tick logger fires 74 identical lines. Fix in the existing `if (s_diagTickCounter >= 60)` block: track previous-tick position, classify the current sample as idle when position is unchanged from last tick, log the first idle sample so the freeze is recorded, suppress subsequent idle samples via a `suppressLog` flag that wraps both the DIRECTION-like and TARGET branches, and emit a `tick log RESUMED after N idle samples` line on first motion.
+
+5. **`ff8_nav_data.log` (4.66 MB) COORD duplication** — the COORD record was the v0.15.9.3–v0.15.9.5 camera-orientation research log (`for parsing by Python/analysis tools` per the file header). Audit of `Utilities/` confirms no checked-in consumer reads `ff8_nav_data.log`; the only log-parsing script (`dump_chase_events.ps1`) reads `ff8_field.log`. On `dotown_3` the BAT recorded 19 alternating COORD lines for triangles 30 and 22 in one second — the party stood on a triangle boundary and the engine's read flickered every frame. Fix in `src/nav_log.cpp::CoordSample`: cache the last `(fieldName, triIdx)` pair and skip duplicate consecutive samples. Preserves the triangle SEQUENCE the record is structured to capture; kills the boundary-flicker spam. Note: the file is opened in append mode (`fopen_s(..., "a")`) so the 4.66 MB accumulated across sessions; new sessions start clean once Aaron deletes the existing file.
+
+Estimated combined reduction across the four logs: roughly 6–7 MB of the 8.30 MB total. Behavior of the mod itself is unchanged — every edit is pure log volume.
+
+### Risk
+
+Very low. Three string edits + two constant value swaps + one cursor-comment change. No behavior change to `CommitChoice`, `ChaseDetector::SetChaseMode`, `DialogInject`, or any chase machinery. INI persistence stores mode by name (`"auto"` / `"manual"` / `"original"`), not by `ANSWER_*` slot, so existing save files are unaffected.
+
+### BAT plan
+
+Aaron triggers the chase. ASK reads the prompt ("X-ATM092 is heading right for you. How do you want to run?") + the three labels in new order: Auto first, then Manual, then Original. Default cursor on Auto. If Aaron confirms without navigating, MODE_AUTO is committed. Arrowing down once announces Manual; twice announces the new Original label.
+
+### Files
+
+- `src/chase_ask_overlay.cpp` — `kChaseChoices` reorder, `ANSWER_*` swap, default-cursor comment, top-of-file design comment, history comment block extension.
+- `src/world_map.cpp` — `BuildDistanceCatalog` `[DEFER]` log throttle.
+- `src/chase_auto_pilot.cpp` — `LogChaseActiveDiagnostic` early-return retirement, `LogBridgeDiagnostic` early-return retirement, per-second tick=60 idle-sample suppression.
+- `src/nav_log.cpp` — `CoordSample` `(fieldName, triIdx)` debounce.
+- `src/ff8_accessibility.h` — version bump.
+- `CHANGELOG.md` — this entry.
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md` — current state + BAT plan.
+
 ## v0.15.9.11.3.6
 
 Install a WndProc subclass that drops arrow-key `WM_KEY*` messages during chase Auto. Closes the last untreated keyboard delivery path to FF8's own WndProc — the `[+0xb48]` per-message handler dispatch invoked from FF8_EN.exe's window procedure at `0x0040AC5B`.

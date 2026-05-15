@@ -4,17 +4,38 @@ Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` inj
 
 **Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
 
-GitHub: `ampage87/FFVIII-Accessibility-Mod`. **HEAD = v0.15.9.10** (pushed 2026-05-13). Local tree is at **v0.15.9.11.3.6 — BAT-SUCCESS, ready to push** — nine unpushed versions ahead.
+GitHub: `ampage87/FFVIII-Accessibility-Mod`. **HEAD on GitHub = v0.15.9.11.3.6** (pushed 2026-05-15, commit `30bc7469`). **Local = v0.15.9.11.3.9** (BAT'd successfully 2026-05-15, ready to push). Four squashed builds atop the pushed HEAD: .11.3.7 ASK polish + log cleanup, .11.3.8 keyboard suppression extension, .11.3.9 ASK race-window fix.
 
 ---
 
-## Current state: v0.15.9.11.3.6 — BAT-SUCCESS (WndProc subclass) ✅
+## Current state: chase scene closed — v0.15.9.11.3.9 BAT passed, ready to push
 
-Aaron's 2026-05-14 BAT: arrow-mashed through the chase fields and never managed to interrupt the auto-drive. Mod log confirms the full route announced naturally — MH-5 → MH-6 → MH-3 → MH-7 → MH-1 bridge → Town Square 1 → **Town Square 5 (`doopen2a`, the previously-failing field)** → Town Square 10 → disc00_06h FMV → Town Square 8 → Town Square 6 → **disc00_07h Lapin Beach chase-climax FMV played all 8 cues across 74 seconds to natural completion**. Aaron then exited normally. The 11→0 catch reduction first achieved hands-off in v0.15.9.8.3 now extends to arrow-mashing gameplay.
+**v0.15.9.11.3.9 BAT result (2026-05-15, Aaron):** *"That worked well. I think we can stick with that solution."* The `TRIGGER_DELAY_MS = 0` fix closes the race window cleanly — pressing confirm during Squall's chase-trigger line now lands on the ASK instead of advancing the MES to the chase-start opcode. NVDA's overlapping-speech sequencing was acceptable in practice; the fallback Options A and B documented in the source comment are not needed and remain available if any future regression resurfaces the UX concern.
 
-**Chase scene item #3 (keyboard suppression during Auto chase) is DONE.** Push the squash and move to the post-chase backlog.
+**v0.15.9.11.3.8 (BAT'd successfully 2026-05-15 ~21:24):** *"I tried mashing buttons during this last run and no battle triggered."* Field log confirms zero `[CBF] PASS` lines across the entire chase. Chase keyboard machinery installed and active throughout (WndProc subclass installed, `ChaseKeyboard ACTIVATED` and `DEACTIVATED` lines per chase field). The extended drop-list (arrows + Ctrl + Enter + Space + Tab + Escape, plus VK_SHIFT in the WndProc layer) successfully suppressed Aaron's intentional button-mashing including action-key glances. The doopen2a `battleyarou` Interactive Object that fired in the v0.15.9.11.3.7 BAT is now fully behind the suppression layer.
 
-### What shipped in v0.15.9.11.3.6 — Path B (WndProc subclass)
+**This closes the chase-scene chapter for real this time.** v0.15.9.11.3.6 was the structural close (auto-pilot routing the full chase end-to-end); v0.15.9.11.3.7 polished the ASK presentation and cleaned up log noise; v0.15.9.11.3.8 closed the last keyboard leak. Three squashed builds atop the pushed HEAD; Aaron will push via `Utilities/push_to_github.vbs` next.
+
+**v0.15.9.11.3.7 (BAT'd successfully apart from the Ctrl leak):**
+
+*ASK polish (`src/chase_ask_overlay.cpp`):* reorder options from {Manual, Auto, Original} to {Auto, Manual, Original} — most-to-least support — with Auto as the default cursor position (protects button-mashers from committing the harder option). Original description rewritten from `"vanilla chase, no mod help"` to `"vanilla, robot keeps getting up to pursue"` to convey the X-ATM092 rise-and-pursue mechanic. `ANSWER_AUTO`/`ANSWER_MANUAL` constants swap values (1 ↔ 2); `CommitChoice` switch body and INI persistence (stores mode by name) both unaffected.
+
+*Log diagnostic cleanup:* review of the v0.15.9.11.3.6 BAT log set (8.30 MB total) found four sources of stale instrumentation that had served their research purpose and were dominating the post-chase logs. All retired or throttled in this build:
+- `src/world_map.cpp::BuildDistanceCatalog` — `[DEFER]` log throttled to one line per defer cycle (was 1.79 MB of `ff8_world.log` from per-frame logging while in field mode).
+- `src/chase_auto_pilot.cpp::LogChaseActiveDiagnostic` — early-return retirement (v0.15.9.3 camera-orientation research; research is complete).
+- `src/chase_auto_pilot.cpp::LogBridgeDiagnostic` — early-return retirement (v0.15.9.8.2 kani-slot identification; v0.15.9.8.3 shipped the override). Bridge dance state-transition logs unchanged.
+- `src/chase_auto_pilot.cpp` per-second `tick=60` logger — idle-sample suppression (was 74 identical lines during the disc00_07h FMV with party frozen).
+- `src/nav_log.cpp::CoordSample` — `(fieldName, triIdx)` debounce (was 4.66 MB of `ff8_nav_data.log` from triangle-boundary flicker; audit confirmed no checked-in consumer reads the file).
+
+BAT plan: trigger chase, verify three ASK paths (confirm-without-navigate → Auto, arrow-down once → Manual, arrow-down twice → Original). Verify in log tails that `ff8_world.log` is small, `ff8_field.log` is mostly transition events (no `ChaseActiveDiag` or `BridgeDiag` lines, no identical-tick=60 runs during FMV), and `ff8_nav_data.log` has no boundary-flicker repeats. Risk: very low. Behavior of the mod itself is unchanged; every cleanup edit is pure log volume reduction.
+
+**v0.15.9.11.3.6 (pushed):**
+
+v0.15.9.11.3.6 shipped 2026-05-14 and pushed 2026-05-15. Aaron arrow-mashed through every chase field and could not interrupt the auto-drive; full route announced naturally — MH-5 → MH-6 → MH-3 → MH-7 → MH-1 bridge → Town Square 1 → **Town Square 5 (`doopen2a`, the previously-failing field)** → Town Square 10 → disc00_06h FMV → Town Square 8 → Town Square 6 → **disc00_07h Lapin Beach chase-climax FMV played all 8 cues across 74 seconds to natural completion**. The 11→0 catch reduction first achieved hands-off in v0.15.9.8.3 now extends to arrow-mashing gameplay. Empirically verified in `Logs/ff8_field.log`: zero `[CBF] PASS` lines across the run and ChaseKeyboard activated/deactivated cleanly on each chase field.
+
+All four chase scene items closed. The next session picks from the post-chase backlog (see below).
+
+### What v0.15.9.11.3.6 shipped — Path B (WndProc subclass)
 
 New module `src/chase_wndproc.cpp` with `EnsureInstalled()` that enumerates top-level visible windows owned by FF8_EN.exe (`EnumWindows` + PID filter + visibility + WS_CHILD reject) and `SetWindowLongPtrW(GWLP_WNDPROC)` subclasses each. The subclass runs on the message-pump thread, same thread as the chase script's catch evaluator.
 
@@ -48,15 +69,13 @@ Together these four make every keyboard delivery path to FF8 return "no arrow pr
 
 ---
 
-## Chase scene status
+## Chase scene status — ALL COMPLETE
 
 - [x] **#4** ASK dialog text (v0.15.9.9, BAT-success, pushed)
 - [x] **#1** auto-pilot self-sufficient (v0.15.9.9, BAT-success, pushed)
 - [x] **post-BAT cleanup** duplicate "Let's go!" (v0.15.9.9.1, BAT-success, pushed)
-- [x] **#2** MODE_ORIGINAL (v0.15.9.10, BAT-success, **pending push**)
-- [x] **#3** keyboard suppression during Auto chase (v0.15.9.11.3.6, BAT-success 2026-05-14, **pending push**)
-
-All four chase scene items closed. Push the squash of v0.15.9.10 → v0.15.9.11.3.6 (`Utilities/push_to_github.vbs`).
+- [x] **#2** MODE_ORIGINAL (v0.15.9.10, BAT-success, pushed)
+- [x] **#3** keyboard suppression during Auto chase (v0.15.9.11.3.6, BAT-success 2026-05-14, **pushed 2026-05-15**)
 
 ---
 
@@ -74,21 +93,18 @@ All four chase scene items closed. Push the squash of v0.15.9.10 → v0.15.9.11.
 
 ---
 
-## Backlog (now post-chase)
+## Backlog (post-chase, in rough priority order)
 
-1. **Push pending versions** — Aaron runs `Utilities/push_to_github.vbs` to squash v0.15.9.10 → v0.15.9.11.3.6 into one commit using v0.15.9.11.3.6 CHANGELOG entry.
-2. **Do NOT revert AUTO battle-suppressor cap to 0.** Aaron's 2026-05-13 directive: the fix is the input layer, not the band-aid. Cap stays `INT_MAX`.
-3. **Cleanup vestigial `WALK_REPRESS_PERIOD` state** in `field_nav_directiondrive.inl` (constants + counters still present from v0.15.9.7.x but unreferenced).
-4. **BridgeDiag verbosity trim** — 10Hz per-sample BridgeDance + all-slots dump on domt1_1 is noise now that the dance is proven. Trim to transition-only events.
-5. **`deploy.bat` "Version: SINGLE-PRONGED" regex** (v0.15.9.3 cosmetic regression, unfixed).
+1. **Cleanup vestigial `WALK_REPRESS_PERIOD` state** in `field_nav_directiondrive.inl` — constants + counters still present from v0.15.9.7.x but unreferenced. Small, mechanical, zero risk.
+2. **BridgeDiag verbosity trim** — 10Hz per-sample BridgeDance + all-slots dump on `domt1_1` is noise now that the bridge dance is proven (v0.15.9.8.3). Trim to transition-only events.
+3. **`deploy.bat` "Version: SINGLE-PRONGED" regex** — cosmetic regression from v0.15.9.3. Deploy log prints `Version: SINGLE-PRONGED` instead of the actual version string. Hunt the regex in `src/deploy.bat`.
+4. **X-ATM092 battle-name fix** — battle TTS announces "X-ATM 6" instead of "X-ATM092". v0.15.9.11.3.6 BAT confirmed in `ff8_battle.log`: TTS string constructed as literal `"X-ATM?6?"`, indicating the kernel.bin enemy-name decoder is missing mappings for FF8's stylized small-form digits. Two fix paths: extend the character map with the missing byte mappings (right fix; needs ~30 min investigation), or hardcoded enemy-ID→ASCII name table like the Blue Magic 0x92/0xAA pattern (band-aid). Affects any enemy whose name uses FF8's stylized characters, not just X-ATM092.
+5. **Generalized countdown-timer hook** — Dollet 30-min countdown is TTS'd via a chase-specific path; generalize for future timers.
+6. **Remove party members from field entity catalog** — Squall/Zell/Selphie appear as targetable entities; filter them out.
 
-### Standalone
+**Do NOT revert AUTO battle-suppressor cap to 0.** Aaron's 2026-05-13 directive: the fix is the input layer, not the band-aid. Cap stays `INT_MAX`. v0.15.9.11.3.6 BAT vindicates the call.
 
-- X-ATM092 battle-name fix
-- Generalized countdown-timer hook
-- Remove party members from field entity catalog
-
-### Deferred
+### Deferred (don't pick without explicit Aaron direction)
 
 - SeeD rank bug #27 (hypothesis: `FIELD_H_OFFSET = 0xF94` is wrong section size)
 - Walk-and-talk dialog gap (hardcoded engine path)
