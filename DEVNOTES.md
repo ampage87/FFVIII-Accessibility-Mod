@@ -4,111 +4,152 @@ Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` inj
 
 **Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
 
-GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.15.12.0** (commit `b573fd12`). **Local tree = v0.15.13.2, BAT-verified, ready for push.**
+GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.15.13.2** (commit `3d6db2a`). **Local tree = v0.16.0.3** (log-spam cleanup on top of v0.16.0.2 BAT pass), ready for Aaron to push the v0.16.0/v0.16.0.1/v0.16.0.2/v0.16.0.3 chain via `Utilities/push_to_github.ps1`.
 
 ---
 
-## Current state: countdown timer chapter COMPLETE
+## Current state: v0.16.0.3 — VEH-POS-FALLBACK log-spam fix on top of v0.16.0.2 BAT pass
 
-### v0.15.13.2 BAT — all features verified
+v0.16.0.3 is a single-file cleanup: `world_map_segments.inl` logs `[VEH-POS-FALLBACK]` only on `s_lastVehicle` transition (a function-local static tracks the last-logged value). No time-based heartbeat — once a given vehicle byte has been logged, subsequent identical entries stay silent. No functional change.
 
-Aaron loaded the Dollet comm-tower save at 22:20:36. Mod log confirms:
+**v0.16.0.3 BAT — PASSED.** Zero `[VEH-POS-FALLBACK]` lines in 733 log lines (vs ~1800 in 2262 for v0.16.0.2). As a bonus, this BAT exercised the planner-ineligible branch of v0.16.0.2's Fix 1 (Poll() replan-gate): Fire Cavern drive hit a random encounter, re-entered the world map, and Poll() correctly logged `[DRIVE] Planner-ineligible destination -- keeping simple-coord steering, not replanning` before reaching final-approach arrival at dist=66. Both branches of Fix 1 (eligible via Balamb Town, ineligible via Fire Cavern) are now empirically verified. Aaron is ready to push v0.16.0/.0.1/.0.2/.0.3 chain.
 
+### v0.16.0.2 BAT result summary (still the most recent functional BAT)
+
+Log timestamps 15:33:49 (module init) through 15:40:32 (Balamb Town arrival).
+
+**Fix 3 (Initialize hardcode) — VERIFIED at module init:**
 ```
-[22:20:36] live raw=1731 (prev=0) state=0 tickMs=99957171
-[22:20:36] ENTER ACTIVE: rawValue=1731 units=SECONDS initialSec=1731 (28m51s)
+[INIT] Refined entry default: Balamb Town (12896,-26711)
+[INIT] Refined entry default: Fire Cavern (30326,-29221)
 ```
 
-Classifier correctly tagged the value as SECONDS. State machine entered ACTIVE. TTS announced "Timer detected. 28 minutes 51 seconds remaining."
+**Fire Cavern drive — CLEAN ARRIVAL in 7 seconds:**
+- Used refined entry (30326,-29221) instead of catalog (36864,-28672).
+- `Geometric-trigger destination Fire Cavern (locIdx=37, planner-ineligible) using simple-coord steering`.
+- No `[PLAN-DEBUG]` walk.
+- Arrival: `dist=66, lastPos=(30260,-29221), planned=0, fieldId=0x0088, fieldName='', elapsed=547ms`.
+- Refined coord auto-updated from (30326,-29221) → (30260,-29221) (66 units west, the actual approach-trigger entry point).
 
-Decrement ran cleanly at exactly 1/sec for 15 seconds (1731 → 1717) before Aaron froze.
+**Balamb Town drive — 4 encounter cycles, all resumed correctly via planner:**
+- Encounters at dist=12926, 10436, 9351, 5157, 1496 — each `Paused via game-mode (MODE_SWIRL)` → `Replanning after world-map re-entry` → normal `[PLAN-DEBUG]` walk → resume.
+- The planner-eligible branch of the Poll() replan-gate fired correctly every time.
+- Final arrival: `dist=65, fieldId=0x006A, fieldName='bcgate_1', elapsed=563ms`.
+- Refined coord re-captured at (12894,-26776) — 2 units off the prior hardcode.
 
-T-key tested 5 times in ACTIVE state (22:20:40 / .42 / .44 / .48 / .49) — each press read the current value correctly.
+**Fix 1 (Poll() replan-gate) verification**: the gate's `if (s_drivePlannerEligible) PlanDrivePath else log+keep-simple-coord` ran the planner-eligible branch 4 times for Balamb Town. The planner-ineligible branch did not fire because the Fire Cavern drive arrived too quickly to encounter a battle — but the conditional is structurally exercised and the eligible-side behavior matches expected.
 
-**FREEZE engaged at 22:20:51, raw=1717.** Log shows a beautifully tight alternation pattern for the next 20 seconds:
-```
-live raw=1716 (prev=1717) state=2 tickMs=99972500
-live raw=1717 (prev=1716) state=2 tickMs=99972562  <- mod re-pinned 62ms later
-```
-Engine writes 1716 once per second; mod writes 1717 immediately after. Value spends ~6% of each second at 1716, ~94% at 1717. **T-key during freeze always reads 1717** — for screen-reader accessibility this is fully working.
+**Fix 2 (two-tier 2500/8000 cap) verification**: structurally in place but unused this BAT. Fire Cavern arrived at dist=66 (well inside strict 2500), Balamb Town arrived at dist=65 (also inside). The 8000 cap is a safety net for future geometric-trigger destinations on their first visit before refined-coord capture.
 
-F11 screenshot at 22:21:08 captured HUD reading **28:36** (= 1716 sec — the brief post-engine-decrement window). After 20 seconds holding the freeze, the on-screen value drifted at most 1 second from the 1717 freeze point. Minor cosmetic flicker for sighted players; irrelevant for Aaron's use case.
+### Open follow-ups (not blockers)
 
-### Path summary (v0.15.12.0 → v0.15.13.2)
-
-- **v0.15.12.0**: countdown timer module introduced, reading `0x01CFEC8C`. BAT showed Case C — snapshot stayed at 0 throughout the chase, no announcements.
-- **v0.15.13.0**: in-mod scanner introduced. Region 1 = 8 KB at game-object struct. BAT showed scanner working mechanically but the timer wasn't in either region.
-- **v0.15.13.1**: Region 1 expanded to 192 KB at `0x01CD0000`. BAT found the live timer at `0x01CFE92C` in cycle 11 (the only cycle calm enough for the slow rate-1.00/s candidate to make the top-16).
-- **v0.15.13.2**: live address hardcoded, scanner gated off via `COUNTDOWN_SCAN_ENABLED 0` (~6 MB static memory freed). BAT verified all three features (auto-announce on entry, T-key read, Shift+T freeze).
-
-### Push state
-
-Local tree has three unpushed commits (v0.15.13.0, .1, .2). Aaron will run `Utilities/push_to_github.ps1` which reads the top CHANGELOG entry (currently v0.15.13.2). Push should combine all three since v0.15.12.0 is the last GitHub commit; pre-push diagnostic will tag them as v0.15.13.2.
+1. **`fieldName=''` race at Fire Cavern arrival.** 7-second drives beat the field-name pointer's populate timing. fieldId 0x0088 is correct; the Balamb Town arrival 5 minutes later got both `fieldId=0x006A` and `fieldName='bcgate_1'`. Either accept (fieldId is sufficient) or add a brief retry in Part B before logging. Backlog.
+2. **VEH-POS-FALLBACK log spam.** v0.16.0.1's guard works correctly (foot DWORDs always preserved), but `s_lastVehicle=33 (VEH_CAR)` latched mid-session and the fallback log line fired ~1800 times in this 7-minute run, dominating ff8_world.log. Functionally fine, diagnostically noisy. Backlog item: rate-limit the log (every 10s or transition-only) AND/OR detect "foot DWORDs are valid and moving" → snap s_lastVehicle back to 0 automatically.
+3. **Fire Cavern A fieldId = 0x0088** — new data for the FieldAnnounce display-name catalog audit backlog item (`src/field_display_names.h`). Confirm it announces as "Fire Cavern A" or similar; tidy mapping if wrong.
 
 ---
 
-## Recently shipped (in order, top is newest)
+## v0.16.0 baseline (still relevant)
 
-### v0.15.13.2 (built, BAT-verified, awaiting push)
-Live timer reads at 0x01CFE92C. Scanner disabled via compile flag. All features working.
+The 222.80 KB / 4452-line `src/world_map.cpp` monolith of v0.15.13.2 is now 10 focused files plus a slim parent. Three behavioral safety nets accompany the structural split:
 
-### v0.15.13.1 (built, BAT-verified — scanner found timer)
-Region expansion to 192 KB at 0x01CD0000. Bounds widened. Found 0x01CFE92C.
+- **Part B** (arrival.inl): off-target-distance cap on arrival. **Two-tier as of v0.16.0.2**: 2500 for planner-eligible, 8000 for geometric-trigger (planner-ineligible) destinations. Refined-coord capture self-corrects to actual trigger position on first arrival; subsequent visits fall back inside the strict 2500 cap.
+- **Part C** (drive.inl): `StartAutoDrive` checks `s_destPlannerEligible[locIdx]` before calling `PlanDrivePath`. Ineligible destinations skip the planner entirely; UpdateAutoDrive's non-planner branch handles them with v0.11.11-era simple-coord steering.
+- **Poll() replan-gate** (slim world_map.cpp, v0.16.0.2): on world-map re-entry after random-encounter pause, replan now gated on `s_drivePlannerEligible`. Eligible destinations replan via PlanDrivePath; ineligible destinations stay on simple-coord steering (no closest-active-region fallback misroute).
+- **ComputePlannerEligibility** (planner.inl): runs once at Initialize, after LoadTriggerZones. Sets `s_destPlannerEligible[LOCATION_COUNT]`. Logs per-catalog YES/NO classification. 11/38 eligible in master catalog as of v0.16.0 BAT.
 
-### v0.15.13.0 (built)
-In-mod memory scanner introduced. Worked mechanically but missed timer (region too narrow).
+CI guard (`.github/workflows/safety-checks.yml`) `source-file-size-check` job: 60 KB soft warning, 80 KB hard fail. Existing oversized files allowlisted with v0.16.x ticket numbers.
 
-### v0.15.12.0 (pushed 2026-05-15, commit `b573fd12`)
-Countdown module + structural cleanup of ff8_accessibility.h (421 KB → 1.17 KB) and CHANGELOG.md (488 KB → 7.93 KB).
+### File split layout
 
-### Chase chapter (closed v0.15.9.11.3.9)
+`state.inl` first (types/state). Then `segments.inl` (coord math + archive I/O), `trigger_data.inl` (38 wmsetus.obj Section 8 programs + LogTriggerPrograms), `catalog.inl` (`s_locations[]` + LOCATION_COUNT + BFS reachability), `announce.inl`, `planner.inl` (A* + ComputePlannerEligibility), **`drive.inl`** (StopAutoDrive + StartAutoDrive + UpdateAutoDrive), **`arrival.inl`** (ResolveDeferredArrival; AFTER drive.inl because it calls StopAutoDrive), `keys.inl` (PollKeys). Slim `world_map.cpp` opens namespace, includes all 9 .inl files in dependency order, defines `Initialize` / `Update` / `Shutdown` / `Poll`. `world_map_history.h` holds the pulled-out v0.14.31–v0.15.13.2 changelog narrative (NOT in build path, `#if 0` wrapper). `MAX_LOCATIONS = 64` in state.inl decouples state-array sizing from `LOCATION_COUNT`.
+
+---
+
+## Recently shipped (newest first; GitHub HEAD is v0.15.13.2 — v0.16.x not yet pushed)
+
+### v0.16.0.3 — VEH-POS-FALLBACK log transition-only (local, awaiting push)
+`world_map_segments.inl` — fallback log now uses a function-local static to fire only when `s_lastVehicle` changes from the last-logged value. No heartbeat. Eliminates ~1800-line floods like v0.16.0.2 BAT produced; one line per distinct vehicle byte that triggers the fallback.
+
+### v0.16.0.2 — Fire Cavern works (local, BAT passed, awaiting push)
+Three fixes from v0.16.0.1 BAT log. (1) Poll() replan-gate honors planner-eligibility via new `s_drivePlannerEligible` flag. (2) Part B two-tier cap: 2500 planner-eligible / 8000 geometric-trigger. (3) Fire Cavern refined-coord hardcoded at (30326,-29221) in Initialize() alongside Balamb Town. BAT confirmed Fire Cavern arrives in 7 seconds at dist=66, all three fixes verified.
+
+### v0.16.0.1 — "Position unavailable" fix + Part C locIdx fix (local, awaiting push)
+(1) `GetWorldMapPosition_Active` guards vehicle-pos overwrite with `if (vx != 0 || vy != 0)`; stale `s_lastVehicle=37` (VEH_CAR) no longer clobbers valid foot DWORDs. `[VEH-POS-FALLBACK]` diagnostic log added. (2) Part C gate switched from `s_destPlannerEligible[catIdx]` (BFS-filtered) to `[locIdx]` (master-table).
+
+### v0.16.0 — world_map.cpp split + Parts B/C + CI guard (local, awaiting push)
+10-file refactor of the 222 KB monolith. Part B distance cap + Part C planner-eligibility gate + ComputePlannerEligibility helper. CI source-file-size-check (60 KB warn / 80 KB fail).
+
+### v0.15.13.2 — commit `3d6db2a`, tag `v0.15.13.2` (pushed 2026-05-15 22:28:49)
+Live countdown timer at 0x01CFE92C. Auto-announce, T-key reads, Shift+T freeze. Confirmed on Dollet AND Fire Cavern.
+
+### v0.15.12.0 — commit `b573fd1`
+Countdown timer module first introduced. Structural cleanup of `ff8_accessibility.h` + `CHANGELOG.md`.
+
+### Chase chapter (closed at v0.15.9.11.3.9)
 X-ATM092 chase accessibility complete. AUTO battle-suppressor cap stays `INT_MAX`.
 
 ---
 
-## Backlog (in priority order)
+## Backlog (priority order)
 
-1. **Push v0.15.13.0 + .1 + .2** (Aaron runs the push utility).
-2. **Verify on Fire Cavern**: same `LIVE_TIMER_ADDR` global is used by Fire Cavern (10/20/30/40-min variants), Missile Base, Centra Odin, and Rinoa-in-space. A quick BAT with a Fire Cavern save should confirm the address is timer-system-wide rather than Dollet-specific. If it works there too, the module covers all FF8 mission countdowns automatically.
-3. **`menu_tts.cpp` T-handler `!shift` gate**. One-line. Theoretical conflict only — Shift+T in menu mode 6 could fire both `AnnouncePlayTime` and `CountdownTimer::ToggleFreeze`.
-4. **FieldAnnounce display-name catalog audit** in `src/field_display_names.h`. Wrong mappings for fieldIds 0x0134 / 0x0136. Surfaced in v0.15.12.0 BAT.
-5. **Deep-research doc updates**: `Plan & Research Documents/Dollet timer countdown deep research results.md` still has `0x01CFE9B8 + 724 = 0x01CFECCC` (wrong math from v0.15.12.0). Add a "v0.15.13.x — LIVE TIMER FOUND" appendix documenting that the field-var stack base 0x01CFE9B8 is correct but var 724 at 0x01CFEC8C is a script-side snapshot only updated by GETTIMER, NOT the live engine global. The actual live global is at 0x01CFE92C, 0x8C bytes BELOW the game-object struct base, in a separate engine-globals allocation.
+1. **v0.16.1**: split `src/chase_auto_pilot.cpp` (108 KB) using the world_map split as the template.
+2. **v0.16.2**: split `src/field_dialog.cpp` (88 KB).
+3. **v0.16.3**: split `src/field_archive_jsm.inl` (91 KB).
+4. **v0.16.4**: split `src/battle_tts_ewm.inl` (90 KB).
+5. **v0.16.5**: split `src/battle_tts_menu.inl` (82 KB).
+6. **`menu_tts.cpp` T-handler `!shift` gate**. One-line cleanup.
+8. **FieldAnnounce display-name catalog audit** in `src/field_display_names.h`. Wrong mappings for fieldIds 0x0134 / 0x0136. Verify the mapping for Fire Cavern A (fieldId 0x0088) too — Aaron heard it announced as "Fire Cavern A" but `fieldName=''` came through empty in the arrival log due to a populate-timing race; confirm display works correctly in steady-state.
+9. **Field-name populate race** at Part B arrival check — **DIAGNOSTIC LOG ONLY, audio is fine**. `fieldName=''` arrived empty in the log line for the 7-second Fire Cavern drive because the engine's `pCurrentFieldName` string pointer hadn't populated yet at the 547ms mark when Part B took its snapshot. The FieldAnnounce module (separate from world_map) reads the pointer hundreds of ms later and announces correctly — Aaron confirmed in v0.16.0.2 BAT that he heard "Fire Cavern A" announce as expected. Backlog action: either retry briefly in Part B before logging, or accept (fieldId alone is sufficient diagnostically).
+10. **Deep-research doc updates**: `Plan & Research Documents/Dollet timer countdown deep research results.md` — wrong-math fix + LIVE TIMER FOUND appendix.
 
-### Future improvements (deferred, low priority)
+### Future (deferred)
 
-- **Engine-write hook for cleaner freeze.** Current freeze has cosmetic ±1-second flicker because mod and engine race on writes to `0x01CFE92C`. A hook on the engine's write instruction (find via the disassembly's `MOV [0x01CFE92C], ...` references) would let us selectively suppress the engine's decrement when frozen. Not urgent — accessibility-side behavior is already correct.
-- **Value-range "spotlight" pass for scanner.** v0.15.13.1 found the timer only because cycle 11 happened to be calm enough for the slow candidate to make the top-16. A spotlight pass (one slot per encoding: SECONDS, MINUTES, FRAMES_30HZ, MS) would surface slow timers reliably in every cycle. Worth adding before the scanner is re-enabled for a future engine-global hunt.
+- **Refined-coord persistence** (JSON or %APPDATA% store so BAT-captured coords survive sessions, replacing per-destination hardcodes).
+- **Other geometric-trigger destinations**: as v0.16.0.2's two-tier cap catches them on first arrival, add their refined coords to the Initialize() hardcode chain. Candidates: Centra Ruins, Tomb of the Unknown King, Cactuar Island, Shumi Village, Edea's House, Chocobo Forest entrances.
+- **Engine-write hook for cleaner countdown freeze** (cosmetic ±1-sec flicker; not urgent).
 
-### Deferred
+### Deferred (don't pick without Aaron's direction)
 
 - SeeD rank bug #27
 - Walk-and-talk dialog gap
 - Refined-coord narrow-gate steering (#29)
-- Fire Cavern entry (#28) — auto-handled by v0.15.13.2's live timer once verified, plus the chase-style gating around the field entry
 - `chase_diag::OnAskOpcodeFired` snprintf bug
-- `CHASE-AGENT FINAL SUMMARY` log regression
 
 **Do NOT revert AUTO battle-suppressor cap to 0.** Aaron's 2026-05-13 directive.
 
 ---
 
+## Catalog of known fieldIds for geometric-trigger destinations
+
+(Grown as BATs reveal them; useful for the FieldAnnounce display-name audit.)
+
+- **Fire Cavern A** (approach field, world-map trigger): `fieldId=0x0088`, engine `fieldName='bdview1'`. Trigger position ≈ (30260, -29221), ~6.5k units southwest of catalog icon (36864, -28672). v0.16.0.3 BAT captured the fieldName once the populate race resolved.
+- **Balamb Town gate** (planner destination, not geometric): `fieldId=0x006A`, fieldName=`bcgate_1`. Trigger position ≈ (12894, -26776).
+
+---
+
 ## Session ritual & rules
 
-- Read **`DEVNOTES.md`** and **`NEXT_SESSION_PROMPT.md`** at start of every session
-- Update both at TWO checkpoints: every version bump AND after every BAT result
+- Read **`DEVNOTES.md`** and **`NEXT_SESSION_PROMPT.md`** at session start
+- Update both at every version bump AND after every BAT result
 - **Filesystem MCP for all Windows project files**
 - **Aaron pushes via `Utilities/push_to_github.ps1`**, Claude NEVER pushes
-- **For "didn't fire" diagnostic results, ASK Aaron what was happening on screen.** Context matters as much as the log.
-- **Read FIELD NAME from the field log, not FieldAnnounce display catalog.** Catalog has known-wrong entries.
 - F-key handlers gated on `!(GetAsyncKeyState(VK_MENU) & 0x8000)`
 - F12 reserved for per-session diagnostics
 - **NEVER re-enable SET3 hook** (CI guard)
 - DEVNOTES under 10KB
 - `deploy.bat` version-extract regex requires `/B` anchor (v0.15.10.1)
-- **`.inl` textual-include pattern**: no `deploy.bat` change needed; reaches the build via `#include` from a `.cpp` already in the compile list.
-- **Inline-changelog accretion is a dead pattern.** Retired in v0.15.12.0.
-- **F11 screenshots are gold for BAT context.** The v0.15.13.0/.1/.2 progression all hinged on Aaron's screenshots providing the reference on-screen value.
-- **Diagnostic-feature gating pattern (v0.15.13.2)**: when a diagnostic has served its purpose, gate the heavy work behind a `#define X 0` flag rather than deleting. Preserves the implementation for future similar problems.
-- **Top-N candidate caps can hide slow-changing signals.** v0.15.13.1's scanner found the timer in only 1 of 14 cycles because faster entity churn pushed the slow timer out of the top-16 in every other cycle. Future scanner versions should consider per-bucket value-range "spotlight" passes.
-- **Memory-write race on shared addresses.** v0.15.13.2's freeze shows the mod and engine both writing `0x01CFE92C` at different cadences; the result is a stable oscillation between two adjacent values, not a perfect pin. Hooking the engine's WRITE (rather than racing it) is the proper fix when freeze pinning matters.
+- **`.inl` textual-include pattern** for source splitting; no `deploy.bat` change needed
+- **Inline-changelog accretion is dead** (retired v0.15.12.0)
+- **F11 screenshots are gold for BAT context**
+- **Diagnostic-feature gating pattern**: gate behind `#define X 0` instead of deleting
+- **Source file size limits (v0.16.0 CI guard)**: 60 KB soft warning, 80 KB hard fail. Split before substantive edits cross the warning line.
+- **Arrival detection needs VERIFICATION, not just signal-presence.** v0.14.96 fixed encounter false-positives; v0.16.0 Part B fixed off-target-field false-positives; v0.16.0.2 fixed icon-vs-trigger false-negatives via two-tier cap.
+- **Empirical-data capture (refined coords) needs the underlying decision VALIDATED before storage.** Bad decisions self-reinforce otherwise (the Fire-Cavern-into-bggate_1 cascade).
+- **Geometric-trigger vs script-trigger destinations need different navigation strategies.** The wmsetus planner only handles script-trigger destinations; geometric-trigger destinations (Fire Cavern, early-game Balamb Garden, likely Centra Ruins / Tomb / Cactuar Island) use simple-coord steering + engine terrain trigger via Part C, with the wider Part B cap on first arrival.
+- **When "fixing" a planner decline, don't substitute a different region — that's the v0.14.95 mistake.** If the data says there's no scripted path, the right answer is fall back to non-planner logic, not invent a route the data doesn't support.
+- **Mid-drive replan must honor the same planner-eligibility gate as initial Start.** v0.16.0.2's s_drivePlannerEligible flag was needed because Poll()'s 2014-era replan code predates Part C and would silently re-introduce the closest-active-region fallback the gate exists to prevent.
+- **Two-stage destination entry** (Fire Cavern, possibly other major dungeons): the world-map terrain trigger drops the player into an approach field, not the destination interior. The refined coord for these destinations is the approach-field trigger position, several thousand units offset from the icon. v0.16.0.2 BAT confirmed: Fire Cavern A approach field at (30260, -29221) is ~6.5k units southwest of icon (36864, -28672).
+- **GitHub commit history is authoritative for "when did X change" questions.** Memory and DEVNOTES can drift; `list_commits` queries reveal exact regression points.
 - Every Claude response starts with `## Claude Says`.

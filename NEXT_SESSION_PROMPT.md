@@ -1,72 +1,89 @@
-# Next Session Prompt: v0.15.13.2 BAT-verified, ready to push
+# Next Session Prompt: v0.16.0.3 BAT confirm + v0.16.1 chase_auto_pilot.cpp split
 
 ## Greeting
 
-Start with `## Claude Says` per session ritual. Read `DEVNOTES.md` and this file before any work.
+Start with `## Claude Says` per session ritual. Read `DEVNOTES.md` and THIS file before any work.
 
 ## Where we are
 
-**GitHub HEAD = v0.15.12.0** (commit `b573fd12`). **Local tree = v0.15.13.2, BAT-verified, awaiting Aaron's push.** The countdown timer chapter is functionally complete.
+**Local tree = v0.16.0.3** (single-file log-spam cleanup on top of v0.16.0.2 BAT pass). `world_map_segments.inl` now logs `[VEH-POS-FALLBACK]` only when `s_lastVehicle` transitions to a value the function hasn't logged before in this session. No time-based heartbeat — once logged, that vehicle byte stays silent. No functional change — just diagnostic noise reduction. Aaron should BAT briefly (any world-map session) to confirm the log no longer floods, then push the v0.16.0/.0.1/.0.2/.0.3 chain.
 
-## v0.15.13.2 BAT recap — everything works
+**GitHub HEAD = v0.15.13.2** (commit `3d6db2a`). The push utility expects `FF8OPC_VERSION = "0.16.0.3"` matches the top `## v0.16.0.3` CHANGELOG heading — both are aligned.
 
-Aaron loaded Dollet comm-tower save at 22:20:36. Log:
-- `live raw=1731 (prev=0) state=0` — first observation succeeded
-- `ENTER ACTIVE: rawValue=1731 units=SECONDS initialSec=1731 (28m51s)` — classifier correct, state transition correct
-- Decrement runs cleanly at 1/sec for 15 seconds (1731 → 1717)
-- T-key tested 5 times in ACTIVE state, all read correctly
-- **Shift+T freeze engaged at raw=1717.** For the next 20 seconds the value oscillated tightly between 1716 (engine decrement) and 1717 (mod rewrite ~62 ms later). T-key during freeze always announced 1717.
-- F11 screenshot at 22:21:08 captured HUD showing 28:36 (= 1716 sec), confirming the freeze visually — value never drifted more than 1 second from the frozen point after 20 sec of holding.
+## v0.16.0.3 BAT plan (very short)
 
-Three iterations to get here:
-- v0.15.13.0 introduced the scanner (region too narrow, missed timer)
-- v0.15.13.1 expanded Region 1, found `0x01CFE92C` in cycle 11
-- v0.15.13.2 hardcoded that address, disabled the scanner, verified all features
+1. Build, restart FF8.
+2. Spend ~1–2 minutes on the world map (foot or any vehicle works — the spam scenario was specifically `s_lastVehicle` latched to a non-foot value with vehicle savemap reading (0,0)).
+3. Open `Logs/ff8_world.log` and confirm `[VEH-POS-FALLBACK]` appears at most a couple of times — one line per distinct `s_lastVehicle` value that hits the fallback, typically 0–3 total — instead of the per-poll flood that produced ~1800 lines in v0.16.0.2 BAT.
+4. If the count looks reasonable, push v0.16.0/.0.1/.0.2/.0.3 sequence.
 
-## What's next (priority order)
+No TTS or AD behavior should differ from v0.16.0.2.
 
-### 1. Push v0.15.13.0/.1/.2
+## v0.16.1 — split src/chase_auto_pilot.cpp (108 KB)
 
-Aaron runs `Utilities/push_to_github.ps1`. The push utility reads the top CHANGELOG entry (v0.15.13.2) and the FF8OPC_VERSION macro (0.15.13.2) — both match, so it'll push cleanly. Since GitHub HEAD is at v0.15.12.0 and local tree is at v0.15.13.2, all three intermediate commits go up in this one push. Diagnostic logs go to `Logs/push_diagnostic.log`. Claude NEVER pushes; only Aaron runs the utility.
+The world_map split is the template. The chase_auto_pilot.cpp file holds the X-ATM092 chase auto-pilot logic — the .inl-include pattern from v0.16.0 should apply directly.
 
-### 2. Fire Cavern verification
+**Suggested file structure** (subject to revision once we look at the actual file head + tail):
 
-The same `LIVE_TIMER_ADDR = 0x01CFE92C` should drive the 10/20/30/40-minute Fire Cavern variants, Missile Base, Centra Odin, and Rinoa-in-space — all of these use the same engine countdown system per the deep research. A quick BAT with a Fire Cavern save would confirm the address is timer-system-wide rather than Dollet-specific. Expected: same `[CountdownTimer] live raw=NNNN` line at field load, SECONDS classification (600 / 1200 / 1800 / 2400 for the four duration choices), boundary announcements as the timer ticks down.
+| Candidate `.inl` | Approximate scope |
+|---|---|
+| `chase_auto_pilot_state.inl` | All module statics (route state, phase tracker, ASK overlay flag, BAT diagnostic counters) |
+| `chase_auto_pilot_route.inl` | Route table data and route lookup helpers |
+| `chase_auto_pilot_engine.inl` | Per-frame Update logic that decides direction + injects DIJOYSTATE2 analog |
+| `chase_auto_pilot_ask.inl` | chase_ask_overlay integration (committed-Auto handoff, deferred-open delay) |
+| `chase_auto_pilot_diag.inl` | F12 diagnostic + per-second position logging |
+| `chase_auto_pilot.cpp` (slim) | Header + namespace + `.inl` chain + public entry points |
 
-If Fire Cavern shows `live raw=0` instead, the address is Dollet-specific and we'd need to either:
-- Re-scan (flip COUNTDOWN_SCAN_ENABLED to 1 in countdown_scan.inl, load a Fire Cavern save, BAT)
-- Or check whether 0x01CFE92C is a per-event slot and the Fire Cavern timer lives at a different but nearby address
+**Workflow** (mirroring v0.16.0):
 
-### 3. Smaller backlog items
+1. **Read the existing file head and tail first** to understand actual structure. Don't pick a split until reading the file.
+2. **Create the .inl files** one at a time, copying the relevant sections out of `chase_auto_pilot.cpp`.
+3. **state.inl always first** in include order. Any .inl that calls a function from another .inl must come AFTER the .inl that defines the function (compiler needs the definition visible in the same translation unit; forward decls won't help inside .inl includes).
+4. **Slim parent `chase_auto_pilot.cpp`**: headers, namespace forward decls, `.inl` chain in dependency order, public entry points (`Initialize`, `Update`, `Shutdown` or whatever the chase module exposes).
+5. **CI guard update**: remove `chase_auto_pilot.cpp` from the allowlist in `.github/workflows/safety-checks.yml`. After the split, no .inl should exceed 60 KB.
+6. **Verify the v0.16.0 build-order rule still applies**: any .inl whose functions are called by a later .inl must come earlier in the include chain.
+7. **Bump FF8OPC_VERSION** to `0.16.1`, prepend CHANGELOG.md entry, refresh DEVNOTES and NEXT_SESSION_PROMPT.
 
-- **`menu_tts.cpp` T-handler `!shift` gate**. One-line change. Theoretical conflict between Shift+T → `AnnouncePlayTime` in menu mode 6 and Shift+T → `CountdownTimer::ToggleFreeze`. The countdown handler runs first (Update is before menu_tts in dinput8.cpp's main loop), so the practical conflict probability is zero — but the gate is still correct hygiene.
-- **FieldAnnounce display-name catalog audit** in `src/field_display_names.h`. Wrong mappings for fieldIds 0x0134 / 0x0136 surfaced in v0.15.12.0 BAT. Likely more Dollet entries are wrong too.
-- **Deep-research doc update**: `Plan & Research Documents/Dollet timer countdown deep research results.md` needs (a) wrong-math fix (`0x01CFEC8C` not `0x01CFECCC`) and (b) a "v0.15.13 — LIVE TIMER FOUND" appendix documenting that the live engine global is at `0x01CFE92C`, NOT in the field-var stack.
+**BAT plan for v0.16.1**: Aaron loads a Dollet save just before/during the X-ATM092 chase. Verifies the chase auto-pilot still works (drives the party, handles the ASK overlay, returns control after the chase). No functional changes — pure refactor.
 
-### 4. Future improvements (low priority)
+**Failure modes to watch:**
+- Build error: read `Logs/build_latest.log` tail first. Most likely candidates are include-order mistakes (state.inl-first rule violated) or missing forward decls in the slim parent.
+- Runtime regression in chase auto-pilot: probably a stale static-state reference. Compare before/after by `grep`ping for variable usage across the .inl files.
+- OneDrive sync `EPERM` on first edit attempt: retry immediately.
 
-- **Engine-write hook for cleaner freeze.** Current Shift+T behavior is functionally correct (value held within ±1 sec, T-key always reads frozen value) but has cosmetic ±1-sec flicker on the HUD for sighted users. A hook on the engine's write to `0x01CFE92C` would let us suppress the engine's decrement instead of racing it. Requires disassembly lookup for the engine's write site — easy with the disassembly files in `Game Files/disassembly/`. Not urgent; nobody's complaining about the flicker because Aaron is blind and T-key reads correctly.
-- **Value-range "spotlight" pass for scanner.** v0.15.13.1 found the timer in only 1 of 14 cycles because the top-16 cap pushed it out elsewhere. A spotlight pass (one guaranteed slot per encoding type: SECONDS, MINUTES, FRAMES_30HZ, MS) would surface slow timers reliably. Worth adding before next time the scanner is re-enabled.
+## After v0.16.1 lands
+
+Remaining size-split queue (each one removes an entry from the CI allowlist):
+- **v0.16.2**: split `src/field_dialog.cpp` (88 KB).
+- **v0.16.3**: split `src/field_archive_jsm.inl` (91 KB).
+- **v0.16.4**: split `src/battle_tts_ewm.inl` (90 KB).
+- **v0.16.5**: split `src/battle_tts_menu.inl` (82 KB).
+
+Once all five v0.16.x splits are done, the CI guard becomes a meaningful gatekeeper (any new oversized file fails the build) rather than a tripwire for legacy files.
 
 ## Hard constraints (unchanged)
 
-- **Do NOT revert AUTO `[CBF]` battle-suppressor cap to 0.** Aaron's 2026-05-13 directive.
-- **Filesystem MCP for all Windows project files.** Bash runs in a Linux container that can't reach the OneDrive mod directory.
-- **Aaron pushes via `Utilities/push_to_github.ps1`.** Claude NEVER pushes.
-- **NEVER re-enable SET3 opcode hook (0x1E)** — CI guard in `.github/workflows/safety-checks.yml`.
+- **Filesystem MCP for all Windows project files.** Bash runs in a Linux container that can't reach the OneDrive mod directory. `str_replace`, `view`, `create_file` etc. from the bash toolset will silently fail or report "File not found" — use `filesystem:edit_file`, `filesystem:read_text_file`, `filesystem:write_file`.
+- **Aaron pushes via `Utilities/push_to_github.ps1`**, Claude NEVER pushes. Push utility reads CHANGELOG top entry as commit body and version from `FF8OPC_VERSION`.
+- **NEVER re-enable SET3 opcode hook (0x1E)** — CI guard.
 - **F-key handlers gated** on `!(GetAsyncKeyState(VK_MENU) & 0x8000)`.
 - **F12 reserved** for per-session diagnostics.
-- **Check file sizes** via `filesystem:list_directory_with_sizes` BEFORE attempting a full rewrite. Past ~50 KB, use the `move_file` to `_history` + slim rewrite pattern.
-- **Verify chase/field entry from the field log, not FieldAnnounce.** Catalog has known-wrong entries.
+- **Source file size limits**: 60 KB warn, 80 KB fail (CI enforced). Split before substantive edits cross the warning line.
+- **OneDrive sync EPERM**: retry immediately on first edit attempt. Sometimes a "File not found" error from `filesystem:edit_file` is actually a successful write masked by a stale-cache read — re-read the file before assuming the edit failed.
+- **AUTO `[CBF]` battle-suppressor cap stays `INT_MAX`** — Aaron's 2026-05-13 directive.
+- **`.inl` files are TEXTUAL INCLUDES**: no header guards inside, no namespace declarations inside, all `static` declarations preserved, `state.inl` always first in include chain.
+- Every Claude response starts with `## Claude Says`.
 
-## Carry-forward lessons
+## Quick reference — what to check first when this session opens
 
-- **Diagnostic-feature gating pattern**: v0.15.13.2 kept the full scanner implementation behind `COUNTDOWN_SCAN_ENABLED 0`. Future address hunts: flip the flag, adjust REGION1_BASE/SIZE if needed, rebuild. Don't delete diagnostic code.
-- **Top-N caps can hide slow-changing signals.** A real timer's signature is LOW decrement rate, not high. Future scanner versions should add a spotlight pass per encoding to ensure slow timers always have a slot.
-- **F11 screenshots are gold for BAT context.** All three v0.15.13.x BATs depended on Aaron's screenshots providing the reference on-screen value to grep for in the log.
-- **Memory-write race produces stable oscillation, not pin.** v0.15.13.2's freeze shows the mod and engine both writing the same address at different cadences; result is the value alternating between two adjacent points, not staying at one. Adequate for screen-reader use; hook the engine write if pixel-perfect pin matters.
-- **Scanner success criterion**: a candidate with EXACT integer-ratio rate (1.00/s, 30.00/s, 60.00/s, 1000.00/s) and value in a known timer range is overwhelming evidence even with a sample size of one cycle.
+- [ ] Read `DEVNOTES.md` (current state + backlog sections).
+- [ ] Read this `NEXT_SESSION_PROMPT.md` (you're already here).
+- [ ] If Aaron is starting v0.16.1: read `src/chase_auto_pilot.cpp` head (first 200 lines) and tail (last 200 lines) to understand actual structure before proposing a split.
+- [ ] If Aaron is doing more BAT runs first (e.g. exercising the planner-ineligible branch of Poll() replan-gate): wait for logs.
+- [ ] If build failed: `Logs/build_latest.log` tail first.
 
-## Session ritual reminder
+## Open follow-ups from v0.16.0.2 BAT (lower priority, not blockers)
 
-Read `DEVNOTES.md` and this file at session start. Update both at every version bump AND after every BAT result. Every Claude response starts with `## Claude Says`.
+1. **VEH-POS-FALLBACK log spam**: ~1800 fallback lines per 7-minute session because `s_lastVehicle` latched to 33 (VEH_CAR) mid-session. Functionally correct but diagnostically noisy. Backlog item: rate-limit log line (every 10s or transition-only) AND/OR auto-snap `s_lastVehicle` back to 0 when foot DWORDs are valid and moving.
+2. **`fieldName=''` race** on fast arrivals (Fire Cavern at dist=66, 547ms). Field-name pointer hasn't populated by the time Part B reads it. Either retry briefly or accept (fieldId is sufficient). Backlog.
+3. **Fire Cavern A fieldId 0x0088** is new data for the FieldAnnounce display-name catalog audit backlog item. Confirm display name reads correctly.

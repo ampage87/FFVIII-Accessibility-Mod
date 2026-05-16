@@ -6,6 +6,180 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.16.0.3
+
+Log-spam cleanup follow-up from v0.16.0.2 BAT. The `[VEH-POS-FALLBACK]` diagnostic added in v0.16.0.1 (when `GetWorldMapPosition_Active` declines to overwrite foot DWORDs with a (0,0) vehicle read) was firing on every world-map poll while `s_lastVehicle` stayed latched to a non-foot value. In Aaron's v0.16.0.2 BAT, `s_lastVehicle=33 (VEH_CAR)` latched mid-session and the fallback log line fired roughly 1800 times in a 7-minute session, dominating `Logs/ff8_world.log` and making post-BAT analysis painful.
+
+**Fix.** `world_map_segments.inl` — the fallback log branch now uses a function-local `s_fbLastLoggedVehicle` static and logs only when the current `s_lastVehicle` differs from the last-logged value. The functional guard (only overwrite foot DWORDs when `vx != 0 || vy != 0`) is unchanged.
+
+Rationale for transition-only (no time-based heartbeat): the guard is silent and self-correcting; the diagnostic exists only as a forensic trail of which vehicle byte values reached the fallback. Once a given vehicle value has been logged once, additional heartbeats add noise without adding forensic value. A future bug that depends on the fallback firing repeatedly without a vehicle change would need its own targeted diagnostic.
+
+No functional change to AD behavior; only diagnostic log frequency reduced.
+
+BAT plan: any session that exercises the world map. Expect at most one `[VEH-POS-FALLBACK]` line per distinct `s_lastVehicle` value that triggers the fallback (typically 0–3 total per session), instead of the per-poll flood.
+
+## v0.16.0.2
+
+Three-part fix from the v0.16.0.1 BAT, which revealed that Fire Cavern is a two-stage entry: the world-map trigger drops the player into the "Fire Cavern A" approach field (a path field leading to the cavern interior), not directly into the cavern. The trigger geometry for this approach field sits ~6.5k units southwest of the icon at (36864,-28672), well outside the 2500-unit Part B cap. Aaron correctly observed in the BAT that landing in Fire Cavern A is a success; the mod was wrongly treating it as off-target.
+
+### Fix 1 — Poll() replan-path now honors planner-eligibility
+
+**Symptom.** Fire Cavern drive at 14:37:46 in the v0.16.0.1 BAT log started correctly with `planned=0` (simple-coord steering, per Part C). A random encounter at 14:37:51 paused it. On world-map re-entry at 14:39:00, the log shows `[DRIVE] Resumed after world-map re-entry`, and immediately after, the next `Awaiting arrival decision` line reports `planned=1`. The Poll()'s replan path had called `PlanDrivePath(rx, ry)` unconditionally, the closest-active-region fallback fired (Fire Cavern's segment (20,20) region=0x0C has no foot clause, so the fallback walked active regions and picked seg(18,20) which belongs to Balamb Town's region 0x07), and the simple-coord drive was converted into a misrouted planner drive.
+
+**Root cause.** Part C correctly gates `StartAutoDrive` on `s_destPlannerEligible[locIdx]`, but `Poll()`'s mid-drive replan code at re-entry was added in v0.14.88 (well before Part C existed) and calls `PlanDrivePath` without the same gate.
+
+**Fix.** `world_map_state.inl` adds `static bool s_drivePlannerEligible = true;`. `world_map_drive.inl`'s `StartAutoDrive` sets it from the same locIdx-based decision Part C uses, and `StopAutoDrive` resets it to `true`. `world_map.cpp`'s Poll() replan block now wraps `PlanDrivePath(rx, ry)` with `if (s_drivePlannerEligible) { ... } else { log + keep simple-coord }`. Planner-ineligible drives now stay simple-coord through encounter-resume cycles.
+
+### Fix 2 — Part B two-tier distance cap
+
+**Symptom.** Same BAT, 14:39:11: the misrouted-then-corrected drive exits the world map at lastPos=(30326,-29221), MODE_FIELD fires, Part B refuses arrival because `dist=6561 > 2500 max`. But that position is exactly where the Fire Cavern A approach-field trigger sits — the off-target stop was actually a successful arrival.
+
+**Root cause.** Part B's 2500-unit cap assumes the destination's catalog point is trigger-aligned (true for refined coords captured from prior BAT, true for planner-eligible destinations whose icons sit at script-event positions). Geometric-trigger destinations (Fire Cavern, early-game Balamb Garden, likely Centra Ruins / Tomb / Cactuar Island / Shumi / Edea's House) have icons placed for visual centering, with terrain triggers thousands of units away. The 2500 cap is correct for them once a refined coord is captured but wrong on first arrival.
+
+**Fix.** `world_map_arrival.inl` adds `DRIVE_ARRIVAL_MAX_DIST_GEOMETRIC = 8000.0`. The MODE_FIELD branch and the timeout-fallback distance branch both choose between the two caps via `s_drivePlannerEligible ? 2500 : 8000`. OFF-TARGET log lines now include the tier label (`planner-eligible` or `geometric-trigger`) for diagnostic clarity. The refined-coord capture in the success branch already exists; it now runs for geometric-trigger arrivals in the 2500–8000 zone, capturing the actual trigger position. Subsequent drives target the refined coord and dist drops to near zero, falling back inside the strict 2500 cap.
+
+This is self-correcting and data-driven: every new geometric-trigger destination Aaron visits will be refined on first arrival, with no per-destination hardcode required. The wider cap is a safety net only for unrefined destinations, not a permanent relaxation.
+
+### Fix 3 — Hardcoded Fire Cavern refined-coord baseline
+
+In `world_map.cpp`'s `Initialize()`, the `s_refinedHas[i]` default-population loop now sets Fire Cavern's refined position to `(30326, -29221)` alongside the existing Balamb Town hardcode at `(12896, -26711)`. This eliminates the first-drive 4-second round-trip through the wider-cap arrival path for Fire Cavern specifically. On a fresh install or after savedata reset, the first Fire Cavern drive will compute dist near zero at arrival and use the strict cap immediately.
+
+The loop's `break;` after Balamb Town was removed so both names are checked on a single pass; the else-if chain ensures only one match per location.
+
+### BAT plan for v0.16.0.2
+
+1. Build v0.16.0.2, restart FF8.
+2. Stand on world map on foot. Select Fire Cavern, press `\`. Expect `[INIT] Refined entry default: Fire Cavern (30326,-29221)` already logged at module init.
+3. Expected drive log: `[DRIVE] Geometric-trigger destination Fire Cavern (locIdx=37, planner-ineligible) -- using simple-coord steering`. **NO `[PLAN-DEBUG]` walk.**
+4. After arrival in Fire Cavern A, expect `[DRIVE] Arrival via game-mode (mode=1 MODE_FIELD, fieldId=0x????, fieldName='?????', target=Fire Cavern, dist=<low>, ...)` — `dist` should be small because the refined coord is now the target.
+5. If a random encounter interrupts mid-drive: on resume, expect `[DRIVE] Planner-ineligible destination -- keeping simple-coord steering, not replanning`. The previous bug would have shown `[PLAN-DEBUG]` here.
+6. Select Balamb Town, press `\`. Expect normal `[PLAN-DEBUG]` walk and planner arrival (unchanged behavior).
+7. Pull `Logs/ff8_world.log` + `Logs/ff8_mod.log` and the field's fieldName/fieldId from the arrival line so the DEVNOTES catalog of geometric-trigger destinations can grow.
+
+## v0.16.0.1
+
+Two follow-up fixes from the v0.16.0 BAT. Both surfaced in `Logs/ff8_world.log` from Aaron's first run; both have known repros and small surgical patches.
+
+### Fix 1 — "Position unavailable" after exiting a field (the bug Aaron hit)
+
+**Symptom.** After exiting a location back to the world map, pressing `\` to start auto-drive spoke "Position unavailable. Try again." After a random encounter the announcement disappeared and AD worked normally.
+
+**Root cause.** In the BAT log at 14:09:55:
+```
+[WM-ENTRY-DEBOUNCE] Snapshot baseline locomotion=37 (was 0, suppressed 3000ms of byte noise)
+```
+The 3-second WM-ENTRY-DEBOUNCE committed `s_lastVehicle = 37` (mode 0x25, in the 32-40 `VEH_CAR` range) for a player who never owned a car. `GetWorldMapPosition_Active` saw `VEH_CAR`, dispatched to `WM_CAR_POS_ADDR`, read the savemap `car_pos` struct which holds `(0,0)` (vehicle never owned, never maintained), and **unconditionally overwrote the perfectly valid foot DWORD position** with `(0,0)`. `StartAutoDrive` then aborted via the `if (px == 0 && py == 0)` guard with "Position unavailable. Try again." The random encounter cycle eventually settled `s_lastVehicle` to mode 0 (foot), and AD started working.
+
+**Fix.** `world_map_segments.inl` — inside the `__try` block in `GetWorldMapPosition_Active`, guard the vehicle-pos overwrite with `if (vx != 0 || vy != 0)`. `(0,0)` from a vehicle savemap struct is a sentinel meaning "vehicle not owned / not maintained," and the foot DWORDs (already populated by the initial `GetWorldMapPosition` call) are the more reliable fallback. The `else` branch logs `[VEH-POS-FALLBACK]` with the tag, `s_lastVehicle`, vehicle-type name, and the retained foot coords so any recurrence is visible in `ff8_world.log` without needing a fresh diagnostic build.
+
+### Fix 2 — Part C indexed the wrong eligibility array (uncovered while diagnosing Fix 1)
+
+The same BAT log showed the Fire Cavern drive at 14:07:15 walking all 38 planner programs and producing the closest-active-region fallback toward seg(18,20), exactly the case Part C was meant to short-circuit. Part B caught the off-target arrival at 14:07:23, but the planner walk shouldn't have fired at all.
+
+**Root cause.** `world_map_drive.inl`'s Part C gate read `s_destPlannerEligible[catIdx]` where `catIdx` is into `s_catalog[]` (the BFS-filtered, distance-sorted, vehicle-aware catalog — 4 entries during the failing drive), but `s_destPlannerEligible[]` is indexed by `s_locations[]` (the 38-entry master table populated by `ComputePlannerEligibility`). For Fire Cavern at catIdx=2, the gate read `s_destPlannerEligible[2]` = **Dollet's** eligibility (master idx 2 = YES) and ran the planner anyway.
+
+**Fix.** `world_map_drive.inl` — `StartAutoDrive` already calls `FindLocationIndexByTargetCoords(dest.x, dest.y)` to look up `locIdx` (master-table position) for the refined-coord check a few lines earlier. Reuse that variable: `s_destPlannerEligible[locIdx]` is the right index. The fallback log now reports `locIdx` for direct correlation with the `[INIT] Planner-eligibility:` lines.
+
+### Verification path for the next BAT
+
+1. **"Position unavailable" gone.** Exit any field on foot, immediately press `\` on the world map. Should announce the destination and start driving. `[VEH-POS-FALLBACK]` lines in `ff8_world.log` confirm the new guard catching the stale-vehicle case; their absence means the locomotion byte stayed clean this run.
+2. **Fire Cavern uses simple-coord steering.** Stand on the world map on foot, select Fire Cavern, press `\`. Expect a new log line: `[DRIVE] Geometric-trigger destination Fire Cavern (locIdx=37, planner-ineligible) -- using simple-coord steering`. **No** `[PLAN-DEBUG]` walk follows. UpdateAutoDrive steers by bearing toward the catalog center until either arrival (capped by Part B at 2500 units) or sweep-abort.
+3. **Balamb Town still uses the planner.** Select Balamb Town, press `\`. Expect the existing `[PLAN-DEBUG]` walk to run and produce a real path. Part B and the new locIdx gate together should keep planner-eligible destinations working exactly as in v0.16.0.
+
+Fire Cavern refined-coord capture is on the BAT punch list for v0.16.0.1: stand on the world map on foot, drive into Fire Cavern via simple-coord steering, the on-arrival log line `[DRIVE] Captured refined entry for Fire Cavern at (X,Y)` is what we want.
+
+## v0.16.0
+
+Refactor + safety net for the world-map auto-drive system. The 222 KB / 4452-line `src/world_map.cpp` monolith has been split into 10 focused files, two new behavioral safety nets were added (Part B and Part C), and a CI guard was added to keep source-file size bounded going forward. No new features for the user beyond the AD safety improvements; the bulk of the diff is structural.
+
+### What v0.15.13.2 BAT exposed (the bug behind Parts B / C)
+
+A Fire Cavern auto-drive routed the player into Balamb Garden's gate field (`bggate_1`) instead. The v0.14.95 closest-active-region fallback in `MatchProgramForCatalog` was the culprit: Fire Cavern's catalog at (36864, -28672) maps to segment region 0x0C, and the only program that names 0x0C is program 20 with `top_vehicle=Garden`. On foot with no Garden owned, that clause filters out, the catalog's own region falls out of the active set, and the closest-active-region search picked an unrelated active region — routing the player toward Balamb Garden's gate. Worse, the v0.14.96 deferred-arrival path then captured the misrouted entry coord into `s_refinedX/Y[bggate_1]`, poisoning subsequent drives to Balamb Garden until a fresh session cleared the in-memory table.
+
+Root diagnosis: some world-map destinations are **planner destinations** (entered via a wmsetus.obj Section 8 trigger zone, well represented by the A* planner) and some are **geometric-trigger destinations** (entered via a terrain-29 polygon trigger on the world map mesh, no wmsetus script event at all). Fire Cavern is the canonical geometric-trigger destination. The A* planner cannot represent these — there's no foot clause to match — so its closest-active-region fallback misroutes drives toward unrelated destinations. Pre-Sonnet builds solved this with v0.11.11-era simple-coord steering (catalog-center, bearing-based) which is bounded and predictable.
+
+### Part B — off-target distance cap on arrival
+
+`world_map_arrival.inl` adds `DRIVE_ARRIVAL_MAX_DIST = 2500.0` and applies it at two anchor points in `ResolveDeferredArrival`:
+
+1. Top of the `MODE_FIELD` branch: when the game settles into a field but the player's last-known world-map position is more than 2500 units from `s_driveTarget`, refuse to capture a refined coord, refuse to declare arrival, log `[DRIVE] OFF-TARGET stop (dist=X.X > 2500.0 max ...)`, and stop AD with a spoken "Entered field but X units from target; not arrival." The Fire-Cavern-into-bggate_1 case fails this check on every retry — it would have stopped cleanly instead of poisoning the refined table.
+2. Inside the timeout-fallback exit-distance branch: same check, defensive. `DRIVE_ARRIVED_ON_EXIT_DIST` (1500) is already below `DRIVE_ARRIVAL_MAX_DIST` (2500), so the check is structurally redundant today, but the explicit guard preserves the contract if a future build raises `DRIVE_ARRIVED_ON_EXIT_DIST`.
+
+### Part C — planner-eligibility gate in `StartAutoDrive`
+
+`world_map_drive.inl`'s `StartAutoDrive` no longer calls `PlanDrivePath` unconditionally. It now checks `s_destPlannerEligible[catIdx]` first:
+
+- **Eligible destination**: call `PlanDrivePath(px, py)` exactly as before. A* runs, planner takes over.
+- **Ineligible destination**: skip the planner entirely. Log `[DRIVE] Geometric-trigger destination (planner-ineligible), using simple-coord steering`. Clear `s_drivePathLen / Idx / Planned / GoalSegCount`. `UpdateAutoDrive`'s non-planner branch (catalog-center steering with bearing-based final approach) handles the rest.
+
+### `ComputePlannerEligibility` — the helper that decides which is which
+
+`world_map_planner.inl` gains `ComputePlannerEligibility()`, called once near the end of `Initialize` (after `LoadTriggerZones` so `s_segmentRegionMap` is populated, after the catalog is registered so `s_locations[]` is valid). It walks every catalog entry, maps `(x, y)` to a segment region byte, and scans `s_triggerPrograms[]` looking for at least one clause that names that region with a foot vehicle code (`TRIG_VEH_FOOT = 0x80` or `TRIG_VEH_FOOT_ALT = 0x84`). Result lands in `s_destPlannerEligible[LOCATION_COUNT]`. Logs one `[INIT] Planner-eligibility:` line per catalog entry plus a count summary. Defaults all flags to false if `s_segmentRegionLoaded` is false — safer than over-marking.
+
+Predicted classifications (verify in v0.16.0 BAT init log):
+
+- Balamb Town (region 0x07): **YES** (program 9 clause 1: foot, 0x07, story [0..3900)).
+- Balamb Garden (region 0x0C): **NO** (only program 20 names 0x0C; top_vehicle=Garden).
+- Fire Cavern (region 0x0C): **NO** (same as Balamb Garden — both at seg(20-ish, 19-ish), both region 0x0C, no foot clause).
+- Most named-town destinations should be YES.
+- Most chocobo forests should be YES.
+- Alien Ship sites are likely NO (they're terrain triggers).
+
+### File split — what moved where
+
+| File | Size | Contains |
+|---|---|---|
+| `src/world_map_history.h` | 17.76 KB | Narrative archive of v0.14.31 through v0.15.13.2. Pulled out of the build. v0.14.102 narrative preserved verbatim; older blocks condensed with a `git show v0.15.13.2:src/world_map.cpp \| head -609` pointer. |
+| `src/world_map_state.inl` | 29.78 KB | Enums (`VehicleType`, `SegTerrainClass`), structs (`LocationEntry`, `TriggerClause`, `TriggerProgram`), all `static` state arrays sized to `MAX_LOCATIONS = 64`, including the new `s_destPlannerEligible[MAX_LOCATIONS]`. Constants for the world torus, wmx.obj, wmsetus.obj, AD lifecycle. |
+| `src/world_map_segments.inl` | 34.35 KB | Coord readers, pure math, vehicle classifier, archive I/O, `LoadTerrainGrid`, `DumpTriggerSection`, `LoadTriggerZones`. |
+| `src/world_map_trigger_data.inl` | 17.72 KB | 38 decoded wmsetus.obj Section 8 trigger programs, `s_triggerPrograms[]`, `TRIGGER_PROGRAM_COUNT`, `LogTriggerPrograms`. |
+| `src/world_map_catalog.inl` | 13.57 KB | `s_locations[]` data with `LOCATION_COUNT`, `static_assert(LOCATION_COUNT <= MAX_LOCATIONS)`, BFS reachability, distance-sorted catalog builder, vehicle-state tracker. |
+| `src/world_map_announce.inl` | 2.81 KB | `AnnounceLocation`, `AnnounceBearing`. |
+| `src/world_map_planner.inl` | ~30 KB | `IsLocationFootFriendly`, story/vehicle predicates, `MatchProgramForCatalog`, `CollectGoalSegments`, `IsGoalSegment`, `WrapManhattan`, `HeuristicToGoals`, `PlanPath`, `PlanDrivePath`, **new** `ComputePlannerEligibility`. |
+| `src/world_map_arrival.inl` | ~11 KB | `ResolveDeferredArrival` with `DRIVE_ARRIVAL_MAX_DIST` and the two Part B distance checks. |
+| `src/world_map_drive.inl` | ~28 KB | `PressKey`, `ReleaseKey`, `ReleaseAllDriveKeys`, `SetDriveKeys`, `StopAutoDrive`, `StartAutoDrive` (with Part C eligibility gate), `StartSweep`, `UpdateAutoDrive`. |
+| `src/world_map_keys.inl` | 2.59 KB | `PollKeys` (catalog cycle, bearing, AD toggle). |
+| `src/world_map.cpp` | ~10 KB | Slim parent. Headers, namespace forward decls, the 9-deep `.inl` include chain inside `namespace WorldMap { ... }`, plus `Initialize` (with the new `ComputePlannerEligibility()` call), `Update`, `Shutdown`, `Poll`. |
+
+`.inl` includes are textual — no header guards inside, all `static` declarations preserved, `state.inl` is always included first so types/state are visible to every later file. The `LocationEntry` struct moved into `state.inl` so state arrays can reference it; `s_locations[]` data and `LOCATION_COUNT` stay in `catalog.inl`. `MAX_LOCATIONS = 64` in `state.inl` decouples state-array sizing from the catalog size; a `static_assert` in `catalog.inl` keeps them honest.
+
+### CI guard — source-file-size check
+
+`.github/workflows/safety-checks.yml` gains a `source-file-size-check` job that scans `src/*.cpp` and `src/*.inl` at push time. Soft warning at 60 KB, hard fail at 80 KB. The check is needed because the 222 KB world_map.cpp got that way precisely because there was no enforcement — every "just add one more changelog block" was locally cheap and globally ruinous.
+
+Existing oversized files are temporarily allowlisted so this build can push without already requiring follow-up refactors: `chase_auto_pilot.cpp` (108 KB), `field_archive_jsm.inl` (91 KB), `battle_tts_ewm.inl` (90 KB), `field_dialog.cpp` (88 KB), `battle_tts_menu.inl` (82 KB). Each of these is queued for its own v0.16.x split — the world_map split is the template.
+
+### BAT plan
+
+1. Build, restart FF8 to clear in-memory poisoned Fire Cavern refined-coord.
+2. Check `Logs/ff8_world.log` for `[INIT] Planner-eligibility:` block. Expect Fire Cavern=NO, Balamb Garden=NO, Balamb Town=YES, plus a count summary.
+3. **Fire Cavern AD test**: select Fire Cavern, press `\`. Log should show `[DRIVE] Geometric-trigger destination (planner-ineligible), using simple-coord steering`. Character moves east toward Fire Cavern. Arrives. Capture refined coord from `[DRIVE] Captured refined entry for Fire Cavern at (X,Y)` for v0.16.0.1 hardcoding.
+4. **Balamb Town AD regression**: planner-eligible path executes normally, drive arrives.
+5. **Balamb Garden AD**: geometric-trigger steering instead of accidental terrain crossing.
+6. **Off-target stop test (Part B safety net)**: if a drive ever enters the wrong field >2500 units from target, look for `[DRIVE] OFF-TARGET stop`. Should fire on the wrong-field scenarios that v0.15.13.2 silently passed.
+7. World-map keyboard nav regression: `+`, `-`, Backspace, `\` all still work.
+
+Upload `Logs/ff8_world.log` + `Logs/ff8_mod.log`.
+
+### Files
+
+- DELETED (effectively, by overwrite): old monolithic `src/world_map.cpp` (222 KB) — content migrated to the .inl files.
+- NEW: `src/world_map_history.h`, `src/world_map_state.inl`, `src/world_map_segments.inl`, `src/world_map_trigger_data.inl`, `src/world_map_catalog.inl`, `src/world_map_announce.inl`, `src/world_map_planner.inl`, `src/world_map_arrival.inl`, `src/world_map_drive.inl`, `src/world_map_keys.inl`.
+- REPLACED: `src/world_map.cpp` (slim parent, ~10 KB).
+- MODIFIED: `src/ff8_accessibility.h` (version 0.16.0).
+- MODIFIED: `.github/workflows/safety-checks.yml` (source-file-size CI guard, allowlist for already-oversized files pending later splits).
+- MODIFIED: `CHANGELOG.md` (this entry).
+- MODIFIED: `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`.
+
+### Deferred
+
+- v0.16.1: split `src/chase_auto_pilot.cpp` (108 KB) using the same `.inl` pattern.
+- v0.16.2: split `src/field_dialog.cpp` (88 KB).
+- v0.16.3: split `src/field_archive_jsm.inl` (91 KB).
+- v0.16.4: split `src/battle_tts_ewm.inl` (90 KB).
+- v0.16.5: split `src/battle_tts_menu.inl` (82 KB).
+- v0.16.0.1 hardcoded refined-coord baseline for Fire Cavern and Balamb Garden, captured from the v0.16.0 BAT logs (Part D from the planning conversation — was always intended to follow the BAT result, not ship blind).
+
 ## v0.15.13.2
 
 Live timer reads now point at the address the v0.15.13.1 scanner discovered. The scanner has served its purpose and is disabled in this build, freeing ~6 MB of static memory and the per-frame snapshot/analyze CPU cost.

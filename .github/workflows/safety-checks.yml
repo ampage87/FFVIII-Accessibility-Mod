@@ -38,3 +38,75 @@ jobs:
             echo "The SET3 opcode hook must remain disabled. See DEVNOTES.md."
             exit 1
           fi
+
+  source-file-size-check:
+    name: Source file size guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enforce source-file size budget
+        run: |
+          echo "=== Source file size guard (v0.16.0+) ==="
+          echo ""
+          echo "Background: src/world_map.cpp grew to 222 KB / 4452 lines before the"
+          echo "v0.16.0 split. Beyond that scale, no editor (including Claude) can"
+          echo "safely round-trip the file in a single rewrite — partial-write bugs"
+          echo "become probable and the dependency graph becomes unreadable."
+          echo ""
+          echo "Policy:"
+          echo "  Soft warning: file > 60 KB. Plan to split into .inl chunks soon."
+          echo "  Hard fail:    file > 80 KB. Split MUST happen before this push."
+          echo ""
+          echo "Allowlist: files queued for an explicit v0.16.x split. The CI fail"
+          echo "becomes active for each once its scheduled split has shipped."
+          echo ""
+
+          # KB thresholds (1 KB = 1024 bytes)
+          WARN_BYTES=$((60 * 1024))
+          FAIL_BYTES=$((80 * 1024))
+
+          # Files that are already known-oversized and have a scheduled split.
+          # Remove a name here once the corresponding v0.16.x split has shipped.
+          declare -A ALLOWLIST
+          ALLOWLIST[src/chase_auto_pilot.cpp]=1     # v0.16.1
+          ALLOWLIST[src/field_dialog.cpp]=1         # v0.16.2
+          ALLOWLIST[src/field_archive_jsm.inl]=1    # v0.16.3
+          ALLOWLIST[src/battle_tts_ewm.inl]=1       # v0.16.4
+          ALLOWLIST[src/battle_tts_menu.inl]=1      # v0.16.5
+
+          fail_count=0
+          warn_count=0
+
+          # Scan every .cpp and .inl under src/. We deliberately don't scan
+          # .h files — header content is generally lean, and the few large
+          # headers (ff8_accessibility_history.h, field_display_names.h) are
+          # documented exceptions.
+          while IFS= read -r f; do
+            size=$(stat -c%s "$f")
+            kb=$(awk "BEGIN { printf \"%.1f\", $size / 1024 }")
+            if [ "$size" -gt "$FAIL_BYTES" ]; then
+              if [ -n "${ALLOWLIST[$f]:-}" ]; then
+                echo "ALLOWLISTED ($kb KB > 80 KB): $f — scheduled for v0.16.x split"
+              else
+                echo "FAIL ($kb KB > 80 KB): $f — must be split into .inl files before push"
+                fail_count=$((fail_count + 1))
+              fi
+            elif [ "$size" -gt "$WARN_BYTES" ]; then
+              echo "WARN  ($kb KB > 60 KB): $f — plan a split soon"
+              warn_count=$((warn_count + 1))
+            fi
+          done < <(find src -maxdepth 1 \( -name '*.cpp' -o -name '*.inl' \) | sort)
+
+          echo ""
+          echo "Summary: $fail_count failures, $warn_count warnings"
+
+          if [ "$fail_count" -gt 0 ]; then
+            echo ""
+            echo "Push refused. See world_map.cpp v0.16.0 split as the template:"
+            echo "  - state.inl first (types, structs, state arrays)"
+            echo "  - subsequent .inl files in dependency order"
+            echo "  - slim parent .cpp with namespace block + textual includes"
+            echo "  - history.h archive for changelog narrative pulled out of the build"
+            exit 1
+          fi
