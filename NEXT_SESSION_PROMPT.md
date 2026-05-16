@@ -1,75 +1,52 @@
-# Next Session Prompt: v0.15.12.0 ready to push; then v0.15.13 = countdown timer Case C remediation
+# Next Session Prompt: v0.15.13.2 BAT-verified, ready to push
 
 ## Greeting
 
-Start with `## Claude Says` per session ritual. Read `DEVNOTES.md` and this file before any work, per the session ritual rule.
+Start with `## Claude Says` per session ritual. Read `DEVNOTES.md` and this file before any work.
 
 ## Where we are
 
-**HEAD (GitHub):** v0.15.11.0, commit `8d29ee61`. **Local tree:** v0.15.12.0 fully assembled and ready for `Utilities/push_to_github.ps1`. Macro at "0.15.12.0", top CHANGELOG entry at `## v0.15.12.0`, push-utility version-match check will pass.
+**GitHub HEAD = v0.15.12.0** (commit `b573fd12`). **Local tree = v0.15.13.2, BAT-verified, awaiting Aaron's push.** The countdown timer chapter is functionally complete.
 
-If Aaron has already pushed v0.15.12.0 by the start of the next session, the GitHub HEAD will be v0.15.12.0 — verify with `git log -1` or by reading the top heading in `CHANGELOG.md`.
+## v0.15.13.2 BAT recap — everything works
 
-## What v0.15.12.0 contains
+Aaron loaded Dollet comm-tower save at 22:20:36. Log:
+- `live raw=1731 (prev=0) state=0` — first observation succeeded
+- `ENTER ACTIVE: rawValue=1731 units=SECONDS initialSec=1731 (28m51s)` — classifier correct, state transition correct
+- Decrement runs cleanly at 1/sec for 15 seconds (1731 → 1717)
+- T-key tested 5 times in ACTIVE state, all read correctly
+- **Shift+T freeze engaged at raw=1717.** For the next 20 seconds the value oscillated tightly between 1716 (engine decrement) and 1717 (mod rewrite ~62 ms later). T-key during freeze always announced 1717.
+- F11 screenshot at 22:21:08 captured HUD showing 28:36 (= 1716 sec), confirming the freeze visually — value never drifted more than 1 second from the frozen point after 20 sec of holding.
 
-Two changes shipped together:
+Three iterations to get here:
+- v0.15.13.0 introduced the scanner (region too narrow, missed timer)
+- v0.15.13.1 expanded Region 1, found `0x01CFE92C` in cycle 11
+- v0.15.13.2 hardcoded that address, disabled the scanner, verified all features
 
-**1. Countdown timer module** (`src/countdown_timer.{h,cpp}`, wired into `src/dinput8.cpp` and `src/deploy.bat`). Reads field var 724 at `0x01CFECCC`, state machine, scheduler at 25/20/15/10/5:00 + 1:00 + 0:30, T announces, Shift+T toggles experimental freeze. Heavy `[CountdownTimer]` diagnostic logging.
+## What's next (priority order)
 
-**2. Structural cleanup.** Two project files that had grown past Claude's full-rewrite capacity are slimmed:
-- `src/ff8_accessibility.h`: 421.80 KB → 1.17 KB (history preserved at `src/ff8_accessibility_history.h`, NOT in build)
-- `CHANGELOG.md`: 488.25 KB → 7.93 KB (history preserved at `CHANGELOG_HISTORY.md`)
+### 1. Push v0.15.13.0/.1/.2
 
-Going forward, version bumps are one-line edits on a 1 KB header. Inline-changelog accretion is retired as a pattern.
+Aaron runs `Utilities/push_to_github.ps1`. The push utility reads the top CHANGELOG entry (v0.15.13.2) and the FF8OPC_VERSION macro (0.15.13.2) — both match, so it'll push cleanly. Since GitHub HEAD is at v0.15.12.0 and local tree is at v0.15.13.2, all three intermediate commits go up in this one push. Diagnostic logs go to `Logs/push_diagnostic.log`. Claude NEVER pushes; only Aaron runs the utility.
 
-## v0.15.12.0 BAT result (already done — confirm before working on v0.15.13)
+### 2. Fire Cavern verification
 
-**Case C — snapshot never observed positive.** Aaron triggered the Dollet chase. T key did not announce; Shift+T spoke "No timer to freeze," meaning `IsActive()` returned false the whole time. The classifier never saw a value at `0x01CFECCC` it would accept.
+The same `LIVE_TIMER_ADDR = 0x01CFE92C` should drive the 10/20/30/40-minute Fire Cavern variants, Missile Base, Centra Odin, and Rinoa-in-space — all of these use the same engine countdown system per the deep research. A quick BAT with a Fire Cavern save would confirm the address is timer-system-wide rather than Dollet-specific. Expected: same `[CountdownTimer] live raw=NNNN` line at field load, SECONDS classification (600 / 1200 / 1800 / 2400 for the four duration choices), boundary announcements as the timer ticks down.
 
-The cleanup didn't change the countdown_timer logic — only file structure. A re-BAT with the v0.15.12.0 build (post-cleanup) will produce the same `[CountdownTimer]` diagnostic logs against the same Dollet chase. Aaron may or may not have re-BAT'd before starting the next session; check `Logs/ff8_mod.log` for recent `[CountdownTimer]` lines either way — they're the data v0.15.13 needs.
+If Fire Cavern shows `live raw=0` instead, the address is Dollet-specific and we'd need to either:
+- Re-scan (flip COUNTDOWN_SCAN_ENABLED to 1 in countdown_scan.inl, load a Fire Cavern save, BAT)
+- Or check whether 0x01CFE92C is a per-event slot and the Fire Cavern timer lives at a different but nearby address
 
-Specifically look for:
-- `[CountdownTimer] Initialize: ...` — confirms module loaded
-- `[CountdownTimer] var724 raw=N (prev=M) state=S tickMs=T` — every value observation, rate-limited 50 ms
-- `[CountdownTimer] ENTER ACTIVE: rawValue=N units=X initialSec=Y` — only fires if classifier accepts a value
+### 3. Smaller backlog items
 
-If only the Initialize line appears across an entire chase and no `var724 raw=` lines change away from the initial value (or they all show `raw=0`), the snapshot really does stay at zero. If the `raw=` lines show nonzero values but no `ENTER ACTIVE` fires, the classifier needs a wider range. If `ENTER ACTIVE` fires but T still says no timer, there's a bug — check `IsActive()` logic.
+- **`menu_tts.cpp` T-handler `!shift` gate**. One-line change. Theoretical conflict between Shift+T → `AnnouncePlayTime` in menu mode 6 and Shift+T → `CountdownTimer::ToggleFreeze`. The countdown handler runs first (Update is before menu_tts in dinput8.cpp's main loop), so the practical conflict probability is zero — but the gate is still correct hygiene.
+- **FieldAnnounce display-name catalog audit** in `src/field_display_names.h`. Wrong mappings for fieldIds 0x0134 / 0x0136 surfaced in v0.15.12.0 BAT. Likely more Dollet entries are wrong too.
+- **Deep-research doc update**: `Plan & Research Documents/Dollet timer countdown deep research results.md` needs (a) wrong-math fix (`0x01CFEC8C` not `0x01CFECCC`) and (b) a "v0.15.13 — LIVE TIMER FOUND" appendix documenting that the live engine global is at `0x01CFE92C`, NOT in the field-var stack.
 
-## v0.15.13 pick: Case C remediation
+### 4. Future improvements (low priority)
 
-Two paths. Aaron picks, or session works through both.
-
-### Path A: In-mod memory scanner
-
-Add a scanner that runs during the chase (gated on `pCurrentFieldId` matching one of the Dollet chase fields, or on a hotkey for general use). Each second, snapshot a candidate region (the research suggests `0x01D00000-0x01E00000` for the live engine timer global) into a buffer; diff against previous snapshot; surface uint16 and uint32 addresses whose values decrement monotonically at rates consistent with frames@30Hz (~30/sec) or seconds (~1/sec). Output candidates to `ff8_mod.log` with their addresses, values over time, and delta rates. Aaron reads the log, identifies the address by elimination (filtering out play-time counter, audio sync counter, etc.), and v0.15.14 hardcodes that address.
-
-Cost analysis: 1 MB region scanned every second is roughly 500k uint16 reads. At the existing 60 Hz AccessibilityThread rate that's amortized to ~8k reads/frame — negligible. SEH-wrap each read because some pages in that range may not be mapped. Skip pages that fault.
-
-Risk: low. Pure-additive diagnostic. If it finds the address, great. If it doesn't, we know to look elsewhere.
-
-### Path B: SETTIMER opcode hook
-
-FF8's JSM opcode dispatch is a function-pointer table indexed by opcode number. The research notes: "Locate the table by following any reference to the PSHM_W (0x00C) handler in your disassembly; the SETTIMER handler is at table-base + 0x09C × 4." We already have `opcode_pshm_w` from FFNx externals (referenced extensively in `field_dialog.cpp` for our existing dialog hooks). From that we can compute the dispatch table base, then hook the SETTIMER handler at slot 0x9C.
-
-When SETTIMER fires, the handler runs with the duration parameter (in seconds per the research). We capture: duration + start tick (GetTickCount). The mod's local simulation tracks remaining = duration - (now - start). Announcements fire from the local sim, not from memory polling.
-
-KILLTIMER hook (slot 0xB9) to mark the timer ended.
-
-This doesn't give us freeze (still needs the engine decrement instruction) but it gives reliable read-and-announce that doesn't depend on snapshot updates.
-
-Risk: medium — opcode dispatch hooking is well-understood in this codebase (it's how `field_dialog.cpp` works) but the specific table base for the timer family hasn't been computed before.
-
-### Recommendation
-
-**Do Path A first.** The scanner is a one-time investment that pays off for every future memory-address research — if Aaron ever needs to find another engine global without external tools (he can't use CE / x64dbg, he's blind), the scanner module exists. It's also useful for v0.15.12.0's own diagnostic question: even if Path B becomes the read path, knowing where the live engine global is unlocks the freeze story later.
-
-If the scanner finds a clear candidate, ship that as v0.15.13 read path. Path B remains a fallback for v0.15.14 if the scanner output is ambiguous.
-
-## Smaller deferred items
-
-- **`menu_tts.cpp` T-handler `!shift` gate.** One-line fix in `menu_tts.cpp::Update()`: change `if (GetAsyncKeyState('T') & 1)` to `if ((GetAsyncKeyState('T') & 1) && !(GetAsyncKeyState(VK_SHIFT) & 0x8000))`. Theoretical conflict only.
-
-- **`src/dinput8.cpp` v0.15.9.11.3.x comment restoration.** Some pre-existing multi-paragraph rationale blocks were compressed during the v0.15.12.0 wiring rewrite to fit Claude's response budget for the 720-line file. Code paths are intact and behaviorally identical. Full original text preserved at GitHub HEAD `8d29ee61` — restore if Aaron wants.
+- **Engine-write hook for cleaner freeze.** Current Shift+T behavior is functionally correct (value held within ±1 sec, T-key always reads frozen value) but has cosmetic ±1-sec flicker on the HUD for sighted users. A hook on the engine's write to `0x01CFE92C` would let us suppress the engine's decrement instead of racing it. Requires disassembly lookup for the engine's write site — easy with the disassembly files in `Game Files/disassembly/`. Not urgent; nobody's complaining about the flicker because Aaron is blind and T-key reads correctly.
+- **Value-range "spotlight" pass for scanner.** v0.15.13.1 found the timer in only 1 of 14 cycles because the top-16 cap pushed it out elsewhere. A spotlight pass (one guaranteed slot per encoding type: SECONDS, MINUTES, FRAMES_30HZ, MS) would surface slow timers reliably. Worth adding before next time the scanner is re-enabled.
 
 ## Hard constraints (unchanged)
 
@@ -77,16 +54,18 @@ If the scanner finds a clear candidate, ship that as v0.15.13 read path. Path B 
 - **Filesystem MCP for all Windows project files.** Bash runs in a Linux container that can't reach the OneDrive mod directory.
 - **Aaron pushes via `Utilities/push_to_github.ps1`.** Claude NEVER pushes.
 - **NEVER re-enable SET3 opcode hook (0x1E)** — CI guard in `.github/workflows/safety-checks.yml`.
-- **F-key handlers gated** on `!(GetAsyncKeyState(VK_MENU) & 0x8000)` to prevent Alt+Fx interception.
-- **F12 reserved** for per-session diagnostics — search source for existing F12 refs and REMOVE old code before re-binding. (Currently DialogInject Phase1/2 own F12 / Shift+F12.)
-- **Check file sizes** via `filesystem:list_directory_with_sizes` BEFORE attempting a full rewrite of any file. Past ~50 KB, the `move_file` to `_history` + slim rewrite pattern (used for v0.15.12.0's cleanup) is the safer path.
-- **No more inline-changelog accretion.** v0.15.12.0 retired the line-12 chain in `ff8_accessibility.h`. Canonical changelog is only `CHANGELOG.md` from now on.
+- **F-key handlers gated** on `!(GetAsyncKeyState(VK_MENU) & 0x8000)`.
+- **F12 reserved** for per-session diagnostics.
+- **Check file sizes** via `filesystem:list_directory_with_sizes` BEFORE attempting a full rewrite. Past ~50 KB, use the `move_file` to `_history` + slim rewrite pattern.
+- **Verify chase/field entry from the field log, not FieldAnnounce.** Catalog has known-wrong entries.
 
-## Carry-forward lessons from v0.15.12.0
+## Carry-forward lessons
 
-- **File-size discipline is a build-time tooling concern, not just a runtime concern.** A 421 KB header file isn't a problem for the compiler but is a problem for any tool with a bounded buffer. The inline-changelog pattern was a good idea at 5 entries; at 80+ entries it became a liability that blocked version bumps. The slim header + `_history` companion is the new pattern.
-- **`move_file` + `write_file` is the workaround for "no `edit_file` available + file too big to round-trip".** When the only edit mode is full overwrite, the cost of preserving large existing content is proportional to file size. Moving the old file aside (renaming) is constant-cost regardless of size. The new file is written fresh with whatever's actually needed. The trade-off is that the old content stops being live — for code, that means it needs to not be in the build; for narrative content like changelogs, it means the canonical reader (push utility, here) only sees the new file.
-- **Heavy diagnostic logging on first-touch modules earns its keep on the first BAT failure.** v0.15.12.0's countdown_timer logs every value observation, state transition, hotkey, and units decision. Aaron's BAT reported "T didn't announce, Shift+T said no timer" — that's a clear Case C signal, but the actual diagnostic data lives in `[CountdownTimer]` log lines that tell us exactly what the snapshot held and when. Without the logging, "didn't fire" is ambiguous; with it, v0.15.13's design choice is data-driven.
+- **Diagnostic-feature gating pattern**: v0.15.13.2 kept the full scanner implementation behind `COUNTDOWN_SCAN_ENABLED 0`. Future address hunts: flip the flag, adjust REGION1_BASE/SIZE if needed, rebuild. Don't delete diagnostic code.
+- **Top-N caps can hide slow-changing signals.** A real timer's signature is LOW decrement rate, not high. Future scanner versions should add a spotlight pass per encoding to ensure slow timers always have a slot.
+- **F11 screenshots are gold for BAT context.** All three v0.15.13.x BATs depended on Aaron's screenshots providing the reference on-screen value to grep for in the log.
+- **Memory-write race produces stable oscillation, not pin.** v0.15.13.2's freeze shows the mod and engine both writing the same address at different cadences; result is the value alternating between two adjacent points, not staying at one. Adequate for screen-reader use; hook the engine write if pixel-perfect pin matters.
+- **Scanner success criterion**: a candidate with EXACT integer-ratio rate (1.00/s, 30.00/s, 60.00/s, 1000.00/s) and value in a known timer range is overwhelming evidence even with a sample size of one cycle.
 
 ## Session ritual reminder
 
