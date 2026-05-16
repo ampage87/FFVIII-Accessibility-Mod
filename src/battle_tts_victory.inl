@@ -113,83 +113,17 @@ static volatile bool s_abilityNameCaptured = false;
 static char s_lastAnnouncedVictoryGFName[64] = {};  // tracks last GF name to prevent re-announce
 
 // ============================================================================
-// FF8 battle text decoder (standard FF8 menu encoding)
+// FF8 text decoder unification (v0.15.10.0 + v0.15.11.0)
 // ============================================================================
-
-static void DecodeFF8TextPreview(const uint8_t* src, char* dst, int maxOut)
-{
-    int out = 0;
-    for (int i = 0; i < 120 && out < maxOut - 1; i++) {
-        uint8_t b = src[i];
-        if (b == 0x00) break;
-        // Standard FF8 menu encoding
-        if (b == 0x20)                   dst[out++] = ' ';
-        else if (b >= 0x45 && b <= 0x5E) dst[out++] = 'A' + (b - 0x45);  // A-Z
-        else if (b >= 0x5F && b <= 0x78) dst[out++] = 'a' + (b - 0x5F);  // a-z
-        else if (b >= 0x24 && b <= 0x2D) dst[out++] = '0' + (b - 0x24);  // 0-9
-        else if (b == 0x02)              dst[out++] = '\n';              // newline
-        else if (b == 0x06)              dst[out++] = '\'';
-        else if (b == 0x2F)              dst[out++] = '-';
-        else if (b == 0x32)              dst[out++] = '-';  // v0.13.34: confirmed hyphen
-        else if (b == 0x43)              dst[out++] = ' ';  // v0.13.34: space variant
-        else if (b == 0x2E)              dst[out++] = '.';
-        else if (b == 0x0A) {
-            // Control code: 0x0A = variable expansion (sub_5348E0)
-            if (out < maxOut - 6) {
-                uint8_t varId = src[i + 1];
-                out += snprintf(dst + out, maxOut - out, "{var%02X}", varId);
-                i++;  // skip the variable ID byte
-            }
-        }
-        else if (b == 0x03) { i++; }     // color/special code — skip next byte
-        else if (b == 0x01)              dst[out++] = '|';               // separator
-        else if (b == 0x0E) {
-            // v0.13.35: Icon code — next byte is icon ID
-            if (i + 1 < 120) {
-                uint8_t iconId = src[++i];
-                const char* iconName = nullptr;
-                switch (iconId) {
-                    case 0x36: iconName = "Fire"; break;
-                    case 0x37: iconName = "Magic"; break;
-                }
-                if (iconName) {
-                    for (const char* p = iconName; *p && out < maxOut - 1; p++)
-                        dst[out++] = *p;
-                }
-            }
-        }
-        else if (b >= 0x79) {
-            // v0.13.46: Complete compressed token table from sysfnt.bin.
-            // Field dialog bytes 0xE8-0xFF = sysfnt bytes 0xC8-0xDF.
-            // Previous table had only 6 entries with 2 errors (0xF9, 0xFB).
-            static const struct { uint8_t tok; const char* s; } TOKENS[] = {
-                { 0xE8, "in" }, { 0xE9, "e " }, { 0xEA, "ne" }, { 0xEB, "to" },
-                { 0xEC, "re" }, { 0xED, "HP" }, { 0xEE, "l " }, { 0xEF, "ll" },
-                { 0xF0, "GF" }, { 0xF1, "nt" }, { 0xF2, "il" }, { 0xF3, "o " },
-                { 0xF4, "ef" }, { 0xF5, "on" }, { 0xF6, " w" }, { 0xF7, " r" },
-                { 0xF8, "wi" }, { 0xF9, "fi" }, { 0xFA, "EC" }, { 0xFB, "s " },
-                { 0xFC, "ar" }, { 0xFD, "FE" }, { 0xFE, " S" }, { 0xFF, "ag" },
-            };
-            bool found = false;
-            for (int t = 0; t < 24; t++) {
-                if (TOKENS[t].tok == b) {
-                    for (const char* p = TOKENS[t].s; *p && out < maxOut - 1; p++)
-                        dst[out++] = *p;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                dst[out++] = '{';
-                int n = snprintf(dst + out, maxOut - out, "%02X", b);
-                out += n;
-                if (out < maxOut - 1) dst[out++] = '}';
-            }
-        }
-        else { dst[out++] = '{'; int n = snprintf(dst+out, maxOut-out, "%02X", b); out += n; if (out < maxOut - 1) dst[out++] = '}'; }
-    }
-    dst[out] = '\0';
-}
+// This file no longer hosts a local decoder. v0.15.10.0 retired the v0.10.08
+// DecodeFF8Char/DecodeFF8String standalone decoder from battle_tts_helpers.inl
+// and v0.15.11.0 retired the DecodeFF8TextPreview function that used to live
+// here + the small inline ability-name decoder in HookedBtCandidate8. Both
+// now route to FF8TextDecode::Decode (in src/ff8_text_decode.cpp) via the
+// SEH-safe DecodeFF8String wrapper in battle_tts_helpers.inl. See the comment
+// at the top of that wrapper for the migration rationale and the history of
+// the three retired decoders.
+// ============================================================================
 
 // ============================================================================
 // Battle text hook functions (BT1-BT8)
@@ -245,7 +179,7 @@ static uint32_t __cdecl HookedBtCandidate1(uint32_t a1, uint32_t a2, uint32_t a3
             char decoded[80] = {};
             if (result >= 0x00400000 && result < 0x02800000) {
                 __try {
-                    DecodeFF8TextPreview((const uint8_t*)result, decoded, sizeof(decoded));
+                    DecodeFF8String((const uint8_t*)result, decoded, sizeof(decoded));
                 } __except(EXCEPTION_EXECUTE_HANDLER) {
                     snprintf(decoded, sizeof(decoded), "<decode failed>");
                 }
@@ -462,7 +396,7 @@ static uint32_t __cdecl HookedBtCandidate4(uint32_t a1, uint32_t a2, uint32_t a3
                 if (vals[vi] >= 0x00400000 && vals[vi] < 0x02800000) {
                     __try {
                         char decoded[80] = {};
-                        DecodeFF8TextPreview((const uint8_t*)vals[vi], decoded, sizeof(decoded));
+                        DecodeFF8String((const uint8_t*)vals[vi], decoded, sizeof(decoded));
                         if (decoded[0] != '\0' && decoded[0] != '{')
                             Log::Battle("BattleTTS: [VAREXP]   %s ff8txt: \"%s\"", labels[vi], decoded);
                         uint8_t* p = (uint8_t*)vals[vi];
@@ -528,8 +462,11 @@ static uint32_t __cdecl HookedBtCandidate5(uint32_t a1, uint32_t a2, uint32_t a3
         __try {
             char decoded[64] = {};
             DecodeFF8String((uint8_t*)result, decoded, sizeof(decoded));
-            if (decoded[0] == '\0')
-                DecodeFF8TextPreview((const uint8_t*)result, decoded, sizeof(decoded));
+            // v0.15.11.0: Was a fallback to DecodeFF8TextPreview when canonical
+            // returned empty. Preview is retired (its 0x21-0x2A digit fix and
+            // 0xFA/0xFD compression sequences are now folded into canonical),
+            // so the fallback is gone. The decoded[0] != '\0' check below still
+            // catches actually-empty input.
             if (decoded[0] != '\0' && decoded[0] != '{') {
                 // v0.13.47: Only log first occurrence of each (a1,text) pair
                 bool bt5AlreadySeen = false;
@@ -588,7 +525,7 @@ static uint32_t __cdecl HookedBtCandidate5(uint32_t a1, uint32_t a2, uint32_t a3
                         __try {
                             uint32_t descResult = s_origBt6(a1, 0, 0, 0, 0, 0, 0, 0);
                             if (descResult >= 0x00400000 && descResult < 0x02800000) {
-                                DecodeFF8TextPreview((const uint8_t*)descResult, descRaw, sizeof(descRaw));
+                                DecodeFF8String((const uint8_t*)descResult, descRaw, sizeof(descRaw));
                                 StripDescriptionTokens(descRaw, descClean, sizeof(descClean));
                                 Log::Battle("BattleTTS: [VICTORY-TTS] Item desc raw: \"%s\"", descRaw);
                                 Log::Battle("BattleTTS: [VICTORY-TTS] Item desc clean: \"%s\"", descClean);
@@ -646,7 +583,7 @@ static uint32_t __cdecl HookedBtCandidate5(uint32_t a1, uint32_t a2, uint32_t a3
                                 __try {
                                     uint32_t descResult = s_origBt6(a1, 0, 0, 0, 0, 0, 0, 0);
                                     if (descResult >= 0x00400000 && descResult < 0x02800000) {
-                                        DecodeFF8TextPreview((const uint8_t*)descResult, descRaw2, sizeof(descRaw2));
+                                        DecodeFF8String((const uint8_t*)descResult, descRaw2, sizeof(descRaw2));
                                         StripDescriptionTokens(descRaw2, descClean2, sizeof(descClean2));
                                     }
                                 } __except(EXCEPTION_EXECUTE_HANDLER) {}
@@ -694,7 +631,7 @@ static uint32_t __cdecl HookedBtCandidate6(uint32_t a1, uint32_t a2, uint32_t a3
         result >= 0x00400000 && result < 0x02800000) {
         __try {
             char decoded[64] = {};
-            DecodeFF8TextPreview((const uint8_t*)result, decoded, sizeof(decoded));
+            DecodeFF8String((const uint8_t*)result, decoded, sizeof(decoded));
             if (decoded[0] != '\0' && decoded[0] != '{') {
                 // v0.13.47: Only log first occurrence of each (a1,text) pair
                 bool bt6AlreadySeen = false;
@@ -739,8 +676,8 @@ static uint32_t __cdecl HookedBtCandidate7(uint32_t a1, uint32_t a2, uint32_t a3
         __try {
             char decoded[64] = {};
             DecodeFF8String((uint8_t*)result, decoded, sizeof(decoded));
-            if (decoded[0] == '\0')
-                DecodeFF8TextPreview((const uint8_t*)result, decoded, sizeof(decoded));
+            // v0.15.11.0: Was a fallback to DecodeFF8TextPreview when canonical
+            // returned empty; preview is retired so the fallback is gone.
             if (decoded[0] != '\0' && decoded[0] != '{') {
                 if (!s_gfNameCaptured || strcmp(s_renderedGFName, decoded) != 0) {
                     strncpy(s_renderedGFName, decoded, 63);
@@ -765,23 +702,14 @@ static uint32_t __cdecl HookedBtCandidate8(uint32_t a1, uint32_t a2, uint32_t a3
     if (mode == 4 && result >= 0x00400000 && result < 0x02800000) {
         __try {
             char decoded[64] = {};
-            // Ability-specific decoder (digits at 0x21-0x2A, not 0x24-0x2D)
-            int out = 0;
-            const uint8_t* src = (const uint8_t*)result;
-            for (int i = 0; i < 60 && out < 62; i++) {
-                uint8_t b = src[i];
-                if (b == 0x00) break;
-                if (b == 0x20)                   decoded[out++] = ' ';
-                else if (b >= 0x45 && b <= 0x5E) decoded[out++] = 'A' + (b - 0x45);
-                else if (b >= 0x5F && b <= 0x78) decoded[out++] = 'a' + (b - 0x5F);
-                else if (b >= 0x21 && b <= 0x2A) decoded[out++] = '0' + (b - 0x21);
-                else if (b == 0x2B)              decoded[out++] = '%';
-                else if (b == 0x31)              decoded[out++] = '+';
-                else if (b == 0x2F)              decoded[out++] = '-';
-                else if (b == 0x2E)              decoded[out++] = '.';
-                else if (b == 0x30)              decoded[out++] = '=';
-            }
-            decoded[out] = '\0';
+            // v0.15.11.0: Was a 13-line inline ability decoder. Its character
+            // table agreed with canonical on 0x21-0x2A digits, 0x2B '%', and
+            // 0x31 '+' (the ones ability names actually use) but disagreed on
+            // 0x2E/0x2F/0x30 — none of which appear in real ability-name bytes
+            // (the engine uses 0x32 for ability hyphens, which both decoders
+            // map to '-'). Migrated to FF8TextDecode::Decode via DecodeFF8String
+            // for single-source-of-truth.
+            DecodeFF8String((const uint8_t*)result, decoded, sizeof(decoded));
             if (decoded[0] != '\0' && decoded[0] != '{') {
                 if (!s_abilityNameCaptured || strcmp(s_renderedAbilityName, decoded) != 0) {
                     strncpy(s_renderedAbilityName, decoded, 63);

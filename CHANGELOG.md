@@ -4,6 +4,71 @@ Newest on top. Each entry begins with a `## vMAJOR.MINOR.BUILD` heading followed
 
 The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_accessibility.h`. The push utility refuses to push if they don't.
 
+## v0.15.11.0
+
+Finish unifying the FF8 text decoders. v0.15.10.0 retired the v0.10.08 standalone decoder (`DecodeFF8Char` + `DecodeFF8String`) from `battle_tts_helpers.inl` and rewrote `DecodeFF8String` as a thin SEH-safe wrapper around `FF8TextDecode::Decode`. v0.15.11.0 finishes the job by retiring the third local decoder (`DecodeFF8TextPreview` in `battle_tts_victory.inl`) and the small inline ability-name decoder that lived in `HookedBtCandidate8`. All call sites now route through `DecodeFF8String` to canonical `FF8TextDecode::Decode` in `ff8_text_decode.cpp` — single source of truth across the entire mod.
+
+### (1) Canonical decoder augmentation in `src/ff8_text_decode.cpp` + `.h`
+
+Two small additions so the canonical decoder isn't a regression relative to the preview it's replacing:
+
+- Added `case 0xFA: result += "EC"; return 0;` and `case 0xFD: result += "FE"; return 0;` to the 0xE8-0xFF compression sequence switch. These were gaps in canonical relative to the preview's v0.13.46 table, which itself was empirically verified against sysfnt.bin. Without them, item descriptions or kernel.bin strings containing these compressed pairs would have been silently mangled by the migration.
+- Changed `if (b == 0x0E) return 0;` to `return 1;` so the icon ID byte that follows 0x0E is consumed silently. Canonical's previous behavior of not consuming meant the icon ID byte would have been re-interpreted as a glyph by the next loop iteration, leaking a spurious character into the output. The retired preview decoder did consume the icon byte and also emitted text for two of the icons (`Fire`, `Magic`); we don't preserve that translation because the preview's table covered only those 2 of many possible icons, so losing icon names entirely is cleaner than maintaining a partial translation. If a missing icon name turns out to materially affect TTS clarity later, this is straightforward to revisit.
+
+Both changes are strict improvements for canonical's existing callers. The header doc comment was extended with a v0.15.11.0 entry summarizing the change.
+
+### (2) Migrated all 7 `DecodeFF8TextPreview` call sites in `src/battle_tts_victory.inl`
+
+Each call site replaced with a `DecodeFF8String` call (which forwards to canonical). Call sites in turn:
+
+- `HookedBtCandidate1` (`sub_47EC70`) — `[BTXT]` diagnostic log entry + EXP-text strstr capture. The strstr looks for `"Next"` / `"LEVEL"` / `"EXP"` / `"to"` / `"reach"` — all pure ASCII text, decoded identically by both decoders, so the EXP Phase 1/2 announcement path is unchanged.
+- `HookedBtCandidate4` (`sub_5348E0`) — `[VAREXP]` diagnostic log only.
+- `HookedBtCandidate5` (`sub_47EA30`) fallback — the `if (decoded[0] == '\0') DecodeFF8TextPreview(...)` fallback after the primary `DecodeFF8String` call has been dropped entirely. Canonical handles every byte preview did (modulo the deliberate Ifrit-table differences described below), so the fallback never fires usefully. The `decoded[0] != '\0'` empty-check on the next line still catches actually-empty input.
+- `HookedBtCandidate5` first item-description decode (player-facing for `"Received N [item]. Description: ..."` TTS).
+- `HookedBtCandidate5` second item-description decode (the multi-page items path).
+- `HookedBtCandidate6` (`sub_47EA90`) — entity-name capture used for `"GF [name] leveled up"` and `"GF [name] learned [ability]"` TTS.
+- `HookedBtCandidate7` (`sub_47E970`) fallback — same fallback drop as `HookedBtCandidate5`.
+
+The `decoded[0] != '{'` checks that follow these calls (preview-era guard against `{XX}` unknown-byte markers) become harmless tautology since canonical silently skips unknown bytes; left in place as a low-cost no-op rather than touching them in the same pass.
+
+### (3) Replaced the inline ability decoder in `HookedBtCandidate8` (`sub_47E710`)
+
+The 13-line inline decoder is replaced with a single `DecodeFF8String` call. Its character table agreed with canonical on `0x21-0x2A` (digits), `0x2B` (`%`), and `0x31` (`+`) — the bytes that actually appear in kernel.bin ability names — but disagreed on `0x2E`, `0x2F`, and `0x30`. Those three bytes don't appear in real ability-name encodings (the engine uses `0x32` for ability hyphens like `"T Mag-RF"` / `"Mag+20%"`, and both decoders map `0x32` to `'-'`), so the disagreement was effectively dead code and the migration is strictly cleanup.
+
+### (4) Deleted `DecodeFF8TextPreview` definition + rewrote file-header comment
+
+The entire `DecodeFF8TextPreview` function body (about 80 lines) is gone. The file-header `FF8 battle text decoder (standard FF8 menu encoding)` comment is replaced with a `FF8 text decoder unification (v0.15.10.0 + v0.15.11.0)` block that explains both retirement steps and points readers at `battle_tts_helpers.inl::DecodeFF8String` for the live wrapper.
+
+`StripDescriptionTokens` survives unchanged — it still does useful whitespace/newline normalization on item descriptions. Its `{XX}` stripping branch becomes a no-op since canonical doesn't emit `{XX}` markers, but the function is small and harmless; leave it alone.
+
+### (5) Refreshed the v0.15.10.0 comment block in `battle_tts_helpers.inl`
+
+The comment above `DecodeFF8StringInner` previously ended with `"Note: the third local decoder in this codebase — DecodeFF8TextPreview in battle_tts_victory.inl — has the same digit-range bug. It's left in place for this build because its call sites are mostly diagnostic logging plus item-name announcements (rarely contain digits). Unification is tracked as a follow-up item in the backlog."`. Updated to record completion: `"v0.15.11.0: The other two local decoders — DecodeFF8TextPreview and the HookedBtCandidate8 inline ability-name decoder, both in battle_tts_victory.inl — were also retired. Canonical decoder is now the single source of truth across the entire mod."`
+
+### Risk assessment
+
+Medium. Three potential surfaces:
+
+- **Canonical 0x0E now consumes a byte where it previously did not.** If any enemy name uses 0x0E as a single-byte marker (very unlikely — scan_tts.cpp has shipped canonical for many enemy names since v0.14.50 without surfacing this), the name will be one byte shorter than before. Fallback: revert just the 0x0E line in `ff8_text_decode.cpp` to `return 0` while keeping the rest of the migration.
+- **Preview's slightly different punctuation table (`0x2E=.`, `0x2F=-`, `0x43=space`) is gone.** If those bytes actually appear in real battle text (no evidence yet that they do), item names or descriptions will show different punctuation — canonical's `0x2E=!`, `0x2F=?`, `0x43='`. Still readable, just different. Fallback for any specific byte: a targeted override in canonical's character table.
+- **Inline ability decoder replaced by a function call.** If `DecodeFF8String`'s SEH wrapping ever returns empty on input that the inline previously handled, the ability TTS would say `"GF [name] learned a new ability."` instead of the specific name. Worst case is the existing fallback wording, no crash.
+
+### Expected BAT (Aaron offline at submission time)
+
+Aaron triggers a battle that produces a victory screen with at least one item drop. `ff8_battle.log` `[BT5-EA30]` and `[BT6-EA90]` entries decode item / GF / ability names through canonical — if any name was being mangled by the preview's wrong digit range or punctuation, it now reads correctly. Item announce TTS `"Received N [item name]. Description: [text]"` speaks correctly. If a GF level-up or ability-learn event fires in the same battle, `[GF-NAME-HOOK]` and `[ABILITY-NAME-HOOK]` log entries still show the correct name (the inline decoder's output for real ability-name byte sequences is bit-for-bit identical to canonical's, so this verifies the migration didn't break what already worked). `[BTXT]` and `[VAREXP]` diagnostic log entries no longer contain `{XX}` unknown-byte markers (canonical silently skips). EXP Phase 1/2 announcements unchanged.
+
+Regression check: `scan_tts.cpp` enemy-name decoding (in production since v0.14.50, the existing canonical user) still works — it's the same code path now with two additional compression sequences and a tightened 0x0E behavior, neither of which affects enemy names empirically.
+
+### Files touched
+
+- `src/ff8_text_decode.cpp` — compression sequences 0xFA `"EC"` and 0xFD `"FE"` added; 0x0E behavior changed from `return 0` to `return 1`.
+- `src/ff8_text_decode.h` — v0.15.11.0 entry in the top-of-file history comment.
+- `src/battle_tts_victory.inl` — 7 `DecodeFF8TextPreview` call sites migrated to `DecodeFF8String`, inline ability decoder in `HookedBtCandidate8` replaced, `DecodeFF8TextPreview` function definition deleted, file-header comment rewritten.
+- `src/battle_tts_helpers.inl` — v0.15.10.0 comment block refreshed to reflect completed unification.
+- `src/ff8_accessibility.h` — version bump to `0.15.11.0`.
+- `CHANGELOG.md` — this entry.
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md` — updated for the new HEAD and pick the next backlog item (generalized countdown-timer hook, or remove party members from field entity catalog).
+
 ## v0.15.10.2
 
 Three-item cleanup pass picked from the post-chase backlog. All three changes are dead-code/dead-data removal or log-line removal with zero runtime behavior change.

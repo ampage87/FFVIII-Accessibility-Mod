@@ -1,59 +1,39 @@
-# Next Session Prompt: BAT v0.15.10.2, then pick next backlog item
+# Next Session Prompt: v0.15.11.0 push, then pick next backlog item
 
 ## Where we are
 
-**GitHub HEAD = v0.15.10.1**, pushed 2026-05-15 21:38 UTC, commit `e934484e`.
+**Local tree = v0.15.11.0, BAT-confirmed 2026-05-15.** GitHub HEAD = v0.15.10.2 (commit `4ef5b61a`). The text-decoder unification work is complete and ready for Aaron to push via `Utilities/push_to_github.vbs`.
 
-**Local tree = v0.15.10.2**, built but NOT YET BAT'd or pushed. Three-item cleanup pass combining backlog items #1/#2/#3 from the v0.15.10.1 era. All three changes are dead-code/dead-data removal or log-line removal — zero runtime behavior change. Aaron approved combining them into one build rather than three separate ones.
+Aaron's BAT report: "Fought several battles and didn't notice any problems with how item drops, enemy names, and so forth were announced." Single full battle in `ff8_battle.log` 19:00:42-19:00:58 exercises every previously-suspect code path — item TTS, GF level-up, ability-learn, EXP Phase 1/2, glyph cache — and all decode cleanly through canonical `FF8TextDecode::Decode`. Smoking-gun line for the migration: `[ABILITY-NAME-HOOK] sub_47E710: a1=85(0x55) -> "SumMag+30%" hex=[57 73 6B 51 5F 65 31 24 21 2B]`. The hex stream contains 0x24 — preview would have mapped that to `'0'`; canonical correctly produces `"SumMag+30%"`. Full BAT evidence trail is in `DEVNOTES.md`.
 
-## Step 1: BAT v0.15.10.2
+## What Aaron does first
 
-Aaron runs `deploy.vbs`.
+Run `Utilities/push_to_github.vbs`. The push utility reads `FF8OPC_VERSION` from `src/ff8_accessibility.h` (currently `0.15.11.0`) and the top entry of `CHANGELOG.md` (the v0.15.11.0 block), tags the commit, and pushes to `ampage87/FFVIII-Accessibility-Mod`. Claude NEVER pushes.
 
-### Expected build-log signals (read `Logs/build_latest.log` first)
+## After push: pick the next backlog item
 
-- Top of file: `Building FF8 Original PC Accessibility Mod Version 0.15.10.2` (not `SINGLE-PRONGED`, not `0.15.10.1`).
-- Deployment Complete block: `Version: 0.15.10.2`.
-- No compile errors. The risky surface area is just three name-removal sites — pre-flight `edit_file` dryRun-greps confirmed `WALK_REPRESS_PERIOD`, `s_walkRepressCounter`, `s_walkRepressLogged`, `LogBridgeDiagnostic`, and `s_bridgeDiagTick` are all fully unreferenced after the edits. If a build error nevertheless surfaces, the message will be a clear `undeclared identifier` pointing at the missed reference; add the cleanup site and rebuild.
+The post-chase backlog is down to two items, both reasonable picks for the next session:
 
-### Expected runtime signals (read domain logs after Aaron launches the game)
+### Pick A: Generalized countdown-timer hook
 
-- `ff8_mod.log` init banner reads `=== FF8 Accessibility Mod v0.15.10.2 — Log opened <timestamp> ===` followed by `Version: 0.15.10.2` and `Build:   <__DATE__> <__TIME__>` on two consecutive lines. **No parenthesized hard-coded date** between them.
-- `ChaseAutoPilot: Initialized v0.15.10.2 ...` log line ends with `v0.15.9.8.3: kani-slot override on domt1_1 -> Others slot 3 (SYM 'laguna').` — no trailing "BridgeDiag still active for empirical confirmation" sentence.
+The Dollet 30-min mission countdown is currently TTS'd via a chase-specific path. Generalize so future timed events (e.g. the chase, future scripted sequences) can register a countdown callback and get standardized announcements. Likely small-to-medium scope — touches the chase countdown plumbing plus probably a new module or section in `chase_detector.cpp` or `field_dialog.cpp`. Worth doing before the next timed-event scene appears so we don't have to invent the abstraction under pressure.
 
-### Functional regression check (low priority — no behavior changed)
+### Pick B: Remove party members from field entity catalog
 
-If Aaron is willing to trigger the chase to validate v0.15.10.2 didn't break anything:
-
-- Trigger the X-ATM092 chase, pick Auto.
-- On `domt1_1` (the bridge): chase still completes with 0 catches. `ff8_field.log` shows the transition-only logs (`BridgeDance: leap #N STARTED`, `BridgeDance: EAST->WEST transition`, `BridgeDance: WEST->EAST transition`) but **no** `BridgeDance: sample state=...` lines at 10 Hz, and **no** `BridgeDiag: ... slot=I sym='Y' ...` lines anywhere.
-- Other chase fields (domt4_1, domt3_2, domt5_1, doopen2a, dotown_2/_1) behave identically to v0.15.9.11.3.9.
-
-If Aaron prefers to skip the chase regression check since no behavior changed (acceptable given the trivial risk profile), just verify the build/init banner signals above and push.
-
-## Step 2: Push (only if BAT passes)
-
-Aaron runs `Utilities/push_to_github.vbs`. The script auto-reads `FF8OPC_VERSION` from `src/ff8_accessibility.h` and the top CHANGELOG entry; both already say `0.15.10.2`.
-
-## Step 3: Pick next backlog item
-
-After the push, Aaron picks the next item. Recommended priority order from `DEVNOTES.md`:
-
-### Top remaining picks
-
-1. **#1 Unify all three FF8 text decoders** (medium risk, continues v0.15.10.0's consolidation)
-   - Files: `src/battle_tts_victory.inl::DecodeFF8TextPreview` + the small inline ability-name decoder in `HookedBtCandidate8` (sub_47E710 hook in victory.inl).
-   - The third decoder has the same wrong digit range as the one retired in v0.15.10.0, plus a slightly different 0x06 mismap, but DOES have 0xE8-0xFF compression-sequence coverage. Item names with digits are quietly broken on the victory phase path.
-   - Recommended approach: same SEH-split pattern from v0.15.10.0 (wrap `FF8TextDecode::Decode` because `std::string` inside a `__try` block triggers C2712 in `/EHsc`). Migrate `DecodeFF8TextPreview` callers cluster by cluster — diagnostic logging hooks first (low risk), then the item-announce path (player-facing), then the inline ability decoder.
-   - Risk surfaces: touches victory phase machinery; the diagnostic logging paths are noisy but the item announce path is player-facing during every battle win.
-
-2. **#2 Generalized countdown-timer hook** — Dollet 30-min countdown is TTS'd via a chase-specific path; generalize for future timers.
-
-3. **#3 Remove party members from field entity catalog** — Squall/Zell/Selphie appear as targetable entities; filter them out.
+Squall / Zell / Selphie currently appear as targetable entities in the field nav catalog (F9 path-finding target list and the `field_nav_catalog.inl` enumeration). Filter them out so the catalog only shows interactable / unique entities. Smaller scope — likely a single predicate in `field_nav_catalog.inl` or `field_nav_names.inl`, guarded against the case where a party member happens to *be* the interaction target (e.g. a script that triggers when you talk to a specific character).
 
 ### Deferred (don't pick without explicit Aaron direction)
 
-See `DEVNOTES.md` Deferred section: SeeD rank bug #27, walk-and-talk dialog gap, refined-coord narrow-gate steering, Fire Cavern entry, chase_diag::OnAskOpcodeFired snprintf bug, CHASE-AGENT FINAL SUMMARY log regression.
+- SeeD rank bug #27 (hypothesis: `FIELD_H_OFFSET = 0xF94` is wrong section size)
+- Walk-and-talk dialog gap (hardcoded engine path)
+- Refined-coord narrow-gate steering (#29)
+- Fire Cavern entry (#28) + planner-fallback
+- chase_diag::OnAskOpcodeFired snprintf bug
+- `CHASE-AGENT FINAL SUMMARY` log regression (fix in DeactivateFreeze before clearing agent state)
+
+## After the next pick is committed
+
+Refresh `DEVNOTES.md` and `NEXT_SESSION_PROMPT.md` to reflect the new HEAD commit SHA from the push, plan and code the next backlog item, BAT, push.
 
 ## Hard constraints (unchanged)
 

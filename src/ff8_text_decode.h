@@ -26,6 +26,14 @@
 // v04.01: Fixed table from Ifrit, fixed name IDs.
 // v04.03: Fixed 0x43 backtick -> apostrophe. Rewrote DecodeChoices to use
 //         line-index splitting with firstQ/lastQ. Added DecodeLines.
+// v0.15.11.0: Added 0xFA "EC" and 0xFD "FE" to the compression sequence
+//         switch (previously a gap relative to the v0.13.46 sysfnt.bin token
+//         table verified by the now-retired DecodeFF8TextPreview). Changed
+//         0x0E (icon code) from return-0 to return-1 so the icon ID byte is
+//         consumed silently instead of leaking into the next decoded char.
+//         These changes unblocked the v0.15.11.0 retirement of
+//         DecodeFF8TextPreview from battle_tts_victory.inl, making this the
+//         single canonical FF8 text decoder in the codebase.
 
 #pragma once
 

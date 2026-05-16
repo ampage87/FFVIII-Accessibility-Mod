@@ -4,84 +4,76 @@ Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` inj
 
 **Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
 
-GitHub: `ampage87/FFVIII-Accessibility-Mod`. **HEAD = v0.15.10.1** (pushed 2026-05-15 21:38 UTC, commit `e934484e`, parent `d198b947`). Local tree at v0.15.10.2, BAT-confirmed, awaiting push.
+GitHub: `ampage87/FFVIII-Accessibility-Mod`. **HEAD = v0.15.10.2** (pushed 2026-05-15, commit `4ef5b61a`). **Local tree = v0.15.11.0, BAT-confirmed 2026-05-15, ready to push.**
 
 ---
 
-## Current state: v0.15.10.2 BAT-confirmed, ready to push
+## Current state: v0.15.11.0 BAT clean, awaiting Aaron's push
 
-Three-item cleanup pass shipped in one build. Build successful in 17s (16:24:53 → 16:25:10). All three BAT signals green: DLL init banner reads `Version: 0.15.10.2` + `Build: May 15 2026 16:24:54` with no parenthesized hard-coded date; ChaseAutoPilot Initialize log ends with the kani-slot override sentence and no "BridgeDiag still active" trailer; no compile errors.
+Aaron BAT'd v0.15.11.0 across multiple battles 2026-05-15 ~19:00 — no regressions across item drops, enemy names, GF level-up, or ability-learn TTS. Single battle in `ff8_battle.log` (19:00:42-19:00:58) hit every previously-suspect code path cleanly:
 
-First BAT attempt at 16:18 failed with a single C2065 error at `nav_log.cpp:101` — pre-flight grep missed a second `FF8OPC_VERSION_DATE` reference in the persistent TSV writer `SessionStart`. One-line fix (drop the date column), re-run, clean. Lesson logged in CHANGELOG (2): when removing a macro, grep the entire `src/` tree, not just the obvious banner-bearing files.
+- **`[BT5-EA30] mode=4 a1=154 -> "Fish Fin"`** + **`[BT6-EA90] ... -> "Fish's fin"`** + **`[VICTORY-TTS] Item (EA30): Received 1 Fish Fin. Description: Fish's fin`** — item name + description + announce TTS all decode and compose cleanly through canonical.
+- **`[ABILITY-NAME-HOOK] sub_47E710: a1=85(0x55) -> "SumMag+30%" hex=[57 73 6B 51 5F 65 31 24 21 2B]`** — confirms the inline ability decoder migration in HookedBtCandidate8 works. The hex stream contains 0x24, which the retired preview decoder would have mapped to `'0'`; canonical correctly recognizes the byte position and produces the intended `"SumMag+30%"`.
+- **`[GF-NAME-HOOK] sub_47E970: a1=0x42 -> "Ifrit"`** + **`[VICTORY-TTS] Ability: GF Ifrit learned SumMag+30%.`** — GF name capture + composed ability TTS coherent.
+- **`[BTXT] #1 ... -> " 0123456789ABCDEF:/',"`** — the engine's glyph-cache string passed through canonical with the correct digit mapping; this would have been garbled by preview's off-by-3 digit range.
+- **`[VICTORY-TTS] EXP Phase 1: Zell and Selphie received 144 EXP. Squall received 0 EXP.`** + **`EXP Phase 2: Zell has 856 EXP to reach level 20...`** — EXP path unchanged, strstr-based capture still firing.
+- No `{XX}` unknown-byte markers in any `[BTXT]` / `[VAREXP]` log line.
 
-After push, Aaron picks the next backlog item; top remaining pick is the medium-risk text-decoder unification (was item #4, now item #1).
+Aaron's BAT report: "Fought several battles and didn't notice any problems with how item drops, enemy names, and so forth were announced." Ready for push via `Utilities/push_to_github.vbs`.
+
+After push: refresh DEVNOTES.md / NEXT_SESSION_PROMPT.md to idle-state, then Aaron picks the next backlog item.
 
 ---
 
 ## Recently shipped
 
-### v0.15.10.2 (built and BAT-confirmed 2026-05-15, awaiting push)
+### v0.15.11.0 (BAT-confirmed 2026-05-15 19:00, ready for push)
 
-Three-item cleanup pass combining items #1/#2/#3 from the v0.15.10.1-era backlog. Pure dead-code/dead-data removal + log-line removal; no runtime behavior change.
+Finish unifying the FF8 text decoders. Three coordinated changes (full detail in CHANGELOG.md):
 
-- **(1) WALK_REPRESS_PERIOD cleanup** in `src/field_nav_directiondrive.inl`: the v0.15.9.7.1 defensive W re-press path was retired in v0.15.9.7.8; the constants + counters + multi-paragraph historical narrative were left as vestigial documentation. Now removed; replaced with a short ~10-line note above `RUN_ANALOG_MAGNITUDE` about the still-current `extended=false` convention.
-- **(2) Stale FF8OPC_VERSION_DATE removal**: macro deleted from `src/ff8_accessibility.h`; banner in `src/dinput8.cpp` shortened to `Version: %s`; second use in `src/nav_log.cpp` `SessionStart` (TSV writer to `ff8_nav_data.log`) also dropped (column removed from the SESSION row). The nav_log reference was missed in pre-flight grep and caught by the first BAT attempt's C2065 error; one-line fix, second BAT clean.
-- **(3) BridgeDance log verbosity trim** in `src/chase_auto_pilot.cpp`: removed the 10Hz per-sample `BridgeDance: sample state=...` log inside `UpdateBridgeDance`, the entire `LogBridgeDiagnostic` function + its header comment block (had been early-returned in v0.15.9.11.3.7 with ~120 lines of dead body), the call site in `Update()`, the `s_bridgeDiagTick` counter + its initializers in `Initialize()` and `Disengage()`, and the now-misleading "BridgeDiag still active for empirical confirmation" trailing sentence in the Initialize log message. All transition logs (EAST→WEST / WEST→EAST / WEST→EAST TIMEOUT / leap STARTED) and the `kani read FAILED` failure-mode log stay in place.
+1. **Canonical augmentation** in `src/ff8_text_decode.cpp` + `.h` — added 0xFA `"EC"` and 0xFD `"FE"` compression sequences (gaps relative to the preview's v0.13.46 sysfnt.bin table); changed 0x0E (icon code) from `return 0` to `return 1` so the icon ID byte is consumed silently instead of leaking into the next decoded char. Preview's small Fire/Magic icon-name translation table is not preserved (it covered only 2 of many icons; cleaner to lose icon names entirely).
+2. **Migrated all 7 `DecodeFF8TextPreview` call sites** in `src/battle_tts_victory.inl` to `DecodeFF8String`: BT1 `[BTXT]` diagnostic + EXP-text strstr capture (pure ASCII, decoded identically); BT4 `[VAREXP]` diagnostic; BT5 fallback (dropped — canonical handles every case preview did); BT5 first + second item-description decodes (player-facing); BT6 entity-name capture; BT7 fallback (dropped).
+3. **Replaced the 13-line inline ability decoder in `HookedBtCandidate8`** with a single `DecodeFF8String` call. The inline's character table agreed with canonical on `0x21-0x2A` / `0x2B` / `0x31` (the bytes ability names actually use) but disagreed on `0x2E` / `0x2F` / `0x30` — bytes that don't appear in real ability-name encodings (the engine uses `0x32` for ability hyphens, both decoders agree), so the disagreement was dead code and migration is strict cleanup.
 
-BAT evidence (2026-05-15 16:25 build):
-- `build_latest.log` top: `Building FF8 Original PC Accessibility Mod Version 0.15.10.2`. Deployment Complete block: `Version: 0.15.10.2`.
-- `ff8_mod.log` init banner: `Version: 0.15.10.2` then `Build:   May 15 2026 16:24:54` on consecutive lines — no parenthesized hard-coded date between them.
-- `ff8_mod.log` chase init: "BridgeDiag still active for empirical confirmation." string verified absent via edit_file dryRun grep; "kani-slot override on domt1_1 -> Others slot 3 (SYM 'laguna')." verified present.
+Also: deleted the `DecodeFF8TextPreview` function definition; refreshed the v0.15.10.0 comment block in `battle_tts_helpers.inl` to record completion; rewrote the file-header comment block at the top of `battle_tts_victory.inl`. Canonical `FF8TextDecode::Decode` is now the single source of truth for FF8 text decoding across the entire mod.
+
+BAT evidence (2026-05-15 18:49 build, 19:00 first battle):
+- `build_latest.log` top: `Building FF8 Original PC Accessibility Mod Version 0.15.11.0`. Deployment Complete block: `Version: 0.15.11.0`.
+- Item path: `[BT5-EA30] a1=154 -> "Fish Fin"` + `[BT6-EA90] a1=154 -> "Fish's fin"` + `[VICTORY-TTS] Received 1 Fish Fin. Description: Fish's fin`.
+- Ability path: `[ABILITY-NAME-HOOK] sub_47E710: a1=85 -> "SumMag+30%"` (the migrated inline decoder, exercising 0x24 in the hex stream which preview would have mangled) + `[GF-NAME-HOOK] sub_47E970: a1=0x42 -> "Ifrit"` + `[VICTORY-TTS] Ability: GF Ifrit learned SumMag+30%.`.
+- No `{XX}` markers in any `[BTXT]` / `[VAREXP]` line. EXP Phase 1/2 announcements unchanged. Glyph cache string `" 0123456789ABCDEF:/',"` decodes correctly.
+
+### v0.15.10.2 (pushed 2026-05-15, BAT-confirmed, commit `4ef5b61a`)
+
+Three-item cleanup pass: vestigial `WALK_REPRESS_PERIOD` constants removed from `field_nav_directiondrive.inl`; stale `FF8OPC_VERSION_DATE` macro removed (was reading "2026-05-07" while date was 2026-05-15); BridgeDance per-sample log + `LogBridgeDiagnostic` function dead-body removed from `chase_auto_pilot.cpp`. Pure dead-code/dead-data removal, no runtime behavior change. Caught one missed reference in `nav_log.cpp` on first BAT attempt (the macro was used in a TSV writer, not just a banner); C2065 compile error pointed straight at it, one-line fix and re-BAT clean.
 
 ### v0.15.10.1 (pushed 2026-05-15, BAT-confirmed)
 
-Fix the `deploy.bat` regex regression that has printed `Version: SINGLE-PRONGED` in every build log since v0.15.3. Cosmetic-only — the deployed DLL has always carried the real version from `FF8OPC_VERSION`; only the deploy script's text output was wrong.
-
-Root cause: `findstr /C:"#define FF8OPC_VERSION "` matched not only line 12 of the header (the real macro) but also line 63 — the historical v0.15.3 comment block, which embedded the literal substring `#define FF8OPC_VERSION` while documenting the v0.15.3 fix. For-loop's last-iteration-wins put token 3 of line 63 into `VERSION`: tokens `1=//, 2=v0.15.3:, 3=SINGLE-PRONGED` (from `// v0.15.3: SINGLE-PRONGED CLEANUP...`). Beautifully ironic — the v0.15.3 entry's own meta-commentary about its findstr-tightening fix is what re-broke the same regex.
-
-Fix: add `/B` (begin-of-line anchor) to findstr. The real `#define` is at column 0; all historical mentions are indented `  // ...`.
-
-BAT evidence (2026-05-15 build):
-- `build_latest.log` top: `Building FF8 Original PC Accessibility Mod Version 0.15.10.1`.
-- Deployment Complete block: `Version: 0.15.10.1`. No `SINGLE-PRONGED` anywhere.
-- `ff8_mod.log` init banner: `=== FF8 Accessibility Mod v0.15.10.1 — Log opened 2026-05-15 15:35:54 ===` and `AccessibilityThread: Starting main loop (v0.15.10.1).` across all subsystems.
+`deploy.bat` regex fix: add `/B` (begin-of-line anchor) to findstr so historical `#define FF8OPC_VERSION` mentions in comments stop false-positively matching. Closes the "Version: SINGLE-PRONGED" regression that had been in every build log since v0.15.3.
 
 ### v0.15.10.0 (pushed 2026-05-15, BAT-confirmed)
 
-First post-chase backlog work. Retired the v0.10.08 standalone decoder (`DecodeFF8Char` deleted; `DecodeFF8String` rewritten as a thin SEH-safe wrapper around the canonical `FF8TextDecode::Decode` from `ff8_text_decode.cpp`). Bug was off-by-0x03 in the digit range (`0x24-0x2D` instead of `0x21-0x2A`) — marked "estimated, not yet confirmed" in the v0.10.07 comment since 2024. Public function signature preserved so all five battle-module call sites kept working unchanged.
-
-BAT evidence: `[TARGET] Entry announce: X-ATM092` clean (no `?`, no `6`). Regression check on G-Soldier pack: `[NAME-CACHE] slot3 = "G-Soldier 1" (base="G-Soldier")` intact with hyphen + disambiguation suffixes.
+First post-chase backlog work. Retired the v0.10.08 standalone decoder (`DecodeFF8Char` deleted; `DecodeFF8String` rewritten as a thin SEH-safe wrapper around canonical `FF8TextDecode::Decode`). Fixed the off-by-0x03 digit-range bug that made battle TTS announce "X-ATM092" as "X-ATM?6?". Five battle-module call sites kept working unchanged because the public function signature was preserved. v0.15.11.0 (above) completes the unification by retiring the remaining two local decoders.
 
 ### Chase chapter (closed v0.15.9.11.3.9, pushed 2026-05-15)
 
-v0.15.0 through v0.15.9.11.3.9 closed the X-ATM092 chase scene accessibility chapter. Aaron's BAT confirmations:
-
-- v0.15.9.11.3.6 (auto-pilot routing the full chase end-to-end, 0 catches): empirical 11→0 catch reduction across `domt4_1 → domt3_2 → domt5_1 → domt2_1 → domt1_1 → doopen2a → dotown_3 → dotown_2 → dotown_1 → disc00_07h FMV`.
-- v0.15.9.11.3.8 (keyboard suppression extended beyond arrows): *"I tried mashing buttons during this last run and no battle triggered."*
-- v0.15.9.11.3.9 (ASK race-window fix): *"That worked well. I think we can stick with that solution."*
-
-Key architecture summary (full detail in `chase_keyboard.cpp` / `chase_wndproc.cpp` comments and CHANGELOG entries):
-
-- **Four coordinated keyboard hooks** block Aaron's physical key presses from reaching FF8 during chase Auto: `DirectInputCreateA` chain → `IDirectInputDevice::GetDeviceState` vtable detour returning a synthetic 256-byte buffer (v0.15.9.11.3.1); `user32::GetAsyncKeyState` MinHook (v0.15.9.11.3.2); `WndProc` subclass dropping arrow WM_KEY* messages (v0.15.9.11.3.6); drop list extended to arrows + Ctrl + Enter + Space + Tab + Escape + Shift in v0.15.9.11.3.8. WH_KEYBOARD_LL was tried first in .11.1/.11.2 and abandoned because it forces synchronous main-thread pumps per SendInput, breaking auto-pilot timing.
-- **AUTO battle-suppressor cap stays `INT_MAX`.** Aaron's 2026-05-13 directive: fix the input layer, don't band-aid the catch.
-- **Per-field auto-pilot configs** in `chase_auto_pilot.cpp::kFieldConfigs[]`: `domt4_1` MODE_DIRECTION RUN south-east; `domt3_2` MODE_DIRECTION RUN east; `domt5_1` MODE_STAGED_DIRECTION walk SW→S→SE; `domt1_1` MODE_BRIDGE_DANCE east/west state machine on kani X-velocity; `doopen2a` MODE_TARGET south to (-952, -3800); `dotown_2`/`dotown_1` MODE_DIRECTION RUN south. Other chase fields use the generic `BuildFallbackConfig` three-tier (INF gateway → trigger line → cluster).
+v0.15.0 through v0.15.9.11.3.9 closed the X-ATM092 chase scene accessibility chapter. Empirical 11→0 catch reduction across the full route. Architecture summary: four coordinated keyboard hooks block physical key presses from reaching FF8 during chase Auto (DirectInputCreateA chain, GetDeviceState vtable detour, GetAsyncKeyState MinHook, WndProc subclass). Per-field auto-pilot configs in `chase_auto_pilot.cpp::kFieldConfigs[]`. AUTO battle-suppressor cap stays `INT_MAX` per Aaron's directive (fix the input layer, don't band-aid the catch).
 
 ---
 
 ## Backlog (in rough priority order)
 
-1. **Fully unify all three FF8 text decoders** — v0.15.10.0 retired the v0.10.08 decoder but a third one remains: `DecodeFF8TextPreview` in `battle_tts_victory.inl`. Same wrong digit range as the retired one (so item names with digits broken the same way), plus a slightly different mismap for 0x06, BUT it does have 0xE8-0xFF compression-sequence coverage. Call sites are mostly diagnostic battle-text logging plus item-name announcements during victory phases. Items rarely contain digits so practical impact is low, but the architectural goal of single source of truth isn't met until this is migrated too. There's also a small inline ability-name decoder in `HookedBtCandidate8` (sub_47E710 ability name hook in victory.inl) that already uses the correct 0x21-0x2A digit range but has its own incomplete punctuation table; ideally fold it into `FF8TextDecode::Decode` as well. Risk: medium (touches victory phase machinery; the diagnostic logging paths are noisy but the item announce path is player-facing). Recommended approach: same SEH-split pattern from v0.15.10.0; migrate `DecodeFF8TextPreview` callers one cluster at a time (logging hooks first as low-risk, then item announce path, then the inline ability decoder).
-2. **Generalized countdown-timer hook** — Dollet 30-min countdown is TTS'd via a chase-specific path; generalize for future timers.
-3. **Remove party members from field entity catalog** — Squall/Zell/Selphie appear as targetable entities; filter them out.
+1. **Generalized countdown-timer hook** — Dollet 30-min countdown is TTS'd via a chase-specific path; generalize for future timers.
+2. **Remove party members from field entity catalog** — Squall/Zell/Selphie appear as targetable entities; filter them out.
 
-**Do NOT revert AUTO battle-suppressor cap to 0.** Aaron's 2026-05-13 directive: the fix is the input layer, not the band-aid. Cap stays `INT_MAX`. v0.15.9.11.3.6 BAT vindicates the call.
+**Do NOT revert AUTO battle-suppressor cap to 0.** Aaron's 2026-05-13 directive: the fix is the input layer, not the band-aid. v0.15.9.11.3.6 BAT vindicates the call.
 
 ### Deferred (don't pick without explicit Aaron direction)
 
 - SeeD rank bug #27 (hypothesis: `FIELD_H_OFFSET = 0xF94` is wrong section size)
 - Walk-and-talk dialog gap (hardcoded engine path)
 - Refined-coord narrow-gate steering (#29)
-- Fire Cavern entry (#28) + planner-fallback (#29)
+- Fire Cavern entry (#28) + planner-fallback
 - chase_diag::OnAskOpcodeFired snprintf bug
 - `CHASE-AGENT FINAL SUMMARY` log regression (fix in DeactivateFreeze before clearing agent state)
 
@@ -99,3 +91,5 @@ Key architecture summary (full detail in `chase_keyboard.cpp` / `chase_wndproc.c
 - **NEVER re-enable SET3 hook** (CI guard in `.github/workflows/safety-checks.yml`)
 - DEVNOTES under 10KB — move older history to DEVNOTES_HISTORY.md
 - `deploy.bat` version-extract regex requires `/B` anchor (v0.15.10.1) — without it, historical `#define FF8OPC_VERSION` mentions in comments cause findstr to match the wrong line.
+
+---

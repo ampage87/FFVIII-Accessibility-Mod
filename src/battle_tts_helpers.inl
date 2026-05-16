@@ -28,10 +28,10 @@ static bool IsPrintableASCII(const uint8_t* p, int len) {
 }
 
 // ============================================================================
-// FF8 text decoder (v0.10.08 → v0.15.10.0)
+// FF8 text decoder (v0.10.08 → v0.15.10.0 → v0.15.11.0)
 // ============================================================================
 // v0.15.10.0: The v0.10.08 standalone decoder (DecodeFF8Char + DecodeFF8String)
-// has been retired. Its character table was an "estimated, not yet confirmed"
+// was retired. Its character table was an "estimated, not yet confirmed"
 // approximation with three known errors that surfaced across BAT iterations:
 //   - Digit range 0x24-0x2D was off-by-0x03 (correct is 0x21-0x2A per the
 //     canonical Ifrit textformat.ifr table). Caused "X-ATM092" to be spoken
@@ -45,23 +45,26 @@ static bool IsPrintableASCII(const uint8_t* p, int len) {
 //     save space; any monster name using a compressed pair was silently
 //     mangled.
 //
-// DecodeFF8String now forwards to the canonical FF8TextDecode::Decode in
+// v0.15.11.0: The other two local decoders — DecodeFF8TextPreview and the
+// HookedBtCandidate8 inline ability-name decoder, both in
+// battle_tts_victory.inl — were also retired. Canonical decoder is now the
+// single source of truth across the entire mod. As part of the migration the
+// canonical was augmented with 0xFA "EC" and 0xFD "FE" compression sequences
+// (filling gaps relative to the preview's v0.13.46 table) and 0x0E (icon
+// code) was changed to consume the icon ID byte silently instead of leaking
+// it into the next decoded char.
+//
+// DecodeFF8String forwards to the canonical FF8TextDecode::Decode in
 // ff8_text_decode.cpp (Ifrit-based; battle-tested via scan_tts.cpp on the same
 // engine name accessor sub_495100 since v0.14.50). The signature is preserved
-// so all five battle-module call sites (this file, hp.inl, menu.inl,
-// victory.inl) keep working unchanged; only the implementation moved.
+// so all call sites (this file, hp.inl, menu.inl, victory.inl) keep working
+// unchanged; only the implementation moved.
 //
 // MSVC /EHsc forbids __try in a function holding non-trivial destructors
 // (C2712). std::string inside FF8TextDecode::Decode triggers that, so the
 // work is split across DecodeFF8StringInner (std::string, no SEH) and the
 // public DecodeFF8String (SEH wrapper). Pattern lifted from
 // scan_tts.cpp::DecodeNameSafe / DecodeNameToBuf.
-//
-// Note: the third local decoder in this codebase — DecodeFF8TextPreview in
-// battle_tts_victory.inl — has the same digit-range bug. It's left in place
-// for this build because its call sites are mostly diagnostic logging plus
-// item-name announcements (rarely contain digits). Unification is tracked
-// as a follow-up item in the backlog.
 
 static int DecodeFF8StringInner(const uint8_t* raw,
                                  char* outBuf,
