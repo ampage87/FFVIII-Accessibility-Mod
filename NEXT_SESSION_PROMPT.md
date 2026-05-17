@@ -1,4 +1,4 @@
-# Next Session Prompt: v0.16.4 BAT triage OR v0.16.5 battle_tts_menu.inl split
+# Next Session Prompt: v0.16.5.1 ready to push, backlog open
 
 ## Greeting
 
@@ -6,88 +6,68 @@ Start with `## Claude Says` per session ritual. Read `DEVNOTES.md` and THIS file
 
 ## Where we are
 
-**GitHub HEAD = v0.16.3** (commit `8a7a23d1`, pushed 2026-05-17 05:58:34 UTC). **Local tree = v0.16.4 awaiting BAT.**
+**GitHub HEAD = v0.16.4** (commit `5d16179a`, pushed 2026-05-17 18:31 UTC). **Local tree = v0.16.5.1** (v0.16.5 BAT confirmed clean + 3-line follow-up patch for the deferred-turn release path; both pending push).
 
-The X-ATM092 chase auto-pilot chapter is **closed**: v0.16.1.4 BAT confirmed clean end-to-end progression with zero catches.
+### v0.16.5 BAT result
 
-### v0.16.4 (last session): battle_tts_ewm.inl split WRITTEN, awaiting BAT
+Confirmed CLEAN. All menu paths exercised across two battles, every announcement fired as expected. Init: `Initialized v0.16.5 (EWM=ON, ATB=OK, GF=OK, FFNx=FAIL, PATCH=OK, BT=deferred)`. Highlights: Magic submenu via mode-byte path, GF submenu via fallback (mode 0x02→0x00 + phase 80) path, deferred GF cancel disambiguation (cancel suppressed on turn-end = confirm), Draw spell list with Stock/Cast + cursor nav + false-exit suppression + revisit-flag handling, target cycling across allies, v0.13.57 ATB exact-value restore preserved. **v0.16.4's open Ifrit-AD miss is RESOLVED** — played end-to-end this session (6 cues, ~23 s, all proper timestamps). Heartbeat diagnostic stays parked.
 
-`src/battle_tts_ewm.inl` (91.79 KB monolith, over the 80 KB CI hard-fail) carved into a 2.17 KB slim shell + **nine** sub-`.inl` files. **Pure mechanical split** — no behavior change. EWM is load-bearing for the turn-based retrofit, so every `__try` block, comment, and static was preserved verbatim; only locations moved.
+### v0.16.5.1: 3-line follow-up
 
-Include chain (dependency-ordered, included textually from the slim parent inside `namespace BattleTTS`):
+v0.16.5 BAT log triage caught that `PollDeferredTurnAnnounce` (defined in `battle_tts_menu_poll.inl`) was never invoked from `Update()`. Latent dead-code path since v0.13.52 introduced the deferred-turn feature — not a v0.16.5 regression. Patched with three guarded lines in `battle_tts.cpp::Update()` after `PollHPChanges()`. Function body untouched.
 
-```
-state → gf_patch → gf_effect → bp_diag → atb_hook → dispatch → ffnx → diag → update
-```
+Specific BAT evidence: line 2942–2943, Selphie's third turn in battle 2 started on the exact frame Zell's Ifrit began animating. `[TURN] Deferred (damage in flight): Selphie's turn. Attack.` logged correctly, but no `[TURN] Deferred fired ...` or `[TURN] Deferred cancelled ...` follow-up ever appeared — the stashed announce silently dropped at battle end. Aaron likely never heard "Selphie's turn. Attack." for that turn (and many similar collisions over the past ~32 versions).
 
-File sizes: state 8.4 KB, gf_patch 8.9 KB, gf_effect 6.9 KB, bp_diag 17.1 KB, atb_hook 12.3 KB, dispatch 5.7 KB, ffnx 9.7 KB, diag 12.0 KB, update 13.8 KB, slim shell 2.2 KB. Largest sub-file is `bp_diag.inl` at 17.1 KB — well under the 60 KB warn line.
+### Push readiness
 
-`atb_hook.inl` folds in the EWM lifecycle (`EWM_LoadConfig`/`SaveConfig`/`PollToggle`/`InstallHook`) because `EWM_InstallHook` installs `HookedATBUpdate` — they belong together.
-
-**`battle_tts.cpp` unchanged.** It still `#include`s `battle_tts_ewm.inl`. `OnBattleEnter`, `Initialize`, `Shutdown` still reference statics declared in `state.inl` (e.g. `s_gfVEHHandle`, `s_gfSnapValid`, `s_gfAutoArmDone`, `s_tgtDiagStage`) — file-scope visibility carries across the textual-include boundary. `deploy.bat` unchanged.
+Both versions ready for one combined push. `FF8OPC_VERSION = "0.16.5.1"` matches the top heading in `CHANGELOG.md`. Run `Utilities/push_to_github.ps1`. The push will land both v0.16.5 (refactor) and v0.16.5.1 (follow-up patch) as one commit, with the v0.16.5.1 CHANGELOG section as the commit body (containing the v0.16.5.1 narrative + the v0.16.5 section below it).
 
 ## Status check at session open
 
-**If Aaron's first message is "BAT"** (the expected case): the v0.16.4 build has been built and tested.
+**If Aaron's first message is "BAT"**: a build of v0.16.5.1 (or later) has been tested. Triage normally — read `Logs/build_latest.log` tail for compile errors, then `Logs/ff8_battle.log`. Specifically look for the v0.16.5.1 confirmation pattern: any `[TURN] Deferred (damage in flight): ...` line should be followed within ~5 seconds by either `[TURN] Deferred fired after <ms> ms: ...` (release succeeded) or `[TURN] Deferred cancelled (char N -> M, stale): ...` (active char advanced past the deferred-for character). Pre-fix, only the first line appeared.
 
-Triage workflow:
-1. Read `Logs/build_latest.log` tail for compile errors. If anything's wrong, it'll be a transcription mistake in the split — most likely a static referenced before declared (wrong include order) or a missing `__try`/`__except` brace from a copy-paste edge.
-2. If build succeeds, read `Logs/ff8_battle.log` for the runtime BAT.
-3. Verify:
-   - `BattleTTS: [EWM] ATB hook @ 0x... — MH_OK` at battle entry.
-   - EWM O-key toggle: pressing O announces "Enhanced Wait Mode on" / "off" and logs `BattleTTS: [EWM] Toggled: ...`.
-   - Command menu opens → `BattleTTS: [EWM] ATB capped (new turn, char=N, phase=N)` line fires.
-   - Player commits action → cap releases (`[EWM] ATB cap released`).
-   - GF summons fire correctly (Quezacotl, Shiva, etc.) — the v0.10.91 GF-fire prevention is still in `gf_patch.inl` + `atb_hook.inl`, must not have regressed.
-   - `[TURN-COUNT]` lines appear on each entity turn (v0.13.58-60 per-slot ATB counter in `diag.inl`).
-4. If the BAT is clean, Aaron pushes v0.16.4 via `Utilities/push_to_github.ps1`. Move on to v0.16.5.
-5. If the BAT shows any deviation from v0.16.3 behavior, diff the affected sub-`.inl` against the v0.16.3 monolith via `git show 8a7a23d1:src/battle_tts_ewm.inl` and fix the transcription error.
+**If Aaron names a backlog item**: jump to that. Refactor queue is empty; everything below is fair game.
 
-**If Aaron's first message is "Begin v0.16.5" or similar**: v0.16.4 has pushed cleanly. Proceed to the v0.16.5 plan below.
+**If Aaron asks about a regression**: read the relevant domain log first, not assumptions.
 
-**If Aaron asks about a regression not related to v0.16.4**: read the relevant domain log first, not assumptions.
+### Deferred-turn observation rule going forward
 
-## Next priority (after v0.16.4 BATs clean): v0.16.5 = battle_tts_menu.inl split
+The one-frame trigger window means this collision can't be reliably reproduced. Aaron will keep an eye out for the post-fix pattern across future BAT runs. If `[TURN] Deferred fired ...` is observed at least once with damage-TTS-first / turn-announce-second audio ordering preserved, the fix is confirmed end-to-end. If `[TURN] Deferred (damage in flight)` ever appears WITHOUT a follow-up `fired` or `cancelled` line in the next ~5 seconds, that's a regression of the v0.16.5.1 fix (e.g. someone removed the `Update()` call).
 
-`src/battle_tts_menu.inl` is **81.89 KB**, the last source file over the 60 KB warn line (excluding the accepted `field_archive_jsm_scan.inl` exception at 63 KB).
+## Refactor queue: EMPTY
 
-### Important note on type
+v0.16.5 was the final size-split task. Every `src/*.cpp` and `src/*.inl` is now under the 80 KB hard fail. The chapter that started with v0.16.0's `world_map.cpp` carve is closed.
 
-Same as v0.16.4: `battle_tts_menu.inl` is a **regular `.inl` textually included from `battle_tts.cpp`**. The split will produce sub-`.inl`s included from `battle_tts_menu.inl`, structurally identical to what v0.16.4 just did for `battle_tts_ewm.inl`.
+If a future file approaches the 60 KB warn line, the established `.inl` pattern is:
+- Parent `.cpp` (or shell `.inl`) becomes a slim file with namespace block + `#include` chain
+- `*_state.inl` (statics) included FIRST
+- No header guards or namespace decls inside `.inl` files
+- 5-20 KB per sub-`.inl` target; resplit if any approaches 60 KB
+- `*_history.h` archive with `#if 0` wrapper holds removed legacy content when applicable
+- Default to PURE mechanical splits — user-facing TTS paths in particular preserve every announcement exactly
 
-### Recipe
+The six reference splits: v0.16.0 (`world_map`), v0.16.1 (`chase_auto_pilot`), v0.16.2 (`field_dialog`), v0.16.3 (`field_archive_jsm` — small-refactor pattern with state hoist + helper extraction), v0.16.4 (`battle_tts_ewm`), v0.16.5 (`battle_tts_menu`).
 
-1. Read `src/battle_tts.cpp` to see where `battle_tts_menu.inl` sits in the include chain (it comes AFTER `battle_tts_ewm.inl` — the orphan section header at the end of `update.inl` calls out the boundary: "Turn announcement + Command menu TTS").
-2. Read `src/battle_tts_menu.inl` end-to-end (use head/tail for the 82 KB if filesystem MCP truncates). Map functional groupings: command menu state, turn announcement, target selection, sub-menus (Magic/GF/Item/Draw), Limit Break handling, anything else.
-3. **Default to pure mechanical split** unless Aaron says otherwise. Battle TTS is user-facing — preserve every announcement exactly.
-4. Create `battle_tts_menu_state.inl` first (all statics + typedefs + constants).
-5. Carve the rest as the groupings suggest. Aim for 5-20 KB per sub-`.inl`. Reasonable splits: `_turn_announce`, `_command_menu`, `_target_select`, `_submenus` (or per-submenu if any one is large), `_limit_break`, `_diag`. Confirm names with Aaron before committing.
-6. Rewrite `battle_tts_menu.inl` as a slim shell: `#include` chain. Keep original orientation comment block.
-7. **`deploy.bat` unchanged** — only `battle_tts.cpp` compiles.
-8. **No functional change.** BAT: trigger battles, confirm turn-start announcements, command menu navigation (arrow keys), target selection (with multi-target arrows), submenu navigation (Magic, GF, Item, Draw), Limit Break announcement.
+## Backlog (now active, roughly priority order)
 
-### Key gotchas (carried from v0.16.0-v0.16.4)
-
-- `.inl` files: **NO header guards, NO namespace declarations inside.** They live inside `namespace BattleTTS` via the textual include from `battle_tts.cpp`.
-- State `.inl` MUST be included FIRST.
-- **Filesystem MCP for all Windows project files.** Bash runs in a Linux container that can't reach the OneDrive mod directory.
-- **OneDrive sync EPERM rename errors**: retry immediately on first edit. Usually clears.
-- Watch the 60 KB warn / 80 KB fail thresholds.
-- Cross-`.inl` statics go in `*_state.inl`.
-- **Don't introduce comment/whitespace changes beyond what's necessary.**
-- **Statics in `state.inl` that are referenced by `battle_tts.cpp` itself** (OnBattleEnter, Initialize, Shutdown resets) remain visible across the textual-include boundary — no special handling needed, just verify they're still file-scope `static`.
-
-### Reference splits (the working models)
-
-- **v0.16.0 world_map.cpp** — slim `.cpp` parent + sub-`.inl` chain.
-- **v0.16.1 chase_auto_pilot.cpp** — 6.47 KB slim parent + 8 `.inl`.
-- **v0.16.2 field_dialog.cpp** — 3 KB slim parent + 8 `.inl`.
-- **v0.16.3 field_archive_jsm.inl** — 2 KB slim shell + 7 `.inl`. Small-refactor pattern (state hoist + helper extraction).
-- **v0.16.4 battle_tts_ewm.inl** (just shipped) — 2.17 KB slim shell + 9 `.inl`. Pure mechanical. Closest reference model for v0.16.5 since they're sibling `.inl`s in the same parent (`battle_tts.cpp`).
+1. **Ifrit / GF audio description miss diagnostic** (carried from v0.16.4 BAT, RESOLVED in v0.16.5 BAT but kept as a watch item). Only act if it recurs.
+2. **POLL teardown garble** (carried from v0.16.2 BAT): polling-thread fallback occasionally speaks `[Name80]kindrL`-style fragments ~17s after dialog dismiss. Pre-existing. Fix candidate: reject unresolved `[…]` tokens in the POLL path.
+3. **`menu_tts.cpp` T-handler `!shift` gate** — one-line cleanup.
+4. **FieldAnnounce display-name catalog audit** in `src/field_display_names.h`. Wrong mappings for fieldIds 0x0134 / 0x0136. Verify Fire Cavern A mapping (fieldId 0x0088, engine `fieldName='bdview1'`, expected "Fire Cavern A") end-to-end.
+5. **Field-name populate race** at Part B arrival check — diagnostic log only, audio fine.
+6. **Deep-research doc updates**: `Plan & Research Documents/Dollet timer countdown deep research results.md` — wrong-math fix + LIVE TIMER FOUND appendix.
+7. Remove party members from field entity catalog.
+8. Walk-and-talk dialog gap (hardcoded engine path).
+9. SeeD rank bug #27 (hypothesis: `FIELD_H_OFFSET = 0xF94` wrong section size).
+10. Refined-coord narrow-gate steering.
+11. Fire Cavern #28 + planner-fallback #29.
+12. Per-world-map vehicle-aware BFS, guided GPS mode.
+13. Battle: Scan TTS keys 9/0 (status resist/active statuses) — offset hunt deferred.
+14. Future: Junction menu TTS, more victory screen polish.
 
 ## Hard constraints (unchanged)
 
-- **Filesystem MCP for all Windows project files.**
+- **Filesystem MCP for all Windows project files.** Bash runs in a Linux container that can't reach the OneDrive mod directory.
 - **Aaron pushes via `Utilities/push_to_github.ps1`**, Claude NEVER pushes.
 - **NEVER re-enable SET3 opcode hook (0x1E)** — CI guard in `.github/workflows/safety-checks.yml`.
 - **F-key handlers gated** on `!(GetAsyncKeyState(VK_MENU) & 0x8000)`.
@@ -97,11 +77,9 @@ Same as v0.16.4: `battle_tts_menu.inl` is a **regular `.inl` textually included 
 - **AUTO `[CBF]` battle-suppressor cap stays `INT_MAX`** — Aaron's 2026-05-13 directive.
 - **`.inl` files are TEXTUAL INCLUDES**: no header guards, no namespace declarations inside, `state.inl` always first.
 - **Push utility refuses to push if top CHANGELOG heading doesn't match `FF8OPC_VERSION`.**
+- **Battle menu TTS is load-bearing** (v0.16.5). Every command, spell, GF name, item with qty, target selection, all-target announce, Stock/Cast, cancel-restore is user-facing. Pure mechanical splits only.
+- **Functions defined but not called are a real failure mode** (v0.16.5.1 lesson). MSVC silently allows `static` unused functions; the compiler can't warn us. If a feature's log marker for the "work started" half appears but the "work finished" half is missing across multiple BAT runs, suspect a missing caller before suspecting a logic bug.
 - Every Claude response starts with `## Claude Says`.
-
-## After v0.16.5
-
-The refactor chapter closes. The allowlist in `.github/workflows/safety-checks.yml` can be emptied (only `field_archive_jsm_scan.inl` at 63 KB remains in the watch zone; accepted exception). Then the backlog below opens.
 
 ## Key lessons carried forward
 
@@ -110,18 +88,8 @@ The refactor chapter closes. The allowlist in `.github/workflows/safety-checks.y
 3. **Multiple catch sources on one field may not all be active.** Always verify the `[CBF] PASS` caller.
 4. **Per-field problems require per-field analysis.**
 5. **EWM is load-bearing.** Preserve "first-to-fill acts first, no skipped turns, natural ally/enemy ratio". Default to pure mechanical splits unless Aaron explicitly approves a refactor.
-6. **Pure mechanical splits avoid behavior regression risk.** v0.16.4 deliberately did NOT touch v0.13.57 ATB-restore semantics or v0.13.55-56 dispatch hooks — they're load-bearing for the EWM contract.
-
-## Backlog (after the size-split queue clears, v0.16.6+)
-
-Roughly in priority order:
-
-1. **POLL teardown garble** (carried from v0.16.2 BAT): polling-thread fallback occasionally speaks `[Name80]kindrL`-style fragments ~17s after dialog dismiss. Pre-existing behavior. Fix candidate: reject unresolved `[…]` tokens in the POLL path.
-2. Remove party members from field entity catalog.
-3. Walk-and-talk dialog gap (hardcoded engine path).
-4. SeeD rank bug #27 (hypothesis: `FIELD_H_OFFSET = 0xF94` wrong section size).
-5. Refined-coord narrow-gate steering.
-6. Fire Cavern #28 + planner-fallback #29.
-7. Per-world-map vehicle-aware BFS, guided GPS mode.
-8. Battle: Scan TTS keys 9/0 (status resist/active statuses) — offset hunt deferred.
-9. Future: Junction menu TTS, more victory screen polish.
+6. **Battle menu TTS is also load-bearing.** Same constraint.
+7. **Pure mechanical splits avoid behavior regression risk.** v0.16.5 deliberately did NOT split `PollTurnAndCommands` into helpers (shared locals + outer SEH); v0.16.4 deliberately did NOT touch v0.13.57 ATB-restore semantics.
+8. **Absence of an expected log line after a refactor doesn't automatically mean the refactor broke it.** If the install/resolution line for that subsystem still fires, the runtime path is structurally identical and the cause is likely environmental or intermittent. v0.16.4's Ifrit-AD miss — confirmed resolved in v0.16.5's BAT — is the canonical example.
+9. **Refactor BAT log triage is a free dead-code audit.** v0.16.5's mechanical split exposed v0.13.52's missing `PollDeferredTurnAnnounce` caller; the new sub-`.inl` boundaries made the "this function is defined but never called" pattern grep-friendly. Future refactors should explicitly check that every public function in a new `.inl` has a caller somewhere in the parent translation unit.
+10. **When editing markdown via `filesystem:edit_file`**: multi-edit calls in one invocation can collide if `oldText` of edit N appears more than once after edit N-1 runs. Prefer separate calls for each independent edit, or carefully verify that the intermediate state of the file is what the next `oldText` expects.

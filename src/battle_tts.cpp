@@ -988,6 +988,21 @@ void Update()
         PollHPChanges();
     }
 
+    // v0.16.5.1: Release the v0.13.52 deferred turn announcement when the
+    // damage window clears. PollTurnAndCommands stashes "X's turn. Y." into
+    // s_deferredTurnBuf whenever a turn starts while damage is in flight
+    // (engAnim=1 or HP changes pending) so the damage TTS speaks first.
+    // PollDeferredTurnAnnounce drains the buffer once those conditions
+    // clear, on a 5-second safety timeout, or cancels it if the active
+    // character has already moved on. The call has to come AFTER
+    // PollHPChanges so s_ewmHoldForDamageTTS reflects this frame's HP
+    // signals before we decide whether to fire. Latent bug since v0.13.52
+    // — the release path was defined but never invoked; reintroduced as
+    // a 3-line guarded call without touching the function body.
+    if (s_inBattle && s_initAnnounceDone && s_enemyAnnounceDone) {
+        PollDeferredTurnAnnounce();
+    }
+
     // v0.13.62-63: Status ailment/buff transition TTS (must come after PollHPChanges)
     if (s_inBattle && s_initAnnounceDone && s_enemyAnnounceDone) {
         PollStatusChanges();

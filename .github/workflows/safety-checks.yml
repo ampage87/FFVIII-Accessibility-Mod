@@ -68,11 +68,11 @@ jobs:
 
           # Files that are already known-oversized and have a scheduled split.
           # Remove a name here once the corresponding v0.16.x split has shipped.
+          #
+          # v0.16.5 (2026-05-17): allowlist emptied — every src/*.{cpp,inl} now
+          # passes the 80 KB hard-fail check. The closest watch-zone file is
+          # field_archive_jsm_scan.inl at 63 KB (accepted exception, will warn).
           declare -A ALLOWLIST
-          ALLOWLIST[src/field_dialog.cpp]=1         # v0.16.2
-          ALLOWLIST[src/field_archive_jsm.inl]=1    # v0.16.3
-          ALLOWLIST[src/battle_tts_ewm.inl]=1       # v0.16.4
-          ALLOWLIST[src/battle_tts_menu.inl]=1      # v0.16.5
 
           fail_count=0
           warn_count=0

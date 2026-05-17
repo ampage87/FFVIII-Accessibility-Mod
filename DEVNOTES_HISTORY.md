@@ -6,6 +6,55 @@
 
 ---
 
+## v0.16.4 battle_tts_ewm.inl split (shipped commit `5d16179a` 2026-05-17 18:31 UTC)
+
+Pure mechanical split of `src/battle_tts_ewm.inl` (91.79 KB monolith) into a 2.17 KB slim shell + nine sub-`.inl` files. Behavior byte-for-byte identical to v0.16.3.
+
+Include chain (dependency-ordered, included textually from the slim parent inside `namespace BattleTTS`):
+
+```
+state → gf_patch → gf_effect → bp_diag → atb_hook → dispatch → ffnx → diag → update
+```
+
+File sizes: state 8.4 KB, gf_patch 8.9 KB, gf_effect 6.9 KB, bp_diag 17.1 KB, atb_hook 12.3 KB, dispatch 5.7 KB, ffnx 9.7 KB, diag 12.0 KB, update 13.8 KB, slim shell 2.2 KB. Largest sub-file `bp_diag.inl` at 17.1 KB — well under the 60 KB warn line.
+
+`state.inl` declares every static (must come first). `update.inl` calls helpers from `gf_patch.inl` and `diag.inl` (must come last). The `atb_hook.inl` folds in the EWM lifecycle (`EWM_LoadConfig`/`SaveConfig`/`PollToggle`/`InstallHook`) because `EWM_InstallHook` installs `HookedATBUpdate`.
+
+`battle_tts.cpp` unchanged. Statics declared in `state.inl` referenced by `battle_tts.cpp` itself (e.g. `OnBattleEnter` resets `s_gfSnapValid`/`s_gfAutoArmDone`/`s_tgtDiagStage`; `Initialize`/`Shutdown` use `s_gfVEHHandle` for VEH register/unregister) remain visible via file-scope `static` across the textual-include boundary. `deploy.bat` unchanged.
+
+### v0.16.4 BAT result (clean)
+
+Build succeeded, runtime verified. Every EWM subsystem fired its expected log lines, confirming the split is byte-for-byte functional:
+
+- `[EWM] ATB hook @ 0x004842B0 — MH_OK` (atb_hook.inl)
+- `[EWM] GF timer hook @ 0x004B0500 — MH_OK` (gf_patch.inl)
+- `[GF-BP] VEH registered: handle=0x0F3E74F8` (bp_diag.inl)
+- `[GF-EFFECT] Resolved battle_magic_id at 0x01D99A68 (poll mode)` (gf_effect.inl)
+- `Initialized v0.16.4 (EWM=ON, ATB=OK, GF=OK, FFNx=FAIL, PATCH=OK, BT=deferred)` — FFNx=FAIL is pre-existing v0.10.77 prologue-padding mismatch, not a regression
+- `[GF-PATCH] APPLIED: 0x004B04B4 = 0xC3 (RET)` at battle start, `RESTORED ... (MOV)` at end
+- `[EWM] ATB capped/released`, `[FRZ-DIAG]`, `[POST-REL]`, `[EWM-DIAG]`, `[DMG-DIAG]`, `[ACT-DIAG]` all firing
+- v0.13.57 ATB exact-value restore semantics preserved (POST-REL lines show entities at non-max values like 6615/12000, not all converged at 11999)
+
+### Open question from v0.16.4 BAT (not v0.16.4-related)
+
+In the second battle, Zell summoned Ifrit and his audio description didn't play. The log shows:
+
+- `[GF-EFFECT] Resolved battle_magic_id at 0x01D99A68 (poll mode)` ✓ install
+- `[HP-CHECK] GF substitution: slot0 -> Ifrit: 1650 HP.` ✓ HP display switched
+- GF cast animation, damage popup, kill announce all fired correctly
+- **No `[GF-EFFECT] Animation detected: effectId=200 gfIdx=2 slot=0` line anywhere** — `PollBattleMagicId` never observed magicId transitioning to 200, so `GfAudioDesc::OnGFAnimationStart(200)` was never called
+- `ff8_mod.log` is silent for `[GF-AD]` runtime lines (only the 18 init load lines)
+
+Two reasons this isn't likely v0.16.4-related:
+1. `gf_effect.inl` is byte-for-byte extracted; poll body and statics are identical to v0.16.3
+2. The install resolution line fires, proving `EWM_InstallBattleEffectHook` ran and set `s_battleMagicIdAddr` correctly
+
+Hypothesis: engine wrote `200` to `0x01D99A68` for fewer frames than the mod thread's poll period covered, or skipped the value entirely (writing the damage formula directly without staging through `battle_magic_id`). Intermittent, not refactor-correlated.
+
+**Diagnostic candidate if it recurs**: add a 1-second `[GF-EFFECT-POLL] magicId=N prev=M` heartbeat to `PollBattleMagicId` to see what values the engine *does* write during a GF cast. Backlog item, queued in DEVNOTES.md.
+
+---
+
 ## v0.16.1 chase_auto_pilot refactor + X-ATM092 chase chapter (v0.16.1 → v0.16.1.4, shipped commit `5c08a1a` 2026-05-16)
 
 Five logical versions, one GitHub push. The v0.16.1 refactor pulled the 108 KB `chase_auto_pilot.cpp` monolith into 8 `.inl` files + a 6.47 KB slim parent + an `_history.h` archive, mirroring v0.16.0's world_map template. The v0.16.1.1/.2/.3/.4 follow-ons started as diagnostic builds for an unrelated chase regression on doopen2a (Town Square 5) and ended with the X-ATM092 chase auto-pilot chapter closed end-to-end.

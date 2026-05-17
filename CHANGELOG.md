@@ -6,6 +6,73 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.16.5.1
+
+Three-line fix wiring `PollDeferredTurnAnnounce()` into `battle_tts.cpp::Update()` after the existing `PollHPChanges()` call. Latent dead-code bug since v0.13.52 (2026-02 timeframe): the deferred turn-announce release function was defined in what is now `battle_tts_menu_poll.inl` but was never invoked anywhere. Whenever a character's ATB filled on the exact frame an enemy attack landed (or a teammate's GF / spell animation was still resolving), `PollTurnAndCommands` would correctly identify the collision, stash "X's turn. <Cmd>." in `s_deferredTurnBuf`, log `[TURN] Deferred (damage in flight): ...`, and set `s_deferredTurnPending = true`. The release path that was supposed to drain that buffer once the damage TTS cleared (or hit the 5-second safety timeout, or cancel on stale activeChar) was simply never called per-frame. The stashed line sat in the buffer until battle end, then got silently wiped when the next battle's `OnBattleEnter` reset state.
+
+Discovered in the v0.16.5 BAT log triage: Selphie's third turn in battle 2 (timestamp 13:24:18, log line 2942) started on the exact frame Zell's Ifrit cast began animating. The defer line `[TURN] Deferred (damage in flight): Selphie's turn. Attack. (tts=0 hp=0 anim=0 engAnim=1)` appeared correctly, Ifrit's GF audio description played end-to-end (~23 s, all 6 cues), the battle continued, and ended ~78 s later — with no `[TURN] Deferred fired ...` or `[TURN] Deferred cancelled ...` log line ever appearing. Grep + dryRun probes across `battle_tts.cpp`, every `battle_tts_*.inl`, `battle_tts_hp.inl`, and `battle_tts_helpers.inl` confirmed no caller existed.
+
+The v0.16.5 split was pure mechanical, so both the function body and the absent call site are byte-for-byte from v0.16.4 and back through v0.13.52. The split did not introduce the bug — it exposed it by giving the BAT triage a clear marker to look for.
+
+### The fix
+
+`src/battle_tts.cpp`, right after the existing `PollHPChanges()` block:
+
+```cpp
+if (s_inBattle && s_initAnnounceDone && s_enemyAnnounceDone) {
+    PollDeferredTurnAnnounce();
+}
+```
+
+Guards match the surrounding poll calls (battle active, init done, enemies announced). Placement after `PollHPChanges` matches the function's own header comment so `s_ewmHoldForDamageTTS` reflects this frame's HP signals before the release-decision is made. No change to the function body in `battle_tts_menu_poll.inl`.
+
+### Reproducibility / verification
+
+The trigger window is one frame wide — a teammate's ATB has to fill on the exact frame an attack lands or a GF animation kicks off. Not reliably reproducible on demand. Future battle log review will look for `[TURN] Deferred (damage in flight): ...` followed by `[TURN] Deferred fired after <ms> ms: ...` (success) or `[TURN] Deferred cancelled (char N -> M, stale): ...` (turn already advanced). Pre-fix, only the first line would appear; post-fix, one of the latter two should always follow within ~5 seconds.
+
+### Impact
+
+From the player's perspective: whenever this collision happened (probably a handful of times per dungeon run with junctioned GFs in play), the spoken "<Character>'s turn. <Command>." line was silently dropped, requiring the player to figure out whose menu was open via cursor probing or HP key inspection. With this fix, the line speaks within milliseconds of the damage window clearing, with `PRIO_TURN` interrupting anything lower-priority that might be queued.
+
+## v0.16.5
+
+Pure mechanical split of `src/battle_tts_menu.inl` (81.89 KB monolith — over the 80 KB CI hard-fail line) into a slim 1.05 KB shell plus four sub-`.inl` modules. No behavioral change; turn announcements, command-menu navigation, target selection, all four submenus (Magic / GF / Item / Draw), Stock/Cast prompts, all-target entry/cancel, deferred GF cancel, and the v0.13.52 deferred-turn TTS are byte-for-byte identical to v0.16.4.
+
+This was the FINAL size-split task. With v0.16.5 shipped, every `src/*.cpp` and `src/*.inl` file is under the 80 KB CI hard-fail line. The CI allowlist in `.github/workflows/safety-checks.yml` is now empty. `field_archive_jsm_scan.inl` remains in the watch zone at 63 KB as an accepted exception (will warn but not fail).
+
+Battle menu TTS is user-facing and load-bearing for accessibility (every command, every spell, every submenu cursor move must announce correctly), so this split deliberately did NOT touch the `PollTurnAndCommands` function body. Internal blocks of that ~52 KB function share local variables (`cmdCursorChangedThisFrame`, `subCursor`) and live inside one outer SEH guard — splitting them into separate helper functions would have required scope restructuring that risks regressing menu announcements. The block stays whole in `_poll.inl`.
+
+### New files
+
+- `src/battle_tts_menu_state.inl` (16.2 KB) — all constants (`BATTLE_CMD_CURSOR`, `BATTLE_MENU_PHASE`, `BATTLE_SUBMENU_CURSOR`, `SAVEMAP_*`, `BATTLE_ITEM_*`, `DRAW_*`), name tables (`CHAR_NAMES[8]`, `MAGIC_NAMES[57]`, GF fallback names), free lookups (`GetCommandName`, `GetMagicName`, `GetDrawEntryName`), struct definitions (`MagicEntry`, `GFEntry`, `BattleItemEntry`, `DrawEntry`, `MagicSlot`), all module statics (sub-menu state, deferred-turn TTS, Magic/GF/Item/Draw list state, magic-snapshot state, turn-tracking state). Hoisted to the head of the chain so every subsequent sub-`.inl` sees these declarations.
+- `src/battle_tts_menu_lists.inl` (9.6 KB) — the per-turn list builders: `BuildMagicList`, `BuildGFList`, `BuildItemList` (plus `ReadBattleItemEntry` and `GetItemVisualPos` helpers), `BuildDrawList`, and the v0.12.52 Draw-validation pair `SnapshotAllMagicInventories` / `DiffMagicInventories`. All read state from `_state.inl`; consumed by `EnterSubmenu`, `PollTurnAndCommands`, and (for `DiffMagicInventories`) the dialog-injection "Received" path.
+- `src/battle_tts_menu_helpers.inl` (3.0 KB) — the per-frame helpers: `EnterSubmenu` (the v0.13.49 shared entry helper called from all three detection paths — submenu mode, dword detection, subCursor change), `GetBattleCharName` (savemap-driven char-name lookup, distinct from `GetSlotName` for the battle entity array), `BuildCharCommandList` (reads savemap `+0x50` equipped-command IDs into `s_turnCharCommands[]`).
+- `src/battle_tts_menu_poll.inl` (55.4 KB) — `PollTurnAndCommands` (the per-frame menu state machine: turn-start/end detection, char→char GF HP substitution arming, command cursor navigation, submenu debounce, target-phase entry/exit via `BATTLE_MENU_PHASE`, submenu entry via `0x01D768EB` mode byte, submenu entry via `BATTLE_MENU_PHASE` dword function-pointer detection, subCursor announcement routing per submenu type, v0.10.112 delayed submenu entry, Draw-specific cursor + Stock/Cast polling, v0.12.72 deferred GF cancel, v0.12.66 all-target entry/cancel via `0x01D7689D`) plus `PollDeferredTurnAnnounce` (the v0.13.52-53 deferred turn TTS release path).
+
+### Include chain
+
+Dependency-ordered, included textually from the slim `battle_tts_menu.inl` parent (which is itself included from `battle_tts.cpp` inside `namespace BattleTTS`):
+
+```
+state → lists → helpers → poll
+```
+
+`state.inl` must come first (declares every static and every struct). `lists.inl` reads state, defines builders. `helpers.inl` reads state, calls list builders. `poll.inl` consumes everything above.
+
+### Statics also referenced by `battle_tts.cpp`
+
+The `OnBattleEnter` reset block in `battle_tts.cpp` writes to many statics that now live in `battle_tts_menu_state.inl`: `s_turnActiveCharId`, `s_turnCmdCursor`, `s_turnCharCommands[]`, `s_inSubmenu` (declared in `battle_tts_hp.inl` since v0.13.51, modified from menu code), `s_turnSubmenuCursor`, `s_submenuCommandId`, `s_magicListBuilt`, `s_turnMagicCount`, `s_gfListBuilt`, `s_turnGFCount`, `s_itemListBuilt`, `s_turnItemCount`, `s_drawListBuilt`, `s_turnDrawCount`, `s_drawTargetSlot`, `s_drawCursorPrev`, `s_drawStockCastPrev`, `s_lastDrawerPartySlot`, `s_drawLastMenuPhase`, `s_pendingSubmenuEntry`, `s_pendingSubmenuTick`, `s_submenuDebouncing`, `s_submenuDebounceTick`, `s_limitBreakActive` (declared elsewhere), `s_lastLimitToggle` (declared elsewhere). `CHAR_NAMES[]` is read by `GetCharNameById` in the shared-victory section. All of these work because the `.inl` chain is textually included inside `battle_tts.cpp` BEFORE `OnBattleEnter` — file-scope `static` visibility carries across the include boundary, identical to the v0.16.4 pattern.
+
+### CI status
+
+Largest sub-file is `_poll.inl` at 55.4 KB — under the 60 KB warn line. The other three sub-files (state 16.2, lists 9.6, helpers 3.0) are comfortably small. Slim parent is 1.05 KB. Total split footprint is 85.3 KB versus the original 81.9 KB; the ~3 KB overhead is per-file orientation comment headers explaining each module's purpose and dependency position.
+
+`battle_tts.cpp` is unchanged — it still `#include`s `battle_tts_menu.inl` exactly as before; the content beneath that include simply expanded into the four sub-files. `deploy.bat` is unchanged (`.inl` files are textually included, only the parent `.cpp` compiles).
+
+### Allowlist emptied
+
+The `.github/workflows/safety-checks.yml` allowlist that protected the queued v0.16.x splits is now empty. The four entries (`field_dialog.cpp` for v0.16.2, `field_archive_jsm.inl` for v0.16.3, `battle_tts_ewm.inl` for v0.16.4, `battle_tts_menu.inl` for v0.16.5) were all stale — the corresponding files have all been carved into slim 1–3 KB shells. Removing them closes the refactor chapter that began with v0.16.0's `world_map.cpp` split.
+
 ## v0.16.4
 
 Pure mechanical split of `src/battle_tts_ewm.inl` (91.79 KB monolith — over the 80 KB CI hard-fail line) into a slim 2.17 KB shell plus nine sub-`.inl` modules. No behavioral change; the EWM freeze, GF fire prevention, dispatch hooks, FFNx hook, and per-frame state machine are byte-for-byte identical to v0.16.3. Pattern matches the v0.16.0 (`world_map.cpp`), v0.16.1 (`chase_auto_pilot.cpp`), v0.16.2 (`field_dialog.cpp`), and v0.16.3 (`field_archive_jsm.inl`) splits.
