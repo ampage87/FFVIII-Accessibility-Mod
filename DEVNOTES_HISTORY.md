@@ -6,6 +6,135 @@
 
 ---
 
+## v0.16.1 chase_auto_pilot refactor + X-ATM092 chase chapter (v0.16.1 → v0.16.1.4, shipped commit `5c08a1a` 2026-05-16)
+
+Five logical versions, one GitHub push. The v0.16.1 refactor pulled the 108 KB `chase_auto_pilot.cpp` monolith into 8 `.inl` files + a 6.47 KB slim parent + an `_history.h` archive, mirroring v0.16.0's world_map template. The v0.16.1.1/.2/.3/.4 follow-ons started as diagnostic builds for an unrelated chase regression on doopen2a (Town Square 5) and ended with the X-ATM092 chase auto-pilot chapter closed end-to-end.
+
+### v0.16.1.4 BAT result -- chase closed
+
+2026-05-16 21:54:20. doopen2a position trace from `ff8_nav_data.log`:
+
+```
+t=0       (-915, -176)   spawn          tri 52
+t=0+      (-738, -392)                  tri 51
+t=0+      (-574, -647)   MAX EAST       tri 50
+t=0+      (-577, -678)                  tri 49
+t=1       (-615, -889)                  tri 48  [stage 1 active]
+... (south, drifting west) ...
+t=5       (-936, -3653)  EXIT TRIGGER   tri 154
+```
+
+Field cleared in ~5 seconds of movement, no `[CBF] PASS` lines, no catches. Chase continued cleanly through dotown_3 (~14s, MODE_DIRECTION south + path-find handled the NW dead-end cluster the party started in), dotown_2 (~13s), dotown_1 (~11s) to the chase climax.
+
+**Empirical numbers vs v0.16.1.4 threshold-derivation predictions:**
+
+| Metric | Predicted | Actual | Notes |
+|---|---|---|---|
+| Spawn | `(-974, -166)` | `(-915, -176)` | spawn drifts +59 east run-to-run |
+| Max east X | `-629` | `-574` | auto-pilot got 55 more east than SE-rate model predicted |
+| Min battleyarou distance | 639 | 582 | still 82-unit margin outside TALKRAD=500 |
+| Min kani distance | n/a | 166 | inert confirmed |
+| Exit position | `(-905, -3447)` | `(-936, -3653)` | 31 west, 206 south of prediction; same SW corner |
+| Total field time | ~4.25s | ~5s | well under 7s TALKRAD expansion |
+
+### Findings shipped as part of the chase chapter
+
+1. **Kani is inert on doopen2a.** Confirmed twice: Aaron's manual run (162 units, no catch), v0.16.1.4 auto-pilot (166 units, no catch). All pre-v0.16.1.4 commentary attributing doopen2a catches to kani was wrong.
+2. **Battleyarou has a static TALKRAD=500 catch zone around its JSM-init position `(0, -744)`.** Confirmed by v0.16.1.3 BAT (453 units from `(0, -744)`, caught at t=1s).
+3. **Battleyarou's TALKRAD expands to 700 at the 7-second mark** on doopen2a, per `[TALKRAD] CHANGED @0x1F8: 500 -> 700` at 21:10:45 in Aaron's manual run with context bytes shifting `@21E 0->2 @244 0->3` indicating a script state transition. The chase mechanic is "outrun an expanding catch radius."
+4. **`ff8_nav_data.log` is the silent goldmine for chase debugging.** Logs every player triangle change as `[timestamp] COORD field tri X Y ...` regardless of auto-pilot state -- including manual runs. The `ChaseAutoPilot` per-tick log in `ff8_field.log` only fires when the auto-pilot is engaged, but `ff8_nav_data.log` always logs movement. This is how the v0.16.1.4 fix was derived from Aaron's manual chase trace.
+
+### Open question (no blocker)
+
+Why did v0.16.1.2's t=3 catch fire at `(-870, -1900)` -- 1447 units from battleyarou's static position, far outside any TALKRAD? The `[CBF] PASS` caller was battleyarou (`entityPtr=0x0188CA04`). Aaron's manual run passes through similar positions without catch. Hypothesis: battleyarou has a velocity- or motion-vector-based catch in addition to the static proximity zone, and the auto-pilot's faster motion or different direction vector trips it on the direct south path. The v0.16.1.4 east-first / west-corridor route empirically avoids it. The mechanism remains uncharacterized; revisit only if a future regression makes it relevant.
+
+### Diagnostic logging from v0.16.1.1 (still in place)
+
+`ReadBattleyarouPosition` SEH-guarded helper in `chase_auto_pilot_io.inl`; `by=(X,Y) bydist=N` per-tick suffix added to the four `ChaseAutoPilot::tick` log paths in `chase_auto_pilot_update.inl`; `_ReturnAddress()` capture on `[CBF] PASS` line in `chase_battle_freeze.cpp`. Useful baseline for any future chase regression.
+
+### v0.16.1 file layout (shipped in v0.16.1.4)
+
+- `chase_auto_pilot.cpp` slim parent (6.47 KB), namespace block + `.inl` chain + public API.
+- `chase_auto_pilot_history.h` (19.15 KB, `#if 0`, NOT in build).
+- Eight `.inl` files: `state` (15.67 KB) -> `route` (21.01 KB) -> `io` (4.3 KB, +0.7 in v0.16.1.1) -> `helpers` (6.81 KB) -> `diag` (5.23 KB) -> `bridge` (7.06 KB) -> `engage` (11.27 KB) -> `update` (16.6 KB, +0.4 in v0.16.1.1).
+
+Largest `.inl` still well under the 60 KB CI warn line.
+
+### Sub-version breakdown
+
+- **v0.16.1** -- pure-refactor split of `chase_auto_pilot.cpp` (108 KB -> 6.47 KB slim parent + 8 `.inl` + history). Mirrors v0.16.0 world_map.cpp template. CI allowlist entry removed. BAT (2x): caught the party on doopen2a ~4 seconds after entry regardless of party position. Aaron directed diagnose-forward instead of version-bisection -- v0.16.1.1 is the diagnostic build.
+- **v0.16.1.1** -- chase doopen2a catch diagnostic. Three pure-diagnostic additions: `ReadBattleyarouPosition`, ` by=(X,Y) bydist=N` per-tick log suffix, `_ReturnAddress()` capture on `[CBF] PASS`. BAT: battleyarou reads `(0,0)` on every chase field (entity UNUSE'd, not tracked); `bydist` increases as party moves away from origin. Surfaced the domt2_1 5s stuck (`pos=(3,-1603)`, `moveDist=160` then `moveDist=0`, 3 velocity-stuck skips over 5s) as a salient observation -- later confirmed by Aaron as the **scripted X-ATM092 landing animation**, immutable cinematic, not a pathing bug. Diagnostic logging retained going forward.
+- **v0.16.1.2** -- funnel wall-parallel portal COLLAPSE fix in `field_nav_pathfinding.inl::FunnelPath`. Wall-parallel portals now emit a midpoint waypoint instead of being skipped, with `SKIP_WALL_PARALLEL_LEGACY = false` toggle as Fix A fallback. BAT: COLLAPSE fired correctly on domt2_1, party reached the new waypoint cleanly, but the 5s stuck persisted unchanged (because it's the cinematic, see above). Doesn't help the chase but doesn't regress anything; COLLAPSE code stays in for other walkmesh cases.
+- **v0.16.1.3** -- doopen2a config switched from `MODE_TARGET (-952, -3800)` to `MODE_STAGED_DIRECTION` with `kStages_doopen2a[]` table per Aaron's sighted-player recipe. Threshold initially wrong: `Y<-1500` required 1.94 seconds of SE motion to reach the (assumed-safe) `X>=-185` boundary, but that trajectory walked the party THROUGH battleyarou's static 500-unit zone at t=1s. BAT caught at `(-446, -821)`, 453 units from `(0, -744)`.
+- **v0.16.1.4** -- threshold corrected to `Y<-631` based on Aaron's manual chase BAT trace from `ff8_nav_data.log`. End of stage 0 at approximately `(-629, -631)` -- same X as Aaron's max-east excursion, ~146 unit safety margin (actual 82 in BAT). BAT clean.
+
+### Lessons that carried forward
+
+1. **`ff8_nav_data.log` is the silent goldmine.** Logs every triangle change regardless of auto-pilot state. Use whenever Aaron's manual play is the ground truth.
+2. **Aaron's domain knowledge is ground truth, but his recipes need empirical verification.** The "SE several steps then S to the exit gateway" recipe pointed in the right direction but with the wrong magnitudes (max east X=-629 was much less east than the model predicted).
+3. **Multiple catch sources on one field may not all be active.** doopen2a's JSMScan listed both kani and battleyarou as catch entities; only battleyarou is active. The TALKRAD log only fires for battleyarou's entity pointer, which was a missed clue across multiple BATs.
+4. **Per-field problems require per-field analysis.** The robot's position resets at every field boundary. Each chase field is its own self-contained proximity-catch problem.
+5. **MODE_STAGED_DIRECTION threshold math needs empirical SE-rate calibration per field.** The doopen2a camera vectors (`camRight=(0.927,-0.376)`, `camDown=(-0.097,-0.995)`) plus FF8's non-normalized analog produce a faster diagonal than the normalized-speed model predicts. v0.16.1.3 BAT measured 528 east + 716 south per second for SE; v0.16.1.4 BAT measured even higher (the party reached X=-574 by Y=-647, implying ~700 east per second).
+
+---
+
+## v0.16.0.x — world_map.cpp split + Parts B/C + CI guard + drive fixes (commits ending at `1e3d7fd5` 2026-05-16)
+
+v0.16.0 / .0.1 / .0.2 / .0.3 shipped as four sequential commits to GitHub.
+
+### v0.16.0 — world_map.cpp split + Parts B/C + CI guard
+
+10-file refactor of the 222.80 KB / 4452-line v0.15.13.2 `src/world_map.cpp` monolith. Now a slim parent + 9 `.inl` files plus `world_map_history.h` archive.
+
+Three behavioral safety nets accompany the structural split:
+
+- **Part B** (arrival.inl): off-target-distance cap on arrival.
+- **Part C** (drive.inl): `StartAutoDrive` checks `s_destPlannerEligible[locIdx]` before calling `PlanDrivePath`. Ineligible destinations skip the planner entirely; UpdateAutoDrive's non-planner branch handles them with v0.11.11-era simple-coord steering.
+- **ComputePlannerEligibility** (planner.inl): runs once at Initialize, after LoadTriggerZones. Sets `s_destPlannerEligible[LOCATION_COUNT]`. Logs per-catalog YES/NO classification. 11/38 eligible in master catalog.
+
+CI guard (`.github/workflows/safety-checks.yml`) `source-file-size-check` job: 60 KB soft warning, 80 KB hard fail. Existing oversized files allowlisted with v0.16.x ticket numbers.
+
+#### File split layout
+
+`state.inl` first (types/state). Then `segments.inl` (coord math + archive I/O), `trigger_data.inl` (38 wmsetus.obj Section 8 programs + LogTriggerPrograms), `catalog.inl` (`s_locations[]` + LOCATION_COUNT + BFS reachability), `announce.inl`, `planner.inl` (A* + ComputePlannerEligibility), **`drive.inl`** (StopAutoDrive + StartAutoDrive + UpdateAutoDrive), **`arrival.inl`** (ResolveDeferredArrival; AFTER drive.inl because it calls StopAutoDrive), `keys.inl` (PollKeys). Slim `world_map.cpp` opens namespace, includes all 9 .inl files in dependency order, defines `Initialize` / `Update` / `Shutdown` / `Poll`. `world_map_history.h` holds the pulled-out v0.14.31-v0.15.13.2 changelog narrative (NOT in build path, `#if 0` wrapper). `MAX_LOCATIONS = 64` in state.inl decouples state-array sizing from `LOCATION_COUNT`.
+
+### v0.16.0.1 — "Position unavailable" fix + Part C locIdx fix
+
+(1) `GetWorldMapPosition_Active` guards vehicle-pos overwrite with `if (vx != 0 || vy != 0)`; stale `s_lastVehicle=37` (VEH_CAR) no longer clobbers valid foot DWORDs. `[VEH-POS-FALLBACK]` diagnostic log added (later quieted in v0.16.0.3). (2) Part C gate switched from `s_destPlannerEligible[catIdx]` (BFS-filtered) to `[locIdx]` (master-table).
+
+### v0.16.0.2 — Fire Cavern works
+
+Three fixes from v0.16.0.1 BAT log. **(1)** Poll() replan-gate honors planner-eligibility via new `s_drivePlannerEligible` flag. On world-map re-entry after random-encounter pause, replan now gated; eligible destinations replan via PlanDrivePath, ineligible stay on simple-coord steering (no closest-active-region fallback misroute). **(2)** Part B two-tier cap: 2500 planner-eligible / 8000 geometric-trigger. Refined-coord capture self-corrects to actual trigger position on first arrival; subsequent visits fall back inside the strict 2500 cap. **(3)** Fire Cavern refined-coord hardcoded at (30326,-29221) in Initialize() alongside Balamb Town.
+
+**v0.16.0.2 BAT result summary** (15:33:49 -> 15:40:32):
+
+Fix 3 (Initialize hardcode) -- VERIFIED at module init:
+```
+[INIT] Refined entry default: Balamb Town (12896,-26711)
+[INIT] Refined entry default: Fire Cavern (30326,-29221)
+```
+
+Fire Cavern drive -- CLEAN ARRIVAL in 7 seconds. Used refined entry (30326,-29221) instead of catalog (36864,-28672). `Geometric-trigger destination Fire Cavern (locIdx=37, planner-ineligible) using simple-coord steering`. No `[PLAN-DEBUG]` walk. Arrival: `dist=66, lastPos=(30260,-29221), planned=0, fieldId=0x0088, fieldName='', elapsed=547ms`. Refined coord auto-updated from (30326,-29221) -> (30260,-29221) (66 units west, the actual approach-trigger entry point).
+
+Balamb Town drive -- 4 encounter cycles, all resumed correctly via planner. Encounters at dist=12926, 10436, 9351, 5157, 1496 -- each `Paused via game-mode (MODE_SWIRL)` -> `Replanning after world-map re-entry` -> normal `[PLAN-DEBUG]` walk -> resume. Final arrival: `dist=65, fieldId=0x006A, fieldName='bcgate_1', elapsed=563ms`. Refined coord re-captured at (12894,-26776) -- 2 units off the prior hardcode.
+
+Fix 1 (Poll() replan-gate) verification: the gate's `if (s_drivePlannerEligible) PlanDrivePath else log+keep-simple-coord` ran the planner-eligible branch 4 times for Balamb Town. The planner-ineligible branch did not fire because Fire Cavern arrived too quickly to encounter a battle -- but the conditional is structurally exercised and the eligible-side behavior matches expected.
+
+Fix 2 (two-tier 2500/8000 cap) verification: structurally in place but unused this BAT. Fire Cavern arrived at dist=66 (well inside strict 2500), Balamb Town arrived at dist=65 (also inside). The 8000 cap is a safety net for future geometric-trigger destinations on their first visit before refined-coord capture.
+
+### v0.16.0.3 — VEH-POS-FALLBACK log transition-only
+
+`world_map_segments.inl` -- fallback log now uses a function-local static to fire only when `s_lastVehicle` changes from the last-logged value. No heartbeat. Eliminates ~1800-line floods like v0.16.0.2 BAT produced; one line per distinct vehicle byte that triggers the fallback. **BAT confirmed: zero fallback lines in 733-line log** (vs ~1800 in 2262 for v0.16.0.2).
+
+Bonus: this BAT exercised the planner-ineligible branch of v0.16.0.2's Fix 1. Fire Cavern drive hit a random encounter, re-entered the world map, and Poll() correctly logged `[DRIVE] Planner-ineligible destination -- keeping simple-coord steering, not replanning` before reaching final-approach arrival at dist=66. Both branches of Fix 1 (eligible via Balamb Town, ineligible via Fire Cavern) are now empirically verified. Bonus 2: Fire Cavern A's engine `fieldName='bdview1'` captured this run (the populate race resolved in time), confirming fieldId 0x0088 ↔ 'bdview1'.
+
+### v0.16.0.x open follow-ups (carried to backlog, not blockers)
+
+1. **`fieldName=''` race at Fire Cavern arrival.** 7-second drives can beat the field-name pointer's populate timing in Part B's snapshot. **DIAGNOSTIC LOG ONLY, audio is fine** -- FieldAnnounce reads the pointer hundreds of ms later and announces correctly. Backlog action: either retry briefly in Part B before logging, or accept (fieldId alone is sufficient).
+2. **Fire Cavern A fieldId/fieldName mapping** -- confirmed in v0.16.0.3 BAT: `fieldId=0x0088`, engine `fieldName='bdview1'`. Useful data for the FieldAnnounce display-name catalog audit backlog item (`src/field_display_names.h`). Confirm 0x0088 ↔ 'bdview1' ↔ "Fire Cavern A" mapping is consistent end-to-end.
+
+---
+
 ## Sessions 66+ (2026-04-27 → 2026-05-05) — Scan TTS chapter (v0.14.50 → v0.14.82) + World Map saga (v0.14.83 → v0.14.90.3)
 
 Two consecutive multi-build sagas, both pushed to GitHub. The detailed version-by-version build narratives live in the GitHub commit messages — see commits below — so this archive entry is a topical index rather than a duplicate of the commit text.

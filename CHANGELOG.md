@@ -6,6 +6,39 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.16.2
+
+Pure mechanical split of `src/field_dialog.cpp` (88 KB monolith → 3 KB slim parent + 8 `.inl` files). No functional change. Pattern matches the v0.16.0 (`world_map.cpp`) and v0.16.1 (`chase_auto_pilot.cpp`) splits.
+
+### New files
+
+- `src/field_dialog_state.inl` — typedefs, all module-static state, struct definitions (`WindowState`, `PendingText`), window-object layout constants, FMV-poll state, show_dialog dedup state, and the `MarkPendingAsSpoken` forward declaration.
+- `src/field_dialog_helpers.inl` — pointer validation (`IsValidTextPointer`, `ProbePointer`, `ProbeGetstrResult`), window accessors (`GetWindowObj`, `GetWinText1/2`, `GetWinOpenCloseTransition`), text helpers (`TrimDecoded`, `IsSuffixOrSubstring`, `fnv1a_prefix`), `CreateDetourHook`.
+- `src/field_dialog_scan.inl` — the central TTS-speak path: `ScanAndSpeakAllWindows`, `ScanAndSpeakChoiceWindows`, `MarkPendingAsSpoken`, `CheckPendingTexts`.
+- `src/field_dialog_show_dialog.inl` — `Hook_show_dialog` with OOR diagnostic, FNV-1a hash dedup, scan-active suppression, chase overlay forward, battle drawer-name decoration.
+- `src/field_dialog_opcodes.inl` — opcode hooks (mes/mesw/ask/ames/aask/amesw), diagnostic opcode hooks (tuto/mesmode/ramesw), `Hook_field_get_dialog_string` with the DialogInject override path, and `RepeatLastDialog`.
+- `src/field_dialog_diag.inl` — dispatch instrumentation (`DispatchStub`, `DispatchStub_EDX`, `PatchDispatchSite`, `UnpatchDispatchSite`), naked counter hooks, `Hook_get_character_width` + `CheckGcwBuffer`, `DiagRawWindowDump`.
+- `src/field_dialog_menuname.inl` — `Hook_opcode_menuname` with GF-diff-on-acquire detection and naming-screen UI suppression.
+- `src/field_dialog_lifecycle.inl` — `Initialize`, `Shutdown`, `PollWindows` (FMV-aware polling fallback).
+
+### Include chain
+
+Dependency-ordered, included textually from the slim parent inside `namespace FieldDialog`:
+
+```
+state → helpers → scan → show_dialog → opcodes → diag → menuname → lifecycle
+```
+
+The parent retains the tiny public-API tail (`IsActive`, `IsDialogOpen`, `GetMenuDrawTextCallCount`, `GetGetCharWidthCallCount`, `SnapshotGcwBuffer`) for visibility — everything else is in the `.inl` chain. Build script (`src/deploy.bat`) unchanged: `.inl` files are textually included, only the parent `.cpp` compiles.
+
+### CI guard
+
+60 KB warn / 80 KB hard-fail thresholds (`.github/workflows/safety-checks.yml`) respected. Largest new file is `field_dialog_lifecycle.inl` at ~12 KB; all others under 25 KB. The 88 KB monolith no longer trips the limit.
+
+### Why
+
+Readability + future-proofing. The v0.16.x refactor sequence is carving every source file over 60 KB into focused `.inl` modules so single-area edits stop touching half the dialog system. `field_dialog.cpp` was the second-largest remaining offender after the v0.16.1 chase split.
+
 ## v0.16.1.4
 
 Corrects the doopen2a auto-pilot route based on Aaron's manual chase BAT (2026-05-16 21:10:38-21:10:47), which successfully cleared Town Square 5 in 9 seconds total with 0 catches. The `ff8_nav_data.log` COORD trace captured every triangle change of the manual run and is the source of truth for the new threshold.
