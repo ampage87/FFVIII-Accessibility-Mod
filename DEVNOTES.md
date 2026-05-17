@@ -4,15 +4,25 @@ Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` inj
 
 **Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
 
-GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.16.1.4** (commit `5c08a1a`, pushed 2026-05-16 21:57:55, tagged `v0.16.1.4`). **Local tree = v0.16.2** (field_dialog.cpp split, pending BAT before push).
+GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.16.2** (commit `7eb1ab1e`, pushed 2026-05-17 05:09:53 UTC, parent `5c08a1ae` = v0.16.1.4). **Local tree = v0.16.3, BAT cleared 2026-05-16 23:56, ready to push.**
 
 ---
 
-## Current state: chase chapter closed; v0.16.2 split complete (pending BAT)
+## Current state: v0.16.3 field_archive_jsm.inl split BAT cleared
 
-The X-ATM092 chase auto-pilot is **complete**. v0.16.1.4 BAT cleared doopen2a in ~5 seconds and progressed cleanly through dotown_3 → dotown_2 → dotown_1 to the chase climax with zero `[CBF] PASS` catches.
+The X-ATM092 chase auto-pilot chapter is **closed**. v0.16.1.4 BAT cleared doopen2a in ~5 seconds and progressed cleanly through dotown_3 → dotown_2 → dotown_1 to the chase climax with zero `[CBF] PASS` catches.
 
-**v0.16.2 mechanical refactor (this session):** `src/field_dialog.cpp` split 88 KB monolith → 3 KB slim parent + 8 `.inl` files. Include chain in dependency order: state → helpers → scan → show_dialog → opcodes → diag → menuname → lifecycle. No functional change. `deploy.bat` unchanged (only the parent `.cpp` compiles). Pending Aaron BAT before push.
+**v0.16.3 (this session) BAT cleared on `bgryo1_1` 23:56:24-23:56:35:** `src/field_archive_jsm.inl` (91 KB monolith, over the 80 KB CI hard-fail) carved into a 2 KB slim shell + seven sub-`.inl` files. Strategy was **Option B** (small refactor, not pure mechanical): the cross-pass `static` arrays inside `ScanJSMScripts()` were hoisted to namespace scope so the Director post-pass could share them, and the Director DIAGNOSTIC + post-pass blocks were extracted into a new `RunDirectorDetection()` helper. Behavior byte-for-byte identical — 18 entities scanned, `[SET3-DIAG]` / `[SET3-SHIFT]` firing for rinoa/dic/seed, 8 `[DIR-DIAG]` lines, classification results `SavePts=2 LineCamPan=1 LineScreenBd=1 LineEvent=1 PshmCoord=3 Dir=0`, INF-GW gateways resolved, catalog populated.
+
+Include chain (dependency-ordered, included textually from the slim parent inside `namespace FieldArchive`):
+
+```
+state → constants → helpers → opnames → director → scan → dump
+```
+
+File sizes: state 4.4 KB, constants 6.5 KB, helpers 2.1 KB, opnames 2.6 KB, director 10.4 KB, scan 63.3 KB, dump 7.1 KB. `scan.inl` lands just over the 60 KB warn line (down from 91 KB hard-fail); further splitting would require breaking the per-entity opcode scan loop into sub-helpers, which crosses from mechanical extraction into behavior-touching refactor — deferred until there's a functional reason. `field_archive.cpp` unchanged.
+
+**v0.16.2 shipped:** `src/field_dialog.cpp` split 88 KB monolith → 3 KB slim parent + 8 `.inl` files. Pure mechanical, no functional change. Include chain in dependency order: state → helpers → scan → show_dialog → opcodes → diag → menuname → lifecycle. BAT 2026-05-16 23:00 confirmed clean: all 14 MinHook detours installed, AMESW / AASK / RAMESW / show_dialog dedup paths all firing correctly. One minor pre-existing POLL teardown garble (`[Name80]kindrL`) noted in backlog.
 
 The full v0.16.1.x narrative (refactor scope, chase chapter, BAT empirical numbers, findings, file layout, open question) is archived in **`DEVNOTES_HISTORY.md`** at the top. Consult it only if a chase regression surfaces.
 
@@ -24,23 +34,24 @@ Likewise the v0.16.0.x world_map.cpp split + Parts B/C + Fire Cavern fixes are a
 
 ## Active refactor queue
 
-Three source files remaining over the 60 KB CI warn line, ordered by size:
+Two source files remaining over the 60 KB CI warn line, ordered by size:
 
-1. **v0.16.2**: split `src/field_dialog.cpp` (88 KB). **DONE this session** (pending BAT + push). 8 `.inl` files + 3 KB slim parent. Largest new file: `field_dialog_lifecycle.inl` ~12 KB.
-2. **v0.16.3**: split `src/field_archive_jsm.inl` (91 KB). **Next up.**
-3. **v0.16.4**: split `src/battle_tts_ewm.inl` (90 KB).
-4. **v0.16.5**: split `src/battle_tts_menu.inl` (82 KB).
+1. **v0.16.4**: split `src/battle_tts_ewm.inl` (90 KB). **Next up.** Pattern matches v0.16.2 (regular `.inl`, not nested-include shell).
+2. **v0.16.5**: split `src/battle_tts_menu.inl` (82 KB).
 
-Note on v0.16.3 quirk: `field_archive_jsm.inl` is *already* an `.inl` (textually included from `field_archive.cpp`). The split will likely produce a set of sub-`.inl`s included by it, rather than a slim-parent-`.cpp` pattern. Confirm strategy at session start.
+(`field_archive_jsm_scan.inl` at 63 KB is in the watch zone but accepted as-is — see v0.16.3 entry above.)
 
-Pattern (established in v0.16.0 world_map.cpp split, refined in v0.16.1 chase_auto_pilot.cpp split, applied again in v0.16.2 field_dialog.cpp split): parent `.cpp` becomes a slim file with namespace block + `#include` chain of `.inl` files + tiny public-API tail. `*_state.inl` (statics) included FIRST. No header guards or namespace decls inside `.inl` files. `*_history.h` archive with `#if 0` wrapper holds removed legacy content (when applicable). Aim for 5-20 KB per `.inl`; resplit if any approaches 60 KB.
+Completed: v0.16.0 (`world_map.cpp`), v0.16.1 (`chase_auto_pilot.cpp`), v0.16.2 (`field_dialog.cpp`), v0.16.3 (`field_archive_jsm.inl`).
+
+Pattern (established in v0.16.0, refined in v0.16.1, applied again in v0.16.2): parent `.cpp` becomes a slim file with namespace block + `#include` chain of `.inl` files + tiny public-API tail. `*_state.inl` (statics) included FIRST. No header guards or namespace decls inside `.inl` files. `*_history.h` archive with `#if 0` wrapper holds removed legacy content (when applicable). Aim for 5-20 KB per `.inl`; resplit if any approaches 60 KB.
 
 ## Backlog (priority order, after the refactor queue)
 
-1. **`menu_tts.cpp` T-handler `!shift` gate**. One-line cleanup.
-2. **FieldAnnounce display-name catalog audit** in `src/field_display_names.h`. Wrong mappings for fieldIds 0x0134 / 0x0136. Verify Fire Cavern A mapping (fieldId 0x0088, engine `fieldName='bdview1'`, expected "Fire Cavern A") end-to-end.
-3. **Field-name populate race** at Part B arrival check — DIAGNOSTIC LOG ONLY, audio is fine. v0.16.0.2 BAT caught the snapshot at `fieldName=''` for a 7-second drive; v0.16.0.3 BAT caught it at `fieldName='bdview1'` once the race resolved. Backlog action: either retry briefly in Part B before logging, or accept (fieldId is sufficient).
-4. **Deep-research doc updates**: `Plan & Research Documents/Dollet timer countdown deep research results.md` — wrong-math fix + LIVE TIMER FOUND appendix.
+1. **POLL teardown garble** (new in v0.16.2 backlog): the polling-thread fallback occasionally speaks fragments like `[Name80]kindrL` ~17 seconds after a dialog dismiss, when the window buffer is being torn down and the poller picks up intermediate state. Pre-existing behavior, NOT a v0.16.2 regression — same `MIN_TEXT_LENGTH=3` filter + hash dedup as v0.16.1.4. Fix candidate: reject text containing unresolved `[…]` tokens in the POLL path.
+2. **`menu_tts.cpp` T-handler `!shift` gate**. One-line cleanup.
+3. **FieldAnnounce display-name catalog audit** in `src/field_display_names.h`. Wrong mappings for fieldIds 0x0134 / 0x0136. Verify Fire Cavern A mapping (fieldId 0x0088, engine `fieldName='bdview1'`, expected "Fire Cavern A") end-to-end.
+4. **Field-name populate race** at Part B arrival check — DIAGNOSTIC LOG ONLY, audio is fine. v0.16.0.2 BAT caught the snapshot at `fieldName=''` for a 7-second drive; v0.16.0.3 BAT caught it at `fieldName='bdview1'` once the race resolved. Backlog action: either retry briefly in Part B before logging, or accept (fieldId is sufficient).
+5. **Deep-research doc updates**: `Plan & Research Documents/Dollet timer countdown deep research results.md` — wrong-math fix + LIVE TIMER FOUND appendix.
 
 ### Future (deferred)
 

@@ -6,6 +6,49 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.16.3
+
+Split `src/field_archive_jsm.inl` (91 KB monolith, over the 80 KB CI hard-fail line) into a slim 2 KB shell plus seven sub-`.inl` modules. The JSM scanner pipeline was the last source file over the size limit; with this split, the field-archive subsystem stays under the 80 KB cap.
+
+### Strategy
+
+This was a small-refactor split rather than a pure mechanical one. Two changes:
+
+1. **State hoist.** The cross-pass `static` arrays inside `ScanJSMScripts()` (`s_methodMapjumps`, `s_entityReqs`, `s_entityPopms`, `s_initVarMaps`, `s_reqOpcodeCount`, `s_hasSetmodelInit`, `s_hasDialogAny`, `s_hasExtDispatchArr`) and their containing struct definitions (`MethodMapjump`, `ReqCallInfo`, `EntityReqs`, `EntityPopms`, `VarWrite`, `EntityVarMap`) were promoted from function-local to namespace scope so the Director post-pass can share them. Function-local `static` already has program lifetime; the move is visibility-only. The explicit `memset` block at scan entry remains and preserves the zero-on-entry contract identically.
+2. **Director helper extraction.** The DIAGNOSTIC + Director-detection-post-pass blocks (originally a v0.12.20 addition with its own bounded scope) were extracted verbatim into a new `RunDirectorDetection()` helper. `ScanJSMScripts()` now calls it as a single line after the draw-point trigger cross-reference completes.
+
+Behavior is byte-for-byte identical to v0.16.2.
+
+### New files
+
+- `src/field_archive_jsm_state.inl` (4.4 KB) — hoisted struct decls, size constants (`MAX_METHOD_MAPJUMPS`, `MAX_PSHM_PER_METHOD`, etc.), the eight cross-pass `static` arrays, and the `RunDirectorDetection` forward declaration.
+- `src/field_archive_jsm_constants.inl` (6.5 KB) — `JSM_OP_*` opcode ID constants and `JSMEntityTypeName()` lookup.
+- `src/field_archive_jsm_helpers.inl` (2.1 KB) — `GetFieldIdByInternalName`, `SwapBE32`, `DecodeJSMInstruction`.
+- `src/field_archive_jsm_opnames.inl` (2.6 KB) — `GetOpcodeName()` lookup for the script-dump diagnostic.
+- `src/field_archive_jsm_director.inl` (10.4 KB) — `RunDirectorDetection()` post-pass: the `[DIR-DIAG]` log emitter and the Director identification + dispatch-target promotion logic, including the party-character SYM filter.
+- `src/field_archive_jsm_scan.inl` (63.3 KB) — `ScanJSMScripts()` main body with the Director block replaced by a single helper call and the consolidated memset block referencing the namespace-scope arrays.
+- `src/field_archive_jsm_dump.inl` (7.1 KB) — `DumpEntityScript()` diagnostic.
+
+### Include chain
+
+Dependency-ordered, included textually from the slim parent inside `namespace FieldArchive` (which is itself included from `field_archive.cpp`):
+
+```
+state → constants → helpers → opnames → director → scan → dump
+```
+
+`state.inl` must come first because it declares the cross-pass arrays and the helper forward decl; everything else depends on those. `director.inl` precedes `scan.inl` so the helper body acts as its own declaration when `scan.inl` calls it.
+
+### CI status
+
+`scan.inl` lands at 63.3 KB — just over the 60 KB warn line but well under the 80 KB hard fail. The 91 KB parent monolith is gone; the largest single piece of the JSM scanner is now ~70% of the CI hard limit. The dense per-entity opcode-scan loop is what keeps `scan.inl` chunky; further splitting would require breaking the loop into sub-helpers, which crosses the line from mechanical extraction into behavior-touching refactor. Holding off until there's a functional reason to revisit.
+
+`field_archive.cpp` is unchanged — it still `#include`s `field_archive_jsm.inl` exactly as before; the `.inl` content beneath that include simply expanded into the seven sub-files. Public-API surface (`JSMEntityTypeName`, `ScanJSMScripts`, `DumpEntityScript` declared in `field_archive.h`) is identical.
+
+### Why
+
+v0.15-era debugging on the X-ATM092 chase repeatedly touched both the JSM scanner (for Background-entity classification fixes) and the Director detection logic (for dormitory-field interactive-object promotion). With both living in a 91 KB monolith, surgical edits to either side required scrolling through the other. The split lets future Director-detection work happen in a 10 KB file and leaves `scan.inl` focused on the per-entity opcode pass.
+
 ## v0.16.2
 
 Pure mechanical split of `src/field_dialog.cpp` (88 KB monolith → 3 KB slim parent + 8 `.inl` files). No functional change. Pattern matches the v0.16.0 (`world_map.cpp`) and v0.16.1 (`chase_auto_pilot.cpp`) splits.
