@@ -4,15 +4,38 @@ Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` inj
 
 **Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
 
-GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.15.13.2** (commit `3d6db2a`). **Local tree = v0.16.0.3** (log-spam cleanup on top of v0.16.0.2 BAT pass), ready for Aaron to push the v0.16.0/v0.16.0.1/v0.16.0.2/v0.16.0.3 chain via `Utilities/push_to_github.ps1`.
+GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.16.0.3** (commit `1e3d7fd5`, pushed 2026-05-16 22:09:49 UTC). **Local tree = v0.16.1.4** (doopen2a SE-stage threshold tightened from Y<-1500 to Y<-631 based on Aaron's manual chase BAT trace; on top of v0.16.1.3 staged config, v0.16.1.2 funnel COLLAPSE, v0.16.1.1 diagnostics, v0.16.1 chase_auto_pilot split; all five unpushed, awaiting BAT).
 
 ---
 
-## Current state: v0.16.0.3 — VEH-POS-FALLBACK log-spam fix on top of v0.16.0.2 BAT pass
+## Current state: v0.16.1.4 doopen2a threshold revision, awaiting BAT
 
-v0.16.0.3 is a single-file cleanup: `world_map_segments.inl` logs `[VEH-POS-FALLBACK]` only on `s_lastVehicle` transition (a function-local static tracks the last-logged value). No time-based heartbeat — once a given vehicle byte has been logged, subsequent identical entries stay silent. No functional change.
+v0.16.1.3 BAT (2026-05-16 20:38:38) caught the party in 1 second on doopen2a with auto-pilot SE direction at `(-446, -821)` -- 453 units from battleyarou's JSM-init position `(0, -744)`, inside TALKRAD=500. The v0.16.1.3 threshold of `Y<-1500` was based on the assumption that kani had an active proximity catch and that the SE leg had to extend past kani's X boundary (>=-185). That assumption was wrong on TWO counts:
 
-**v0.16.0.3 BAT — PASSED.** Zero `[VEH-POS-FALLBACK]` lines in 733 log lines (vs ~1800 in 2262 for v0.16.0.2). As a bonus, this BAT exercised the planner-ineligible branch of v0.16.0.2's Fix 1 (Poll() replan-gate): Fire Cavern drive hit a random encounter, re-entered the world map, and Poll() correctly logged `[DRIVE] Planner-ineligible destination -- keeping simple-coord steering, not replanning` before reaching final-approach arrival at dist=66. Both branches of Fix 1 (eligible via Balamb Town, ineligible via Fire Cavern) are now empirically verified. Aaron is ready to push v0.16.0/.0.1/.0.2/.0.3 chain.
+1. The 1.94 seconds of SE motion required to reach X=-185 sent the party THROUGH battleyarou's static 500-unit zone around `(0, -744)`. The trajectory passed within 453 units of `(0, -744)` at t=1s and triggered the proximity catch immediately.
+2. KANI HAS NO ACTIVE PROXIMITY CATCH ON DOOPEN2A. Aaron's manual chase BAT (21:10:38-21:10:47) cleared the field in 4 seconds of movement, passing within 162 units of kani at `(-685, -2284)` at position `(-807, -2391)` without being caught.
+
+The `ff8_nav_data.log` COORD trace captured every triangle change of Aaron's manual run. Path shape: SE briefly (~1.5s, max east X=-629), then SOUTH for the rest along the western corridor with natural west drift, exiting at `(-1068, -3542)` in the SW corner.
+
+v0.16.1.4 tightens the SE-stage threshold in `kStages_doopen2a[]` from `Y<-1500` to `Y<-631`. At auto-pilot SE rate (528 east/sec, 716 south/sec from v0.16.1.3 BAT empirical measurement), the threshold ends stage 0 at approximately `(-629, -631)` -- same X as Aaron's max-east excursion, 639 units from battleyarou's catch center at `(0, -744)` (139-unit margin). Stage 1 (pure south) then walks the party south at 782 u/s with natural west drift at -76/sec, reaching the SW screen-boundary trigger at approximately `(-905, -3447)` after ~3.6 more seconds. Total field time: ~4.25 seconds, well under the 7-second TALKRAD-expansion mark (battleyarou's TALKRAD expands from 500 to 700 at the 7-second mark, per `[TALKRAD] CHANGED @0x1F8: 500 -> 700` in Aaron's manual run at 21:10:45 with context bytes shifting `@21E 0->2 @244 0->3`).
+
+There's still an unexplained mystery: v0.16.1.2's t=3 catch with party at `(-870, -1900)` (1447 units from battleyarou static position) was fired by battleyarou per `[CBF] PASS` caller. Distance 1447 is far outside the 500-unit zone, yet Aaron walked through similar positions in his manual run without trigger. Hypothesis: battleyarou has a velocity- or motion-vector-based catch in addition to the static proximity zone. The v0.16.1.4 route empirically avoids whatever it is by matching Aaron's east-first / west-corridor shape.
+
+Expected BAT signature: ENGAGED on doopen2a MODE_STAGED_DIRECTION stage 0/2 SE, `tick=60` log line approximately at `pos=(-629, -631)` with `bydist>=639`, stage transition to S after Y<-631, field transition to dotown_3 at ~t=4-5 seconds, no `[CBF] PASS` BATTLE call.
+
+**Diagnostic logging from v0.16.1.1 stays in place**: `by=(X,Y) bydist=N` per-tick suffix; `_ReturnAddress()` capture on `[CBF] PASS`. Useful baseline for any future chase regression.
+
+## v0.16.1 file layout (unchanged across v0.16.1.1 / .2 / .3 / .4)
+
+- `chase_auto_pilot.cpp` slim parent (6.47 KB), namespace block + `.inl` chain + public API.
+- `chase_auto_pilot_history.h` (19.15 KB, `#if 0`, NOT in build).
+- Eight `.inl` files: `state` (15.67 KB) → `route` (21.01 KB) → `io` (4.3 KB, +0.7 in v0.16.1.1) → `helpers` (6.81 KB) → `diag` (5.23 KB) → `bridge` (7.06 KB) → `engage` (11.27 KB) → `update` (16.6 KB, +0.4 in v0.16.1.1). Largest .inl still well under the 60 KB CI warn line.
+
+## v0.16.0.3 baseline (still latest pushed)
+
+GitHub HEAD now matches local tree at v0.16.0.3 (commit `1e3d7fd5`, parent `3d6db2a` v0.15.13.2). The v0.16.0/v0.16.0.1/v0.16.0.2/v0.16.0.3 chain shipped as four sequential commits. v0.16.0.3 itself is a single-file diagnostic cleanup: `world_map_segments.inl` logs `[VEH-POS-FALLBACK]` only on `s_lastVehicle` transition. No time-based heartbeat — once a given vehicle byte has been logged, subsequent identical entries stay silent. No functional change.
+
+**v0.16.0.3 BAT — PASSED.** Zero `[VEH-POS-FALLBACK]` lines in 733 log lines (vs ~1800 in 2262 for v0.16.0.2). As a bonus, this BAT exercised the planner-ineligible branch of v0.16.0.2's Fix 1 (Poll() replan-gate): Fire Cavern drive hit a random encounter, re-entered the world map, and Poll() correctly logged `[DRIVE] Planner-ineligible destination -- keeping simple-coord steering, not replanning` before reaching final-approach arrival at dist=66. Both branches of Fix 1 (eligible via Balamb Town, ineligible via Fire Cavern) are now empirically verified. Bonus 2: Fire Cavern A's engine `fieldName='bdview1'` captured this run (the populate race resolved in time), confirming fieldId 0x0088 ↔ 'bdview1'.
 
 ### v0.16.0.2 BAT result summary (still the most recent functional BAT)
 
@@ -43,9 +66,8 @@ Log timestamps 15:33:49 (module init) through 15:40:32 (Balamb Town arrival).
 
 ### Open follow-ups (not blockers)
 
-1. **`fieldName=''` race at Fire Cavern arrival.** 7-second drives beat the field-name pointer's populate timing. fieldId 0x0088 is correct; the Balamb Town arrival 5 minutes later got both `fieldId=0x006A` and `fieldName='bcgate_1'`. Either accept (fieldId is sufficient) or add a brief retry in Part B before logging. Backlog.
-2. **VEH-POS-FALLBACK log spam.** v0.16.0.1's guard works correctly (foot DWORDs always preserved), but `s_lastVehicle=33 (VEH_CAR)` latched mid-session and the fallback log line fired ~1800 times in this 7-minute run, dominating ff8_world.log. Functionally fine, diagnostically noisy. Backlog item: rate-limit the log (every 10s or transition-only) AND/OR detect "foot DWORDs are valid and moving" → snap s_lastVehicle back to 0 automatically.
-3. **Fire Cavern A fieldId = 0x0088** — new data for the FieldAnnounce display-name catalog audit backlog item (`src/field_display_names.h`). Confirm it announces as "Fire Cavern A" or similar; tidy mapping if wrong.
+1. **`fieldName=''` race at Fire Cavern arrival.** 7-second drives can beat the field-name pointer's populate timing in Part B's snapshot. **DIAGNOSTIC LOG ONLY, audio is fine** — FieldAnnounce reads the pointer hundreds of ms later and announces correctly (Aaron confirmed in v0.16.0.2 BAT, and v0.16.0.3 BAT captured `fieldName='bdview1'` when the race resolved). Backlog action: either retry briefly in Part B before logging, or accept (fieldId alone is sufficient).
+2. **Fire Cavern A fieldId/fieldName mapping** — confirmed in v0.16.0.3 BAT: `fieldId=0x0088`, engine `fieldName='bdview1'`. Useful data for the FieldAnnounce display-name catalog audit backlog item (`src/field_display_names.h`). Confirm 0x0088 ↔ 'bdview1' ↔ "Fire Cavern A" mapping is consistent end-to-end.
 
 ---
 
@@ -66,21 +88,33 @@ CI guard (`.github/workflows/safety-checks.yml`) `source-file-size-check` job: 6
 
 ---
 
-## Recently shipped (newest first; GitHub HEAD is v0.15.13.2 — v0.16.x not yet pushed)
+## Recently shipped (newest first; GitHub HEAD = v0.16.0.3, commit `1e3d7fd5`; local HEAD = v0.16.1.3 unpushed)
 
-### v0.16.0.3 — VEH-POS-FALLBACK log transition-only (local, awaiting push)
-`world_map_segments.inl` — fallback log now uses a function-local static to fire only when `s_lastVehicle` changes from the last-logged value. No heartbeat. Eliminates ~1800-line floods like v0.16.0.2 BAT produced; one line per distinct vehicle byte that triggers the fallback.
+### v0.16.1.3 — doopen2a SE->S staged config (local, awaiting BAT)
+Replaces the v0.15.9.8 `MODE_TARGET (-952, -3800)` doopen2a config with `MODE_STAGED_DIRECTION` matching Aaron's sighted-player recipe (SE first to escape kani's TALKRAD=500 catch zone, then S to the gateway at Y=-3414). The previous MODE_TARGET routed the party along the west wall at X~-850, within 165 units of kani's X=-685 -- inside the proximity catch radius. Single-file change to `chase_auto_pilot_route.inl`.
 
-### v0.16.0.2 — Fire Cavern works (local, BAT passed, awaiting push)
-Three fixes from v0.16.0.1 BAT log. (1) Poll() replan-gate honors planner-eligibility via new `s_drivePlannerEligible` flag. (2) Part B two-tier cap: 2500 planner-eligible / 8000 geometric-trigger. (3) Fire Cavern refined-coord hardcoded at (30326,-29221) in Initialize() alongside Balamb Town. BAT confirmed Fire Cavern arrives in 7 seconds at dist=66, all three fixes verified.
+### v0.16.1.2 — funnel wall-parallel portal COLLAPSE fix (local, BAT'd, ineffective for chase but retained)
+`field_nav_pathfinding.inl::FunnelPath` now emits a forced waypoint at the doorway midpoint (offset toward triB by AGENT_RADIUS) instead of `continue`-ing past wall-parallel portals. BAT result: COLLAPSE fired correctly on domt2_1, party reached the new waypoint cleanly, but the 5-second stuck at `(8, -1602)` persisted unchanged. That stuck is the scripted X-ATM092 landing animation (Aaron confirmed 2026-05-16), not a pathing bug. v0.16.1.2 doesn't help the chase but also doesn't regress anything; the COLLAPSE code stays in for other walkmesh cases. `SKIP_WALL_PARALLEL_LEGACY=false` toggle remains as Fix A fallback.
 
-### v0.16.0.1 — "Position unavailable" fix + Part C locIdx fix (local, awaiting push)
-(1) `GetWorldMapPosition_Active` guards vehicle-pos overwrite with `if (vx != 0 || vy != 0)`; stale `s_lastVehicle=37` (VEH_CAR) no longer clobbers valid foot DWORDs. `[VEH-POS-FALLBACK]` diagnostic log added. (2) Part C gate switched from `s_destPlannerEligible[catIdx]` (BFS-filtered) to `[locIdx]` (master-table).
+### v0.16.1.1 — chase doopen2a catch diagnostic (local, BAT'd, falsified proximity hypothesis)
+Three pure-diagnostic additions: `ReadBattleyarouPosition`, ` by=(X,Y) bydist=N` per-tick log suffix, `_ReturnAddress()` capture on `[CBF] PASS`. BAT result: battleyarou reads `(0,0)` on every chase field, `bydist` increases as party moves away. Catch is NOT proximity-based. Surfaced the domt2_1 5s stuck (`pos=(3,-1603)`, `moveDist=160` then `moveDist=0`, 3 velocity-stuck skips over 5s) as the actual time sink. Diagnostic logging retained going forward.
 
-### v0.16.0 — world_map.cpp split + Parts B/C + CI guard (local, awaiting push)
+### v0.16.1 — chase_auto_pilot.cpp split (local, BAT'd 2x, regression found)
+Pure-refactor split of `src/chase_auto_pilot.cpp` (108 KB → 6.47 KB slim parent + 8 `.inl` files + history.h). Mirrors v0.16.0 world_map.cpp template. CI allowlist entry removed. **BAT result: two consecutive runs caught the party on doopen2a (Town Square 5)** ~4 seconds after entry, regardless of party position. Aaron directed diagnose-forward instead of version bisection -- v0.16.1.1 is the diagnostic build.
+
+### v0.16.0.3 — VEH-POS-FALLBACK log transition-only (commit `1e3d7fd5`, pushed 2026-05-16 22:09:49Z)
+`world_map_segments.inl` — fallback log now uses a function-local static to fire only when `s_lastVehicle` changes from the last-logged value. No heartbeat. Eliminates ~1800-line floods like v0.16.0.2 BAT produced; one line per distinct vehicle byte that triggers the fallback. BAT confirmed: zero fallback lines in 733-line log.
+
+### v0.16.0.2 — Fire Cavern works (pushed in chain)
+Three fixes from v0.16.0.1 BAT log. (1) Poll() replan-gate honors planner-eligibility via new `s_drivePlannerEligible` flag. (2) Part B two-tier cap: 2500 planner-eligible / 8000 geometric-trigger. (3) Fire Cavern refined-coord hardcoded at (30326,-29221) in Initialize() alongside Balamb Town. BAT confirmed Fire Cavern arrives in 7 seconds at dist=66; both planner-eligible (Balamb Town) and planner-ineligible (Fire Cavern with random encounter) branches of Fix 1 verified across two BATs.
+
+### v0.16.0.1 — "Position unavailable" fix + Part C locIdx fix (pushed in chain)
+(1) `GetWorldMapPosition_Active` guards vehicle-pos overwrite with `if (vx != 0 || vy != 0)`; stale `s_lastVehicle=37` (VEH_CAR) no longer clobbers valid foot DWORDs. `[VEH-POS-FALLBACK]` diagnostic log added (later quieted in v0.16.0.3). (2) Part C gate switched from `s_destPlannerEligible[catIdx]` (BFS-filtered) to `[locIdx]` (master-table).
+
+### v0.16.0 — world_map.cpp split + Parts B/C + CI guard (pushed in chain)
 10-file refactor of the 222 KB monolith. Part B distance cap + Part C planner-eligibility gate + ComputePlannerEligibility helper. CI source-file-size-check (60 KB warn / 80 KB fail).
 
-### v0.15.13.2 — commit `3d6db2a`, tag `v0.15.13.2` (pushed 2026-05-15 22:28:49)
+### v0.15.13.2 — commit `3d6db2a` (pushed 2026-05-15 22:28:49Z)
 Live countdown timer at 0x01CFE92C. Auto-announce, T-key reads, Shift+T freeze. Confirmed on Dollet AND Fire Cavern.
 
 ### v0.15.12.0 — commit `b573fd1`
@@ -93,15 +127,14 @@ X-ATM092 chase accessibility complete. AUTO battle-suppressor cap stays `INT_MAX
 
 ## Backlog (priority order)
 
-1. **v0.16.1**: split `src/chase_auto_pilot.cpp` (108 KB) using the world_map split as the template.
-2. **v0.16.2**: split `src/field_dialog.cpp` (88 KB).
-3. **v0.16.3**: split `src/field_archive_jsm.inl` (91 KB).
-4. **v0.16.4**: split `src/battle_tts_ewm.inl` (90 KB).
-5. **v0.16.5**: split `src/battle_tts_menu.inl` (82 KB).
-6. **`menu_tts.cpp` T-handler `!shift` gate**. One-line cleanup.
-8. **FieldAnnounce display-name catalog audit** in `src/field_display_names.h`. Wrong mappings for fieldIds 0x0134 / 0x0136. Verify the mapping for Fire Cavern A (fieldId 0x0088) too — Aaron heard it announced as "Fire Cavern A" but `fieldName=''` came through empty in the arrival log due to a populate-timing race; confirm display works correctly in steady-state.
-9. **Field-name populate race** at Part B arrival check — **DIAGNOSTIC LOG ONLY, audio is fine**. `fieldName=''` arrived empty in the log line for the 7-second Fire Cavern drive because the engine's `pCurrentFieldName` string pointer hadn't populated yet at the 547ms mark when Part B took its snapshot. The FieldAnnounce module (separate from world_map) reads the pointer hundreds of ms later and announces correctly — Aaron confirmed in v0.16.0.2 BAT that he heard "Fire Cavern A" announce as expected. Backlog action: either retry briefly in Part B before logging, or accept (fieldId alone is sufficient diagnostically).
-10. **Deep-research doc updates**: `Plan & Research Documents/Dollet timer countdown deep research results.md` — wrong-math fix + LIVE TIMER FOUND appendix.
+1. **v0.16.2**: split `src/field_dialog.cpp` (88 KB).
+2. **v0.16.3**: split `src/field_archive_jsm.inl` (91 KB).
+3. **v0.16.4**: split `src/battle_tts_ewm.inl` (90 KB).
+4. **v0.16.5**: split `src/battle_tts_menu.inl` (82 KB).
+5. **`menu_tts.cpp` T-handler `!shift` gate**. One-line cleanup.
+6. **FieldAnnounce display-name catalog audit** in `src/field_display_names.h`. Wrong mappings for fieldIds 0x0134 / 0x0136. Verify the mapping for Fire Cavern A (fieldId 0x0088, engine `fieldName='bdview1'`) too — confirm it announces as "Fire Cavern A" end-to-end (Aaron's v0.16.0.3 BAT confirmed the audio output is correct; this backlog item is about double-checking the catalog mapping is what's producing that audio rather than a fallback).
+7. **Field-name populate race** at Part B arrival check — **DIAGNOSTIC LOG ONLY, audio is fine**. v0.16.0.2 BAT caught the snapshot at `fieldName=''` for a 7-second drive; v0.16.0.3 BAT caught it at `fieldName='bdview1'` once the race resolved. Backlog action: either retry briefly in Part B before logging, or accept (fieldId is sufficient).
+8. **Deep-research doc updates**: `Plan & Research Documents/Dollet timer countdown deep research results.md` — wrong-math fix + LIVE TIMER FOUND appendix.
 
 ### Future (deferred)
 

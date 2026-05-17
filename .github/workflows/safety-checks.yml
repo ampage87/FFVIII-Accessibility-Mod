@@ -69,7 +69,6 @@ jobs:
           # Files that are already known-oversized and have a scheduled split.
           # Remove a name here once the corresponding v0.16.x split has shipped.
           declare -A ALLOWLIST
-          ALLOWLIST[src/chase_auto_pilot.cpp]=1     # v0.16.1
           ALLOWLIST[src/field_dialog.cpp]=1         # v0.16.2
           ALLOWLIST[src/field_archive_jsm.inl]=1    # v0.16.3
           ALLOWLIST[src/battle_tts_ewm.inl]=1       # v0.16.4

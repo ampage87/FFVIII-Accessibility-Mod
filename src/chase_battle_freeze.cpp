@@ -34,6 +34,7 @@
 #include <climits>     // v0.15.9.9: INT_MAX for the Auto-mode verification cap
 #include <cstdio>
 #include <cstring>
+#include <intrin.h>    // v0.16.1.1: _ReturnAddress for engine caller capture
 
 namespace ChaseBattleFreeze {
 
@@ -59,6 +60,17 @@ static volatile LONG    s_freezeCount    = 0;
 
 static int __cdecl Hook_opcode_battle(int entityPtr)
 {
+    // v0.16.1.1: capture the engine return address FIRST. _ReturnAddress
+    // is a compiler intrinsic that resolves to the address the engine's
+    // dispatcher will return to -- i.e. the instruction immediately after
+    // the call site that invoked opcode_battle (0x69). Logged in the [CBF]
+    // PASS line below to identify which engine dispatch path is firing the
+    // BATTLE on doopen2a. Doing this at the very top of the function
+    // before any other code keeps the captured address clean (no inlining
+    // games shuffle it). Currently we only use this for diagnostic logging;
+    // there is no behavior change tied to the value.
+    void* retAddr = _ReturnAddress();
+
     LONG total = InterlockedIncrement(&s_callCount);
 
     bool inChase = ChaseDetector::IsInChaseField();
@@ -161,11 +173,12 @@ static int __cdecl Hook_opcode_battle(int entityPtr)
         const char* fieldName = ChaseDetector::GetDebouncedFieldName();
         Log::Field("[CBF] PASS chase BATTLE call #%ld (total #%ld) "
                    "field='%s' mode=%s battleCount=%d cap=%d "
-                   "caller=%s entityPtr=0x%08X",
+                   "caller=%s entityPtr=0x%08X retAddr=0x%08X",
                    (long)chaseN, (long)total,
                    fieldName,
                    ChaseDetector::ChaseModeName(mode),
-                   battleCount, cap, whoTag, (uint32_t)(uintptr_t)entityPtr);
+                   battleCount, cap, whoTag, (uint32_t)(uintptr_t)entityPtr,
+                   (uint32_t)(uintptr_t)retAddr);
 
         // v0.15.2.15: skip the dynamic pin in doopen2a only. The v0.15.2.14
         // BAT showed that the BATTLE caller in doopen2a (Others slot 4,

@@ -6,6 +6,192 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.16.1.4
+
+Corrects the doopen2a auto-pilot route based on Aaron's manual chase BAT (2026-05-16 21:10:38-21:10:47), which successfully cleared Town Square 5 in 9 seconds total with 0 catches. The `ff8_nav_data.log` COORD trace captured every triangle change of the manual run and is the source of truth for the new threshold.
+
+### Manual run trace
+
+```
+t=0       (-974, -166)   spawn          tri 52
+t=0+      (-856, -450)                  tri 51
+t=1       (-783, -669)                  tri 49
+t=1.5     (-629, -891)   MAX EAST       tri 46
+t=2       (-662, -1351)                 tri 97
+t=2       (-725, -1559)                 tri 96
+t=2       (-750, -1805)                 tri 94
+t=2       (-753, -1836)                 tri 89
+t=2       (-777, -2082)                 tri 88
+t=2       (-780, -2113)                 tri 85
+t=3       (-807, -2391)                 tri 37
+t=3       (-825, -2576)                 tri 33
+t=3       (-871, -3038)                 tri 14
+t=3       (-874, -3069)                 tri 79
+t=4       (-940, -3293)                 tri 148
+t=4       (-964, -3313)                 tri 23
+t=4       (-1068, -3542) EXIT TRIGGER   tri 151
+```
+
+Shape: SE briefly (~1.5s, max east X=-629), then SOUTH along the western corridor with natural west drift. Exit triggered in the SW corner around `(-1068, -3542)`. Aaron's TALKRAD log also showed battleyarou's catch radius expanded from 500 to 700 at the 7-second mark (`[TALKRAD] CHANGED @0x1F8: 500 -> 700` at 21:10:45, context `@21E 0->2 @244 0->3`) -- the chase mechanic is "outrun an expanding catch radius", not "avoid a fixed circle."
+
+### Critical correction: kani has no active proximity catch on doopen2a
+
+Aaron's path passes within **162 units** of kani at `(-685, -2284)` (at position `(-807, -2391)`) and is not caught. The pre-v0.16.1.4 commentary that attributed v0.16.1.2's t=3 catch to kani was wrong. That catch's caller in the `[CBF] PASS` log was always `entityPtr=0x0188CA04` (battleyarou). Battleyarou fired BATTLE in v0.16.1.2 from 1447 units away -- probably velocity- or motion-vector-based rather than pure proximity. The exact mechanism remains unidentified, but the empirical fact is that Aaron's east-first / west-corridor route avoids it while a direct west-wall A* path triggers it.
+
+Battleyarou's *static* TALKRAD=500 around its JSM init position `(0, -744)` is a real proximity catch, confirmed by v0.16.1.3 BAT (auto-pilot at `(-446, -821)`, 453 units from `(0, -744)`, caught at t=1). Aaron's max-east excursion to `(-629, -891)` was 646 units from `(0, -744)` -- 146-unit margin.
+
+### Fix
+
+`src/chase_auto_pilot_route.inl`: SE-stage threshold in `kStages_doopen2a[]` tightened from `Y < -1500` to `Y < -631`. The new threshold ends stage 0 at approximately `(-629, -631)` -- same X as Aaron's max-east excursion, 639 units from battleyarou's catch center (139-unit margin). Stage 1 (pure south) then drifts west naturally at -76/sec from the camDown vector `(-0.097, -0.995)`, walking the party along the western corridor to the SW screen-boundary trigger at approximately `(-905, -3447)` after ~3.6 more seconds. Total field time: ~4.25 seconds, well under the 7-second TALKRAD expansion.
+
+### Walk vs run
+
+Unchanged: `walk=false` on both stages. Aaron's manual run was at running pace; the slower observed rate compared to the auto-pilot's top speed is from walkmesh constraints and analog thumb angle, not a forced walk modifier.
+
+### Expected v0.16.1.4 BAT signature
+
+- Auto-pilot ENGAGED on doopen2a, MODE_STAGED_DIRECTION, stage 0/2 SE.
+- `tick=60` log line approximately at `pos=(-629, -631)` or thereabouts, with `bydist >= 639`.
+- Stage transition to S after Y crosses -631.
+- Field transition to dotown_3 at approximately t=4-5 seconds.
+- No `[CBF] PASS` BATTLE call on doopen2a.
+
+### v0.16.1.3 reverted in spirit
+
+The MODE_STAGED_DIRECTION mode is kept; only the SE-stage threshold changes. v0.16.1.3's threshold of `Y < -1500` was based on the false kani-proximity model and is replaced with the empirically-derived `Y < -631`.
+
+## v0.16.1.3
+
+Functional fix for the X-ATM092 chase catch on doopen2a (Town Square 5). The v0.16.1.1 diagnostic and v0.16.1.2 funnel-collapse BATs both reached BATTLE at ~3 seconds on doopen2a regardless of upstream timing, which finally clicked into place after Aaron's 2026-05-16 confirmation that the catch IS proximity-based ("that is how the chase scene works -- when the robot catches you then you end up in a fight") and that the field is not difficult for a sighted player following his recipe: "first have to go southeast (down and right) several steps, then due south to the exit gateway."
+
+### Root cause
+
+The v0.15.9.8 doopen2a config used `MODE_TARGET (-952, -3800)`, aiming at a SETLINE south trigger center the v0.15.9.7.8 fallback-mis-selection comment described as the chase exit. The A* + funnel pipeline routed the party along the WEST wall of the field (per v0.16.1.2 BAT portal data: portal 0 `L=(-1022,-99) R=(-769,53)` through portal 19 `L=(-1171,-2693) R=(-1180,-2525)`, X range ~-769 to -1180). The party's actual path held X around -800 to -900 throughout the south leg.
+
+Kani sits at `(-685, -2284)` mid-field with TALKRAD set to 500 on field load (per the `[TALKRAD] CHANGED @0x1F8: 128 -> 500` log line that fires on every doopen2a engage). The west-wall path crossed within 165 units of kani's X column when the party reached kani's Y band -- well inside the 500-unit catch radius. The chase script's proximity check fired BATTLE at ~3 seconds reliably across multiple BATs. The v0.16.1.1 diagnostic captured the closing pattern in the new `kdist` per-tick log: 1837 -> 1061 -> caught, with `bydist` (party-to-origin distance for the UNUSE'd battleyarou entity) increasing in lockstep as the party moved away from world origin -- confirming kani, not battleyarou, as the proximity source.
+
+### Why the v0.16.1.2 funnel-COLLAPSE didn't help
+
+The v0.16.1.2 BAT confirmed Fix B fired correctly on domt2_1 (`[funnel] COLLAPSE wall-parallel portal 23 ... -> wp=(-13,-1508) tri 26->27`) and the party reached the new collapsed waypoint cleanly. But the 5-second stuck on domt2_1 at `(8, -1602)` persisted unchanged. That stuck is the scripted X-ATM092 landing animation Aaron confirmed plays on domt2_1 ("the field with the robot-jump-down animation, right before the bridge"). It is immutable game cinematic, not a pathing bug, and doesn't affect doopen2a timing because the robot's position resets at each field boundary. v0.16.1.2 was a clean swing-and-miss against the actual problem; the funnel-collapse code stays in for other walkmesh cases (no regression risk shown), but it's not what fixes the chase.
+
+### Fix
+
+New `MODE_STAGED_DIRECTION` config for doopen2a in `src/chase_auto_pilot_route.inl`, modelled on the domt5_1 stage table. Two stages match Aaron's recipe:
+
+- Stage 0: `dirX=+1, dirY=+1` (south-east), running, active while `Y > -1500`. Several steps of SE motion push the party east of `X = -185` (kani's TALKRAD radius east boundary) before reaching kani's Y line. At doopen2a's calibrated camera (`camRight=(0.927,-0.376)`, `camDown=(-0.097,-0.995)`), SE input produces approximately `+407` east and `-672` south per second of world motion. Clearing `dX = 789` east (from spawn `X=-974` to safe `X=-185`) takes ~1.94 seconds, by which point `dY = -1303` south -- the threshold is set to `Y < -1500` with a ~90-unit safety margin.
+- Stage 1: `dirX=0, dirY=+1` (pure south), running, active while `Y <= -1500`. Pure south to cross the exit gateway at `Y=-3414` (Screen Boundary line, X range `[-497, 311]` per the v0.16.1.2 BAT `gateway crossing line (-497,-3414)->(311,-3414)` log). Party X is held at the value reached during stage 0 (~-185 or further east), keeping kdist >= 500 throughout the south leg.
+
+The exit-gateway target also corrects a long-standing misidentification of the chase exit. The v0.15.9.8 comment treated the south SETLINE at `Y=-3703` (center `(-952, -3703)`, X range `-1091` to `-814`) as the chase exit. That line is in the west of the field and was the target the A* path was aimed at. The actual chase exit per the BAT-logged `gateway crossing line` is at `Y=-3414` with `X` range `[-497, 311]`, in the center-east of the field -- exactly where the SE -> S route ends up.
+
+### Diagnostic logging from v0.16.1.1 remains in place
+
+- `ReadBattleyarouPosition` helper + ` by=(X,Y) bydist=N` per-tick log suffix in `chase_auto_pilot_update.inl`.
+- `_ReturnAddress()` capture on the `[CBF] PASS` line in `chase_battle_freeze.cpp`.
+
+Future chase regressions will surface in these logs without re-shipping diagnostic code.
+
+### Expected v0.16.1.3 BAT signature
+
+- doopen2a transit: ~5 seconds (1.94s SE + ~3s S), 0 catches.
+- Per-tick log shows party moving south-east during stage 0 with `pos.X` increasing from ~-974 toward 0 (or close), then southbound with `pos.X` held near -100 to -200.
+- `kdist` minimum ~545 (party at X=-185, kani at X=-685, same Y -- never closer).
+- No `[CBF] PASS` line on doopen2a; field transitions to dotown_3 via the gateway crossing line at Y=-3414.
+
+If the chase still catches:
+- Check the BAT log for the per-tick `pos.X` trajectory during stage 0. If party X stays under -400 (didn't move east enough), the camera-mapping math is off and the threshold needs lowering (more negative Y to allow more SE travel time).
+- If party moves east correctly but kdist still drops below 500 in stage 1, kani's TALKRAD is wider than 500 or her tracked position differs from the BAT-logged value. Re-derive thresholds.
+- If party reaches the exit but the chase doesn't transition out, the gateway crossing line is on a different Screen Boundary than expected. Dump the `squall` / `zell` SETLINE entries to see which one corresponds to the south gateway.
+
+## v0.16.1.2
+
+Functional fix for the deterministic doopen2a catch identified by the v0.16.1.1 diagnostic BAT. The catch was not proximity-based (battleyarou reads as static at `(0,0)` across all chase fields per the new `by=(X,Y) bydist=N` per-tick log) and not a non-script controller (no FFNx hook detour; the chase script just runs out of session-budget). Total chase time domt5_1->BATTLE = 51 seconds, of which 5 seconds are eaten by a stuck on domt2_1 at `(3, -1603)`. Removing that 5 seconds gives doopen2a enough headroom for the south trigger to fire before the chase script does.
+
+### Root cause
+
+The SSFA (Simple Stupid Funnel Algorithm) in `src/field_nav_pathfinding.inl::FunnelPath` includes a wall-parallel portal optimization added in v06.01: portals whose endpoints lie on the same vertical line (`absDX < WALL_PARALLEL_EPSILON && absDY > 10 * epsilon`) are skipped via `continue` before being added to the portal list. The justification, validated against all 894 game walkmeshes offline, is that these portals "run ALONG a wall, not across the walkable corridor."
+
+That reasoning holds for the bg2f_1 case the heuristic was tuned against (a long open corridor whose left/right inner walls happen to be exposed as wall-parallel portals between adjacent corridor triangles). It fails for tight chase fields like domt2_1, where the wall-parallel portal IS the corridor: tri 26 -> tri 27 has exactly one shared edge, a vertical doorway at `x=-42` spanning `y=-1638` to `y=-1360`. Skipping the portal removed the only aim point inside the doorway. The player at `(3, -1603)` saw a steer vector pointing to wp 23 at `(-64, -1658)` -- mostly south, slightly west -- which the camera projection (`camRight=(0.860,-0.510)`, `camDown=(-0.619,-0.785)`) converted to analog dominated by south. Player walked south into the `x=-42` wall, slid east-west along it for 2 seconds (`moveDist=160` with zero net displacement), then froze entirely (`moveDist=0`) for another 2 seconds before velocity-stuck recovery advanced wp 23 -> 24 -> 25 -> 26 over a total of 5 seconds. Each waypoint skip took ~1 second because each new waypoint also lived on the far side of the same wall.
+
+### Fix B (default behavior)
+
+When a wall-parallel portal is detected, emit a single "forced waypoint" at the portal midpoint shrunk inward by `AGENT_RADIUS` (30 units) toward triB's center, rather than `continue`-ing past it. The SSFA treats `L == R` as a pass-through constraint, so the funnel produces a waypoint exactly at the doorway and the player aims through it. New log line: `[funnel] COLLAPSE wall-parallel portal N dX=... dY=... L=(...) R=(...) -> wp=(...) tri A->B`. Summary log on field load: `[funnel] N wall-parallel portals processed (SKIP if SKIP_WALL_PARALLEL_LEGACY else COLLAPSE; v0.16.1.2 default = COLLAPSE)`.
+
+### Fix A (fallback toggle)
+
+A `static const bool SKIP_WALL_PARALLEL_LEGACY = false` inside the wall-parallel branch restores the v0.16.1.1 `continue` behavior globally when flipped to `true`. Intended as a one-line + rebuild mitigation if Fix B turns out to regress on bg2f_1 or other long-corridor fields where the original SKIP was correct. If a per-field toggle becomes necessary, we lift the constant to a route-config field instead. The toggle's legacy path emits `[funnel] SKIP wall-parallel portal N (LEGACY)` so BAT logs distinguish the modes.
+
+### Diagnostic logging retained from v0.16.1.1
+
+- `ReadBattleyarouPosition` and the ` by=(X,Y) bydist=N` suffix on ChaseAutoPilot per-tick logs stay in place. Useful for confirming battleyarou continues to read as `(0,0)` on chase fields (proximity catch falsified) and for diagnosing future chase regressions.
+- `_ReturnAddress()` capture on the `[CBF] PASS` line stays. Useful for tracing future BATTLE invocations through the FFNx hook chain.
+
+### Expected v0.16.1.2 BAT signature
+
+**Chase clears cleanly**:
+- `[funnel] COLLAPSE wall-parallel portal N` appears once during the domt2_1 chase-drive (between A* and the chase-drive STARTED log).
+- domt2_1 transit time drops from ~14s to ~9s (the 5s stuck at `(3, -1603)` is gone).
+- Total chase time domt5_1 -> doopen2a south trigger arrives well under 51s.
+- No `[CBF] PASS` line on doopen2a; the chase ends with a field transition to dotown_3 (or whatever follows).
+
+If chase still catches:
+- Check the BAT log for `[funnel] COLLAPSE` lines to confirm Fix B fired.
+- If COLLAPSE fired but domt2_1 transit is still 14s, the wall-parallel portal wasn't the bottleneck and we need to revisit (memory scan for chase timer or other approaches).
+- If COLLAPSE did NOT fire (the wall-parallel detection missed the portal), the threshold values need tightening.
+
+If bg2f_1 or other fields regress:
+- Flip `SKIP_WALL_PARALLEL_LEGACY` to `true` in `field_nav_pathfinding.inl::FunnelPath` and rebuild. This restores the v0.16.1.1 behavior pending a per-field toggle.
+
+## v0.16.1.1
+
+Diagnostic build investigating the reproducible X-ATM092 catch on doopen2a (Town Square 5) discovered in the v0.16.1 BAT. The catch fires ~4 seconds after entering doopen2a regardless of party progress -- party position at BATTLE time (-853, -1266) is still ~2500 units short of the target trigger at (-952, -3800). Two consecutive BATs (same save state) both caught the party in the square; the regression is deterministic, not marginal.
+
+Three small additions, all pure diagnostic logging -- no behavior changes:
+
+### (1) `ReadBattleyarouPosition` in `src/chase_auto_pilot_io.inl`
+
+New SEH-guarded helper mirroring `ReadKaniPosition` but targeting `ChaseDetector::GetBattleyarouEntityPtr()`. battleyarou (Others slot 6 on doopen2a) is the BATTLE caller per the v0.16.1 `[CBF]` log line (`entityPtr=0x0188CA04 caller=other`). Its method[4] is a 51-instruction movement loop (SET3 at dword 990 with PSHM_W params 7, -744, 0 -- the spawn position -- and a chain of waypoint constants 442/765/500/724/1494/756) and its TALKRAD jumps from 128 to 500 at field load. The question this read answers: is battleyarou actively closing on the party (proximity catch within TALKRAD=500), or is its position roughly static while a session-timer fires BATTLE regardless of geometry?
+
+### (2) Per-tick log adds ` by=(X,Y) bydist=N` in `src/chase_auto_pilot_update.inl`
+
+All four ChaseAutoPilot tick log paths (DIRECTION-with-pos, DIRECTION-without-pos, TARGET-with-pos, TARGET-without-pos) gain the battleyarou suffix alongside the existing kani suffix. Format mirrors the kani fragment exactly: ` by=(X,Y) bydist=N` when both reads succeed, ` by=(X,Y) bydist=?` when only battleyarou resolves, ` by=UNRESOLVED` when battleyarou's slot pointer is null on this field. Slots into the v0.15.9.11.3.7 delta-zero suppression cleanly because the suffix is appended after `kaniBuf` in the same `Log::Field` call -- no new log gate.
+
+### (3) `_ReturnAddress()` capture in `src/chase_battle_freeze.cpp`
+
+`Hook_opcode_battle` reads MSVC's `_ReturnAddress()` intrinsic on its very first line (before any other code so no inlining shuffles the captured value) and appends ` retAddr=0x%08X` to the existing `[CBF] PASS` log line. The captured address is the engine instruction immediately after the call site that invoked opcode_battle (0x69). With this we can map the BATTLE invocation back to the engine function that fired it -- battleyarou's script body, an EXT_DISPATCH handler, or some other dispatch path the v0.16.1 BAT's opcode histogram (which topped out at 0x35 with no 0x66 BATTLE opcode visible) didn't surface. New include: `<intrin.h>`.
+
+### Expected v0.16.1.1 BAT signatures
+
+**Proximity hypothesis confirmed:** on doopen2a, `bydist` starts ~1165 (battleyarou spawn at (0,-744), party at (-974,-105)) and decreases each tick as battleyarou's script moves it south, dropping below 500 right before the `[CBF] PASS` line fires. The `retAddr` lands inside battleyarou's script execution -- whatever engine function actually runs the JSM bytecode.
+
+**Timer hypothesis confirmed:** `bydist` stays large (>500) throughout the engagement; `[CBF] PASS` fires with `bydist=800+`. The `retAddr` lands in a non-script engine function (e.g. a scene-state controller) that fires BATTLE on its own schedule.
+
+Either result narrows the next fix substantially: proximity wants a faster auto-pilot path through doopen2a (MODE_DIRECTION south for instant engagement, no CALIB delay) and possibly a battleyarou-position-aware steering bias; timer wants us to either save time on earlier fields (bridge transit was 14s in the v0.16.1 BAT -- on the high end) or to intercept the timer-arming opcode on chase entry.
+
+## v0.16.1
+
+Pure-refactor split of `src/chase_auto_pilot.cpp` (108 KB, 1402 lines — second-largest non-history source file after `ff8_accessibility_history.h`). No behavioral changes. Removes `chase_auto_pilot.cpp` from the CI source-file-size-check allowlist.
+
+The v0.15.9.x narrative comment header (every chase auto-pilot iteration from v0.15.9 through v0.15.9.11.3.7, walking through MODE_DIRECTION, MODE_TARGET, MODE_STAGED_DIRECTION, MODE_BRIDGE_DANCE, per-field configs, BAT findings, and the v0.15.9.11.3 synthetic-keyboard hookup) is pulled into a new `chase_auto_pilot_history.h` with an `#if 0` wrapper, mirroring the `world_map_history.h` archive pattern.
+
+File layout after the split:
+
+- `chase_auto_pilot.cpp` (slim parent) — system includes, namespace forward decls, namespace block, `.inl` chain in dependency order, public API: `Initialize`, `Shutdown`, `IsEngaged`. The big `Update` function lives in `chase_auto_pilot_update.inl` and is wired in via the textual include.
+- `chase_auto_pilot_history.h` — pulled-out v0.15.9.x narrative, NOT in build path.
+- `chase_auto_pilot_state.inl` — enums (`FieldDriveMode`, `BridgeDanceState`), structs (`FieldStage`, `FieldConfig`), all `s_*` module-static state, bridge-dance `kBridge*` thresholds, `ENTITY_STRIDE_OTHERS`. First in include chain.
+- `chase_auto_pilot_route.inl` — `kStages_domt5_1[]` and `kFieldConfigs[]` with their rationale comments.
+- `chase_auto_pilot_io.inl` — `ReadSquallPosition`, `ReadKaniPosition` (both SEH-guarded), `DistSquared`, `IntSqrt`.
+- `chase_auto_pilot_helpers.inl` — `IsDirectionLikeMode`, `PickStageIdx`, `LookupConfig`, `BuildFallbackConfig`, `DirectionName`.
+- `chase_auto_pilot_diag.inl` — `LogChaseActiveDiagnostic` (currently retired/early-returns; preserved for future camera-orientation research).
+- `chase_auto_pilot_bridge.inl` — `UpdateBridgeDance` state machine (domt1_1 EAST/WEST kani-leap dance).
+- `chase_auto_pilot_engage.inl` — `Engage`, `Disengage`.
+- `chase_auto_pilot_update.inl` — the big per-tick `Update` function with the per-second diagnostic and delta-zero suppression.
+
+Include order in the slim parent: state → route → io → helpers → diag → bridge → engage → update. State first per the v0.16.0 rule; each later file's functions reference only definitions from earlier files.
+
+Largest .inl after the split is `chase_auto_pilot_update.inl` at roughly 22 KB — well clear of the 60 KB soft warning and 80 KB hard fail thresholds enforced by `.github/workflows/safety-checks.yml`. The allowlist entry for `src/chase_auto_pilot.cpp` is removed in the same diff.
+
+BAT plan: load a Dollet save just before/during the X-ATM092 chase. Verify the auto-pilot still engages at the chase-ASK answer, drives the party across `domt4_1 / domt3_2 / domt5_1 / domt1_1 / doopen2a / dotown_2 / dotown_1` per their respective configs, and disengages cleanly at field exits. No log lines or behavior should differ from v0.16.0.3.
+
 ## v0.16.0.3
 
 Log-spam cleanup follow-up from v0.16.0.2 BAT. The `[VEH-POS-FALLBACK]` diagnostic added in v0.16.0.1 (when `GetWorldMapPosition_Active` declines to overwrite foot DWORDs with a (0,0) vehicle read) was firing on every world-map poll while `s_lastVehicle` stayed latched to a non-foot value. In Aaron's v0.16.0.2 BAT, `s_lastVehicle=33 (VEH_CAR)` latched mid-session and the fallback log line fired roughly 1800 times in a 7-minute session, dominating `Logs/ff8_world.log` and making post-BAT analysis painful.

@@ -518,10 +518,67 @@ static void FunnelPath(float startX, float startY, float goalX, float goalY)
             // false positives on bg2f_1 (dX=209 dY=0 portal at Y=-2342).
             bool wallParallel = (absDX < WALL_PARALLEL_EPSILON && absDY > WALL_PARALLEL_EPSILON * 10.0f);
             if (wallParallel) {
-                degenerateSkipped++;
-                Log::Field("FieldNavigation: [funnel] SKIP wall-parallel portal %d "
-                           "dX=%.1f dY=%.1f L=(%.0f,%.0f) R=(%.0f,%.0f) tri %d->%d",
-                           i, absDX, absDY, lx, ly, rx, ry,
+                // v0.16.1.2 Fix B: COLLAPSE wall-parallel portals to a single
+                // waypoint instead of SKIPPING them. The v0.16.1.1 diagnostic
+                // BAT on the X-ATM092 chase identified the SKIP behavior as
+                // the root cause of the deterministic doopen2a catch: on
+                // domt2_1, the wall-parallel portal between tri 26 and tri 27
+                // at x=-42 (L=(-42,-1638), R=(-42,-1360)) is the ONLY exit
+                // from tri 26 going south. Skipping it left the player with
+                // no aim point inside the doorway, so they slid along the
+                // x=-42 wall accumulating moveDist=160 over 2s with zero net
+                // displacement, then froze entirely (moveDist=0) for another
+                // 2s before velocity-stuck recovery advanced wp 23 -> 24 ->
+                // 25 -> 26 over 5 seconds total. Without that 5s, the chase
+                // session timer (~51s total budget) has enough headroom for
+                // the party to reach doopen2a's south trigger before BATTLE.
+                //
+                // The new behavior emits a single "forced waypoint" at the
+                // portal midpoint, offset toward triB's center by
+                // AGENT_RADIUS. The funnel algorithm treats L == R as a
+                // pass-through constraint, which forces the player to aim
+                // into the doorway and cross the wall.
+                //
+                // SKIP_WALL_PARALLEL_LEGACY toggle (Fix A fallback): if Fix B
+                // regresses on bg2f_1 or other fields where the wall-parallel
+                // skip was the right call (e.g. long open corridors with
+                // inner-wall edges that the v0.15-era SKIP heuristic was
+                // tuned against), flip this constant to true to restore the
+                // v0.16.1.1 "continue" behavior globally. The toggle is
+                // intentionally static const so a one-line flip + rebuild
+                // is the quickest mitigation; if a per-field toggle becomes
+                // necessary we can lift it to a route-config field later.
+                static const bool SKIP_WALL_PARALLEL_LEGACY = false;
+                if (SKIP_WALL_PARALLEL_LEGACY) {
+                    degenerateSkipped++;
+                    Log::Field("FieldNavigation: [funnel] SKIP wall-parallel portal %d (LEGACY) "
+                               "dX=%.1f dY=%.1f L=(%.0f,%.0f) R=(%.0f,%.0f) tri %d->%d",
+                               i, absDX, absDY, lx, ly, rx, ry,
+                               (int)s_corridor[i], (int)s_corridor[i+1]);
+                    continue;
+                }
+                // Fix B: collapse to a single waypoint offset toward triB.
+                float mx = (lx + rx) / 2.0f;
+                float my = (ly + ry) / 2.0f;
+                uint16_t triB = s_corridor[i+1];
+                if (triB < (uint16_t)s_walkmesh.numTriangles) {
+                    float toBx = s_walkmesh.triangles[triB].centerX - mx;
+                    float toBy = s_walkmesh.triangles[triB].centerY - my;
+                    float toBlen = sqrtf(toBx*toBx + toBy*toBy);
+                    if (toBlen > 0.001f) {
+                        mx += (toBx / toBlen) * AGENT_RADIUS;
+                        my += (toBy / toBlen) * AGENT_RADIUS;
+                    }
+                }
+                portals[numPortals].lx = mx;
+                portals[numPortals].ly = my;
+                portals[numPortals].rx = mx;
+                portals[numPortals].ry = my;
+                numPortals++;
+                degenerateSkipped++;  // reused as "encountered" counter for the summary log
+                Log::Field("FieldNavigation: [funnel] COLLAPSE wall-parallel portal %d "
+                           "dX=%.1f dY=%.1f L=(%.0f,%.0f) R=(%.0f,%.0f) -> wp=(%.0f,%.0f) tri %d->%d",
+                           i, absDX, absDY, lx, ly, rx, ry, mx, my,
                            (int)s_corridor[i], (int)s_corridor[i+1]);
                 continue;
             }
@@ -548,7 +605,8 @@ static void FunnelPath(float startX, float startY, float goalX, float goalY)
         }
     }
     if (degenerateSkipped > 0) {
-        Log::Field("FieldNavigation: [funnel] Skipped %d wall-parallel portals",
+        Log::Field("FieldNavigation: [funnel] %d wall-parallel portals processed "
+                   "(SKIP if SKIP_WALL_PARALLEL_LEGACY else COLLAPSE; v0.16.1.2 default = COLLAPSE)",
                    degenerateSkipped);
     }
     // Add a degenerate portal at the goal (both sides = goal point).
