@@ -1,4 +1,4 @@
-# Next Session Prompt: v0.16.5.1 ready to push, backlog open
+# Next Session Prompt: v0.16.5.2 ready to push, backlog open
 
 ## Greeting
 
@@ -6,25 +6,27 @@ Start with `## Claude Says` per session ritual. Read `DEVNOTES.md` and THIS file
 
 ## Where we are
 
-**GitHub HEAD = v0.16.4** (commit `5d16179a`, pushed 2026-05-17 18:31 UTC). **Local tree = v0.16.5.1** (v0.16.5 BAT confirmed clean + 3-line follow-up patch for the deferred-turn release path; both pending push).
+**GitHub HEAD = v0.16.5.1** (commit `7c462392`, pushed 2026-05-17 20:42:43 UTC, parent `5d16179a` = v0.16.4). **Local tree = v0.16.5.2** (utility-only change adding a client-side mirror of the GitHub Actions CI checks; no mod code change). The combined v0.16.5 refactor + v0.16.5.1 follow-up landed in one commit; the v0.16.0–v0.16.5 size-split chapter is formally closed.
+
+### v0.16.5.2: local mirror of CI safety checks (pending push)
+
+`Utilities/push_to_github.ps1` gained a new Step 7c (between the duplicate-commit refusal in Step 7b and the cmd.exe invocation in Step 8) that runs the same two checks as `.github/workflows/safety-checks.yml` locally: SET3 hook marker grep on `src/field_navigation.cpp` and source file size budget on `src/*.{cpp,inl}` at depth 1 (60 KB warn, 80 KB fail). If either would fail on the server, the push is refused via the existing `Show-ErrorDialog` flow with a screen-reader-readable explanation. The CI workflow remains as the authoritative server-side backstop in case the utility is ever bypassed (manual `git push`). DLL behavior unchanged — the only mod-side difference is `Initialize()` will log `v0.16.5.2` once Aaron rebuilds + redeploys.
+
+If future safety checks get added to `safety-checks.yml`, mirror them in Step 7c too. Bidirectional pointer comments in both files document the duplication so the sync doesn't bit-rot.
 
 ### v0.16.5 BAT result
 
 Confirmed CLEAN. All menu paths exercised across two battles, every announcement fired as expected. Init: `Initialized v0.16.5 (EWM=ON, ATB=OK, GF=OK, FFNx=FAIL, PATCH=OK, BT=deferred)`. Highlights: Magic submenu via mode-byte path, GF submenu via fallback (mode 0x02→0x00 + phase 80) path, deferred GF cancel disambiguation (cancel suppressed on turn-end = confirm), Draw spell list with Stock/Cast + cursor nav + false-exit suppression + revisit-flag handling, target cycling across allies, v0.13.57 ATB exact-value restore preserved. **v0.16.4's open Ifrit-AD miss is RESOLVED** — played end-to-end this session (6 cues, ~23 s, all proper timestamps). Heartbeat diagnostic stays parked.
 
-### v0.16.5.1: 3-line follow-up
+### v0.16.5.1: 3-line follow-up (shipped in the same commit)
 
 v0.16.5 BAT log triage caught that `PollDeferredTurnAnnounce` (defined in `battle_tts_menu_poll.inl`) was never invoked from `Update()`. Latent dead-code path since v0.13.52 introduced the deferred-turn feature — not a v0.16.5 regression. Patched with three guarded lines in `battle_tts.cpp::Update()` after `PollHPChanges()`. Function body untouched.
 
 Specific BAT evidence: line 2942–2943, Selphie's third turn in battle 2 started on the exact frame Zell's Ifrit began animating. `[TURN] Deferred (damage in flight): Selphie's turn. Attack.` logged correctly, but no `[TURN] Deferred fired ...` or `[TURN] Deferred cancelled ...` follow-up ever appeared — the stashed announce silently dropped at battle end. Aaron likely never heard "Selphie's turn. Attack." for that turn (and many similar collisions over the past ~32 versions).
 
-### Push readiness
-
-Both versions ready for one combined push. `FF8OPC_VERSION = "0.16.5.1"` matches the top heading in `CHANGELOG.md`. Run `Utilities/push_to_github.ps1`. The push will land both v0.16.5 (refactor) and v0.16.5.1 (follow-up patch) as one commit, with the v0.16.5.1 CHANGELOG section as the commit body (containing the v0.16.5.1 narrative + the v0.16.5 section below it).
-
 ## Status check at session open
 
-**If Aaron's first message is "BAT"**: a build of v0.16.5.1 (or later) has been tested. Triage normally — read `Logs/build_latest.log` tail for compile errors, then `Logs/ff8_battle.log`. Specifically look for the v0.16.5.1 confirmation pattern: any `[TURN] Deferred (damage in flight): ...` line should be followed within ~5 seconds by either `[TURN] Deferred fired after <ms> ms: ...` (release succeeded) or `[TURN] Deferred cancelled (char N -> M, stale): ...` (active char advanced past the deferred-for character). Pre-fix, only the first line appeared.
+**If Aaron's first message is "BAT"**: a build at v0.16.5.1 or later has been tested. Triage normally — read `Logs/build_latest.log` tail for compile errors, then `Logs/ff8_battle.log`. Specifically look for the v0.16.5.1 confirmation pattern: any `[TURN] Deferred (damage in flight): ...` line should be followed within ~5 seconds by either `[TURN] Deferred fired after <ms> ms: ...` (release succeeded) or `[TURN] Deferred cancelled (char N -> M, stale): ...` (active char advanced past the deferred-for character). Pre-fix, only the first line appeared.
 
 **If Aaron names a backlog item**: jump to that. Refactor queue is empty; everything below is fair game.
 

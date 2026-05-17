@@ -6,6 +6,50 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.16.5.2
+
+Defense-in-depth utility change — no mod code change. The DLL behavior is byte-for-byte identical to v0.16.5.1 except `Initialize()` will log `Initialized v0.16.5.2 ...` instead of `v0.16.5.1`.
+
+Mirror the two checks in `.github/workflows/safety-checks.yml` locally in `Utilities/push_to_github.ps1` as new Step 7c, between the duplicate-commit refusal (Step 7b) and the session-header / cmd.exe invocation (Step 8). The CI workflow runs server-side AFTER a push lands — if it fails, the offending commit is already on `main` with a red X next to it, and the only notifications are an email to the committer and (next session) a Claude `github:list_commits` check. The push utility's own success dialog never reflects CI results, so a screen-reader user could come away believing a push succeeded when in fact CI was about to flag it. Step 7c closes that gap by running the same two checks locally and refusing the push (via the existing `Show-ErrorDialog` flow) if either would fail on the server.
+
+### Checks added
+
+- **SET3 hook marker** (mirrors CI job `check-set3-hook`): greps `src/field_navigation.cpp` for `SET3.*PERMANENTLY DISABLED`. The marker is a comment near the disabled SET3 hook block that documents the v0.09.32–v0.09.40 diagnosis showing ANY interception of the SET3 opcode handler hangs the infirmary scene (Dr. Kadowaki walk-to-phone freeze). If the marker is missing, the utility refuses with a screen-reader-readable error dialog naming the file and explaining the consequence.
+- **Source file size** (mirrors CI job `source-file-size-check`): walks `src/*.{cpp,inl}` at depth 1 (matches the CI's `find src -maxdepth 1 \( -name '*.cpp' -o -name '*.inl' \)`), checks each file's byte size. Files > 60 KB log a WARN line to `Logs/push_diagnostic.log` as informational (matching CI's warn-but-don't-fail behavior). Files > 80 KB cause refusal with a dialog listing every offending filename and KB size, plus a pointer to the v0.16.0–v0.16.5 splits in CHANGELOG.md as the template for splitting.
+
+### Thresholds (constants in both files)
+
+- `WARN_BYTES = 60 * 1024 = 61440`
+- `FAIL_BYTES = 80 * 1024 = 81920`
+
+The duplication between `safety-checks.yml` and `push_to_github.ps1` is intentional and acceptable. The check needs to be fast and offline (no GitHub API round-trip), and the thresholds have been stable since v0.16.0. A header comment in each file points at the other so future maintenance keeps both in sync.
+
+### What this catches vs. what it doesn't
+
+Catches:
+- A future source edit that crosses 80 KB without anyone noticing during the edit session.
+- Accidentally removing the SET3 marker (e.g. during a refactor that touches `field_navigation.cpp`).
+- Cases where Claude or another tool grew a file but didn't trigger a split.
+
+Doesn't catch:
+- Files in subdirectories of `src/` (CI also doesn't — only depth 1).
+- `.h` files growing large (CI also doesn't — documented exception for `ff8_accessibility_history.h` and `field_display_names.h`).
+- Server-side checks added in the future to `safety-checks.yml` that aren't also mirrored here (manual sync required).
+- Bypass via direct `git push` from a terminal (the .ps1 is the only path that runs this check; CI is still the authoritative server-side backstop).
+
+### Watch zone
+
+Files in the 60–80 KB range log to `Logs/push_diagnostic.log` as `[Step 7c] Watch zone (60-80 KB, informational): ...`. This gives a passive trail of which files are creeping toward the limit, useful for spotting growth trends across multiple pushes without having to actively monitor. Current watch zone after v0.16.5: `field_archive_jsm_scan.inl` (63 KB, accepted exception), plus several `battle_tts_*.inl` files near the line.
+
+### Future maintenance
+
+If new safety checks are added to `safety-checks.yml` (e.g. a guard against inline-changelog accretion in source headers, or a check for forbidden imports), mirror them as additional sub-blocks under Step 7c. Each check should:
+1. Run its detection logic.
+2. Append a descriptive failure message to `$ciFailReasons` on failure (don't `exit 1` immediately — collect all reasons so the user sees them in one dialog).
+3. Log PASS/FAIL/WARN to `Write-Diag` for the diagnostic trail.
+
+The push utility now treats itself as the canonical client-side enforcement point; CI remains the authoritative server-side backstop in case the utility is ever bypassed.
+
 ## v0.16.5.1
 
 Three-line fix wiring `PollDeferredTurnAnnounce()` into `battle_tts.cpp::Update()` after the existing `PollHPChanges()` call. Latent dead-code bug since v0.13.52 (2026-02 timeframe): the deferred turn-announce release function was defined in what is now `battle_tts_menu_poll.inl` but was never invoked anywhere. Whenever a character's ATB filled on the exact frame an enemy attack landed (or a teammate's GF / spell animation was still resolving), `PollTurnAndCommands` would correctly identify the collision, stash "X's turn. <Cmd>." in `s_deferredTurnBuf`, log `[TURN] Deferred (damage in flight): ...`, and set `s_deferredTurnPending = true`. The release path that was supposed to drain that buffer once the damage TTS cleared (or hit the 5-second safety timeout, or cancel on stale activeChar) was simply never called per-frame. The stashed line sat in the buffer until battle end, then got silently wiped when the next battle's `OnBattleEnter` reset state.

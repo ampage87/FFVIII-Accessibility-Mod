@@ -1,5 +1,11 @@
 # Safety checks for known bugs.
 # Runs on every push and PR to catch accidental re-introduction of fixed issues.
+#
+# IMPORTANT: as of v0.16.5.2, the two checks below are ALSO mirrored locally
+# in Utilities/push_to_github.ps1 as Step 7c. The local mirror catches
+# violations BEFORE the push lands; this CI workflow remains the authoritative
+# server-side backstop. If you change any threshold, file pattern, or check
+# in this file, also update the corresponding block in push_to_github.ps1.
 
 name: Safety Checks
 

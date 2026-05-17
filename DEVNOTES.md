@@ -4,11 +4,23 @@ Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` inj
 
 **Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
 
-GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.16.4** (commit `5d16179a`, pushed 2026-05-17 18:31 UTC). **Local tree = v0.16.5.1** (v0.16.5 BAT confirmed clean; v0.16.5.1 is a 3-line follow-up fix wiring the v0.13.52 deferred-turn release path that BAT log triage caught had never been called).
+GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.16.5.1** (commit `7c46239`, tag `v0.16.5.1`, pushed 2026-05-17 14:42 local). **Local tree = v0.16.5.2** (utility-only change adding a client-side mirror of the GitHub Actions CI checks; no mod code change). Refactor chapter (v0.16.0 → v0.16.5) is closed; v0.16.5.1 deferred-turn release fix shipped; v0.16.5.2 pending push.
 
 ---
 
-## v0.16.5.1: 3-line fix for the deferred-turn release path
+## v0.16.5.2: local mirror of CI safety checks
+
+Utility-only change. Mirrored both checks from `.github/workflows/safety-checks.yml` into a new Step 7c in `Utilities/push_to_github.ps1`, between the duplicate-commit refusal (Step 7b) and the cmd.exe invocation (Step 8). The CI runs server-side AFTER a push lands; if the size or SET3 check fails, the offending commit is already on `main` with a red X. Step 7c catches the same conditions client-side and refuses via the existing `Show-ErrorDialog -ShowViewLog $false` flow with a screen-reader-readable explanation.
+
+Thresholds mirror the YAML exactly (60 KB warn, 80 KB fail, `src/*.{cpp,inl}` at depth 1; SET3 marker `SET3.*PERMANENTLY DISABLED` in `src/field_navigation.cpp`). Watch-zone files (60-80 KB) log to `Logs/push_diagnostic.log` as `[Step 7c] Watch zone ...` for passive trend monitoring without blocking.
+
+Duplication between YAML and PS1 is intentional and acceptable: the local check needs to be fast and offline. Bidirectional pointer comments added in both files so future maintenance keeps them in sync.
+
+DLL behavior is byte-for-byte identical to v0.16.5.1 except `Initialize()` logs `v0.16.5.2`. No BAT required; the verification is simply "does push_to_github.ps1 still succeed when all files are under threshold" (which they are post-v0.16.5).
+
+---
+
+## v0.16.5.1: 3-line fix for the deferred-turn release path (SHIPPED)
 
 v0.16.5 BAT log review (battle 2, log lines 2942–3136) caught a latent bug: when Selphie's turn started on the exact frame Zell's Ifrit cast began animating, `PollTurnAndCommands` correctly identified the collision and stashed "Selphie's turn. Attack." in the deferred buffer with the `[TURN] Deferred (damage in flight): ...` log line. But the release path — `PollDeferredTurnAnnounce` defined in `battle_tts_menu_poll.inl` — was never wired into `Update()`. The stashed line sat in the buffer until battle end, then got silently wiped by `OnBattleEnter` state reset. dryRun grep probes across `battle_tts.cpp` and every sibling `.inl` confirmed no caller existed.
 
