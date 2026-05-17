@@ -6,6 +6,48 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.16.4
+
+Pure mechanical split of `src/battle_tts_ewm.inl` (91.79 KB monolith — over the 80 KB CI hard-fail line) into a slim 2.17 KB shell plus nine sub-`.inl` modules. No behavioral change; the EWM freeze, GF fire prevention, dispatch hooks, FFNx hook, and per-frame state machine are byte-for-byte identical to v0.16.3. Pattern matches the v0.16.0 (`world_map.cpp`), v0.16.1 (`chase_auto_pilot.cpp`), v0.16.2 (`field_dialog.cpp`), and v0.16.3 (`field_archive_jsm.inl`) splits.
+
+EWM is the load-bearing core of the turn-based retrofit ("first-to-fill acts first, no skipped turns, natural ally/enemy ratio"), so this split deliberately did NOT touch the v0.13.57 ATB-restore semantics or any of the dispatch / cooldown / grace-period logic. Every static, comment, and `__try` block is preserved verbatim; only locations moved.
+
+### New files
+
+- `src/battle_tts_ewm_state.inl` (8.4 KB) — all module statics, typedefs, structs, constants. Hoisted to file head so every sub-`.inl` can reference them. Includes the `TargetDiagSnapshot` struct, all `s_ewm*` lifecycle flags, dispatch hook counters (`s_processReadyCalls/Blocks/Passes`, `s_actionExecuteCalls/Blocks/Passes`), diagnostic state (`s_diagPrevDamageAnim`, `s_prevSlotATB[]`, `s_slotTurnCount[]`), and the two function-pointer typedefs (`ProcessReadyFn`, `ActionExecuteFn`, `FFNxBattleUpdateFn`, `BattleEffectFn`).
+- `src/battle_tts_ewm_gf_patch.inl` (8.9 KB) — GF fire prevention layer: `HookedGFTimerUpdate`, `EWM_ClampGFState` (the three-layer prevention: 0x004B04B4 MOV→RET code patch + state68 clamp + timer function skip), `EWM_RestoreGFPatch`, `GF_LogHookStats`, `GF_PollStateChanges`, `EWM_InstallGFHook`.
+- `src/battle_tts_ewm_gf_effect.inl` (6.9 KB) — battle_magic_id polling (v0.12.48-49) for GF animation fire detection and Scan effect handling: `IsGFEffectId`, `GFEffectIdToIndex`, `FindPartySlotForGF`, `PollBattleMagicId` (handles GF anim fire AND Scan effect ID 39 with target bitmask resolution), `EWM_InstallBattleEffectHook`.
+- `src/battle_tts_ewm_bp_diag.inl` (17.1 KB) — hardware breakpoint diagnostic (DR0 VEH + ToolHelp32 thread enumeration), target-selection diff diagnostic, and function entry scanner: `GF_BP_VectoredHandler`, `GF_BP_ArmAllThreads`, `GF_BP_AutoArm` (display-timer ≤3 arm window), `TgtDiag_TakeSnapshot`, `GF_BP_PollKey` (no-op since v0.11.01), `GF_ScanForFunctionEntry`.
+- `src/battle_tts_ewm_atb_hook.inl` (12.3 KB) — `HookedATBUpdate` (the core ATB freeze sandwich with v0.13.57 exact-value restore semantics) plus EWM lifecycle/toggle: `EWM_LoadConfig`, `EWM_SaveConfig`, `EWM_PollToggle` (O-key toggle), `EWM_InstallHook`. The lifecycle functions live with the ATB hook because EWM_InstallHook is the installer for HookedATBUpdate and the toggle gates its behavior.
+- `src/battle_tts_ewm_dispatch.inl` (5.7 KB) — v0.13.55/56 dispatch-layer hooks (sub_483470 + sub_482F80): `HookedProcessReady`, `HookedActionExecute`, `EWM_InstallProcessReadyHook`, `EWM_InstallActionExecuteHook`, `EWM_LogDispatchStats`.
+- `src/battle_tts_ewm_ffnx.inl` (9.7 KB) — v0.10.77 FFNx GF loading counter hook: `HookedFFNxBattleUpdate` (the GF loading counter cap-at-max-1 sandwich), `FindFFNxModuleBase` (via the E9 JMP at set_midi_volume 0x0046BB40), `ScanModuleForSignature` (sig: `B9 16 F0 CF 01 66 89 06`), `ScanAllModulesForSignature`, `FindFunctionEntry` (backward CC/90/C3 padding scan), `EWM_InstallFFNxGFHook`.
+- `src/battle_tts_ewm_diag.inl` (12.0 KB) — diagnostic helpers: `EWM_IsExecutingPhase` (phases 14/21/23/33/34), `EWM_FormatATBSnapshot`, `EWM_PollDiagnostics` (v0.13.57 transition logger for [0x01D280C0]/[0x01D27B00]/s_ewmShouldCap + post-release trace window), `EWM_ResetTurnCount`, `EWM_LogTurnCountSummary`, `EWM_TrackTurnCount` (v0.13.58-60 per-slot ATB high→low turn counter), `EWM_DiagLogATB`.
+- `src/battle_tts_ewm_update.inl` (13.8 KB) — `EWM_UpdateBattle`, the per-frame freeze state machine. Calls helpers from `gf_patch.inl` (`EWM_ClampGFState`, `EWM_RestoreGFPatch`) and `diag.inl` (`EWM_PollDiagnostics`, `EWM_IsExecutingPhase`, `EWM_DiagLogATB`), so must come last in the include chain.
+
+### Include chain
+
+Dependency-ordered, included textually from the slim parent (which is itself included from `battle_tts.cpp` inside `namespace BattleTTS`):
+
+```
+state → gf_patch → gf_effect → bp_diag → atb_hook → dispatch → ffnx → diag → update
+```
+
+`state.inl` must come first (declares every static). `update.inl` must come last (calls helpers from `gf_patch` and `diag`). Everything between is independent and could be reordered; the chosen order groups related concerns (GF prevention → diagnostics → core hook → dispatch → FFNx → diag helpers → state machine).
+
+### Statics also referenced by `battle_tts.cpp`
+
+A few statics declared in `state.inl` are also referenced by `battle_tts.cpp` itself (e.g. `OnBattleEnter` resets `s_gfSnapValid`, `s_gfSnapLastTick`, `s_gfAutoArmLastActive`, `s_gfAutoArmDone`, `s_tgtDiagStage`; `Initialize` and `Shutdown` reference `s_gfVEHHandle` for the AddVectoredExceptionHandler / RemoveVectoredExceptionHandler pair). These work because the `.inl` chain is textually included inside `battle_tts.cpp` BEFORE the functions that use them — file-scope `static` visibility carries across the include boundary.
+
+### CI status
+
+Largest sub-file is `bp_diag.inl` at 17.1 KB — comfortably under the 60 KB warn line. Smallest is the slim parent at 2.17 KB. Total split is 96.83 KB versus the original 91.79 KB; the ~5 KB overhead is per-file orientation comment headers explaining each module's purpose.
+
+`battle_tts.cpp` is unchanged — it still `#include`s `battle_tts_ewm.inl` exactly as before; the `.inl` content beneath that include simply expanded into the nine sub-files. `deploy.bat` is unchanged (`.inl` files are textually included, only the parent `.cpp` compiles).
+
+### Remaining size-split work
+
+After v0.16.4 ships, the size-split sequence is one file from done: v0.16.5 splits `src/battle_tts_menu.inl` (82 KB). With that, every source file in the project is under the 80 KB CI hard fail, and the allowlist in `.github/workflows/safety-checks.yml` can be emptied.
+
 ## v0.16.3
 
 Split `src/field_archive_jsm.inl` (91 KB monolith, over the 80 KB CI hard-fail line) into a slim 2 KB shell plus seven sub-`.inl` modules. The JSM scanner pipeline was the last source file over the size limit; with this split, the field-archive subsystem stays under the 80 KB cap.

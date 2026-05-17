@@ -1,4 +1,4 @@
-# Next Session Prompt: v0.16.3 BAT triage, then v0.16.4 battle_tts_ewm.inl split
+# Next Session Prompt: v0.16.4 BAT triage OR v0.16.5 battle_tts_menu.inl split
 
 ## Greeting
 
@@ -6,96 +6,88 @@ Start with `## Claude Says` per session ritual. Read `DEVNOTES.md` and THIS file
 
 ## Where we are
 
-**GitHub HEAD = v0.16.2** (commit `7eb1ab1e`, pushed 2026-05-17 05:09:53 UTC, parent `5c08a1ae` = v0.16.1.4). **Local tree = v0.16.3, awaiting BAT.**
+**GitHub HEAD = v0.16.3** (commit `8a7a23d1`, pushed 2026-05-17 05:58:34 UTC). **Local tree = v0.16.4 awaiting BAT.**
 
-The X-ATM092 chase auto-pilot chapter is **closed**: v0.16.1.4 BAT confirmed clean end-to-end progression through all four post-bridge fields with zero catches.
+The X-ATM092 chase auto-pilot chapter is **closed**: v0.16.1.4 BAT confirmed clean end-to-end progression with zero catches.
 
-### v0.16.3 (last session): field_archive_jsm.inl split, READY FOR BAT
+### v0.16.4 (last session): battle_tts_ewm.inl split WRITTEN, awaiting BAT
 
-`src/field_archive_jsm.inl` (91 KB monolith, over the 80 KB CI hard-fail) carved into a 2 KB slim shell + seven sub-`.inl` files. **Option B small refactor**, not pure mechanical:
+`src/battle_tts_ewm.inl` (91.79 KB monolith, over the 80 KB CI hard-fail) carved into a 2.17 KB slim shell + **nine** sub-`.inl` files. **Pure mechanical split** — no behavior change. EWM is load-bearing for the turn-based retrofit, so every `__try` block, comment, and static was preserved verbatim; only locations moved.
 
-1. Cross-pass `static` arrays inside `ScanJSMScripts()` (`s_methodMapjumps`, `s_entityReqs`, `s_entityPopms`, `s_initVarMaps`, `s_reqOpcodeCount`, `s_hasSetmodelInit`, `s_hasDialogAny`, `s_hasExtDispatchArr`) and their containing structs (`MethodMapjump`, `ReqCallInfo`, `EntityReqs`, `EntityPopms`, `VarWrite`, `EntityVarMap`) hoisted to namespace scope. Function-local `static` already has program lifetime so this is a visibility change only; explicit `memset` block at scan entry preserves the zero-on-entry contract.
-2. Director DIAGNOSTIC + post-pass blocks extracted verbatim into a new `RunDirectorDetection()` helper. `ScanJSMScripts()` calls it as one line after the draw-point trigger cross-reference.
-
-Behavior byte-for-byte identical to v0.16.2.
-
-Include chain (dependency-ordered, included textually from the slim parent inside `namespace FieldArchive`):
+Include chain (dependency-ordered, included textually from the slim parent inside `namespace BattleTTS`):
 
 ```
-state → constants → helpers → opnames → director → scan → dump
+state → gf_patch → gf_effect → bp_diag → atb_hook → dispatch → ffnx → diag → update
 ```
 
-File sizes:
-- `field_archive_jsm_state.inl` 4.4 KB
-- `field_archive_jsm_constants.inl` 6.5 KB
-- `field_archive_jsm_helpers.inl` 2.1 KB
-- `field_archive_jsm_opnames.inl` 2.6 KB
-- `field_archive_jsm_director.inl` 10.4 KB
-- `field_archive_jsm_scan.inl` **63.3 KB** (just over 60 KB warn, well under 80 KB fail)
-- `field_archive_jsm_dump.inl` 7.1 KB
-- `field_archive_jsm.inl` (slim shell) 2.3 KB
+File sizes: state 8.4 KB, gf_patch 8.9 KB, gf_effect 6.9 KB, bp_diag 17.1 KB, atb_hook 12.3 KB, dispatch 5.7 KB, ffnx 9.7 KB, diag 12.0 KB, update 13.8 KB, slim shell 2.2 KB. Largest sub-file is `bp_diag.inl` at 17.1 KB — well under the 60 KB warn line.
 
-`scan.inl` at 63 KB is in the watch zone. Further splitting would require breaking the per-entity opcode scan loop into sub-helpers — crosses from mechanical extraction into behavior-touching refactor. Deferred until there's a functional reason. CHANGELOG.md and DEVNOTES.md both call this out.
+`atb_hook.inl` folds in the EWM lifecycle (`EWM_LoadConfig`/`SaveConfig`/`PollToggle`/`InstallHook`) because `EWM_InstallHook` installs `HookedATBUpdate` — they belong together.
 
-### Status check at session open
+**`battle_tts.cpp` unchanged.** It still `#include`s `battle_tts_ewm.inl`. `OnBattleEnter`, `Initialize`, `Shutdown` still reference statics declared in `state.inl` (e.g. `s_gfVEHHandle`, `s_gfSnapValid`, `s_gfAutoArmDone`, `s_tgtDiagStage`) — file-scope visibility carries across the textual-include boundary. `deploy.bat` unchanged.
 
-**If Aaron's first message is "BAT" or "Built and tested"**: triage the v0.16.3 BAT result:
+## Status check at session open
 
-1. Read `Logs/build_latest.log` tail first — confirm compile clean.
-2. If compile errors: focus on those. Likely places for issues:
-   - Forward declaration mismatch in `field_archive_jsm_state.inl` (signature of `RunDirectorDetection` must match the body in `director.inl`).
-   - Namespace-scope statics colliding with something else in `field_archive.cpp` (unlikely — checked at split time, no conflicts).
-   - Include order: `state.inl` must come first.
-3. If compile clean: read `Logs/ff8_field.log` tail. Look for `[JSMScan]` lines (per-field scan summaries) and `[DIR-DIAG]` / `[DIRECTOR]` lines (Director detection). Compare against v0.16.2 baseline behavior — same fields should produce the same classification counts.
-4. If runtime regressions show up (entities misclassified, Directors not detected, etc.): the most likely cause is a typo in the memset block or the helper call. Walk the diff carefully.
+**If Aaron's first message is "BAT"** (the expected case): the v0.16.4 build has been built and tested.
 
-**If Aaron's first message is "Begin v0.16.4" or pushes ahead without BAT comment**: assume v0.16.3 BAT cleared (or Aaron will catch a regression later); proceed to the v0.16.4 plan below.
+Triage workflow:
+1. Read `Logs/build_latest.log` tail for compile errors. If anything's wrong, it'll be a transcription mistake in the split — most likely a static referenced before declared (wrong include order) or a missing `__try`/`__except` brace from a copy-paste edge.
+2. If build succeeds, read `Logs/ff8_battle.log` for the runtime BAT.
+3. Verify:
+   - `BattleTTS: [EWM] ATB hook @ 0x... — MH_OK` at battle entry.
+   - EWM O-key toggle: pressing O announces "Enhanced Wait Mode on" / "off" and logs `BattleTTS: [EWM] Toggled: ...`.
+   - Command menu opens → `BattleTTS: [EWM] ATB capped (new turn, char=N, phase=N)` line fires.
+   - Player commits action → cap releases (`[EWM] ATB cap released`).
+   - GF summons fire correctly (Quezacotl, Shiva, etc.) — the v0.10.91 GF-fire prevention is still in `gf_patch.inl` + `atb_hook.inl`, must not have regressed.
+   - `[TURN-COUNT]` lines appear on each entity turn (v0.13.58-60 per-slot ATB counter in `diag.inl`).
+4. If the BAT is clean, Aaron pushes v0.16.4 via `Utilities/push_to_github.ps1`. Move on to v0.16.5.
+5. If the BAT shows any deviation from v0.16.3 behavior, diff the affected sub-`.inl` against the v0.16.3 monolith via `git show 8a7a23d1:src/battle_tts_ewm.inl` and fix the transcription error.
 
-**If Aaron asks about a different regression**: read the relevant domain log first, not assumptions.
+**If Aaron's first message is "Begin v0.16.5" or similar**: v0.16.4 has pushed cleanly. Proceed to the v0.16.5 plan below.
 
-### v0.16.2 shipped (prior session)
+**If Aaron asks about a regression not related to v0.16.4**: read the relevant domain log first, not assumptions.
 
-`src/field_dialog.cpp` (88 KB monolith) → 3 KB slim parent + 8 `.inl` files. Pure mechanical. BAT clean 2026-05-16 23:00.
+## Next priority (after v0.16.4 BATs clean): v0.16.5 = battle_tts_menu.inl split
 
-## Next priority: v0.16.4 = battle_tts_ewm.inl split
-
-`src/battle_tts_ewm.inl` is **89.64 KB**, the largest remaining source file over the 60 KB warn line.
+`src/battle_tts_menu.inl` is **81.89 KB**, the last source file over the 60 KB warn line (excluding the accepted `field_archive_jsm_scan.inl` exception at 63 KB).
 
 ### Important note on type
 
-Unlike v0.16.3, this is a **regular `.inl` textually included from `battle_tts.cpp`** — same pattern as v0.16.0/v0.16.1/v0.16.2's `.cpp` splits, except the parent is a `.cpp` that compiles and `battle_tts_ewm.inl` is one of several `.inl`s already living inside it. The split will produce sub-`.inl`s included from `battle_tts_ewm.inl`, identical structurally to what v0.16.3 just did for `field_archive_jsm.inl`.
+Same as v0.16.4: `battle_tts_menu.inl` is a **regular `.inl` textually included from `battle_tts.cpp`**. The split will produce sub-`.inl`s included from `battle_tts_menu.inl`, structurally identical to what v0.16.4 just did for `battle_tts_ewm.inl`.
 
 ### Recipe
 
-1. Read `src/battle_tts.cpp` first to see how `battle_tts_ewm.inl` is currently included and what other `.inl`s are in play. Look for include order constraints.
-2. Read `src/battle_tts_ewm.inl` end-to-end (use head/tail for the 90 KB if filesystem MCP truncates). Map functional groupings: typedefs/state, EWM mode toggle and lifecycle, ATB freeze/unfreeze logic, action queue, turn-order decision logic, debug/diag, anything else.
-3. **Default to pure mechanical split** unless Aaron says otherwise. EWM is a load-bearing subsystem — Aaron's previous instruction was to preserve "first-to-fill acts first, no skipped turns, natural ally/enemy ratio". Don't refactor behavior under the guise of a split.
-4. Create `battle_tts_ewm_state.inl` first (all statics + typedefs + constants). State always first.
-5. Carve the rest as the groupings suggest. Aim for 5-25 KB per sub-`.inl`. Reasonable splits to consider: `_lifecycle`, `_atb_freeze`, `_action_queue`, `_turn_order`, `_diag`. Confirm with Aaron before committing to names.
-6. Rewrite `battle_tts_ewm.inl` as a slim shell: `#include` chain of the new sub-`.inl`s. Keep the original orientation comment block at the top.
-7. **`deploy.bat` unchanged** — only `battle_tts.cpp` compiles; `.inl`s are textual.
-8. **No functional change.** Aaron BATs: trigger any battle, confirm EWM (O key toggle) still works, confirm turn order announces correctly, confirm ATB freezes during menus.
+1. Read `src/battle_tts.cpp` to see where `battle_tts_menu.inl` sits in the include chain (it comes AFTER `battle_tts_ewm.inl` — the orphan section header at the end of `update.inl` calls out the boundary: "Turn announcement + Command menu TTS").
+2. Read `src/battle_tts_menu.inl` end-to-end (use head/tail for the 82 KB if filesystem MCP truncates). Map functional groupings: command menu state, turn announcement, target selection, sub-menus (Magic/GF/Item/Draw), Limit Break handling, anything else.
+3. **Default to pure mechanical split** unless Aaron says otherwise. Battle TTS is user-facing — preserve every announcement exactly.
+4. Create `battle_tts_menu_state.inl` first (all statics + typedefs + constants).
+5. Carve the rest as the groupings suggest. Aim for 5-20 KB per sub-`.inl`. Reasonable splits: `_turn_announce`, `_command_menu`, `_target_select`, `_submenus` (or per-submenu if any one is large), `_limit_break`, `_diag`. Confirm names with Aaron before committing.
+6. Rewrite `battle_tts_menu.inl` as a slim shell: `#include` chain. Keep original orientation comment block.
+7. **`deploy.bat` unchanged** — only `battle_tts.cpp` compiles.
+8. **No functional change.** BAT: trigger battles, confirm turn-start announcements, command menu navigation (arrow keys), target selection (with multi-target arrows), submenu navigation (Magic, GF, Item, Draw), Limit Break announcement.
 
-### Key gotchas (carried from v0.16.0–v0.16.3)
+### Key gotchas (carried from v0.16.0-v0.16.4)
 
 - `.inl` files: **NO header guards, NO namespace declarations inside.** They live inside `namespace BattleTTS` via the textual include from `battle_tts.cpp`.
 - State `.inl` MUST be included FIRST.
 - **Filesystem MCP for all Windows project files.** Bash runs in a Linux container that can't reach the OneDrive mod directory.
 - **OneDrive sync EPERM rename errors**: retry immediately on first edit. Usually clears.
-- Watch the 60 KB warn / 80 KB fail thresholds. If a sub-`.inl` approaches 60 KB, split further. (v0.16.3 `scan.inl` at 63 KB is an accepted exception, not a precedent.)
-- Forward declarations for cross-`.inl` references go in `*_state.inl`.
-- **Don't introduce comment/whitespace changes beyond what's necessary** (don't replace em-dashes with hyphens unless encoding requires it).
+- Watch the 60 KB warn / 80 KB fail thresholds.
+- Cross-`.inl` statics go in `*_state.inl`.
+- **Don't introduce comment/whitespace changes beyond what's necessary.**
+- **Statics in `state.inl` that are referenced by `battle_tts.cpp` itself** (OnBattleEnter, Initialize, Shutdown resets) remain visible across the textual-include boundary — no special handling needed, just verify they're still file-scope `static`.
 
 ### Reference splits (the working models)
 
 - **v0.16.0 world_map.cpp** — slim `.cpp` parent + sub-`.inl` chain.
-- **v0.16.1 chase_auto_pilot.cpp** — 6.47 KB slim parent + 8 `.inl`: state (15.67), route (24.09), io (5.95), helpers (6.81), diag (5.23), bridge (7.06), engage (11.27), update (17.64).
-- **v0.16.2 field_dialog.cpp** — 3 KB slim parent + 8 `.inl`: state (~11), helpers (~6), scan (~11), show_dialog (~11), opcodes (~13), diag (~15), menuname (~6), lifecycle (~14).
-- **v0.16.3 field_archive_jsm.inl** (just shipped) — 2 KB slim shell + 7 `.inl` as listed above. Used small-refactor pattern (state hoist + helper extraction); v0.16.4 should default to pure mechanical unless Aaron approves something more invasive.
+- **v0.16.1 chase_auto_pilot.cpp** — 6.47 KB slim parent + 8 `.inl`.
+- **v0.16.2 field_dialog.cpp** — 3 KB slim parent + 8 `.inl`.
+- **v0.16.3 field_archive_jsm.inl** — 2 KB slim shell + 7 `.inl`. Small-refactor pattern (state hoist + helper extraction).
+- **v0.16.4 battle_tts_ewm.inl** (just shipped) — 2.17 KB slim shell + 9 `.inl`. Pure mechanical. Closest reference model for v0.16.5 since they're sibling `.inl`s in the same parent (`battle_tts.cpp`).
 
 ## Hard constraints (unchanged)
 
-- **Filesystem MCP for all Windows project files.** Bash runs in a Linux container that can't reach the OneDrive mod directory.
+- **Filesystem MCP for all Windows project files.**
 - **Aaron pushes via `Utilities/push_to_github.ps1`**, Claude NEVER pushes.
 - **NEVER re-enable SET3 opcode hook (0x1E)** — CI guard in `.github/workflows/safety-checks.yml`.
 - **F-key handlers gated** on `!(GetAsyncKeyState(VK_MENU) & 0x8000)`.
@@ -107,18 +99,18 @@ Unlike v0.16.3, this is a **regular `.inl` textually included from `battle_tts.c
 - **Push utility refuses to push if top CHANGELOG heading doesn't match `FF8OPC_VERSION`.**
 - Every Claude response starts with `## Claude Says`.
 
-## Refactor queue after v0.16.4
+## After v0.16.5
 
-- **v0.16.5**: split `src/battle_tts_menu.inl` (82 KB).
+The refactor chapter closes. The allowlist in `.github/workflows/safety-checks.yml` can be emptied (only `field_archive_jsm_scan.inl` at 63 KB remains in the watch zone; accepted exception). Then the backlog below opens.
 
-After v0.16.5 all source files are at or under the 80 KB hard fail (with only `field_archive_jsm_scan.inl` and possibly a few others in the watch zone), and the refactor chapter closes. Then the backlog below opens.
+## Key lessons carried forward
 
-## Key lessons carried forward (from the chase chapter)
-
-1. **`ff8_nav_data.log` is the silent goldmine for spatial debugging.** It logs every player triangle change as `[timestamp] COORD field tri X Y ...` regardless of auto-pilot state — including manual runs.
-2. **Aaron's domain knowledge is ground truth, but his recipes need empirical verification.** Recipes point direction; position traces give magnitudes.
-3. **Multiple catch sources on one field may not all be active.** Always verify the `[CBF] PASS` caller (`entityPtr=`) against the actual entity identity.
-4. **Per-field problems require per-field analysis.** The robot's position resets at every field boundary.
+1. **`ff8_nav_data.log` is the silent goldmine for spatial debugging.**
+2. **Aaron's domain knowledge is ground truth, but his recipes need empirical verification.**
+3. **Multiple catch sources on one field may not all be active.** Always verify the `[CBF] PASS` caller.
+4. **Per-field problems require per-field analysis.**
+5. **EWM is load-bearing.** Preserve "first-to-fill acts first, no skipped turns, natural ally/enemy ratio". Default to pure mechanical splits unless Aaron explicitly approves a refactor.
+6. **Pure mechanical splits avoid behavior regression risk.** v0.16.4 deliberately did NOT touch v0.13.57 ATB-restore semantics or v0.13.55-56 dispatch hooks — they're load-bearing for the EWM contract.
 
 ## Backlog (after the size-split queue clears, v0.16.6+)
 

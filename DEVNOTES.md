@@ -4,29 +4,43 @@ Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` inj
 
 **Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
 
-GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.16.2** (commit `7eb1ab1e`, pushed 2026-05-17 05:09:53 UTC, parent `5c08a1ae` = v0.16.1.4). **Local tree = v0.16.3, BAT cleared 2026-05-16 23:56, ready to push.**
+GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.16.3** (commit `8a7a23d1`, pushed 2026-05-17 05:58:34 UTC). **Local tree at v0.16.4 awaiting BAT.**
 
 ---
 
-## Current state: v0.16.3 field_archive_jsm.inl split BAT cleared
+## Current state: v0.16.4 battle_tts_ewm.inl split — LOCAL, awaiting BAT
 
-The X-ATM092 chase auto-pilot chapter is **closed**. v0.16.1.4 BAT cleared doopen2a in ~5 seconds and progressed cleanly through dotown_3 → dotown_2 → dotown_1 to the chase climax with zero `[CBF] PASS` catches.
+The X-ATM092 chase auto-pilot chapter is **closed**. v0.16.1.4 BAT cleared doopen2a in ~5 seconds and progressed cleanly through the chase climax with zero `[CBF] PASS` catches.
 
-**v0.16.3 (this session) BAT cleared on `bgryo1_1` 23:56:24-23:56:35:** `src/field_archive_jsm.inl` (91 KB monolith, over the 80 KB CI hard-fail) carved into a 2 KB slim shell + seven sub-`.inl` files. Strategy was **Option B** (small refactor, not pure mechanical): the cross-pass `static` arrays inside `ScanJSMScripts()` were hoisted to namespace scope so the Director post-pass could share them, and the Director DIAGNOSTIC + post-pass blocks were extracted into a new `RunDirectorDetection()` helper. Behavior byte-for-byte identical — 18 entities scanned, `[SET3-DIAG]` / `[SET3-SHIFT]` firing for rinoa/dic/seed, 8 `[DIR-DIAG]` lines, classification results `SavePts=2 LineCamPan=1 LineScreenBd=1 LineEvent=1 PshmCoord=3 Dir=0`, INF-GW gateways resolved, catalog populated.
+**v0.16.4 written locally (not yet BAT'd):** `src/battle_tts_ewm.inl` (91.79 KB monolith, over the 80 KB CI hard-fail) carved into a 2.17 KB slim shell + **nine** sub-`.inl` files. **Pure mechanical** split — no behavior change. EWM is load-bearing for the turn-based retrofit, so every `__try` block, comment, and static was preserved verbatim; only locations moved.
 
-Include chain (dependency-ordered, included textually from the slim parent inside `namespace FieldArchive`):
+Include chain (dependency-ordered, included textually from the slim parent inside `namespace BattleTTS`, which itself is included from `battle_tts.cpp`):
 
 ```
-state → constants → helpers → opnames → director → scan → dump
+state → gf_patch → gf_effect → bp_diag → atb_hook → dispatch → ffnx → diag → update
 ```
 
-File sizes: state 4.4 KB, constants 6.5 KB, helpers 2.1 KB, opnames 2.6 KB, director 10.4 KB, scan 63.3 KB, dump 7.1 KB. `scan.inl` lands just over the 60 KB warn line (down from 91 KB hard-fail); further splitting would require breaking the per-entity opcode scan loop into sub-helpers, which crosses from mechanical extraction into behavior-touching refactor — deferred until there's a functional reason. `field_archive.cpp` unchanged.
+`state.inl` must come first (declares every static). `update.inl` must come last (`EWM_UpdateBattle` calls helpers from `gf_patch.inl` and `diag.inl`). The `atb_hook.inl` file folds in the EWM lifecycle (`EWM_LoadConfig`, `EWM_SaveConfig`, `EWM_PollToggle`, `EWM_InstallHook`) because `EWM_InstallHook` installs `HookedATBUpdate` — they conceptually belong together.
 
-**v0.16.2 shipped:** `src/field_dialog.cpp` split 88 KB monolith → 3 KB slim parent + 8 `.inl` files. Pure mechanical, no functional change. Include chain in dependency order: state → helpers → scan → show_dialog → opcodes → diag → menuname → lifecycle. BAT 2026-05-16 23:00 confirmed clean: all 14 MinHook detours installed, AMESW / AASK / RAMESW / show_dialog dedup paths all firing correctly. One minor pre-existing POLL teardown garble (`[Name80]kindrL`) noted in backlog.
+File sizes: state 8.4 KB, gf_patch 8.9 KB, gf_effect 6.9 KB, bp_diag 17.1 KB, atb_hook 12.3 KB, dispatch 5.7 KB, ffnx 9.7 KB, diag 12.0 KB, update 13.8 KB, slim shell 2.2 KB. Largest sub-file is `bp_diag.inl` at 17.1 KB — comfortably under the 60 KB warn line. Total split is 96.8 KB vs original 91.8 KB; the ~5 KB overhead is per-file orientation comment headers explaining each module's role.
 
-The full v0.16.1.x narrative (refactor scope, chase chapter, BAT empirical numbers, findings, file layout, open question) is archived in **`DEVNOTES_HISTORY.md`** at the top. Consult it only if a chase regression surfaces.
+**`battle_tts.cpp` unchanged.** It still `#include`s `battle_tts_ewm.inl` exactly as before; the textual include simply expands into nine sub-files. `OnBattleEnter`, `Initialize`, `Shutdown` still reference statics declared in `state.inl` (e.g. `s_gfVEHHandle`, `s_gfSnapValid`, `s_gfAutoArmDone`, `s_tgtDiagStage`) — file-scope visibility carries across the textual-include boundary. `deploy.bat` unchanged.
 
-Likewise the v0.16.0.x world_map.cpp split + Parts B/C + Fire Cavern fixes are archived there.
+### What Aaron's BAT will verify
+
+Trigger any battle. Confirm:
+- Build compiles (`Logs/build_latest.log` tail).
+- EWM O-key toggle still works (announces "Enhanced Wait Mode on" / "off").
+- ATB freezes during command menus.
+- Turn order announces correctly.
+- GF summons (Quezacotl, Shiva, Ifrit, etc.) still fire without the v0.10.91 GF-fire bug recurring.
+- v0.13.58 per-slot turn counter still logs `[TURN-COUNT]` on each entity turn.
+
+Any deviation from v0.16.3 behavior means a transcription error in the split — re-examine the affected sub-`.inl` against the v0.16.3 monolith via `git show 8a7a23d1:src/battle_tts_ewm.inl`.
+
+**v0.16.3 shipped (commit `8a7a23d1`):** `src/field_archive_jsm.inl` split (91 KB → 2 KB slim shell + 7 sub-`.inl`). Strategy was Option B small refactor (state hoist + `RunDirectorDetection` helper extraction). BAT cleared on `bgryo1_1`. The full v0.16.3 narrative is in `DEVNOTES_HISTORY.md`.
+
+The full v0.16.1.x chase chapter, v0.16.0.x world_map split + Parts B/C + Fire Cavern fixes, and other completed chapters are archived in **`DEVNOTES_HISTORY.md`**. Consult only if a regression surfaces.
 
 ### Diagnostic logging still in place
 
@@ -34,29 +48,28 @@ Likewise the v0.16.0.x world_map.cpp split + Parts B/C + Fire Cavern fixes are a
 
 ## Active refactor queue
 
-Two source files remaining over the 60 KB CI warn line, ordered by size:
+After v0.16.4 BATs clean and pushes:
 
-1. **v0.16.4**: split `src/battle_tts_ewm.inl` (90 KB). **Next up.** Pattern matches v0.16.2 (regular `.inl`, not nested-include shell).
-2. **v0.16.5**: split `src/battle_tts_menu.inl` (82 KB).
+1. **v0.16.5**: split `src/battle_tts_menu.inl` (82 KB). **Final size-split task.** Pattern matches v0.16.4 (regular `.inl` shell + sub-`.inl` chain).
 
-(`field_archive_jsm_scan.inl` at 63 KB is in the watch zone but accepted as-is — see v0.16.3 entry above.)
+After v0.16.5 ships, every source file in the project is under the 80 KB CI hard fail (with `field_archive_jsm_scan.inl` at 63 KB an accepted watch-zone exception), the allowlist in `.github/workflows/safety-checks.yml` can be emptied, and the refactor chapter closes.
 
-Completed: v0.16.0 (`world_map.cpp`), v0.16.1 (`chase_auto_pilot.cpp`), v0.16.2 (`field_dialog.cpp`), v0.16.3 (`field_archive_jsm.inl`).
+Completed: v0.16.0 (`world_map.cpp`), v0.16.1 (`chase_auto_pilot.cpp`), v0.16.2 (`field_dialog.cpp`), v0.16.3 (`field_archive_jsm.inl`), v0.16.4 (`battle_tts_ewm.inl`).
 
-Pattern (established in v0.16.0, refined in v0.16.1, applied again in v0.16.2): parent `.cpp` becomes a slim file with namespace block + `#include` chain of `.inl` files + tiny public-API tail. `*_state.inl` (statics) included FIRST. No header guards or namespace decls inside `.inl` files. `*_history.h` archive with `#if 0` wrapper holds removed legacy content (when applicable). Aim for 5-20 KB per `.inl`; resplit if any approaches 60 KB.
+Pattern (established in v0.16.0, refined through v0.16.4): parent `.cpp` (or shell `.inl`) becomes a slim file with namespace block + `#include` chain of `.inl` files + tiny public-API tail (when applicable). `*_state.inl` (statics) included FIRST. No header guards or namespace decls inside `.inl` files. `*_history.h` archive with `#if 0` wrapper holds removed legacy content (when applicable). Aim for 5-20 KB per `.inl`; resplit if any approaches 60 KB.
 
 ## Backlog (priority order, after the refactor queue)
 
-1. **POLL teardown garble** (new in v0.16.2 backlog): the polling-thread fallback occasionally speaks fragments like `[Name80]kindrL` ~17 seconds after a dialog dismiss, when the window buffer is being torn down and the poller picks up intermediate state. Pre-existing behavior, NOT a v0.16.2 regression — same `MIN_TEXT_LENGTH=3` filter + hash dedup as v0.16.1.4. Fix candidate: reject text containing unresolved `[…]` tokens in the POLL path.
+1. **POLL teardown garble** (carried from v0.16.2 BAT): the polling-thread fallback occasionally speaks fragments like `[Name80]kindrL` ~17 seconds after a dialog dismiss. Pre-existing behavior. Fix candidate: reject text containing unresolved `[…]` tokens in the POLL path.
 2. **`menu_tts.cpp` T-handler `!shift` gate**. One-line cleanup.
 3. **FieldAnnounce display-name catalog audit** in `src/field_display_names.h`. Wrong mappings for fieldIds 0x0134 / 0x0136. Verify Fire Cavern A mapping (fieldId 0x0088, engine `fieldName='bdview1'`, expected "Fire Cavern A") end-to-end.
-4. **Field-name populate race** at Part B arrival check — DIAGNOSTIC LOG ONLY, audio is fine. v0.16.0.2 BAT caught the snapshot at `fieldName=''` for a 7-second drive; v0.16.0.3 BAT caught it at `fieldName='bdview1'` once the race resolved. Backlog action: either retry briefly in Part B before logging, or accept (fieldId is sufficient).
+4. **Field-name populate race** at Part B arrival check — diagnostic log only, audio fine.
 5. **Deep-research doc updates**: `Plan & Research Documents/Dollet timer countdown deep research results.md` — wrong-math fix + LIVE TIMER FOUND appendix.
 
 ### Future (deferred)
 
 - **Refined-coord persistence** (JSON or %APPDATA% store so BAT-captured coords survive sessions, replacing per-destination hardcodes).
-- **Other geometric-trigger destinations**: as v0.16.0.2's two-tier cap catches them on first arrival, add their refined coords to the Initialize() hardcode chain. Candidates: Centra Ruins, Tomb of the Unknown King, Cactuar Island, Shumi Village, Edea's House, Chocobo Forest entrances.
+- **Other geometric-trigger destinations**: as v0.16.0.2's two-tier cap catches them on first arrival, add their refined coords to the Initialize() hardcode chain.
 - **Engine-write hook for cleaner countdown freeze** (cosmetic ±1-sec flicker; not urgent).
 
 ### Deferred (don't pick without Aaron's direction)
@@ -72,7 +85,7 @@ Pattern (established in v0.16.0, refined in v0.16.1, applied again in v0.16.2): 
 
 ## Catalog of known fieldIds for geometric-trigger destinations
 
-- **Fire Cavern A** (approach field, world-map trigger): `fieldId=0x0088`, engine `fieldName='bdview1'`. Trigger position ≈ (30260, -29221), ~6.5k units southwest of catalog icon (36864, -28672). v0.16.0.3 BAT captured the fieldName once the populate race resolved.
+- **Fire Cavern A** (approach field, world-map trigger): `fieldId=0x0088`, engine `fieldName='bdview1'`. Trigger position ≈ (30260, -29221).
 - **Balamb Town gate** (planner destination, not geometric): `fieldId=0x006A`, fieldName=`bcgate_1`. Trigger position ≈ (12894, -26776).
 
 ---
@@ -94,13 +107,17 @@ Pattern (established in v0.16.0, refined in v0.16.1, applied again in v0.16.2): 
 - **Diagnostic-feature gating pattern**: gate behind `#define X 0` instead of deleting.
 - **Source file size limits (v0.16.0 CI guard)**: 60 KB soft warning, 80 KB hard fail. Split before substantive edits cross the warning line.
 - **Arrival detection needs VERIFICATION, not just signal-presence.** v0.14.96 fixed encounter false-positives; v0.16.0 Part B fixed off-target-field false-positives; v0.16.0.2 fixed icon-vs-trigger false-negatives via two-tier cap.
-- **Empirical-data capture (refined coords) needs the underlying decision VALIDATED before storage.** Bad decisions self-reinforce otherwise (the Fire-Cavern-into-bggate_1 cascade).
-- **Geometric-trigger vs script-trigger destinations need different navigation strategies.** The wmsetus planner only handles script-trigger destinations; geometric-trigger destinations (Fire Cavern, early-game Balamb Garden, likely Centra Ruins / Tomb / Cactuar Island) use simple-coord steering + engine terrain trigger via Part C, with the wider Part B cap on first arrival.
-- **When "fixing" a planner decline, don't substitute a different region — that's the v0.14.95 mistake.** If the data says there's no scripted path, the right answer is fall back to non-planner logic, not invent a route the data doesn't support.
+- **Empirical-data capture (refined coords) needs the underlying decision VALIDATED before storage.**
+- **Geometric-trigger vs script-trigger destinations need different navigation strategies.**
+- **When "fixing" a planner decline, don't substitute a different region — that's the v0.14.95 mistake.**
 - **Mid-drive replan must honor the same planner-eligibility gate as initial Start.**
-- **Two-stage destination entry** (Fire Cavern, possibly other major dungeons): the world-map terrain trigger drops the player into an approach field, not the destination interior. The refined coord for these destinations is the approach-field trigger position, several thousand units offset from the icon.
-- **GitHub commit history is authoritative for "when did X change" questions.** Memory and DEVNOTES can drift; `list_commits` queries reveal exact regression points.
-- **`ff8_nav_data.log` is the silent goldmine for spatial debugging.** Per-triangle player position logged regardless of auto-pilot state — including manual runs. Use whenever Aaron's manual play is the ground truth.
-- **Aaron's domain knowledge is ground truth, but his recipes need empirical verification.** Recipes point direction; position traces give magnitudes.
-- **Multiple catch sources on one field may not all be active.** Always verify the `[CBF] PASS` caller (`entityPtr=`) against the actual entity identity, not just the field's JSMScan listing.
+- **Two-stage destination entry** (Fire Cavern, possibly other major dungeons): the world-map terrain trigger drops the player into an approach field, not the destination interior.
+- **GitHub commit history is authoritative for "when did X change" questions.**
+- **`ff8_nav_data.log` is the silent goldmine for spatial debugging.**
+- **Aaron's domain knowledge is ground truth, but his recipes need empirical verification.**
+- **Multiple catch sources on one field may not all be active.** Always verify the `[CBF] PASS` caller (`entityPtr=`) against the actual entity identity.
+- **EWM is load-bearing.** Preserve "first-to-fill acts first, no skipped turns, natural ally/enemy ratio". Default to pure mechanical splits unless Aaron explicitly approves a refactor.
 - Every Claude response starts with `## Claude Says`.
+
+
+---
