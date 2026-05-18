@@ -1,71 +1,126 @@
-# Next Session Prompt: v0.17.5.2 BAT'd clean, post-push session
+# Next Session Prompt: v0.17.5.4 LOCAL, awaiting BAT
 
 ## Greeting
 
 Start with `## Claude Says`. Read `DEVNOTES.md` and THIS file before any work.
 
-## Where we are at session open
+## Where we are
 
-**GitHub HEAD = v0.17.5.2** (assuming Aaron pushed via `Utilities/push_to_github.ps1` after the v0.17.5.2 BAT). **Local tree = matches GitHub HEAD** unless Aaron has started new work.
+**GitHub HEAD = v0.17.5.2** (commit `6dc080a`, pushed 2026-05-17). **Local tree = v0.17.5.4**, awaiting BAT. v0.17.5.3 was BAT'd but its diagnostics are stacked into v0.17.5.4.
 
-If GitHub HEAD is still `v0.16.5.2`, Aaron hasn't pushed yet. The push utility is a one-line command on his end (`Utilities/push_to_github.ps1`); the CHANGELOG.md top heading already matches `FF8OPC_VERSION = 0.17.5.2` so the utility's guard check will pass. If Aaron asks, the BAT was clean -- safe to push.
+Recent history (most recent on top):
+- **v0.17.5.4 = WorldMap polling stuck-at-startup fix** (the topic of this BAT)
+- v0.17.5.3 = autodrive failure + TTS audit logging (BAT'd; diagnostics retained)
+- v0.17.5.2 = funnel waypoint pruning (BAT'd clean, shipped to GitHub)
+- v0.17.5.1 = GPS announcement hysteresis (BAT'd clean, shipped)
+- v0.17.5 = load-time 90-degree axis quantization (BAT'd clean, shipped)
 
-## v0.17.5.2 BAT result summary
+## v0.17.5.3 BAT result (the input to v0.17.5.4)
 
-Aaron walked elevator -> directory -> classroom hallway -> elevator. Outcome: "directions seemed good throughout."
+Aaron pressed `\` on bghall_1 to start autodrive. Two TTS messages fired in the same second:
 
-Quantitative wins from the log:
+```
+[15:59:37] [TTS] "Driving."
+[15:59:37] [TTS] "No locations available." (interrupt)
+```
 
-| Field | A* tris | Pre-prune wp | Post-prune wp | Sweeps |
-|-------|---------|--------------|---------------|--------|
-| bghall_1 | 11 | 11 | 5 | 7 |
-| bg2f_2 | 46 | 46 | **10** | **37** |
+FieldNavigation autodrive started correctly ("Driving"). Immediately afterward, the WorldMap module's PollKeys() also responded to the same `\` press, found its catalog empty (correctly -- Aaron is on a field, not the world map), and announced "No locations available" with interrupt=true. The interrupt clobbered the "Driving" announcement, so Aaron heard the second one and not the first.
 
-bg2f_2's path this BAT was a different (longer) route than v0.17.5.1's, but the prune behaviour is consistent: ~4-5x reduction in waypoint count by removing waypoints within 50 units of the line through their neighbours. No autodrive velocity-stuck events; no compile warnings; DIVERGE numbers within expected residual (11° on bg2f_2 due to tilted-camera 2D projection, well within sector tolerance).
+Root cause traced to `IsOnWorldMap()` in `world_map_segments.inl`. It only checked `WM_SCENE_FLAG`. At boot that memory reads 0 (zero-init), returning true. WorldMap's `Poll()` declared "Entered world map" and `s_onWorldMap` stayed latched. PollKeys() ran every tick on every screen.
 
-First announced cardinal on bg2f_2 this run was **"north"**, matching Aaron's mental model (path's first leg was -X direction = screen-north on bg2f_2's quantized axes). The "east when expected north" scenario from v0.17.5.1 wasn't reproduced this time because Aaron started from a different position -- the path's geometry was different.
+The world log carries a long-standing diagnostic warning that surfaced this:
 
-## Open architectural question
+```
+[15:58:52][WORLD] WorldMap: Entered world map
+[15:58:53][WORLD] WorldMap: Warning - On world map but game mode is 0 (expected 2)
+```
 
-v0.17.5.3 (option B hybrid announcement) was queued as "ship if pruning alone isn't enough." This BAT showed pruning + path-aware was good for the route walked. The "east when expected north" scenario from v0.17.5.1 may or may not still occur on the original-position path; we don't know because Aaron didn't reproduce that exact starting position this BAT.
+The warning was observing the disagreement but never acting on it.
 
-**Recommendation:** defer v0.17.5.3 until Aaron hits the issue again in real play. If he reports it, ship B then. Otherwise the next session should move to the v0.16.5.2 BAT triage backlog (see below).
+## v0.17.5.4: World Map polling stuck-at-startup fix
 
-## v0.16.5.2 BAT triage backlog (resumable)
+### The change
 
-Issues from the v0.16.5.2 BAT that were deferred for the v0.17.x navigation accuracy work. Rough priority order:
+Single function rewritten. `IsOnWorldMap()` in `world_map_segments.inl` now requires BOTH:
 
-1. **Remove party members from field entity catalog.** When the party has 2-3 active members, the non-leader members appear as NPCs in the F9/F10 cycle. They shouldn't -- party members aren't navigation targets. Fix: filter ent0..ent2 (party slots) from the catalog before populating the cycle list. Specific code location not yet investigated.
+1. `FF8Addresses::pGameMode` resolved AND equal to `MODE_WORLDMAP` (= 2).
+2. THEN scene flag at `WM_SCENE_FLAG` reads 0.
 
-2. **Walk-and-talk dialog gap.** During scripted walk-and-talk sequences (Squall walks somewhere while NPCs speak), the dialog text doesn't always announce via TTS. Hardcoded engine path bypassing the normal dialog injection hook. Needs disassembly trace of which engine routine fires for these scripted dialogues.
+Either failure returns false. Both reads SEH-wrapped.
 
-3. **SeeD rank bug #27.** Hypothesis from earlier sessions: `FIELD_H_OFFSET = 0xF94` is wrong section size. Need to verify offset by reading the actual savemap section boundary. Disassembly references in `/mnt/project/FF8_EN_*.txt` should help locate the relevant struct.
+### Files changed
 
-4. **Refined-coord narrow-gate steering.** Some narrow corridors cause autodrive to oscillate. Possibly addressable by using a wider AGENT_RADIUS for path planning but a narrower one for steering target validation. Investigation needed.
+- `src/ff8_accessibility.h` -- version bump (0.17.5.4)
+- `src/world_map_segments.inl` -- `IsOnWorldMap()` rewritten
+- `CHANGELOG.md`, `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`
 
-5. **Fire Cavern #28 + planner-fallback #29.** Fire Cavern's world map navigation has a planner failure mode. Need to repro and trace.
+### What's NOT touched
 
-6. **Per-world-map vehicle-aware BFS, guided GPS mode.** Bigger feature. World map navigation currently treats all terrain the same; should know which terrain the current vehicle can cross.
+FieldNavigation autodrive steering issue (see below). Funnel pruning. Quantization. Hysteresis. TTS audit logging (retained from v0.17.5.3 -- proved its worth surfacing this bug).
 
-7. **Battle: Scan TTS keys 9/0 (status resist/active statuses)** -- offset hunt deferred. Need to find the right savemap offsets for these two fields.
+## Separate bug observed (DEFERRED to v0.17.6+)
 
-8. **Junction menu TTS** -- future feature, not actively investigated.
+The v0.17.5.3 BAT also shows that **FieldNavigation autodrive on bghall_1 fails despite manual GPS working**. Drive started dist=3899, ran 21 seconds, ended dist=3726 (173 units progress). Multiple recovery cycles + re-paths. Final tick analysis:
 
-9. **More victory screen polish** -- ongoing future work.
+- player=(134,-7461), steer=(452,-7722)
+- delta = (+318 east, -261 south)
+- With `driveCamRight=(1,0) driveCamDown=(0,-1)`: correct response = RIGHT+DOWN
+- Log shows `kb=U lX=1000 lY=0` -- UP key + analog right only (no Y component)
+
+The vertical axis is inverted for autodrive on this field. Manual GPS works because it uses `s_camRight/Down` (CA-quantized at field load) while autodrive uses `s_driveCamRight/Down` (runtime calibration via CALIB phases). They're separate code paths since the v0.17.2 split.
+
+This is the "Refined-coord narrow-gate steering" backlog item plus more. The autodrive steering pipeline needs its own dedicated investigation. Queued for v0.17.6+.
 
 ## Status check at session open
 
-**If Aaron's first message is about the v0.16.5.2 BAT backlog**: pick the highest-priority item he wants to address. Start by re-reading the relevant code with `filesystem:read_text_file` rather than working from memory.
+**If Aaron's first message is "BAT"**: v0.17.5.4 has been built and tested. Triage in this order:
 
-**If Aaron's first message is "let's do B / v0.17.5.3"**: he's hit the path-aware-vs-mental-model scenario again. Implement option B (hybrid announcement) in `field_nav_gps.inl::UpdateGPS`:
-- Compute both `dirIdx` (toward waypoint, current behavior) and `finalDirIdx` (toward `(tx-px, ty-py)`).
-- When they differ, speak both: "east, heading north, 6 steps" or similar phrasing.
-- When they match, speak just one (current behavior).
-- Same change in `StartGPS`.
-- Keep path-aware steering intact (`AdvanceGpsWaypoint` still drives autodrive and the immediate `dirIdx`).
-- New version v0.17.5.3, single CHANGELOG entry.
+### 1. `Logs/build_latest.log` tail
 
-**If Aaron's first message is "BAT" without a v0.17.5.3 build between sessions**: that's a stale BAT message about v0.17.5.2 or something unexpected -- ask before assuming.
+Confirm `Version: 0.17.5.4` and no compile errors. The new code uses `FF8Addresses::pGameMode` and `FF8Addresses::MODE_WORLDMAP`, both already used in `world_map.cpp` Poll(). Since `world_map_segments.inl` is textually included AFTER `#include "ff8_addresses.h"`, both symbols should resolve.
+
+### 2. `Logs/ff8_world.log` -- no spurious "Entered world map"
+
+If Aaron loaded into a field (any field, not the world map), the world log should NOT contain `WorldMap: Entered world map` for the boot/title/load sequence. The old buggy behavior emits that line at boot. The fix should suppress it.
+
+The "Warning - On world map but game mode is 0" log line should also disappear: if `IsOnWorldMap()` correctly returns false when gameMode=0, Poll() never enters the entry block, so the warning never fires.
+
+### 3. `Logs/ff8_mod.log` -- clean TTS sequence on `\`
+
+When Aaron presses `\` on a field:
+- `[TTS] "Driving."` (or `[TTS] "Target not yet located."`) should appear in isolation.
+- NO follow-up `[TTS] "No locations available."` immediately after.
+
+### 4. World map sanity check
+
+When Aaron actually reaches the world map (e.g., walks out of Balamb Garden), the WorldMap module should still announce "World map." correctly and accept `\` for autodrive. The fix tightens the entry condition; it doesn't disable world map behavior when actually on the world map.
+
+### 5. Aaron's qualitative report
+
+The `\` key on fields should now produce only the FieldNavigation TTS, no clobbering. The underlying autodrive-fails-to-reach-target issue will STILL be present (that's a separate bug), but at least Aaron will hear the correct "Driving" announcement instead of the misleading "No locations available" message.
+
+## What to do after the BAT
+
+### If clean
+
+Push v0.17.5.4 to GitHub. The fix is small and self-contained.
+
+Then either:
+- Address the autodrive steering issue (v0.17.6 -- the "vertical axis inverted on bghall_1 for autodrive only" bug). This needs its own investigation; the calibration pipeline in `field_nav_autodrive.inl` is where to start.
+- Resume the v0.16.5.2 BAT triage backlog (FMV STOP/PLAY race, party-member-as-NPC, classroom entity catalog under-population, SeeD rank #27, Fire Cavern #28, planner-fallback #29).
+
+### If a regression appears
+
+The fix is minimal -- just a tighter gate on one function. The most likely regression would be: WorldMap module fails to declare entry when the player IS on the world map (because gameMode hasn't updated yet, or there's a transient state where the scene flag is set before gameMode). Mitigation: keep both checks but loosen one of them.
+
+## Autodrive steering investigation (when we get to it)
+
+The next step for the bghall_1 autodrive failure:
+
+1. Read `field_nav_autodrive.inl` carefully -- the calibration pipeline (phase 1 = +X push, phase 2 = +Y push, calibration done = construct driveCamRight/driveCamDown).
+2. Look at how steering vector is converted to keyboard + analog. Is the keyboard direction derived from screenY using the same axes as analog?
+3. The bghall_1 BAT showed phase 1 FAILED (no movement on +X push) but phase 2 succeeded (+Y push moved -Y in world). That produced `driveCamRight=(1,0) driveCamDown=(0,-1)` defaults rather than calibrated values. Maybe phase 1 failure should trigger different fallback behavior.
+4. Compare with the manual nav axes (camRight=(1,0) camDown=(0,-1) for bghall_1 from CA quantization) -- they're identical to driveCamDown but driveCamRight defaulted. So maybe defaulting to (1,0) when phase 1 fails is wrong; should use the CA-derived axes as fallback?
 
 ## Hard constraints (unchanged)
 
@@ -74,7 +129,7 @@ Issues from the v0.16.5.2 BAT that were deferred for the v0.17.x navigation accu
 - **NEVER re-enable SET3 opcode hook (0x1E).**
 - **F-key handlers gated** on `!(GetAsyncKeyState(VK_MENU) & 0x8000)`.
 - **F12 reserved** for per-session diagnostics only.
-- **Source file size limits**: 60 KB warn, 80 KB fail. `field_nav_pathfinding.inl` is approaching the warn threshold after v0.17.5.2 -- if v0.17.5.3 adds significant code there, split to a new `.inl`.
+- **Source file size limits**: 60 KB warn, 80 KB fail.
 - **OneDrive sync EPERM**: retry immediately on first edit attempt.
 - **AUTO `[CBF]` battle-suppressor cap stays `INT_MAX`**.
 - **`.inl` files are TEXTUAL INCLUDES**: no header guards, no namespace declarations inside.
@@ -84,15 +139,15 @@ Issues from the v0.16.5.2 BAT that were deferred for the v0.17.x navigation accu
 
 ## Notes for resumption
 
-- The v0.17.x series shipped the navigation accuracy stack in three small steps: load-time 90 deg axis quantization (v0.17.5), GPS hysteresis (v0.17.5.1), and post-funnel collinear waypoint pruning (v0.17.5.2). All three working together. Architecture is in a good place.
-- The `PruneCollinearWaypoints` function in `field_nav_pathfinding.inl` is the most recent change. 50-unit epsilon; conservative below FF8 wall thickness; first/last waypoints preserved; sweep-to-stable with 100-iteration safety cap.
-- bg2f_2's tilted camera (d2len=0.130) is a known special case. v0.17.5 quantization handles it correctly within sector tolerance. If a future field has even more tilted axes and quantization fails, the observer log surfaces it as DIVERGE > 15°.
-- For diagnostic walking on a specific field, F9/F10 cycle + GPS start is the established workflow. F11 captures a screenshot. F12 is reserved for per-session diagnostics.
+- v0.17.5.3's TTS audit trail is now permanent infrastructure. It surfaced this WorldMap bug in one BAT cycle.
+- The `[drive] REFUSED` log from v0.17.5.3 didn't fire in this BAT (autodrive validation passed) but remains in place for future debugging.
+- v0.17.5.4 is the third small fix in the v0.17.5.x series. All four (quantization, hysteresis, pruning, world-map gate) work together cleanly.
+- The bghall_1 autodrive failure is real but architecturally distinct -- separate axis system, separate calibration pipeline, separate code path. Don't conflate it with the manual nav improvements.
 
 ## Classroom entity catalog (parallel track, still paused)
 
 Still pending. Need from Aaron:
-1. Field name confirm -- now corroborated as `bg2f_2` from v0.17.5.x BATs.
+1. Field name confirm -- corroborated as `bg2f_2` from v0.17.5.x BATs.
 2. F9 list contents (cycle through, get the two "interaction" names if they exist).
 
-This is low priority; can be deferred until Aaron specifically wants to address it.
+Low priority; deferred until Aaron specifically wants to address it.

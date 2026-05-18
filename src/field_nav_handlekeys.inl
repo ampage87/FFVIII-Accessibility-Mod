@@ -387,6 +387,31 @@ static void HandleKeys()
 
                 ScreenReader::Speak("Driving.");
             } else {
+                // v0.17.5.3: Log the validation failure so the next BAT exposes
+                // which target was unreachable and why. Most common cause:
+                // target is an NPC whose init script has not yet placed it on
+                // the walkmesh, so GetEntityPos returns false for entityIdx.
+                // Other failure modes: catalog out-of-range (shouldn't happen
+                // with the bounds-checked drTgt above), gateway/JSM index
+                // off-by-one, or trigger line index out of range.
+                const char* fld = FF8Addresses::pCurrentFieldName
+                                  ? FF8Addresses::pCurrentFieldName : "?";
+                const char* tType = EntityTypeName(drTgt.type);
+                bool playerPosKnown = GetEntityPos(s_playerEntityIdx, _px, _pz);
+                bool targetPosKnown = false;
+                if (drTgt.entityIdx >= 0 && drTgt.entityIdx < MAX_ENTITIES) {
+                    float tmpX, tmpY;
+                    targetPosKnown = GetEntityPos(drTgt.entityIdx, tmpX, tmpY);
+                }
+                Log::Field("FieldNavigation: [drive] REFUSED -- target validation failed: "
+                           "field='%s' catIdx=%d/%d entityIdx=%d gatewayIdx=%d "
+                           "type=%s name='%s' player_pos_known=%d target_pos_known=%d "
+                           "player_entityIdx=%d",
+                           fld, s_selectedCatalogIdx, s_catalogCount,
+                           drTgt.entityIdx, drTgt.gatewayIdx,
+                           tType, drTgt.name,
+                           (int)playerPosKnown, (int)targetPosKnown,
+                           s_playerEntityIdx);
                 ScreenReader::Speak("Target not yet located.");
             }
             }

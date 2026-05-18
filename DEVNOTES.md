@@ -4,15 +4,84 @@ Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` inj
 
 **Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
 
-GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.16.5.2** (commit `63dbbfac`, pushed 2026-05-17 20:59:00 UTC). **Local tree = v0.17.5.2, BAT'd clean** -- ready to push via `Utilities/push_to_github.ps1`.
+GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.17.5.2** (commit `6dc080a`, tagged `v0.17.5.2`, pushed 2026-05-17 23:00:02 local). **Local tree = v0.17.5.4, BAT'd clean** -- ready to push via `Utilities/push_to_github.ps1`. v0.17.5.3's diagnostic logging is stacked into the same commit since it was never pushed standalone; the CHANGELOG entry for v0.17.5.3 documents it.
 
-v0.17.5.2 BAT result: prune pass worked exactly as designed. bg2f_2's 46-triangle A* corridor (longer this BAT than v0.17.5.1's 13-triangle path because Aaron started from a different spot in the hallway) produced 46 funnel waypoints pre-prune and **10 waypoints post-prune** -- 36 collinear-ish waypoints removed in 37 sweeps. bghall_1's 11-triangle corridor went 11 -> 5 (6 pruned in 7 sweeps). First announced cardinal on bg2f_2 was "north" matching Aaron's mental model (path's first leg was -X direction this run). Aaron's qualitative: "directions seemed good throughout" walking elevator -> directory -> classroom hallway -> elevator. No velocity-stuck events; no autodrive regressions. Quantization architecture (v0.17.5), announcement hysteresis (v0.17.5.1), and collinear pruning (v0.17.5.2) all working together cleanly.
+v0.17.5.4 BAT result: world map polling no longer fires on fields. World log now ends at "Module initialized (v0.17.5.4)" with no spurious "Entered world map" line at boot. The TTS log shows clean sequences: `\` press on a field produces `[TTS] "Driving."` in isolation, with no follow-up "No locations available." interrupt. Aaron pressed `\` again to cancel and got `[TTS] "Cancelled."` cleanly. The world map gameMode+sceneFlag dual-check works as designed.
 
-With v0.17.5.2 BAT'd, the GPS announcement pipeline is in good shape. The open question is whether v0.17.5.3 (option B hybrid announcement) is still worth implementing. Aaron's BAT path this time didn't reproduce the original "east when I expected north" complaint, but that scenario depends on starting position -- if Aaron walks the corridor from a position where the first segment genuinely heads east before bending north, path-aware will still announce east first. Probably worth deferring B until/unless Aaron hits that scenario again in real play, and focusing next session on the v0.16.5.2 BAT triage backlog instead.
+The separate bghall_1 autodrive steering bug from the v0.17.5.3 BAT is still present (vertical axis inverted, autodrive stuck at dist=3726 of 3899). Not addressed by v0.17.5.4 -- that's autodrive's separate calibration pipeline, queued for v0.17.6+.
 
 ---
 
-## v0.17.5.2: Funnel waypoint pruning (BAT'd clean, ready to push)
+## v0.17.5.4: World Map polling stuck-at-startup fix (BAT'd clean, ready to push)
+
+Narrow bug fix. One function changed.
+
+### The fix
+
+`IsOnWorldMap()` in `world_map_segments.inl` now requires BOTH signals to agree:
+
+1. `FF8Addresses::pGameMode` resolved AND equal to `MODE_WORLDMAP` (= 2).
+2. THEN the scene flag at `WM_SCENE_FLAG` reads 0.
+
+If either fails, returns false. SEH-wrapped on both reads.
+
+### Files changed
+
+- `src/ff8_accessibility.h` -- version bump
+- `src/world_map_segments.inl` -- `IsOnWorldMap()` rewritten
+
+### What's NOT touched
+
+FieldNavigation autodrive's underlying steering issue (deferred). Funnel pruning (v0.17.5.2). Quantization (v0.17.5). Hysteresis (v0.17.5.1). TTS audit logging (v0.17.5.3, retained).
+
+### BAT verification
+
+Launch the game. Reach a field. Press `\`.
+
+Expect:
+- `ff8_world.log` should NOT show "Entered world map" at boot.
+- `ff8_mod.log` should show `[TTS] "Driving."` or `[TTS] "Target not yet located."` in isolation. No follow-up `[TTS] "No locations available."`.
+- World map navigation should still work normally when actually on the world map.
+
+---
+
+## v0.17.5.3: Autodrive failure + TTS audit logging (LOCAL, BAT'd -- diagnostics retained)
+
+[v0.17.5.3 was BAT'd as part of the test that produced v0.17.5.4. The diagnostic logging itself works as designed -- the TTS audit trail surfaced the WorldMap bug above. The validation-fail log line wasn't triggered in this BAT because autodrive validation passed (the real issue was the post-success TTS clobber, not validation refusal). Both diagnostics remain in place permanently.]
+
+No behaviour changes. Two new log channels.
+
+### What ships
+
+**1. `ScreenReader::Speak` -- TTS audit trail.**
+Every actually-spoken utterance is logged to `ff8_mod.log` as `ScreenReader: [TTS] "<text>"` (with `(interrupt)` suffix when applicable). Empty-string silence/purge calls are skipped. Both `Speak(const wchar_t*)` and the `const char*` overload funnel through the wide-char path, so one logging hook captures everything.
+
+This is a permanent diagnostic. Every "what did the mod say?" question from now on is answerable from the log.
+
+**2. `[drive] REFUSED` -- autodrive validation-fail log.**
+When the `\` key's validation gate fails, log the full context: field name, catalog index/size, target entityIdx/gatewayIdx, target type and name, whether `GetEntityPos` succeeded for the player and target, and the player's own entity index.
+
+### Files changed (v0.17.5.3)
+
+- `src/ff8_accessibility.h` -- version bump
+- `src/screen_reader.cpp` -- `[TTS]` logging in `Speak(const wchar_t*, bool)`
+- `src/field_nav_handlekeys.inl` -- `[drive] REFUSED` diagnostic in `HandleKeys` autodrive-validation-fail branch
+- `CHANGELOG.md`, `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`
+
+### What's NOT touched
+
+Validation logic itself. Funnel pruning (v0.17.5.2). Quantization (v0.17.5). Hysteresis (v0.17.5.1).
+
+### BAT verification
+
+Load bghall_1. Cycle the F9/F10 catalog. Press `\` on an NPC target. Expect:
+
+- `ff8_mod.log`: `ScreenReader: [TTS] "..."` lines for every announcement, including the refusal.
+- `ff8_field.log`: one `[drive] REFUSED -- target validation failed: ...` line per refused press. Likely signature `player_pos_known=1 target_pos_known=0` -- if so, confirms NPC-position-not-yet-tracked hypothesis and points v0.17.5.4 at JSM-coordinate fallback.
+
+---
+
+## v0.17.5.2: Funnel waypoint pruning (shipped to GitHub as commit `6dc080a`)
 
 E from session discussion. Reduces SSFA micro-corner waypoint count without changing the path's macro shape or wall avoidance properties. BAT confirmed nearly 5x waypoint reduction on the test case and good qualitative behavior throughout the test path.
 

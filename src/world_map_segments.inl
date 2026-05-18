@@ -170,7 +170,32 @@ static uint16_t GetCurrentStoryFlag()
 
 static bool IsOnWorldMap()
 {
-    uint16_t scene = 1;  // default to field (not worldmap)
+    // v0.17.5.4: require BOTH the scene flag AND the game mode to agree.
+    // The scene flag at WM_SCENE_FLAG can read 0 at boot (before any scene
+    // has actually loaded -- it's just zero-initialized memory at that
+    // point), which previously made this function return true at startup.
+    // The downstream effect: world_map.cpp's Poll() declared "Entered world
+    // map" before the player was on any scene, set s_onWorldMap=true, and
+    // never reset because the exit detector only fires on a true->false
+    // transition. PollKeys() then ran every tick on every screen, including
+    // fields, and stole the `\` key with its own "No locations available"
+    // announcement on top of FieldNavigation's "Driving."
+    //
+    // The pre-existing diagnostic warning in Poll() ("Warning - On world
+    // map but game mode is N (expected 2)") was tracking this exact bug
+    // but only logging it. v0.17.5.4 actually uses gameMode as part of the
+    // decision.
+    if (!FF8Addresses::pGameMode) return false;  // address not resolved yet
+    uint32_t mode = 0;
+    __try {
+        mode = *FF8Addresses::pGameMode;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (mode != FF8Addresses::MODE_WORLDMAP) return false;
+
+    // Game mode says world map; also confirm the scene flag agrees.
+    uint16_t scene = 1;
     __try {
         scene = *(uint16_t*)WM_SCENE_FLAG;
     } __except (EXCEPTION_EXECUTE_HANDLER) {

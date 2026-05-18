@@ -482,6 +482,22 @@ bool Speak(const wchar_t* text, bool interrupt)
     // v04.25: Track last spoken text for repeat feature
     if (wcslen(text) > 0) s_lastSpokenText = text;
 
+    // v0.17.5.3: Log every actually-spoken utterance so post-mortems can
+    // confirm what the player heard. Narrow ASCII transliteration is good
+    // enough for the log -- this is a diagnostic trail, not a transcript.
+    // Skip the empty-string "silence" Speak() calls that are used as queue
+    // purges (those produce no audio so a player would not hear them).
+    if (wcslen(text) > 0) {
+        char narrow[512];
+        int nb = WideCharToMultiByte(CP_UTF8, 0, text, -1, narrow,
+                                      sizeof(narrow) - 1, NULL, NULL);
+        if (nb > 0) {
+            narrow[nb] = '\0';
+            Log::Mod("ScreenReader: [TTS] \"%s\"%s", narrow,
+                       interrupt ? " (interrupt)" : "");
+        }
+    }
+
     switch (s_backend) {
     case Backend::NVDA_SAPI:
     {

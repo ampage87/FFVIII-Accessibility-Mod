@@ -6,6 +6,126 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.5.4
+
+Fixes the World Map polling stuck-at-startup bug exposed by v0.17.5.3's TTS audit trail.
+
+### What v0.17.5.3 revealed
+
+Aaron's BAT log showed two TTS messages firing in the same second when pressing `\` on bghall_1:
+
+```
+[15:59:37] [TTS] "Driving."
+[15:59:37] [TTS] "No locations available." (interrupt)
+```
+
+The FieldNavigation autodrive started successfully ("Driving"). Immediately afterward, the World Map module's key handler also responded to `\`, found its catalog empty (correctly, since there's no world map data when on a field), and announced "No locations available" with interrupt=true -- clobbering the "Driving" announcement.
+
+### Root cause
+
+World Map's `IsOnWorldMap()` in `world_map_segments.inl` only checked `WM_SCENE_FLAG`. At application boot before any scene has loaded, that memory location reads 0 (zero-initialized memory), and `(scene == 0)` returned true. The `Poll()` function then declared "Entered world map" at boot, set `s_onWorldMap=true`, and never reset because the exit detector only fires on a true->false transition of `IsOnWorldMap()`. `PollKeys()` then ran every tick on every screen (including fields), responding to `\` with the "No locations available" announcement.
+
+The world log carried a long-standing diagnostic warning that surfaced exactly this:
+
+```
+[WORLD] WorldMap: Entered world map
+[WORLD] WorldMap: Warning - On world map but game mode is 0 (expected 2)
+```
+
+The warning was observing the disagreement between scene flag and game mode but only logging it. v0.17.5.4 uses game mode as part of the decision.
+
+### The fix
+
+`IsOnWorldMap()` now requires BOTH signals to agree:
+
+1. `FF8Addresses::pGameMode` must be resolved AND its value must equal `MODE_WORLDMAP` (= 2).
+2. THEN the scene flag at `WM_SCENE_FLAG` must read 0.
+
+If either check fails, the function returns false. Both signals are wrapped in SEH (`__try`/`__except`) since they read raw process memory.
+
+### Files changed
+
+- `src/ff8_accessibility.h` -- version bump (0.17.5.4)
+- `src/world_map_segments.inl` -- `IsOnWorldMap()` rewritten to require both scene flag AND game mode
+
+### What's NOT touched
+
+FieldNavigation autodrive's underlying steering issue on bghall_1 (separate bug, see below). Funnel pruning (v0.17.5.2). Quantization (v0.17.5). Hysteresis (v0.17.5.1). TTS audit logging (v0.17.5.3, retained and proving its worth).
+
+### Separate bug exposed (deferred)
+
+The BAT log also shows that even after the spurious "No locations available" TTS, FieldNavigation autodrive RAN but FAILED to reach its target. At drive start (15:59:37) dist=3899 from target. After 21 seconds of running (15:59:58) dist=3726 -- only 173 units of forward progress. Player position went from (137,-7634) to (134,-7461). Multiple recovery cycles and re-paths in the log. Drive stopped with `[drive] stopped: Stuck. Distance remaining: 3726`.
+
+Analysis of the final tick shows the steering math is producing contradictory inputs: at player=(134,-7461), steer target=(452,-7722), delta is (+318 east, -261 south). With autodrive's calibrated axes `driveCamRight=(1,0) driveCamDown=(0,-1)`, the correct keyboard direction is RIGHT+DOWN. The log instead shows `kb=U lX=1000 lY=0` -- pressing UP on the keyboard and pushing analog right only. The vertical axis is inverted for autodrive on this field.
+
+This is a separate, longstanding autodrive issue independent of v0.17.5.4's world-map fix. Manual GPS works fine on bghall_1 because manual nav and autodrive use SEPARATE axis pairs (`s_camRight/Down` vs `s_driveCamRight/Down`, v0.17.2 split). Tackling this needs a dedicated investigation of autodrive's steering pipeline and is queued for a future version.
+
+### BAT recipe
+
+Launch the game and reach a field (any field). Press `\` to start autodrive on a catalog entity.
+
+Expect:
+- `ff8_world.log` should NOT show "Entered world map" at boot. The world map module should only declare entry when the player actually reaches the world map.
+- `ff8_mod.log` should show `[TTS] "Driving."` (or "Target not yet located.") in isolation -- no follow-up `[TTS] "No locations available."` interrupt.
+- `\` on the world map (when the player is actually on it) should still work normally.
+
+## v0.17.5.3
+
+Diagnostic logging for autodrive validation failures and an audit trail of every TTS utterance. No behavior changes; this build is a step toward fixing the "Target not yet located" autodrive refusal Aaron hit on bghall_1.
+
+### Motivation
+
+After the v0.17.5.2 push, Aaron tried autodrive on bghall_1 by selecting an entity from the catalog and pressing `\`. The mod spoke something like "location not available" (Aaron's paraphrase) and refused to start driving. There was no record in any log of:
+
+1. What was actually spoken (the message Aaron heard).
+2. Which catalog target was selected at the moment of the refusal.
+3. Why the validation failed (was the player position unknown? the target position? was the catalog index out of bounds?).
+
+v0.17.5.3 adds both logs so the next BAT will expose the cause without needing further investigation.
+
+### What ships
+
+**1. `ScreenReader::Speak` -- TTS audit trail.** Every call to `Speak(text, interrupt)` now writes a `[TTS] "<text>"` line to `ff8_mod.log` before the text reaches SAPI/NVDA. Empty-string "silence" purge calls are skipped (they produce no audio). The narrow-ASCII transliteration is one WideCharToMultiByte hop and bounded at 511 chars; overhead is negligible at the speech cadence the player actually experiences. The same logging applies whether the call site uses `Speak`, `Output`, `RepeatLast`, or any other variant -- all funnel into this one wide-char path.
+
+This is a permanent diagnostic. It pays for itself every time a player reports "the mod said something weird" -- we get the literal string without needing to reproduce the scenario.
+
+**2. Autodrive validation-fail logging.** In `field_nav_handlekeys.inl`, the `else` branch that fires "Target not yet located" now logs a full context line before speaking. The line reports:
+
+- Current field name
+- Selected catalog index (and total catalog size)
+- Target's `entityIdx` and `gatewayIdx`
+- Target type and name
+- Whether `GetEntityPos` succeeded for the player
+- Whether `GetEntityPos` succeeded for the target (only meaningful when entityIdx >= 0)
+- Player's own entity index
+
+This tells us in one log line which of the validation gates failed.
+
+### Files changed
+
+- `src/ff8_accessibility.h` -- version bump (0.17.5.3)
+- `src/screen_reader.cpp` -- `[TTS]` audit logging in `Speak(const wchar_t*, bool)`
+- `src/field_nav_handlekeys.inl` -- `[drive] REFUSED` diagnostic in the validation-fail branch
+
+### What's NOT touched
+
+Funnel pruning (v0.17.5.2). Quantization (v0.17.5). Hysteresis (v0.17.5.1). The validation logic itself -- this is observation only, no fix. The actual fix for whatever the next BAT exposes will ship as v0.17.5.4 or v0.17.6.
+
+### BAT recipe
+
+Repeat the autodrive attempt that failed on bghall_1:
+1. Load to bghall_1 (or any field).
+2. Cycle to an entity in the F9/F10 catalog (especially an NPC, which is the suspected failure case).
+3. Press `\` to start autodrive.
+4. If you hear "Target not yet located" or anything else other than "Driving", note which entity was selected.
+
+Check `ff8_mod.log` for `[TTS] "..."` -- that's the exact utterance you heard.
+Check `ff8_field.log` for `[drive] REFUSED -- target validation failed: ...` -- that's the why.
+
+### Likely cause (hypothesis, BAT will confirm)
+
+GetEntityPos for NPCs returns false until the engine's `set_current_triangle` callback fires for them. That callback runs the first time the entity's init script puts it on a triangle. For NPCs whose init scripts haven't executed yet at autodrive-press time, `target_pos_known=0` is the expected log signal. Fix (deferred to v0.17.5.4): fall back to the JSM-extracted SETPOS coordinates already captured for those NPCs.
+
 ## v0.17.5.2
 
 Funnel waypoint pruning. Reduces SSFA micro-corner waypoint noise on walkmesh corridors that have many small triangle turns. Quantization architecture (v0.17.5) and announcement hysteresis (v0.17.5.1) ship unchanged.
