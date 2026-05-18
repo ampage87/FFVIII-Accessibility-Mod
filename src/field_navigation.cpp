@@ -315,13 +315,14 @@ static bool        s_driveCrossLineActive = false;
 // --- Camera axes (loaded per field from .ca file for screen-space mapping) ---
 static FieldArchive::CameraAxes s_cameraAxes = {};
 
-// --- GPS Guidance state (v0.12.02) ---
+// --- GPS Guidance state (v0.12.02; projection rewritten v0.17.0) ---
 // Continuous directional guidance to selected entity.
-// Backspace toggles on/off. Provides periodic distance+direction announcements
-// using entity coordinate deltas, which are already in screen space.
-// Compass: +X = right on screen, +Y = up on screen.
-// (Corrected v0.12.03: +Y = UP confirmed by gateway data — bggate_4 forest
-// exit at Y=5353 is screen top, hallway at Y=534 is screen bottom.)
+// Backspace toggles on/off. Provides distance+direction announcements
+// where direction is a cardinal (north/northeast/east/...) derived by
+// projecting the walkmesh delta through the per-field camera axes
+// (s_camRightX/Y, s_camDownX/Y; populated from .ca file at field load).
+// Cardinals map to arrow keys: north=up, east=right, south=down, west=left.
+// See field_nav_gps.inl::ComputeScreenDirIndex for the projection + binning.
 static bool    s_gpsActive = false;        // guidance is currently on
 static int     s_gpsCatalogIdx = -1;       // which catalog entry we're guiding to
 static float   s_gpsLastDist = 1e30f;      // distance at last full announcement
@@ -340,11 +341,18 @@ static const float GPS_CLOSE_DIST  = 200.0f;           // switch to close interv
 static const float GPS_ARRIVE_DIST = 120.0f;           // "In range" threshold (default for non-entity targets)
 static const float GPS_ARRIVE_MARGIN = 0.9f;           // v0.12.07: safety margin — arrive at 90% of talk radius
 
-// Screen-relative direction names (8-way, indexed by compass octant).
-// Entity +X = right, +Y = up. atan2(dx, dy) gives angle from up (0°), CW.
+// v0.17.0: Cardinal direction names (8-way, indexed by ComputeScreenDirIndex result).
+// Cardinals are SCREEN-relative and map directly to arrow keys:
+//   north = up arrow, east = right, south = down, west = left.
+//   northeast = up+right, etc.
+// The mapping from walkmesh delta to cardinal goes through the per-field
+// camera projection (s_camRightX/Y, s_camDownX/Y populated from .ca file
+// at field load — see field_nav_fieldscripts.inl). On default-camera fields
+// the projection is identity; on rotated cameras the projection ensures
+// 'east' really does mean 'press the right arrow on the keyboard.'
 static const char* GPS_DIR_NAMES[] = {
-    "up", "up right", "right", "down right",
-    "down", "down left", "left", "up left"
+    "north",     "northeast", "east",      "southeast",
+    "south",     "southwest", "west",      "northwest"
 };
 
 // Step conversion: divide entity distance units by this to get "steps".
@@ -580,10 +588,69 @@ static uint16_t  s_structFallbackLogged = 0;
 // v06.14/v0.07.76: Per-field camera heading axes for analog steering + compass directions.
 // Calibrated empirically on first auto-drive; default = identity (world axes).
 // Declared here (before FormatNavComponents) so compass directions can use them.
-static float s_camRightX = 1.0f;   // camera right vector X component (normalized)
-static float s_camRightY = 0.0f;   // camera right vector Y component
-static float s_camDownX  = 0.0f;   // camera down vector X component
-static float s_camDownY  = -1.0f;  // camera down vector Y component (default: -Y world = screen-down, matches common calibration)
+//
+// v0.17.2: SPLIT INTO TWO PAIRS to stop auto-drive's empirical calibration
+// from corrupting manual-nav's screen-projection.
+//
+//   s_camRightX/Y, s_camDownX/Y  -- MANUAL NAV axes. Set at field load by
+//                                    HookedFieldScriptsInit:
+//                                      1. Parse .ca file -> 2D-normalize axis0/axis1
+//                                         (v0.17.0.1).
+//                                      2. Det convention check -- negate camDown if
+//                                         det(camRight, camDown) > 0 so left-handed
+//                                         .ca fields (e.g. bg2f_2 classroom) end up
+//                                         in standard screen-down convention
+//                                         (v0.17.4).
+//                                      3. Quantize camRight angle to nearest 90deg
+//                                         and derive camDown by rotating 90deg CW
+//                                         from camRight (v0.17.5). The engine
+//                                         appears to use per-axis world-cardinal
+//                                         input mapping; quantization makes
+//                                         predicted == engine actual on every
+//                                         clean field and ~5-11deg off on bg2f_2
+//                                         (well within the 22.5deg sector
+//                                         tolerance).
+//                                    Or identity defaults when .ca is absent /
+//                                    degenerate. NEVER written by anything after
+//                                    field load -- no observer cal, no auto-drive
+//                                    cal. Read by:
+//                                      - field_nav_gps.inl :: ComputeScreenDirIndex (GPS cardinals)
+//                                      - field_nav_gps.inl :: [NAV-PROJ] log lines
+//                                      - field_nav_helpers.inl :: FormatNavComponents (Backspace announce)
+//
+//   s_driveCamRightX/Y, s_driveCamDownX/Y -- AUTO-DRIVE PRIVATE axes. Mirrors
+//                                    the manual-nav pair at field load (so
+//                                    auto-drive starts from CA values), then
+//                                    overwritten by the empirical calibration
+//                                    in field_nav_autodrive.inl's phase 1/2.
+//                                    Read by:
+//                                      - field_nav_autodrive.inl :: SetAnalogFromVector
+//
+// Background: v0.17.1 BAT showed manual-nav cardinals reading wrong axes ~3
+// minutes into a session. The simplest explanation was that auto-drive's
+// calibration had overwritten s_camRight/Down at some intermediate field.
+// The chase doc "Auto-drive lessons" Finding #10 also notes that empirical
+// calibration and .ca-derived values aren't proven equivalent on every field
+// (the chase doc's verified-working axis source is empirical calibration; the
+// CA-derived values are still in evaluation for manual nav). Splitting the
+// state pairs lets each consumer use the source most appropriate for it
+// without cross-contamination, and the next BAT log will show definitively
+// whether the wrong-cardinal issue persists once calibration can no longer
+// touch the manual-nav pair.
+static float s_camRightX = 1.0f;   // camera right vector X component (normalized) -- MANUAL NAV
+static float s_camRightY = 0.0f;   // camera right vector Y component                -- MANUAL NAV
+static float s_camDownX  = 0.0f;   // camera down vector X component                 -- MANUAL NAV
+static float s_camDownY  = -1.0f;  // camera down vector Y component (default: -Y world = screen-down) -- MANUAL NAV
+static float s_driveCamRightX = 1.0f;   // AUTO-DRIVE private camera right X (calibration-mutable)
+static float s_driveCamRightY = 0.0f;   // AUTO-DRIVE private camera right Y
+static float s_driveCamDownX  = 0.0f;   // AUTO-DRIVE private camera down X
+static float s_driveCamDownY  = -1.0f;  // AUTO-DRIVE private camera down Y
+// v0.17.2: Source tag for the MANUAL-NAV camera axes pair. Logged in [NAV-PROJ]
+// lines so the BAT log makes obvious whether the axes came from the .ca file
+// (preferred) or fell back to identity defaults.
+//   "identity" = no .ca file or degenerate 2D projection; world-bearing fallback.
+//   "ca-file"  = parsed from the field's .ca and normalized to 2D unit length.
+static const char* s_camAxesSource = "identity";
 static bool  s_camCalibrated = false;
 
 
@@ -917,6 +984,9 @@ static bool WouldCrossTriggerLine(float px, float py, float dx, float dy, int sk
 // --- Diagnostic functions (extracted v0.12.18) ---
 #include "field_nav_diagnostics.inl"
 
+// --- v0.17.3: Passive arrow-key response observer (diagnostic only) ---
+#include "field_nav_observe.inl"
+
 void Update()
 {
     if (!s_initialized) return;
@@ -927,6 +997,7 @@ void Update()
     HandleKeys();
     UpdateAutoDrive();
     UpdateGPS();  // v0.12.02: GPS guided navigation polling
+    ObserveArrowResponse();  // v0.17.3: log empirical arrow->world response vs CA prediction
 
     // v0.14.45: POPM varblock write capture summary block removed (F12 diagnostic retired).
 

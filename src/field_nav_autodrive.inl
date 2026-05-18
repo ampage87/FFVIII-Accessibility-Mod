@@ -123,8 +123,11 @@ static void SetHeldDirections(uint8_t desired)
 //
 // Until calibrated, we use the .ca camera axes (loaded at field load) as
 // a best guess. The calibration refines this empirically.
-// NOTE: s_camRightX/Y, s_camDownX/Y, s_camCalibrated are declared earlier
-// (before FormatNavComponents) so compass directions can access them.
+// NOTE (v0.17.2): s_driveCamRightX/Y, s_driveCamDownX/Y, s_camCalibrated are
+// declared in field_navigation.cpp. The drive-private pair starts mirrored
+// to the manual-nav pair (CA-derived) at field load and is overwritten by
+// phases 1/2 here. The manual-nav pair (s_camRight/Down) is read by GPS
+// and FormatNavComponents and is NEVER touched here.
 
 // v06.14: Heading calibration state machine.
 // At drive start, we inject lX=+1000,lY=0 for a few ticks, measure the
@@ -143,6 +146,9 @@ static bool  s_calibPending = false;  // true if calibration should run at drive
 // Converts (dx, dy) in entity/world space into DIJOYSTATE2 lX/lY values
 // using the per-field camera axes to produce correct screen-relative input.
 // DirectInput axis convention: lX +1000 = screen right, lY +1000 = screen down.
+//
+// v0.17.2: Reads the AUTO-DRIVE PRIVATE axis pair (s_driveCamRight/Down) so
+// the empirical calibration's writes don't leak into manual-nav's projection.
 static void SetAnalogFromVector(float dx, float dy)
 {
     float len = sqrtf(dx*dx + dy*dy);
@@ -157,8 +163,8 @@ static void SetAnalogFromVector(float dx, float dy)
     // lX = dot(worldDir, camRight) = how much of the desired direction
     //   aligns with the camera's rightward axis.
     // lY = dot(worldDir, camDown) = how much aligns with camera's downward axis.
-    float lxF = (nx * s_camRightX + ny * s_camRightY) * 1000.0f;
-    float lyF = (nx * s_camDownX  + ny * s_camDownY)  * 1000.0f;
+    float lxF = (nx * s_driveCamRightX + ny * s_driveCamRightY) * 1000.0f;
+    float lyF = (nx * s_driveCamDownX  + ny * s_driveCamDownY)  * 1000.0f;
     int lx = (int)lxF;
     int ly = (int)lyF;
     if (lx < -1000) lx = -1000; if (lx > 1000) lx = 1000;
@@ -257,12 +263,14 @@ static void UpdateAutoDrive()
                 float cdist = sqrtf(cdx*cdx + cdy*cdy);
                 if (cdist > 5.0f) {
                     // Normalize: this is the world-space direction of lX=+1000.
-                    s_camRightX = cdx / cdist;
-                    s_camRightY = cdy / cdist;
-                    Log::Field("FieldNavigation: [CALIB] phase 1 done: lX=+1000 moved (%.1f,%.1f) dist=%.1f -> camRight=(%.3f,%.3f)",
-                               cdx, cdy, cdist, s_camRightX, s_camRightY);
+                    // v0.17.2: Write to AUTO-DRIVE PRIVATE pair (s_driveCamRight)
+                    // so manual-nav's s_camRight stays at its CA-derived value.
+                    s_driveCamRightX = cdx / cdist;
+                    s_driveCamRightY = cdy / cdist;
+                    Log::Field("FieldNavigation: [CALIB] phase 1 done: lX=+1000 moved (%.1f,%.1f) dist=%.1f -> driveCamRight=(%.3f,%.3f)",
+                               cdx, cdy, cdist, s_driveCamRightX, s_driveCamRightY);
                 } else {
-                    Log::Field("FieldNavigation: [CALIB] phase 1 FAILED: no movement (dist=%.1f), keeping default camRight", cdist);
+                    Log::Field("FieldNavigation: [CALIB] phase 1 FAILED: no movement (dist=%.1f), keeping default driveCamRight", cdist);
                 }
                 // Transition to phase 2.
                 s_calibPhase = 2;
@@ -287,26 +295,26 @@ static void UpdateAutoDrive()
                 float cdy = cpy - s_calibStartY;
                 float cdist = sqrtf(cdx*cdx + cdy*cdy);
                 if (cdist > 5.0f) {
-                    s_camDownX = cdx / cdist;
-                    s_camDownY = cdy / cdist;
-                    Log::Field("FieldNavigation: [CALIB] phase 2 done: lY=+1000 moved (%.1f,%.1f) dist=%.1f -> camDown=(%.3f,%.3f)",
-                               cdx, cdy, cdist, s_camDownX, s_camDownY);
+                    s_driveCamDownX = cdx / cdist;
+                    s_driveCamDownY = cdy / cdist;
+                    Log::Field("FieldNavigation: [CALIB] phase 2 done: lY=+1000 moved (%.1f,%.1f) dist=%.1f -> driveCamDown=(%.3f,%.3f)",
+                               cdx, cdy, cdist, s_driveCamDownX, s_driveCamDownY);
                 } else {
                     // v06.17: Derive camDown from camRight by 90° clockwise rotation.
                     // In screen space, rotating right vector 90° CW gives the down vector.
                     // rotation: (x,y) -> (y, -x)
-                    s_camDownX = s_camRightY;
-                    s_camDownY = -s_camRightX;
-                    Log::Field("FieldNavigation: [CALIB] phase 2 FAILED: no movement (dist=%.1f), derived camDown=(%.3f,%.3f) from camRight perpendicular",
-                               cdist, s_camDownX, s_camDownY);
+                    s_driveCamDownX = s_driveCamRightY;
+                    s_driveCamDownY = -s_driveCamRightX;
+                    Log::Field("FieldNavigation: [CALIB] phase 2 FAILED: no movement (dist=%.1f), derived driveCamDown=(%.3f,%.3f) from driveCamRight perpendicular",
+                               cdist, s_driveCamDownX, s_driveCamDownY);
                 }
                 // Calibration complete.
                 s_calibPhase = 3;
                 s_camCalibrated = true;
                 s_calibPending = false;
                 // Log the final calibration result.
-                Log::Field("FieldNavigation: [CALIB] complete: camRight=(%.3f,%.3f) camDown=(%.3f,%.3f)",
-                           s_camRightX, s_camRightY, s_camDownX, s_camDownY);
+                Log::Field("FieldNavigation: [CALIB] complete: driveCamRight=(%.3f,%.3f) driveCamDown=(%.3f,%.3f)",
+                           s_driveCamRightX, s_driveCamRightY, s_driveCamDownX, s_driveCamDownY);
                 // Reset stuck detection to account for calibration movement.
                 s_driveStuckTicks = 0;
                 GetEntityPos(s_playerEntityIdx, s_driveStuckPosX, s_driveStuckPosY);

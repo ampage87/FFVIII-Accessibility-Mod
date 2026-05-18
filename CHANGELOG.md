@@ -6,6 +6,397 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.5.2
+
+Funnel waypoint pruning. Reduces SSFA micro-corner waypoint noise on walkmesh corridors that have many small triangle turns. Quantization architecture (v0.17.5) and announcement hysteresis (v0.17.5.1) ship unchanged.
+
+### Motivation
+
+Aaron's v0.17.5.1 BAT on bg2f_2 (classroom hallway) revealed that the SSFA funnel was producing 13 waypoints for a 1600-unit path. Tracing the SSFA against the corridor's actual portal geometry showed that the algorithm was correctly identifying every walkmesh triangle's portal-vertex alternation as a turn point -- but most of those "turns" don't represent real bends from the player's perspective.
+
+Perpendicular-distance check of each waypoint against the line through its neighbors:
+
+| Waypoint | Off line | Real corner? |
+|----------|----------|--------------|
+| wp 1 | 220 units off wp 0->wp 4 | YES (real bend) |
+| wp 2 | 6 units off wp 1->wp 4 | no (collinear-ish) |
+| wp 3 | 24 units off wp 1->wp 4 | no |
+| wp 4 | 30 units off wp 1->wp 5 | no |
+
+With hysteresis filtering brief sector flips (v0.17.5.1), each of these waypoint advances still produced a cardinal-change announcement, since they each spanned >500ms of walking. So on this corridor Aaron heard "east, northeast, north, northeast, north, northwest, north..." instead of "east, north" (the two macroscopic legs).
+
+### What ships
+
+New function `PruneCollinearWaypoints` in `field_nav_pathfinding.inl`, called at the end of `FunnelPath` after the funnel produces its waypoint list. Algorithm:
+
+1. For each interior waypoint B (with neighbors A and C), compute perpendicular distance from B to the segment AC.
+2. If perpDist < `PRUNE_PERP_EPSILON` (50 units), remove B from the list.
+3. Repeat the sweep until no more removable waypoints (sweep-to-stable).
+
+First and last waypoints are preserved. Iteration is capped at 100 sweeps as a safety bound.
+
+50-unit epsilon was chosen conservatively below typical FF8 wall thickness (~100+ units). Combined with the existing `AGENT_RADIUS = 30` portal shrinking (waypoints are already pulled 30 units inward from walls), worst-case post-prune wall clearance is ~80 units -- still well within walkable space. Real corners (like wp 1 above at 220 units off) are never touched.
+
+### Properties
+
+- **Reduces micro-corner cardinal changes.** Aaron hears one announcement per real corner, not one per walkmesh-triangle bend.
+- **Preserves object avoidance.** Pruning eps is below wall thickness, so corners that actually route around walls/objects (where the perp distance is large) survive.
+- **Affects both GPS and autodrive.** Both read the same `s_waypoints` array from FunnelPath. Autodrive benefits from fewer waypoints to navigate too, and its existing stuck-recovery handles any wall-grazing.
+- **Reversible.** If a future field surfaces a real corner under 50 units of perp distance, lowering the constant or skipping the prune for that field is a one-line change.
+
+### Files changed
+
+- `src/ff8_accessibility.h` -- version bump (0.17.5.2)
+- `src/field_nav_pathfinding.inl` -- `PruneCollinearWaypoints` function added; `FunnelPath` calls it before logging; log line now reports both pre- and post-prune counts as `[funnel] N triangles -> M waypoints (post-prune; pre-prune=K, was J centers)`
+
+### What's NOT touched
+
+v0.17.5 quantization (working). v0.17.5.1 announcement hysteresis (working). The SSFA funnel itself (its waypoint output is still optimal in the geometric sense; pruning just discards waypoints that don't represent meaningful turns). EdgeMidpointPath fallback (used by autodrive when funnel fails). v0.16.5.2 BAT triage backlog.
+
+### Known remaining gap (for v0.17.5.3 or later)
+
+Even with pruning, the FIRST cardinal on bg2f_2 will still be "east" because the path genuinely starts by going east before bending north (the corridor curves around the central pillar visible in Aaron's BAT screenshot). Aaron's mental model focuses on the final destination, which is north of the start. Resolving this fully will require hybrid announcement (option B from session discussion): announce both the immediate cardinal AND the final-target cardinal, e.g. "east, heading north, 6 steps". This is queued for v0.17.5.3 if Aaron's BAT shows the pruning alone isn't enough.
+
+### BAT recipe
+
+Repeat the v0.17.5.1 BAT path (elevator -> classroom hallway -> classroom -> dorm). Watch for:
+
+1. `[funnel] N triangles -> M waypoints (post-prune; pre-prune=K, was J centers)` lines should show K >> M on corridors with zigzag triangles. bg2f_2's path that was 13 waypoints should drop to 4-5.
+2. `[funnel-prune] removed N collinear waypoints (eps=50 units, K sweeps)` lines confirm pruning fired.
+3. Aaron's qualitative: fewer cardinal-change announcements per journey. Each one should correspond to a real bend in the path.
+
+## v0.17.5.1
+
+GPS announcement hysteresis. Quantization architecture from v0.17.5 ships unchanged; this point release fixes the TTS rattle Aaron reported in the v0.17.5 BAT.
+
+### Motivation
+
+Aaron's v0.17.5 BAT: quantization worked on 4 of 5 fields (cardinals correct from the first announcement, no warmup needed). Two issues on bg2f_1 (the C-shaped classroom hallway):
+
+1. **TTS rattle.** "The direction / distance was constantly rattling off and spamming the TTS." The v0.17.0 GPS cadence fires on every cardinal sector boundary crossing AND every step-count change. Near a sector boundary the cardinal can flip between two adjacent values for a tick or two; every flip fired an announcement. Step counts decrement frequently as the player walks. The existing 3-second throttle (`GPS_ANNOUNCE_INTERVAL_FAR`) only gated step-only changes -- direction changes always broke through. Result: 1-2 announcements per second on long walks.
+2. **"South when I needed north" on bg2f_1.** Aaron's spatial description (enter at bottom point of a C-shape, door at top opposite side, considerably north and west of entry) combined with the quantized axes (RIGHT->world-north, DOWN->world-east) means a real "south" leg would push the player world-east -- away from the door. So this was almost certainly a transient sector flip during the rattle, not a sustained wrong cardinal.
+
+Aaron's spec for the fix: "TTS only announces the direction when it changes, e.g. it says to go north so I keep going north until it eventually says east then I go east."
+
+### What ships
+
+In `field_nav_gps.inl::UpdateGPS`, the v0.17.0 sector-change-driven cadence and the v0.17.1 waypoint-force are replaced with **cardinal-change-only with hysteresis**:
+
+- Announcements fire ONLY when the cardinal changes from `s_gpsLastDirIdx` to something different, AND the new value has held steady for `GPS_DIR_HYSTERESIS_MS = 500ms`.
+- Step-count changes never fire on their own.
+- Waypoint advances never fire on their own (if the cardinal happens to match across two waypoint legs, the conceptual handoff is silent -- Aaron just keeps walking the same direction).
+- Nearby/in-range one-shot announcements are unchanged.
+
+Mechanism: two new statics `s_gpsPendingDirIdx` and `s_gpsPendingDirSince`. When the computed cardinal differs from the last spoken one, it becomes a candidate. If a new candidate appears (different from previous candidate), its timer resets. Only when the candidate has held its value for 500ms is it promoted to `s_gpsLastDirIdx` and announced. Brief sector flips never get past the hysteresis.
+
+### Properties
+
+- **Eliminates the rattle structurally.** Sector boundary jitter can no longer fire because brief flips reset the candidate timer rather than promote.
+- **Resolves the bg2f_1 transient.** Whatever caused the one-off "south" announcement (likely a corner-waypoint geometry quirk in the funnel) can no longer reach the screen reader unless it persists for half a second.
+- **Matches Aaron's spec exactly.** Silence while walking in a constant direction, announce only when the direction genuinely changes.
+- **No effect on the architecture.** v0.17.5 quantization is untouched. The fix is purely in the announcement gate.
+
+### Edge cases the fix handles
+
+- **Long straight walks.** Cardinal stays constant for minutes -> total silence (except Nearby/in-range at the end). Matches Aaron's spec.
+- **Genuine corner turn.** Cardinal changes from A to B and B holds steady -> announced after 500ms. Adds ~half a step of delay to corner announcements; acceptable.
+- **Wander back out of nearby zone.** Re-prime pending so the next direction change still requires hysteresis confirmation rather than firing immediately.
+- **GPS started mid-flight on a stable bearing.** `StartGPS` primes both `s_gpsLastDirIdx` and `s_gpsPendingDirIdx` to the initial cardinal, so `UpdateGPS` doesn't spuriously fire on the first tick.
+
+### Files changed
+
+- `src/ff8_accessibility.h` -- version bump
+- `src/field_nav_gps.inl` -- new statics `s_gpsPendingDirIdx`/`s_gpsPendingDirSince`/`GPS_DIR_HYSTERESIS_MS`; reset in `StopGPS`; prime in `StartGPS`; cadence block in `UpdateGPS` rewritten
+
+### What's NOT touched
+
+v0.17.5 quantization (working). v0.17.4 det convention check. v0.17.1 path-aware path building (waypoints still drive the steering target; they just no longer trigger announcements on their own). v0.17.0 ComputeScreenDirIndex math. v0.16.5.2 BAT triage backlog.
+
+### BAT recipe
+
+Walk the same path as v0.17.5 (elevator -> classroom hallway -> classroom -> dorm). Expect:
+
+1. **Drastically fewer `[GPS] Update` lines in the log.** Each one's tagged `hysteresis=ok` and `dirChanged=1`.
+2. **No back-to-back announcements** for step-count changes.
+3. **bg2f_1 hallway**: cardinals should be "north" along the up-leg, "west" along the cross-leg (or "northwest" near the bend), no spurious "south". If a spurious south DOES sneak through, it means whatever produced it was stable for >500ms, which is a separate issue from rattle and we look at the .ca data.
+4. **Aaron's qualitative report.** Silence while walking in a stable direction. Announcement at each genuine cardinal change. Same architecture-level correctness as v0.17.5.
+
+## v0.17.5
+
+Replaces v0.17.4's passive movement-driven calibration with a **load-time 90-degree quantization** of the CA-derived camera axes. Same end result as a perfect calibration on the four well-behaved fields, deterministic on field load, and zero state machine.
+
+### Motivation
+
+Aaron asked the right question after the v0.17.4 BAT: "is it really necessary to have this calibration? It seems like the ideal solution would be for the mod to automatically calibrate each field based on the field's unique data upon field load, and not when the character moves." Looking back at the v0.17.3 BAT clean samples through that lens, the engine's actual arrow -> world direction was world-axis-aligned on every tested field:
+
+| Field | CA camRight angle | Engine RIGHT direction | World cardinal |
+|-------|-------------------|------------------------|----------------|
+| bghall_1 | 7.8 deg | (1, 0) | 0 deg (snap from 7.8) |
+| bghall_4 | 23.8 deg | (1, 0) | 0 deg (snap from 23.8) |
+| bg2f_1 | 65.4 deg | (0, 1) | 90 deg (snap from 65.4) |
+| bg2f_2 (det-fixed) | 60.5 deg | ~(-0.19, 0.98) | 90 deg (5-11 deg residual) |
+| bgroom_1 | -62.5 deg | (0, -1) | -90 deg (snap from -62.5) |
+
+The CA value rounds to the engine's actual direction in every case. The engine appears to use a 90-degree-quantized form of its camera matrix when mapping DIJOYSTATE2 lX/lY to walkmesh delta. So we can do exactly that at load time and skip the entire observation-based calibration loop.
+
+bg2f_2 (classroom) has a 5-11 deg residual after quantization. That's well within the 22.5 deg cardinal sector tolerance, and the v0.17.4 BAT proved bg2f_2 navigates correctly via the det fix alone with the residual baked in.
+
+### What ships
+
+The det convention check from v0.17.4 stays unchanged. v0.17.5 adds **one quantization block** in `HookedFieldScriptsInit` after the det fix:
+
+1. Compute `angleR = atan2f(camRight.y, camRight.x)`.
+2. Snap to nearest 90 deg: `snappedR = roundf(angleR / (PI/2)) * (PI/2)`.
+3. Regenerate camRight as a unit vector at the snapped angle.
+4. Derive camDown from camRight via the rotation `(x, y) -> (y, -x)` which is R(-90 deg) and exactly the det = -1 screen-down convention (independent quantization of camDown could break orthogonality near 45 deg boundaries, so we don't do that).
+5. Mirror the quantized pair to `s_driveCam*` so the auto-drive private pair starts from the same baseline.
+6. Source tag becomes `"ca-quantized"` and the load-time log includes both the original CA angle and the snapped angle.
+
+The `[NAV-OBSERVE]` log from v0.17.3 stays in place as pure diagnostic. The observer now compares engine measured direction against the QUANTIZED prediction, so a future field where the engine doesn't match 90-deg snap will surface as DIVERGE > ~12 deg in the log.
+
+### What got ripped out
+
+From v0.17.4 and v0.17.5-pre:
+
+- `ObsCalibrateAxes()` function and its call from `ObserveArrowResponse`.
+- `s_fieldCalibratedManual` static flag and its reset at field load.
+- Observer hold-state reset at field load (no longer needed without the cal logic).
+- Include order change that put observe.inl before fieldscripts.inl (observe.inl is back at the end where it was in v0.17.3).
+- The v0.17.5 filter constants (`OBS_CALIB_AXIS_ALIGN_MAX`, `OBS_CALIB_MAX_ROT_DEG`, etc.).
+
+The v0.17.4 BAT-induced TTS rattle is structurally impossible now: cardinals are computed from axes that never change after field load.
+
+### Properties
+
+- **Deterministic.** Same .ca file -> same axes. No timing windows, no "walk for 500ms before cardinals are right."
+- **No state machine.** No flag, no observer dependency for correctness.
+- **No regressions.** Filter retest against the v0.17.4 BAT data shows: bghall_1 -> camRight=(1,0) (matches engine exactly), bg2f_1 -> camRight=(0,1) (matches), bg2f_2 -> camRight=(0,1) (matches engine within 11 deg), bghall_4 -> camRight=(1,0) (matches), bgroom_1 -> camRight=(0,-1) (matches).
+- **Observer becomes pure diagnostic.** If a future field violates the 90-deg-quantized model, DIVERGE > ~12 deg in `[NAV-OBSERVE]` shows it and we revisit.
+
+### Edge cases the math handles
+
+- 45 deg boundary (e.g., camRight at exactly 45 deg): `roundf(0.5)` rounds away from zero, so the snap is consistent. camDown is derived from camRight rather than independently quantized, so the 90 deg relationship is always preserved.
+- Floating-point residuals from `cosf(pi/2)` returning ~6e-8 instead of 0 are clamped to 0 so the log reads cleanly.
+- Both det conventions (-1 raw + det-corrected, +1 -> negate camDown to get det = -1, then quantize) end up at the same standard right-handed quantized axes.
+
+### Files changed
+
+- `src/ff8_accessibility.h` -- version bump
+- `src/field_navigation.cpp` -- comment block above `s_camRight/Down` rewritten to describe the v0.17.5 architecture; removed `s_fieldCalibratedManual` static; restored original observe.inl include position (after diagnostics.inl)
+- `src/field_nav_observe.inl` -- removed `ObsCalibrateAxes` function, call site, and v0.17.4/.5 filter constants; restored v0.17.3 "purely observational" comment block
+- `src/field_nav_fieldscripts.inl` -- removed observer/lock reset block; added quantization step inside the CA-init branch after the det fix; updated source tag to `"ca-quantized"`
+
+### What's NOT touched
+
+v0.17.4 det convention check (proven correct and necessary for bg2f_2 and any other left-handed CA fields). v0.17.0.1 2D normalization. v0.17.2 state separation between manual-nav and auto-drive axis pairs. v0.17.1 path-aware GPS. v0.17.3 observer logging (now diagnostic-only, same as it was originally). Auto-drive's empirical calibration (separate state pair, unaffected). v0.16.5.2 BAT triage backlog.
+
+### BAT recipe
+
+Repeat the v0.17.4 BAT pass. Expect:
+
+1. `[NAV-PROJ-INIT] det-correction` line for bg2f_2 only.
+2. `[NAV-PROJ-INIT] quantization: camRight pre=(...) angle=(...) -> snap=(...) -> camRight=(...) camDown=(...)` line for every field that successfully loads its .ca file.
+3. `[NAV-PROJ-INIT] field=... source=ca-quantized` summary line.
+4. **NO `[NAV-CALIB-AUTO]` lines anywhere.** That function is gone.
+5. `[NAV-OBSERVE]` lines as before (still throttled to 1.5s), now showing DIVERGE against quantized prediction. Expect DIVERGE near 0 on every field except bg2f_2 where DIVERGE will be 5-11 deg (within sector tolerance, no action needed).
+6. **Aaron's qualitative report.** All five fields should navigate correctly from the first cardinal announcement after entering. No "walk a bit before cardinals work," no TTS rattle.
+
+## v0.17.4
+
+The fix the v0.17.3 BAT diagnosed. v0.17.3's observer logged the world-space response to single-arrow key presses across `bghall_1`, `bghall_4` (elevator field), `bg2f_1` (2nd-floor hall), `bg2f_2` (classroom), and `bgroom_1` (dorm). Two findings:
+
+**Finding 1 — the engine's screen-to-world transform is a uniform rotation per field, not a per-arrow thing.** On `bgroom_1`, all 14 axis-aligned clean samples agreed on -27.5° (CW), stdev 0.49°. On `bg2f_1`, all 8 clean samples agreed on +24.6° (CCW), stdev 0.0°. `bghall_1` had -7.8° (small enough Aaron didn't notice), `bghall_4` had -23.8° (Aaron reports works perfectly — borderline but the elevator corridor's geometry tolerates it). Meaning: a single clean observation per field is enough to determine the rotation matrix that maps CA-derived axes to the engine's actual axes. The chase auto-pilot's empirical calibration has been doing this all along; the manual-nav pair never adopted the technique.
+
+**Finding 2 — `bg2f_2` (classroom) had `det(camRight, camDown) = +1.0`, left-handed CA axes.** All other fields in the BAT had `det = -1.0`. With det=+1, the 2D projection of `.ca` axis1 ends up pointing world-UP instead of the standard world-DOWN convention. The mod's prediction for UP/DOWN arrows comes out exactly opposite of the world direction Aaron actually moves — "had to go opposite the instructions" matches the math precisely. With axis1 negated to force `det=-1`, the residual rotation for `bg2f_2` becomes ~+30-40° (in line with the other tilted-camera fields, varying with noise from Aaron walking through curves).
+
+The two paired fixes ship together because they target the same end-to-end outcome (cardinals match Aaron's walking direction) and the diagnostic distinguishes them in the log:
+
+### Fix 1: det convention check at CA load
+
+In `field_nav_fieldscripts.inl` after the v0.17.0.1 2D normalization, compute `det = camRight.x*camDown.y - camRight.y*camDown.x`. If positive, negate `camDown` to force `det=-1`. Logs a new `[NAV-PROJ-INIT] det-correction` line when this fires.
+
+The negation propagates to the drive-private pair (auto-drive starts from CA values), but auto-drive's empirical calibration overwrites those on first run, so chase auto-pilot is unaffected. The only visible behavior change is that fields with det=+1 (rare, e.g. `bg2f_2`) now project to UP/DOWN cardinals using the corrected direction.
+
+### Fix 2: passive self-correcting calibration
+
+In `field_nav_observe.inl`, a new `ObsCalibrateAxes()` function fires from the per-tick observer when:
+
+- Single arrow held for >= 30 ticks (~500ms; stricter than the diagnostic log's 18 ticks so the engine has settled into a stable motion direction).
+- Measured movement delta >= 100 world units (twice the diagnostic threshold).
+- `dot(predicted, measured) >= 0.5` (within a 60° cone of the current axes — rejects samples where Aaron walked through a wall or a curve and the engine's actual direction was deflected, which v0.17.3 BAT showed as 95-100° outliers).
+
+When all three pass: compute `theta = atan2(cross(predicted, measured), dot(predicted, measured))` and rotate BOTH `s_camRightX/Y` and `s_camDownX/Y` by `theta` using the standard 2D rotation matrix. Update `s_camAxesSource` to `"calibrated"`. Log a `[NAV-CALIB-AUTO]` line with the old axes, new axes, and rotation magnitude.
+
+Uniform rotation across the four arrows (Finding 1) means a single clean observation calibrates the field for all subsequent cardinal computations. If the camera changes mid-field (unlikely but possible on multi-section fields), the next clean observation re-calibrates. Wall-deflection samples are filtered out by the 60° cone, so axes don't wobble on noisy data.
+
+The diagnostic `[NAV-OBSERVE]` log from v0.17.3 stays in place at the lower 18-tick / 50-unit / no-cone thresholds so the next BAT can still surface residual divergence patterns if they exist.
+
+### What Aaron should experience
+
+On entering a field, the first GPS cardinal still uses CA-derived axes (possibly off by 0-40°). When he holds an arrow to walk in that announced direction for ~500ms, calibration fires and rotates the axes to match the engine. The next GPS update announces a corrected cardinal. Total mismatch window: about half a second.
+
+For `bghall_1` (small -7.8° rotation), Aaron likely won't notice anything different — cardinals stayed within the 22.5° sector tolerance even before calibration. For `bg2f_1`, `bg2f_2`, and `bgroom_1`, the mismatch window is the only time wrong cardinals appear; after that, cardinals are accurate. For `bghall_4` (elevator, -23.8° rotation, Aaron reported works perfectly), behavior should also improve slightly though Aaron was already comfortable with it.
+
+### Files changed
+
+- `src/ff8_accessibility.h` — version bump
+- `src/field_nav_fieldscripts.inl` — det convention check after CA 2D normalization
+- `src/field_nav_observe.inl` — new `ObsCalibrateAxes()` function plus `ObsCalibrateAxes(...)` call from `ObserveArrowResponse()`; comment block at top updated to reflect that the observer now writes state
+- `src/field_navigation.cpp` — comment block above `s_camRight/Down` updated to document v0.17.4 observer writes
+
+### What's NOT touched
+
+Auto-drive's empirical calibration code in `field_nav_autodrive.inl` (proven correct, never read s_camRight/Down anyway). v0.17.2 state separation (preserved verbatim — drive pair and manual pair stay independent except for the field-load mirror). Chase auto-pilot config tables. v0.17.1 path-aware GPS. v0.17.0.1 2D normalization. The v0.16.5.2 BAT triage backlog. Classroom entity catalog under-population (parallel track — still needs Aaron's field-name lookup and F9 list).
+
+### BAT recipe
+
+Repeat the v0.17.3 BAT pass: load save in `bghall_1`, walk through the same fields holding each cardinal for 2-3 seconds. Watch for new `[NAV-CALIB-AUTO]` log lines. Each field should produce one `[NAV-CALIB-AUTO]` line within seconds of the first eligible arrow hold; subsequent `[NAV-PROJ] start` lines for GPS sessions on that field should show `axes=calibrated` and updated `camRight`/`camDown` values.
+
+Qualitative test: GPS-guide to a target on `bg2f_1` and `bg2f_2`. Initial cardinal announcement may briefly point the wrong way; after walking a step or two, subsequent announcements should be correct. End-to-end navigation should succeed without Aaron having to go opposite the instructions.
+
+## v0.17.3
+
+Diagnostic-only build. No behavior change. Adds a passive observer that logs the empirical world-space response to single-arrow key presses alongside the .ca-derived prediction, so the next BAT log shows directly whether the CA file values match the engine's actual screen-to-world projection on the fields where manual navigation has been giving wrong cardinals.
+
+Background from the v0.17.2 BAT: Aaron loaded a save in `bghall_1` (Balamb Garden hallway), walked to the classroom. The `[NAV-PROJ]` line for the `bg2f_1` GPS session showed `axes=ca-file` (state separation working as designed: calibration can no longer leak into manual nav). But cardinals on `bg2f_1` and the classroom were still wrong, while the field outside the elevator -- previously the worst case -- now navigates correctly. That distribution rules out calibration corruption (hypothesis A) and confirms CA-vs-engine mismatch (hypothesis B): some fields' .ca data happens to align with the engine's actual projection, others don't, and which is which can't be derived from CA values alone.
+
+The chase auto-pilot's empirical calibration in `field_nav_autodrive.inl` has always produced correct axes because it injects analog input and measures the resulting walkmesh delta -- it doesn't trust .ca, it observes reality. v0.17.3 does the same observation passively (no input injection) using Aaron's actual keypresses as the test signal. Each time he holds a single arrow for long enough to produce measurable movement (>= 18 ticks held, >= 50 world-unit delta), the observer logs a comparison line:
+
+```
+[NAV-OBSERVE] field='bg2f_1' axes=ca-file arrow=RIGHT held=22ticks delta=(120,-50)
+              measured=(0.92,-0.38) predicted=(0.417,0.909)
+              DIVERGE=68deg | camRight=(0.417,0.909) camDown=(0.909,-0.417)
+```
+
+The `DIVERGE` angle is the diagnostic core: 0 deg means CA values match the engine's actual projection for this arrow direction, 180 deg means exact opposite (both components signed wrong), 90 deg suggests axes swapped (axis0 and axis1 reversed in the .ca file's labeling convention), and any other angle is something more complex that needs the data to explain. Across multiple samples per field, the divergence pattern surfaces the transformation needed.
+
+### How the observer self-gates
+
+The sample is invalid if any of these is true, so the observer skips logging:
+
+- An auto-drive (F9 path-finding or chase auto-pilot) is running -- synthetic key injection would pollute the measurement.
+- The player entity hasn't been detected yet.
+- A dialog is open -- engine ignores movement input.
+- More than one arrow is held -- a diagonal press averages two camera-axis directions, ambiguous for clean per-axis comparison.
+- Less than 18 ticks (~300ms at 60fps) of held time -- engine hasn't settled into movement.
+- Less than 50 world units of measured delta -- noise rather than signal.
+- Less than 1.5 seconds since the last sample -- throttle so a continuous hold doesn't flood the log.
+
+With those gates, Aaron walking around naturally produces one log line per arrow direction per second or so. A test pass that walks a couple of seconds in each cardinal direction on each field of interest fills the log with the data needed to design v0.17.4.
+
+### Why GetAsyncKeyState instead of the engine's keyboard buffer
+
+The observer reads arrow state via `GetAsyncKeyState(VK_UP/DOWN/LEFT/RIGHT)` rather than the engine's keyboard buffer at `*0x01CD02D8`. Two reasons. First, GetAsyncKeyState reflects Aaron's physical key presses regardless of any in-engine remapping (FF8 lets the player remap keys; Aaron almost certainly hasn't, but the diagnostic shouldn't depend on that assumption). Second, the engine's keyboard buffer is written to by chase_keyboard during chase Auto and by FFNx during normal play; reading from the OS layer instead of the engine layer keeps the observer self-contained and removes a dependency on hook timing that doesn't matter here (the observer gates on auto-drive being inactive anyway, so synthetic injection isn't a confounder).
+
+### Files changed
+
+- `src/ff8_accessibility.h` -- version bump
+- `src/field_nav_observe.inl` -- NEW file, ~150 lines, contains the observer state, helpers, and `ObserveArrowResponse()` function called from `Update()`.
+- `src/field_navigation.cpp` -- include the new .inl after `field_nav_diagnostics.inl` (so it can see all helper functions from earlier includes) and add `ObserveArrowResponse();` to `Update()` right after `UpdateGPS();`.
+
+### Not touched, deliberately
+
+Projection math in `field_nav_gps.inl::ComputeScreenDirIndex` (still uses CA-derived `s_camRight/Down` -- v0.17.4 will know how to transform those once we have the BAT data). `field_nav_autodrive.inl` empirical calibration (proven correct, untouched). Chase auto-pilot config. v0.17.2 state separation (proven working). v0.17.1 path-aware buffer + advance logic. v0.17.0.1 CA 2D normalization. The v0.16.5.2 BAT triage backlog. The classroom entity catalog under-population (separate track).
+
+### BAT recipe
+
+Load a save in `bghall_1`, walk slowly in each cardinal direction (north / east / south / west) for at least 2-3 seconds, holding only one arrow at a time. Transition to `bg2f_1` and do the same. Transition into the classroom (the field that's been giving the worst cardinals) and do the same. The field log will contain `[NAV-OBSERVE]` lines with field name, arrow direction, measured vs predicted world direction, and divergence angle. Aaron can also include the elevator-side field that v0.17.2 BAT confirmed works correctly -- that gives a known-good baseline for what the divergence looks like when CA is correct.
+
+Ideal sample count: 4 cardinals per field, across 3-4 fields, total ~12-16 lines. Plus whatever incidental samples happen during normal walking. Throttling ensures the log doesn't explode even on long sessions.
+
+What the v0.17.4 fix looks like depends on what the data shows. If divergence is consistent per field (e.g. always 0 deg on field A, always 180 deg on field B, always 90 deg on field C), the fix is a per-field transformation table or a single geometric flip applied conditionally on a tractable .ca header value. If divergence varies within a single field (different per camera section), the fix needs to be runtime: read the engine's current camera state at the moment of projection rather than the static .ca snapshot. The observer data resolves the ambiguity in one BAT cycle.
+
+## v0.17.2
+
+Follow-up to v0.17.1 BAT triage. v0.17.1 added path-aware GPS (A* + funnel waypoints) and the BAT log confirmed the path-aware logic works correctly — two GPS sessions on the test field showed the funnel producing 11 and 38 waypoints respectively, the waypoint advance routine fired through the sequence, and the overshoot-detection branch caught three sub-arrive-distance passes. The new logic is sound. But the announced cardinals didn't match the direction Aaron actually had to walk, and the BAT log surfaced the cause: the `[NAV-PROJ]` lines at GPS-start time recorded camera axes `(0.493,0.870)`/`(-0.871,0.492)`, which are NOT the CA-derived axes that fieldscripts.inl logged for that same session at field load (`bghall_1` first load: `(0.991,0.135)`/`(0.134,-0.991)`). Something had overwritten the manual-nav camera axes between field load and the GPS test.
+
+The most likely culprit is the auto-drive empirical calibration in `field_nav_autodrive.inl`. Phases 1 and 2 of that calibration inject `lX=+1000`/`lY=+1000`, measure the resulting walkmesh-delta direction, and write the normalized result back into `s_camRightX/Y` and `s_camDownX/Y` — the same statics that GPS and `FormatNavComponents` read for screen-relative projection. The calibration was originally added in v06.14 to give the chase auto-pilot's analog steering correct screen-to-world conversion, but it shares state with manual-nav by virtue of writing to the same module-level statics. That shared state never mattered before v0.17.0 because manual-nav didn't actually consume `s_camRight/Down` for cardinal labels — only the chase code did. v0.17.0 changed that: it wired CA-derived values into the same statics and pointed manual-nav at them. The wiring works at field load, but if calibration runs at any point afterward — even on a different field, even briefly — its writes leak into manual-nav's projection for the rest of the session or until the next field load.
+
+A secondary possibility, raised by the chase auto-pilot lessons document, is that empirical calibration and `.ca`-derived axes don't produce identical results on every field. The chase doc's "What chase-drive proved works" list is explicit: empirical calibration produces correct axes (verified across multiple BATs on multiple rotated-camera chase fields). The CA-derived equivalent is unverified at that level of rigor — Finding #10 mentions it as a future option, not a proven equivalent. If CA-axes diverge from what the engine actually uses for screen projection on some fields, manual-nav cardinals will be wrong on those fields regardless of whether calibration runs.
+
+v0.17.2 distinguishes the two hypotheses by splitting the camera-axes state pair, so manual-nav and auto-drive consume axes from independent sources that can no longer cross-contaminate:
+
+- **`s_camRightX/Y, s_camDownX/Y`** is now the MANUAL-NAV pair. Set once by `HookedFieldScriptsInit` at field load — from the `.ca` file via v0.17.0.1's 2D-normalization path, or identity defaults if the `.ca` is absent / degenerate. Never written by auto-drive. Read by `field_nav_gps.inl::ComputeScreenDirIndex`, `field_nav_gps.inl`'s `[NAV-PROJ]` log lines, and `field_nav_helpers.inl::FormatNavComponents`.
+- **`s_driveCamRightX/Y, s_driveCamDownX/Y`** is a new AUTO-DRIVE PRIVATE pair. Mirrors the manual-nav pair at field load (so auto-drive starts from CA-derived values on the first drive of each field), then overwritten by the calibration's phase 1 / phase 2 writes. Read only by `field_nav_autodrive.inl::SetAnalogFromVector` (and through it by chase auto-pilot + F9 path-finding's analog steering).
+
+With this split, the next BAT log answers the question definitively. If manual-nav cardinals are now correct on `bghall_1` end-to-end, hypothesis A (calibration corrupting manual-nav) was the cause and the fix is complete. If the cardinals are still wrong on the same field, hypothesis B (CA-derived axes diverge from the engine's actual projection) is in play and v0.17.3 will need a deeper fix — either auto-drive-style empirical calibration on GPS start, or reading the engine's runtime camera matrix from memory rather than the file-load `.ca` snapshot.
+
+Diagnostic logging added so the BAT log tells us which case we're in without needing further log forensics. The `[NAV-PROJ] start` line at `StartGPS` now includes the current field name and a new `axes=` tag that reads either `ca-file` (CA loaded and 2D-normalized successfully) or `identity` (CA absent, degenerate, or fell through to fallback). New static `s_camAxesSource` in `field_navigation.cpp` tracks this; `field_nav_fieldscripts.inl` sets it at every field load. With the source tag in every NAV-PROJ line, a v0.17.2 BAT log showing two GPS sessions on `bghall_1` will show the same `axes=ca-file` and the same camera-axis values on both — confirming the manual-nav pair is stable through the session. If the values still differ, the difference is now provably a real `.ca`-vs-engine mismatch and points to v0.17.3 work; calibration is no longer a possible culprit.
+
+Chase auto-pilot is deliberately untouched. The empirical-calibration code path in `field_nav_autodrive.inl` still runs (phases 1, 2, fallback-perpendicular, and the `[CALIB]` log lines all retained); the only change is that it writes into the `s_driveCam*` pair instead of `s_cam*`. The chase doc's verified-working behavior on `domt4_1`, `domt3_2`, `domt5_1`, `dotown_2`, `dotown_1`, etc. is preserved bit-for-bit, since auto-drive's `SetAnalogFromVector` now reads from the same drive-private pair that calibration writes. The mirror-at-field-load step ensures the first drive on each field starts from CA-derived values rather than the previous field's calibration residue — a small improvement, but a side effect of the state split, not its purpose.
+
+v0.17.1's path-aware logic is also untouched. `BuildGpsPath` and `AdvanceGpsWaypoint` still work the way the v0.17.1 BAT confirmed; the only thing changing in `field_nav_gps.inl` is the `[NAV-PROJ] start` log format (added two fields: `field='%s'` and `axes=%s`). Behavior outside the diagnostic logging is byte-for-byte identical.
+
+Files changed: `src/ff8_accessibility.h` (version), `src/field_navigation.cpp` (new state pair + source tag), `src/field_nav_fieldscripts.inl` (reset + CA-load both pairs, set source tag), `src/field_nav_autodrive.inl` (calibration phases + `SetAnalogFromVector` rename `s_cam*` → `s_driveCam*`), `src/field_nav_gps.inl` (NAV-PROJ start log adds field + axes fields).
+
+Not touched, deliberately: chase auto-pilot config tables, `field_nav_pathfinding.inl` (A* + funnel reused unchanged), `field_nav_helpers.inl::FormatNavComponents` (already reads `s_camRight/Down` which is now manual-nav-pinned), the v0.17.1 path-aware buffer + advance logic (proven working last BAT, no reason to risk regression), the v0.16.5.2 BAT triage backlog (FMV STOP/PLAY race, POLL tutorial garble, formation party-member filter, GF-BP diagnostic gating, HP-TRACK during GF-HP-SUB), and the classroom entity catalog under-population reported in v0.17.0.1.
+
+BAT recipe: load `bghall_1` again (or any tilted-camera field). The new `[NAV-PROJ] start` log line will include `field='bghall_1'` and `axes=ca-file`. Walk around the field exercising both manual nav (Backspace/F9) and at least one auto-drive (F9 list cycle then start drive, or chase-trigger if convenient). If manual-nav GPS produces correct cardinals throughout AND a subsequent BAT shows the camera-axis values matching the field's CA load every time GPS announces, the state-separation fix is sufficient. If cardinals are still wrong with `axes=ca-file` in the NAV-PROJ logs, the BAT log will show the same axis values across multiple announces — proving the issue is CA-vs-engine divergence, not calibration corruption, and v0.17.3 needs to address the projection itself.
+
+## v0.17.1
+
+Path-aware GPS direction. v0.17.0/0.17.0.1 made the cardinal genuinely screen-relative on any camera, but the announced cardinal was still the straight-line bearing from player to final destination. On a curved hallway, that bearing cuts through walls. v0.17.0.1 BAT confirmed this on `bghall_1` (Balamb Garden hallway, C-shaped): going classroom → elevator corridor the bearing happened to align with the walkable direction at every step, so the cardinal was correct; going the other way, the bearing pointed through the inside of the curve and the announced cardinal was wrong because the player needed to follow the bend, not aim through it.
+
+v0.17.1 runs A* on the walkmesh from the player's triangle to the target's triangle, smooths the corridor with the existing funnel algorithm (`FunnelPath` in `field_nav_pathfinding.inl`), and announces the cardinal toward the NEXT waypoint rather than the final destination. The funnel produces a small number of turn-point waypoints; on a straight path it produces a single waypoint at the destination, so behavior degrades cleanly to v0.17.0.1's straight-line direction. On a curved path it produces one waypoint per major bend, and the GPS announces the leg-by-leg direction the player needs to walk.
+
+The A* + funnel infrastructure already exists in `field_nav_pathfinding.inl` — chase auto-pilot has been using it since v0.15.9, and F9 path-finding auto-drive uses it from `UpdateAutoDrive`. v0.17.1 calls it from `StartGPS` and copies the result into a GPS-private buffer (`s_gpsWaypoints[]`) so an active auto-drive's path isn't disturbed. The save/restore mechanism in `BuildGpsPath` snapshots the shared `s_waypoints[]`, `s_waypointCount`, `s_waypointIdx`, `s_usingFunnel`, `s_corridor[]`, `s_corridorCount`, and `s_wpMinDist` before A* runs and restores them after the funnel result is copied. If no auto-drive is running, the save/restore is effectively a state-clear and has no observable effect; if auto-drive IS running, its waypoint sequence and progress index are preserved across the GPS path build.
+
+Waypoint advance uses two conditions, evaluated each `UpdateGPS` tick: (a) the player gets within `GPS_WP_ARRIVE_DIST` (200 units) of the current waypoint, or (b) the player overshoots — they got reasonably close (under `GPS_WP_OVERSHOOT_CLOSE` = 300 units) and the distance is now growing again, indicating they passed the waypoint at an angle. Either condition advances to the next waypoint. The 200-unit threshold is generous compared to auto-drive's 60-unit `FUNNEL_ARRIVE_DIST` because the player walking themselves doesn't need precise turn points — the threshold's job is to advance the announced direction BEFORE the player reaches the corner, so they have time to plan their turn. The overshoot detection mirrors auto-drive's same-named feature for the same reason.
+
+The announcement cadence from v0.17.0 still applies: silent in the nearby/in-range zone, fires on cardinal sector change or step-count change outside it, with a 3-second minimum interval that direction changes break through. v0.17.1 adds one new break-through condition: a waypoint advance forces an announcement even when the cardinal happens to match the previous one. This matters for L-shaped paths where two legs both run, say, east — without the forced announcement, the player would never get a corner-handoff signal. The forced announcement uses the same cardinal text but fires immediately on advance regardless of the time-interval floor.
+
+Fallback behavior is unchanged from v0.17.0.1 whenever A* can't run: walkmesh not loaded, target not on the walkmesh, player and target on disconnected walkmesh islands, or A* iteration limit exhausted. In all those cases `BuildGpsPath` returns false, `s_gpsUseWaypoints` stays false, and `UpdateGPS` aims straight at the final destination as before. The `[NAV-PATH]` log lines record which fallback path fired, so a future BAT where path-aware misbehaves can be diagnosed by reading the log without re-running.
+
+Diagnostic logging additions: `[NAV-PATH]` lines at `BuildGpsPath` covering walkmesh availability, start/goal triangle indices, A* success/failure, funnel waypoint count, and the first 6 waypoint positions; `[NAV-PATH] wp N/M reached` on each advance with the reached/overshoot reason; the existing `[NAV-PROJ] start` / `[NAV-PROJ] update` lines now include `wp=I/N` and a `steer=(x,y)` field separate from `target=(x,y)` so the path-aware behavior is fully traceable.
+
+Trigger-line targets get special handling: when the GPS target's catalog entry is a trigger line (`entityIdx <= -200` and `> -300`), `BuildGpsPath` passes the trigger index as `skipTriggerIdx` to `ComputeAStarPath` so A* can route through that specific trigger line (it's the goal). Without this, A* would refuse to enter the destination triangle because crossing the trigger line is forbidden by default. Runtime-entity targets (`entityIdx >= 0`) pass their entity index as `targetEntityIdx` so A*'s push-radius blackout doesn't block the goal triangle.
+
+Files changed: `src/ff8_accessibility.h` (version), `src/field_nav_gps.inl` (path-aware state, `BuildGpsPath` helper, `AdvanceGpsWaypoint` helper, `StartGPS`/`UpdateGPS`/`StopGPS` integration with path-aware mode, expanded diagnostics).
+
+Not touched, deliberately: `field_nav_pathfinding.inl` (A* + funnel implementation is reused as-is), `field_nav_autodrive.inl` (auto-drive's waypoint state save/restore is handled at the GPS-call boundary, not by changing auto-drive), `field_navigation.cpp` GPS_DIR_NAMES (the cardinal vocabulary is the same), the v0.16.5.2 BAT triage's other backlog bugs (FMV STOP/PLAY race, POLL tutorial garble, formation-based party-as-NPC filter, GF-BP diagnostic spam, missing damage announce during GF-HP-SUB), and the classroom entity catalog under-population reported in the v0.17.0.1 BAT (separate diagnosis track once we have the field name and the F9 list).
+
+BAT recipe: load `bghall_1` (or any curved-corridor field). Cycle F9 to a target on the opposite side of the curve, press Backspace to start GPS guidance. The initial announcement should be the cardinal toward the first turn point, not the final destination. Walking along the corridor should produce a `[NAV-PATH] wp 0/N reached` log line and a fresh direction announcement at each bend. Going the reverse direction — same field, opposite endpoints — should now produce correct directions; that was the v0.17.0.1 BAT failure case. On straight fields (`bgroom_1`, default-camera open areas), behavior should be indistinguishable from v0.17.0.1.
+
+## v0.17.0.1
+
+Follow-up to v0.17.0 BAT triage. v0.17.0 confirmed the orientation infrastructure in principle — most fields improved — but two specific fields (`bghall_1` Balamb Garden hallway and the classroom outside it) still produced wrong cardinals. The BAT logs surfaced the cause immediately: `bghall_1`'s `[NAV-PROJ-INIT]` line showed `camRight=(0.991,0.135) camDown=(0.044,-0.330)`. camRight's 2D magnitude is 1.0; camDown's is only 0.333. The asymmetry biased every `atan2(sD, sR)` toward east/west and produced the wrong cardinal even when the screen-direction was unambiguously north or south.
+
+Root cause was a missing normalization step in the v0.17.0 CA-to-`s_camRight/Down` wiring. The `.ca` file stores camera axes as **3D unit vectors** (int16 fixed-point /4096). For a tilted camera — where the rendering camera looks forward+down at the floor instead of straight down — most of axis1's magnitude lies in the Z (depth) component; the XY projection is short. v0.17.0 divided by 4096 and used the raw XY components, which left `s_camDown` at sub-unit-length on tilted-camera fields. Walkmesh deltas have Z=0, so dotting them against a short-XY-vector produced screen-space deltas with asymmetric scale: the screen-right projection was at full scale while screen-down was at fractional scale. `atan2(sD, sR)` reads ratios, so the asymmetry rotates the apparent angle toward the larger axis's direction.
+
+The chase auto-pilot's empirical calibration in `field_nav_autodrive.inl` doesn't have this problem because it measures the resulting walkmesh-delta direction and normalizes by `cdist` (the magnitude of the delta). The result is always a unit-length 2D vector matching the engine's actual analog-to-walkmesh transform. v0.17.0.1 mirrors that: it normalizes axis0's and axis1's 2D projections to unit length before writing into `s_camRight/Down`.
+
+The geometric justification matches the chase calibration's empirical observation. When the engine reads analog input `(lX, lY)` and converts it to walkmesh movement, it follows the camera axes' 2D projection as a *direction* — the player's walking speed is constrained to the engine's pace, not the axis vector's magnitude. So the walkmesh direction of "press right arrow" is the unit-length 2D projection of axis0, regardless of how much of axis0's 3D magnitude lies along Z. Same for camDown and axis1.
+
+Default-camera fields produced correct cardinals on v0.17.0 because their axis0 and axis1 already have near-zero Z components (the 2D magnitude was ~1.0 already, so normalization is a no-op). The bug only surfaced on tilted-camera fields where axis1's Z component is large — a class of fields that includes the Balamb Garden interiors (`bghall_1`, `bgcls_1`/classroom, and likely most of the indoor environments with non-default camera framings).
+
+Two extra `[NAV-PROJ-INIT]` log fields: `source=ca-file-normalized` (was `ca-file`) so a v0.17.0 build vs v0.17.0.1 build is unambiguous from the log; and a per-field `raw-2D r2len=N d2len=M` line showing the pre-normalization 2D magnitudes. `d2len` near 1.0 means a flat (default) camera; `d2len` significantly less than 1.0 means a tilted camera. This makes "is this a tilted-camera field?" a one-line lookup in the field log.
+
+Also adds a degenerate-projection safety check: if both `r2len` and `d2len` are essentially zero, the camera is looking straight down a single world axis and the screen-projection is undefined for direction labels. v0.17.0.1 keeps identity defaults in that case and logs a warning rather than dividing by ~0 and producing NaN.
+
+Files changed: `src/ff8_accessibility.h` (version), `src/field_nav_fieldscripts.inl` (CA wiring now normalizes 2D projections, extra diagnostic log lines, degenerate-camera guard).
+
+Not touched: `src/field_nav_gps.inl` (the projection math was correct in v0.17.0 — only the inputs to it were wrong), `src/field_navigation.cpp` `GPS_DIR_NAMES` cardinals (unchanged from v0.17.0), the chase auto-pilot's empirical calibration path (also unchanged — it normalizes correctly already).
+
+BAT recipe: load any tilted-camera field (`bghall_1` is the canonical example). The `[NAV-PROJ-INIT]` line should now show `camDown` with 2D magnitude ~1.0 (e.g. `(0.132,-0.991)` for `bghall_1`) instead of `(0.044,-0.330)`. Cardinals announced during GPS guidance should match arrow keys. The `raw-2D` line records the pre-normalization magnitudes so the tilt-or-flat status is logged independently.
+
+## v0.17.0
+
+Field navigation, Bug 2 from the v0.16.5.2 BAT triage: manual GPS direction announcements were correct on some fields and inverted on others ("left" when the player actually needed to press right). Root cause was a coordinate-system mismatch: the GPS direction code computed the world-space bearing from raw entity coordinates and labeled it with screen-relative names, which works only on default-camera fields. On any field with a rotated camera — e.g. the Mountain Hideout chase fields, where the chase auto-pilot's empirical calibration found `camRight ≈ (0.04, 0.99)` instead of identity — the labeled direction did not match the arrow key the player needed to press.
+
+The fix has two parts. First, the `.ca` (camera) file is already parsed at field load into the `CameraAxes` struct, but the parsed result was never being wired into the projection axes (`s_camRightX/Y`, `s_camDownX/Y`) that the direction code actually reads. Those projection axes were only ever populated by the chase auto-pilot's empirical calibration, which runs lazily on the first auto-drive of a field — i.e. on chase fields and nowhere else. The rest of the time they sat at their identity defaults. `field_nav_fieldscripts.inl` now derives the screen-right and screen-down vectors from `s_cameraAxes.axis0` and `axis1` (int16 fixed-point, normalized by /4096) and writes them into `s_camRightX/Y/DownX/DownY` immediately after `LoadCameraAxes()` returns. A `[NAV-PROJ-INIT]` log line records the derived axes and a 2D determinant per field load; degenerate cameras (|det| < 0.1) get a warning line. The chase auto-pilot's empirical calibration is untouched and will overwrite the CA-derived values on chase fields when it runs, which is fine because the two methods converge on the same axes for static cameras.
+
+Second, `field_nav_gps.inl` no longer uses the world-space `atan2(dx, dy)`. The new `ComputeScreenDirIndex` projects the walkmesh delta through the now-correctly-populated camera axes (`screenRight = dx*camRightX + dy*camRightY`, `screenDown = dx*camDownX + dy*camDownY`) before classifying into one of eight 45° cardinal sectors. The cardinal vocabulary (north, northeast, east, southeast, south, southwest, west, northwest) replaces the old `up / up right / right / ...` labels; cardinals were chosen because they map unambiguously to arrow keys (north = up arrow, east = right, south = down, west = left) and are the canonical terminology already used by the chase auto-pilot. Aaron confirmed this convention before the rewrite.
+
+GPS announcement cadence also changes. The old loop spoke a direction every 3 seconds while distance > 500 units, every 1.5 seconds while distance was in 200–500, and every 0.8 seconds while distance was under 200 — producing announcement bursts on long stretches where nothing meaningful was changing, and continuous spam in the final approach where the `Nearby` and `In range` one-shots already cover the player. New rule: in the nearby/in-range zone (distance ≤ `s_gpsNearbyDist`) GPS Updates are silent entirely, leaving messaging to the existing one-shots. Outside that zone, an Update fires only when (a) the cardinal sector changes — i.e. the player crosses into a new 45° wedge — or (b) the step count changes AND at least `GPS_ANNOUNCE_INTERVAL_FAR` (3 s) has elapsed since the last announcement. Direction changes break through the minimum-interval floor immediately; step-count-only changes wait it out so the player doesn't hear "11 steps… 10 steps… 9 steps…" in rapid succession on a long approach. State for this is two new statics in `field_nav_gps.inl`: `s_gpsLastDirIdx` (last announced cardinal index) and `s_gpsLastStepsAnn` (last announced step count), both reset by `StartGPS()` / `StopGPS()`.
+
+A `[NAV-PROJ]` log line is added to both `StartGPS` (initial announcement) and the `UpdateGPS` periodic announce path. Each line records player position, target position, walkmesh delta, projected screen delta, and the chosen cardinal label. Combined with the `[NAV-PROJ-INIT]` line at field load, this gives full traceability for any direction the mod announces — if a future BAT exposes a direction that feels wrong, the log line shows exactly which step disagrees with reality. The diagnostic also serves the Bug 2 verification recipe: walk to a known target on a field where pre-v0.17.0 direction was inverted, confirm the announced cardinal matches the arrow key needed, and verify the `[NAV-PROJ]` math against what the player observes.
+
+Scope of this version is the orientation layer only — GPS direction announcements (Backspace-triggered guided nav, F9-list-cycle-then-Backspace, F10 player-position-and-named-destination). Path-aware direction (the second half of Bug 2: "dir=up for 4000 units then suddenly up-left in the final 6 seconds" on bdin3, where the destination is correct but the player needs to follow a bend in the corridor) is queued for v0.17.1 and will reuse the existing A*+funnel infrastructure to target the next funnel waypoint instead of the final destination. Auto-drive integration (replacing the chase auto-pilot's parallel empirical calibration with the same CA-derived axes) is queued for v0.17.2+. v0.17.0 ships orientation alone so a single BAT cycle confirms or refutes the camera-projection approach in isolation before path-aware complexity goes on top — the v0.15.9 chase auto-pilot work hammered home that one-change-per-BAT cycle is the only way to attribute regressions cleanly.
+
+Files changed: `src/ff8_accessibility.h` (version), `src/field_navigation.cpp` (`GPS_DIR_NAMES` array — cardinal vocabulary + comment update), `src/field_nav_fieldscripts.inl` (CA → `s_camRight/Down` wiring at field load, `[NAV-PROJ-INIT]` log), `src/field_nav_gps.inl` (full rewrite of `ComputeScreenDirIndex`, new sector-change cadence in `UpdateGPS`, `[NAV-PROJ]` diagnostic, new state `s_gpsLastDirIdx` / `s_gpsLastStepsAnn`).
+
+Not touched, deliberately: the chase auto-pilot's empirical calibration path (`s_calibPending`, `s_camCalibrated`); the F9/F10 component-readout `FormatNavComponents` (it already uses `s_camRight/Down`, so it inherits the fix automatically); the post-v0.16.5.2 BAT triage's other five bugs (FMV STOP/PLAY race, POLL tutorial garble, formation-based party-member-as-NPC filter, GF-BP diagnostic gating, HP-TRACK during GF-HP-SUB) which remain backlog.
+
 ## v0.16.5.2
 
 Defense-in-depth utility change — no mod code change. The DLL behavior is byte-for-byte identical to v0.16.5.1 except `Initialize()` will log `Initialized v0.16.5.2 ...` instead of `v0.16.5.1`.

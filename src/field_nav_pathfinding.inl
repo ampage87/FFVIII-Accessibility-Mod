@@ -479,6 +479,82 @@ static bool FindPortal(uint16_t triA, uint16_t triB,
     return true;
 }
 
+// v0.17.5.2: Iterative collinear waypoint pruning.
+//
+// The SSFA funnel can emit many micro-corner waypoints when the walkmesh
+// corridor has multiple small triangle turns. v0.17.5.1 BAT on bg2f_2
+// (classroom hallway) showed a 1600-unit path produce 13 waypoints; checking
+// each one's perpendicular distance from the line through its neighbors:
+//
+//   wp 1 = 220 units off line wp 0->wp 4   <- real corner (keep)
+//   wp 2 =   6 units off line wp 1->wp 4   <- nearly collinear (remove)
+//   wp 3 =  24 units off line wp 1->wp 4   <- nearly collinear (remove)
+//   wp 4 =  30 units off line wp 1->wp 5   <- nearly collinear (remove)
+//   ...
+//
+// Aaron's perception: TTS rattling through micro-cardinal changes as each
+// waypoint advances. Each micro-correction is a real walkmesh triangle
+// portal corner, but doesn't represent a turn the player needs to make.
+//
+// This pass repeatedly scans the waypoint list and removes any waypoint B
+// whose perpendicular distance from the segment connecting its neighbors A
+// and C is below PRUNE_PERP_EPSILON. It's a simplified Ramer-Douglas-
+// Peucker (no recursion; just sweep-until-stable).
+//
+// PRUNE_PERP_EPSILON is set conservatively below typical FF8 wall thickness
+// (~100+ units) so post-prune paths cannot route through walls. Combined
+// with the existing AGENT_RADIUS=30 portal shrinking that pre-pulls
+// waypoints inward from walls, worst-case wall clearance after pruning is
+// ~80 units -- still well within walkable space.
+//
+// First and last waypoints are preserved (loop runs i = 1 to count-2).
+static const float PRUNE_PERP_EPSILON = 50.0f;
+
+static int PruneCollinearWaypoints(float wp[][2], int count)
+{
+    if (count < 3) return count;
+    bool changed = true;
+    int iterations = 0;
+    int totalRemoved = 0;
+    while (changed && iterations < 100) {  // safety bound
+        changed = false;
+        iterations++;
+        for (int i = 1; i + 1 < count; i++) {
+            float ax = wp[i-1][0], ay = wp[i-1][1];
+            float bx = wp[i][0],   by = wp[i][1];
+            float cx = wp[i+1][0], cy = wp[i+1][1];
+            float abx = bx - ax, aby = by - ay;
+            float acx = cx - ax, acy = cy - ay;
+            float aclen = sqrtf(acx * acx + acy * acy);
+            float perpDist;
+            if (aclen < 0.001f) {
+                // A and C are essentially the same point; B is redundant.
+                perpDist = 0.0f;
+            } else {
+                float cross = abx * acy - aby * acx;
+                perpDist = fabsf(cross) / aclen;
+            }
+            if (perpDist < PRUNE_PERP_EPSILON) {
+                // Remove B by shifting subsequent waypoints left.
+                for (int k = i; k + 1 < count; k++) {
+                    wp[k][0] = wp[k+1][0];
+                    wp[k][1] = wp[k+1][1];
+                }
+                count--;
+                totalRemoved++;
+                changed = true;
+                break;  // restart scan with the smaller list
+            }
+        }
+    }
+    if (totalRemoved > 0) {
+        Log::Field("FieldNavigation: [funnel-prune] removed %d collinear waypoints "
+                   "(eps=%.0f units, %d sweeps)",
+                   totalRemoved, PRUNE_PERP_EPSILON, iterations);
+    }
+    return count;
+}
+
 static void FunnelPath(float startX, float startY, float goalX, float goalY)
 {
     // Build portal list from corridor.
@@ -708,11 +784,19 @@ static void FunnelPath(float startX, float startY, float goalX, float goalY)
     int oldCount = s_waypointCount;
     memcpy(s_waypoints, result, sizeof(float) * 2 * resultCount);
     s_waypointCount = resultCount;
+    // v0.17.5.2: Prune near-collinear waypoints from the funnel output.
+    // SSFA on walkmesh corridors with small zigzag triangles emits a waypoint
+    // at each portal-vertex alternation, even when those alternations don't
+    // represent meaningful turns from the player's perspective. The prune
+    // pass collapses such micro-corners while preserving real bends.
+    int prePruneCount = s_waypointCount;
+    s_waypointCount = PruneCollinearWaypoints(s_waypoints, s_waypointCount);
     s_waypointIdx = 0;
     s_usingFunnel = true;  // v05.95: use tighter arrive distance for funnel waypoints
 
-    Log::Field("FieldNavigation: [funnel] %d triangles -> %d waypoints (was %d centers)",
-               s_corridorCount, resultCount, oldCount);
+    Log::Field("FieldNavigation: [funnel] %d triangles -> %d waypoints "
+               "(post-prune; pre-prune=%d, was %d centers)",
+               s_corridorCount, s_waypointCount, prePruneCount, oldCount);
 }
 
 // v06.06: Edge-midpoint path generation — the reliable fallback for when funnel

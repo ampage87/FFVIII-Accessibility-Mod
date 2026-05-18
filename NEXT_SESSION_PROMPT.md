@@ -1,97 +1,98 @@
-# Next Session Prompt: v0.16.5.2 ready to push, backlog open
+# Next Session Prompt: v0.17.5.2 BAT'd clean, post-push session
 
 ## Greeting
 
-Start with `## Claude Says` per session ritual. Read `DEVNOTES.md` and THIS file before any work.
+Start with `## Claude Says`. Read `DEVNOTES.md` and THIS file before any work.
 
-## Where we are
+## Where we are at session open
 
-**GitHub HEAD = v0.16.5.1** (commit `7c462392`, pushed 2026-05-17 20:42:43 UTC, parent `5d16179a` = v0.16.4). **Local tree = v0.16.5.2** (utility-only change adding a client-side mirror of the GitHub Actions CI checks; no mod code change). The combined v0.16.5 refactor + v0.16.5.1 follow-up landed in one commit; the v0.16.0–v0.16.5 size-split chapter is formally closed.
+**GitHub HEAD = v0.17.5.2** (assuming Aaron pushed via `Utilities/push_to_github.ps1` after the v0.17.5.2 BAT). **Local tree = matches GitHub HEAD** unless Aaron has started new work.
 
-### v0.16.5.2: local mirror of CI safety checks (pending push)
+If GitHub HEAD is still `v0.16.5.2`, Aaron hasn't pushed yet. The push utility is a one-line command on his end (`Utilities/push_to_github.ps1`); the CHANGELOG.md top heading already matches `FF8OPC_VERSION = 0.17.5.2` so the utility's guard check will pass. If Aaron asks, the BAT was clean -- safe to push.
 
-`Utilities/push_to_github.ps1` gained a new Step 7c (between the duplicate-commit refusal in Step 7b and the cmd.exe invocation in Step 8) that runs the same two checks as `.github/workflows/safety-checks.yml` locally: SET3 hook marker grep on `src/field_navigation.cpp` and source file size budget on `src/*.{cpp,inl}` at depth 1 (60 KB warn, 80 KB fail). If either would fail on the server, the push is refused via the existing `Show-ErrorDialog` flow with a screen-reader-readable explanation. The CI workflow remains as the authoritative server-side backstop in case the utility is ever bypassed (manual `git push`). DLL behavior unchanged — the only mod-side difference is `Initialize()` will log `v0.16.5.2` once Aaron rebuilds + redeploys.
+## v0.17.5.2 BAT result summary
 
-If future safety checks get added to `safety-checks.yml`, mirror them in Step 7c too. Bidirectional pointer comments in both files document the duplication so the sync doesn't bit-rot.
+Aaron walked elevator -> directory -> classroom hallway -> elevator. Outcome: "directions seemed good throughout."
 
-### v0.16.5 BAT result
+Quantitative wins from the log:
 
-Confirmed CLEAN. All menu paths exercised across two battles, every announcement fired as expected. Init: `Initialized v0.16.5 (EWM=ON, ATB=OK, GF=OK, FFNx=FAIL, PATCH=OK, BT=deferred)`. Highlights: Magic submenu via mode-byte path, GF submenu via fallback (mode 0x02→0x00 + phase 80) path, deferred GF cancel disambiguation (cancel suppressed on turn-end = confirm), Draw spell list with Stock/Cast + cursor nav + false-exit suppression + revisit-flag handling, target cycling across allies, v0.13.57 ATB exact-value restore preserved. **v0.16.4's open Ifrit-AD miss is RESOLVED** — played end-to-end this session (6 cues, ~23 s, all proper timestamps). Heartbeat diagnostic stays parked.
+| Field | A* tris | Pre-prune wp | Post-prune wp | Sweeps |
+|-------|---------|--------------|---------------|--------|
+| bghall_1 | 11 | 11 | 5 | 7 |
+| bg2f_2 | 46 | 46 | **10** | **37** |
 
-### v0.16.5.1: 3-line follow-up (shipped in the same commit)
+bg2f_2's path this BAT was a different (longer) route than v0.17.5.1's, but the prune behaviour is consistent: ~4-5x reduction in waypoint count by removing waypoints within 50 units of the line through their neighbours. No autodrive velocity-stuck events; no compile warnings; DIVERGE numbers within expected residual (11° on bg2f_2 due to tilted-camera 2D projection, well within sector tolerance).
 
-v0.16.5 BAT log triage caught that `PollDeferredTurnAnnounce` (defined in `battle_tts_menu_poll.inl`) was never invoked from `Update()`. Latent dead-code path since v0.13.52 introduced the deferred-turn feature — not a v0.16.5 regression. Patched with three guarded lines in `battle_tts.cpp::Update()` after `PollHPChanges()`. Function body untouched.
+First announced cardinal on bg2f_2 this run was **"north"**, matching Aaron's mental model (path's first leg was -X direction = screen-north on bg2f_2's quantized axes). The "east when expected north" scenario from v0.17.5.1 wasn't reproduced this time because Aaron started from a different position -- the path's geometry was different.
 
-Specific BAT evidence: line 2942–2943, Selphie's third turn in battle 2 started on the exact frame Zell's Ifrit began animating. `[TURN] Deferred (damage in flight): Selphie's turn. Attack.` logged correctly, but no `[TURN] Deferred fired ...` or `[TURN] Deferred cancelled ...` follow-up ever appeared — the stashed announce silently dropped at battle end. Aaron likely never heard "Selphie's turn. Attack." for that turn (and many similar collisions over the past ~32 versions).
+## Open architectural question
+
+v0.17.5.3 (option B hybrid announcement) was queued as "ship if pruning alone isn't enough." This BAT showed pruning + path-aware was good for the route walked. The "east when expected north" scenario from v0.17.5.1 may or may not still occur on the original-position path; we don't know because Aaron didn't reproduce that exact starting position this BAT.
+
+**Recommendation:** defer v0.17.5.3 until Aaron hits the issue again in real play. If he reports it, ship B then. Otherwise the next session should move to the v0.16.5.2 BAT triage backlog (see below).
+
+## v0.16.5.2 BAT triage backlog (resumable)
+
+Issues from the v0.16.5.2 BAT that were deferred for the v0.17.x navigation accuracy work. Rough priority order:
+
+1. **Remove party members from field entity catalog.** When the party has 2-3 active members, the non-leader members appear as NPCs in the F9/F10 cycle. They shouldn't -- party members aren't navigation targets. Fix: filter ent0..ent2 (party slots) from the catalog before populating the cycle list. Specific code location not yet investigated.
+
+2. **Walk-and-talk dialog gap.** During scripted walk-and-talk sequences (Squall walks somewhere while NPCs speak), the dialog text doesn't always announce via TTS. Hardcoded engine path bypassing the normal dialog injection hook. Needs disassembly trace of which engine routine fires for these scripted dialogues.
+
+3. **SeeD rank bug #27.** Hypothesis from earlier sessions: `FIELD_H_OFFSET = 0xF94` is wrong section size. Need to verify offset by reading the actual savemap section boundary. Disassembly references in `/mnt/project/FF8_EN_*.txt` should help locate the relevant struct.
+
+4. **Refined-coord narrow-gate steering.** Some narrow corridors cause autodrive to oscillate. Possibly addressable by using a wider AGENT_RADIUS for path planning but a narrower one for steering target validation. Investigation needed.
+
+5. **Fire Cavern #28 + planner-fallback #29.** Fire Cavern's world map navigation has a planner failure mode. Need to repro and trace.
+
+6. **Per-world-map vehicle-aware BFS, guided GPS mode.** Bigger feature. World map navigation currently treats all terrain the same; should know which terrain the current vehicle can cross.
+
+7. **Battle: Scan TTS keys 9/0 (status resist/active statuses)** -- offset hunt deferred. Need to find the right savemap offsets for these two fields.
+
+8. **Junction menu TTS** -- future feature, not actively investigated.
+
+9. **More victory screen polish** -- ongoing future work.
 
 ## Status check at session open
 
-**If Aaron's first message is "BAT"**: a build at v0.16.5.1 or later has been tested. Triage normally — read `Logs/build_latest.log` tail for compile errors, then `Logs/ff8_battle.log`. Specifically look for the v0.16.5.1 confirmation pattern: any `[TURN] Deferred (damage in flight): ...` line should be followed within ~5 seconds by either `[TURN] Deferred fired after <ms> ms: ...` (release succeeded) or `[TURN] Deferred cancelled (char N -> M, stale): ...` (active char advanced past the deferred-for character). Pre-fix, only the first line appeared.
+**If Aaron's first message is about the v0.16.5.2 BAT backlog**: pick the highest-priority item he wants to address. Start by re-reading the relevant code with `filesystem:read_text_file` rather than working from memory.
 
-**If Aaron names a backlog item**: jump to that. Refactor queue is empty; everything below is fair game.
+**If Aaron's first message is "let's do B / v0.17.5.3"**: he's hit the path-aware-vs-mental-model scenario again. Implement option B (hybrid announcement) in `field_nav_gps.inl::UpdateGPS`:
+- Compute both `dirIdx` (toward waypoint, current behavior) and `finalDirIdx` (toward `(tx-px, ty-py)`).
+- When they differ, speak both: "east, heading north, 6 steps" or similar phrasing.
+- When they match, speak just one (current behavior).
+- Same change in `StartGPS`.
+- Keep path-aware steering intact (`AdvanceGpsWaypoint` still drives autodrive and the immediate `dirIdx`).
+- New version v0.17.5.3, single CHANGELOG entry.
 
-**If Aaron asks about a regression**: read the relevant domain log first, not assumptions.
-
-### Deferred-turn observation rule going forward
-
-The one-frame trigger window means this collision can't be reliably reproduced. Aaron will keep an eye out for the post-fix pattern across future BAT runs. If `[TURN] Deferred fired ...` is observed at least once with damage-TTS-first / turn-announce-second audio ordering preserved, the fix is confirmed end-to-end. If `[TURN] Deferred (damage in flight)` ever appears WITHOUT a follow-up `fired` or `cancelled` line in the next ~5 seconds, that's a regression of the v0.16.5.1 fix (e.g. someone removed the `Update()` call).
-
-## Refactor queue: EMPTY
-
-v0.16.5 was the final size-split task. Every `src/*.cpp` and `src/*.inl` is now under the 80 KB hard fail. The chapter that started with v0.16.0's `world_map.cpp` carve is closed.
-
-If a future file approaches the 60 KB warn line, the established `.inl` pattern is:
-- Parent `.cpp` (or shell `.inl`) becomes a slim file with namespace block + `#include` chain
-- `*_state.inl` (statics) included FIRST
-- No header guards or namespace decls inside `.inl` files
-- 5-20 KB per sub-`.inl` target; resplit if any approaches 60 KB
-- `*_history.h` archive with `#if 0` wrapper holds removed legacy content when applicable
-- Default to PURE mechanical splits — user-facing TTS paths in particular preserve every announcement exactly
-
-The six reference splits: v0.16.0 (`world_map`), v0.16.1 (`chase_auto_pilot`), v0.16.2 (`field_dialog`), v0.16.3 (`field_archive_jsm` — small-refactor pattern with state hoist + helper extraction), v0.16.4 (`battle_tts_ewm`), v0.16.5 (`battle_tts_menu`).
-
-## Backlog (now active, roughly priority order)
-
-1. **Ifrit / GF audio description miss diagnostic** (carried from v0.16.4 BAT, RESOLVED in v0.16.5 BAT but kept as a watch item). Only act if it recurs.
-2. **POLL teardown garble** (carried from v0.16.2 BAT): polling-thread fallback occasionally speaks `[Name80]kindrL`-style fragments ~17s after dialog dismiss. Pre-existing. Fix candidate: reject unresolved `[…]` tokens in the POLL path.
-3. **`menu_tts.cpp` T-handler `!shift` gate** — one-line cleanup.
-4. **FieldAnnounce display-name catalog audit** in `src/field_display_names.h`. Wrong mappings for fieldIds 0x0134 / 0x0136. Verify Fire Cavern A mapping (fieldId 0x0088, engine `fieldName='bdview1'`, expected "Fire Cavern A") end-to-end.
-5. **Field-name populate race** at Part B arrival check — diagnostic log only, audio fine.
-6. **Deep-research doc updates**: `Plan & Research Documents/Dollet timer countdown deep research results.md` — wrong-math fix + LIVE TIMER FOUND appendix.
-7. Remove party members from field entity catalog.
-8. Walk-and-talk dialog gap (hardcoded engine path).
-9. SeeD rank bug #27 (hypothesis: `FIELD_H_OFFSET = 0xF94` wrong section size).
-10. Refined-coord narrow-gate steering.
-11. Fire Cavern #28 + planner-fallback #29.
-12. Per-world-map vehicle-aware BFS, guided GPS mode.
-13. Battle: Scan TTS keys 9/0 (status resist/active statuses) — offset hunt deferred.
-14. Future: Junction menu TTS, more victory screen polish.
+**If Aaron's first message is "BAT" without a v0.17.5.3 build between sessions**: that's a stale BAT message about v0.17.5.2 or something unexpected -- ask before assuming.
 
 ## Hard constraints (unchanged)
 
-- **Filesystem MCP for all Windows project files.** Bash runs in a Linux container that can't reach the OneDrive mod directory.
+- **Filesystem MCP for all Windows project files.** Bash is Linux-container and can't see them.
 - **Aaron pushes via `Utilities/push_to_github.ps1`**, Claude NEVER pushes.
-- **NEVER re-enable SET3 opcode hook (0x1E)** — CI guard in `.github/workflows/safety-checks.yml`.
+- **NEVER re-enable SET3 opcode hook (0x1E).**
 - **F-key handlers gated** on `!(GetAsyncKeyState(VK_MENU) & 0x8000)`.
-- **F12 reserved** for per-session diagnostics.
-- **Source file size limits**: 60 KB warn, 80 KB fail (CI enforced).
+- **F12 reserved** for per-session diagnostics only.
+- **Source file size limits**: 60 KB warn, 80 KB fail. `field_nav_pathfinding.inl` is approaching the warn threshold after v0.17.5.2 -- if v0.17.5.3 adds significant code there, split to a new `.inl`.
 - **OneDrive sync EPERM**: retry immediately on first edit attempt.
-- **AUTO `[CBF]` battle-suppressor cap stays `INT_MAX`** — Aaron's 2026-05-13 directive.
-- **`.inl` files are TEXTUAL INCLUDES**: no header guards, no namespace declarations inside, `state.inl` always first.
-- **Push utility refuses to push if top CHANGELOG heading doesn't match `FF8OPC_VERSION`.**
-- **Battle menu TTS is load-bearing** (v0.16.5). Every command, spell, GF name, item with qty, target selection, all-target announce, Stock/Cast, cancel-restore is user-facing. Pure mechanical splits only.
-- **Functions defined but not called are a real failure mode** (v0.16.5.1 lesson). MSVC silently allows `static` unused functions; the compiler can't warn us. If a feature's log marker for the "work started" half appears but the "work finished" half is missing across multiple BAT runs, suspect a missing caller before suspecting a logic bug.
-- Every Claude response starts with `## Claude Says`.
+- **AUTO `[CBF]` battle-suppressor cap stays `INT_MAX`**.
+- **`.inl` files are TEXTUAL INCLUDES**: no header guards, no namespace declarations inside.
+- **CHANGELOG.md top heading must match `FF8OPC_VERSION`** or the push utility refuses.
+- **Navigation direction announcements are screen-relative, not world-relative.**
+- **AUTO-DRIVE uses `s_driveCam*` pair (v0.17.2), MANUAL-NAV uses `s_camRight/Down`.** Neither is written by anything other than the field-load handler.
 
-## Key lessons carried forward
+## Notes for resumption
 
-1. **`ff8_nav_data.log` is the silent goldmine for spatial debugging.**
-2. **Aaron's domain knowledge is ground truth, but his recipes need empirical verification.**
-3. **Multiple catch sources on one field may not all be active.** Always verify the `[CBF] PASS` caller.
-4. **Per-field problems require per-field analysis.**
-5. **EWM is load-bearing.** Preserve "first-to-fill acts first, no skipped turns, natural ally/enemy ratio". Default to pure mechanical splits unless Aaron explicitly approves a refactor.
-6. **Battle menu TTS is also load-bearing.** Same constraint.
-7. **Pure mechanical splits avoid behavior regression risk.** v0.16.5 deliberately did NOT split `PollTurnAndCommands` into helpers (shared locals + outer SEH); v0.16.4 deliberately did NOT touch v0.13.57 ATB-restore semantics.
-8. **Absence of an expected log line after a refactor doesn't automatically mean the refactor broke it.** If the install/resolution line for that subsystem still fires, the runtime path is structurally identical and the cause is likely environmental or intermittent. v0.16.4's Ifrit-AD miss — confirmed resolved in v0.16.5's BAT — is the canonical example.
-9. **Refactor BAT log triage is a free dead-code audit.** v0.16.5's mechanical split exposed v0.13.52's missing `PollDeferredTurnAnnounce` caller; the new sub-`.inl` boundaries made the "this function is defined but never called" pattern grep-friendly. Future refactors should explicitly check that every public function in a new `.inl` has a caller somewhere in the parent translation unit.
-10. **When editing markdown via `filesystem:edit_file`**: multi-edit calls in one invocation can collide if `oldText` of edit N appears more than once after edit N-1 runs. Prefer separate calls for each independent edit, or carefully verify that the intermediate state of the file is what the next `oldText` expects.
+- The v0.17.x series shipped the navigation accuracy stack in three small steps: load-time 90 deg axis quantization (v0.17.5), GPS hysteresis (v0.17.5.1), and post-funnel collinear waypoint pruning (v0.17.5.2). All three working together. Architecture is in a good place.
+- The `PruneCollinearWaypoints` function in `field_nav_pathfinding.inl` is the most recent change. 50-unit epsilon; conservative below FF8 wall thickness; first/last waypoints preserved; sweep-to-stable with 100-iteration safety cap.
+- bg2f_2's tilted camera (d2len=0.130) is a known special case. v0.17.5 quantization handles it correctly within sector tolerance. If a future field has even more tilted axes and quantization fails, the observer log surfaces it as DIVERGE > 15°.
+- For diagnostic walking on a specific field, F9/F10 cycle + GPS start is the established workflow. F11 captures a screenshot. F12 is reserved for per-session diagnostics.
+
+## Classroom entity catalog (parallel track, still paused)
+
+Still pending. Need from Aaron:
+1. Field name confirm -- now corroborated as `bg2f_2` from v0.17.5.x BATs.
+2. F9 list contents (cycle through, get the two "interaction" names if they exist).
+
+This is low priority; can be deferred until Aaron specifically wants to address it.

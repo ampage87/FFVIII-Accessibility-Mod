@@ -62,8 +62,15 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
     s_partyDiagDumped    = false;  // v0.14.107: re-arm the [party-state] dump for this field load
     s_coordPrevPlayerTri = 0;       // v06.13: reset for shared-edge CoordSample
     // v06.14: Reset heading calibration for new field.
+    //
+    // v0.17.2: Reset BOTH axis pairs (manual nav + auto-drive private) and the
+    // source tag. The CA-loaded block further down will overwrite both pairs
+    // and set s_camAxesSource = "ca-file" when a .ca file is parsed.
     s_camRightX = 1.0f; s_camRightY = 0.0f;
-    s_camDownX = 0.0f; s_camDownY = -1.0f;  // default: -Y world = screen-down (matches common calibration result)
+    s_camDownX  = 0.0f; s_camDownY  = -1.0f;
+    s_driveCamRightX = 1.0f; s_driveCamRightY = 0.0f;
+    s_driveCamDownX  = 0.0f; s_driveCamDownY  = -1.0f;
+    s_camAxesSource  = "identity";
     s_camCalibrated = false;
     s_calibPhase = 0;
     s_calibPending = true;  // calibrate on first drive
@@ -170,6 +177,181 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
             // 3D walkmesh coordinates project to 2D entity/screen space.
             s_cameraAxes = {};
             FieldArchive::LoadCameraAxes(fieldName, s_cameraAxes);
+
+            // v0.17.0: Wire the .ca-derived camera axes into s_camRightX/Y/DownX/DownY
+            // so all manual-nav direction code paths (GPS guided navigation,
+            // FormatNavComponents-based Backspace announce, F9/F10 catalog cycling)
+            // get screen-relative directions on EVERY field, not just chase fields
+            // where the empirical chase-auto-pilot calibration happens to run.
+            //
+            // .ca format: 3 axis vectors stored as int16 fixed-point (/4096 to normalize).
+            //   axis0 = screen-right direction in world XY basis
+            //   axis1 = screen-down direction  in world XY basis
+            //   axis2 = screen-forward (depth) — unused for direction labels
+            // Confirmed by default-camera fields where axis0=(1.000,0.000,0.000) and
+            // axis1=(0.000,-1.000,0.000) — exactly the identity defaults reset above.
+            //
+            // Walkmesh deltas are 3D but we treat them as 2D (dx, dy, 0) because the
+            // floor is essentially flat for nav purposes. Projection becomes:
+            //   screenRight = dx*axis0[0] + dy*axis0[1]
+            //   screenDown  = dx*axis1[0] + dy*axis1[1]
+            // matching how FormatNavComponents already uses s_camRight/Down.
+            //
+            // The chase auto-pilot's empirical calibration will overwrite these values
+            // on chase fields when it runs (s_calibPending stays true). For non-chase
+            // fields, the CA-derived values remain in place — which is exactly the
+            // gap that caused 'left means right on some fields' for manual nav.
+            if (s_cameraAxes.valid) {
+                // v0.17.0.1: Normalize the 2D projection of axis0/axis1 to unit length.
+                // The .ca file stores axes as 3D unit vectors (int16 fixed-point /4096).
+                // For a tilted camera, axis1 has most of its magnitude in the Z
+                // (depth) component — the XY projection is short. Walkmesh deltas have
+                // Z=0, so dotting a short-XY-vector against (dx, dy) produces small
+                // results, asymmetric with the camRight projection. atan2(sD, sR) then
+                // biases toward east/west and the wrong cardinal comes out.
+                //
+                // The chase auto-pilot's empirical calibration produces NORMALIZED
+                // values (it divides the measured walkmesh delta by its magnitude),
+                // so the screen-projection is symmetric. We match that here by
+                // normalizing axis0/axis1's 2D projections to unit length too.
+                //
+                // Why this works geometrically: when the engine reads analog input
+                // (lX, lY) and converts to walkmesh movement, it follows the camera
+                // axes' 2D projection as a *direction* (the speed is normalized to
+                // the player's walking pace, not the axis magnitude). So the
+                // walkmesh direction of "press right arrow" is the unit-length 2D
+                // projection of axis0, not the raw 3D unit vector's XY components.
+                // BAT v0.17.0 confirmed this for bghall_1 where the raw projection
+                // produced `camDown=(0.044,-0.330)` (2D mag 0.333), breaking the
+                // cardinal computation; normalized projection gives `camDown=
+                // (0.132,-0.991)` (2D mag 1.0) and the cardinal binning works.
+                float r2x = (float)s_cameraAxes.axis0[0] / 4096.0f;
+                float r2y = (float)s_cameraAxes.axis0[1] / 4096.0f;
+                float r2len = sqrtf(r2x*r2x + r2y*r2y);
+                float d2x = (float)s_cameraAxes.axis1[0] / 4096.0f;
+                float d2y = (float)s_cameraAxes.axis1[1] / 4096.0f;
+                float d2len = sqrtf(d2x*d2x + d2y*d2y);
+                if (r2len > 0.001f && d2len > 0.001f) {
+                    s_camRightX = r2x / r2len;
+                    s_camRightY = r2y / r2len;
+                    s_camDownX  = d2x / d2len;
+                    s_camDownY  = d2y / d2len;
+                    // v0.17.4: Det convention check. The .ca format usually stores
+                    // axes with det(camRight, camDown) = -1 (screen convention:
+                    // camDown projects to world-down). Some fields (Aaron's BAT
+                    // surfaced bg2f_2 / Balamb Garden classroom) have det = +1
+                    // after 2D projection — axis1 ends up pointing world-UP after
+                    // normalization. The engine treats those as left-handed and
+                    // the predicted UP/DOWN cardinals come out exactly opposite
+                    // of the world direction Aaron actually moved ("had to go
+                    // opposite the instructions"). Negating camDown when det>0
+                    // forces standard right-handed convention; passive calibration
+                    // (v0.17.4 observer) then handles any residual rotation.
+                    float det2d = s_camRightX * s_camDownY - s_camRightY * s_camDownX;
+                    if (det2d > 0.0f) {
+                        s_camDownX = -s_camDownX;
+                        s_camDownY = -s_camDownY;
+                        Log::Field("FieldNavigation: [NAV-PROJ-INIT] field='%s' det-correction: raw det=%+.3f (left-handed); negated camDown to (%.3f,%.3f). Engine now treats axis1 as screen-up convention; manual nav uses negated value.",
+                                   fieldName, det2d, s_camDownX, s_camDownY);
+                    }
+                    // v0.17.5: Quantize camRight angle to its nearest 90-degree
+                    // world-cardinal snap, then derive camDown by rotating 90
+                    // degrees clockwise from camRight (which preserves the
+                    // det=-1 screen convention regardless of where camRight
+                    // happens to land).
+                    //
+                    // Rationale: v0.17.3 BAT data showed FF8's engine response
+                    // to a held single arrow is world-axis-aligned on every
+                    // tested field (bghall_1 measured exactly (1,0); bg2f_1
+                    // exactly (0,1); bgroom_1 exactly (0,-1); bghall_4 exactly
+                    // (0,1)). The CA-file values for those fields had axis
+                    // angles of 7.8, 65.4, -62.5 and 23.8 degrees respectively,
+                    // each rounding cleanly to a world cardinal. Only bg2f_2
+                    // (classroom) had measured directions 5-11 degrees off-
+                    // axis after the det fix; that residual is well within the
+                    // 22.5-degree cardinal-sector tolerance and Aaron confirmed
+                    // bg2f_2 navigates correctly with the det fix alone.
+                    //
+                    // The engine therefore appears to use a 90-deg-quantized
+                    // version of its camera matrix when mapping DIJOYSTATE2
+                    // lX/lY to walkmesh delta. Quantizing here makes the
+                    // mod's cardinal prediction match the engine exactly
+                    // (or within sector tolerance for bg2f_2), with zero
+                    // observation-based correction and zero per-field state.
+                    //
+                    // Quantize camRight independently. Derive camDown from
+                    // camRight via the rotation (x, y) -> (y, -x) which is
+                    // R(-90deg) and exactly the screen-down convention with
+                    // det = -1. (Quantizing camDown independently could break
+                    // orthogonality if camRight happened to be near a 45-deg
+                    // boundary, so we do not do that.)
+                    {
+                        float angleR = atan2f(s_camRightY, s_camRightX);
+                        float quantum = (float)NAV_PI / 2.0f;  // 90 degrees in radians
+                        float snappedR = roundf(angleR / quantum) * quantum;
+                        float qrx = cosf(snappedR);
+                        float qry = sinf(snappedR);
+                        // Clean up floating-point residuals so logs read
+                        // cleanly (cosf(pi/2) gives ~6e-8 instead of 0).
+                        if (fabsf(qrx) < 1e-6f) qrx = 0.0f;
+                        if (fabsf(qry) < 1e-6f) qry = 0.0f;
+                        float preRx = s_camRightX, preRy = s_camRightY;
+                        float preDx = s_camDownX,  preDy = s_camDownY;
+                        s_camRightX = qrx;
+                        s_camRightY = qry;
+                        // camDown = R(-90deg) * camRight = (y, -x)
+                        s_camDownX  = s_camRightY;
+                        s_camDownY  = -s_camRightX;
+                        float snappedDeg = snappedR * 180.0f / (float)NAV_PI;
+                        float origAngleDeg = angleR * 180.0f / (float)NAV_PI;
+                        Log::Field("FieldNavigation: [NAV-PROJ-INIT] field='%s' quantization: "
+                                   "camRight pre=(%.3f,%.3f) angle=%+.1fdeg -> snap=%+.0fdeg -> "
+                                   "camRight=(%.3f,%.3f) camDown=(%.3f,%.3f) (was camDown=(%.3f,%.3f))",
+                                   fieldName, preRx, preRy, origAngleDeg, snappedDeg,
+                                   s_camRightX, s_camRightY, s_camDownX, s_camDownY,
+                                   preDx, preDy);
+                    }
+                    // v0.17.2: Mirror to the auto-drive private pair so auto-drive
+                    // starts from CA-derived values on the first drive of this
+                    // field. Phase 1/2 of empirical calibration will overwrite
+                    // these as it runs.
+                    s_driveCamRightX = s_camRightX;
+                    s_driveCamRightY = s_camRightY;
+                    s_driveCamDownX  = s_camDownX;
+                    s_driveCamDownY  = s_camDownY;
+                    s_camAxesSource  = "ca-quantized";
+                } else {
+                    // Both 2D projections are essentially zero — the camera is
+                    // looking straight down a single world axis. Keep identity
+                    // defaults; the field will navigate with world-bearing
+                    // labels which on this geometry are effectively meaningless.
+                    Log::Field("FieldNavigation: [NAV-PROJ-INIT] WARNING field='%s' camera 2D projections degenerate (r2len=%.3f d2len=%.3f); keeping identity defaults.",
+                               fieldName, r2len, d2len);
+                    s_camAxesSource = "identity";
+                }
+                // Determinant of the 2D projection (camRight x camDown). For a normal
+                // camera this is ~1.0 (or -1.0 if axes are flipped). When near zero,
+                // both axes point in nearly the same world direction — pathological
+                // for the inverse problem (chase finding #4) but forward projection
+                // still works for nav labels. Log so we can spot odd cameras.
+                float det = s_camRightX * s_camDownY - s_camRightY * s_camDownX;
+                Log::Field("FieldNavigation: [NAV-PROJ-INIT] field='%s' camRight=(%.3f,%.3f) camDown=(%.3f,%.3f) det=%.3f source=ca-quantized",
+                           fieldName, s_camRightX, s_camRightY, s_camDownX, s_camDownY, det);
+                // Pre-normalization 2D magnitudes are useful for diagnosing tilted vs
+                // rolled cameras.
+                Log::Field("FieldNavigation: [NAV-PROJ-INIT] field='%s' raw-2D r2len=%.3f d2len=%.3f (1.0 = flat camera; <1.0 = tilted)",
+                           fieldName, r2len, d2len);
+                if (fabsf(det) < 0.1f) {
+                    Log::Field("FieldNavigation: [NAV-PROJ-INIT] WARNING field='%s' degenerate camera (|det|<0.1); direction labels may be unreliable.",
+                               fieldName);
+                }
+            } else {
+                // No .ca file or parse failed — keep identity defaults. Manual nav
+                // will report world-bearing-as-screen-bearing, which is correct on
+                // default-camera fields and wrong on rotated ones. Same as pre-v0.17.0.
+                Log::Field("FieldNavigation: [NAV-PROJ-INIT] field='%s' camera axes unavailable; using identity defaults (world-bearing fallback).",
+                           fieldName);
+            }
 
             // v0.07.68: JSM script scan — classify all entities by opcode signatures.
             // Detects draw points, save points, shops, card games, ladders, and map exits.
