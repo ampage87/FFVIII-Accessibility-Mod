@@ -6,6 +6,51 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.7.0
+
+Prerequisite file split for the upcoming Track B (entity-catalog overhaul) chapter. No functional change. `field_nav_catalog.inl` was 75.77 KB at v0.17.6.2 — only 4 KB under the 80 KB CI hard fail. The substantive Track B fixes (walkmesh exclusion, per-line exit discriminator, SETLINE-position promotion, NPC `ResolveFriendlyName` routing) will add ~5 KB to this file, which would trip CI. This release moves two large blocks out into dedicated helper files so the next four point releases have room to land.
+
+### What moved, where, why
+
+Two new sub-`.inl` files included from `field_navigation.cpp` *before* `field_nav_catalog.inl` so their static helpers are visible to `RefreshCatalog`:
+
+- **`field_nav_catalog_diag.inl`** (9.29 KB) — four one-shot diagnostic dumps. `DumpEntityDiagOnce(base, lim)` (ENTDIAG, dormant since v05.58), `DumpBgDiagOnce(lim)` (BGDIAG, dormant since v05.58), `DumpPartyStateOnce()` (party-state, fires once per field), `DumpCoordDiagOnce(base, lim)` (COORDDIAG, fires once per field). Each helper no-ops on subsequent calls via the existing `s_*Dumped` flags.
+
+- **`field_nav_catalog_lateres.inl`** (11.19 KB) — three late-position-resolution passes: `ResolveLatePositions()` (LATE-RESOLVE: read runtime entity struct for entities with `hasPshmCoords` but no `hasPosition`), `MatchSet3LateCaptures()` (SET3-LATE-MATCH: overlay accumulated SET3 captures), `ResolveStructPositions()` (STRUCT-POS: direct entity-struct read for PSHM entities, catches entities beyond the active window). Called in the same order they ran inline pre-split.
+
+The v0.12.17 VARBLOCK-POS block (~60 lines of unreachable code gated `if (false)`) is dropped during extraction. It corrupted positions when last enabled and was permanently disabled. Git history at v0.17.6.2 preserves the source if anyone needs to revisit varblock as a future resolution path.
+
+### Sizes
+
+- `field_nav_catalog.inl`: 75.77 KB → **53.82 KB** (-21.95 KB). Now comfortably under the 60 KB warn line with ~26 KB headroom under the 80 KB hard fail.
+- Combined catalog footprint (slim + diag + lateres): 74.30 KB. ~1.5 KB net reduction from dropping VARBLOCK.
+
+### Files
+
+- `src/ff8_accessibility.h` — version 0.17.6.2 → 0.17.7.0
+- `src/field_nav_catalog_diag.inl` — NEW (extracted)
+- `src/field_nav_catalog_lateres.inl` — NEW (extracted)
+- `src/field_nav_catalog.inl` — slim, calls helpers (75.77 KB → 53.82 KB)
+- `src/field_navigation.cpp` — `#include` chain extended with the two new files
+- `CHANGELOG.md` — this entry
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md` — updated
+
+### What's NOT touched
+
+Every classification, screen-filter, trigger-line, JSM-injection, INF-gateway-dedup, commit, and selection-restore block stays inline in `RefreshCatalog` byte-for-byte. The same applies to the party-filter, model-24 save-point detection, draw-point consolidation, and entity-type-table classification. `RefreshCatalog`'s outer `__try/__except` wrapper is unchanged. `deploy.bat` unchanged (only the parent `.cpp` compiles; new `.inl`s are textual includes).
+
+The substantive Track B fixes ship in v0.17.7.1 and later.
+
+### BAT recipe
+
+Load bghall_1. Press F9 several times to cycle the catalog. Confirm:
+- Catalog populates with the same entries that v0.17.6.2 produced (Directory, Hall exits, Save Point, NPC, etc. — whatever was there pre-split).
+- F9/F10 cycling, Backspace direction announce, `\` auto-drive all behave the same as v0.17.6.2.
+- `Logs/ff8_field.log` shows `[party-state] formation = ...` and `[COORDDIAG]` lines firing once per field (proving the diag helpers still run).
+- `Logs/build_latest.log` clean — no compile errors from the new `#include` chain or the helper function visibility.
+
+If the catalog populates differently from v0.17.6.2, the split has changed behavior somewhere and needs triage before any substantive fixes land.
+
 ## v0.17.6.2
 
 Disables F9 path-finding auto-drive's corridor-level steering. The v0.17.6.1 BAT [drive-vec] log on bghall_1 Save Point exposed corridor steering directly fighting the drive-start pre-skip block, wedging the player against geometry for hundreds of ticks. Funnel waypoints alone (manual nav's BAT-proven primitive) are now F9 auto-drive's only steering source.

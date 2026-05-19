@@ -988,6 +988,11 @@ static bool WouldCrossTriggerLine(float px, float py, float dx, float dy, int sk
 // The selected catalog index is adjusted so the user stays on the same entity
 // (or the nearest valid one if theirs was removed).
 
+// --- Catalog diagnostic + late-resolve helpers (extracted v0.17.7.0) ---
+// MUST come before field_nav_catalog.inl so RefreshCatalog can call them.
+#include "field_nav_catalog_diag.inl"
+#include "field_nav_catalog_lateres.inl"
+
 // --- RefreshCatalog (extracted v0.12.18) ---
 #include "field_nav_catalog.inl"
 
