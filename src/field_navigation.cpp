@@ -237,10 +237,20 @@ static int      s_driveStuckTicks   = 0;
 static int      s_driveWiggleTicks  = 0;
 static uint8_t  s_driveWiggleDir    = 0;   // current wiggle direction
 static int      s_driveWigglePhase  = 0;   // v05.68: rotates through 8 recovery directions
+// v0.17.6.1: Player's walkmesh triangle at the most recent recovery cycle.
+// Set to 0xFFFF at drive start (no prior recovery). When the recovery block
+// fires and the player's current tri differs from s_lastRecoveryTri, that
+// signals genuine corridor progress (the player escaped the previous triangle
+// and entered the next one) and we reset s_driveWigglePhase = 0 to give the
+// new triangle a fresh recovery budget. Without this reset, the v0.17.6.0
+// BAT showed the recovery counter inflating across 5 corridor advances
+// (tri 367 -> 366 -> 363 -> 362 -> 359) and hitting MAX_RECOVERY_PHASES at
+// recovery 12 even though the player was making real progress.
+static uint16_t s_lastRecoveryTri    = 0xFFFF;
 static const int DRIVE_STUCK_THRESH  = 80;  // v06.14: ticks before wiggle (~1.3s, was 40). Analog steering needs more settling time.
 static const int DRIVE_WIGGLE_TICKS  = 18;  // v05.90: quick nudge (~0.3s, was 45)
 static const int NUDGE_TICKS         = 8;   // v06.07: micro-nudge duration (~0.13s)
-static const int MAX_RECOVERY_PHASES = 12;  // v06.08: auto-cancel after this many recovery phases without progress
+static const int MAX_RECOVERY_PHASES = 30;  // v0.17.6.1: bumped from 12. Narrow corridors (e.g. bghall_1 save-point alcove) need 2-3 recoveries per triangle to escape; 12 was too small for multi-triangle traversals. The new tri-advance reset (see s_lastRecoveryTri logic in UpdateAutoDrive) also resets the counter on genuine progress, so 30 only fires as a true "can't escape this triangle" cap.
 
 // v05.90: Velocity-based stuck detection — track position over a rolling window.
 // If the player moves less than DRIVE_STUCK_MIN_DIST world units over

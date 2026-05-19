@@ -4,15 +4,238 @@ Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` inj
 
 **Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
 
-GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.17.5.2** (commit `6dc080a`, tagged `v0.17.5.2`, pushed 2026-05-17 23:00:02 local). **Local tree = v0.17.5.4, BAT'd clean** -- ready to push via `Utilities/push_to_github.ps1`. v0.17.5.3's diagnostic logging is stacked into the same commit since it was never pushed standalone; the CHANGELOG entry for v0.17.5.3 documents it.
+GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.17.5.4** (commit `b54fa75`, tagged `v0.17.5.4`, pushed 2026-05-18 16:20:18 local). **Local tree = v0.17.6.2 (BAT'd 2026-05-18 18:32, rolled forward, ready to push).**
 
-v0.17.5.4 BAT result: world map polling no longer fires on fields. World log now ends at "Module initialized (v0.17.5.4)" with no spurious "Entered world map" line at boot. The TTS log shows clean sequences: `\` press on a field produces `[TTS] "Driving."` in isolation, with no follow-up "No locations available." interrupt. Aaron pressed `\` again to cancel and got `[TTS] "Cancelled."` cleanly. The world map gameMode+sceneFlag dual-check works as designed.
-
-The separate bghall_1 autodrive steering bug from the v0.17.5.3 BAT is still present (vertical axis inverted, autodrive stuck at dist=3726 of 3899). Not addressed by v0.17.5.4 -- that's autodrive's separate calibration pipeline, queued for v0.17.6+.
+v0.17.6.x is a staged re-base of F9 path-finding auto-drive onto manual nav's BAT-proven primitives. v0.17.6.0 wired F9 to manual nav's `.ca`-quantized axes (all three mechanics worked correctly per the BAT log). v0.17.6.1 added a recovery-counter reset on tri advance and a per-tick `[drive-vec]` diagnostic (the reset fired correctly; the diagnostic revealed the next failure). v0.17.6.2 disables F9 corridor-level steering, which the diagnostic showed was fighting the drive-start pre-skip block and wedging the player against geometry. Funnel waypoints alone (manual nav's primitive) are now F9's only steering source. **v0.17.6.2 BAT confirmed: all four bghall_1 cross-field exits reach `Arrived.` with diagonal-kb wall-sliding through corridor turns, exactly as designed.**
 
 ---
 
-## v0.17.5.4: World Map polling stuck-at-startup fix (BAT'd clean, ready to push)
+## v0.17.6.2: F9 corridor-level steering disabled (LOCAL, BAT'd 2026-05-18, ready to push)
+
+### BAT result
+
+Reading `Logs/ff8_mod.log` start-to-finish (build at 18:32:13, session ends 18:43:11):
+
+Four bghall_1 cross-field exit drives, all reaching `Arrived.`:
+1. **Hall 8 (east exit)**: 18:32:49 `Driving.` -> 18:32:58 `Arrived.` -> field transition. 9 seconds. ✓
+2. **Front Gate 5 (west exit)**: 18:33:17 `Driving.` -> 18:33:31 field transition to fepic1. 14 seconds. ✓
+3. **Hall 4 (west exit)**: 18:36:53 `Driving.` -> 18:36:55 `northwest, 10 steps.` -> 18:36:58 `Nearby. northwest, 2 steps.` -> 18:36:59 `In range.` -> 18:36:59 `Arrived.` -> 18:37:00 `B-Garden - Hall 4`. 7 seconds. ✓ **Textbook clean run with diagonal-kb wall-sliding through the corridor turn.**
+4. **Hall 10 (from bghall_4)**: 18:37:27 `Driving.` -> 18:37:29 `north, 24 steps.` -> 18:37:37 `northeast, 4 steps.` -> 18:37:37 `Nearby. north, 2 steps.` -> 18:37:38 `In range.` -> 18:37:38 `Arrived.` -> 18:37:39 `B-Garden - Hall 10`. 12 seconds. ✓
+
+The diagonal-kb direction announcements during drives (`northwest, 10 steps` -> `north, 24 steps` -> `northeast, 4 steps`) confirm the analog is producing diagonal masks and FF8's wall-sliding is handling corridor turns naturally, exactly as the v0.17.6.2 design predicted. The drive timings (7-14 sec) match manual-nav travel times.
+
+v0.17.6.1 mechanics that stayed (and worked):
+- Recovery counter reset on tri advance: didn't need to fire in any successful drive because the drives just *worked*.
+- `MAX_RECOVERY_PHASES=30`: same, didn't fire.
+- `[drive-vec]` diagnostic: stayed on, would have surfaced any new failure mode; none surfaced.
+
+v0.17.6.2 is rolled forward as the correct fix and stays in place.
+
+### New issues exposed by BAT (out of scope for v0.17.6.2)
+
+**Push-through gate at fepic1 (B-Garden - Front Gate 5, fieldId=0x00A3).** After the successful Front Gate 5 cross-field drive landed Aaron in fepic1 at 18:33:31, multiple within-field drives failed:
+- 18:34:47 `Driving.` (target: `Interaction 3` at southwest 6 steps). Drive oscillated `south, 4 steps` -> `southwest, 3 steps` -> `south, 3 steps` -> `southwest, 3 steps` for 32 seconds. Aaron cancelled at 18:35:19. No `Arrived.`
+- 18:35:25 `Driving.` (target: `Interaction 2` at south 3 steps). Drive went `southwest, 2 steps` -> `south, 3 steps` -> `southwest, 2 steps`. Aaron cancelled at 18:35:36. No `Arrived.`
+- 18:35:40 `Driving.` (target: `Interaction 1` at north 4 steps). Drive went north toward Interaction 1 -> 18:35:54 `Nearby. northeast, 2 steps.` -> 18:35:55 `B-Garden - Hall 1` transition. Drive walked the player into the wrong exit (back to Hall 1) instead of completing.
+
+Aaron's diagnosis confirmed: the front gate has a **push-through gate** -- a scripted gate the player walks INTO at a specific point to trigger an animation that pushes them through to the exit on the south side. The walkmesh almost certainly treats the gate as a wall (since you can't normally walk through it), so A* can't find a path through, only around -- and there is no "around" because the gate spans the full corridor.
+
+The push-through is likely a PUSHRADIUS or SETLINE trigger entity that fires a scripted JUMP/MOVA opcode teleporting the player to the south side. Without engine support for this mechanic, F9 can't path through it.
+
+**Generic entity catalog names.** fepic1's catalog shows `Interaction 1`, `Interaction 2`, `Interaction 3`, `Light 1 of 1`, `NPC 1 of 1` -- and Cafeteria 1 (fieldId=0x009A) showed `Son 1 of 1`. For a blind player these names are useless friction -- Aaron has to brute-force cycle and drive to each Interaction to figure out which one is the gate trigger, which is the guard, etc. Until the catalog has meaningful labels, even solving push-through routing leaves Aaron needing to know WHICH entity IS the gate.
+
+Both issues queued for v0.17.7.x. See `NEXT_SESSION_PROMPT.md`.
+
+---
+
+## v0.17.6.2: F9 corridor-level steering disabled (technical details)
+
+One change, one BAT cycle. The v0.17.6.1 BAT [drive-vec] log on bghall_1 Save Point exposed the dominant failure mode: corridor-level steering keeps re-introducing the exact waypoint that drive-start pre-skip discarded, wedging the player against a wall pressing pure LEFT for hundreds of ticks.
+
+### What [drive-vec] showed
+
+Save Point drive setup: player at `(-568,-8218)` in tri 358, target Save Point at `(-700,-8593)` in tri 8 (corridor 358 -> 71 -> 70 -> 8). Funnel produced 2 waypoints: `wp 0=(-626,-8215)` (the collapsed corridor edge midpoint between tri 358 and 71) and `wp 1=(-700,-8593)` (the save point itself).
+
+Drive-start pre-skip correctly bumped past wp 0 (only 58 units from player < PRE_SKIP_DIST=120): `[drive] pre-skip wp 0 (dist=58 < 120)`. With wp 0 skipped, the drive should steer toward wp 1 (south-west, into a `kb=DL` diagonal). For one tick at t=30, that worked:
+
+```
+t=30  corOverride=0  corSteer=(-700,-8593)  finalDelta=(-132,-375)  lX=-332 lY=943  kb=DL
+```
+
+But at t=60, the corridor-level steering block's `s_driveTotalTicks >= 30` gate opened and the block overrode `steerX/Y` to the shared-edge midpoint between the player's current tri 358 and next tri 71:
+
+```
+t=60   corOverride=1  corSteer=(-626,-8215)  finalDelta=(-57.8, 2.6)  lX=-999 lY=-44  kb=L
+```
+
+That's the EXACT point pre-skip just discarded. The corridor steering algorithm doesn't know about pre-skip and computes its own "local target" from the same shared edge the funnel collapsed wp 0 onto. Result: analog flipped from south-west diagonal to pure west, keyboard collapsed from `DL` to `L`, the player pressed LEFT into a wall, moveDist=0 for hundreds of ticks. Recovery fired, re-pathed, corridor steering picked the same point again, player wedged again. The drive ended with `Gave up. Distance remaining: 555.`
+
+### Why manual nav succeeds at the same position
+
+Manual nav announced "Save Point. south, 2 steps. Nearby." at the same position. It uses the same funnel waypoints but has no corridor-level override -- it computes the analog directly from `(target - player) * camAxes` and presses arrow keys for the dominant axes. From `(-568,-8218)` toward `(-700,-8593)` the dominant axes are LEFT (`dx=-132`) and DOWN (`dy=-375`), so the keyboard fires `DL` diagonal. FF8's built-in wall-sliding handles the corridor turn: the player walks south-west, slides along the west wall, and naturally tracks the corridor through tri 358 -> 71 -> 70 -> 8 to the save point.
+
+### The fix
+
+`field_nav_autodrive.inl` line ~635: the corridor-level steering condition is wrapped with `false &&`, matching the pattern v06.20 used to disable wall-avoidance. The entire block stays with its original v06.17/v0.15.9.2.3 rationale plus a new v0.17.6.2 block explaining why it's off and what to flip if a future field regresses without it. To re-enable later (for elongated-corridor maze fields like Fire Cavern, if needed), flip `false &&` to `true &&` -- and consider gating on `currentWpDist > 200.0f` so the override only fires when the current waypoint is far enough that an intermediate edge midpoint adds value.
+
+Chase-drive is unaffected; it has skipped this block since v0.15.9.2.3 (corridor steering on rotated cameras / stale triId hit chase first).
+
+### What stays from v0.17.6.1
+
+- Recovery counter reset on tri advance: worked exactly as designed. The v0.17.6.1 BAT log shows `[drive] recovery counter reset: tri 358 -> 359 (player advanced along corridor; phase was 6)` firing at the right moment when the player escaped tri 358 via a recovery nudge. Kept.
+- `MAX_RECOVERY_PHASES` 12 -> 30: safety net, didn't actually fire in v0.17.6.1 BAT because the drive timed out (`DRIVE_MAX_TICKS`) before hitting the recovery cap. Kept.
+- `[drive-vec]` per-tick diagnostic log: this is how the bug was identified. Kept on for v0.17.6.2 BAT in case a different failure pattern emerges.
+
+### Files changed
+
+- `src/ff8_accessibility.h` -- 0.17.6.1 -> 0.17.6.2
+- `src/field_nav_autodrive.inl` -- corridor-level steering block gated with `false &&` (~50 lines of new rationale comments)
+- `CHANGELOG.md`, `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`
+
+### What's NOT touched
+
+All of v0.17.6.0 and v0.17.6.1 mechanics are preserved. No changes to `SetAnalogFromVector` axis branching, CALIB skip, draw-point/save-point arrival split, INF gateway crossing detection, recovery counter reset, `MAX_RECOVERY_PHASES`, or the `[drive-vec]` log. Chase-drive's `s_chaseDriveActive` branches in `UpdateAutoDrive` and `StartChaseDrive` are still untouched. Manual nav, GPS, funnel pruning, hysteresis are v0.17.5.x stable.
+
+### BAT recipe
+
+1. Load save in bghall_1.
+2. Cycle F9 / F10 to a previously-failing target: Save Point, Exit to Hall 8, Exit to Front Gate 5.
+3. Press `\` to start auto-drive.
+
+Expected log signals:
+- No `[CALIB] phase` lines (v0.17.6.0 behavior preserved).
+- `[drive-vec]` lines fire every 30 ticks. **All `corOverride` fields are 0** -- corridor steering no longer runs. `corSteer` always equals `wpRaw`.
+- Drive completes with `Arrived.` for the three previously-failing targets. The kb mask should stay diagonal (e.g. `DL`, `DR`, `UL`, `UR`) as the player walks toward the funnel waypoints, with FF8's wall-sliding handling the corridor turns.
+
+If any drive still fails: the `[drive-vec]` log's `kb` field will tell us whether the analog is producing diagonal kb masks (good -- means the issue is somewhere else, like the funnel waypoint placement) or single-axis kb masks (bad -- means the analog projection is railing on one axis again, possibly from a different source).
+
+---
+
+## v0.17.6.1: recovery counter reset on tri advance + [drive-vec] diagnostic (LOCAL, BAT'd 2026-05-18; rolled forward to v0.17.6.2)
+
+Three changes, one BAT cycle. The common thread: v0.17.6.0 proved the steering pipeline is correct but the recovery system gives up too early on multi-triangle corridor traversals, and the 2-second `[drive] tick=` log can't catch transient pipeline state. v0.17.6.1 fixes the recovery counter and adds enough per-tick visibility to triage whatever fails next.
+
+### Change 1: recovery counter resets when player advances to a new triangle
+
+The v0.17.6.0 Save Point drive on bghall_1 made genuine progress through five corridor triangles (367 -> 366 -> 363 -> 362 -> 359), but each triangle escape needed 2-3 recovery cycles. `s_driveWigglePhase` only resets when the player crosses funnel waypoint index 3, which never happened because the path kept re-pathing back to waypoint 0 after each recovery. The global counter inflated to 12 (the old `MAX_RECOVERY_PHASES` cap) and the drive gave up at recovery 12 in tri 362 -- still making real progress.
+
+v0.17.6.1 adds a new state variable `s_lastRecoveryTri` (in `field_navigation.cpp`, near the other recovery statics). When the recovery block fires, it reads the player's current walkmesh triangle from `entity +0x1FA`; if that tri differs from `s_lastRecoveryTri`, that's genuine corridor progress and `s_driveWigglePhase` resets to 0. Each new triangle along the corridor earns a fresh recovery budget. The state is initialized to `0xFFFF` at drive start in `field_nav_handlekeys.inl` so the first recovery doesn't see a stale tri from a prior drive.
+
+The reset log is the new `[drive] recovery counter reset: tri X -> Y (player advanced along corridor; phase was N)` line, which fires whenever the counter resets.
+
+### Change 2: MAX_RECOVERY_PHASES 12 -> 30
+
+Safety net for cases the tri-advance reset doesn't catch. With the reset working, the v0.17.6.0 Save Point case would have run at phase max ~3 per triangle and never gotten anywhere near 30. The new ceiling fires only on "this triangle is permanently unreachable" failures, not on slow corridor traversals.
+
+### Change 3: [drive-vec] per-tick pipeline diagnostic
+
+The v0.17.6.0 BAT log showed `lX=-840 lY=-542` for multiple consecutive 120-tick log windows even as the player oscillated between two positions. The existing `[drive] tick=` log fires every 2 seconds and only shows post-projection state, which made it hard to tell whether the analog projection itself was wrong or just stuck on a stale waypoint.
+
+v0.17.6.1 adds a `[drive-vec]` log that fires every 30 ticks (~0.5 s) and shows the intermediate values at each stage of the steering pipeline. Format:
+
+```
+[drive-vec] t=N tri=T pp=(px,pz) wpRaw=(wx,wy) corOverride=0|1 corSteer=(sx,sy) trigRedir=0|1 finalDelta=(dx,dz) lX=lx lY=ly kb=mask wig=W phase=P
+```
+
+- `wpRaw` = chosen funnel waypoint (or final target) before corridor steering runs
+- `corOverride/corSteer` = whether corridor steering replaced the waypoint, and what midpoint it picked
+- `trigRedir/finalDelta` = whether the trigger-line proximity check rewrote `dx/dz` parallel, and the final `dx/dz` going into `SetAnalogFromVector`
+- `lX/lY` = analog values after camera projection
+- `kb` = heading bitmask derived from `lX/lY` (post v0.17.6.0 unified logic)
+- `wig/phase` = recovery counters
+
+When the next BAT comes back and a drive still gets stuck, the per-tick log shows exactly which stage broke. Three new tracking variables (`vecWpRawX/Y`, `vecCorridorOverrode`, `vecTrigRedirected`) record stage outputs as the existing pipeline runs; they cost essentially nothing per tick and the log is gated by `s_driveTotalTicks % 30 == 0`. To turn off after triage, raise `DRIVE_VEC_LOG_INTERVAL`.
+
+### Files changed
+
+- `src/ff8_accessibility.h` -- 0.17.6.0 -> 0.17.6.1
+- `src/field_navigation.cpp` -- `MAX_RECOVERY_PHASES` 12 -> 30; new `s_lastRecoveryTri` state
+- `src/field_nav_handlekeys.inl` -- reset `s_lastRecoveryTri` at drive start
+- `src/field_nav_autodrive.inl` -- recovery block tri-advance reset; three pipeline tracking flags (`vecWpRawX/Y`, `vecCorridorOverrode`, `vecTrigRedirected`); [drive-vec] log emit
+- `CHANGELOG.md`, `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`
+
+### What's NOT touched
+
+All of v0.17.6.0's mechanics are preserved. No changes to `SetAnalogFromVector` axis branching, CALIB skip, draw-point/save-point arrival split, or INF gateway crossing detection. Chase auto-pilot's `s_chaseDriveActive` branches in `UpdateAutoDrive` and `StartChaseDrive` are still untouched. Manual nav, GPS, funnel pruning, hysteresis are v0.17.5.x stable.
+
+### BAT recipe
+
+1. Load save in bghall_1.
+2. Press F9 / F10 to cycle the catalog to a target that previously failed: Save Point, Exit to Hall 8, or Exit to Front Gate 5.
+3. Press `\` to start auto-drive.
+
+Expected:
+- No `[CALIB] phase` lines (v0.17.6.0 behavior preserved).
+- `[drive] recovery counter reset: tri X -> Y (...)` lines fire as the player advances through corridor triangles. Each line confirms the counter is correctly resetting on tri advance.
+- `[drive-vec] t=N tri=T pp=(...) wpRaw=(...) corOverride=0|1 corSteer=(...) trigRedir=0|1 finalDelta=(...) lX=lx lY=ly kb=mask wig=W phase=P` fires every 30 ticks.
+- Drive completes with `Arrived.` instead of `Stuck. Distance remaining: <N>.` for the three previously-failing targets.
+
+If still stuck: the per-tick `[drive-vec]` log shows which stage produces the wrong direction. `wpRaw` vs `corSteer` reveals corridor override behavior; `finalDelta` vs `lX/lY` reveals camera projection; `kb` vs `lX/lY` reveals heading-bitmask agreement.
+
+---
+
+## v0.17.6.0: F9 auto-drive re-bases on manual nav primitives (LOCAL, BAT'd 2026-05-18; rolled forward to v0.17.6.1)
+
+Three connected changes, one BAT cycle. The common thread: F9 auto-drive previously ran independent steering / arrival / crossing pipelines from manual nav. Those pipelines were where the bghall_1 BAT failures came from. Manual nav's v0.17.5.x pipeline is BAT-proven across five fields; v0.17.6.0 has F9 share that pipeline wherever practical, while leaving chase-drive's separate (also BAT-proven) empirical-calibration path alone.
+
+### Change 1: F9 uses .ca-quantized axes; CALIB is chase-drive-only
+
+`SetAnalogFromVector` now branches on `s_chaseDriveActive`. Chase keeps reading `s_driveCamRight/Down` (the empirical pair, written by CALIB phase 1/2). F9 reads `s_camRight/Down` (the manual-nav quantized pair, set at field load from .ca). F9's handlekeys block no longer initiates CALIB — it sets `s_calibPhase = 3` unconditionally.
+
+Why this fixes the bghall_1 BAT: CALIB phase 1 injects `lX=+1000` for 24 ticks and measures the resulting walkmesh delta. When the player is wedged against geometry at drive start, the engine doesn't move them, dist < 5 fails the phase, and `s_driveCamRight` keeps its default `(1,0)`. On rotated-camera fields this means F9 reads wrong axes and steering produces the kb-vs-analog disagreement Aaron's log showed. The quantized .ca axes can't fail this way: they're set once at field load from a constant data file, with deterministic 2D normalization + det correction + 90-degree snap. Manual nav has been correct on the first announcement across bghall_1, bghall_4, bg2f_1, bg2f_2, bgroom_1 since v0.17.5; F9 sharing those axes inherits that correctness.
+
+Chase-drive deliberately stays on empirical calibration. Per the chase doc Finding #10, the empirical path is the verified-working axis source for rotated-camera chase fields (domt5_1 etc.). Future unification (chase doc Finding #28) can swap chase to the quantized axes once F9 with quantization has BAT mileage, but we don't risk regressing chase auto-pilot while validating F9.
+
+### Change 2: Draw points use talkRadius, save points stay walk-onto
+
+The handlekeys arrival-distance block previously conflated save points and draw points under a single 30-unit walk-onto rule. Per Aaron's spec, draw points should behave like NPCs / interactive objects — arrive within interaction distance.
+
+New split:
+- `ENT_SAVE_POINT` → `arriveDist = 30.0f` (unchanged; the save crystal only activates when the player overlaps it).
+- Runtime-entity targets (`entityIdx >= 0`) including NPCs, Objects, and runtime-entity Draw Points → read engine-set talkRadius, clamp to 60-unit floor. Includes target type in log line for diagnostic clarity.
+- JSM-injected Draw Points (`entityIdx <= -300`, no runtime entity slot, e.g. Fire Cavern 'drpoint') → `arriveDist = 120.0f` (matches GPS_ARRIVE_DIST's default).
+
+### Change 3: INF exit gateways auto-cross like trigger lines
+
+Trigger-line targets (`entityIdx <= -200`) already had cross-product sign-flip arrival detection. INF gateways (`entityIdx <= -400`) used plain `dist < arriveDist`, which stopped the drive 300 units short of the gateway and left the player to walk through manually.
+
+v0.17.6.0:
+- At drive start, handlekeys finds the raw INF gateway in `s_gateways[]` whose `destFieldId` matches the dedup-catalog entry and is nearest to the player, then seeds its line endpoints into `s_driveCrossLine*` and sets `s_driveCrossLineActive = true`.
+- `UpdateAutoDrive`'s crossing block condition widened from `s_chaseDriveActive && s_driveCrossLineActive` to just `s_driveCrossLineActive`. Chase-drive AND F9 gateway both flow through the same code path.
+- F9 trigger-line targets unchanged — they keep using the `s_capturedLines[]` lookup branch; handlekeys doesn't seed `s_driveCrossLine*` for them.
+
+If the player crosses a different raw gateway in the same dedup group, the engine still fires the transition and `"Player position lost."` ends the drive when the field reloads. Functionally equivalent for the user.
+
+### Files changed
+
+- `src/ff8_accessibility.h` — version bump
+- `src/field_nav_autodrive.inl` — `SetAnalogFromVector` branches on `s_chaseDriveActive`; crossing block condition widened to `s_driveCrossLineActive` only
+- `src/field_nav_handlekeys.inl` — F9 drive-start replaces CALIB initiator with unconditional `s_calibPhase=3`; arrival block splits save vs draw vs runtime-entity; new gateway-crossing setup block
+- `CHANGELOG.md`, `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md`
+
+### What's NOT touched
+
+Chase auto-pilot's `s_chaseDriveActive` branches in `UpdateAutoDrive` and `StartChaseDrive`. `s_driveCamRight/Down`, `s_camCalibrated`, `s_calibPending` (chase still needs them). Recovery wiggle (v0.17.6.2). Engine triId corridor steering (v0.17.6.1). Per-tick `[drive-vec]` diagnostic (v0.17.6.3). Manual nav, GPS, funnel pruning, hysteresis (v0.17.5.x stable).
+
+### BAT recipe
+
+1. Load save in bghall_1.
+2. Press F9 / F10 to cycle the catalog to an Exit (Hall 4 or Hall 6).
+3. Press `\` to start auto-drive.
+
+Expect:
+- NO `[CALIB] phase 1` or `phase 2` log lines.
+- `[drive] gateway target -> crossing line (...)->(...) crossStart=...` at drive start.
+- First `[drive] tick=` should show analog and keyboard in agreement (no kb=U with lX=+1000 lY=0).
+- Player physically walks through the gateway, drive stops with `[drive] stopped: Arrived.`, field reloads.
+
+Also BAT a Draw Point target (Fire Cavern, or any field with one): drive stops within ~120 units (or talkRadius if a runtime entity), not walking on top of the marker.
+
+Also BAT a Save Point: drive walks ONTO the crystal (unchanged behavior).
+
+---
+
+## v0.17.5.4: World Map polling stuck-at-startup fix (shipped to GitHub as commit `b54fa75`)
 
 Narrow bug fix. One function changed.
 

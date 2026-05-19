@@ -163,16 +163,18 @@ static void HandleKeys()
                 s_driveStuckPosY   = _pz;
                 s_driveProgressDist    = 1e30f;  // v06.10: reset progress tracking
                 s_driveNoProgressCount = 0;
+                s_lastRecoveryTri      = 0xFFFF;  // v0.17.6.1: clear so first recovery doesn't see a stale tri from a prior drive
 
                 // v06.14: Start heading calibration if not yet calibrated for this field.
-                if (s_calibPending && !s_camCalibrated) {
-                    s_calibPhase = 1;
-                    s_calibTicks = 0;
-                    Log::Field("FieldNavigation: [CALIB] starting heading calibration for field '%s'",
-                               FF8Addresses::pCurrentFieldName ? FF8Addresses::pCurrentFieldName : "?");
-                } else {
-                    s_calibPhase = 3;  // skip calibration, use existing axes
-                }
+                // v0.17.6.0: F9 path-finding auto-drive NEVER runs CALIB. It uses the
+                // .ca-file-derived, 90-degree-quantized axes that manual nav sets at
+                // field load (s_camRight/Down). CALIB stays available for chase-drive
+                // (StartChaseDrive sets s_calibPhase=1 conditionally on s_calibPending).
+                // The phase-1-failed-on-wall-stuck class of bugs that the bghall_1 BAT
+                // exhibited cannot occur for F9 because F9 never enters CALIB to begin
+                // with. See SetAnalogFromVector's v0.17.6.0 block comment for the full
+                // rationale and the chase-vs-F9 axis-source split.
+                s_calibPhase = 3;  // skip calibration unconditionally for F9
 
                 // v05.84: Install fake gamepad so the game processes our analog values.
                 if (FF8Addresses::HasDinputGamepadPtrs() && !s_fakeGamepadInstalled) {
@@ -201,17 +203,32 @@ static void HandleKeys()
                 // We use talkRadius directly (not talkRadius-20) to give more
                 // margin for collision bodies and narrow approaches.
                 // For non-entity targets (gateways, triggers), use the default.
+                //
+                // v0.17.6.0: Save points and draw points split apart.
+                //   - Save points stay walk-onto (30 units). The save crystal
+                //     activates only when the player's model overlaps it;
+                //     stopping "nearby" leaves the player unable to save.
+                //   - Draw points get talkRadius treatment, matching how NPCs
+                //     and interactive objects work (per Aaron's v0.17.6.0
+                //     spec: "you have to walk up to draw points and interact
+                //     with them just like an NPC or interactive object").
+                //     Runtime-entity draw points (catalog reclassified an NPC
+                //     slot as a draw point) read their engine-set talkRadius.
+                //     JSM-injected draw points (no runtime entity, e.g. Fire
+                //     Cavern 'drpoint') use a 120-unit default that matches
+                //     GPS_ARRIVE_DIST.
                 s_driveArriveDist = DRIVE_ARRIVE_DIST_DEFAULT;
                 s_driveTargetEntityIdx = -1;
                 s_driveOrigTalkRadius = 0;
                 s_driveTalkRadExpanded = false;
-                // v0.07.76: Save/draw points require walking INTO the spot, not stopping nearby.
-                // These are walk-on triggers with no talk radius — arrive distance must be tiny.
-                if (drTgt.type == ENT_SAVE_POINT || drTgt.type == ENT_DRAW_POINT) {
+                if (drTgt.type == ENT_SAVE_POINT) {
                     s_driveArriveDist = 30.0f;
-                    Log::Field("FieldNavigation: [drive] %s target -> arriveDist=30 (walk-into)",
-                               EntityTypeName(drTgt.type));
+                    Log::Field("FieldNavigation: [drive] Save Point target -> arriveDist=30 (walk-onto)");
                 } else if (drTgt.entityIdx >= 0 && drTgt.entityIdx < MAX_ENTITIES) {
+                    // NPC, Object, or runtime-entity Draw Point. Read the
+                    // engine-set talkRadius and clamp to a 60-unit floor so
+                    // very tight zones still leave room for the player's
+                    // walking radius without overshoot.
                     uint16_t talkRad = GetEntityTalkRadius(drTgt.entityIdx);
                     if (talkRad > 0) {
                         s_driveArriveDist = (float)talkRad;
@@ -219,15 +236,90 @@ static void HandleKeys()
                         // v06.21: Save original talk radius for potential expansion.
                         s_driveTargetEntityIdx = drTgt.entityIdx;
                         s_driveOrigTalkRadius = talkRad;
-                        Log::Field("FieldNavigation: [drive] talkRadius=%u -> arriveDist=%.0f",
+                        Log::Field("FieldNavigation: [drive] %s target talkRadius=%u -> arriveDist=%.0f",
+                                   EntityTypeName(drTgt.type),
                                    (unsigned)talkRad, s_driveArriveDist);
                     }
+                } else if (drTgt.type == ENT_DRAW_POINT) {
+                    // v0.17.6.0: JSM-injected draw point (entityIdx <= -300,
+                    // no runtime entity slot to query). Use a sensible default
+                    // that lets the player press X to draw without first having
+                    // to inch onto the exact marker.
+                    s_driveArriveDist = 120.0f;
+                    Log::Field("FieldNavigation: [drive] Draw Point (JSM-injected) -> arriveDist=120 (default talkRad-equivalent)");
                 }
 
-                // v05.76: Track trigger line crossing for arrival detection.
+                // v05.76 / v0.17.6.0: Track trigger line and gateway crossing for arrival detection.
+                // Trigger lines come from SETLINE (drTgt.entityIdx <= -200);
+                // INF gateways come from the .inf gateway table (drTgt.entityIdx <= -400).
+                // Both produce a line-crossing arrival condition rather than
+                // point-distance, because the engine itself fires the screen transition
+                // (or event) when the player physically crosses the line. Stopping
+                // 300 units short of an exit means the player has to walk through
+                // manually, defeating auto-drive on exits.
+                //
+                // The shared crossing-detection state (s_driveCrossLine*,
+                // s_driveCrossLineActive, s_driveTrigCrossStart) is read by
+                // UpdateAutoDrive's crossing block.
                 s_driveTrigTarget = false;
                 s_driveTrigCrossStart = 0.0f;
-                if (drTgt.entityIdx <= -200) {
+                s_driveCrossLineActive = false;
+                s_driveCrossLineX1 = 0; s_driveCrossLineY1 = 0;
+                s_driveCrossLineX2 = 0; s_driveCrossLineY2 = 0;
+                if (drTgt.entityIdx <= -400) {
+                    // v0.17.6.0: Exit gateway target. The dedup catalog entry covers
+                    // 1..N raw INF gateways with the same destination field; pick the
+                    // raw gateway nearest to the player and use its line endpoints for
+                    // crossing detection. If the player ends up crossing a different
+                    // raw gateway in the same group, the engine still fires the
+                    // transition; auto-drive will stop with "Player position lost."
+                    // when the field reloads, which is functionally equivalent for the
+                    // user (they arrive at the next field). Picking the nearest gives
+                    // the closest steer target and the most reliable cross-product
+                    // sign-flip math.
+                    int gwIdx = -(drTgt.entityIdx + 400);
+                    if (gwIdx >= 0 && gwIdx < s_dedupGatewayCount) {
+                        uint16_t destFieldId = s_dedupGateways[gwIdx].destFieldId;
+                        int bestRawIdx = -1;
+                        float bestDistSq = 1e30f;
+                        for (int g = 0; g < s_gatewayCount; g++) {
+                            if (s_gateways[g].destFieldId != destFieldId) continue;
+                            // Skip degenerate (zero-length) gateway lines.
+                            if (s_gateways[g].lineX1 == 0 && s_gateways[g].lineY1 == 0 &&
+                                s_gateways[g].lineX2 == 0 && s_gateways[g].lineY2 == 0) continue;
+                            float gcx = s_gateways[g].centerX;
+                            float gcy = s_gateways[g].centerZ;  // centerZ = Y in our coords
+                            float dx = gcx - _px;
+                            float dy = gcy - _pz;
+                            float distSq = dx*dx + dy*dy;
+                            if (distSq < bestDistSq) {
+                                bestDistSq = distSq;
+                                bestRawIdx = g;
+                            }
+                        }
+                        if (bestRawIdx >= 0) {
+                            s_driveTrigTarget = true;
+                            s_driveCrossLineX1 = s_gateways[bestRawIdx].lineX1;
+                            s_driveCrossLineY1 = s_gateways[bestRawIdx].lineY1;
+                            s_driveCrossLineX2 = s_gateways[bestRawIdx].lineX2;
+                            s_driveCrossLineY2 = s_gateways[bestRawIdx].lineY2;
+                            s_driveCrossLineActive = true;
+                            float tdx = (float)(s_driveCrossLineX2 - s_driveCrossLineX1);
+                            float tdy = (float)(s_driveCrossLineY2 - s_driveCrossLineY1);
+                            s_driveTrigCrossStart = tdx * (_pz - (float)s_driveCrossLineY1)
+                                                  - tdy * (_px - (float)s_driveCrossLineX1);
+                            Log::Field("FieldNavigation: [drive] gateway target -> crossing line "
+                                       "(%d,%d)->(%d,%d) crossStart=%.0f rawIdx=%d destFieldId=%u",
+                                       (int)s_driveCrossLineX1, (int)s_driveCrossLineY1,
+                                       (int)s_driveCrossLineX2, (int)s_driveCrossLineY2,
+                                       s_driveTrigCrossStart, bestRawIdx, (unsigned)destFieldId);
+                        } else {
+                            Log::Field("FieldNavigation: [drive] gateway target gwIdx=%d destFieldId=%u: "
+                                       "no raw gateway with line endpoints found, falling back to point-distance arrival",
+                                       gwIdx, (unsigned)destFieldId);
+                        }
+                    }
+                } else if (drTgt.entityIdx <= -200) {
                     int trigIdx = -(drTgt.entityIdx + 200);
                     if (trigIdx >= 0 && trigIdx < s_capturedLineCount) {
                         s_driveTrigTarget = true;

@@ -149,6 +149,31 @@ static bool  s_calibPending = false;  // true if calibration should run at drive
 //
 // v0.17.2: Reads the AUTO-DRIVE PRIVATE axis pair (s_driveCamRight/Down) so
 // the empirical calibration's writes don't leak into manual-nav's projection.
+//
+// v0.17.6.0: Source of camera axes branches on which drive owns the wheel:
+//   - Chase auto-pilot (s_chaseDriveActive == true): keep reading
+//     s_driveCamRight/Down. The chase doc's "Auto-drive lessons" Finding #10
+//     explicitly lists empirical calibration as the verified-working path for
+//     rotated-camera chase fields (e.g. domt5_1 where camRight ~= (0,1)).
+//     CALIB phase 1/2 still runs at chase-drive start (see UpdateAutoDrive)
+//     and writes the empirical result into s_driveCam*.
+//   - F9 path-finding auto-drive (s_chaseDriveActive == false): read the
+//     MANUAL-NAV pair s_camRight/Down, which is set at field load by
+//     HookedFieldScriptsInit from the .ca file with 2D normalization, det
+//     correction, and 90-degree quantization (v0.17.5). Manual nav has been
+//     BAT-proven correct on the first announcement across bghall_1, bghall_4,
+//     bg2f_1, bg2f_2, bgroom_1; F9 auto-drive sharing those axes means F9
+//     also gets correct steering on every field with a .ca file, with no
+//     warmup phase and no CALIB-can-fail edge case (the bghall_1 bug from
+//     NEXT_SESSION_PROMPT: phase 1 fails when the player is wedged against
+//     geometry, leaves default driveCamRight=(1,0) untouched, and steering
+//     uses wrong axes on rotated cameras).
+//
+// The two-source split also unblocks future unification (chase doc Finding
+// #28: parallel implementations cost five wasted BAT cycles): once F9 with
+// quantized axes proves stable in production, chase-drive can switch to the
+// same source by adding it to the chase-drive doc's per-field verification
+// matrix.
 static void SetAnalogFromVector(float dx, float dy)
 {
     float len = sqrtf(dx*dx + dy*dy);
@@ -159,12 +184,21 @@ static void SetAnalogFromVector(float dx, float dy)
     }
     float nx = dx / len;
     float ny = dy / len;
+    // v0.17.6.0: Select axis source per drive type. See block comment above.
+    float camRX, camRY, camDX, camDY;
+    if (s_chaseDriveActive) {
+        camRX = s_driveCamRightX; camRY = s_driveCamRightY;
+        camDX = s_driveCamDownX;  camDY = s_driveCamDownY;
+    } else {
+        camRX = s_camRightX; camRY = s_camRightY;
+        camDX = s_camDownX;  camDY = s_camDownY;
+    }
     // v06.14: Project world-space direction onto camera axes.
     // lX = dot(worldDir, camRight) = how much of the desired direction
     //   aligns with the camera's rightward axis.
     // lY = dot(worldDir, camDown) = how much aligns with camera's downward axis.
-    float lxF = (nx * s_driveCamRightX + ny * s_driveCamRightY) * 1000.0f;
-    float lyF = (nx * s_driveCamDownX  + ny * s_driveCamDownY)  * 1000.0f;
+    float lxF = (nx * camRX + ny * camRY) * 1000.0f;
+    float lyF = (nx * camDX + ny * camDY) * 1000.0f;
     int lx = (int)lxF;
     int ly = (int)lyF;
     if (lx < -1000) lx = -1000; if (lx > 1000) lx = 1000;
@@ -430,10 +464,18 @@ static void UpdateAutoDrive()
     // (s_driveCrossLine*) instead of indexing into s_capturedLines. This lets
     // INF gateways drive the same crossing logic -- gateways aren't in
     // s_capturedLines (which only holds SETLINE-defined trigger lines).
+    //
+    // v0.17.6.0: F9 auto-drive now ALSO populates s_driveCrossLine* when its
+    // target is an INF gateway exit (entityIdx <= -400). The first branch's
+    // condition was widened from `chase-drive + crossing-line-active` to just
+    // `crossing-line-active` so it covers both paths uniformly. F9 trigger
+    // lines (entityIdx <= -200) still take the second branch via the
+    // s_capturedLines lookup -- handlekeys doesn't seed s_driveCrossLine* for
+    // them (point-distance plus per-line geometry is the proven path).
     bool gotCrossLine = false;
     float tlx1 = 0, tly1 = 0, tlx2 = 0, tly2 = 0;
     if (s_driveTrigTarget) {
-        if (s_chaseDriveActive && s_driveCrossLineActive) {
+        if (s_driveCrossLineActive) {
             tlx1 = (float)s_driveCrossLineX1;
             tly1 = (float)s_driveCrossLineY1;
             tlx2 = (float)s_driveCrossLineX2;
@@ -480,6 +522,13 @@ static void UpdateAutoDrive()
     // Chain-advance is delayed until tick 30 (~0.5s) so we don't skip
     // nearby waypoints before the player has started moving.
     float steerX = tx, steerY = tz;  // default: straight to target
+    // v0.17.6.1: [drive-vec] pipeline tracking. Records what each steering
+    // stage produced so the per-tick diagnostic log can show WHICH stage
+    // changed the heading. Initialized to the default (straight to target)
+    // and updated as the waypoint, corridor, and trigger-line stages run.
+    float vecWpRawX = tx, vecWpRawY = tz;  // chosen waypoint (or final target if none)
+    bool  vecCorridorOverrode = false;     // true if corridor steering rewrote steerX/Y
+    bool  vecTrigRedirected   = false;     // true if trigger-line proximity check rewrote dx/dz
     if (s_waypointCount > 0 && s_waypointIdx < s_waypointCount) {
         // v05.66: Only chain-advance after the player has had time to move.
         // On the first few ticks, nearby waypoints shouldn't be skipped
@@ -536,6 +585,8 @@ static void UpdateAutoDrive()
         }
         steerX = s_waypoints[s_waypointIdx][0];
         steerY = s_waypoints[s_waypointIdx][1];
+        vecWpRawX = steerX;  // v0.17.6.1: capture pre-corridor waypoint for [drive-vec]
+        vecWpRawY = steerY;
     }
     // v06.17: Corridor-level steering — steer toward the shared-edge midpoint
     // of the next corridor triangle instead of distant funnel waypoints.
@@ -557,7 +608,36 @@ static void UpdateAutoDrive()
     // waypoint instead (computed at A* time from portal positions, independent
     // of per-tick tri ID reads). Waypoints can be slightly less precise at
     // edge crossings but don't suffer from stale tri ID feedback loops.
-    if (s_walkmesh.valid && s_corridorCount >= 2 && s_driveTotalTicks >= 30 && !s_chaseDriveActive) {
+    //
+    // v0.17.6.2: DISABLED for F9 auto-drive as well (via `if (false && ...)`).
+    // The v0.17.6.1 BAT [drive-vec] log on bghall_1 Save Point exposed a hard
+    // failure mode: the handlekeys drive-start "pre-skip" block bumps
+    // s_waypointIdx past any wp closer than PRE_SKIP_DIST (120) so the drive
+    // targets the next meaningful waypoint instead of a trivial near-player
+    // one. Corridor steering then re-introduces the SAME point that pre-skip
+    // just discarded -- the corridor edge midpoint between the player's
+    // current triangle and the next is, by construction, the same location
+    // the funnel emitted as that near-player wp. The result is that the
+    // analog flips from "steer toward the real target wp 1" (lX=-332 lY=943,
+    // kb=DL, south-west toward Save Point) to "steer toward the corridor
+    // edge" (lX=-999 lY=-44, kb=L, pure west into a wall), the player
+    // wedges against geometry and moveDist=0 for hundreds of ticks. Manual
+    // nav uses the same funnel waypoints WITHOUT corridor steering and has
+    // been BAT-proven across bghall_1, bghall_4, bg2f_1, bg2f_2, bgroom_1
+    // since v0.17.5 -- FF8's built-in wall-sliding handles narrow corridor
+    // turns naturally when the analog points at a far-enough waypoint to
+    // produce a non-trivial diagonal heading. F9 inherits that correctness
+    // by removing the override and trusting the funnel output, matching the
+    // v0.17.6.x design theme (re-base F9 auto-drive on manual nav primitives).
+    //
+    // The block is preserved with the existing v06.17/v0.15.9.2.3 rationale
+    // because the geometry, shrink-by-agent-radius, and trigger-line edge-
+    // crossing avoidance might still be useful for elongated-corridor maze
+    // fields (Fire Cavern etc.) if v0.17.6.2 BAT regresses on those. To
+    // re-enable, flip `false &&` to `true &&` -- and consider gating on
+    // `currentWpDist > 200.0f` so the override only fires when the current
+    // waypoint is far enough that an intermediate edge midpoint adds value.
+    if (false && s_walkmesh.valid && s_corridorCount >= 2 && s_driveTotalTicks >= 30 && !s_chaseDriveActive) {
         uint16_t nowTri = 0xFFFF;
         {
             uint8_t* base2 = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
@@ -602,6 +682,7 @@ static void UpdateAutoDrive()
                         if (!edgeCrossesTrig) {
                             steerX = emx;
                             steerY = emy;
+                            vecCorridorOverrode = true;  // v0.17.6.1: flag for [drive-vec]
                         }
                         // else: keep the funnel waypoint as steer target
                     }
@@ -711,6 +792,7 @@ static void UpdateAutoDrive()
                         float dot = dx * trigNx + dz * trigNy;
                         dx = trigNx * dot;
                         dz = trigNy * dot;
+                        vecTrigRedirected = true;  // v0.17.6.1: flag for [drive-vec]
                     }
                     break;
                 }
@@ -913,8 +995,21 @@ static void UpdateAutoDrive()
     // Fix: in chase-drive, heading reflects the screen direction the analog
     // is currently requesting (screen-relative, lX > thresh → RIGHT, etc.).
     // F9 path-finding keeps the v0.15.9.2.2 origDx/origDz behavior unchanged.
+    //
+    // v0.17.6.0: F9 now uses the same analog-derived heading logic as chase-drive.
+    // Reason: F9's analog values now flow through the .ca-quantized camera
+    // projection (s_camRight/Down), so on rotated-camera fields the analog
+    // direction is screen-relative while origDx/origDz remained world-relative.
+    // On a 90-degree rotated field (camRight=(0,1), camDown=(-1,0)), a world
+    // +Y target produces lX=+positive (screen right) but origDz>0 triggers
+    // DIR_UP -- the same kb-vs-analog axis conflict the chase doc warned
+    // about. Sharing the analog-derived heading logic guarantees keyboard and
+    // analog agree on every field regardless of camera orientation. The
+    // chase doc Finding from v0.15.9.2.3 ("If F9 ever hits the same freeze
+    // pattern, replace this branch with the chase-drive logic above") was
+    // explicit foreshadowing; v0.17.6.0 acts on it.
     uint8_t heading = 0;
-    if (s_chaseDriveActive) {
+    {
         // Derive heading from analog values (screen-relative).
         // DirectInput convention: lX +1000 = screen right, lY +1000 = screen down.
         // Arrow keys are screen-relative: DIR_RIGHT = screen right, DIR_DOWN = screen down.
@@ -934,18 +1029,46 @@ static void UpdateAutoDrive()
             else if (absLy > 0)                   heading = (ly >= 0) ? DIR_DOWN : DIR_UP;
             else                                  heading = DIR_UP;  // pure deadzone
         }
-    } else {
-        // F9 path-finding: v0.15.9.2.2 origDx/origDz heading. Long-range
-        // target direction. F9's NPC targets are usually far so origDx/origDz
-        // matches the analog direction by default; the issue chase-drive hit
-        // (corridor / funnel turn points different from long-range target)
-        // is less common for F9 NPC use cases. If F9 ever hits the same
-        // freeze pattern, replace this branch with the chase-drive logic above.
-        if (origDz >  DRIVE_AXIS_THRESH) heading |= DIR_UP;    // +Y world = press UP
-        if (origDz < -DRIVE_AXIS_THRESH) heading |= DIR_DOWN;  // -Y world = press DOWN
-        if (origDx >  DRIVE_AXIS_THRESH) heading |= DIR_RIGHT; // +X world = press RIGHT
-        if (origDx < -DRIVE_AXIS_THRESH) heading |= DIR_LEFT;  // -X world = press LEFT
-        if (heading == 0) heading = DIR_UP;  // fallback: shouldn't happen (dist > arrive)
+    }
+
+    // v0.17.6.1: [drive-vec] per-tick steering pipeline diagnostic.
+    // Logs the intermediate values at each stage of the steering pipeline so
+    // we can see WHICH STAGE produced the wrong direction when the drive gets
+    // stuck. Fires every DRIVE_VEC_LOG_INTERVAL ticks (~0.5 s at 60 Hz) -- the
+    // existing 120-tick [drive] tick log was too sparse to catch transient
+    // steering inversions (e.g. the v0.17.6.0 BAT showed lX=-840/lY=-542 for
+    // multiple consecutive log windows, but the per-tick values likely jumped
+    // around between recovery cycles). Format:
+    //   t  = total ticks since drive start
+    //   tri = engine-reported walkmesh triangle (read from entity +0x1FA)
+    //   pp = player world position
+    //   wpRaw = chosen funnel waypoint or final target (pre-corridor override)
+    //   corOverride/corSteer = corridor steering wrote new steer to this edge midpoint
+    //   trigRedir/finalDelta = trigger-line proximity rewrote dx/dz parallel
+    //   lX/lY = analog values written by SetAnalogFromVector (camera-projected)
+    //   kb = heading bitmask derived from analog (post v0.17.6.0 unified logic)
+    //   wig/phase = wiggle tick counter / recovery phase counter
+    // To disable, raise DRIVE_VEC_LOG_INTERVAL; the per-tick cost otherwise
+    // is one mod-by-constant and an int compare.
+    static const int DRIVE_VEC_LOG_INTERVAL = 30;
+    if ((s_driveTotalTicks % DRIVE_VEC_LOG_INTERVAL) == 0) {
+        uint16_t vecTri = 0xFFFF;
+        {
+            uint8_t* baseVec = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+            if (baseVec)
+                vecTri = *(uint16_t*)(baseVec + ENTITY_STRIDE * s_playerEntityIdx + 0x1FA);
+        }
+        Log::Field("FieldNavigation: [drive-vec] t=%d tri=%u pp=(%.0f,%.0f) "
+                   "wpRaw=(%.0f,%.0f) corOverride=%d corSteer=(%.0f,%.0f) "
+                   "trigRedir=%d finalDelta=(%.1f,%.1f) "
+                   "lX=%d lY=%d kb=%s%s%s%s wig=%d phase=%d",
+                   s_driveTotalTicks, (unsigned)vecTri, px, pz,
+                   vecWpRawX, vecWpRawY, (int)vecCorridorOverrode, steerX, steerY,
+                   (int)vecTrigRedirected, dx, dz,
+                   (int)s_analogDesiredLX, (int)s_analogDesiredLY,
+                   (heading & DIR_UP) ? "U" : "", (heading & DIR_DOWN) ? "D" : "",
+                   (heading & DIR_LEFT) ? "L" : "", (heading & DIR_RIGHT) ? "R" : "",
+                   s_driveWiggleTicks, s_driveWigglePhase);
     }
 
     if (s_driveWiggleTicks > 0) {
@@ -1077,6 +1200,31 @@ static void UpdateAutoDrive()
         // either, and the outer chase auto-pilot's per-tick IsChaseDriveActive
         // check provides the only sensible cancel path.
         s_driveStuckTicks = 0;
+
+        // v0.17.6.1: Reset recovery counter when the player's walkmesh triangle
+        // has changed since the previous recovery cycle. Each new triangle
+        // along the corridor counts as genuine progress and earns a fresh
+        // MAX_RECOVERY_PHASES budget. Without this, narrow-corridor traversals
+        // burn the global counter across many triangles even when each
+        // individual triangle escape works -- the v0.17.6.0 Save Point BAT
+        // got 5 corridor advances (tri 367 -> 366 -> 363 -> 362 -> 359) and
+        // gave up at recovery 12 in tri 362 because the counter never reset.
+        {
+            uint16_t curRecoveryTri = 0xFFFF;
+            uint8_t* baseRT = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+            if (baseRT)
+                curRecoveryTri = *(uint16_t*)(baseRT + ENTITY_STRIDE * s_playerEntityIdx + 0x1FA);
+            if (curRecoveryTri != 0xFFFF && s_lastRecoveryTri != 0xFFFF &&
+                curRecoveryTri != s_lastRecoveryTri) {
+                Log::Field("FieldNavigation: [drive] recovery counter reset: tri %u -> %u "
+                           "(player advanced along corridor; phase was %d)",
+                           (unsigned)s_lastRecoveryTri, (unsigned)curRecoveryTri,
+                           s_driveWigglePhase);
+                s_driveWigglePhase = 0;
+            }
+            s_lastRecoveryTri = curRecoveryTri;
+        }
+
         s_driveWigglePhase++;
 
         // Auto-cancel after too many recovery phases without progress.
