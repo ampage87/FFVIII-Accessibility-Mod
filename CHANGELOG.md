@@ -6,6 +6,331 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.7.6.2
+
+Follow-up to v0.17.7.6.1 BAT on bgroad_5. The calibration math + threshold
+reduction both worked correctly: when Aaron walked manually, `[NAV-CAL]`
+fired after just 2 samples (down from 3). BUT auto-drive still failed to
+reach the dormitory because AD's wrong-direction injection (kb=R east)
+pushed the player straight into a wall.
+
+### Root cause of the v0.17.7.6.1 failure
+
+The v0.17.7.6.1 design assumed AD's own injected keys would seed the
+calibration. That's true when AD's wrong-direction movement still
+produces measurable forward progress. It's NOT true when the wrong
+direction is blocked by a wall:
+
+- 22:58:58 Aaron triggers AD to dormitory exit
+- 22:58:59-22:59:01 AD injects `kb=R lX=995 lY=93` (strong east)
+- 22:59:00 `[drive] tick=120 ... moveDist=0` -- **player not moving**
+- Observer's 50-unit movement gate filters out all samples
+- Calibration cannot fire from AD-injected presses
+- AD thrashes through recovery phases and eventually gives up
+- Aaron walks manually (UP, LEFT, UP) -- THESE moves produce real
+  movement because Aaron presses keys he knows align with the visible
+  hallway geometry
+- 22:59:15 `[NAV-CAL]` fires after 2 UP samples
+
+The v0.17.7.6.1 catch-22 mutated into a new shape: AD pushes into wall
+-> no movement -> no samples -> no calibration -> AD continues into wall.
+
+### Fix (Option A: block AD until calibrated)
+
+When Aaron presses the AD trigger (backslash) on a field where
+`s_camAxesSource == "identity"` and `!s_camAxesEmpiricalApplied`, AD
+does NOT start. Instead, TTS announces:
+
+> *"Camera not yet calibrated. Press an arrow key briefly to calibrate,
+> then try again."*
+
+Aaron walks a few steps with arrow keys (which DO produce movement
+because he's pressing keys aligned with visible geometry). The observer
+samples it. After 2 samples agree, `[NAV-CAL]` fires and TTS announces:
+
+> *"Camera calibrated."*
+
+Aaron retries AD. With corrected axes, AD now works normally.
+
+### Changes
+
+1. **`field_nav_handlekeys.inl`** -- new refusal case in the AD-start
+   chain, between the dialog-open check and the target-validation block.
+   Fires when `strcmp(s_camAxesSource, "identity") == 0 &&
+   !s_camAxesEmpiricalApplied`. Speaks the calibration-needed message and
+   logs `[drive] REFUSED (camera axes not yet calibrated: source=identity,
+   pending empirical correction)`.
+
+2. **`field_nav_observe.inl`** -- `ObsApplyEmpirical` adds a single
+   `ScreenReader::Speak("Camera calibrated.")` call at the end, after
+   the existing `[NAV-CAL]` log line. Fires once per field load (the
+   `s_camAxesEmpiricalApplied` lock prevents repeats).
+
+### Regression safety
+
+The AD refusal gate is gated on `s_camAxesSource == "identity"`. On
+CA-valid fields the source is `"ca-quantized"` and the strcmp returns
+non-zero, so AD starts as before -- byte-for-byte identical to v0.17.7.6.1
+and earlier on those fields. After calibration applies on a degenerate
+field, source becomes `"empirical-corrected"`; the gate stops firing.
+
+The TTS announcement at `[NAV-CAL]` is additive. No existing logic
+changes; just a new Speak call.
+
+v0.17.7.6.1's other changes are unchanged in this build: the two-tier AD
+gate in the observer still allows sampling during AD on degenerate-CA
+fields (in case Aaron triggers AD before reading the TTS prompt and AD
+then produces movement somehow), and `EMPIRICAL_MIN_SAMPLES` remains at
+2 (the threshold reduction was independently useful).
+
+### Expected BAT outcome
+
+**Primary (bgroad_5):**
+- Aaron enters bgroad_5. `[NAV-PROJ-INIT] source=identity` logged.
+- Aaron triggers AD (backslash) immediately.
+- TTS announces "Camera not yet calibrated. Press an arrow key briefly
+  to calibrate, then try again."
+- AD does not start. `[drive] REFUSED` line logged.
+- Aaron presses UP for ~1 second.
+- Observer samples (1 UP). Throttle waits.
+- Aaron continues UP, second sample fires.
+- `[NAV-CAL]` fires. TTS announces "Camera calibrated."
+- Aaron triggers AD again.
+- AD starts with corrected axes; goes the right direction; reaches
+  dormitory.
+
+**Regression sanity:**
+- bghall_1, bg2f_2, other CA-valid fields: no behavioral change. AD on
+  those fields starts immediately as before.
+- bgroad_5 entered, Aaron walks before triggering AD: same as above
+  but the refusal message never fires (calibration applied first).
+
+### Open question for later
+
+If the calibration-walk-then-retry-AD UX becomes annoying after Aaron
+lives with it, v0.17.7.6.3 could add a one-shot synthetic look-around at
+field load on degenerate-CA fields (inject a brief UP arrow before the
+player has a chance to act). Deferred unless Aaron asks for it.
+
+## v0.17.7.6.1
+
+Follow-up to v0.17.7.6 BAT on bgroad_5. The empirical calibration math
+worked correctly when it fired (the `[NAV-CAL]` line at 22:12:59 produced
+`camRight=(0.000,-1.000) camDown=(-1.000,0.000) det=-1.000`, which matches
+the .ca file's axis2=+X and the screenshot's visual hallway orientation),
+but the calibration didn't fire until **80 seconds** after field entry --
+long enough for Aaron to receive wrong-direction guidance ("east 12 steps"
+when he needed to go north), trigger auto-drive that went the wrong way
+for 53 seconds, disengage AD, try manual GPS, give up on guidance, and
+finally walk manually until the observer caught enough samples.
+
+### Root cause
+
+The v0.17.6's NAV-OBSERVE has an existing gate that suppresses sampling
+during any auto-drive (so AD's synthetic key injection doesn't pollute the
+diagnostic log). v0.17.7.6 kept that gate but used the observer's samples
+as calibration input. On a degenerate-CA field that's a catch-22:
+
+1. Field loads with identity-fallback axes (wrong by 90 degrees on bgroad_5).
+2. Aaron triggers AD; AD projects through identity axes; goes wrong direction.
+3. Observer is suppressed (AD-gate); no samples accumulate.
+4. Calibration can't fire; AD continues wrong direction.
+5. Aaron disengages AD; observer starts sampling; calibration fires after
+   ~5 seconds of clean manual walking.
+6. By then Aaron has walked into walls, tried manual GPS (also wrong), and
+   become understandably frustrated.
+
+F11 screenshot taken at 22:12:54 confirmed visually: the hallway runs
+into the screen (vanishing point at center-back), so screen-up = north
+is the right direction; "east 12 steps" would have walked Aaron sideways
+into a pillar.
+
+### Fix
+
+Three small changes:
+
+1. **`field_nav_observe.inl`** -- two-tier auto-drive gate. Chase drive
+   continues to fully suppress the observer (it has its own empirical
+   calibration loop). Regular auto-drive ALSO suppresses the observer
+   EXCEPT when `s_camAxesSource == "identity"` and the empirical
+   correction is still pending. In that specific case, the observer runs
+   during AD; AD's own keyboard injection seeds the calibration the same
+   way Aaron's hand would (GetAsyncKeyState reflects SendInput-injected
+   state). Once the correction applies (`s_camAxesEmpiricalApplied`
+   becomes true and `s_camAxesSource` becomes `"empirical-corrected"`),
+   the gate returns to its original v0.17.7.6 behavior.
+
+2. **`field_nav_observe.inl`** -- `EMPIRICAL_MIN_SAMPLES` lowered from 3
+   to 2. With the existing per-sample filters (single-arrow only, 18-tick
+   hold, 100-unit movement floor, 10-degree consensus threshold) two
+   samples already give high confidence: v0.17.7.6 BAT showed all three
+   bgroad_5 measurements landed at exactly `(1.000, 0.000)`, well within
+   threshold. Two-sample consensus halves time-to-correction (~3 seconds
+   instead of ~5 under throttle).
+
+3. **`field_nav_fieldscripts.inl`** -- the `[NAV-PROJ-INIT]` log line
+   hardcoded `source=ca-quantized` regardless of which branch of the
+   CA-load block ran. On bgroad_5 (degenerate CA) the code correctly set
+   `s_camAxesSource = "identity"` but the log line still wrote
+   `source=ca-quantized`, making BAT debugging harder than necessary.
+   Read the actual `s_camAxesSource` value into the log line instead.
+
+### Regression safety
+
+The `degenerateCaPendingCal` gate is the only behavior change that
+affects non-bgroad_5 fields. It's gated on `s_camAxesSource == "identity"`
+-- only fields where the CA file's 2D projection is degenerate (`d2len <
+0.001f` in the existing check). On those fields, AD was already failing
+(v0.17.7.6 BAT proved this). On all other fields (CA valid, source =
+"ca-quantized" or "empirical-corrected"), the AD-gate behaves identically
+to v0.17.7.6: observer suppressed during AD, no change to AD direction
+injection, no change to GPS, no change to anything else.
+
+The sample-count change (3 -> 2) does affect any field that triggers
+empirical calibration. The risk profile: a 2-sample consensus is
+somewhat weaker than 3-sample. Mitigations: each sample requires 18-tick
+hold + 100-unit movement + single-arrow + 10-degree agreement with mean.
+A single anomalous sample (player on a moving platform, scripted move)
+would need a SECOND anomalous sample landing within 10 degrees of the
+first to apply a wrong correction. The probability of two such samples
+in sequence is very low; one-off scripted movements are rare on entry
+to a degenerate-CA field that the player will then navigate manually.
+
+### Expected BAT outcome
+
+**Primary test (bgroad_5 retry):**
+- Aaron enters bgroad_5.
+- `[NAV-PROJ-INIT]` log now reads `source=identity` (was wrongly
+  `ca-quantized`).
+- Aaron triggers AD to dormitory exit. AD starts going wrong direction.
+- Within ~3 seconds (2 NAV-OBSERVE samples), `[NAV-CAL]` fires from
+  AD's own injected key state.
+- AD re-projects on next tick with corrected axes; starts going right
+  direction.
+- Total wrong-direction time: ~3 seconds (versus 80 in v0.17.7.6).
+- AD completes successfully.
+
+**Regression sanity:**
+- bghall_1 / bg2f_2 / other CA-valid fields: no behavioral change.
+  Observer still suppressed during AD; AD still uses CA-quantized axes;
+  no `[NAV-CAL]` fires.
+- bgroad_5 entered, AD not triggered, Aaron walks manually: same as
+  v0.17.7.6 (observer samples normally, calibration fires after 2
+  samples instead of 3).
+- Log files: cleaner `source=...` reporting in `[NAV-PROJ-INIT]` lines.
+
+## v0.17.7.6
+
+Closed-loop empirical camera-axes calibration. Fixes auto-drive direction
+confusion on fields where the .ca file's 2D projection is degenerate (the
+identity-fallback path). Surfaced by v0.17.7.5.4 BAT on bgroad_5 (Hallway 5),
+whose `.ca` has `axis1=(0,0,-4096)` -- entirely in the depth axis -- producing
+`d2len=0.000` in the existing degenerate-CA check, after which the mod fell
+back to identity defaults that were wrong by 90 degrees vs. the engine's
+actual screen-to-world mapping.
+
+NAV-OBSERVE on bgroad_5 had been logging the divergence for several BAT
+cycles (`arrow=UP delta=(279,0) measured=(1.000,0.000) predicted=(-0.000,1.000)
+DIVERGE=90deg`) but the data was only ever logged, never fed back. This
+build closes the loop.
+
+### Mechanism
+
+When the observer fires a NAV-OBSERVE sample AND `s_camAxesSource ==
+"identity"` AND a correction hasn't already been applied this field load,
+the normalized measured direction is pushed into a per-arrow ring buffer.
+When the last 3 samples for the same arrow agree on a mean direction
+within 10 degrees, the consensus measurement is mapped to the camera axis
+the arrow corresponds to (UP/DOWN -> camDown, LEFT/RIGHT -> camRight),
+quantized to nearest 90-degree world cardinal, and the orthogonal axis is
+derived via the existing v0.17.5 rotation rule (`camDown = (camRight.y,
+-camRight.x)`, det = -1).
+
+Both the manual-nav pair (`s_camRightX/Y`, `s_camDownX/Y`) and the auto-drive
+private pair (`s_driveCamRightX/Y`, `s_driveCamDownX/Y`) are overwritten so
+all consumers (auto-drive direction injection, GPS cardinal computation,
+FormatNavComponents Backspace announce) pick up the corrected values.
+`s_camAxesSource` is set to `"empirical-corrected"` and
+`s_camAxesEmpiricalApplied` locks the correction to one-shot per field load.
+
+### Regression safety
+
+Aaron's mandate: do not regress auto-drive on fields where it already works.
+
+The entire calibration path is gated on `s_camAxesSource == "identity"`. On
+any field where the CA file's 2D projection was non-degenerate, the CA-load
+block in `field_nav_fieldscripts.inl` set `s_camAxesSource = "ca-quantized"`,
+and the observer's calibration block (line ~302 in `field_nav_observe.inl`)
+is never entered. Auto-drive, GPS, and manual nav behavior on those fields
+is byte-for-byte identical to v0.17.7.5.5.
+
+Additional safety layers:
+- 3-sample consensus requirement (single bad measurement won't fire).
+- 10-degree agreement threshold (mixed-direction samples won't fire).
+- 100-unit minimum delta magnitude (stricter than the upstream
+  OBS_MOVE_THRESHOLD=50; rejects wall-stuck noise).
+- Single-arrow-only gate (already enforced by the observer's existing
+  diagonal-rejection logic; defensive `ObsArrowToIdx` in the new path).
+- Skipped entirely while any auto-drive or chase-drive is active
+  (existing observer gate).
+- One-shot lock per field load (`s_camAxesEmpiricalApplied`).
+
+### Files touched
+
+- `src/ff8_accessibility.h` -- version bump (1 line).
+- `src/field_navigation.cpp` -- new state declarations (struct
+  NavObsSample + 3 arrays/flags + 2 constants), ~25 lines plus comment.
+- `src/field_nav_observe.inl` -- 3 helper functions (`ObsArrowToIdx`,
+  `ObsPushSample`, `ObsCheckConsensus`, `ObsApplyEmpirical`), 3 tuning
+  constants, and a ~15-line gate block at the end of `ObsLogSample` that
+  feeds samples into the helpers. ~170 lines added.
+- `src/field_nav_fieldscripts.inl` -- 3 lines added to the reset block
+  (memset the buffer and counts, reset the applied flag).
+
+No changes to the CA parser, the catalog, auto-drive's direction injection,
+or GPS cardinal logic.
+
+### Expected BAT results
+
+**Primary test (bgroad_5):**
+- Aaron enters bgroad_5 (Hallway 5).
+- Walks a few steps (3+ steady single-arrow presses, ~5 seconds).
+- The log accumulates `[NAV-OBSERVE]` lines with `axes=identity
+  DIVERGE=90deg`.
+- After the 3rd consistent sample, a `[NAV-CAL]` line fires with
+  `EMPIRICAL CORRECTION APPLIED: camRight (1.000,0.000)->(0.000,-1.000)
+  camDown (0.000,-1.000)->(-1.000,0.000) source=empirical-corrected`.
+- Subsequent NAV-OBSERVE lines show `axes=empirical-corrected DIVERGE=0deg`.
+- Triggering auto-drive to the dormitory exit completes successfully
+  (no 90-degree direction error).
+- Manual nav cardinals also come out right (they read the same axes).
+
+**Regression sanity (must pass unchanged):**
+- bghall_1: CA non-degenerate (axes are world-cardinal). No NAV-CAL
+  lines fire. Auto-drive behavior identical to v0.17.7.5.5.
+- bg2f_2: Same as above (det-correction from v0.17.4 still applies; no
+  empirical correction triggered).
+- Any field where Aaron was happy with auto-drive in .5.5: no change.
+
+**Edge cases:**
+- bgroad_5 entered, auto-drive triggered immediately (no observations
+  yet): correction not applied, drive misbehaves same as v0.17.7.5.5.
+  No hang or crash.
+- bgroad_5 entered, only diagonal walking: diagonals filtered by
+  observer; no consensus; no correction.
+- Player leaves bgroad_5 and re-enters: `HookedFieldScriptsInit` resets
+  the accumulator and the applied flag; correction re-applies on the
+  next valid sample run.
+
+### What's still deferred
+
+- v0.17.7.7: SETLINE-position promotion + NPC `ResolveFriendlyName`.
+- v0.17.7.8: Shop/Card Game -> NPC announce-layer collapse.
+- v0.17.7.9 (optional): SYM override layer for residual leaks.
+- Open design question: should the empirical correction also fire on
+  non-degenerate CA fields where NAV-OBSERVE shows persistent divergence?
+  Currently NO (riskier; defer until a concrete case appears).
+
 ## v0.17.7.5.5
 
 Fix bgryo1_4 bed labeled as "Exit to B-Garden - Dormitory Double 4" — BAT'd

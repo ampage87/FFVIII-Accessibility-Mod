@@ -66,6 +66,189 @@ static const char* ObsArrowName(uint8_t m) {
     }
 }
 
+// v0.17.7.6: Closed-loop empirical calibration thresholds.
+//
+// EMPIRICAL_MIN_SAMPLES = require this many consecutive in-buffer samples
+// for the same arrow before considering consensus.
+//
+// v0.17.7.6.1: lowered from 3 to 2. Background: v0.17.7.6 BAT on bgroad_5
+// showed the user-facing wrong-direction window was driven by the gap
+// between field load and first calibration. Each NAV-OBSERVE sample takes
+// ~1.5 seconds (throttle) plus the 18-tick hold floor plus 100-unit
+// movement floor; 3 samples means ~5 seconds minimum even under ideal
+// conditions. With the strict per-sample filters (single-arrow only,
+// ~6deg residual noise floor empirically, 100-unit movement) two samples
+// already give high consensus confidence -- bgroad_5 samples landed at
+// exactly (1.000, 0.000) both times. The remaining risk (a single bad
+// sample applying wrong correction) is bounded by the consensus check
+// itself: two random samples both within 10 degrees of their mean is
+// rare. Two samples is enough to filter the rarer of those failure modes
+// (player-on-platform, scripted-nudge) while halving time-to-correction.
+static const int   EMPIRICAL_MIN_SAMPLES   = 2;
+//
+// EMPIRICAL_AGREEMENT_RAD = max angular deviation between the mean
+// direction and any individual sample. 10 degrees is wider than the
+// ~1-2 degree noise floor observed in v0.17.3 NAV-OBSERVE logs but
+// narrow enough to reject genuine non-cardinal motion.
+//
+// OBS_EMPIRICAL_MIN_MAG = minimum measured-delta magnitude (in world
+// units) before a sample is admitted to the buffer. Defense-in-depth
+// against stuck-on-wall noise; the upstream OBS_MOVE_THRESHOLD of 50
+// already filters most of this but the calibration is permanent so
+// the bar is higher.
+static const float EMPIRICAL_AGREEMENT_RAD = 10.0f * (float)NAV_PI / 180.0f;
+static const float OBS_EMPIRICAL_MIN_MAG   = 100.0f;
+
+// Map an arrow bitmask to a buffer index 0..3. Returns -1 for non-single-
+// arrow inputs. The caller in ObsLogSample has already gated on single-
+// arrow, but this defense lets us reuse the helper safely.
+static int ObsArrowToIdx(uint8_t arrow) {
+    switch (arrow) {
+        case DIR_UP:    return 0;
+        case DIR_DOWN:  return 1;
+        case DIR_LEFT:  return 2;
+        case DIR_RIGHT: return 3;
+        default:        return -1;
+    }
+}
+
+// Push a normalized world-direction sample into the matching arrow's
+// ring buffer. When the buffer is full, the oldest entry is dropped
+// (shift-left) so the consensus check always operates on the most
+// recent OBS_MAX_SAMPLES measurements.
+static void ObsPushSample(int arrowIdx, float wx, float wy) {
+    int n = s_navObsSampleCount[arrowIdx];
+    if (n >= OBS_MAX_SAMPLES) {
+        for (int i = 1; i < OBS_MAX_SAMPLES; i++) {
+            s_navObsBuffer[arrowIdx][i - 1] = s_navObsBuffer[arrowIdx][i];
+        }
+        n = OBS_MAX_SAMPLES - 1;
+    }
+    s_navObsBuffer[arrowIdx][n].wx = wx;
+    s_navObsBuffer[arrowIdx][n].wy = wy;
+    s_navObsSampleCount[arrowIdx] = n + 1;
+}
+
+// Check whether the last EMPIRICAL_MIN_SAMPLES entries in this arrow's
+// buffer agree on a common direction within EMPIRICAL_AGREEMENT_RAD.
+// Returns true and writes the consensus unit vector to (outX, outY) on
+// success; returns false otherwise.
+//
+// Method: sum the unit vectors, normalize -> mean direction. Then verify
+// every sample's dot product with the mean exceeds cos(threshold). If the
+// samples are ~180-degree opposite (e.g. player walked back and forth),
+// the mean magnitude approaches zero and we bail.
+static bool ObsCheckConsensus(int arrowIdx, float& outX, float& outY) {
+    int n = s_navObsSampleCount[arrowIdx];
+    if (n < EMPIRICAL_MIN_SAMPLES) return false;
+    int firstIdx = n - EMPIRICAL_MIN_SAMPLES;
+    float sx = 0.0f, sy = 0.0f;
+    for (int i = firstIdx; i < n; i++) {
+        sx += s_navObsBuffer[arrowIdx][i].wx;
+        sy += s_navObsBuffer[arrowIdx][i].wy;
+    }
+    float meanLen = sqrtf(sx * sx + sy * sy);
+    if (meanLen < 0.001f) return false;
+    float mnx = sx / meanLen;
+    float mny = sy / meanLen;
+    float cosThresh = cosf(EMPIRICAL_AGREEMENT_RAD);
+    for (int i = firstIdx; i < n; i++) {
+        float dot = s_navObsBuffer[arrowIdx][i].wx * mnx
+                  + s_navObsBuffer[arrowIdx][i].wy * mny;
+        if (dot < cosThresh) return false;
+    }
+    outX = mnx;
+    outY = mny;
+    return true;
+}
+
+// Apply the empirical correction.
+//
+// Mapping rules (mirror of the predicted-direction logic in ObsLogSample):
+//   arrow=UP    measured -> world-direction of screen-up.    camDown = -measured.
+//   arrow=DOWN  measured -> world-direction of screen-down.  camDown = +measured.
+//   arrow=LEFT  measured -> world-direction of screen-left.  camRight = -measured.
+//   arrow=RIGHT measured -> world-direction of screen-right. camRight = +measured.
+//
+// Quantize the derived axis to its nearest 90-degree world cardinal
+// (matches the v0.17.5 CA-quantization path so the empirical and
+// CA-derived paths produce identical axis values when both succeed on the
+// same field). Then derive the orthogonal axis via the existing v0.17.5
+// rotation rule: camDown = (camRight.y, -camRight.x), which keeps det = -1.
+//
+// Overwrites BOTH the manual-nav pair (s_cam*X/Y) and the auto-drive
+// private pair (s_driveCam*X/Y). Sets s_camAxesSource to a distinct tag
+// ("empirical-corrected") so logs make obvious which path applied. Marks
+// s_camAxesEmpiricalApplied so the correction is one-shot per field load.
+static void ObsApplyEmpirical(uint8_t arrow, float wx, float wy) {
+    float preRx = s_camRightX, preRy = s_camRightY;
+    float preDx = s_camDownX,  preDy = s_camDownY;
+
+    // Step 1: derive the axis directly informed by this measurement.
+    float axisX = 0.0f, axisY = 0.0f;
+    bool  isDown = false;   // true -> measurement maps to camDown; false -> camRight
+    switch (arrow) {
+        case DIR_UP:    axisX = -wx; axisY = -wy; isDown = true;  break;
+        case DIR_DOWN:  axisX =  wx; axisY =  wy; isDown = true;  break;
+        case DIR_LEFT:  axisX = -wx; axisY = -wy; isDown = false; break;
+        case DIR_RIGHT: axisX =  wx; axisY =  wy; isDown = false; break;
+        default: return;
+    }
+
+    // Step 2: quantize to nearest 90-degree cardinal.
+    float angle = atan2f(axisY, axisX);
+    float quantum = (float)NAV_PI / 2.0f;
+    float snappedAngle = roundf(angle / quantum) * quantum;
+    float qx = cosf(snappedAngle);
+    float qy = sinf(snappedAngle);
+    if (fabsf(qx) < 1e-6f) qx = 0.0f;
+    if (fabsf(qy) < 1e-6f) qy = 0.0f;
+
+    // Step 3: derive the orthogonal axis with det = -1 (v0.17.5 convention:
+    //   camDown = R(-90deg) * camRight = (rY, -rX)
+    //   Inverting that:
+    //   camRight = (-dY, dX)
+    // when camDown is the known axis.
+    float rx, ry, dx, dy;
+    if (isDown) {
+        dx = qx; dy = qy;
+        rx = -dy; ry = dx;
+    } else {
+        rx = qx; ry = qy;
+        dx = ry; dy = -rx;
+    }
+
+    s_camRightX = rx; s_camRightY = ry;
+    s_camDownX  = dx; s_camDownY  = dy;
+    s_driveCamRightX = rx; s_driveCamRightY = ry;
+    s_driveCamDownX  = dx; s_driveCamDownY  = dy;
+    s_camAxesSource = "empirical-corrected";
+    s_camAxesEmpiricalApplied = true;
+
+    const char* fieldName = FF8Addresses::pCurrentFieldName
+                            ? FF8Addresses::pCurrentFieldName : "(unknown)";
+    float det = s_camRightX * s_camDownY - s_camRightY * s_camDownX;
+    Log::Field("FieldNavigation: [NAV-CAL] field='%s' arrow=%s samples=%d "
+               "consensus=(%.3f,%.3f) EMPIRICAL CORRECTION APPLIED: "
+               "camRight (%.3f,%.3f)->(%.3f,%.3f) camDown (%.3f,%.3f)->(%.3f,%.3f) "
+               "det=%.3f source=empirical-corrected",
+               fieldName, ObsArrowName(arrow), EMPIRICAL_MIN_SAMPLES, wx, wy,
+               preRx, preRy, s_camRightX, s_camRightY,
+               preDx, preDy, s_camDownX, s_camDownY, det);
+
+    // v0.17.7.6.2: TTS confirmation so Aaron knows the calibration
+    // completed. This pairs with the v0.17.7.6.2 AD-refusal message in
+    // handlekeys.inl: "Camera not yet calibrated. Press an arrow key
+    // briefly to calibrate, then try again." Once this announcement
+    // fires, Aaron knows AD will work on his next attempt.
+    //
+    // Kept terse on purpose -- frequent enough on first entry to
+    // degenerate-CA fields that a longer message would be intrusive,
+    // but rare enough overall (degenerate CA is uncommon) that the
+    // confirmation doesn't add log noise during normal play.
+    ScreenReader::Speak("Camera calibrated.");
+}
+
 // Log one observation sample. Compares the empirically-measured world-space
 // movement direction against the CA-derived prediction for the held arrow.
 //
@@ -114,6 +297,38 @@ static void ObsLogSample(uint8_t arrow, float dx, float dy, int heldTicks) {
                fieldName, s_camAxesSource, ObsArrowName(arrow), heldTicks,
                dx, dy, mnx, mny, pnx, pny, divDeg,
                s_camRightX, s_camRightY, s_camDownX, s_camDownY);
+
+    // v0.17.7.6: Closed-loop empirical calibration feed.
+    //
+    // GATES (all must hold):
+    //   1. s_camAxesSource == "identity"    -> CA was missing or degenerate
+    //                                          at field load; the v0.17.7.5.5
+    //                                          identity defaults are wrong on
+    //                                          this field and need replacing.
+    //   2. !s_camAxesEmpiricalApplied        -> correction is one-shot per
+    //                                          field load; once applied, lock.
+    //   3. arrowIdx >= 0                     -> single cardinal arrow (caller
+    //                                          already gates, defensive here).
+    //   4. measLen >= OBS_EMPIRICAL_MIN_MAG  -> sample is well above the
+    //                                          OBS_MOVE_THRESHOLD floor;
+    //                                          calibration is permanent so
+    //                                          we use a stricter bar.
+    //
+    // REGRESSION SAFETY: when s_camAxesSource is anything other than
+    // "identity" (i.e. "ca-quantized" on healthy CA fields, or
+    // "empirical-corrected" after a prior correction), this entire block is
+    // skipped. Auto-drive behavior on those fields is byte-for-byte
+    // identical to v0.17.7.5.5.
+    if (strcmp(s_camAxesSource, "identity") == 0 && !s_camAxesEmpiricalApplied) {
+        int arrowIdx = ObsArrowToIdx(arrow);
+        if (arrowIdx >= 0 && measLen >= OBS_EMPIRICAL_MIN_MAG) {
+            ObsPushSample(arrowIdx, mnx, mny);
+            float cx = 0.0f, cy = 0.0f;
+            if (ObsCheckConsensus(arrowIdx, cx, cy)) {
+                ObsApplyEmpirical(arrow, cx, cy);
+            }
+        }
+    }
 }
 
 // Per-tick observer. Called from Update() each frame.
@@ -132,8 +347,47 @@ static void ObsLogSample(uint8_t arrow, float dx, float dy, int heldTicks) {
 // effect; if it logs, the only side-effect is the log line and an update to
 // the observer's own private statics.
 static void ObserveArrowResponse() {
-    // Gate: skip during any auto-drive so injected keys can't pollute the sample.
-    if (s_driveActive || s_chaseDriveActive) {
+    // v0.17.7.6.1: Two-tier gating for auto-drive activity.
+    //
+    // CHASE drive always suppresses observer sampling. The chase auto-pilot
+    // runs its own empirical calibration in a tighter loop than the manual
+    // observer can match (it injects analog and reads walkmesh delta on a
+    // per-tick basis), so the observer should stay out of its way.
+    //
+    // REGULAR auto-drive normally suppresses observer sampling too, for
+    // diagnostic cleanliness -- so the NAV-OBSERVE log shows the engine's
+    // response to Aaron's hand, not AD's synthetic injection. BUT on a
+    // degenerate-CA field with empirical correction still pending, that
+    // suppression creates a catch-22: AD uses the wrong identity axes,
+    // goes wrong direction, doesn't produce useful progress, the observer
+    // can't sample, calibration can't fire, AD continues wrong forever.
+    // v0.17.7.6 BAT on bgroad_5 hit this exact failure: 53 seconds of AD
+    // with wrong-direction movement before Aaron disengaged and walked
+    // manually to seed the calibration.
+    //
+    // The fix: when degenerate-CA + pending calibration, allow observer
+    // sampling DURING AD. AD's keyboard injection produces the same key
+    // state visible to GetAsyncKeyState as Aaron's hand would; the
+    // calibration math (input arrow -> world delta direction) is identical
+    // regardless of who pressed the key. After enough samples accumulate
+    // (~3 seconds with the reduced 2-sample threshold), the calibration
+    // fires, both manual-nav and auto-drive axes get overwritten, and
+    // AD's next tick re-projects through the corrected axes -- self-
+    // correcting within a few seconds of first AD activation.
+    //
+    // Regression safety: when s_camAxesSource is anything other than
+    // "identity" (e.g. "ca-quantized" on healthy CA fields), or after the
+    // calibration has already applied ("empirical-corrected"), the gate
+    // behaves identically to v0.17.7.6 and earlier. AD on those fields
+    // continues to suppress observation.
+    if (s_chaseDriveActive) {
+        s_obsHoldTicks  = 0;
+        s_obsPrevArrows = 0;
+        return;
+    }
+    bool degenerateCaPendingCal = (strcmp(s_camAxesSource, "identity") == 0 &&
+                                   !s_camAxesEmpiricalApplied);
+    if (s_driveActive && !degenerateCaPendingCal) {
         s_obsHoldTicks  = 0;
         s_obsPrevArrows = 0;
         return;

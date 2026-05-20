@@ -71,6 +71,15 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
     s_driveCamRightX = 1.0f; s_driveCamRightY = 0.0f;
     s_driveCamDownX  = 0.0f; s_driveCamDownY  = -1.0f;
     s_camAxesSource  = "identity";
+    // v0.17.7.6: Reset closed-loop empirical calibration accumulator.
+    // The buffer holds NAV-OBSERVE samples that drive the empirical
+    // camera-axes correction on degenerate-CA fields. Clearing on every
+    // field load means samples from one field never bleed into another's
+    // consensus check, and the one-shot lock re-arms so the new field's
+    // first valid sample run can apply a fresh correction if needed.
+    memset(s_navObsBuffer, 0, sizeof(s_navObsBuffer));
+    memset(s_navObsSampleCount, 0, sizeof(s_navObsSampleCount));
+    s_camAxesEmpiricalApplied = false;
     s_camCalibrated = false;
     s_calibPhase = 0;
     s_calibPending = true;  // calibrate on first drive
@@ -335,8 +344,15 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                 // for the inverse problem (chase finding #4) but forward projection
                 // still works for nav labels. Log so we can spot odd cameras.
                 float det = s_camRightX * s_camDownY - s_camRightY * s_camDownX;
-                Log::Field("FieldNavigation: [NAV-PROJ-INIT] field='%s' camRight=(%.3f,%.3f) camDown=(%.3f,%.3f) det=%.3f source=ca-quantized",
-                           fieldName, s_camRightX, s_camRightY, s_camDownX, s_camDownY, det);
+                // v0.17.7.6.1: log the actual s_camAxesSource value
+                // instead of hardcoding "ca-quantized". On the degenerate-CA
+                // branch (else clause above) the code correctly sets
+                // s_camAxesSource to "identity" but the original log line
+                // here always wrote "source=ca-quantized" regardless,
+                // misleading anyone reading the BAT log. The code logic
+                // was always right; only the log message was wrong.
+                Log::Field("FieldNavigation: [NAV-PROJ-INIT] field='%s' camRight=(%.3f,%.3f) camDown=(%.3f,%.3f) det=%.3f source=%s",
+                           fieldName, s_camRightX, s_camRightY, s_camDownX, s_camDownY, det, s_camAxesSource);
                 // Pre-normalization 2D magnitudes are useful for diagnosing tilted vs
                 // rolled cameras.
                 Log::Field("FieldNavigation: [NAV-PROJ-INIT] field='%s' raw-2D r2len=%.3f d2len=%.3f (1.0 = flat camera; <1.0 = tilted)",

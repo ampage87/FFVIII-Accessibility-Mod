@@ -16,39 +16,56 @@ v0.17.6.2 also exposed two within-field friction points in B-Garden (fepic1 push
 
 ## Where we are at session open
 
-**v0.17.7.5.5 BAT'd clean. bgryo1_4 bed labeled as Interaction. Exit/interaction labeling chapter is feature-complete.**
+**v0.17.7.6.2 implemented locally, awaiting BAT.** `FF8OPC_VERSION` = `0.17.7.6.2`. CHANGELOG top heading matches.
 
-The cumulative v0.17.7.1 → v0.17.7.5.5 series is push-ready. GitHub HEAD is
-still at v0.17.7.0 (`8b9299c2`); 11 build chapters of unpublished work locally.
-When Aaron pushes, the commit body should reference the catalog overhaul as a
-whole (walkmesh exclusion rule, MAPJUMP destField static resolver with
-addr-as-literal pattern, hasDialogReqTarget split, self-loop detection).
+v0.17.7.6.1 BAT'd partial on bgroad_5:
+- The 2-sample threshold worked: `[NAV-CAL]` fired after 2 UP samples (vs. 3 in v0.17.7.6).
+- The two-tier AD gate worked in principle: observer code path was enabled during AD on degenerate-CA + pending-cal fields.
+- BUT AD pushed Aaron into a wall (`moveDist=0` for entire drive), no samples accumulated during AD, calibration didn't fire until Aaron walked manually with UP arrow.
+- AD failed twice (gave up after recovery), then Aaron walked manually, calibration fired, but by then AD attempts had thrashed and Aaron was frustrated.
 
-**Next chapter pending Aaron's direction.** Three candidates in priority order:
+The v0.17.7.6.1 catch-22 mutated: AD pushes into wall -> no movement -> observer's 50-unit movement gate filters all samples -> calibration can't fire -> AD continues into wall -> AD gives up.
 
-1. **v0.17.7.6 — camera projection closed-loop calibration.** Fixes bgroad_5
-   auto-drive direction confusion (.ca file has axis1=(0,0,-4096) entirely
-   in the depth axis; 2D projection degenerate; identity fallback wrong by
-   90 degrees per NAV-OBSERVE empirical data). Substantial chapter: design
-   pass first, then implementation touching projection init + drive
-   direction injection + possibly GPS cardinal logic. May also improve
-   manual nav cardinal accuracy on similar fields.
-2. **v0.17.7.7 — SETLINE-position promotion + NPC ResolveFriendlyName.**
-   Auto-drive needs accurate target positions for the new SCREEN_BOUND
-   exits; right now the catalog uses captured SETLINE centers but the
-   auto-drive may need a slightly different anchor. NPC `ResolveFriendlyName`
-   replaces generic "NPC" labels with sym-based friendly names.
-3. **v0.17.7.8 — Shop/Card Game → NPC announce-layer collapse.** When a shop
-   or card-game NPC exists, the catalog currently exposes both an NPC entry
-   and the shop/game entry; collapse to one.
+### v0.17.7.6.2 fix (in tree, awaiting BAT)
 
-**Bug 1 from the v0.17.7.5.4 BAT (auto-drive on bgroad_5)** is the same
-problem v0.17.7.6 addresses. Aaron experienced it twice already, so v0.17.7.6
-is the natural next chapter unless Aaron prefers another direction.
+**Option A from the v0.17.7.6.1 BAT discussion: block AD until calibrated.**
 
-**Friction points from v0.17.6.2 BAT (driving Track B):** unchanged.
+Two changes:
 
-**Aaron's taxonomy (2026-05-18):** Exit (MAPJUMP, destFieldId > 0), Interaction (TALKRADIUS/TALKON), Event (no talk setup, but MES/BATTLE/SHOW/HIDE/MOVE/REQ), NPC / Save / Draw / Shop / Card. Exclusion rule: drop entities with NO talkradius AND outside the walkmesh.
+1. **`field_nav_handlekeys.inl`** -- new refusal case in the AD-start chain. When `s_camAxesSource == "identity"` and `!s_camAxesEmpiricalApplied`, AD does not start. TTS announces: *"Camera not yet calibrated. Press an arrow key briefly to calibrate, then try again."* `[drive] REFUSED` line logged.
+
+2. **`field_nav_observe.inl`** -- `ObsApplyEmpirical` speaks *"Camera calibrated."* after the existing `[NAV-CAL]` log line. Fires once per field load (lock flag prevents repeats).
+
+v0.17.7.6.1's other changes are preserved: two-tier AD gate in observer (still allows sampling during AD on degenerate-CA in case some future field has wall-free wrong-direction injection), `EMPIRICAL_MIN_SAMPLES = 2`.
+
+### Regression safety
+
+The AD-refusal gate fires only on fields where `s_camAxesSource == "identity"` (degenerate-CA fallback). All CA-valid fields (source `"ca-quantized"`) behave identically to v0.17.7.6.1 = identical to v0.17.7.5.5. After calibration applies on a degenerate field, source becomes `"empirical-corrected"` and the gate stops firing for that field load.
+
+The TTS announcement at `[NAV-CAL]` is purely additive (one new `ScreenReader::Speak` call). No other logic changes.
+
+### Expected BAT outcome
+
+**Primary (bgroad_5):**
+- Aaron enters bgroad_5. `[NAV-PROJ-INIT] source=identity` logged.
+- Aaron presses backslash to start AD.
+- TTS: *"Camera not yet calibrated. Press an arrow key briefly to calibrate, then try again."*
+- `[drive] REFUSED` logged. AD does not start.
+- Aaron presses UP arrow for ~3 seconds.
+- Observer collects 2 UP samples; `[NAV-CAL]` fires.
+- TTS: *"Camera calibrated."*
+- Aaron retries AD (backslash again).
+- AD starts with corrected axes; drives correctly to dormitory.
+
+**Regression sanity:**
+- bghall_1, bg2f_2, other CA-valid fields: no behavioral change. AD starts immediately as before.
+- bgroad_5 entered, Aaron walks before triggering AD: same as above but the refusal message never fires.
+
+### Open question for later (deferred)
+
+If the walk-then-retry UX becomes annoying after Aaron lives with it, v0.17.7.6.3 could add a one-shot synthetic look-around at field load on degenerate-CA fields. Defer unless Aaron asks.
+
+---
 
 **Open question (deferred, not blocking)**: bgryo1_1 (Dormitory Double 1)
 resolver picked addr 0xE7 = 231 (Hallway 8) for its single SCREEN_BOUND line,
@@ -59,25 +76,24 @@ one was captured at that BAT point, or the addr-as-literal pattern doesn't
 hold for this field. Investigate if Aaron reports dormitory exit labeling
 issues later; otherwise leave it.
 
+**Friction points from v0.17.6.2 BAT (driving Track B):** unchanged.
+
+**Aaron's taxonomy (2026-05-18):** Exit (MAPJUMP, destFieldId > 0), Interaction (TALKRADIUS/TALKON), Event (no talk setup, but MES/BATTLE/SHOW/HIDE/MOVE/REQ), NPC / Save / Draw / Shop / Card. Exclusion rule: drop entities with NO talkradius AND outside the walkmesh.
+
 **Track B sequencing:**
 1. ✅ **v0.17.7.0**: file split. Pushed `8b9299c2`.
 2. ✅ **v0.17.7.1 / .1.1 / .1.2**: walkmesh rule + hasExtDispatch + runtime PSHM + INF fallback.
 3. ✅ **v0.17.7.2**: gated dumps + diagnostics.
-4. ✅ **v0.17.7.3**: all-method POPM_W capture. Destinations confirmed NOT in script bytecode init writes.
-5. ✅ **v0.17.7.4**: runtime MAPJUMP-family dispatch table hooks. Revealed forward scanner picks wrong push.
-6. ✅ **v0.17.7.5**: static resolver + VM stack/engine RESULT validation.
-7. ✅ **v0.17.7.5.1**: widen resolver + contiguous varblock dump. Confirmed varblock at field load doesn't hold destField.
-8. ✅ **v0.17.7.5.2**: inline_param + bytecode context + firing IP diagnostics. Revealed addr-as-literal pattern.
-9. ✅ **v0.17.7.5.3**: addr-as-literal fix BAT'd clean. 27 PSHM-DEST resolutions all correct.
-10. ✅ **v0.17.7.5.4**: split `hasExtDispatch` into `hasExtDispatch` + `hasDialogReqTarget`. Fixed bgroad_5 dormitory-exit mislabel.
-11. ✅ **v0.17.7.5.5**: self-loop MAPJUMP detection. Fixed bgryo1_4 bed-as-exit mislabel. BAT'd clean.
-12. 🟡 **v0.17.7.6 (next)**: camera projection closed-loop calibration --
-    NAV-OBSERVE empirical feedback overwrites CA-derived axes when 2D
-    projection is degenerate. Fixes bgroad_5 auto-drive direction
-    confusion + may improve manual nav cardinals on similar fields.
-13. **v0.17.7.7**: SETLINE-position promotion + NPC `ResolveFriendlyName`.
-14. **v0.17.7.8**: Shop/Card Game → NPC announce-layer collapse.
-15. **v0.17.7.9** (optional): SYM override layer for residual leaks.
+4. ✅ **v0.17.7.3**: all-method POPM_W capture.
+5. ✅ **v0.17.7.4**: runtime MAPJUMP-family dispatch table hooks.
+6. ✅ **v0.17.7.5**: static resolver + VM stack/RESULT validation.
+7. ✅ **v0.17.7.5.1-.5.5**: catalog overhaul cumulative batch. Pushed `6abcb8f`.
+8. ✅ **v0.17.7.6**: empirical calibration math (stepping stone, BAT'd partial).
+9. ✅ **v0.17.7.6.1**: two-tier AD gate + 2-sample threshold + log-line fix (stepping stone, BAT'd partial -- AD-into-wall failure revealed).
+10. ✅ **v0.17.7.6.2**: block AD on uncalibrated degenerate-CA + TTS instruction + "Camera calibrated" confirmation. BAT'd clean -- Aaron confirmed bgroad_5 AD works after one calibration walk.
+11. **v0.17.7.7**: SETLINE-position promotion + NPC `ResolveFriendlyName`.
+12. **v0.17.7.8**: Shop/Card Game → NPC announce-layer collapse.
+13. **v0.17.7.9** (optional): SYM override layer for residual leaks.
 
 ---
 

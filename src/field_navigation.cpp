@@ -663,6 +663,36 @@ static float s_driveCamDownY  = -1.0f;  // AUTO-DRIVE private camera down Y
 static const char* s_camAxesSource = "identity";
 static bool  s_camCalibrated = false;
 
+// v0.17.7.6: Closed-loop empirical camera-axes calibration state.
+//
+// Active ONLY when s_camAxesSource == "identity" (CA file missing or its
+// 2D projection was degenerate). The observer in field_nav_observe.inl
+// pushes single-arrow measurements into s_navObsBuffer; when
+// OBS_EMPIRICAL_MIN_SAMPLES recent samples for the same arrow agree within
+// the threshold, the consensus direction is mapped to the camera axis
+// the arrow corresponds to, snapped to nearest 90-degree world cardinal,
+// and the orthogonal axis is derived via the standard det=-1 rotation.
+// Both s_cam*X/Y (manual nav) and s_driveCam*X/Y (auto-drive private)
+// are overwritten so all consumers pick up the corrected values.
+//
+// s_camAxesEmpiricalApplied locks the correction to one-shot per field
+// load. All three fields are reset in HookedFieldScriptsInit.
+//
+// REGRESSION SAFETY: on any field where the CA file's 2D projection
+// was non-degenerate, s_camAxesSource was set to "ca-quantized" by the
+// CA-load block; this state is never touched and the observer never
+// pushes a sample. Behavior on those fields is byte-for-byte identical
+// to v0.17.7.5.5.
+struct NavObsSample {
+    float wx;   // normalized world-X of measured movement direction
+    float wy;   // normalized world-Y of measured movement direction
+};
+static const int OBS_NUM_ARROWS  = 4;   // index 0=UP, 1=DOWN, 2=LEFT, 3=RIGHT
+static const int OBS_MAX_SAMPLES = 8;
+static NavObsSample s_navObsBuffer[OBS_NUM_ARROWS][OBS_MAX_SAMPLES] = {};
+static int          s_navObsSampleCount[OBS_NUM_ARROWS] = {};
+static bool         s_camAxesEmpiricalApplied = false;
+
 
 // --- Engine input hooks (extracted v0.12.18) ---
 #include "field_nav_input_hooks.inl"

@@ -106,6 +106,38 @@ static void HandleKeys()
                        "(direction-drive is active)");
         } else if (FieldDialog::IsDialogOpen()) {
             ScreenReader::Speak("Auto-drive unavailable: dialog is open.");
+        } else if (strcmp(s_camAxesSource, "identity") == 0 && !s_camAxesEmpiricalApplied) {
+            // v0.17.7.6.2: Camera axes haven't been calibrated yet on this
+            // field. The CA file's 2D projection was degenerate (e.g.
+            // bgroad_5's axis1=(0,0,-4096), entirely in depth) so the mod
+            // fell back to identity defaults that don't match the engine's
+            // actual screen-to-world mapping on this field.
+            //
+            // The previous v0.17.7.6.1 design let AD start and tried to
+            // seed calibration from AD's own injected keys. That works only
+            // if AD's wrong-direction injection produces measurable
+            // movement -- BUT bgroad_5's wrong direction (east) pushed the
+            // player straight into a wall, producing moveDist=0 for the
+            // entire drive duration. With no movement, the observer's
+            // 50-unit gate filters out all samples, calibration never
+            // fires, AD thrashes through recovery phases and gives up.
+            //
+            // v0.17.7.6.2's fix: refuse AD start with a TTS message that
+            // tells Aaron what to do. He walks an arrow briefly (which
+            // does produce movement, since he's pressing keys he KNOWS
+            // align with the field's visible geometry), the observer
+            // samples it, calibration fires after 2 samples, and a TTS
+            // confirmation announces "Camera calibrated." Aaron then
+            // retries AD and it works with correct axes.
+            //
+            // This gate ONLY affects degenerate-CA fields with pending
+            // calibration. On CA-valid fields (source="ca-quantized") the
+            // strcmp returns non-zero and AD starts as before. After
+            // calibration applies on a degenerate field, the lock flag
+            // (s_camAxesEmpiricalApplied) becomes true and the gate stops
+            // firing for the remainder of that field load.
+            ScreenReader::Speak("Camera not yet calibrated. Press an arrow key briefly to calibrate, then try again.");
+            Log::Field("FieldNavigation: F9 drive REFUSED (camera axes not yet calibrated: source=identity, pending empirical correction)");
         } else {
             // Validate we have a usable target before starting.
             const EntityInfo& drTgt = (s_selectedCatalogIdx < s_catalogCount)
