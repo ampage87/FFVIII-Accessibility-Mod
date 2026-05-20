@@ -1111,16 +1111,39 @@ static void PollGFSummonState()
 {
     for (int gs = 0; gs < BATTLE_ALLY_SLOTS; gs++) {
         bool nowSummoning = IsSlotSummoningGF(gs);
-        
+
         // Bug 1: Detect new summon starting — clear animation-fired flag
         if (nowSummoning && !s_prevSlotSummoning[gs]) {
             s_gfAnimFired[gs] = false;
             s_gfHpTracking[gs] = false;  // reset HP baseline for new summon
             Log::Battle("BattleTTS: [GF-SUMMON] New summon detected for slot %d (entity+0x7C 0->non-zero)", gs);
         }
-        
+
+        // v0.17.8.0: HP-tracking predicate now OR'd with s_gfHpSubstitutionActive.
+        //
+        // Pre-v0.17.8.0 this only checked IsSlotSummoningGF (entity+0x7C). That
+        // engine flag is unreliable during the HP-SUB window: it can read 0 in
+        // intervals where the GF is acting as HP substitute but the engine
+        // hasn't yet flipped the per-character flag, and stays 0xFFFF after the
+        // animation fires (the "stays stale forever" pattern noted on the
+        // s_gfHpSubstitutionActive declaration above). v0.16.5.2 BAT logged
+        // Shiva taking damage with no announcement on a field where the engine
+        // flag was 0 throughout the damage event.
+        //
+        // AnnouncePartyMemberHP (the manual HP-check-key path, 1/2/3) already
+        // uses this same OR pattern — it correctly shows GF HP across the
+        // entire HP-SUB window. The auto damage-announce path now matches.
+        //
+        // s_gfHpSubstitutionActive is set definitively at GF command confirm
+        // in battle_tts_menu_poll.inl (when the turn ends and submenuCommandId
+        // is 0x15 = GF), and cleared when that character gets its next turn or
+        // on battle exit. Once set, it covers the entire interval from command
+        // confirm through animation fire, regardless of the per-character
+        // engine flag's state.
+        bool hpSubActive = nowSummoning || s_gfHpSubstitutionActive[gs];
+
         // Bug 2: Track GF HP for damage announcements during summon
-        if (nowSummoning && !s_gfAnimFired[gs]) {
+        if (hpSubActive && !s_gfAnimFired[gs]) {
             char gfName[64];
             uint16_t gfHP = 0;
             if (GetActiveGFInfo(gs, gfName, sizeof(gfName), &gfHP)) {

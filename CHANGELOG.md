@@ -6,6 +6,105 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.8.0
+
+Fire Cavern playthrough bug list (Aaron's 2026-05-18 report) — chapter open.
+v0.17.7.6.2 closed item #2 (manual field nav direction lag). This build
+addresses items #5 (GF breakpoint diagnostic spam) and #6 (damage not
+announced when a character is summoning and the GF takes damage in place)
+together in one build per Aaron's request — both are GF-related and the
+fixes don't interact. Item #3 (tutorial TTS garbage) ships separately in a
+follow-up build. Items #1 (Quistis FMV race) and #4 (party-as-NPC in
+two-member parties) remain deferred.
+
+### Bug #5: GF-BP diagnostic spam
+
+The v0.10.91 GF dispatch hunt diagnostic (`GF_BP_AutoArm` in
+`battle_tts_ewm_bp_diag.inl`) arms a hardware write/read breakpoint on
+the GF display timer at 0x01D769D6 when timer<=3, then captures up to
+GF_BP_MAX_HITS VEH events with full register + GF-state dumps. The
+investigation it supported closed in v0.10.91 when the GF fire dispatch
+function entry was identified and hooked. The auto-arm path was never
+removed — it still fires every GF cast, floods the battle log with 350+
+`[GF-BP] #N ACCESS` lines in a fraction of a second.
+
+**Fix:** Gate the auto-arm behind `#define GF_BP_AUTOARM_DIAG 0` in
+`battle_tts_ewm_bp_diag.inl`. Wrapped the single call site in
+`battle_tts.cpp` (Update() loop) with `#if GF_BP_AUTOARM_DIAG ... #endif`.
+The VEH handler (`GF_BP_VectoredHandler`), `GF_BP_ArmAllThreads`, and
+`GF_ScanForFunctionEntry` remain compiled in so the diagnostic can be
+re-armed by flipping the define to 1 without restoring removed code.
+
+### Bug #6: GF damage missing during GF-HP-SUB window
+
+Two defects compounded:
+
+1. **`PollGFSummonState()` was dead code.** Defined in
+   `battle_tts_hp.inl` since v0.13.47, never called from `Update()`. The
+   v0.16.5.2 BAT analysis noted "HP-TRACK doesn't watch the GF HP
+   address while GF-HP-SUB is active" — the polling logic existed but
+   wasn't wired in. Confirmed via exhaustive search across all
+   `battle_tts*.inl` files; the only references are the function
+   definition itself and two comments in `menu_poll.inl` /
+   `battle_tts_hp.inl` describing what it would do if called. Wired into
+   `Update()` adjacent to `PollHPChanges()` with matching
+   `s_inBattle && s_initAnnounceDone && s_enemyAnnounceDone` guards.
+
+2. **Predicate mismatch with `AnnouncePartyMemberHP`.** Once running,
+   `PollGFSummonState` gated GF HP tracking on `nowSummoning` alone
+   (`IsSlotSummoningGF` reads entity+0x7C). That engine flag is
+   unreliable during the HP-SUB window per the comment on
+   `s_gfHpSubstitutionActive`'s declaration: "Engine flags (entity+0x7C,
+   0x01D76971) are unreliable — they stay stale forever." The manual
+   HP-check-key path (`AnnouncePartyMemberHP`, 1/2/3 keys) has used
+   `IsSlotSummoningGF(slot) || s_gfHpSubstitutionActive[slot]` since
+   v0.13.48 and correctly shows GF HP across the full HP-SUB window.
+   `PollGFSummonState` now uses the same OR pattern via a `hpSubActive`
+   local: damage-announce path matches HP-check-key path.
+
+`s_gfHpSubstitutionActive[slot]` is set definitively in
+`battle_tts_menu_poll.inl` when the player confirms a GF command (turn
+ends with `submenuCommandId == 0x15`); cleared on the next turn for that
+character or on battle exit. It covers the entire interval from command
+confirm through GF animation fire, regardless of the engine flag's state.
+Combined with the wiring fix, GF HP changes during the substitution
+window now produce `[GF-SUMMON] <gfName> takes N damage.` log lines + TTS
+announcements.
+
+### Regression safety
+
+**Bug #5:** Pure compile-out. Without the auto-arm call site, the BP is
+never set, the VEH never fires, no behavior change other than the
+absence of the `[GF-BP]` log spam. All other GF systems (timer hook,
+state clamp, code patch at 0x004B04B4, FFNx hook) are untouched.
+
+**Bug #6:** Two changes, both additive in the announce direction:
+- New call to `PollGFSummonState()` from Update() runs an existing
+  function that was previously dead code; it only emits TTS in cases
+  where damage was previously missed entirely. Cannot suppress existing
+  announcements because it writes to its own state (`s_gfHpPrev`,
+  `s_gfHpTracking`) that no other code reads.
+- Predicate widening from `nowSummoning` to
+  `nowSummoning || s_gfHpSubstitutionActive[slot]` can only enable HP
+  tracking in additional states; it never disables tracking that the
+  pre-v0.17.8.0 code path enabled. `s_gfAnimFired[gs]` gating is
+  unchanged — announcements still stop at animation fire (visual parity
+  with the engine).
+
+### Expected BAT outcome
+
+- Enter a battle, summon any GF, let an enemy attack while the GF is
+  loading. Battle log should NOT show any `[GF-BP] #N ACCESS` lines for
+  the cast; should show `[GF-SUMMON] HP baseline for slot N: <gfName>
+  M HP` at HP-SUB window open, followed by `[GF-SUMMON] <gfName> takes K
+  damage.` lines as the enemy hits. TTS should announce the GF damage in
+  the player's voice.
+- Regression sanity: non-GF damage (Squall hit by Bite Bug) still
+  announces via `PollHPChanges` -> `FlushHPAnnouncements` -> `[HP-TRACK]`
+  with no change.
+- Carry-over: v0.17.7.6.2's "Camera not yet calibrated" + "Camera
+  calibrated" announcements on degenerate-CA fields still fire correctly.
+
 ## v0.17.7.6.2
 
 Follow-up to v0.17.7.6.1 BAT on bgroad_5. The calibration math + threshold

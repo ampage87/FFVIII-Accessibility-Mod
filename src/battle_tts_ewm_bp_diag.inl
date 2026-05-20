@@ -2,6 +2,21 @@
 // Included from battle_tts_ewm.inl. Do not compile independently.
 // v0.16.4: Extracted from battle_tts_ewm.inl for size compliance.
 //
+// v0.17.8.0: GF_BP_AUTOARM_DIAG gate. The auto-arm path that arms a hardware
+// write/read breakpoint on the GF display timer when timer<=3, then captures
+// up to GF_BP_MAX_HITS VEH events with full register + GF-state dumps, was a
+// v0.10.x investigation tool used to find the GF fire dispatch function entry.
+// That investigation closed when the function entry was identified and hooked
+// in v0.10.91. The auto-arm path is now leftover diagnostic that floods the
+// battle log with 350+ [GF-BP] lines per GF cast in a fraction of a second,
+// flagged in Aaron's 2026-05-18 Fire Cavern playthrough.
+//
+// Set GF_BP_AUTOARM_DIAG to 1 to re-enable the auto-arm path for future
+// hardware-BP-based investigation. The VEH handler, GF_BP_ArmAllThreads,
+// GF_ScanForFunctionEntry, and the manual-arm paths (if any) remain compiled
+// in either way so they're available without removing/restoring code.
+#define GF_BP_AUTOARM_DIAG 0
+//
 // ============================================================================
 // v0.10.63/70: Hardware write breakpoint diagnostic for GF fire trigger hunt
 // ============================================================================

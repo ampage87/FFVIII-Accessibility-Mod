@@ -1,6 +1,53 @@
 # DEVNOTES_HISTORY - FF8 Accessibility Mod Build History Archive
 ## All detailed build tables, investigation narratives, and per-version test results
 
+---
+
+## v0.17.7.6 → v0.17.7.6.2: Empirical camera-axes calibration chapter (pushed 2026-05-20 05:47 UTC as `d3321665` squashed onto `6abcb8f`)
+
+Closed-loop empirical correction for fields whose .ca file produces a degenerate 2D camera projection. Three iterations, each a stepping stone:
+
+### v0.17.7.6 (BAT'd partial)
+- Per-arrow ring buffer in `field_nav_observe.inl`. When `s_camAxesSource == "identity"` and observer fires, normalized measured direction pushes into matching arrow's buffer. 3-sample consensus within 10 degrees -> quantize to nearest 90° cardinal, derive orthogonal axis via R(-90°), overwrite both `s_cam*X/Y` and `s_driveCam*X/Y`. `s_camAxesSource` -> `"empirical-corrected"`. One-shot lock prevents oscillation.
+- New `[NAV-CAL]` log channel.
+- State reset in `HookedFieldScriptsInit`.
+- BAT on bgroad_5: math correct (`camRight (1,0)->(0,-1), camDown (0,-1)->(-1,0), det=-1`) but took 80 seconds to fire. AD-gate (`s_driveActive || s_chaseDriveActive` early-return) suppressed observer for entire AD attempt; calibration only fired when Aaron walked manually after AD gave up.
+
+### v0.17.7.6.1 (BAT'd partial)
+- Two-tier AD gate in observer: chase always suppresses (own calibration loop); regular AD suppresses except when `s_camAxesSource == "identity" && !s_camAxesEmpiricalApplied`. AD's SendInput-injected keys produce same GetAsyncKeyState visibility as hand presses.
+- `EMPIRICAL_MIN_SAMPLES` lowered 3 -> 2 (halves time-to-correction).
+- Fixed misleading `[NAV-PROJ-INIT]` log line that hardcoded `source=ca-quantized` even on degenerate branch where code correctly set source to `"identity"`.
+- BAT on bgroad_5: math + threshold worked (NAV-CAL fired after 2 UP samples) but AD pushed Aaron into a wall, `moveDist=0` for entire drive, observer's 50-unit gate filtered all samples. Calibration didn't fire until Aaron walked manually with UP after AD gave up. The catch-22 mutated: AD-into-wall -> no movement -> no samples -> no calibration.
+
+### v0.17.7.6.2 (BAT'd CLEAN — Aaron confirmed)
+- Option A: block AD on uncalibrated degenerate-CA fields with TTS instruction.
+- New refusal case in `field_nav_handlekeys.inl` AD-start chain: when `strcmp(s_camAxesSource, "identity") == 0 && !s_camAxesEmpiricalApplied`, AD does NOT start. TTS announces *"Camera not yet calibrated. Press an arrow key briefly to calibrate, then try again."* `[drive] REFUSED` line logged.
+- `ObsApplyEmpirical` now speaks *"Camera calibrated."* after `[NAV-CAL]` log line (lock prevents repeats).
+- BAT on bgroad_5: Aaron triggered AD -> heard refusal TTS -> walked UP a few seconds -> heard "Camera calibrated." -> retried AD -> drove correctly to dormitory.
+
+### Key learnings
+
+- **`s_camAxesSource = "identity"` is the canonical signal for degenerate-CA + pending-calibration state.** All three iterations gated their changes on this string. The mod has three CA states: `"ca-quantized"` (CA file's 2D projection non-degenerate), `"identity"` (degenerate fallback, pending calibration), `"empirical-corrected"` (after `[NAV-CAL]` fires).
+- **Observer's 50-unit movement gate is correct.** Designed to filter out player-stationary noise. But it makes AD-on-wall a dead state for calibration sampling.
+- **AD pushing into wall is not a recoverable state for empirical calibration.** With no movement, no signal. v0.17.7.6.3 (parked) considered: synthetic look-around inject at field load to pre-calibrate without user action. Not implemented because v0.17.7.6.2's UX ("walk first, then AD") proved acceptable in BAT.
+- **GetAsyncKeyState reflects SendInput-injected synthetic state.** Confirmed by v0.17.7.6.1's two-tier gate working in principle (observer code path enabled during AD); when player actually moved, samples flowed. The chase auto-pilot's analog injection via `s_fakeDIJOYSTATE2` is independent of GetAsyncKeyState observability — observer sees the keyboard side.
+- **F11 screenshot was load-bearing for verifying the math.** axis2=+X in bgroad_5's .ca matched the visual hallway orientation (vanishing point at center-back = screen-up = world +X). camDown=(-1,0) post-correction confirmed.
+
+### Files touched across .6 → .6.2
+
+- `src/ff8_accessibility.h` -- version
+- `src/field_navigation.cpp` -- state declarations, ScreenReader forward decl already present
+- `src/field_nav_observe.inl` -- ring buffer, consensus logic, quantization, two-tier gate, TTS speak
+- `src/field_nav_fieldscripts.inl` -- state reset, log line fix
+- `src/field_nav_handlekeys.inl` -- AD-refusal case
+- `CHANGELOG.md` -- three entries
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md` -- updated through each iteration
+
+No catalog changes, no auto-drive direction injection logic changes, no CA parser changes, no GPS cardinal computation changes.
+
+---
+
+
 > This file is the archaeological record. Consult ONLY when you need to understand
 > WHY a past decision was made, or to trace the evolution of a specific feature.
 

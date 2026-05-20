@@ -979,13 +979,35 @@ void Update()
     }
 
     if (s_inBattle) {
+#if GF_BP_AUTOARM_DIAG
+        // v0.10.91 GF dispatch hunt diagnostic. Disabled by default in
+        // v0.17.8.0 (floods log with 350+ [GF-BP] lines per cast). Flip
+        // GF_BP_AUTOARM_DIAG to 1 in battle_tts_ewm_bp_diag.inl to re-arm
+        // for future hardware-BP investigation.
         GF_BP_AutoArm();
+#endif
     }
 
     // v0.14.45: F12 victory step-capture polling removed (diagnostic complete).
 
     if (s_inBattle && s_initAnnounceDone && s_enemyAnnounceDone) {
         PollHPChanges();
+    }
+
+    // v0.17.8.0: Wire PollGFSummonState into the main Update loop. The
+    // function was defined in battle_tts_hp.inl (v0.13.47) but never called
+    // from any Update path -- dead code since introduction. Without it, GF
+    // HP changes during a summon (damage to Shiva while loading) never get
+    // detected or announced. The v0.16.5.2 BAT triage flagged this as bug
+    // #6; the predicate fix in PollGFSummonState (OR with
+    // s_gfHpSubstitutionActive, also v0.17.8.0) accomplishes nothing
+    // without the function actually running. PollGFSummonState reads
+    // savemap GF HP and announces deltas via BattleSpeakEvent --
+    // independent of PollHPChanges's entity-HP path, so ordering between
+    // them is free; placing it adjacent keeps the per-frame damage-announce
+    // logic in one block.
+    if (s_inBattle && s_initAnnounceDone && s_enemyAnnounceDone) {
+        PollGFSummonState();
     }
 
     // v0.16.5.1: Release the v0.13.52 deferred turn announcement when the

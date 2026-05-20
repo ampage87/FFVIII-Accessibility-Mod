@@ -1,4 +1,4 @@
-# Next Session Prompt: v0.17.7.6.2 BAT triage
+# Next Session Prompt: v0.17.8.1 — Bug #3 (tutorial TTS garbage)
 
 ## Greeting
 
@@ -6,93 +6,110 @@ Start with `## Claude Says`. Read `DEVNOTES.md` and THIS file before any work.
 
 ## Where we are at session open
 
-**v0.17.7.6.2 is implemented locally, awaiting Aaron's BAT.** `FF8OPC_VERSION` = `0.17.7.6.2`. `CHANGELOG.md` top heading matches.
+**v0.17.8.0 BAT'd CLEAN.** Aaron confirmed both fixes:
+- Bug #5 (GF-BP diagnostic spam) — no GF breakpoint TTS announcement heard.
+- Bug #6 (GF damage announce during HP-SUB window) — heard the GF take damage in place of the character.
 
-**What's in this build:** the calibration-needed gate. When Aaron triggers AD on a field where `s_camAxesSource == "identity"` (degenerate-CA fallback) and calibration hasn't applied yet:
-- AD does not start
-- TTS announces: *"Camera not yet calibrated. Press an arrow key briefly to calibrate, then try again."*
-- Aaron walks an arrow briefly; observer collects 2 samples; `[NAV-CAL]` fires
-- TTS announces: *"Camera calibrated."*
-- Aaron retries AD; drives correctly
+**Two possible session-open paths:**
 
-This is "Option A" from the v0.17.7.6.1 BAT discussion. It defers AD until calibration applied, instead of trying to make AD self-correct (which the v0.17.7.6 and .6.1 BATs both proved unreliable because the wrong direction can push the player into a wall, producing `moveDist=0`).
+### Path A: Aaron has already pushed v0.17.8.0
 
-**Regression safety:** the gate fires only on `source=identity` fields with pending calibration. CA-valid fields are byte-for-byte identical to v0.17.7.6.1 = identical to v0.17.7.5.5. The TTS at `[NAV-CAL]` is purely additive.
+GitHub HEAD is now at the v0.17.8.0 commit. Verify by calling `github:list_commits` and confirming the top commit is titled `v0.17.8.0`. Then proceed to bug #3 work.
 
-GitHub HEAD still at v0.17.7.5.5 (`6abcb8f`). v0.17.7.6, .6.1, .6.2 all stay local until .6.2 BAT'd clean.
+### Path B: Aaron hasn't pushed yet
 
-## Status check at session open
+Local tree has v0.17.8.0 ready to push (CHANGELOG top heading matches `FF8OPC_VERSION`). Push utility: `Utilities/push_to_github.ps1`. Aaron pushes; Claude doesn't. Confirm push completed via `github:list_commits` before starting v0.17.8.1 work.
 
-If Aaron opens with **"BAT"** or a log paste: triage v0.17.7.6.2.
+Either way: once pushed, proceed to bug #3.
 
-If Aaron opens with a build error: read `Logs/build_latest.log` first. (The new code uses `strcmp` which is already in scope from v0.17.7.6.1 and `ScreenReader::Speak` which is widely used in handlekeys.inl — no new headers needed.)
+## Bug #3: Tutorial TTS garbage
 
-If Aaron opens with a question or design discussion about the calibration UX: most likely scenario is he wants v0.17.7.6.3 (synthetic look-around at field load) if the walk-then-retry friction is too much. Discuss before coding — that one is more intrusive.
+### What we know
 
-## BAT triage workflow
+From the 2026-05-18 Fire Cavern playthrough (v0.16.5.2 BAT triage):
 
-### Step 1: Confirm build clean
+```
+[POLL] win[0] Speaking: ",e 3in*retone3 e~HP~B:All08E%~!/..."
+```
 
-Read `Logs/build_latest.log`. Two-file change set; build should be clean.
+…fires after `[TUTO]` mode transitions from 10 → 1 (tutorial scene completes). The text is garbled — looks like tokens / unprintable bytes / unset character codes. SAPI then attempts to speak this garbage, which the screen reader reads as a string of nonsense.
 
-### Step 2: Pull the field log + accessibility log
+### Two candidate fixes
 
-`Logs/ff8_field.log` for `[NAV-PROJ-INIT]`, `[drive] REFUSED`, `[NAV-CAL]`, `[NAV-OBSERVE]` lines.
-`Logs/ff8_accessibility.log` (or `ff8_mod.log`) for the two TTS announcements.
+**Option A (preferred): Token rejection in POLL path.** Filter out `[…]` tokens (FF8 dialog control codes that weren't decoded), unprintable bytes (< 0x20 except whitespace), and characters above the standard ASCII range that aren't part of valid encoded text. Reject the whole speak attempt if it fails some validity threshold (e.g. >25% non-letters).
 
-Sanity check version: `FieldNavigation: Initialized v0.17.7.6.2`.
+Pro: catches similar future cases regardless of source.
+Con: needs careful threshold tuning so legitimate punctuation-heavy text isn't rejected.
 
-### Step 3: Primary test — bgroad_5 retry
+**Option B (alternative): Suppress POLL win[0] briefly on tutorial-end.** Track the `[TUTO]` mode 10→1 transition and suppress any POLL speech from win[0] for ~500 ms after.
 
-The key sequence Aaron should observe (and the logs should confirm):
+Pro: surgical, no risk of rejecting legitimate text.
+Con: tutorial-specific. If garbage appears in other contexts, this won't catch it.
 
-1. **Field load.** `[NAV-PROJ-INIT] WARNING field='bgroad_5' camera 2D projections degenerate ...` + `[NAV-PROJ-INIT] field='bgroad_5' ... source=identity`.
-2. **Aaron presses backslash (AD trigger).**
-3. `ff8_mod.log` shows TTS: `"Camera not yet calibrated. Press an arrow key briefly to calibrate, then try again."`
-4. `ff8_field.log` shows: `FieldNavigation: F9 drive REFUSED (camera axes not yet calibrated: source=identity, pending empirical correction)`.
-5. AD does NOT start. No `[drive] started toward` line. No `[drive-vec]` lines. No fake gamepad install.
-6. **Aaron walks UP arrow for a few seconds.** Player moves.
-7. `[NAV-OBSERVE] field='bgroad_5' axes=identity arrow=UP held=18ticks delta=(279,0) ... DIVERGE=90deg` — first sample.
-8. After 1500ms throttle, second sample comes in. `[NAV-OBSERVE] ... arrow=UP delta=(...,0)`.
-9. **`[NAV-CAL]` fires.** Expected values: `camRight (1.000,0.000)->(-0.000,-1.000) camDown (0.000,-1.000)->(-1.000,0.000) det=-1.000 source=empirical-corrected`.
-10. `ff8_mod.log` shows TTS: `"Camera calibrated."`
-11. **Aaron presses backslash again.** AD starts normally.
-12. `[drive] started toward ...` line logged. `[drive-vec]` lines show the corrected axes producing correct direction injection.
-13. Drive completes; Aaron arrives at dormitory.
+**Suggested approach**: implement Option A as the primary fix (general-purpose) and consider Option B as a fallback if Option A proves too aggressive.
 
-### Step 4: Regression sanity
+### Investigation steps
 
-Confirm Aaron's standard fields behave the same as v0.17.7.5.5:
-- bghall_1 auto-drive to any exit: AD starts immediately. No refusal. No `[NAV-CAL]`. Behavior identical.
-- bg2f_2 auto-drive: identical.
-- A field with valid CA in general: `[NAV-PROJ-INIT] ... source=ca-quantized` (the misleading log was fixed in .6.1). AD starts immediately.
+1. **Locate the POLL pipeline.** Likely in `dialog_inject.cpp`, `src/dialog_inject.h`, or one of the field/menu TTS files. The log line `[POLL] win[0] Speaking: ...` should be searchable via `filesystem:edit_file` dryRun across `src/`.
 
-### Step 5: Edge cases (if Aaron tests)
+2. **Find the `[TUTO]` mode tracker.** Search for `[TUTO]` log emissions to identify which file emits the mode 10→1 transition log.
 
-- **Walk first, then AD:** Calibration fires from manual walking; "Camera calibrated" plays; AD starts normally without ever hearing the refusal message. Working as designed.
-- **Trigger AD multiple times rapidly before walking:** Each backslash press fires the refusal TTS again. Throttling at the SAPI/queue layer should prevent spam — verify it's not stacking up an annoying queue of identical announcements. If it does, add a debounce window on the refusal speak (note for follow-up, not blocking).
-- **Cancel and restart AD on a CA-valid field after the gate fires once:** State should reset cleanly between fields via the field-load reset in fieldscripts.inl. No carry-over of `s_camAxesEmpiricalApplied` flag from a prior field.
-- **Re-enter bgroad_5 after leaving:** Accumulator + lock flag both reset. Aaron must re-calibrate. (Acceptable: calibration is per field-load.)
+3. **Find the win[0] data source.** The POLL path likely reads from FF8's window object array (`ff8_win_obj` per memory notes). Identify the read site and the text buffer.
 
-## Reporting back to Aaron
+4. **Trace the text encoding.** FF8 dialog text uses encoded byte values (the FF8 character map). The mod has `DecodeFF8String()` somewhere — if the POLL path bypasses that, raw bytes would look garbled. Alternatively, the engine may have already started overwriting the buffer before the POLL fires (race condition).
 
-**If everything works:**
-1. Mark v0.17.7.6, .6.1, .6.2 all ✅ in DEVNOTES.
-2. The three are push-ready as a coherent batch (calibration math + threshold + gate + UX messaging).
-3. Suggest v0.17.7.7 (SETLINE-position promotion + NPC ResolveFriendlyName) as the next chapter.
+5. **Reproduce the garble.** Aaron's 2026-05-18 Fire Cavern playthrough should have logged a clean example. Search `Logs/ff8_dialog.log` (or wherever `[POLL]` lives) for the date/time of that playthrough.
 
-**If the gate fires but TTS doesn't play:**
-- Check `ff8_mod.log` for any `ScreenReader::Speak` errors.
-- Verify `ff8_field.log` shows the `[drive] REFUSED` line (proves the gate fired).
-- If logging fires but TTS doesn't, the ScreenReader pipeline has a queue issue — investigate that side.
+### Implementation plan (Option A)
 
-**If TTS plays but AD doesn't refuse:**
-- Check the strcmp comparison. Possible the gate logic is short-circuiting wrong way.
-- Pull the `[NAV-PROJ-INIT]` line for the field — confirm it actually says `source=identity` at the time of AD trigger.
+Pseudocode for the filter:
 
-**If a regression surfaces** (working field starts misbehaving):
-- Pull that field's `[NAV-PROJ-INIT]` line. Should say `source=ca-quantized`.
-- The refusal gate must NOT fire on CA-valid fields. If it does, the strcmp condition is broken.
+```cpp
+static bool IsGarbledText(const char* text) {
+    if (!text || !text[0]) return false;  // empty is fine, not garbled
+    int len = (int)strlen(text);
+    int badCount = 0;
+    int totalCount = 0;
+    
+    for (int i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)text[i];
+        totalCount++;
+        
+        // Reject control codes (except whitespace)
+        if (c < 0x20 && c != ' ' && c != '\t' && c != '\n') { badCount++; continue; }
+        
+        // Reject undecoded FF8 control tokens (typically '~' followed by hex)
+        // — Actual character depends on what the tokens look like in the log
+        if (c == '~' && i + 1 < len && (isxdigit(text[i+1]) || text[i+1] == ' ')) {
+            badCount++;
+            continue;
+        }
+        
+        // Reject extended ASCII / control bytes
+        if (c >= 0x7F && c < 0xA0) { badCount++; continue; }
+    }
+    
+    if (totalCount == 0) return false;
+    return (badCount * 100 / totalCount) > 25;  // >25% bad → reject
+}
+
+// In the POLL Speak path, before calling SAPI:
+if (IsGarbledText(textBuf)) {
+    Log::Battle("[POLL] win[0] REJECTED garbled text: \"%s\"", textBuf);
+    return;  // don't speak
+}
+```
+
+The exact tokens to reject need to be matched against the actual sample (`",e 3in*retone3 e~HP~B:All08E%~!/..."`). The `~HP~`, `~B:`, `%~` patterns look like undecoded FF8 dialog macros — `~` followed by a letter/code is a strong garble signal.
+
+### Files likely involved
+
+- `src/dialog_inject.cpp` / `src/dialog_inject.h` — dialog injection pipeline (per memory notes)
+- `src/field_dialog.cpp` (or similar field dialog file) — field-side POLL hooks
+- `src/ff8_text_decode.cpp` / `.h` — text decoder (if it exists)
+- `src/battle_tts.cpp` — has its own DecodeFF8String? Worth checking.
+
+Step 1 will narrow it down.
 
 ## File-access reminder
 
@@ -102,7 +119,22 @@ For mid-file log searches, use `filesystem:edit_file` with `dryRun=true` and a u
 
 ## Session checkpoint rule reminder
 
-After BAT triage:
-1. Update DEVNOTES.md (mark .6.2 ✅ or note regressions).
-2. Rewrite this NEXT_SESSION_PROMPT.md for whatever comes next.
-3. If pushing: `Utilities/push_to_github.ps1`. Claude doesn't push. Aaron does. Utility checks version + CHANGELOG match before pushing.
+After v0.17.8.1 implementation:
+1. Bump `FF8OPC_VERSION` in `src/ff8_accessibility.h` to `0.17.8.1`.
+2. Add top entry `## v0.17.8.1` in `CHANGELOG.md`.
+3. Update `DEVNOTES.md` to reflect the new in-tree state.
+4. Rewrite this `NEXT_SESSION_PROMPT.md` for the BAT-triage step.
+
+After BAT:
+1. Mark v0.17.8.1 ✅ in DEVNOTES (move bug #3 from active to closed).
+2. If pushing: Aaron runs `Utilities/push_to_github.ps1`. Claude never pushes.
+3. Suggest next chapter — likely bug #4 (party-as-NPC) or bug #1 (Quistis FMV race) depending on Aaron's priority.
+
+## Remaining Fire Cavern bug list
+
+1. Quistis' FMV in the Infirmary fired prematurely — deferred
+2. ~~Manual field navigation direction lag~~ — ✅ closed by v0.17.7.6.2
+3. Garbage announced by TTS following completion of a tutorial scene — **current target (v0.17.8.1)**
+4. Party member announced as NPC in catalog when party consists of just two members — deferred
+5. ~~Breakpoint on display timer announced when GF sequence starts~~ — ✅ closed by v0.17.8.0
+6. ~~Damage not announced when a character is summoning and the GF takes the damage in place of the character~~ — ✅ closed by v0.17.8.0
