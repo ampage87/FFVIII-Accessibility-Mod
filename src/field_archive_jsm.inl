@@ -38,5 +38,7 @@
 #include "field_archive_jsm_helpers.inl"
 #include "field_archive_jsm_opnames.inl"
 #include "field_archive_jsm_director.inl"
+#include "field_archive_jsm_mapjump_resolver.inl"  // v0.17.7.5: static destField resolver, included before scan.inl (used inside ScanJSMScripts)
 #include "field_archive_jsm_scan.inl"
 #include "field_archive_jsm_dump.inl"
+#include "field_archive_jsm_initvars.inl"  // v0.17.7.2: public API for init-var lookups

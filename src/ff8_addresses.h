@@ -293,6 +293,17 @@ extern uint32_t opcode_set3;       // 0x01E — set entity position (X, Y, Z, tr
 // v0.08.07: PSHM_W opcode for shared memory read diagnostics
 extern uint32_t opcode_pshm_w;     // 0x00C — push shared memory word (unsigned)
 
+// v0.17.7.4: MAPJUMP variants for diagnostic destination capture.
+// Each is read from pExecuteOpcodeTable[N] at startup. Hooked via dispatch
+// table overwrite in field_nav_mapjump_diag.inl to log destination values
+// at the moment MAPJUMP fires, sidestepping the static-resolution dead end
+// found in v0.17.7.3 BAT.
+extern uint32_t opcode_mapjump;      // 0x029 — field transition (X, Y, tri)
+extern uint32_t opcode_mapjump3;     // 0x02A — field transition (X, Y, Z, tri)
+extern uint32_t opcode_discjump;     // 0x038 — disc change transition
+extern uint32_t opcode_mapjumpo;     // 0x05C — map jump (other variant)
+extern uint32_t opcode_worldmapjump; // 0x10D — world map transition
+
 // v04.28+: engine input button state variables.
 // Both are written by engine_eval_is_button_pressed each frame.
 // confirmed_buttons = buttons just pressed this frame (edge-triggered).

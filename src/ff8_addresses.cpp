@@ -80,6 +80,13 @@ uint32_t  opcode_set3 = 0;
 // v0.08.07: PSHM_W opcode for shared memory read diagnostics
 uint32_t  opcode_pshm_w = 0;
 
+// v0.17.7.4: MAPJUMP variants for diagnostic destination capture
+uint32_t  opcode_mapjump      = 0;
+uint32_t  opcode_mapjump3     = 0;
+uint32_t  opcode_discjump     = 0;
+uint32_t  opcode_mapjumpo     = 0;
+uint32_t  opcode_worldmapjump = 0;
+
 // v04.28+: engine input button state variables
 uint32_t* pEngineInputConfirmedButtons = nullptr;
 uint32_t* pEngineInputValidButtons     = nullptr;
@@ -698,6 +705,18 @@ bool Resolve()
             // v0.08.07: PSHM_W for hooking (shared memory word read)
             opcode_pshm_w = pExecuteOpcodeTable[0x06];
             Log::Mod("FF8Addresses:   opcode_pshm_w     [0x006] = 0x%08X", opcode_pshm_w);
+
+            // v0.17.7.4: MAPJUMP variants for diagnostic hook in field_nav_mapjump_diag.inl
+            opcode_mapjump      = pExecuteOpcodeTable[0x29];
+            opcode_mapjump3     = pExecuteOpcodeTable[0x2A];
+            opcode_discjump     = pExecuteOpcodeTable[0x38];
+            opcode_mapjumpo     = pExecuteOpcodeTable[0x5C];
+            opcode_worldmapjump = pExecuteOpcodeTable[0x10D];
+            Log::Mod("FF8Addresses:   opcode_mapjump      [0x029] = 0x%08X", opcode_mapjump);
+            Log::Mod("FF8Addresses:   opcode_mapjump3     [0x02A] = 0x%08X", opcode_mapjump3);
+            Log::Mod("FF8Addresses:   opcode_discjump     [0x038] = 0x%08X", opcode_discjump);
+            Log::Mod("FF8Addresses:   opcode_mapjumpo     [0x05C] = 0x%08X", opcode_mapjumpo);
+            Log::Mod("FF8Addresses:   opcode_worldmapjump [0x10D] = 0x%08X", opcode_worldmapjump);
 
             // v0.08.06: PSHM_W handler diagnostic — dump machine code to find
             // the shared memory base address for direct variable reads.

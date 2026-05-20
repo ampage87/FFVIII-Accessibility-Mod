@@ -162,6 +162,18 @@ struct JSMEntityInfo {
     // v0.12.24: True if entity uses runtime 0x1C extended dispatch (PSHM_W-based).
     // Indicates potential runtime-dispatched dialog opcodes not detectable statically.
     bool           hasExtDispatch;
+    // v0.17.7.5.4: True if REQ-following found this Line entity REQs a target
+    // entity that has dialog opcodes (MES/ASK/AMES/AASK) or extended dispatch.
+    // Distinguishes the genuine "dual-purpose dialog-mediated exit" pattern
+    // (e.g. dormitory bed: bed Line REQs bed Background which shows "Sleep?")
+    // from the "line uses extended dispatch for non-dialog purposes" pattern
+    // (e.g. bgroad_5 squalls: uses 0x1C for sound/particle effects only).
+    // Before this flag existed, the catalog used hasExtDispatch for both cases
+    // and incorrectly suppressed pure-exit Lines from the catalog's Exit
+    // labeling -- BAT'd on bgroad_5 (Hallway 5) where the dormitory exit
+    // showed as "Interaction 1" instead of "Exit to Dormitory Double 1".
+    // Only set by the scanner's REQ-following post-pass (never by own 0x1C use).
+    bool           hasDialogReqTarget;
     // v0.12.16: SETLINE interaction zone from JSM script.
     // SETLINE defines the exact line segment where the player can interact.
     // The line center is the precise interaction position (better than SET3
@@ -169,6 +181,13 @@ struct JSMEntityInfo {
     bool           hasSetline;    // true if SETLINE opcode found with literal coords
     int16_t        setlineX1, setlineY1, setlineZ1;
     int16_t        setlineX2, setlineY2, setlineZ2;
+    // v0.17.7.1: True if entity's script uses TALKRADIUS or TALKON, meaning the
+    // player must press confirm to interact (vs. crossing a Line trigger to
+    // fire it). Used by catalog classification to distinguish Interactions
+    // from Events for Line entities, and as a keep-condition for the walkmesh
+    // exclusion filter (off-walkmesh entities with talk setup are kept because
+    // the player can interact from on-walkmesh).
+    bool           hasTalkSetup;
 };
 
 const char* JSMEntityTypeName(JSMEntityType t);
@@ -253,6 +272,27 @@ void FreeWalkmesh(WalkmeshData& mesh);
 // jsmEntityIndex is the flat JSM entity index (Door+Line+BG+Other ordering).
 // Logs all methods and decoded opcodes to the accessibility log.
 bool DumpEntityScript(const char* fieldName, int jsmEntityIndex);
+
+// v0.17.7.2: Look up init-method POPM_W writes to a specific varblock address.
+// After ScanJSMScripts() has run, this exposes the static init-script writes
+// captured per entity (the s_initVarMaps array). The diagnostic block in
+// HookedFieldScriptsInit calls this for each unresolved MAPJUMP PSHM address
+// to find out which entity writes the destination field ID at field load.
+//
+// addr: the PSHM varblock address (e.g. extracted from a 0x8000xxxx marker)
+// outEntries: caller-provided buffer of (entityIdx, value) pairs filled in
+// maxEntries: capacity of outEntries
+// Returns: number of writers found (may exceed maxEntries; only the first
+//          maxEntries are written to the buffer).
+struct InitVarWriter { int entityIdx; int32_t value; };
+int LookupInitVarWrites(int16_t addr, InitVarWriter* outEntries, int maxEntries);
+
+// v0.17.7.2: Iterate all init-method writes across the field for summary logging.
+// outEntries: caller buffer of (entityIdx, addr, value) tuples
+// maxEntries: capacity
+// Returns: number of writes found (may exceed maxEntries).
+struct InitVarTuple { int entityIdx; int32_t addr; int32_t value; };
+int EnumerateInitVars(InitVarTuple* outEntries, int maxEntries);
 
 // Shut down and release memory.
 void Shutdown();

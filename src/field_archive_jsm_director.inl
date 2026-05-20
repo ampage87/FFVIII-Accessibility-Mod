@@ -106,12 +106,22 @@ static void RunDirectorDetection(const char* fieldName,
             // v0.12.23: Also dump Background entities on this field.
             // Deep research suggests interaction zones may be in Background
             // entity init scripts (SETLINE/SET3/TALKRADIUS), not Others.
+            //
+            // v0.17.7.2: Gated behind FF8OPC_VERBOSE_JSM. The unguarded dump
+            // was generating thousands of log lines per field (bghall_1 has
+            // 6 Background entities; each Director re-dumps them all, and
+            // bghall_1 has 3 Directors -> 18 full BG dumps). In v0.17.7.1.2
+            // BAT logs this caused field_scripts_init's post-init block to
+            // be cut off entirely when the player moved to another field
+            // before logging finished. Production builds skip the dump.
+#ifdef FF8OPC_VERBOSE_JSM
             for (int bg = countDoors + countLines; bg < countDoors + countLines + countBg; bg++) {
                 int bgSymIdx = bg - countDoors;
                 const char* bgSym = (bgSymIdx >= 0 && bgSymIdx < symCount) ? symNames[bgSymIdx] : "?";
                 Log::Field("FieldArchive: [DIRECTOR]   dumping Background entity %d '%s'", bg, bgSym);
                 DumpEntityScript(fieldName, bg);
             }
+#endif
 
             Log::Field("FieldArchive: [DIRECTOR] Detected: ent%d '%s' on '%s' — "
                        "%d REQ opcodes, %d dialog targets, %d init vars",
@@ -129,7 +139,13 @@ static void RunDirectorDetection(const char* fieldName,
             }
 
             // v0.12.20: Dump Director's full decoded script for position pattern analysis.
+            // v0.17.7.2: Gated -- displight on bghall_1 has 34 methods (~3000 dwords),
+            // dumping it three times (one per Director) blew up the log past the
+            // point where the field_scripts_init post-init block could complete
+            // before the player changed fields.
+#ifdef FF8OPC_VERBOSE_JSM
             DumpEntityScript(fieldName, dIdx);
+#endif
 
             // Promote each potential dispatch target to INTERACTIVE_OBJECT.
             // Since REQ target IDs aren't reliably parsed, we promote all
@@ -186,9 +202,15 @@ static void RunDirectorDetection(const char* fieldName,
                 // v0.12.22: Dump init script for unpositioned targets to verify
                 // whether they contain SETLINE/SET3/TALKRADIUS literals.
                 // Deep research suggests coordinates should be here.
+                // v0.17.7.2: Gated -- same log-explosion problem; dumps fire per
+                // promoted target per Director, easily 18+ on hub fields. The
+                // bghall_1 BAT showed seito4's dump appearing here even with the
+                // other three gates in place.
+#ifdef FF8OPC_VERBOSE_JSM
                 if (!outEntities[tc].hasPosition) {
                     DumpEntityScript(fieldName, tgt);
                 }
+#endif
             }
         }
         if (directorsFound > 0) {

@@ -212,6 +212,7 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         bool foundSetmodel     = false;
         bool foundSetmodelInit = false;  // v0.12.20: SETMODEL specifically in method 0 (init)
         bool foundTalkon       = false;
+        bool foundTalkradius   = false;  // v0.17.7.1: TALKRADIUS opcode in this entity's scripts
         bool foundDoorline     = false;
         bool foundParticleon   = false;
         bool foundAdditem      = false;
@@ -383,7 +384,18 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                         case 0x0B: // POPM_L - pop to memory long
                             // v0.12.20: Record PUSH+POPM_W pairs in init method for Director variable maps.
                             // Must capture BEFORE the pop. Only record literal values (no PSHM markers).
-                            if ((highByte == 0x08 || highByte == 0x0B) && m == 0 && e < 128 &&
+                            // v0.17.7.3: Dropped the `m == 0` gate so writes from ANY method get
+                            // recorded. Reason: v0.17.7.2 BAT confirmed bghall_2/3/5 SCREEN_BOUND
+                            // Lines read MAPJUMP destinations from varblock addresses (e.g. 0x01F6,
+                            // 0x023A) that NO field-wide init-method write touches. Either the
+                            // Lines themselves write the destination in their walk-on method
+                            // (likely), or some other entity does it in a story-dispatch method
+                            // reached via REQ from init. Either way, capturing all-method writes
+                            // lets the v0.17.7.4 resolver cross-reference unresolved markers
+                            // against the Line's own bytecode. Empirically harmless to other
+                            // consumers: director.inl uses s_initVarMaps only for diagnostic
+                            // logging, no decision logic depends on the m==0 restriction.
+                            if ((highByte == 0x08 || highByte == 0x0B) && e < 128 &&
                                 pushCount > 0 && ((uint32_t)pushStack[pushCount-1] & 0x80000000u) == 0 &&
                                 s_initVarMaps[e].count < 64) {
                                 s_initVarMaps[e].writes[s_initVarMaps[e].count].addr = opcParam;
@@ -587,6 +599,7 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                 if (opcode == JSM_OP_SETMODEL) foundSetmodel = true;
                 if (opcode == JSM_OP_SETMODEL && m == 0) foundSetmodelInit = true;  // v0.12.20
                 if (opcode == JSM_OP_TALKON)   foundTalkon = true;
+                if (opcode == JSM_OP_TALKRADIUS) foundTalkradius = true;  // v0.17.7.1
 
                 // Door trigger line.
                 if (opcode == JSM_OP_DOORLINEON || opcode == JSM_OP_DOORLINEOFF)
@@ -715,32 +728,49 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         }
         // Otherwise, keep the default from JSM category assignment above.
 
-        // v0.07.82: Classify Line entities by opcode signatures.
-        // Priority: dialog/interactive > MAPJUMP > battle > event > camera pan > default.
-        // v0.12.24: Run for ALL category-1 entities regardless of general classification.
-        // Line entities often have MAPJUMP (general block sets MAP_EXIT) AND dialog opcodes
-        // (e.g. bgryo1_4 'squall' handles both room exit and uniform interaction).
-        // The Line-specific block must override to get the correct line type.
+        // v0.07.82 / v0.17.7.1 / v0.17.7.1.1: Classify Line entities by opcode signatures.
+        //
+        // v0.17.7.1.1 reverts the v0.17.7.1 TALK-setup gating that regressed
+        // dorm bed Interactions. Background: dormitory beds use SETLINE + dialog
+        // opcodes; the engine fires the "Sleep?" prompt when the player crosses
+        // the line. They do NOT use TALKRADIUS/TALKON, so the v0.17.7.1 rule
+        // "INTERACTIVE only if dialog + TALK setup" demoted them to EVENT or
+        // SCREEN_BOUND. The actual fepic1 fix (which v0.17.7.1 was supposed to
+        // ship) was the catalog's field-wide `fieldHasInteractiveObjects`
+        // demote removal -- that's preserved here, so fepic1 still works.
+        //
+        // Priority restored to v0.12.24-era rule: dialog wins first.
+        //   1. dialog opcodes  -> INTERACTIVE  (covers SETLINE+MES walk-through beds AND TALKRADIUS-press signs)
+        //   2. MAPJUMP w/o dialog -> SCREEN_BOUND (pure screen exits like fepic1's three)
+        //   3. battle/event w/o dialog -> EVENT
+        //   4. BGDRAW/SCROLL only -> CAMERA_PAN
+        //   5. nothing recognisable -> CAMERA_PAN  (silent default)
+        //
+        // The `hasTalkSetup` field on JSMEntityInfo is still populated below
+        // and remains available for future fixes that need to distinguish
+        // confirm-press interactions from walk-across triggers; we just don't
+        // gate the LINE_INTERACTIVE classification on it any more.
         if (info.jsmCategory == 1) {
             if (foundDialogOp) {
                 info.type = JSM_ENT_LINE_INTERACTIVE;
-            } else if (info.type == JSM_ENT_LINE_TRIGGER || info.type == JSM_ENT_MAP_EXIT) {
-                if (foundMapjump) {
-                    info.type = JSM_ENT_LINE_SCREEN_BOUND;
-                } else if (foundBattle) {
-                    info.type = JSM_ENT_LINE_EVENT;
-                } else if (foundEventOp) {
-                    info.type = JSM_ENT_LINE_EVENT;
-                } else if (foundBgdraw || foundScroll) {
-                    info.type = JSM_ENT_LINE_CAMERA_PAN;
-                } else {
-                    info.type = JSM_ENT_LINE_CAMERA_PAN;
-                }
+            } else if (foundMapjump) {
+                info.type = JSM_ENT_LINE_SCREEN_BOUND;
+            } else if (foundBattle || foundEventOp) {
+                info.type = JSM_ENT_LINE_EVENT;
+            } else if (foundBgdraw || foundScroll) {
+                info.type = JSM_ENT_LINE_CAMERA_PAN;
+            } else {
+                info.type = JSM_ENT_LINE_CAMERA_PAN;
             }
         }
 
         // v0.12.24: Store ext dispatch flag for dual-purpose Line detection.
         info.hasExtDispatch = foundExtDispatch;
+
+        // v0.17.7.1: Talk-setup flag for catalog walkmesh exclusion rule.
+        // True when the script uses TALKRADIUS or TALKON, indicating the player
+        // can interact via confirm-press (vs. crossing a Line trigger).
+        info.hasTalkSetup = foundTalkradius || foundTalkon;
 
         // v0.12.20: Store persistent flags for Director/interaction detection.
         if (e < 128) {
@@ -945,6 +975,42 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                          countDoors, countLines, countBg,
                          symNames, symCount);
 
+    // v0.17.7.5: Static destField resolver pass.
+    //
+    // v0.17.7.4 BAT confirmed the forward scanner above mis-identifies the
+    // destField source for SCREEN_BOUND lines on bghall_3/5 -- the reported
+    // PSHM addresses (0x0002, 0x023A, 0x01F6) hold values (14381, 0, 0) at
+    // MAPJUMP3 fire time that don't match the engine's chosen destination
+    // (field 170 then 165). Root cause: pushCount accumulates across basic
+    // block boundaries and the 8-deep pushStack truncates older entries.
+    //
+    // The resolver in mapjump_resolver.inl re-walks each SCREEN_BOUND line's
+    // bytecode method-by-method with proper basic-block awareness and a
+    // wider 32-slot abstract stack. When it finds a MAPJUMP/MAPJUMP3, it
+    // identifies the actual destField source (literal or PSHM_W ref) and
+    // overwrites info.param. The existing [PSHM-DEST] resolution in
+    // HookedFieldScriptsInit then resolves PSHM markers via the live
+    // varblock at field load -- which is the same downstream path the
+    // forward scanner's (incorrect) markers already flowed through, just
+    // now with the RIGHT marker.
+    //
+    // Build parallel arrays describing the EntityGroup layout so the
+    // resolver doesn't need access to the function-local EntityGroup type.
+    {
+        static int methodStartIdxs[128];
+        static int methodCounts[128];
+        int safeCount = (totalEntities < 128) ? totalEntities : 128;
+        for (int e = 0; e < safeCount; e++) {
+            methodStartIdxs[e] = groups[e].startMethodIdx;
+            methodCounts[e]    = groups[e].methodCount;
+        }
+        MapjumpResolver::Run(fieldName,
+                             scriptData, scriptDataDwords,
+                             entryPoints, totalMethods,
+                             methodStartIdxs, methodCounts, safeCount,
+                             outEntities, outCount);
+    }
+
     // v0.07.88: Diagnostic — log POPM_W addresses for unclassified "Other" entities.
     // This helps identify which memory addresses real exit entities write to.
     // v0.12.11: DISABLED — served its purpose, clutters log.
@@ -1053,13 +1119,22 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         }
     }
 
-    // v0.12.24: REQ-following for Line entity interaction detection.
+    // v0.12.24 / v0.17.7.5.4: REQ-following for Line entity interaction detection.
     // If a Line entity REQs another entity that has dialog opcodes or ext dispatch,
-    // the Line is dual-purpose (exit + interaction). Mark it with hasExtDispatch
-    // so the catalog Interaction section can detect it.
+    // the Line is dual-purpose (exit + interaction). Mark it with hasDialogReqTarget
+    // so the catalog can distinguish this from the (much more common) case where
+    // a Line uses extended dispatch in its OWN script for non-dialog purposes
+    // (sound, particle effects, animation). v0.17.7.5.4 split the previous unified
+    // hasExtDispatch flag into two: hasExtDispatch (own 0x1C usage, set in opcode
+    // scan) and hasDialogReqTarget (dialog REQ target, set HERE). The catalog uses
+    // hasDialogReqTarget for the dual-purpose check.
+    //
+    // The previous `if (outEntities[i].hasExtDispatch) continue;` early-exit was
+    // dropped: we now run REQ-following for ALL Line entities regardless of own
+    // ext-dispatch usage, so lines like bgroad_5 squalls (own 0x1C true, REQ
+    // target dialog false) get correctly classified as pure exits.
     for (int i = 0; i < outCount; i++) {
         if (outEntities[i].jsmCategory != 1) continue;  // Line entities only
-        if (outEntities[i].hasExtDispatch) continue;     // already flagged
         int e = outEntities[i].jsmIndex;
         if (e >= 128) continue;
         // Check if this Line entity REQs any entity with dialog/ext dispatch.
@@ -1083,8 +1158,8 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
             }
         }
         if (reqsInteractive) {
-            outEntities[i].hasExtDispatch = true;
-            Log::Field("FieldArchive: [JSMScan] REQ-interact: Line ent%d '%s' REQs interactive entity -> hasExtDispatch=1",
+            outEntities[i].hasDialogReqTarget = true;
+            Log::Field("FieldArchive: [JSMScan] REQ-interact: Line ent%d '%s' REQs interactive entity -> hasDialogReqTarget=1",
                        e, outEntities[i].symName);
         }
     }

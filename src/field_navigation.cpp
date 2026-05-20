@@ -679,6 +679,12 @@ static bool  s_camCalibrated = false;
 // --- Opcode hooks: SETLINE, TALKRAD, PUSHRAD, SET3, PSHM_W (extracted v0.12.18) ---
 #include "field_nav_opcode_hooks.inl"
 
+// --- v0.17.7.4: MAPJUMP/MAPJUMP3/DISCJUMP/MAPJUMPO/WORLDMAPJUMP dispatch-table
+//   diagnostic hooks. Logs varblock state at field-transition fire time so we
+//   can identify the destination value for variable-dispatch MAPJUMPs that
+//   static analysis couldn't resolve. Diagnostic-only, no catalog changes.
+#include "field_nav_mapjump_diag.inl"
+
 // --- Catalog announce: AnnounceCurrentTarget, AnnounceDirections, CycleEntity (extracted v0.12.18) ---
 #include "field_nav_announce.inl"
 
@@ -857,6 +863,12 @@ void Initialize()
         Log::Field("FieldNavigation: PSHM_W at 0x%08X (hook disabled, using varblock diagnostic)",
                    FF8Addresses::opcode_pshm_w);
     }
+
+    // v0.17.7.4: Install MAPJUMP-family dispatch table hooks for destination
+    // diagnostics. See field_nav_mapjump_diag.inl for the full rationale.
+    // Runs after the existing SET3/PSHM_W setup block so we know the opcode
+    // table is resolved by the time we touch it.
+    MapjumpDiag::Install();
 
     // v0.14.45: POPM_W/B/L shared memory write capture hooks removed (F12 diagnostic retired).
 
@@ -1124,6 +1136,8 @@ void Shutdown()
         }
         s_originalPshmW = nullptr;
     }
+    // v0.17.7.4: Restore MAPJUMP-family dispatch table entries before unload.
+    MapjumpDiag::Restore();
     // v0.14.45: POPM_W/B/L shared memory write hook removal block removed (F12 diagnostic retired).
     // Ensure fake gamepad is removed even if StopAutoDrive wasn't called.
     if (s_fakeGamepadInstalled && FF8Addresses::HasDinputGamepadPtrs()) {

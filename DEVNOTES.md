@@ -4,40 +4,80 @@ Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` inj
 
 **Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
 
-GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.17.6.2** (commit `a42d4aeb`, pushed 2026-05-19 01:01:26 UTC). **Local tree = v0.17.7.0** (file split, awaiting BAT before push).
+GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.17.7.0** (commit `8b9299c2`, pushed 2026-05-19 02:48:27 UTC).
 
-v0.17.6.2 BAT was a clean win. All four bghall_1 cross-field exit drives reach `Arrived.` with diagonal-kb wall-sliding through corridor turns (7–14 sec each, matches manual-nav travel times). The v0.17.6.x chapter (re-base F9 path-finding auto-drive onto manual nav's BAT-proven primitives, disable corridor-level steering, lean on FF8's built-in wall-sliding) is closed. Full per-drive timings, the [drive-vec] diagnostic that pinpointed the corridor-steering wedge, and all v0.17.x narrative now live in `DEVNOTES_HISTORY.md`.
+v0.17.7.0 BAT'd clean on bghall_1 and bggate_6: build clean, both fields loaded without exception, catalog behavior matches v0.17.6.2 per Aaron's confirmation. The mechanical file split is verified end-to-end; the helper call chain (DumpEntityDiagOnce, DumpBgDiagOnce, DumpPartyStateOnce, DumpCoordDiagOnce, ResolveLatePositions, MatchSet3LateCaptures, ResolveStructPositions) is wired correctly and produces the same catalog output as pre-split.
 
-v0.17.6.2 also exposed two within-field friction points in B-Garden (fepic1 push-through gate, generic entity-catalog names), prompting Track B (entity catalog overhaul). v0.17.7.0 is the prerequisite file split: `field_nav_catalog.inl` went 75.77 KB → 53.82 KB with two new helper files (`field_nav_catalog_diag.inl`, `field_nav_catalog_lateres.inl`). No functional change. Awaiting BAT to confirm catalog behavior unchanged; then v0.17.7.1—.4 land the substantive Track B fixes.
+v0.17.6.2 BAT was also a clean win. All four bghall_1 cross-field exit drives reach `Arrived.` with diagonal-kb wall-sliding through corridor turns (7–14 sec each, matches manual-nav travel times). The v0.17.6.x chapter (re-base F9 path-finding auto-drive onto manual nav's BAT-proven primitives, disable corridor-level steering, lean on FF8's built-in wall-sliding) is closed. Full per-drive timings, the [drive-vec] diagnostic that pinpointed the corridor-steering wedge, and all v0.17.x narrative now live in `DEVNOTES_HISTORY.md`.
+
+v0.17.6.2 also exposed two within-field friction points in B-Garden (fepic1 push-through gate, generic entity-catalog names), prompting Track B (entity catalog overhaul). v0.17.7.0 (now pushed) was the prerequisite file split: `field_nav_catalog.inl` went 75.77 KB → 53.82 KB with two new helper files (`field_nav_catalog_diag.inl`, `field_nav_catalog_lateres.inl`). v0.17.7.1—.4 land the substantive Track B fixes.
 
 ---
 
 ## Where we are at session open
 
-**Active work: v0.17.7.x Track B — entity catalog overhaul.** v0.17.7.0 (file split) shipped locally; awaiting BAT before push. Investigation phase complete — see Track B findings below and the v0.17.7.1+ plan in `NEXT_SESSION_PROMPT.md`. Aaron's 2026-05-18 clarification expanded Track B from "better labels" to four structural issues; the substantive fixes land across v0.17.7.1 through v0.17.7.4.
+**v0.17.7.5.5 BAT'd clean. bgryo1_4 bed labeled as Interaction. Exit/interaction labeling chapter is feature-complete.**
 
-**Friction points from v0.17.6.2 BAT (driving Track B):**
+The cumulative v0.17.7.1 → v0.17.7.5.5 series is push-ready. GitHub HEAD is
+still at v0.17.7.0 (`8b9299c2`); 11 build chapters of unpublished work locally.
+When Aaron pushes, the commit body should reference the catalog overhaul as a
+whole (walkmesh exclusion rule, MAPJUMP destField static resolver with
+addr-as-literal pattern, hasDialogReqTarget split, self-loop detection).
 
-1. **Push-through gate at fepic1 (Front Gate 5, fieldId=0x00A3).** A scripted gate spans the corridor; walkmesh treats it as a wall so A* can't path through. Multiple within-field drives oscillated and one walked the player into the wrong exit. Aaron's diagnosis: PUSHRADIUS or SETLINE trigger fires scripted JUMP/MOVA teleporting the player south. → Track A, deferred until Track B done.
-2. **Entity catalog issues (four-pronged, scope per Aaron 2026-05-18).** Catalog should surface only useful entities: save points, draw points, interactive objects (signs, switches), NPCs, event triggers, exits. Currently:
-   - **Misclassification.** fepic1's exits surface as `Interaction 1/2/3` instead of `Exit to <field>`. The v0.12.24 block demotes ALL screen-bound trigger lines to Interaction on any field with an Interactive Object — was meant for dormitories (where SETLINE serves dual purpose: walk through to exit OR press X to interact) but mistakenly demotes fepic1's genuine exits because the field also has interactive objects.
-   - **Missing entities.** Signs and other examined-only interactive objects aren't catalogued. JSM scanner promotes background entities to `JSM_ENT_INTERACTIVE_OBJECT` only when `hasPosition || hasPshmCoords`; SETLINE-positioned entities (signs in Cafeteria/dormitories) extract `setlineX1/Y1` into local variables but never write them back to `info.posX/Y`, so the position gate fails.
-   - **Light regression.** `Light 1 of 1` is appearing again in fepic1. `ENTITY_SKIP_NAMES` (213 entries) is consulted by `IsBgControllerName`, which only fires in the BG-entity path. Light entities entering via JSM `JSM_ENT_INTERACTIVE_OBJECT` promotion (with own SET3 + 0x1C extended dispatch) bypass the filter entirely — the v0.08.04 `!strstr(symName, "light")` guard sits only on paired-entity inheritance, not the primary promotion gate.
-   - **Generic naming + SYM leaks.** Runtime NPC classification sets `entName = "NPC"` literal and never calls `ResolveFriendlyName`. Result: every named NPC reads as `NPC 1 of N`. Where SYM does flow through, missing display map entries (e.g. `son`) leak as `Son 1 of 1`.
+**Next chapter pending Aaron's direction.** Three candidates in priority order:
 
-**Aaron's clarified taxonomy (2026-05-18):**
-- **Exit**: trigger line with MAPJUMP target (destFieldId > 0). Label: `"Exit to <field name>"`. Unresolved destination falls back to bare `"Exit"`.
-- **Interaction**: requires confirm. Has TALKRADIUS or TALKON in its script.
-- **Event**: crosses the line to fire. No TALKRADIUS/TALKON. MES/BATTLE/SHOW/HIDE/MOVE/REQ in script.
-- **NPC / Save Point / Draw Point**: as today. Shop and Card Game internal types fold into NPC at the announce layer (shopkeepers and card masters are NPCs).
-- **Exclusion rule**: drop entities with NO talkradius AND outside the walkmesh. Either condition alone keeps the entity.
+1. **v0.17.7.6 — camera projection closed-loop calibration.** Fixes bgroad_5
+   auto-drive direction confusion (.ca file has axis1=(0,0,-4096) entirely
+   in the depth axis; 2D projection degenerate; identity fallback wrong by
+   90 degrees per NAV-OBSERVE empirical data). Substantial chapter: design
+   pass first, then implementation touching projection init + drive
+   direction injection + possibly GPS cardinal logic. May also improve
+   manual nav cardinal accuracy on similar fields.
+2. **v0.17.7.7 — SETLINE-position promotion + NPC ResolveFriendlyName.**
+   Auto-drive needs accurate target positions for the new SCREEN_BOUND
+   exits; right now the catalog uses captured SETLINE centers but the
+   auto-drive may need a slightly different anchor. NPC `ResolveFriendlyName`
+   replaces generic "NPC" labels with sym-based friendly names.
+3. **v0.17.7.8 — Shop/Card Game → NPC announce-layer collapse.** When a shop
+   or card-game NPC exists, the catalog currently exposes both an NPC entry
+   and the shop/game entry; collapse to one.
 
-**Track B sequencing (full plan in NEXT_SESSION_PROMPT.md):**
-1. ✅ **v0.17.7.0**: file split (`field_nav_catalog.inl` 75.77 KB → 53.82 KB), no functional change. Awaiting BAT.
-2. **v0.17.7.1**: walkmesh exclusion rule + per-line exit/interaction/event discriminator using TALKRADIUS/TALKON detection. Kills lights and fixes fepic1's misclassification.
-3. **v0.17.7.2**: SETLINE-position promotion (signs reach catalog) + runtime NPC `ResolveFriendlyName` routing (148 entries in display map unlocked).
-4. **v0.17.7.3**: Shop/Card Game → NPC announce-layer collapse.
-5. **v0.17.7.4** (optional): SYM override layer for residual leaks like `Son`.
+**Bug 1 from the v0.17.7.5.4 BAT (auto-drive on bgroad_5)** is the same
+problem v0.17.7.6 addresses. Aaron experienced it twice already, so v0.17.7.6
+is the natural next chapter unless Aaron prefers another direction.
+
+**Friction points from v0.17.6.2 BAT (driving Track B):** unchanged.
+
+**Aaron's taxonomy (2026-05-18):** Exit (MAPJUMP, destFieldId > 0), Interaction (TALKRADIUS/TALKON), Event (no talk setup, but MES/BATTLE/SHOW/HIDE/MOVE/REQ), NPC / Save / Draw / Shop / Card. Exclusion rule: drop entities with NO talkradius AND outside the walkmesh.
+
+**Open question (deferred, not blocking)**: bgryo1_1 (Dormitory Double 1)
+resolver picked addr 0xE7 = 231 (Hallway 8) for its single SCREEN_BOUND line,
+but Aaron's actual return transition in the v0.17.7.5.3 BAT went to bgroad_5
+(Hallway 5, field 228). INF gateway log showed destId=174 (Hall 10) -- also
+doesn't match. Either the dormitory has multiple SCREEN_BOUND exits and only
+one was captured at that BAT point, or the addr-as-literal pattern doesn't
+hold for this field. Investigate if Aaron reports dormitory exit labeling
+issues later; otherwise leave it.
+
+**Track B sequencing:**
+1. ✅ **v0.17.7.0**: file split. Pushed `8b9299c2`.
+2. ✅ **v0.17.7.1 / .1.1 / .1.2**: walkmesh rule + hasExtDispatch + runtime PSHM + INF fallback.
+3. ✅ **v0.17.7.2**: gated dumps + diagnostics.
+4. ✅ **v0.17.7.3**: all-method POPM_W capture. Destinations confirmed NOT in script bytecode init writes.
+5. ✅ **v0.17.7.4**: runtime MAPJUMP-family dispatch table hooks. Revealed forward scanner picks wrong push.
+6. ✅ **v0.17.7.5**: static resolver + VM stack/engine RESULT validation.
+7. ✅ **v0.17.7.5.1**: widen resolver + contiguous varblock dump. Confirmed varblock at field load doesn't hold destField.
+8. ✅ **v0.17.7.5.2**: inline_param + bytecode context + firing IP diagnostics. Revealed addr-as-literal pattern.
+9. ✅ **v0.17.7.5.3**: addr-as-literal fix BAT'd clean. 27 PSHM-DEST resolutions all correct.
+10. ✅ **v0.17.7.5.4**: split `hasExtDispatch` into `hasExtDispatch` + `hasDialogReqTarget`. Fixed bgroad_5 dormitory-exit mislabel.
+11. ✅ **v0.17.7.5.5**: self-loop MAPJUMP detection. Fixed bgryo1_4 bed-as-exit mislabel. BAT'd clean.
+12. 🟡 **v0.17.7.6 (next)**: camera projection closed-loop calibration --
+    NAV-OBSERVE empirical feedback overwrites CA-derived axes when 2D
+    projection is degenerate. Fixes bgroad_5 auto-drive direction
+    confusion + may improve manual nav cardinals on similar fields.
+13. **v0.17.7.7**: SETLINE-position promotion + NPC `ResolveFriendlyName`.
+14. **v0.17.7.8**: Shop/Card Game → NPC announce-layer collapse.
+15. **v0.17.7.9** (optional): SYM override layer for residual leaks.
 
 ---
 
@@ -78,6 +118,7 @@ All v0.17.6.0/.1/.2 BAT'd successfully. Remaining standbys may not be needed:
 
 ## Recently shipped (one-liners; full narratives in `DEVNOTES_HISTORY.md`)
 
+- **v0.17.7.0** (`8b9299c2`): mechanical file split of `field_nav_catalog.inl` (75.77 KB → 53.82 KB). Two new helper `.inl` files: `field_nav_catalog_diag.inl` (one-shot diagnostic dumps), `field_nav_catalog_lateres.inl` (late position resolution). Dropped v0.12.17 dead VARBLOCK-POS `if (false)` block. No functional change. Prerequisite for the Track B catalog-overhaul fixes landing in v0.17.7.1–.4. BAT'd clean on bghall_1 + bggate_6.
 - **v0.17.6.x** (peak `a42d4aeb`): F9 path-finding auto-drive re-based on manual-nav primitives. `.ca`-quantized axes, talkRadius arrival distances, INF gateway auto-cross. Recovery counter resets on tri-advance with `[drive-vec]` per-tick diagnostic. Corridor-level steering disabled — funnel waypoints + FF8 wall-sliding only. BAT-confirmed across four bghall_1 cross-field exits.
 - **v0.17.5.x** (peak `b54fa75`): World-map-polling boot fix; `[TTS]` and `[drive] REFUSED` audit logs; funnel collinear-waypoint pruning (5×); GPS 500 ms hysteresis; load-time 90° `.ca` axis quantization (replaced v0.17.4 passive calibration).
 - **v0.17.0 → v0.17.4**: Manual-nav direction projection wired through `s_cameraAxes`; 2D normalization; A* + funnel path-aware GPS; camera-axes state separation (manual `s_camRight/Down` vs drive `s_driveCam*`); passive arrow-response observer; det convention check.

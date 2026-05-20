@@ -27,6 +27,7 @@ static const uint16_t JSM_OP_SET      = 0x01D;  // 2D position
 static const uint16_t JSM_OP_SET3     = 0x01E;  // 3D position
 static const uint16_t JSM_OP_SETLINE  = 0x039;  // trigger line geometry
 static const uint16_t JSM_OP_SETMODEL = 0x02B;  // assign 3D model
+static const uint16_t JSM_OP_TALKRADIUS = 0x056;  // v0.17.7.1: set talk-interaction radius
 static const uint16_t JSM_OP_TALKON   = 0x057;  // enable talk interaction
 static const uint16_t JSM_OP_MAPJUMP  = 0x029;  // field transition
 static const uint16_t JSM_OP_MAPJUMP3 = 0x02A;  // field transition (3D)

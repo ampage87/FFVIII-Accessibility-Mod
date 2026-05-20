@@ -6,6 +6,856 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.7.5.5
+
+Fix bgryo1_4 bed labeled as "Exit to B-Garden - Dormitory Double 4" — BAT'd
+regression from v0.17.7.5.4. The bed is a Line whose MAPJUMP destination
+resolves to the same field id the player is on (field 240 -> field 240).
+Labeling it as "Exit to <the room I'm in>" is nonsense; Aaron correctly
+identified it should be an Interaction.
+
+### Diagnosis
+
+bgryo1_4 ent0 'squall' is classified SCREEN_BOUND with destFieldId=240 by the
+resolver. v0.17.7.5.4's `hasDialogReqTarget` check passed (the bed Line
+doesn't itself REQ a dialog-bearing entity -- the "Sleep?" prompt is handled
+by the Director entity 'seed' via different code paths). So Block 1 emitted
+the Exit label.
+
+Root cause: catalog had no self-loop detection. A MAPJUMP whose destFieldId
+matches the current fieldId is an in-place state transition (sleep, fade-to-
+next-day, similar), not a navigational exit. The engine's behavior on
+self-loop MAPJUMPs is "reload this field, advancing some state."
+
+### Fix
+
+Catalog block 1 (Exits): add an early-continue when
+`s_capturedLines[t].destFieldId == *FF8Addresses::pCurrentFieldId`.
+
+Catalog block 2 (Interactions): extend the SCREEN_BOUND dual-purpose
+acceptance check to ALSO accept self-loop lines (mirror condition: a line
+rejected by block 1 should be picked up by block 2 to ensure it appears
+somewhere in the catalog).
+
+No scanner changes; no struct changes. The decision is made at catalog-build
+time using the existing `destFieldId` + the runtime `pCurrentFieldId` pointer.
+Single-file change in `src/field_nav_catalog.inl`.
+
+### Expected BAT results
+
+- **bgryo1_4 bed** (the BAT'd regression): catalog now shows
+  `cat<n> TRIGGER line0 ... name='Interaction 1'`
+  instead of `name='Exit to B-Garden - Dormitory Double 4'`.
+- **Other v0.17.7.5.4 wins** (bgroad_5 dormitory exit, bghall_* exits): no
+  change. Those lines have destFieldId pointing to DIFFERENT fields, so the
+  self-loop check doesn't trip.
+- **Genuine dual-purpose Lines** (dorm beds detected via REQ-following's
+  `hasDialogReqTarget`): no change. They were already handled in block 2.
+- **Any field with a SCREEN_BOUND self-loop Line that ISN'T a sleep
+  transition** (hypothetical, none known): the Line will be relabeled as
+  Interaction instead of Exit. This is at worst slightly imprecise; the
+  previous "Exit to <same room>" label was unambiguously wrong.
+
+### Known issue, NOT fixed in this build
+
+v0.17.7.5.4 BAT also surfaced a longstanding camera-projection bug on
+bgroad_5 (Hallway 5). The .ca file for that field has axis1=(0,0,-4096) --
+entirely in the depth axis -- producing a degenerate 2D projection. The mod
+falls back to identity camera axes, but the engine's actual screen-up
+direction is world +X (confirmed by NAV-OBSERVE: arrow=UP produced
+delta=(279,0), measured=(1.000,0.000), DIVERGE=90deg from prediction).
+
+Consequence: on bgroad_5 the auto-drive system injects the wrong keyboard
+direction (e.g. presses RIGHT when the player needs UP), so the player
+gets pushed perpendicular to the target and either gets stuck against a
+wall or transitions through the wrong exit. Manual GPS cardinal directions
+are also affected -- the cardinal is correct ("east") but Aaron's arrow-key
+mapping interpretation has to be learned empirically per field.
+
+Fix is a closed-loop calibration: use NAV-OBSERVE empirical measurements to
+overwrite camRight/camDown when the CA-derived 2D projection is degenerate.
+Queued for v0.17.7.6 as its own chapter (touches projection init,
+auto-drive direction injection, and possibly GPS cardinal computation).
+
+## v0.17.7.5.4
+
+Fix bgroad_5 (Hallway 5) catalog regression revealed by v0.17.7.5.3 BAT. Aaron heard
+the dormitory exit announced as "Interaction 1" instead of "Exit to Dormitory Double 1".
+All other v0.17.7.5.3 predicted resolutions confirmed working (27 PSHM-DEST entries
+all matched expected fields). This build addresses one remaining false-positive in the
+catalog labeling pipeline.
+
+### Diagnosis
+
+The `[MAPJUMP-RES]` resolver correctly identified bgroad_5 ent1 'squalls' as
+SCREEN_BOUND with destFieldId=237 (Dormitory Double 1). But the catalog Block 1
+("Exit to ..." labeling) skipped the line because `hasExtDispatch=true`. Block 2
+("Interaction N" labeling) then picked it up and labeled it "Interaction 1".
+
+Root cause: `hasExtDispatch` is set by two distinct mechanisms in the JSM scanner,
+and the catalog conflated them:
+
+1. **Own 0x1C extended-dispatch use** (set in opcode scan, very common): fires for
+   any extended opcode -- sound effects, particle effects, animation triggers,
+   anything dispatched via 0x1C with a PSHM_W or empty stack. bgroad_5 squalls
+   has this from non-dialog effects.
+
+2. **REQ to dialog-bearing entity** (set in REQ-following post-pass): the genuine
+   "dual-purpose dialog-mediated exit" pattern. The Line REQs a Background that
+   shows MES/ASK dialog; the MAPJUMP fires as a consequence of the player
+   choosing yes. Example: dormitory beds ("Sleep?" -> next-day field).
+
+The catalog used mechanism #1's signal to decide "this is dual-purpose". For
+bgroad_5 squalls (mechanism #1 only, no dialog REQ), this incorrectly suppressed
+the Exit label.
+
+### The fix
+
+Split the conflated flag into two:
+- Keep `hasExtDispatch` (own 0x1C usage) -- unchanged semantics.
+- Add `hasDialogReqTarget` -- set ONLY by REQ-following when REQ target has
+  dialog or extended dispatch.
+
+Catalog Blocks 1 and 2 now use `hasDialogReqTarget` for the dual-purpose check.
+Lines with own 0x1C usage but no dialog REQ (the common case, including
+bgroad_5 squalls) flow through Block 1 as Exits. True dual-purpose lines
+(dorm beds) still flow through Block 2 as Interactions.
+
+### Files touched
+
+- `src/ff8_accessibility.h`: version 0.17.7.5.3 -> 0.17.7.5.4
+- `src/field_archive.h`: add `bool hasDialogReqTarget;` to `JSMEntityInfo`
+- `src/field_archive_jsm_scan.inl`: in REQ-following post-pass, drop the
+  `if (hasExtDispatch) continue;` early-exit so REQ-following runs for ALL
+  Line entities. Set `hasDialogReqTarget=true` (new flag) instead of
+  `hasExtDispatch=true`. Log message updated accordingly.
+- `src/field_nav_pathfinding.inl`: add `bool hasDialogReqTarget;` to
+  `CapturedTriggerLine`.
+- `src/field_nav_fieldscripts.inl`: reset and copy `hasDialogReqTarget` in
+  the lineType assignment block.
+- `src/field_nav_catalog.inl`: Block 1 (Exits) skip condition changed from
+  `hasExtDispatch` to `hasDialogReqTarget`. Block 2 (Interactions) dual-purpose
+  acceptance check also changed from `hasExtDispatch` to `hasDialogReqTarget`.
+  Both comments updated with the v0.17.7.5.4 split rationale.
+
+### Expected BAT results
+
+- **bgroad_5 squalls** (the BAT'd regression): catalog now shows
+  `cat4 TRIGGER line1 center=(3765,10) name='Exit to B-Garden - Dormitory Double 1'`
+  instead of `name='Interaction 1'`.
+- **Other v0.17.7.5.3 wins** (bghall_1 / bghall_2 / bghall_5 / bgroad_1 exits): no
+  change -- those lines never had `hasExtDispatch=true` to begin with, so the
+  catalog Block 1 path was already labeling them correctly.
+- **Dormitory beds and similar genuine dual-purpose Lines**: no behavior change.
+  REQ-following still sets `hasDialogReqTarget=true` for them (their REQ target
+  has dialog), Block 1 still suppresses the Exit, Block 2 still labels them as
+  Interactions.
+- **REQ-interact log lines** now read `-> hasDialogReqTarget=1` instead of
+  `-> hasExtDispatch=1`. Should appear for fewer lines overall because the
+  scanner no longer skips lines where `hasExtDispatch` was already set by own
+  0x1C usage.
+
+### Risk
+
+Low. The change makes the catalog's dual-purpose detection more precise. Worst
+case: a hypothetical Line that uses extended dispatch internally AND is genuinely
+dialog-mediated WITHOUT REQing a dialog entity. No known field exhibits this
+pattern -- dorm-bed dialogs go via REQ, not via the Line's own 0x1C dispatch.
+
+## v0.17.7.5.3
+
+The v0.17.7.5.2 BAT confirmed the addr-as-literal pattern across 8 fires. Implementing the fix.
+
+### What the .5.2 BAT showed
+
+Two engine fires captured:
+- bghall_2 -> 185 (Quad 4), inline_param=0x0188 (392), engine firing IP=1722
+- bghall_5 -> 224 (Hallway 1), inline_param=0x0039 (57), engine firing IP=2705
+
+Cross-referenced via inline_param to resolver entries:
+- bghall_2 zell m7 ip=2639/2646/2653 all have inline_param=0x0188; resolver picked VARBLOCK 0x00B9 (= 185)
+- bghall_5 selphie m7 ip=4348/4355 both have inline_param=0x0039; resolver picked VARBLOCK 0x00E0 (= 224)
+
+Bytecode context dumps for selphie's two MAPJUMP3 instructions:
+
+```
+ip=4348 ctx: -7=JMP+9 -6=JMPB-8 -5=PSHM_W 0xE0 -4=PSHM_W 0x194 -3=PSHM_W 0x000
+              -2=PSHM_W 0xFFFFFF00 -1=PSHM_W 0xC0  *+0=MAPJUMP3 0x39  +1=JPF+7
+
+ip=4355 ctx: -7=MAPJUMP3 0x39 -6=JPF+7 -5=PSHM_W 0x9A -4=PSHM_W 0x248
+              -3=PSHM_W 0xFFFFF844 -2=PSHM_W 0x000 -1=PSHM_W 0x74  *+0=MAPJUMP3 0x39  +1=op 0x06
+```
+
+VM stack at hook entry (bghall_5 fire): `sp=12 [12]=192 [11]=65280 [10]=0 [9]=404 [8]=224=destField`.
+
+The five VM stack values match the five PSHM_W param values *exactly in decimal*:
+
+| Bytecode | Param (hex) | Param (decimal) | VM stack | Match |
+|---|---|---|---|---|
+| PSHM_W 0xE0   | 0xE0      | 224  | [8]=224   | yes |
+| PSHM_W 0x194  | 0x194     | 404  | [9]=404   | yes |
+| PSHM_W 0x000  | 0x000     | 0    | [10]=0    | yes |
+| PSHM_W 0xFFFFFF00 | 0xFF00 (low16) | 65280 | [11]=65280 | yes |
+| PSHM_W 0xC0   | 0xC0      | 192  | [12]=192  | yes |
+
+The varblock dump at the same instant shows `varblock[0x00E0]=255`. Not 224. So PSHM_W did NOT read the varblock value of 255 -- it produced 224. Either:
+
+1. **Pattern is intentional self-documenting bytecode.** B-Garden's script authors chose pshmAddr = destField for readability. The PSHM_W instruction reads varblock[addr], but the varblock at byte-offset = destField holds value = destField at method-7 execution time (some setup we haven't located populates it between field-load and the line's MAPJUMP3 firing).
+2. **Pattern is coincidental.** Engine populates varblock[X] = X for some init range; PSHM_W's value happens to equal its address.
+
+Either way the runtime behavior is consistent: `destField == pshmAddr in decimal`.
+
+### Why this didn't show up earlier
+
+v0.17.7.x had tried reading varblock at field-load time (in the `[PSHM-DEST]` resolver). That fails because the varblock-population step happens later. Results were:
+- Varblock=0 -> kept marker -> line stayed bare in catalog
+- Varblock=255 (random stale value) -> coincidentally close to the field-id range -> line labeled as field 255 (Headmaster's Office 7), which was wrong (actual was 185 for bghall_2 zell)
+
+The v0.17.7.5.2 contiguous varblock 0x80-0xFF dump showed that varblock entries at SCREEN_BOUND-line PSHM addresses do NOT hold the destField at field-load. The match between VM stack and PSHM param can only be explained by the pattern described above.
+
+### The fix
+
+Single change in `field_nav_fieldscripts.inl`, the `[PSHM-DEST]` block:
+
+**Before** (~24 lines): read `*(int16_t*)(0x1CFE9B8 + pshmAddr)` and use that as resolvedId.
+
+**After** (~20 lines including comments): treat `pshmAddr` (the low 16 bits of the marker) directly as the destField. No varblock read.
+
+```cpp
+if (pshmAddr > 0 && pshmAddr < FIELD_DISPLAY_NAMES_COUNT) {
+    rawParam = (int)pshmAddr;
+}
+```
+
+Net: roughly the same line count. Removed the `__try` block (no longer reading memory). Added an extensive comment explaining the empirical pattern.
+
+### Expected catalog changes (predicted from resolver output)
+
+| Field | Line | Old label | New label |
+|---|---|---|---|
+| bghall_1 | squalls, squallsd, zell | bare "Exit" | "Exit to Hall 11" (x3) [needs BAT confirmation] |
+| bghall_2 | squallsd | bare | "Exit to Hall 1" |
+| bghall_2 | zell | "Exit to Headmaster's Office 7" (wrong) | "Exit to Quad 4" (correct, BAT'd) |
+| bghall_2 | zells | bare | "Exit to Hallway 4" (BAT'd) |
+| bghall_5 | selphie | bare | "Exit to Hallway 1" (BAT'd) |
+| bghall_5 | irvine | bare | "Exit to Hall 6" (BAT'd) |
+| bghall_5 | zell | bare | "Exit to Hallway 5" |
+| bghall_5 | zells | bare | "Exit to Hallway 2" |
+| bgroad_1 | squall | bare | "Exit to Cafeteria 1" (BAT'd) |
+| bgkote_3 | (lines) | varies | varies (mixed -- bgkote_3 had different resolver picks) |
+
+### Risks
+
+1. **Non-B-Garden fields**: any field using PSHM_W where the address is NOT the destField in decimal will mislabel. No such case is currently known; will surface during catalog testing on later areas.
+2. **bghall_1**: 3 SCREEN_BOUND lines all pick `addr=0x00AF=175`. After this fix they all label as "Exit to Hall 11". If wrong, we'll see it; revisit then.
+3. **Fallback removed**: lines where the field-load varblock read previously gave a coincidentally-correct value (none confirmed) lose that path. Acceptable risk -- the addr-as-literal interpretation is empirically more reliable.
+
+### Files
+
+- `src/ff8_accessibility.h` -- version `0.17.7.5.2` -> `0.17.7.5.3`
+- `src/field_nav_fieldscripts.inl` -- `[PSHM-DEST]` block replaces varblock read with addr-as-literal; ~3 KB added (mostly comments). File size: 68.09 KB (in watch zone, well under 80 KB hard limit).
+- `CHANGELOG.md`, `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md` -- updated
+
+No new files. `deploy.bat` does NOT need updating (only one source touched, already listed).
+
+### BAT recipe
+
+1. Build and launch. Verify version line `v0.17.7.5.3` in startup log.
+2. Walk to bghall_2 and bghall_5. Cycle through their catalogs (F9/F10) on each field and check the SCREEN_BOUND line labels:
+   - bghall_2: should announce "Exit to Hall 1", "Exit to Quad 4", "Exit to Hallway 4" for the three exits
+   - bghall_5: should announce "Exit to Hallway 1", "Exit to Hallway 2", "Exit to Hallway 5", "Exit to Hall 6"
+3. (Optional) Walk through bghall_1, bgroad_1 and any other reachable B-Garden hall fields to spot-check labels and catch the bghall_1 case if it's wrong.
+4. Send `Logs/ff8_field.log`.
+
+### Followups (not blocking)
+
+- **v0.17.7.6 (next planned)**: wire confirmed destField into catalog labeling for SETLINE-position promotion + NPC `ResolveFriendlyName`. This makes the new destField info actually surface in the catalog announce path. (The .5.3 fix produces correct destFieldId values; the consumer pipeline still needs to integrate them at the catalog labeling step.)
+- **bghall_1 BAT**: needed to confirm or refute the "all 3 lines -> Hall 11" labeling.
+- **Engine firing IP mystery (deferred)**: in the .5.2 BAT, engine firing IP=2705 did not equal selphie m7 ip=4348 (difference 1643). This was not needed for the fix (inline_param + bytecode-context cross-reference was sufficient), but the IP mismatch is unexplained. Possible: engine maintains a separate bytecode copy with different base. Not blocking; leaving as an open question.
+
+## v0.17.7.5.2
+
+Diagnostic-only build to break the deadlock that v0.17.7.5.1 surfaced. v0.17.7.5.1 BAT confirmed two facts that together rule out both prior hypotheses:
+
+1. **No non-SCREEN_BOUND entity fires MAPJUMP.** Widening the resolver to scan every entity type produced no LITERAL resolutions outside the four SCREEN_BOUND lines. The 4 traversed-line scans went from 5 MAPJUMP3 instructions to 9 (each line has 2-3 MAPJUMP3s in method 7), but only SCREEN_BOUND lines have them. 35 of the 39 entities on bghall_5 have zero MAPJUMP-family instructions.
+2. **No varblock value in 0x80-0xFF matches the engine destField.** For bghall_5 -> 224, the contiguous dump shows varblock[0x00E0]=255 and varblock[0x00E2]=255 at fire time, no value=224 anywhere in the dumped range. The engine pushes destField=224 from somewhere, but not from where my resolver predicted.
+
+### Inferred bytecode structure
+
+Every SCREEN_BOUND line has TWO adjacent MAPJUMP3 instructions ~7 IP slots apart, with consistent shape across all four lines on each field:
+
+| Field | Line | MAPJUMP3 #1 (resolver picks) | MAPJUMP3 #2 (resolver underflows) |
+|---|---|---|---|
+| bghall_2 | squallsd | ip=2562 VARBLOCK 0x00A5 | ip=2569 sp=4 need 5 |
+| bghall_2 | zells    | ip=2714 VARBLOCK 0x00E3 | ip=2721 sp=4 need 5 |
+| bghall_5 | selphie  | ip=4348 VARBLOCK 0x00E0 | ip=4355 sp=4 need 5 |
+| bghall_5 | irvine   | ip=4760 VARBLOCK 0x00AA | ip=4767 sp=4 need 5 |
+
+Ground truth from the bghall_5 -> 224 fire: varblock[0x00E0]=255 at fire time but engine destField=224. The first MAPJUMP3 (the one my resolver picked) therefore CANNOT be firing -- if it were, the destField on the VM stack would be 255. The second MAPJUMP3 (the one that underflows) must be firing, with a LITERAL destField push of 224.
+
+The pattern: each line carries two destField encodings -- a varblock-driven path (used during scripted story scenes that override default destinations) and a literal-driven default. For Aaron's Disc 1 playthrough, the game-state flag is clear, so the literal branch runs. The address-equals-destination-in-decimal pattern is not coincidence: the two encodings represent the SAME logical destination (`PSHM_W 0x00E0` reads varblock at byte offset 224, and `PSHN_L 224` pushes 224 directly -- both equal 0xE0 in hex).
+
+The v0.17.7.5.1 LITERAL-preference policy is the right policy. It just doesn't trigger because the second MAPJUMP3 underflows at sp=4 (one push missing) before the LITERAL push can land on the abstract stack.
+
+### Why the underflow happens
+
+One push opcode in the 6-slot gap between the two MAPJUMP3s isn't modeled in `GetStackEffect`. bghall_5's opcode histogram lists 0x11 (16x), 0x13 (4x), 0x1F (12x), 0x32 (21x) as candidates not covered by my resolver's table OR by the existing forward scanner's switch (both have the same `default: break` blind spot).
+
+The existing forward scanner has worked anyway for position extraction (SET3) because that only needs the most recent 4 pushes -- those always fit in the 8-deep cap and aren't affected by older truncated entries. MAPJUMP3 fails specifically because the destField is the 5th-from-top push (the deepest), which is exactly what an under-modeled stack effect clobbers.
+
+### Pre-build assembly verification
+
+Before implementing the diagnostics, verified from FF8_EN.exe disassembly:
+
+- `[esi + 0x176]` is the IP at hook entry. Dispatcher at 0x0052A621 reads it before decoding the bytecode word, increments at 0x0052A675 after dispatch returns. Reading it at hook entry safely gives the firing opcode's IP.
+- `opcode_pshm_w` at `0x0051CB30` confirmed to read `*(uint16_t*)(0x01CFE9B8 + inline_param)` and run through a no-op saturation. No literal-passthrough trick.
+- Dispatch table at `0x00B8DE94` is in `.data` (28 MB section), not accessible from my `.text`-only disassembly dumps. Cannot directly identify handlers for opcodes 0x11/0x13/0x1F/0x32 without another BAT cycle. The function index doesn't help either: handlers are indirect-call-only via the dispatch table, so they don't appear as direct call targets.
+
+### Three diagnostics in this build
+
+**Resolver: inline_param on every per-instruction log line.** Each `[MAPJUMP-RES]` log now includes `inline_param=0x%04X` so resolver entries can be matched to runtime MAPJUMP-HOOK fires by inline_param. (The hook already logs inline_param; both sides finally speak the same language.)
+
+**Resolver: bytecode context dump per scanned MAPJUMP3.** New `[MAPJUMP-CTX]` log line for every scanned MAPJUMP-family instruction, 9 dwords wide (ip-7 through ip+1). Lets us decode the basic-block structure between MAPJUMP3 #1 and #2 by hand and identify the missing push opcode without further BAT cycles after this one.
+
+**Hook: firing IP read from `[ctx + 0x176]` at hook entry.** New `firing IP=N (0x%04X)` log line in the MAPJUMP-HOOK output. The IP is method-relative (not absolute scriptData index), so direct comparison with resolver's `m7 ip=4348` needs the method's start IP; but inline_param uniquely identifies the bytecode word, so pairing by inline_param is sufficient for triage. The IP is logged anyway for safety -- if inline_params collide we can still differentiate.
+
+No catalog change. No code path change other than logging.
+
+### Files
+
+- `src/ff8_accessibility.h` -- version `0.17.7.5.1` -> `0.17.7.5.2`
+- `src/field_archive_jsm_mapjump_resolver.inl` -- header bumped, `DumpBytecodeContext` helper added, inline_param appended to all per-instruction log formats, `Run()` calls the dump for each scanned MAPJUMP
+- `src/field_nav_mapjump_diag.inl` -- header bumped, `VMCTX_IP_OFFSET = 0x176` constant added, `LogMapjumpVmStack` reads and logs the firing IP before the stack dump
+- `CHANGELOG.md`, `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md` -- updated
+
+`deploy.bat` does NOT need updating (.inl files are textual includes).
+
+### BAT recipe
+
+1. Build and launch. Sanity check `[MAPJUMP-HOOK] 5 / 5 hooks installed (installed=true)` in startup log.
+2. Walk same paths as v0.17.7.5.1 (bghall_5 wing exits, bghall_2 hub exits). One traversal per line is enough.
+3. Send `Logs/ff8_field.log`.
+
+### What I'll do with the log
+
+1. Match the engine fires' inline_param (e.g. `inline_param=57` for bghall_5 -> 224) to a specific `[MAPJUMP-RES]` per-instruction entry on the same field. Confirm which of the two MAPJUMP3s in selphie's m7 the engine actually fires.
+2. Read the `[MAPJUMP-CTX]` bytecode dump for that firing IP. Decode the 9 dwords by hand using the opcode format spec (high byte = opcode, low 24 bits = param; high byte == 0 means literal push). The dwords leading up to the firing MAPJUMP3 give us the 5 pushes the engine actually executes, including whatever opcode my resolver is failing to model.
+3. v0.17.7.5.3 will be a simple `GetStackEffect` table extension once we know which opcode is missing -- probably 5-10 lines of code.
+
+### Two safety properties
+
+- Build with no game-state-mutating changes. The resolver runs at JSM scan time (post field load), the hook runs in the existing dispatch path. Both already worked in v0.17.7.5.1; this build only adds log output.
+- No new files, no new entries to `deploy.bat`. `.inl` files are textually included from existing `.cpp` parents.
+
+## v0.17.7.5.1
+
+Iterative refinement of v0.17.7.5 based on the BAT. The static resolver fires and replaces the forward scanner's wrong markers with new ones, but exits are still mostly unlabeled because the resolver's new markers (e.g. bghall_5 irvine -> PSHM_W 0x00AA) read 0 from the varblock at field load AND at MAPJUMP3 fire time -- yet the engine's actual destField is 170. The resolver is therefore identifying MAPJUMP3 instructions that aren't the ones the engine actually fires for those traversals.
+
+This build widens both the resolver and the hook diagnostic to disambiguate.
+
+### What v0.17.7.5 BAT revealed
+
+- Resolver fired correctly on 9 field loads, ~95 [MAPJUMP-RES] entries total.
+- Engine RESULT (ground truth from `*(uint16_t*)0x01CE4762` after handler return) for four traversals:
+  - bghall_2 -> 165 (B-Garden Hall 1)
+  - bghall_2 -> 227 (B-Garden Hallway 4)
+  - bghall_5 -> 224 (B-Garden Hallway 1)
+  - bghall_5 -> 170 (B-Garden Hall 6)
+- VM stack `[8]=destField` slot matched the engine RESULT in all 4 traversals (the disassembly trace of opcode_mapjump3 at `0x00521AC0` is correct).
+- Resolver-picked PSHM addresses for the four bghall_5 SCREEN_BOUND lines: zell@0xE4, zells@0xE1, selphie@0xE0, irvine@0xAA. None of those varblock slots hold the engine's actual destFields at fire time -- e.g. varblock[0x00AA] = 0 at fire time for the bghall_5 -> 170 transition, but engine destField = 170.
+- Disassembly of `opcode_pshm_w` at `0x0051CB30` confirms PSHM_W really reads `*(uint16_t*)(0x01CFE9B8 + inline_param)` and passes through a no-op saturation. There's no special-case where it pushes the address as a literal.
+
+Conclusion: the engine fires MAPJUMP3 from entities OTHER than the four SCREEN_BOUND lines my resolver scanned. Likely candidates: Event Trigger lines (bghall_5 ent6/7/8: selphies/quistis/rinoa) classified as JSM_ENT_LINE_EVENT, Background scripts, or Other entities dispatched via REQ from a Line.
+
+### Changes in v0.17.7.5.1
+
+**Resolver widening**: drops the `info.type == JSM_ENT_LINE_SCREEN_BOUND` filter. The resolver now walks the bytecode of every entity, logging `[MAPJUMP-RES]` for every MAPJUMP-family instruction found. `info.param` is still ONLY overwritten for SCREEN_BOUND lines (the downstream `[PSHM-DEST]` resolver consumes that field for catalog labeling); other entities produce diagnostic log lines only.
+
+**LITERAL preference**: when an entity has multiple MAPJUMP-family instructions resolving to a mix of LITERAL and VARBLOCK, the resolver now prefers the LITERAL. A LITERAL is statically self-contained (no varblock lookup needed) and trumps a VARBLOCK marker that might read garbage at field-load time. Previously the resolver took the first valid resolution regardless of kind.
+
+**Contiguous varblock dump 0x80-0xFF**: the MAPJUMP-HOOK now logs an additional set of varblock entries covering the 0x80-0xFF range in four lines of 16 entries each (only non-zero entries are shown to keep log volume sane). This range covers all of the resolver's recently-picked PSHM addresses, so we can finally see what's at varblock[0x00A5], [0x00AA], [0x00E0], [0x00E3], etc. at MAPJUMP3 fire time.
+
+### Two distinguishing outcomes for the BAT
+
+**Outcome A** -- the firing entity is non-SCREEN_BOUND. The new `[MAPJUMP-RES]` lines will show extra MAPJUMP-family instructions in EVENT trigger lines (entity type "Event Trigger") or other entity classifications, with LITERAL destFields matching the engine's actual destinations (165, 224, 227, 170). Fix in v0.17.7.5.2: widen the classification logic so those entities are surfaced as exits.
+
+**Outcome B** -- the firing entity IS a SCREEN_BOUND line, but the varblock at the resolver's address holds the right value at fire time (just not at field load). The new contiguous dump will show value=170 at some varblock address near 0x00AA at the bghall_5 -> 170 fire, value=224 at some address near 0x00E0, etc. Fix in v0.17.7.5.2: capture varblock values at FIRST fire time and use those for subsequent labeling (session cache pattern).
+
+Most likely outcome A based on the v0.17.7.5 data (the address-decimal-equals-destination pattern is striking but unlikely to hold across all entity types if checked).
+
+### Files
+
+- `src/ff8_accessibility.h` -- version `0.17.7.5` -> `0.17.7.5.1`
+- `src/field_archive_jsm_mapjump_resolver.inl` -- drop SCREEN_BOUND filter, add LITERAL preference, distinguish param-update vs diagnostic-only log lines
+- `src/field_nav_mapjump_diag.inl` -- header bumped, contiguous varblock 0x80-0xFF dump added (4 log lines, non-zero entries only)
+- `CHANGELOG.md` -- this entry
+- `DEVNOTES.md` / `NEXT_SESSION_PROMPT.md` -- updated
+
+### BAT recipe
+
+1. Build and launch.
+2. Same walks as v0.17.7.5 (bghall_5 wings, bghall_2 hub exits, etc.).
+3. Send `Logs/ff8_field.log`.
+
+### What to look for in the log
+
+**At field load** (e.g. bghall_5):
+- Look for `[MAPJUMP-RES] ... (Event Trigger): would-be param 0x000000AA [LITERAL]` (or similar) on `selphies`, `quistis`, `rinoa`. If present, those are the firing entities and the LITERAL value is the destFieldId.
+- Look for `[MAPJUMP-RES] ... (Background): ...` lines too -- some fields may dispatch via background scripts.
+
+**At MAPJUMP3 fire time**:
+- The new `varblock(0x0080-0x00AE) ... varblock(0x00E0-0x010E)` lines show all non-zero values in those ranges. Cross-reference: `engine RESULT: destField=170` -- does varblock[some_addr_near_0xAA] hold 170 at this moment? If yes, outcome B; we have a timing problem.
+
+### Known not-fixed
+
+- Catalog still shows bare `Exit` for SCREEN_BOUND lines. We don't ship catalog changes until BAT confirms which entity actually fires AND we have a confirmed-correct destField for it.
+- All Track B carry-over items remain deferred.
+
+## v0.17.7.5
+
+First static-resolution build for SCREEN_BOUND line destinations. Adds the MapjumpResolver pass that re-walks each line's bytecode method-by-method with proper basic-block awareness, and extends the v0.17.7.4 MAPJUMP-HOOK to read the engine's actual VM stack args and resolved destField global so the resolver's output can be cross-checked against ground truth.
+
+No catalog change yet -- the resolver writes its result into `JSMEntityInfo::param` (replacing the forward scanner's incorrect marker) and the existing downstream `[PSHM-DEST]` path in `HookedFieldScriptsInit` consumes it as before. We turn the resolver's output ON for catalog labeling AFTER the validation log confirms predicted == actual on the bghall_5 / bghall_3 wing exits Aaron walked in the v0.17.7.4 BAT.
+
+### What the v0.17.7.4 BAT revealed
+
+Aaron walked B-Garden halls. MAPJUMP3 fired twice (bghall_5 -> bghall_3 with inline_param=175, bghall_3 -> bghall_1 with inline_param=111). The hook captured varblock state at fire time -- but the destination wasn't in any of the 10 PSHM addresses the scanner had reported. The scanner-reported source for the zell line said "destField from PSHM_W 0x0002", and varblock[0x0002] = 14381 (0x382D) at fire time, while the actual destination was 170. There is no plausible arithmetic that maps 14381 to 170, so the scanner is just looking at the wrong push entirely.
+
+### Why the existing forward scanner picks the wrong push
+
+Disassembly of `opcode_mapjump3` @ `0x00521AC0` confirms the destField is the deepest of the 5 args MAPJUMP3 pops -- i.e. `pushStack[pushCount - 5]` per the scanner's own indexing. The indexing is correct in principle. Two specific bugs in `field_archive_jsm_scan.inl` desynchronize the simulated stack from the real VM:
+
+1. **No stack reset at basic block boundaries.** Jumps (`0x01` JMP, `0x03` JMPB, `0x04` JMPF) hit `break;` without resetting `pushCount`. Pushes accumulate across labels and the 8-deep `pushStack` cap truncates older entries.
+2. **Most opcodes have unmodeled stack effects.** The scanner explicitly models PSHM_W, POPM_W/L, JPF, REQ family, and control-flow opcodes. Everything else is `default: break;` -- stack untouched. bghall_5's opcode histogram shows 135x 0x14, 35x 0x1A, 31x 0x1E, 21x 0x32, 19x 0x2B / 0x2C, etc., all unmodeled.
+
+By the time the scanner reaches MAPJUMP3 at the end of a walk-on method, `pushCount` is meaningless and the slot it reports as destField is just whatever happened to be at `pushCount - 5` at that moment -- a stale PSHM_W from a branch-condition check, not the destField push.
+
+### The new resolver
+
+`src/field_archive_jsm_mapjump_resolver.inl` -- runs as a follow-up pass over each SCREEN_BOUND line entity after `RunDirectorDetection`. For each MAPJUMP / MAPJUMP3 / DISCJUMP / MAPJUMPO instruction in the entity's methods:
+
+1. Pre-builds the set of jump-target IPs within the method (LBL instructions and computed targets of JMP / JPF / JMPB).
+2. Forward-walks the bytecode with a 32-slot abstract stack.
+3. Resets the stack at every jump target so only pushes that reach MAPJUMP3 through its own basic block count.
+4. Tracks abstract values as one of LITERAL, VARBLOCK (with address), or UNKNOWN. PSHM_W / PSHM_B / PSHM_L / PSHSM_W / PSHSM_B are all tracked as VARBLOCK refs (downstream `[PSHM-DEST]` resolves them all the same way).
+5. At the MAPJUMP instruction, inspects the deepest of the top-N stack values. If LITERAL -> the literal IS the destField. If VARBLOCK -> stores `0x80000000 | addr` as the marker. If UNKNOWN -> logs as unresolved and leaves `info.param` alone (the forward scanner's existing value stays).
+
+Opcode stack effects are confirmed for MAPJUMP / MAPJUMP3 / DISCJUMP / MAPJUMPO / SET / SET3 / SETLINE / REQ family / JPF / extended dispatch / push-pop memory ops. Less-common opcodes default to {0, 0} (no stack effect) -- safer than guessing wrong; the resolver logs an UNKNOWN result in that case rather than silently producing garbage.
+
+The resolver rewrites `JSMEntityInfo::param` in place for resolved entities. The existing `[PSHM-DEST]` resolver in `HookedFieldScriptsInit` (at field load, after varblock is populated) reads `info.param`, recognizes bit-31 PSHM markers, and reads `*(int16_t*)(0x1CFE9B8 + addr)` to convert the marker to a literal field ID. The resolver's output flows through that same path -- it just puts the CORRECT marker in `info.param` instead of the wrong one.
+
+### Hook enhancements for validation
+
+`src/field_nav_mapjump_diag.inl` -- each Hooked* stub now ALSO:
+
+1. Reads the VM stack pointer at `ctx + 0x184` and dumps the 5 (or 4) args the engine is about to pop. Each slot is logged with its index, value, and a tag identifying the top and the destField slot.
+2. After chaining to the original handler, reads `*(uint16_t*)0x01CE4762` (the engine's resolved destField global, written by `opcode_mapjump3` per disassembly) and logs both that value and the corresponding field name from `FIELD_DISPLAY_NAMES`.
+
+This gives us three independent ground-truth signals per traversal:
+
+- What the static resolver predicted at field load (`[MAPJUMP-RES]` lines from the new pass)
+- What the engine actually saw on the VM stack at fire time (`[MAPJUMP-HOOK] ... VM stack:` lines)
+- What the engine wrote into the transition globals after popping (`[MAPJUMP-HOOK] ... engine RESULT:` lines)
+
+All three should agree on the destField. If they do, the resolver is correct and v0.17.7.6 can wire its output into the catalog. If they don't, the discrepancy tells us which case the resolver missed (unmodeled opcode, missed branch, varblock not yet populated, etc.).
+
+### Files
+
+- `src/ff8_accessibility.h` -- version `0.17.7.4` -> `0.17.7.5`
+- `src/field_archive_jsm_mapjump_resolver.inl` -- NEW, MapjumpResolver namespace + Run() entry point
+- `src/field_archive_jsm.inl` -- include the new resolver .inl AFTER director.inl and BEFORE scan.inl
+- `src/field_archive_jsm_scan.inl` -- call `MapjumpResolver::Run(...)` after `RunDirectorDetection(...)` returns
+- `src/field_nav_mapjump_diag.inl` -- header bumped to v0.17.7.5, two new helpers (`LogMapjumpVmStack`, `LogMapjumpResult`), all five Hooked* stubs updated to log around the original call
+- `CHANGELOG.md` -- this entry
+- `DEVNOTES.md` / `NEXT_SESSION_PROMPT.md` -- updated
+
+### BAT recipe
+
+1. Build and launch.
+2. Walk through the same B-Garden hall transitions from v0.17.7.4 (bghall_5 wing -> bghall_3 -> bghall_1 / bghall_2, then continue exploring).
+3. Send `Logs/ff8_field.log`.
+
+### Expected log shape
+
+**At field load** (one of these per resolved line, plus a summary):
+
+```
+[MAPJUMP-RES] bghall_5 ent3 'zell' m? ip=?: LITERAL destField=170
+[MAPJUMP-RES] bghall_5 ent3 'zell': param 0x80000002 -> 0x000000AA
+[MAPJUMP-RES] bghall_5 summary: N MAPJUMP instructions scanned, R entities resolved, U unresolved
+```
+
+(literal 170 = bghall_3's field ID; the example is illustrative -- actual values come from BAT)
+
+**At MAPJUMP3 fire time** (every transition):
+
+```
+[MAPJUMP-HOOK] MAPJUMP3 fired on field=... inline_param=175
+[MAPJUMP-HOOK]   player entity=I tri=T
+[MAPJUMP-HOOK]   varblock [0x0000]=... [0x0002]=... ...
+[MAPJUMP-HOOK]   MAPJUMP3 VM stack: sp=N [[N]=top=triId [N-1]=Z [N-2]=Y [N-3]=X [N-4]=destField]
+[MAPJUMP-HOOK]   MAPJUMP3 engine RESULT: transition_type=1 destField=170 (bghall_3)
+```
+
+**Validation:** `[MAPJUMP-RES]` LITERAL destField (or VARBLOCK + addr resolved via varblock) should match `[MAPJUMP-HOOK] ... engine RESULT: destField=...` for the line Aaron crossed.
+
+### Known not-fixed
+
+- Catalog still shows bare `Exit` for SCREEN_BOUND lines. The resolver's output flows through `info.param` but until BAT confirms predicted == actual we don't trust it for labeling.
+- All other deferred items from v0.17.7.4 remain deferred (`deploy.bat` cosmetic regression, walk-and-talk dialog gap, SeeD rank #27, Fire Cavern #28, planner-fallback #29).
+
+## v0.17.7.4
+
+Diagnostic-only build. Installs runtime hooks on the five MAPJUMP-family opcodes (MAPJUMP, MAPJUMP3, DISCJUMP, MAPJUMPO, WORLDMAPJUMP) to capture varblock state at the exact moment a field transition fires. Sidesteps the static-resolution dead end documented in v0.17.7.3 BAT: across ~220 captured POPM_W writes covering 5 fields, ZERO targeted the unresolved PSHM addresses (0x00AF, 0x01F6, 0x023A, 0x00E6, etc.) that SCREEN_BOUND lines read from. The destinations exist somewhere the JSM scanner can't see; this build asks the engine directly.
+
+No catalog change in this build. The deliverable is the BAT log.
+
+### Two corrections that shaped this build
+
+Aaron flagged two interpretation errors carried over from v0.17.7.1.2 / v0.17.7.2:
+
+1. **Dormant SCREEN_BOUND Lines are NOT meaningless.** They ARE valid exits with story-state-dependent destinations. Early-game routes through intermediate hallway fields; late-game routes direct. The v0.17.7.3 filter plan that would have stripped these from the catalog is REJECTED.
+
+2. **The bghall_3 "Headmaster's Office 7" varblock-resolve in v0.17.7.1.2 was a misidentification.** The runtime read at addr=0x00E2 returned value 255 and the resolver labeled that as field 255 (Headmaster's Office 7), but Aaron never visited the Headmaster's Office during that BAT (it's on the 3rd floor; BAT was 1st-floor only). The value 255 was either a stale/uninitialized varblock slot or a story flag, NOT a destination field ID. Even the one apparent success of the runtime varblock approach was bogus, which means the timing AND the addressing in v0.17.7.1.2's resolver might both be wrong. This new diagnostic captures ground truth instead of guessing.
+
+### How the hook works
+
+`FF8Addresses::pExecuteOpcodeTable[N]` holds the dispatch function pointer for opcode N. The table lives in `.data` (writable). At `Initialize()` we save the original pointers for opcodes 0x29/0x2A/0x38/0x5C/0x10D and overwrite each entry with our own hook stub. The stub:
+
+1. Reads `*FF8Addresses::pCurrentFieldId` and `pCurrentFieldName` for the source field.
+2. Calls `GetPlayerEntityIndex()` + `GetEntityTriangleId()` for the player's walkmesh triangle, so we can correlate the firing with one specific SCREEN_BOUND line's SETLINE coordinates after the fact.
+3. Reads `uint16_t` values from `0x01CFE9B8 + addr` for 10 known relevant PSHM addresses (0x0000, 0x0002, 0x00AA, 0x00AF, 0x00E2, 0x00E6, 0x01DF, 0x01F6, 0x023A, 0x0401) -- the union of every SCREEN_BOUND PSHM address seen in v0.17.7.x BAT logs.
+4. Calls the saved original opcode function so the transition still proceeds.
+
+Dispatch table addresses confirmed from FFNx source + disassembly cross-reference:
+- `update_field_entities` = `0x00529FF0` (call site at `sub_4767B0 + 0x14E`)
+- `execute_opcode_table` = `0x00B8DE94` (dispatch instruction at `update_field_entities + 0x657`)
+- `field_vars_stack_1CFE9B8` = `0x01CFE9B8` (FFNx names the global after its address)
+- Opcode handler signature = `int __cdecl (void* vmCtx, int param)` (from FFNx's `opcode_popm_w` typedef)
+
+### Why not just hook the VM stack to read the destination directly
+
+Would need to disassemble `opcode_pshm_w` / `opcode_mapjump` to learn the VM context struct layout, which adds risk for a build whose entire point is to get one round of ground-truth logging out. Reading the varblock at all 10 known PSHM addresses gives us the same information (the destination IS in one of those slots at MAPJUMP fire time) without touching VM internals.
+
+### SET3 safety note
+
+The one-line memory note about SET3 (opcode 0x1E) being permanently disabled because ANY interception hangs the infirmary cutscene applies SPECIFICALLY to SET3 -- not a general "don't patch the dispatch table" rule. SET3 is hot-path enough that even a pass-through wrapper triggers a script-interpreter race. MAPJUMP-family opcodes only fire on field transition (at most every few seconds), and the SET3 wrapper investigation in v0.09.32-40 never implicated 0x29 / 0x2A / 0x38 / 0x5C / 0x10D. The same dispatch-table-patch pattern (with `VirtualProtect` wrap, mirroring the disabled SET3 code path that's already in `Initialize()`) is safe for these.
+
+### Files
+
+- `src/ff8_accessibility.h` -- version `0.17.7.3` -> `0.17.7.4`
+- `src/ff8_addresses.h` -- declarations for `opcode_mapjump` / `opcode_mapjump3` / `opcode_discjump` / `opcode_mapjumpo` / `opcode_worldmapjump`
+- `src/ff8_addresses.cpp` -- storage and resolution from `pExecuteOpcodeTable[N]` at startup
+- `src/field_nav_mapjump_diag.inl` -- NEW, dispatch-table patch + 5 hook stubs + `Install()` / `Restore()`
+- `src/field_navigation.cpp` -- `#include` the new .inl, call `MapjumpDiag::Install()` from `Initialize()` and `MapjumpDiag::Restore()` from `Shutdown()`
+- `CHANGELOG.md` -- this entry
+- `DEVNOTES.md` / `NEXT_SESSION_PROMPT.md` -- updated
+
+### BAT recipe
+
+1. Build and launch.
+2. Walk through any field transitions Aaron is investigating. B-Garden halls are the highest-value targets (bghall_1 -> wings, bghall_2/3/5 -> hub, ...). Any exit firing a MAPJUMP triggers a log entry.
+3. Send `Logs/ff8_field.log`.
+
+**Expected log shape per traversal:**
+
+```
+[MAPJUMP-HOOK] MAPJUMP fired on field=N 'fieldname' inline_param=P (0xPP)
+[MAPJUMP-HOOK]   player entity=I tri=T
+[MAPJUMP-HOOK]   varblock [0x0000]=V(0x...) [0x0002]=V(0x...) ...
+[MAPJUMP-HOOK]   varblock [0x01F6]=V(0x...) [0x023A]=V(0x...) ...
+```
+
+For each traversal, the destination field ID is in ONE of those 10 varblock slots. Cross-reference the line crossing direction + player triangle against the `s_capturedLines[]` SETLINE coordinates (already logged at field load) to identify WHICH line fired, then read that line's preferred PSHM address from the existing scan output. The intersection gives us `(field, lineIdx) -> destination` in one BAT cycle.
+
+**Sanity check:** at minimum, MAPJUMPs from bghall_1 INF-gateway exits (which v0.17.4.x already labels correctly) should show varblock destinations matching the known gateway destFieldIds. If they don't, the varblock base or read width is wrong and v0.17.7.5 fixes the addressing before resolving anything.
+
+### Known not-fixed
+
+- All wing-exit labels still show as bare `Exit` in this build. The catalog isn't touched; this is by design.
+- Dorm bed Interaction, static-text leaks like `Kanban2 1 of 1`, and the `deploy.bat` "Version: SINGLE-PRONGED" cosmetic regression are all deferred to Track B v0.17.7.5+.
+
+## v0.17.7.3
+
+Diagnostic-only follow-up to v0.17.7.2. Two surgical changes: drop the `m == 0` gate on the JSM scanner's POPM_W capture so writes from all methods (not just init) get recorded, and gate the fourth `DumpEntityScript` call site that slipped through v0.17.7.2 (the promote-targets-without-position branch in `RunDirectorDetection`). Same `[MAPJUMP-RESOLVE]` and `[INITVARS-SUMMARY]` diagnostic blocks fire as in v0.17.7.2 -- this build's deliverable is the BAT log, NOT a catalog-visible change.
+
+### Why widen the scanner
+
+v0.17.7.2 BAT confirmed across all four B-Garden hall fields that the unresolved SCREEN_BOUND lines read from varblock addresses (0x00AF, 0x01F6, 0x023A, 0x00E6, 0x0002) which NO entity writes to in its init method. Field-wide init writes go to a completely different set of addresses (0x0000, 0x0405, 0x0410, 0x040F, 0x0406, 0x0407, 0x01DF, 0x0401). Zero overlap. The exception was bghall_3's `quistis` line at addr=0x00E2, which the runtime varblock read happened to resolve to field 255 (Headmaster's Office 7) -- proving destinations DO end up in the varblock, just not via init writes.
+
+Most likely explanation: the Line entities write the destination to their own varblock address in their own walk-on / interaction method (not the m=0 init), then PSHM_W + MAPJUMP to use it. The current scanner doesn't see those writes because it only records POPM_W when `m == 0`.
+
+The v0.17.7.3 widening removes that filter. The same `[INITVARS-SUMMARY]` block now logs every literal-PUSH + POPM_W pair across every entity's bytecode, not just method 0. If the unresolved addresses (0x01F6, 0x023A, etc.) now appear as writers with plausible field-ID values, v0.17.7.4 ships a five-line per-entity resolver. If they still don't appear, destinations live outside script bytecode (savemap, engine state) and we need a runtime opcode_mapjump hook instead.
+
+### Why the fourth dump gate
+
+v0.17.7.2 gated three `DumpEntityScript` call sites in `field_archive_jsm_director.inl` and `field_nav_fieldscripts.inl`, but missed the one in `RunDirectorDetection`'s promote-targets-without-position loop (`if (!outEntities[tc].hasPosition) DumpEntityScript(fieldName, tgt);`). bghall_1's BAT log showed `seito4` getting dumped from this site even with the other three gates active. Same `#ifdef FF8OPC_VERBOSE_JSM` wrap. The post-init block completed cleanly anyway in v0.17.7.2 BAT, but tightening this for cleaner logs.
+
+### Per-entity buffer cap
+
+`s_initVarMaps[entityIdx].count` is capped at 64 writes per entity. v0.17.7.2 BAT showed at most ~9 writes per entity from m=0 only; even with all-method widening, individual entities are unlikely to exceed 64. If a chatty entity hits the cap, the diagnostic will be incomplete but won't crash.
+
+### Files
+
+- `src/ff8_accessibility.h` -- version 0.17.7.2 -> 0.17.7.3
+- `src/field_archive_jsm_scan.inl` -- drop `m == 0` from the POPM_W capture condition
+- `src/field_archive_jsm_director.inl` -- gate the fourth `DumpEntityScript` site
+- `CHANGELOG.md` -- this entry
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md` -- updated
+
+### BAT recipe
+
+Same as v0.17.7.2 -- load any B-Garden hall (bghall_1 / bghall_2 / bghall_3 / bghall_5), wait at field load, send `Logs/ff8_field.log` for inspection.
+
+**Expected outcomes:**
+
+- **Path A (hypothesis confirmed):** `[INITVARS-SUMMARY]` for bghall_3 now shows an entity writing value 255 to addr 0x00E2 (matching the runtime varblock read that succeeded in v0.17.7.2). `[MAPJUMP-RESOLVE]` for bghall_2/3/5 SCREEN_BOUND lines now reports `K init writers` with plausible field-ID values instead of `NO init writers found`. v0.17.7.4 ships a 5-line per-entity resolver: for each unresolved line, look up `LookupInitVarWrites(addr)` filtered to the line's own jsmIndex, adopt the writer's value if it's in [1, 982].
+
+- **Path B (hypothesis rejected):** Even with all-method widening, no entity writes to the unresolved addresses. Destinations live in savemap state populated by prior gameplay (parent field's init when player entered bghall_2 set the address; engine global state; new-game template). v0.17.7.4 ships a runtime opcode_mapjump hook + session cache: snapshot destinations on first traversal, label them on subsequent visits. Drawback: first visit shows bare `Exit`, second visit shows full destination.
+
+- **Path C (partial):** Some lines resolve via the new writes, others don't. v0.17.7.4 ships Path A for the working cases plus an explicit `[PSHM-UNRESOLVED]` log marker for the rest, queueing them for the runtime hook in v0.17.7.5.
+
+### Known not-fixed
+
+- B-Garden hall WING exits (bghall_2/3/5) still show as bare `Exit`. Hub bghall_1 still labels its 4 INF gateway exits correctly.
+- Dorm bed Interaction still missing (separate bug, deferred).
+- Static text/signs like `Kanban2 1 of 1` still leak (Track B v0.17.7.5+).
+- `Logs/build_latest.log` may still trigger the `deploy.bat` "Version: SINGLE-PRONGED" cosmetic regression (backlog).
+
+## v0.17.7.2
+
+Diagnostic-only build. v0.17.7.1.2 BAT confirmed two things at once: B-Garden hall exits still show as bare `Exit`, and `bghall_1`'s `field_scripts_init` post-init logging block never completed in the BAT log (Aaron transitioned fields ~37 seconds after entering, but `[PSHM-DEST]` lines for the hall exits, the `[fieldload] lineType assigned` summary, and everything after it were absent). Root cause for the log gap: `RunDirectorDetection` was unconditionally calling `DumpEntityScript` for every Background entity AND the Director itself, once per Director detected. `bghall_1` has three Directors (displight, cornerlight, sidelight) and six Backgrounds; one of those Backgrounds is `displight` with 34 methods covering ~3000 dwords. The combined dump volume blew up the field log past the point where init could finish before the player moved to another field, masking diagnostic output for everything that runs AFTER the JSM scan.
+
+The broader v0.17.7.x problem -- the runtime PSHM varblock read at `0x1CFE9B8 + addr` returns zero/garbage at the lifecycle point where `field_scripts_init` runs the post-init resolution block, so the marker stays unresolved and the catalog falls back to bare `Exit` -- is unsolved. v0.17.7.2 explicitly does NOT attempt another runtime read. Instead it adds enough STATIC instrumentation to confirm or rule out a specific hypothesis before any resolver code is written: **field-exit destinations live in init-method literal-PUSH + POPM_W pairs that the JSM scanner already captures in `s_initVarMaps[]`**.
+
+If that hypothesis holds, the v0.17.7.3 resolver is a five-line cross-reference: for each `JSM_ENT_LINE_SCREEN_BOUND` line whose `param` is a bit31 marker, ask `LookupInitVarWrites(marker & 0xFFFF)` for matching writers; if exactly one entity wrote a sensible field ID, that's the resolved destination. If the hypothesis fails (zero writers for the unresolved addresses), the destinations live in story-dispatch methods (m > 0) reachable from init via REQ chains, and the scanner has to be widened first. Either way, v0.17.7.2's BAT log tells us which path we're on -- and avoids shipping another build that *looks* right in code review but produces no labels at runtime.
+
+### Fix 1 -- Gate the Director script-dumps behind `FF8OPC_VERBOSE_JSM`
+
+Three call sites were unconditionally calling `DumpEntityScript`:
+
+- `field_archive_jsm_director.inl` per-Background loop: dumps every BG entity once per Director detected. On `bghall_1` that's 6 backgrounds * 3 directors = 18 full dumps. `displight` (a Background, despite being a Director on the Others side) has 34 methods of ~88 dwords each.
+- `field_archive_jsm_director.inl` per-Director self-dump: dumps the Director's own script after detection. Same `displight`-class entities, three times per field.
+- `field_nav_fieldscripts.inl` Event-Trigger/Unknown Line loop: dumps every non-CAMERA_PAN, non-SCREEN_BOUND Line entity. On dormitory fields these reference long Background scripts.
+
+All three now wrap their `DumpEntityScript` calls in `#ifdef FF8OPC_VERBOSE_JSM`. The build script doesn't define the symbol, so production runs skip the dumps entirely. The `[DIR-DIAG]` per-entity flag lines and the `[DIRECTOR] Detected` summary line stay in place -- those are tiny and informative.
+
+### Fix 2 -- `LookupInitVarWrites()` + `EnumerateInitVars()` public API
+
+Added to `field_archive.h` and implemented in a new `field_archive_jsm_initvars.inl` (textually included from `field_archive_jsm.inl` after `scan.inl`). Both functions are read-only walkers of `s_initVarMaps[128]` populated during `ScanJSMScripts`. The first answers "which entities write to this varblock address during init?"; the second enumerates all init writes across the field. New structs `InitVarWriter { entityIdx, value }` and `InitVarTuple { entityIdx, addr, value }` expose results to callers.
+
+Neither function changes data. They exist only so the diagnostic block in `HookedFieldScriptsInit` can ask the question without poking at `FieldArchive`'s internal statics.
+
+### Fix 3 -- `[MAPJUMP-RESOLVE]` + `[INITVARS-SUMMARY]` diagnostic blocks
+
+Inserted in `field_nav_fieldscripts.inl` immediately after the `[fieldload] lineType assigned` summary log line. Two stages:
+
+1. **Per-unresolved-line lookup**: for each captured line where `lineType == JSM_ENT_LINE_SCREEN_BOUND` AND `destFieldId & 0x80000000 != 0` (still a bit31 marker because v0.17.7.1.2's varblock read failed), extract `addr = destFieldId & 0xFFFF`, call `LookupInitVarWrites(addr)`, and log every writer found with `(entityIdx, symName, value)` and -- if `value` is a plausible field ID -- the resolved display name. If `totalWriters == 0`, log `NO init writers found` so we know to expand the scan.
+
+2. **Field-wide summary**: call `EnumerateInitVars()` for the whole field, log up to 256 init writes annotated with `(entityIdx, symName, addr, value, optional displayName if value is a field ID)`. This shows the full landscape so we can spot patterns even when the per-line lookup misses (wrong addr convention, shifted/masked addresses, etc).
+
+Neither block changes catalog behavior. Production runs will still see bare `Exit` labels until v0.17.7.3. The BAT log is the deliverable.
+
+### Files
+
+- `src/ff8_accessibility.h` -- version 0.17.7.1.2 -> 0.17.7.2
+- `src/field_archive_jsm_director.inl` -- gate per-BG and per-Director self-dump behind `FF8OPC_VERBOSE_JSM`
+- `src/field_nav_fieldscripts.inl` -- gate Event-Trigger/Unknown Line dump behind `FF8OPC_VERBOSE_JSM`; add `[MAPJUMP-RESOLVE]` + `[INITVARS-SUMMARY]` diagnostic blocks
+- `src/field_archive.h` -- declare `InitVarWriter`, `InitVarTuple`, `LookupInitVarWrites`, `EnumerateInitVars`
+- `src/field_archive_jsm_initvars.inl` -- NEW: implement the two lookup functions
+- `src/field_archive_jsm.inl` -- `#include` the new .inl after `scan.inl`
+- `CHANGELOG.md` -- this entry
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md` -- updated
+
+### BAT recipe
+
+1. **bghall_1 (any B-Garden hall field)**. Load the field. Wait for ~5 seconds AT THE LOAD SCREEN (don't move) so the field log captures the init blocks. Press F10 to confirm field name.
+2. **Quick exit verification**: press `-` / `=` to cycle to each exit. Aaron will hear the catalog labels (still bare `Exit` -- this build does not fix labels; resolver lives in v0.17.7.3).
+3. **Log inspection (Claude)**: look for `[MAPJUMP-RESOLVE]` and `[INITVARS-SUMMARY]` lines for `bghall_1`. Expected outcomes:
+   - **Hypothesis confirmed**: `[MAPJUMP-RESOLVE]` shows each unresolved line's `addr=0xXX` matched by exactly one writer with a plausible value (e.g. "ent7 'saveline_init' value=170 -> Cafeteria"). v0.17.7.3 ships the cross-reference resolver.
+   - **Hypothesis rejected**: `[MAPJUMP-RESOLVE]` shows `NO init writers found` for the hall exit addresses. v0.17.7.3 widens the scanner to capture POPM_W writes from method 1+ reachable from init via REQ chain.
+   - **Partial**: some lines resolve, some don't. v0.17.7.3 ships the resolver for the cases that work and a TODO for the others.
+4. Confirm `[DIR-DIAG]` lines still appear for `bghall_1` (proves Director detection still runs) and that NO `[SCRIPT-DUMP]` log spam appears (proves the gate works). The `[fieldload] lineType assigned` summary and `[NAV-PROJ-INIT]` block MUST appear -- if they're missing, the build still has a log-explosion problem we haven't diagnosed.
+
+### Known not-fixed
+
+- B-Garden hall exits still show as bare `Exit` (resolver deferred to v0.17.7.3).
+- Dorm bed Interaction still missing (deferred -- separate issue, addressed after the hall-exits resolver lands).
+- `Logs/build_latest.log` may still trigger `deploy.bat` "Version: SINGLE-PRONGED" cosmetic regression from v0.15.3 (backlog).
+
+## v0.17.7.1.2
+
+Second hotfix on the v0.17.7.1 BAT findings. v0.17.7.1.1's two fixes both missed: the dorm bed `hasTalkSetup`-based JSM-scanner gating didn't classify the bed as INTERACTIVE (it uses REQ-to-Background for dialog, not its own MES/ASK), and the INF gateway proximity match couldn't recover B-Garden hall exit destinations because the INF binary data holds vestigial PSX placeholders (the v0.07.95 comment explicitly warned about this). v0.17.7.1.2 attacks both with the right signals.
+
+### Fix 1 — Per-line `hasExtDispatch` discriminator (dorm bed)
+
+The dorm bed Line's own script has only `SETLINE + REQ(bedBackground)`; the `MES`/`ASK` opcodes live in the bed Background entity. Static JSM scanning finds `foundDialogOp=false` for the Line, so dialog-wins-first reclassification (v0.17.7.1.1) sends the bed to `JSM_ENT_LINE_SCREEN_BOUND` via the MAPJUMP-to-next-day branch. In the v0.12.24 era this was masked by the field-wide `fieldHasInteractiveObjects` demote (which v0.17.7.1 correctly removed for fepic1).
+
+The per-line equivalent of that demote was already present: the v0.12.24 REQ-following pass sets `info.hasExtDispatch=true` on Line entities that REQ entities containing dialog or 0x1C ext-dispatch. The flag propagates to `s_capturedLines[t].hasExtDispatch` in `field_nav_fieldscripts.inl`. It just wasn't consumed in `field_nav_catalog.inl`.
+
+Now it is. Two surgical changes in `field_nav_catalog.inl`:
+
+- **SETLINE-Exit injection**: skip SCREEN_BOUND lines with `hasExtDispatch=true`. These are dual-purpose (exit-via-interaction); showing them as Exits is misleading and the destination name (next-day field) is uninformative anyway.
+- **SETLINE-Interaction injection**: accept SCREEN_BOUND lines with `hasExtDispatch=true` as Interactions, alongside the existing LINE_INTERACTIVE classification.
+
+fepic1's three exit Lines have `hasExtDispatch=false` (they don't REQ interactive entities), so they pass through the Exit block as before. Per-line signal replaces field-wide signal with no false-positives.
+
+### Fix 2 — PSHM varblock resolution (B-Garden hall exits)
+
+B-Garden hall MAPJUMPs use runtime memory variables for the destination field ID. The script emits `MAPJUMP <PSHM_W varAddr>`, the engine pushes the value at `varblock[varAddr]` onto the VM stack, then MAPJUMP pops it as the destination. The destination table is populated during field init, but the static JSM scanner sees only the PSHM marker (`0x80000000 | varAddr`).
+
+v0.17.7.1.1's INF-gateway-proximity fallback failed because B-Garden's INF gateways hold vestigial PSX placeholder `destFieldId` values — confirmed by the v0.07.95 comment that originally introduced INF-gateway support. The runtime varblock is the only authoritative source for these destinations.
+
+Resolution in `field_nav_fieldscripts.inl` at the destFieldId copy block, which runs AFTER `s_originalFieldScriptsInit` has populated the varblock. For each Line classified as `JSM_ENT_LINE_SCREEN_BOUND`:
+
+```c
+if ((unsigned)rawParam & 0x80000000u) {
+    uint16_t pshmAddr = (uint16_t)(rawParam & 0xFFFF);
+    int16_t resolvedId = *(int16_t*)(0x1CFE9B8 + pshmAddr);  // varblock base hardcoded for Steam 2013 en-US
+    if (resolvedId > 0 && resolvedId < FIELD_DISPLAY_NAMES_COUNT)
+        rawParam = (int)resolvedId;
+}
+s_capturedLines[t].destFieldId = rawParam;
+```
+
+New log line `[PSHM-DEST] lineN (jsmM 'symName') marker=0xXXXXXXXX addr=0xXXXX -> field N (DisplayName)` confirms a successful resolution. If the varblock read produces an out-of-range value, the marker is kept and the catalog still falls back to bare `Exit` (no regression vs v0.17.7.1.1).
+
+The v0.17.7.1.1 INF-gateway-proximity block in `field_nav_catalog.inl` stays in place as a secondary fallback for any field whose destinations aren't PSHM-resolvable but DO have meaningful INF data (e.g. older or simpler fields where INF was kept current).
+
+PSHSM_W (opcode 0x0C, special memory) also produces the same marker via the scanner's shared branch. We read from the regular varblock base only; if a SCREEN_BOUND uses PSHSM_W and reads from special memory, the varblock fetch lands on the wrong region, produces out-of-range, and the catalog falls back. Acceptable for first BAT — likely rare on exit Lines.
+
+### Files
+
+- `src/ff8_accessibility.h` — version 0.17.7.1.1 → 0.17.7.1.2
+- `src/field_nav_catalog.inl` — SETLINE-Exit skip on hasExtDispatch (already shipped in .1.1's partial implementation); SETLINE-Interaction accepts SCREEN_BOUND+hasExtDispatch
+- `src/field_nav_fieldscripts.inl` — PSHM marker resolution for SCREEN_BOUND `destFieldId` reads from `0x1CFE9B8 + addr`
+- `CHANGELOG.md` — this entry
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md` — updated
+
+### BAT recipe
+
+1. **bghall_1**. Catalog now shows `Exit to Cafeteria` (or display-name equivalent), `Exit to Dormitories`, `Exit to Parking Lot` instead of bare `Exit`. `Light 1 of 1` still absent. `\` drive to each exit still works.
+2. **Any dorm field** (bgryo1_1 / bgmaki1_1 etc.). Bed appears in catalog as `Interaction 1` (or higher N if multiple Lines). Drive to it with `\`; auto-drive lands on the SETLINE center. The bed's SCREEN_BOUND exit-to-next-day is NOT listed separately.
+3. **fepic1**. Three `Exit to ...` entries still present. No regression — fepic1's exit Lines have `hasExtDispatch=false`.
+4. **bggate_6**. Disconnected-island guard still in catalog.
+
+Log lines to grep in `Logs/ff8_field.log`:
+
+- `[PSHM-DEST] lineN ... -> field N (Name)` — successful PSHM resolution. Should fire 3+ times on bghall_1.
+- `[PSHM-DEST] lineN ... -> varblock=N (out of range, keeping marker)` — PSHM read returned a nonsense value. Indicates the varblock at that address isn't a field ID, or the variable hasn't been initialised yet. Falls back to `Exit`.
+- `[walkmesh-excl] JSM ent%d ...` from v0.17.7.1 should still fire for the bghall_1 light.
+
+If bghall_1 exits still show as bare `Exit` after this fix, the next diagnostic is to confirm whether `[PSHM-DEST]` lines fire at all (varblock content empty/wrong at this lifecycle point), or whether they fire with out-of-range values (varblock address scheme different than assumed). v0.17.7.1.3 fallback would be a runtime opcode_mapjump hook that snapshots the resolved field ID on first traversal and caches it session-long, indexed by (sourceFieldId, lineIdx).
+
+## v0.17.7.1.1
+
+Hotfix on top of v0.17.7.1's BAT findings. Two fixes:
+
+### Fix 1 — Dorm bed Interaction regression
+
+v0.17.7.1 over-engineered the JSM scanner. The real fepic1 fix was the catalog's `fieldHasInteractiveObjects` field-wide demote removal; I *also* changed the JSM scanner to require TALKRADIUS/TALKON for `JSM_ENT_LINE_INTERACTIVE`. Dorm beds turn out not to use TALKRADIUS — they use SETLINE + dialog opcodes, and the engine fires the "Sleep?" prompt when the player crosses the line. With the new gating they classified as SCREEN_BOUND or EVENT and stopped appearing as `Interaction N` in the catalog.
+
+Reverted the Line classification priority back to v0.12.24-era "dialog wins first":
+
+1. dialog opcodes → `JSM_ENT_LINE_INTERACTIVE`  *(covers walk-across SETLINE+MES beds AND press-confirm TALKRADIUS signs)*
+2. MAPJUMP without dialog → `JSM_ENT_LINE_SCREEN_BOUND`  *(pure screen exits like fepic1's three)*
+3. battle/event without dialog → `JSM_ENT_LINE_EVENT`
+4. BGDRAW/SCROLL only → `JSM_ENT_LINE_CAMERA_PAN`
+5. nothing recognisable → `JSM_ENT_LINE_CAMERA_PAN`
+
+fepic1's exit Lines have no dialog, so they still classify as SCREEN_BOUND → "Exit to ...". The catalog's field-wide demote removal (v0.17.7.1) stays in place; that's what actually fixed fepic1. The `hasTalkSetup` field on `JSMEntityInfo` is still populated and remains available for future fixes that need to distinguish confirm-press interactions from walk-across triggers, just no longer used to gate classification.
+
+### Fix 2 — Robust exit destination recovery
+
+Bghall_1 BAT exposed a pre-existing issue that v0.17.7.1 made visible: when a SETLINE SCREEN_BOUND Line's MAPJUMP destination is sourced from PSHM_W (runtime memory variable, common for B-Garden hall exits to Cafeteria / Dormitories / Parking Lot), the static JSM scan can't resolve the destination field ID. The captured trigger line's `destFieldId` ends up as a negative marker or out-of-range value, and the catalog label falls back to bare `"Exit"`.
+
+Pre-v0.17.7.1, the v0.12.24 field-wide demote was masking this — those exits were mislabeled as `Interaction 1/2/3` so the missing destination didn't matter. Now they correctly show as exits but the destinations are missing.
+
+Fix: when the captured SETLINE's `destFieldId` is unresolvable (`< 0` or `>= FIELD_DISPLAY_NAMES_COUNT`, not equal to the World-Map sentinel `-2`), match the SETLINE center to the nearest INF gateway by spatial proximity and inherit that gateway's `destFieldId`. INF gateway destFieldIds are static binary data in the `.inf` file at offset `+18` of each gateway record (loaded by `LoadINFGateways`) and reliable when present. Threshold: 1000 world units — SETLINE trigger lines and INF gateway lines for the same physical exit are typically co-located at the screen boundary (usually within ~200 units); 1000 gives generous margin without risking cross-matching.
+
+The dedup-against-existing-exit check in the v0.07.94 INF-gateway-injection block runs after this and catches the duplicate via display-name `strcmp` (both paths now use the same `FIELD_DISPLAY_NAMES` table), so the INF gateway won't add a redundant entry once we've recovered the destId here. World-map destinations (`-2` sentinel) are preserved and resolve correctly through their existing branch.
+
+New log line: `[refresh] SETLINE lineN center=... destId=N unresolvable -> matched INF gateway G destId=N (dist=N) -- recovering`. Useful for confirming the proximity match worked.
+
+### Files
+
+- `src/ff8_accessibility.h` — version 0.17.7.1 → 0.17.7.1.1
+- `src/field_archive_jsm_scan.inl` — reverted Line classification refactor to dialog-wins-first; `foundTalkradius` tracker and `info.hasTalkSetup` writeback retained as harmless and future-useful
+- `src/field_nav_catalog.inl` — INF gateway proximity recovery for unresolvable SETLINE destinations
+- `CHANGELOG.md` — this entry
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md` — updated
+
+### BAT recipe
+
+1. **bghall_1**. Catalog now shows `Exit to Cafeteria`, `Exit to Dormitories`, `Exit to Parking Lot` (or the equivalent display names from `FIELD_DISPLAY_NAMES`) instead of bare `Exit` entries. `\` drive to each exit still works.
+2. **Any dorm field** (e.g. bgryo1_1). The bed appears in catalog as `Interaction 1` (or higher N if there are multiple Lines). Drive to it with `\`; auto-drive lands on the SETLINE center.
+3. **fepic1**. Three `Exit to ...` entries still present; the v0.17.7.1 fix isn't regressed.
+4. **bghall_1 (light regression)**. `Light 1 of 1` still absent from catalog (v0.17.7.1's walkmesh exclusion stays).
+
+If an exit on bghall_1 still shows as bare `Exit`, grep `Logs/ff8_field.log` for `SETLINE lineN center=... destId=N unresolvable` to see whether the INF gateway proximity matched. "matched INF gateway" → destination recovered; "no INF gateway within 1000 units" → the bghall_1 INF doesn't have a static destFieldId for that exit and we need a different recovery mechanism (likely a runtime opcode_mapjump hook to snapshot the PSHM_W-resolved destination right before transition).
+
+## v0.17.7.1
+
+First substantive Track B fix: walkmesh exclusion rule plus per-line exit/interaction/event discriminator. Kills the `Light 1 of 1` regression on fepic1 and restores correct exit labels there. Two combined fixes, one BAT cycle. v0.17.7.0's file split (`field_nav_catalog.inl` 75.77 KB → 53.82 KB) was the prerequisite; this entry adds ~3 KB of code there (final size 56.77 KB, still comfortably under the 60 KB warn line).
+
+### Fix 1 — Walkmesh exclusion rule
+
+New `IsInsideWalkmesh(float x, float y)` helper in `field_nav_pathfinding.inl`. Standard sign-of-cross-product point-in-triangle across `s_walkmesh.tris` — cheap (the walkmesh is already loaded for A*) and conservative (returns false / keeps entity if the walkmesh isn't loaded).
+
+Two call sites in `field_nav_catalog.inl`:
+
+- **Runtime classification loop** (after party-filter). Drops entities with `talkonoff == 0 && pushonoff == 0` whose runtime position lies outside any walkmesh triangle. Either condition alone keeps the entity — a guard with `talkonoff > 0` who happens to stand on a disconnected island (bggate_6's tri=87) stays, an over-the-railing NPC stays, but the lights/particle emitters/decorative scenery that were leaking into the catalog via JSM Interactive Object promotion drop. The v0.12.08 reachability filter (removed in v0.12.09 because bggate_6's guard sat on tri=87 while the player stood on tri=22 — disconnected within one screen) does **not** recur here because the OR-with-talk preserves that guard.
+- **JSM Interactive Object injection** (the path the lights take). Drops `JSM_ENT_INTERACTIVE_OBJECT` injections that have no `hasTalkSetup` AND sit off-mesh. Save Points, Draw Points, Shops, Card Games, and MAP_EXITs are explicitly excluded from this filter — those are always valuable navigation targets regardless of mesh position.
+
+Entities at position `(0, 0)` skip the walkmesh test (placeholder for not-yet-placed) so the engine has time to place them before they get culled.
+
+### Fix 2 — Per-line exit/interaction/event discriminator
+
+Replaces the v0.12.24 `fieldHasInteractiveObjects` field-wide demote (which converted *every* SCREEN_BOUND Line into an Interaction on any field that contained at least one Interactive Object — wrong for fepic1 where the three exit Lines and the Interactive Objects are separate entities) with a per-line classification driven by the JSM scanner.
+
+New opcode constant `JSM_OP_TALKRADIUS = 0x056`. New field `bool hasTalkSetup` on `JSMEntityInfo`, set to `foundTalkradius || foundTalkon` after the scan. JSM scanner Line classification now prioritises in this order (matches Aaron's 2026-05-18 taxonomy):
+
+1. dialog + TALKRADIUS/TALKON → `JSM_ENT_LINE_INTERACTIVE`  *(player confirms — dormitory bed)*
+2. MAPJUMP → `JSM_ENT_LINE_SCREEN_BOUND`  *(exit; dialog if any is cutscene)*
+3. dialog/battle/event without talk → `JSM_ENT_LINE_EVENT`  *(walk-through fires it)*
+4. BGDRAW/SCROLL only → `JSM_ENT_LINE_CAMERA_PAN`
+5. nothing recognisable → `JSM_ENT_LINE_CAMERA_PAN`
+
+The dual-purpose dormitory case (bgryo1_4 'squall' = MAPJUMP + dialog + TALK setup) still classifies as INTERACTIVE because rule 1 wins over rule 2. fepic1's three exit Lines (MAPJUMP only, no dialog, no talk setup) stay SCREEN_BOUND and reach the catalog as Exits.
+
+The SETLINE-injection layer in `RefreshCatalog` now trusts `lineType` directly:
+
+- LINE_SCREEN_BOUND → "Exit to <field>" (the v0.12.24 demote and its `fieldHasInteractiveObjects` lookup are deleted).
+- LINE_INTERACTIVE → "Interaction N" (the v0.12.24 dual-purpose promote-SCREEN_BOUND path is deleted, because dual-purpose Lines now classify as LINE_INTERACTIVE directly in the JSM scanner).
+
+### Files
+
+- `src/ff8_accessibility.h` — version 0.17.7.0 → 0.17.7.1
+- `src/field_archive_jsm_constants.inl` — new `JSM_OP_TALKRADIUS = 0x056`
+- `src/field_archive.h` — new `JSMEntityInfo::hasTalkSetup`
+- `src/field_archive_jsm_scan.inl` — `foundTalkradius` tracker, Line classification refactor, `info.hasTalkSetup` writeback
+- `src/field_nav_pathfinding.inl` — `IsInsideWalkmesh` helper (~30 lines, +2.48 KB)
+- `src/field_nav_catalog.inl` — runtime walkmesh exclusion, JSM-injection walkmesh exclusion (Interactive Object only), removed v0.12.24 field-wide demote in both SETLINE-exit and LINE_INTERACTIVE blocks
+- `CHANGELOG.md` — this entry
+- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md` — updated
+
+### File sizes after edits
+
+- `field_nav_catalog.inl`: 53.82 → **56.77 KB** (+2.95 KB; 23 KB headroom under the 80 KB hard fail)
+- `field_archive_jsm_scan.inl`: 63.32 → **64.62 KB** (+1.30 KB; warn-zone but 15 KB headroom)
+- `field_nav_pathfinding.inl`: 39.70 → **42.18 KB** (+2.48 KB)
+- `field_archive.h`: 12.62 → **13.09 KB** (+0.47 KB)
+- `field_archive_jsm_constants.inl`: 6.52 → **6.61 KB** (+0.09 KB)
+
+### BAT recipe
+
+1. **bghall_1**. Confirm `Light 1 of 1` is **NOT** in the catalog (the JSM-injection walkmesh exclusion killed it). Confirm Save Point, Directory, NPCs, exits all still present and selectable. Drive to Save Point with `\` and confirm the auto-drive still completes successfully.
+2. **fepic1** (Front Gate 5). Confirm the catalog shows `Exit to ...` for the three exits instead of `Interaction 1/2/3`. The push-through gate (Track A) is still broken, but the labels are now correct — that's the win for this BAT.
+3. **bggate_6** (disconnected-walkmesh island regression check). Confirm the guard still appears in the catalog (because guard has `talkonoff > 0`, so the runtime walkmesh-exclusion's OR-with-talk preserves him). This is the v0.12.08 regression test.
+4. **bgroom_1** or **Cafeteria 1** (no-regression check). Walk to a sign or interactive object on a dormitory-style field. The sign won't be in the catalog yet — that's v0.17.7.2's SETLINE-position promotion. Confirm the v0.17.7.1 changes haven't broken any existing interactive surface that *was* in the catalog at v0.17.6.2.
+
+`Logs/ff8_field.log` will show `[walkmesh-excl] ent... -- excluded` lines for filtered entities and `[refresh]` catalog dumps reflecting the cleaned-up labels.
+
 ## v0.17.7.0
 
 Prerequisite file split for the upcoming Track B (entity-catalog overhaul) chapter. No functional change. `field_nav_catalog.inl` was 75.77 KB at v0.17.6.2 — only 4 KB under the 80 KB CI hard fail. The substantive Track B fixes (walkmesh exclusion, per-line exit discriminator, SETLINE-position promotion, NPC `ResolveFriendlyName` routing) will add ~5 KB to this file, which would trip CI. This release moves two large blocks out into dedicated helper files so the next four point releases have room to land.

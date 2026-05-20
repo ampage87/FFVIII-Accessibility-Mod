@@ -96,6 +96,45 @@ static void RefreshCatalog()
                 continue;
             }
 
+            // v0.17.7.1: Walkmesh exclusion rule.
+            //
+            // Drop entities that are BOTH non-talkable AND non-pushable AND
+            // positioned off the walkmesh. These are typically light sources,
+            // particle emitters, decorative props, and other scenery the
+            // player cannot reach or interact with. The OR-with-talkonoff /
+            // pushonoff condition preserves entities like over-railing guards
+            // (off-mesh but talkable) and walking NPCs whose model puts them
+            // briefly off-mesh between steps (talk radius keeps them).
+            //
+            // Light sources entering via JSM_ENT_INTERACTIVE_OBJECT promotion
+            // (bypassing the existing ENTITY_SKIP_NAMES BG filter) drop here
+            // because lights have no talkradius. fepic1's three exit Lines
+            // pass through unaffected because they're injected from the
+            // SETLINE/JSM-MAP_EXIT block, not the runtime loop -- their
+            // walkmesh check lives in those blocks (added separately).
+            //
+            // The v0.12.08 reachability filter (REMOVED in v0.12.09 because
+            // bggate_6 has a guard on tri=87 while the player stands on
+            // tri=22, disconnected islands within one screen) does not
+            // recur here: the guard has talkonoff>0 so the OR keeps it.
+            //
+            // Skip player and entities without a readable position (fpX=fpY=0
+            // covers the placeholder case where the engine hasn't placed the
+            // entity yet -- treat that as on-mesh provisionally rather than
+            // dropping prematurely).
+            if (i != s_playerEntityIdx &&
+                talkonoff == 0 && pushonoff == 0 &&
+                (fpX != 0 || fpY != 0)) {
+                float wmX = (float)(fpX / 4096);
+                float wmY = (float)(fpY / 4096);
+                if (!IsInsideWalkmesh(wmX, wmY)) {
+                    Log::Field("FieldNavigation: [walkmesh-excl] ent%d model=%d "
+                               "pos=(%.0f,%.0f) off-mesh + no-talk/push -- excluded",
+                               i, (int)modelId, wmX, wmY);
+                    continue;
+                }
+            }
+
             // v05.52: Classify entity type by interaction flags.
             // setpc==0 means this IS the player; setpc!=0 means it isn't.
             // Interaction flags determine what the player can do with it.
@@ -305,27 +344,85 @@ static void RefreshCatalog()
         // Each JSM_ENT_LINE_SCREEN_BOUND captured line becomes an ENT_EXIT entry
         // with the destination resolved from the MAPJUMP destination field ID.
         // Replaces INF gateway exits entirely (INF data is vestigial PS1 data).
+        //
+        // v0.17.7.1: Removed the v0.12.24 field-wide demote that converted
+        // SCREEN_BOUND lines into Interactions whenever ANY entity on the
+        // field was an Interactive Object. That rule fired on fepic1 (Front
+        // Gate 5) and turned the three legitimate exit Lines into
+        // 'Interaction 1/2/3'. Per-line discrimination now happens in the
+        // JSM scanner via TALKRADIUS/TALKON detection -- if a Line really IS
+        // dual-purpose (dormitory bed: MAPJUMP + dialog + TALK setup) the
+        // scanner classifies it as JSM_ENT_LINE_INTERACTIVE and this exit
+        // loop skips it on lineType alone (no field-wide lookup needed).
         if (s_capturedLineCount > 0 && s_playerEntityIdx >= 0) {
             float scrPlayerX = 0, scrPlayerY = 0;
             if (GetEntityPos(s_playerEntityIdx, scrPlayerX, scrPlayerY)) {
                 for (int t = 0; t < s_capturedLineCount && newCount < MAX_CATALOG; t++) {
                     if (!s_capturedLines[t].active) continue;
-                    // v0.12.24: Check if this field has Interactive Objects.
-                    // On such fields (dormitories), SETLINE screen boundaries serve
-                    // dual purposes (exit + interaction) and their CENTER position is
-                    // the interaction zone, not the exit. INF gateways handle exits.
-                    // Convert these SETLINEs to Interactions instead of Exits.
-                    bool fieldHasInteractiveObjects = false;
-                    for (int ji = 0; ji < s_jsmEntityCount; ji++) {
-                        if (s_jsmEntities[ji].type == FieldArchive::JSM_ENT_INTERACTIVE_OBJECT) {
-                            fieldHasInteractiveObjects = true; break;
-                        }
-                    }
-                    if (s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_SCREEN_BOUND &&
-                        fieldHasInteractiveObjects) {
-                        continue;  // skip — will be added as Interaction below
-                    }
                     if (s_capturedLines[t].lineType != FieldArchive::JSM_ENT_LINE_SCREEN_BOUND) continue;
+                    // v0.17.7.1.2 / v0.17.7.5.4: SCREEN_BOUND lines that
+                    // genuinely REQ a dialog-bearing entity are dual-purpose
+                    // (exit-via-interaction). The Line REQs a background
+                    // entity that fires dialog (dorm bed: bed Line REQs the
+                    // bed Background, which shows "Sleep?"; the MAPJUMP fires
+                    // as a consequence of the player choosing yes, not as a
+                    // walk-across event). These show only as Interactions
+                    // below, not as Exits here -- showing both would be
+                    // confusing and the Exit name (next-day field) is
+                    // uninformative anyway.
+                    //
+                    // fepic1's three exit Lines, bgroad_5 squalls (Hallway 5
+                    // -> Dormitory), and similar pure-exit Lines do NOT
+                    // REQ dialog entities (they may still use 0x1C extended
+                    // dispatch for sound/particle effects, but that's not
+                    // a dual-purpose signal), so they pass through here as
+                    // Exits.
+                    //
+                    // The check used to be `hasExtDispatch` which incorrectly
+                    // suppressed bgroad_5 squalls because squalls' own script
+                    // uses 0x1C for non-dialog purposes. v0.17.7.5.4 split
+                    // hasExtDispatch into two signals: hasExtDispatch (own
+                    // 0x1C usage, very common, not a dual-purpose indicator)
+                    // and hasDialogReqTarget (REQ to dialog/ext-dispatch
+                    // entity, only set by REQ-following post-pass). The
+                    // catalog now uses hasDialogReqTarget, which only fires
+                    // for genuine dual-purpose Lines.
+                    if (s_capturedLines[t].hasDialogReqTarget) continue;
+
+                    // v0.17.7.5.5: Self-loop detection. SCREEN_BOUND lines whose
+                    // resolved destField equals the CURRENT field id are in-place
+                    // state transitions, not navigational exits. The canonical
+                    // case is a dormitory bed: walking onto it does a MAPJUMP to
+                    // the same field id (which the engine treats as "reload this
+                    // field, advancing some state like day/night"). The player
+                    // doesn't move to a different room -- they wake up where
+                    // they slept.
+                    //
+                    // BAT'd on bgryo1_4 (Dormitory Double 4, field 240): ent0
+                    // 'squall' SCREEN_BOUND with destField=240 was labeled
+                    // "Exit to B-Garden - Dormitory Double 4" -- nonsense
+                    // because that IS the field the player is on. Aaron
+                    // correctly identified the bed should be an Interaction.
+                    //
+                    // Block 2 below picks up self-loop SCREEN_BOUND lines as
+                    // Interactions (same condition mirrored there). This is
+                    // the same pattern as the hasDialogReqTarget split for
+                    // genuinely dual-purpose Lines: Block 1 suppresses, Block 2
+                    // emits the appropriate Interaction label.
+                    //
+                    // Safety: an in-place state-change Line that ISN'T a sleep
+                    // transition (e.g. a script-driven looping animation Line)
+                    // would also be treated as an Interaction here. That's
+                    // mostly fine -- such a Line is still something the player
+                    // CAN interact with, even if the meaning differs from
+                    // "sleep here". A bare "Exit" label to the current field
+                    // is unambiguously wrong; Interaction is at worst slightly
+                    // imprecise.
+                    {
+                        uint16_t curFid = FF8Addresses::pCurrentFieldId
+                                          ? *FF8Addresses::pCurrentFieldId : 0xFFFF;
+                        if (s_capturedLines[t].destFieldId == (int)curFid) continue;
+                    }
                     float tcx = (float)(s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2.0f;
                     float tcy = (float)(s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2.0f;
 
@@ -334,9 +431,61 @@ static void RefreshCatalog()
                     if (IsSeparatedByTriggerLine(scrPlayerX, scrPlayerY, tcx, tcy))
                         continue;
 
+                    // v0.17.7.1.1: Robust destination recovery for PSHM_W-sourced
+                    // MAPJUMPs. When the JSM static scan couldn't extract a usable
+                    // destFieldId (the script pushed a memory-variable marker like
+                    // 0x8000xxxx at MAPJUMP time, which the scanner treats as a
+                    // marker and the marker survives into this code path as a
+                    // negative int32 or an out-of-range positive), match the
+                    // SETLINE center to the nearest INF gateway. INF gateway
+                    // destFieldIds are static binary data in the .inf file and
+                    // reliable when present. Threshold: 1000 world units --
+                    // SETLINE trigger lines and INF gateway lines for the same
+                    // physical exit are typically co-located (both at the screen
+                    // boundary), often within ~200 units; 1000 gives generous
+                    // margin without risking cross-matching to a different exit.
+                    //
+                    // World-map dest (-2) is preserved -- those resolve correctly
+                    // through the WorldMapJump branch below.
+                    //
+                    // The dedup-against-existing-exit check in the v0.07.94 INF
+                    // gateway block runs after this and catches the duplicate via
+                    // displayName strcmp (same FIELD_DISPLAY_NAMES table on both
+                    // paths), so the INF gateway won't be added as a separate
+                    // entry once we've recovered its destId here.
+                    int destId = s_capturedLines[t].destFieldId;
+                    if ((destId < 0 || destId >= FIELD_DISPLAY_NAMES_COUNT) &&
+                        destId != -2 && s_gatewayCount > 0) {
+                        float bestDistSq = 1000.0f * 1000.0f;
+                        int bestGw = -1;
+                        for (int gi = 0; gi < s_gatewayCount; gi++) {
+                            float gdx = s_gateways[gi].centerX - tcx;
+                            float gdy = s_gateways[gi].centerZ - tcy;
+                            float dsq = gdx*gdx + gdy*gdy;
+                            if (dsq < bestDistSq) {
+                                bestDistSq = dsq;
+                                bestGw = gi;
+                            }
+                        }
+                        if (bestGw >= 0) {
+                            int recoveredId = (int)s_gateways[bestGw].destFieldId;
+                            Log::Field("FieldNavigation: [refresh] SETLINE line%d "
+                                       "center=(%.0f,%.0f) destId=%d unresolvable -> "
+                                       "matched INF gateway %d destId=%d (dist=%.0f) "
+                                       "-- recovering",
+                                       t, tcx, tcy, destId, bestGw, recoveredId,
+                                       sqrtf(bestDistSq));
+                            destId = recoveredId;
+                        } else {
+                            Log::Field("FieldNavigation: [refresh] SETLINE line%d "
+                                       "center=(%.0f,%.0f) destId=%d unresolvable, "
+                                       "no INF gateway within 1000 units -- staying generic",
+                                       t, tcx, tcy, destId);
+                        }
+                    }
+
                     // Resolve destination name from MAPJUMP field ID.
                     char exitName[48];
-                    int destId = s_capturedLines[t].destFieldId;
                     if (destId >= 0 && destId < FIELD_DISPLAY_NAMES_COUNT) {
                         snprintf(exitName, sizeof(exitName), "Exit to %s", FIELD_DISPLAY_NAMES[destId]);
                     } else if (destId == -2) {
@@ -446,33 +595,58 @@ static void RefreshCatalog()
             }
         }
 
-        // v0.12.24: Add SETLINE-triggered interactive objects as "Interaction N".
-        // Line entities classified as JSM_ENT_LINE_INTERACTIVE have dialog opcodes
-        // (MES/ASK/AMES/AASK) or runtime ext dispatch — genuine player-facing
-        // interactions (dormitory bed/desk/wardrobe, classroom desk/sign, etc.).
-        // These use SETLINE center as navigation position.
+        // v0.12.24 / v0.17.7.1: Add SETLINE-triggered interactive objects as
+        // "Interaction N". Line entities classified as JSM_ENT_LINE_INTERACTIVE
+        // by the JSM scanner have dialog opcodes (MES/ASK/AMES/AASK) AND a
+        // TALKRADIUS/TALKON setup -- genuine player-facing interactions
+        // (dormitory bed/desk/wardrobe, classroom desk/sign, etc.).
+        //
+        // v0.17.7.1: dropped the dual-purpose SCREEN_BOUND-promote-to-Interactive
+        // path. JSM scanner now classifies dual-purpose lines (MAPJUMP + dialog
+        // + talk setup, like dormitory beds) directly as LINE_INTERACTIVE
+        // because TALKRADIUS/TALKON wins over MAPJUMP in the new priority
+        // ordering. fepic1's three exit Lines (MAPJUMP only, no dialog, no
+        // talk setup) stay LINE_SCREEN_BOUND and are added as Exits above
+        // rather than mislabeled here.
         if (s_capturedLineCount > 0 && s_playerEntityIdx >= 0) {
             float intPlayerX = 0, intPlayerY = 0;
             if (GetEntityPos(s_playerEntityIdx, intPlayerX, intPlayerY)) {
                 int interactionNum = 0;
                 for (int t = 0; t < s_capturedLineCount && newCount < MAX_CATALOG; t++) {
                     if (!s_capturedLines[t].active) continue;
-                    bool isInteractive = (s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_INTERACTIVE);
+                    // v0.17.7.1.2 / v0.17.7.5.4 / v0.17.7.5.5: Accept
+                    // SCREEN_BOUND lines as Interactions in two cases:
+                    //   1. hasDialogReqTarget=true (genuine dual-purpose,
+                    //      e.g. dorm bed Line REQs dialog-bearing Background)
+                    //   2. destFieldId == currentFieldId (self-loop sleep
+                    //      transition, e.g. bgryo1_4 bed MAPJUMPs to field 240
+                    //      which IS bgryo1_4) -- introduced v0.17.7.5.5 after
+                    //      Aaron BAT'd the bed-as-exit mislabel.
+                    //
+                    // The SETLINE-Exit block above skips those same lines so
+                    // they only appear here.
+                    //
+                    // Pure-exit SCREEN_BOUND lines (fepic1, bgroad_5 squalls)
+                    // have hasDialogReqTarget=false AND destFieldId pointing
+                    // to a different field -- they fall through this whole
+                    // block and remain as Exits emitted by Block 1.
+                    bool isInteractive =
+                        (s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_INTERACTIVE);
                     if (!isInteractive &&
                         s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_SCREEN_BOUND) {
-                        // v0.12.24: On fields with Interactive Objects, SETLINE screen
-                        // boundaries are dual-purpose (exit + interaction). Their center
-                        // position is the interaction zone. Add as Interaction.
-                        bool fhio = false;
-                        for (int ji = 0; ji < s_jsmEntityCount; ji++) {
-                            if (s_jsmEntities[ji].type == FieldArchive::JSM_ENT_INTERACTIVE_OBJECT) {
-                                fhio = true; break;
+                        if (s_capturedLines[t].hasDialogReqTarget) {
+                            isInteractive = true;
+                        } else {
+                            // v0.17.7.5.5: self-loop check.
+                            uint16_t curFid = FF8Addresses::pCurrentFieldId
+                                              ? *FF8Addresses::pCurrentFieldId : 0xFFFF;
+                            if (s_capturedLines[t].destFieldId == (int)curFid) {
+                                isInteractive = true;
                             }
                         }
-                        if (fhio) isInteractive = true;
                     }
                     if (!isInteractive) continue;
-                    // Don't check alreadyAdded — Interactions use sentinel -600-t,
+                    // Don't check alreadyAdded -- Interactions use sentinel -600-t,
                     // distinct from exit sentinel -200-t, so both can coexist.
                     // Reachability: must be on same side of screen-boundary trigger lines.
                     float tcx = (float)(s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2.0f;
@@ -481,7 +655,7 @@ static void RefreshCatalog()
                         continue;
                     interactionNum++;
                     EntityInfo intEntry = {};
-                    intEntry.entityIdx  = -200 - t;  // same sentinel as exits — position lookup works identically
+                    intEntry.entityIdx  = -200 - t;  // same sentinel as exits -- position lookup works identically
                     intEntry.modelId    = -1;
                     intEntry.triangleId = 0;
                     intEntry.type       = ENT_INTERACTION;
@@ -641,6 +815,29 @@ static void RefreshCatalog()
             if (!je.hasPosition) continue;
             // Validate position is in plausible range.
             if (je.posX == 0 && je.posY == 0 && je.posZ == 0) continue;
+
+            // v0.17.7.1: Walkmesh exclusion for off-mesh Interactive Objects
+            // without TALKRADIUS/TALKON. Lights and decorative props get
+            // incorrectly promoted to JSM_ENT_INTERACTIVE_OBJECT during the
+            // JSM scan (foundDialogOp/foundExtDispatch + SET3 position make
+            // them look like real interactive objects). Almost all of them
+            // sit off-walkmesh, so excluding off-mesh + no-talk-setup catches
+            // the bug without dropping real signs/desks (those land on the
+            // walkmesh because the player has to stand on top of them or
+            // adjacent to them to read).
+            //
+            // Save/Draw/Shop/Card points are NOT filtered here: they may
+            // use proximity (PARTICLEON + MENUSAVE etc.) rather than
+            // TALKRADIUS, and they're always valuable navigation targets.
+            // MAP_EXIT injection runs in a separate block below; it's also
+            // not subject to this filter -- exits are always valuable.
+            if (jt == ENT_OBJECT && !je.hasTalkSetup &&
+                !IsInsideWalkmesh((float)je.posX, (float)je.posY)) {
+                Log::Field("FieldNavigation: [walkmesh-excl] JSM ent%d '%s' "
+                           "INTERACTIVE_OBJECT pos=(%d,%d) off-mesh + no-talk-setup -- excluded",
+                           je.jsmIndex, je.symName, (int)je.posX, (int)je.posY);
+                continue;
+            }
             EntityInfo jsmEntry = {};
             jsmEntry.entityIdx  = -300 - j;  // unique sentinel for JSM-injected entities
             jsmEntry.modelId    = -1;

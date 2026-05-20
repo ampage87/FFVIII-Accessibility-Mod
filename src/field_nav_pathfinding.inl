@@ -33,6 +33,53 @@ static int FindNearestTriangle(float x, float y)
     return best;
 }
 
+// v0.17.7.1: Point-in-triangle test for the walkmesh exclusion filter in
+// RefreshCatalog. Returns true if (x, y) lies inside any walkmesh triangle
+// using the standard sign-of-cross-product 2D test.
+//
+// Rationale: light sources, scenery and other non-interactive props on FF8
+// fields are commonly placed off the walkmesh (above an alcove ceiling, on
+// a far wall, etc.). The walkmesh is the navigable surface, so an entity
+// off-mesh is one the player can't reach. Combined with the
+// no-TALKRADIUS/TALKON check at the catalog call site, this excludes them
+// from the entity catalog while preserving talkable off-mesh entities like
+// guards over a railing (player interacts from on-mesh).
+//
+// Returns false if the walkmesh isn't loaded -- conservative default that
+// keeps every entity rather than dropping them all when data is unavailable.
+//
+// The walkmesh is already in memory for A* path-finding, so this is cheap
+// (one cross-product triple per triangle, at most a few hundred per field,
+// run at most ~16 times per RefreshCatalog).
+static bool IsInsideWalkmesh(float x, float y)
+{
+    if (!s_walkmesh.valid || s_walkmesh.numTriangles == 0) return false;
+    for (int t = 0; t < s_walkmesh.numTriangles; t++) {
+        int vi0 = s_walkmesh.triangles[t].vertexIdx[0];
+        int vi1 = s_walkmesh.triangles[t].vertexIdx[1];
+        int vi2 = s_walkmesh.triangles[t].vertexIdx[2];
+        if (vi0 < 0 || vi0 >= s_walkmesh.numVertices) continue;
+        if (vi1 < 0 || vi1 >= s_walkmesh.numVertices) continue;
+        if (vi2 < 0 || vi2 >= s_walkmesh.numVertices) continue;
+        float ax = (float)s_walkmesh.vertices[vi0].x;
+        float ay = (float)s_walkmesh.vertices[vi0].y;
+        float bx = (float)s_walkmesh.vertices[vi1].x;
+        float by = (float)s_walkmesh.vertices[vi1].y;
+        float cx = (float)s_walkmesh.vertices[vi2].x;
+        float cy = (float)s_walkmesh.vertices[vi2].y;
+        // Sign-of-cross-product test. If all three signs match, the point is
+        // inside; if mixed, it's outside. Points exactly on an edge get
+        // counted as inside (zero is permissive in both directions here).
+        float d1 = (x - bx) * (ay - by) - (ax - bx) * (y - by);
+        float d2 = (x - cx) * (by - cy) - (bx - cx) * (y - cy);
+        float d3 = (x - ax) * (cy - ay) - (cx - ax) * (y - ay);
+        bool hasNeg = (d1 < 0.0f) || (d2 < 0.0f) || (d3 < 0.0f);
+        bool hasPos = (d1 > 0.0f) || (d2 > 0.0f) || (d3 > 0.0f);
+        if (!(hasNeg && hasPos)) return true;
+    }
+    return false;
+}
+
 // A* open set node.
 struct AStarNode {
     uint16_t triIdx;
@@ -111,6 +158,11 @@ struct CapturedTriggerLine {
     // v0.12.24: True if the JSM entity also has foundExtDispatch (runtime 0x1C dispatch).
     // Used to identify dual-purpose Lines (exit + interaction via PSHM_W-dispatched dialog).
     bool hasExtDispatch;
+    // v0.17.7.5.4: True if REQ-following found this Line REQs a target with
+    // dialog opcodes or extended dispatch. The genuine dual-purpose signal
+    // (distinct from hasExtDispatch which also fires on non-dialog 0x1C usage).
+    // See JSMEntityInfo::hasDialogReqTarget for full rationale.
+    bool hasDialogReqTarget;
 };
 static const int MAX_CAPTURED_LINES = 32;
 static CapturedTriggerLine s_capturedLines[MAX_CAPTURED_LINES] = {};
