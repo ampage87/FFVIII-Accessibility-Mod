@@ -6,6 +6,110 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.8.1.1
+
+Fire Cavern playthrough bug #3: garbage read out by TTS after a tutorial
+scene completes. (v0.17.8.0 closed bugs #5 and #6; #1 Quistis FMV race
+and #4 party-as-NPC remain deferred.)
+
+This entry covers the whole tutorial-garbage fix. An initial filter was
+built as v0.17.8.1 and BAT'd, but it let a longer garbage string through;
+v0.17.8.1.1 strengthens the heuristic. v0.17.8.1 was never pushed, so the
+two are folded into one shipped entry.
+
+### Root cause
+
+After a tutorial overlay tears down ([TUTO] mode 10 -> 1), FF8 leaves
+stale bytes in window slot 0's text region. The accessibility poll loop
+(`PollWindows` -> `ScanAndSpeakAllWindows("POLL")` in
+`field_dialog_scan.inl`) then decodes those bytes as if they were real
+dialog and speaks them. The decoder is not at fault -- every byte decodes
+legally; the bytes themselves are garbage. Confirmed in Aaron's
+2026-05-18 and 2026-05-21 dialog logs:
+
+  [POLL] win[0] Speaking: ",e 3in*retone3 e~HP~B:All08E%~!/..."        (short)
+  [POLL] win[0] Speaking: "q...1& 3,e 3in*retone3 ... meuiquymuy"      (~400 chars)
+
+### Fix: IsGarbledText() heuristic filter
+
+A new `IsGarbledText()` in `field_dialog_scan.inl` runs on each decoded
+buffer before it is spoken, in both the live poll path
+(`ScanAndSpeakAllWindows`) and the deferred path (`CheckPendingTexts`).
+When it fires, the buffer is still recorded as "spoken" (window state +
+pending queue) so the same garbage is not re-detected on later poll
+ticks; only the `ScreenReader::Speak` call is suppressed. Rejections log
+as `[POLL] win[N] REJECTED garbled: ...` / `[GETSTR-DEFERRED] ... REJECTED
+garbled: ...`.
+
+Signals (computed over the decoded string, only when length >= 8):
+- letter<->digit transitions with no separator ("3in", "retone3", "08E")
+- lowercase->uppercase transitions, i.e. random mid-word capitalization
+  ("wlNVFEC", "RJtVPNR", "FNdV")
+- unusual-punctuation density (* % # USD + = & _ /)
+- letter ratio
+- "[NameXX]" literal (decoder's marker for an out-of-range name byte)
+
+Strong standalone triggers (any one rejects): >= 5 lower->upper
+transitions, >= 4 letter-digit transitions, > 15% unusual punctuation, or
+< 30% letters. Weaker signals (>= 2 lower->upper transitions, >= 2
+letter-digit transitions, > 8% unusual punctuation, < 45% letters)
+require any two to agree. "[NameXX]" rejects immediately.
+
+### Why v0.17.8.1 failed and v0.17.8.1.1 fixes it
+
+The initial v0.17.8.1 thresholds were tuned on the short canonical
+sample, which trips on punctuation density and low letter ratio. The
+~400-char tutorial buffer has a long letter-heavy tail that dilutes both
+of those below threshold, leaving only the letter-digit-transition signal
+-- and the old "require 2 signals" rule then ignored a lone signal, so
+the string was spoken. v0.17.8.1.1 adds the lowercase->uppercase
+transition counter (the most reliable discriminator: real dialog
+capitalizes only at word starts or in all-caps words like "SeeD", so it
+has 0-2; this garbage had 15+) and promotes the two transition counters
+to strong standalone triggers. The long string now rejects on the
+letter-digit-transition strong trigger; the short sample still rejects on
+the weaker-signal pair.
+
+### Regression safety
+
+The filter only suppresses speech; it never alters decoded text or game
+state. The strong thresholds sit far above what well-formed English
+dialog of any length produces (verified against the same log: lines like
+"Zell's Limit Break settings can also be changed in the Status screen",
+"If Duel-Auto", and "...12 members from Squads A through D..." have zero
+letter-digit and zero stray lower->upper transitions because FF8
+space-separates numbers and capitalizes only at word starts). If a legit
+line is ever suppressed, the BAT log names it via the REJECTED line and
+the thresholds can be relaxed.
+
+### Known remaining minor case
+
+Very short stale blips (e.g. a 4-char `"HebL"` seen once in the
+2026-05-21 log) fall under the 8-char minimum the filter needs to judge
+reliably, so they are not caught. Lowering that bound risks false
+positives on legit short fragments ("HP", "GF", "OK"), so it is left as-is
+for now and revisited only if these short blips prove common.
+
+### Tooling note
+
+`filesystem:edit_file` corrupts a file when the replacement text contains
+a literal dollar-sign character (it truncates and duplicates the original
+content). The punctuation classifier therefore uses the hex literal 0x24
+rather than the dollar-sign character. If a dollar sign is unavoidable in
+future edits, use `filesystem:write_file` to rewrite the whole file
+instead of `edit_file`.
+
+### Expected BAT outcome
+
+- Trigger a tutorial to its [TUTO] mode 10 -> 1 teardown (e.g. Zell's
+  Duel limit-break tutorial in bghall_6). The dialog log should show
+  `[POLL] win[0] REJECTED garbled: ...` instead of `Speaking: ...` for
+  the stale buffer, and NVDA should stay silent through it.
+- Regression: normal field dialog across NPCs still spoken correctly --
+  the surrounding Quistis / Seifer / Cid conversation in the same scene
+  should read normally, and legit tutorial lines ("Zell's Limit Break
+  settings...", "If Duel-Auto") should still be announced.
+
 ## v0.17.8.0
 
 Fire Cavern playthrough bug list (Aaron's 2026-05-18 report) — chapter open.

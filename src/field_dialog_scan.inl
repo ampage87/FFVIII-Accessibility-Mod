@@ -17,6 +17,145 @@
 // CheckPendingTexts runs from PollWindows. It speaks any pending text that
 // hasn't been picked up by an opcode hook within PENDING_SPEAK_DELAY_MS,
 // catching off-screen dialog (Squall's thoughts) that bypass the windows.
+//
+// v0.17.8.1: IsGarbledText() filter rejects decoded buffers that look like
+// stale / uninitialized memory rather than real FF8 dialog. See the function
+// header for the heuristic rules and the bug context.
+
+// ============================================================================
+// v0.17.8.1: Garbled-text rejection filter (Fire Cavern bug #3)
+// ============================================================================
+//
+// Aaron's 2026-05-18 Fire Cavern playthrough logged this after a tutorial
+// scene completed ([TUTO] mode 10 -> 1):
+//
+//   [POLL] win[0] Speaking: ",e 3in*retone3 e~HP~B:All08E%~!/..."
+//
+// Decomposed against ff8_text_decode.cpp: every byte in the buffer decoded
+// successfully -- digits (0x21-0x2A), letters (0x45-0x78), punctuation
+// (0x2B-0x44), and the two-char compression sequences (0xE8-0xFF: "in",
+// "re", "to", "ne", "HP", "l "). The decoder did nothing wrong. The bytes
+// themselves were stale tutorial-overlay buffer data that the engine left
+// in win[0]'s text region after the tutorial torn down, and the poll loop
+// then decoded them as if they were real dialog.
+//
+// The signature of this kind of stale-buffer garbage versus real FF8 dialog:
+// 1. Letter-digit boundaries with no space separator. Real FF8 dialog
+//    keeps digits in standalone tokens ("5 Potions", "Level 3"). Stale
+//    buffers produce sequences like "3in", "retone3", "08E" -- a digit
+//    adjacent to a letter inside what would otherwise be a word.
+// 2. Unusual punctuation density. The character table has rare-in-dialog
+//    glyphs at 0x2B (%), 0x34 (*), 0x41 (#), 0x42 (USD), 0x33 (=),
+//    0x35 (&), 0x44 (_), 0x2C (/), 0x31 (+). Real dialog uses them
+//    sparingly; stale buffers hit them at random byte values, pushing
+//    density above ~10%.
+// 3. Low letter ratio. Real dialog is mostly letters and spaces.
+//    Stale buffers have letters scattered among digits and punctuation.
+// 4. "[NameXX]" literals. DecodeByte emits this when a 0x03 name-
+//    substitution byte has a name ID outside 0x30-0x3D (Squall through
+//    Boko). Real text never has these; stale buffers do.
+//
+// The filter combines all four signals with thresholds tuned against the
+// canonical garbage sample. We reject only when length >= 8 -- short
+// fragments like "Yes." or "OK" don't have enough data to judge and the
+// short-text MIN_TEXT_LENGTH gate above already catches the most extreme
+// cases.
+//
+// Trade-off: a deliberately weird-looking line of legit dialog (heavy on
+// punctuation, mixed with stat numbers) could in principle be rejected.
+// We mitigate by requiring TWO independent signals to fire, not one. If
+// the BAT shows legit dialog being suppressed, lower the digit-transition
+// or punctuation thresholds.
+//
+// Punctuation byte values flagged as "unusual" (hex literals used to avoid
+// edit-tool issues with the dollar-sign source character):
+//   0x2A '*'   0x25 '%'   0x23 '#'   0x24 dollar   0x2B '+'
+//   0x3D '='   0x26 '&'   0x5F '_'   0x2F '/'
+static bool IsGarbledText(const std::string& text)
+{
+    const int len = (int)text.length();
+    if (len < 8) return false;  // too short to judge reliably
+
+    // Signal 4 (immediate disqualifier): [NameXX] literal substring
+    if (text.find("[Name") != std::string::npos) return true;
+
+    int letterCount = 0;
+    int unusualPunctCount = 0;
+    int letterDigitTransitions = 0;
+    int lowerToUpperTransitions = 0;  // v0.17.8.1.1: random mid-word caps
+
+    unsigned char prev = 0;
+    for (int i = 0; i < len; i++) {
+        const unsigned char c = (unsigned char)text[i];
+
+        const bool curLower = (c >= 'a' && c <= 'z');
+        const bool curUpper = (c >= 'A' && c <= 'Z');
+        const bool curAlpha = curLower || curUpper;
+        const bool curDigit = (c >= '0' && c <= '9');
+
+        if (curAlpha) {
+            letterCount++;
+        } else if (!curDigit) {
+            // Unusual punctuation classification by ASCII value
+            // (avoids dollar-sign literal in source for edit-tool safety).
+            if (c == 0x2A || c == 0x25 || c == 0x23 || c == 0x24 ||
+                c == 0x2B || c == 0x3D || c == 0x26 || c == 0x5F ||
+                c == 0x2F) {
+                unusualPunctCount++;
+            }
+            // Common punctuation (. , ! ? ' " : ; - ( ) ~ space) is not
+            // counted as unusual; real dialog uses these freely.
+        }
+
+        if (i > 0) {
+            const bool prevLower = (prev >= 'a' && prev <= 'z');
+            const bool prevUpper = (prev >= 'A' && prev <= 'Z');
+            const bool prevAlpha = prevLower || prevUpper;
+            const bool prevDigit = (prev >= '0' && prev <= '9');
+            if ((prevAlpha && curDigit) || (prevDigit && curAlpha)) {
+                letterDigitTransitions++;
+            }
+            // v0.17.8.1.1: lowercase immediately followed by uppercase is
+            // a hallmark of stale-buffer garbage ("wlNVFEC", "RJtVPNR",
+            // "FNdV", "aVme"). Real FF8 dialog capitalizes only at word
+            // starts (after a space) or in all-caps words ("SeeD",
+            // "SAY WHAT"), so a legit line has at most 1-2 of these
+            // (e.g. the single e->D in "SeeD"). Garbage has many.
+            if (prevLower && curUpper) {
+                lowerToUpperTransitions++;
+            }
+        }
+        prev = c;
+    }
+
+    const int letterPct       = (letterCount * 100) / len;
+    const int unusualPunctPct = (unusualPunctCount * 100) / len;
+
+    // v0.17.8.1.1: Strong standalone signals -- any ONE is decisive. These
+    // thresholds are set high enough that well-formed English dialog of any
+    // length stays comfortably below them. The v0.17.8.1 BAT failure was a
+    // ~400-char tutorial-overlay buffer whose long letter-heavy tail diluted
+    // the punctuation-density and letter-ratio signals below the old
+    // thresholds, leaving only the letter-digit-transition signal -- which
+    // the old "require 2 signals" rule then ignored. The two transition
+    // counters below are the reliable discriminators: real dialog has
+    // near-zero of either.
+    if (lowerToUpperTransitions >= 5) return true;  // random capitalization
+    if (letterDigitTransitions  >= 4) return true;  // digits glued to letters
+    if (unusualPunctPct > 15)         return true;  // punctuation soup
+    if (letterPct < 30)               return true;  // almost no letters
+
+    // Weaker signals -- require any TWO to fire. Catches the shorter
+    // canonical sample (",e 3in*retone3 e~HP~B:All08E%~!/...") which trips
+    // the digit-transition and punctuation-density signals together.
+    int signalCount = 0;
+    if (letterDigitTransitions  >= 2) signalCount++;
+    if (lowerToUpperTransitions >= 3) signalCount++;
+    if (unusualPunctPct > 8)          signalCount++;
+    if (letterPct < 45)               signalCount++;
+
+    return (signalCount >= 2);
+}
 
 // ============================================================================
 // Core: scan ALL windows and speak any new text
@@ -78,6 +217,25 @@ static void ScanAndSpeakAllWindows(const char* opcodeLabel)
             }
         }
         if (spokenElsewhere) continue;
+
+        // v0.17.8.1: Garbled-text filter. Stale tutorial-overlay buffer
+        // data was producing strings like ",e 3in*retone3 e~HP~B:All08E%~!/..."
+        // after [TUTO] mode 10->1 (Fire Cavern bug #3, Aaron 2026-05-18).
+        // IsGarbledText uses 4 heuristic signals (letter/digit transitions,
+        // unusual-punctuation density, letter ratio, [NameXX] markers)
+        // and requires TWO to fire. We still mark the buffer as "spoken"
+        // (updating ws.lastSpokenText + the pending queue) so subsequent
+        // poll ticks don't re-detect and re-log the same garbage. Only
+        // the ScreenReader::Speak call is suppressed.
+        if (IsGarbledText(decoded)) {
+            ws.lastSpokenText = decoded;
+            ws.lastRawText = decoded;
+            ws.skipLogged = false;
+            MarkPendingAsSpoken(decoded);
+            Log::Dialog("FieldDialog: [%s] win[%d] REJECTED garbled: \"%s\"",
+                       opcodeLabel, i, decoded.c_str());
+            continue;
+        }
 
         // New text for this window -- speak it
         ws.lastSpokenText = decoded;
@@ -254,9 +412,18 @@ static void CheckPendingTexts()
         s_pending[i].spoken = true;  // Mark as handled either way
 
         if (!alreadySpoken) {
-            Log::Dialog("FieldDialog: [GETSTR-DEFERRED] msgId=%d Speaking: \"%s\"",
-                       s_pending[i].messageId, s_pending[i].decoded.c_str());
-            ScreenReader::Speak(s_pending[i].decoded.c_str(), false);
+            // v0.17.8.1: Garbled-text filter (same as ScanAndSpeakAllWindows).
+            // The deferred path can also receive stale-buffer garbage via
+            // field_get_dialog_string fetches that happened during a
+            // tutorial overlay teardown.
+            if (IsGarbledText(s_pending[i].decoded)) {
+                Log::Dialog("FieldDialog: [GETSTR-DEFERRED] msgId=%d REJECTED garbled: \"%s\"",
+                           s_pending[i].messageId, s_pending[i].decoded.c_str());
+            } else {
+                Log::Dialog("FieldDialog: [GETSTR-DEFERRED] msgId=%d Speaking: \"%s\"",
+                           s_pending[i].messageId, s_pending[i].decoded.c_str());
+                ScreenReader::Speak(s_pending[i].decoded.c_str(), false);
+            }
         }
     }
 

@@ -4,31 +4,31 @@ Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` inj
 
 **Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
 
-GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.17.7.6.2** (commit `d3321665`, pushed 2026-05-20 05:47 UTC, squashed from local v0.17.7.6 / .6.1 / .6.2 onto parent `6abcb8f`).
+GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.17.8.0** (commit `d29b6050`, pushed 2026-05-20 07:04 UTC, parent `d3321665` v0.17.7.6.2). Bugs #5 (GF-BP diagnostic spam) and #6 (GF damage announce during HP-SUB) both closed.
 
-The v0.17.7.6.x chapter closed the bgroad_5 hallway calibration failure: empirical correction from NAV-OBSERVE measurements, two-tier AD gate, 2-sample consensus threshold, AD-refusal-with-TTS on uncalibrated degenerate-CA fields, "Camera calibrated" confirmation. Full narrative in `DEVNOTES_HISTORY.md`. The .6.x chapter and the larger v0.17.7.x catalog overhaul track are both feature-complete and pushed.
+The v0.17.7.6.x chapter closed the bgroad_5 hallway calibration failure (full narrative in `DEVNOTES_HISTORY.md`); v0.17.8.0 closed bugs #5 and #6 from Aaron's 2026-05-18 Fire Cavern playthrough report. Current active chapter: **v0.17.8.1.1** — bug #3 (tutorial TTS garbage).
 
 ---
 
 ## Where we are at session open
 
-**v0.17.8.0 BAT'd CLEAN — Aaron confirmed both fixes work.** Battle test confirmed GF damage announcements during GF-HP-SUB window (bug #6 fixed) and absence of GF breakpoint TTS announcement (bug #5 fixed). Ready to push via `Utilities/push_to_github.ps1`.
+**v0.17.8.1.1 BAT'd CLEAN — Aaron confirmed bug #3 fixed.** Zell's Duel limit-break tutorial (bghall_6) finished with no garbage TTS. `FF8OPC_VERSION` = `0.17.8.1.1`, CHANGELOG top heading matches. Ready to push via `Utilities/push_to_github.ps1`. GitHub HEAD still v0.17.8.0 until pushed.
 
-Fire Cavern playthrough bug list (Aaron's 2026-05-18 report) progress:
+**Bug #3 (tutorial TTS garbage) status:** The `IsGarbledText()` filter lives in `src/field_dialog_scan.inl` and runs in both the live poll path (`ScanAndSpeakAllWindows`) and the deferred path (`CheckPendingTexts`). History:
+- **v0.17.8.1** (built + BAT'd, never pushed): first version of the filter. BAT on Zell's Duel limit-break tutorial (bghall_6, [TUTO] tutoId 6, mode 10→1) showed it let a ~400-char garbage string through — `[POLL] win[0] Speaking: "q...1& 3,e 3in*retone3 ... meuiquymuy"`. The long letter-heavy tail diluted the punctuation-density + letter-ratio signals below threshold, leaving only the letter-digit-transition signal, which the "require 2 signals" rule ignored.
+- **v0.17.8.1.1** (current, in tree): added a lowercase→uppercase transition counter (random mid-word caps — the most reliable garbage discriminator; real dialog has 0-2, this garbage had 15+) and promoted the two transition counters to strong standalone triggers (≥5 lower→upper OR ≥4 letter-digit rejects on its own). Short canonical sample still caught by the weaker-signal pair.
+
+**Known minor remaining case:** 4-char `"HebL"` stale blip (seen once in 2026-05-21 log) is under the filter's 8-char minimum and not caught. Left as-is; lowering the bound risks false positives on "HP"/"GF"/"OK".
+
+**v0.17.8.0 (pushed) closed bugs #5 + #6.** Fire Cavern playthrough bug list (Aaron's 2026-05-18 report) progress:
 1. Quistis' FMV in the Infirmary fired prematurely — deferred
 2. ~~Manual field navigation direction lag and inaccurate direction guidance~~ — ✅ closed by v0.17.7.6.2
-3. Garbage announced by TTS following completion of a tutorial scene — **next single build (v0.17.8.1)**
+3. Garbage announced by TTS following completion of a tutorial scene — ✅ closed by v0.17.8.1.1 (BAT'd 2026-05-21)
 4. Party member announced as NPC in catalog when party consists of just two members — deferred
 5. ~~Breakpoint on display timer announced when GF sequence starts~~ — ✅ closed by v0.17.8.0
 6. ~~Damage not announced when a character is summoning and the GF takes the damage in place of the character~~ — ✅ closed by v0.17.8.0
 
-### Up next: v0.17.8.1 — Bug #3 (tutorial TTS garbage)
-
-From the v0.16.5.2 BAT triage note: `[POLL] win[0] Speaking: ",e 3in*retone3 e~HP~B:All08E%~!/..."` after `[TUTO]` mode 10→1. Two candidate fixes:
-- **Preferred**: reject `[…]` tokens / unprintable garbage in the POLL path (filter before SAPI). More general, catches similar future cases.
-- **Alternative**: suppress POLL win[0] for ~500 ms after the `[TUTO]` mode 10→1 transition.
-
-Needs investigation into the POLL pipeline in the dialog system to find where to insert the filter. Likely in `dialog_inject.cpp` or similar. The 2026-05-18 Fire Cavern playthrough log should have a clean reproduction example to verify the fix against.
+**Tooling lesson (carry forward):** `filesystem:edit_file` corrupts a file when the replacement text contains a literal dollar-sign character — it truncates the replacement and appends the original content, doubling file size. Use the hex literal `0x24` in source instead, or rewrite the whole file with `filesystem:write_file`. This bit us once on `field_dialog_scan.inl` (11.46 KB → 27.07 KB) during the v0.17.8.1 work.
 
 ---
 
