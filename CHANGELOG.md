@@ -6,6 +6,135 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.8.3
+
+Fire Cavern playthrough bug #4: a party member is announced as an NPC in the
+field navigation catalog. Root cause confirmed via the v0.17.8.2 diagnostic.
+
+### Root cause
+
+The party-member filter in `field_nav_catalog.inl` (v0.14.108) skipped an
+entity only when it was a FOLLOWING party member: a visible character model
+(0-9) with `throughonoff > 0` (player walks through it) and no talk/push. In
+scripted scenes -- a dormitory, the Laguna dream intro -- party members are
+placed as STATIC actors with no interaction flags at all
+(`talk==push==thru==0`), so the `throughonoff>0` test missed them and they
+were classified as `NPC`. The v0.17.8.2 diagnostic confirmed this on bgryo2_1
+(B-Garden dormitory, formation [1,0,5,255]): `ent1 model=3` and `ent2 model=5`,
+all interaction flags zero, both became catalog NPCs.
+
+### Why not just drop the throughonoff requirement
+
+Some draw points reuse a party-character model with all interaction flags zero
+-- the Fire Cavern `drpoint` uses model 9. Blanket-filtering every model-0-9
+zero-flag entity would delete those before the downstream JSM draw-point
+reclassification can find them. The gwgrass1 (Laguna dream) log shows the same
+hazard: a no-position `drpoint` whose fallback grabs the nearest catalog NPC.
+
+### Fix
+
+The discriminator is the entity SYM NAME, which is reliable and field-data
+sourced. Party members are named after the character
+(`squall`/`zell`/`laguna`/...); draw points are named `drpoint`/`dp*`, save
+points `savePoint`/`saveline`, exits `l1` etc. -- none match. New helper
+`IsPartyCharacterSym()` prefix-matches a SYM against the known playable /
+party-swap character bases (squall, zell, selphie, quistis, rinoa, irvine,
+laguna, kiros, ward, seifer, edea -- covering the Laguna dream party). The
+filter now skips an entity with no talk/push interaction when EITHER it is a
+visible character model (0-9) the player walks through (`throughonoff>0`,
+following party member, model-based -- also catches followers whose SYM didn't
+resolve) OR its SYM is a party-character name (placed scene actor, ANY model
+and ANY walk-through state). The name branch is model-independent on purpose:
+bgryo2_1 `ent5 'selphie'` uses model 11 (a full NPC model) with walk-through,
+so a model<10 rule would have missed it -- only the name catches it.
+Non-character zero-flag entities (draw points) are deliberately kept so their
+reclassification still runs.
+
+### Regression safety
+
+- Following party members (Training Center, bgmon_2/bgmon_5): still caught by
+  the model-based `throughonoff>0` branch -- unchanged.
+- Real NPCs / save points (model 24) / exits: never named after a party
+  character, so the name branch never touches them.
+- Talkable scene characters (talk>0): `noInteract` is false, so NOT filtered;
+  they stay navigable.
+- Real exits are added via the trigger-line / gateway path, not the runtime
+  entity, so filtering a character-named runtime actor never removes an exit
+  (verified on bgryo2_1: the 'squalls' screen-boundary exit still appears in
+  the catalog after the runtime ent1 'squalls' actor is filtered).
+- Fire Cavern model-9 draw point (sym='drpoint'): not a character name, so NOT
+  filtered; draw-point reclassification still works.
+- If a SYM name fails to resolve, the name branch simply doesn't fire (no
+  regression) -- the entity stays an NPC as before.
+
+### Confirmed (BAT)
+
+BAT on bgryo2_1 (B-Garden dormitory, formation [1,0,5,255]): all six party
+entities now filter as `named party member` -- `squalls` (model 3), `squallsd`
+(model 5), `zell` / `zells` / `selphies` (model -1), and `selphie` (model 11,
+the high-model case the first model<10 attempt missed). Zero misses. The
+catalog contains only real targets (Hall 10 exit, save point, camera, second
+exit) and navigation is intact -- auto-drive to the camera logged `Arrived`
+and GPS reported `In range`, so nothing needed was removed.
+
+### Diagnostic removed
+
+The `[party-filter-miss]` diagnostic from v0.17.8.2 has been removed now that
+the fix is confirmed. The permanent `[party-filter]` log (which records each
+filtered party member) is kept. Draw-point safety holds by construction, not
+by observation: `drpoint` is not a character name and has thru=0, so neither
+the follower branch nor the named-party branch can touch it.
+
+### Not addressed here (logged for follow-up)
+
+Two separate bugs surfaced in the first Laguna dream (gwgrass1) and are NOT
+part of this change:
+- Field navigation is fully broken in the Laguna dream: the player entity is
+  not detected (`player=ent-1`), so auto-drive refuses every target
+  (`player_pos_known=0`). Distinct root cause (the `setpc==0` player-detection
+  heuristic) -- own chapter.
+- Battle TTS announces the real party (Squall/Zell/Selphie) instead of the
+  dream party (Laguna/Kiros/Ward), because the savemap formation still holds
+  the real party during the dream. Battle-side, separate chapter.
+
+## v0.17.8.2
+
+DIAGNOSTIC build for Fire Cavern bug #4 (party member announced as NPC in
+2-member parties on bdin2/bdin3). Not a fix -- adds one targeted log line
+to pin the mechanism, to be removed once the real fix lands. Safe to push
+or to keep local; the only behavioral change is an extra `[party-filter-miss]`
+log line on fields that have a visible party-character-model entity which
+the existing party filter did not catch.
+
+### Background
+
+The party-member filter in `field_nav_catalog.inl` (v0.14.108) skips an
+entity from the navigation catalog when ALL of these hold:
+  modelId in [0,9] (visible character model), throughonoff > 0 (walk-
+  through), talkonoff == 0 (not talkable), pushonoff == 0 (no collision).
+The follower-as-NPC bug means a 2-member party's follower fails one of
+those four conditions on bdin2/bdin3, so it survives the filter and gets
+classified as an NPC. The existing `[party-filter]` log only records
+entities it DID filter -- it says nothing about a follower it missed, so
+the mechanism (which flag is off) is currently unknown.
+
+### Change
+
+Added a `[party-filter-miss]` diagnostic immediately after the filter
+block: for any non-player entity with a party-character model (0-9) that
+survived the filter, log its talk/push/thru flags, triangle, and field
+position. This fires only on the suspect case -- real NPCs use model >= 10
+and never hit it -- so there is no log spam on NPC-heavy fields.
+
+### Expected BAT outcome
+
+Load bdin2/bdin3 with a 2-member party and press F9 to build the catalog.
+The field log should show one `[party-filter-miss]` line for the follower,
+revealing which flag (talk/push/thru) is set unexpectedly. That pins the
+fix for the next build (e.g. relax the filter to also skip a model-0-9
+walk-through entity that is pushable-but-not-talkable, if push is the
+culprit). No user-facing behavior change otherwise.
+
 ## v0.17.8.1.1
 
 Fire Cavern playthrough bug #3: garbage read out by TTS after a tutorial

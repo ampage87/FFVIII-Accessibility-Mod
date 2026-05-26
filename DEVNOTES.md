@@ -4,31 +4,44 @@ Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` inj
 
 **Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
 
-GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.17.8.0** (commit `d29b6050`, pushed 2026-05-20 07:04 UTC, parent `d3321665` v0.17.7.6.2). Bugs #5 (GF-BP diagnostic spam) and #6 (GF damage announce during HP-SUB) both closed.
+GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.17.8.1.1** (commit `54f6f9f3`, parent `d29b6050` v0.17.8.0). Local tree at **v0.17.8.3** (bug #4 fix, BAT-confirmed, ready to push). Bugs #2, #3, #4, #5, #6 from the Fire Cavern list all closed.
 
-The v0.17.7.6.x chapter closed the bgroad_5 hallway calibration failure (full narrative in `DEVNOTES_HISTORY.md`); v0.17.8.0 closed bugs #5 and #6 from Aaron's 2026-05-18 Fire Cavern playthrough report. Current active chapter: **v0.17.8.1.1** — bug #3 (tutorial TTS garbage).
+The v0.17.7.6.x chapter closed the bgroad_5 hallway calibration failure (full narrative in `DEVNOTES_HISTORY.md`); v0.17.8.0 closed bugs #5 and #6, v0.17.8.1.1 closed bug #3, v0.17.8.3 closed bug #4, from Aaron's 2026-05-18 Fire Cavern playthrough report. Next active chapter: **Laguna dream bugs #7 (field-nav player detection) and #8 (battle announces wrong party).**
 
 ---
 
 ## Where we are at session open
 
-**v0.17.8.1.1 BAT'd CLEAN — Aaron confirmed bug #3 fixed.** Zell's Duel limit-break tutorial (bghall_6) finished with no garbage TTS. `FF8OPC_VERSION` = `0.17.8.1.1`, CHANGELOG top heading matches. Ready to push via `Utilities/push_to_github.ps1`. GitHub HEAD still v0.17.8.0 until pushed.
+**v0.17.8.3 in tree — bug #4 FIX, BAT-CONFIRMED, ready to push.** `FF8OPC_VERSION` = `0.17.8.3`, CHANGELOG matches. GitHub HEAD = v0.17.8.1.1 (`54f6f9f3`). Aaron pushes via `Utilities/push_to_github.ps1` (Claude never pushes).
 
-**Bug #3 (tutorial TTS garbage) status:** The `IsGarbledText()` filter lives in `src/field_dialog_scan.inl` and runs in both the live poll path (`ScanAndSpeakAllWindows`) and the deferred path (`CheckPendingTexts`). History:
-- **v0.17.8.1** (built + BAT'd, never pushed): first version of the filter. BAT on Zell's Duel limit-break tutorial (bghall_6, [TUTO] tutoId 6, mode 10→1) showed it let a ~400-char garbage string through — `[POLL] win[0] Speaking: "q...1& 3,e 3in*retone3 ... meuiquymuy"`. The long letter-heavy tail diluted the punctuation-density + letter-ratio signals below threshold, leaving only the letter-digit-transition signal, which the "require 2 signals" rule ignored.
-- **v0.17.8.1.1** (current, in tree): added a lowercase→uppercase transition counter (random mid-word caps — the most reliable garbage discriminator; real dialog has 0-2, this garbage had 15+) and promoted the two transition counters to strong standalone triggers (≥5 lower→upper OR ≥4 letter-digit rejects on its own). Short canonical sample still caught by the weaker-signal pair.
+### Bug #4 — party member announced as NPC — CLOSED
 
-**Known minor remaining case:** 4-char `"HebL"` stale blip (seen once in 2026-05-21 log) is under the filter's 8-char minimum and not caught. Left as-is; lowering the bound risks false positives on "HP"/"GF"/"OK".
+The v0.17.8.2 diagnostic (`[party-filter-miss]`) caught it. The party-member filter in `src/field_nav_catalog.inl` skips an entity with no talk/push interaction in two ways:
+- **Following party member** (model-based, existing v0.14.108 rule): model 0-9, `throughonoff>0`. Caught correctly on Training Center (bgmon_2/bgmon_5).
+- **Named party member** (v0.17.8.3, name-based via `IsPartyCharacterSym()`, ANY model / ANY thru): SYM is a party-character name. Covers standing members AND high-model scene actors.
 
-**v0.17.8.0 (pushed) closed bugs #5 + #6.** Fire Cavern playthrough bug list (Aaron's 2026-05-18 report) progress:
+**BAT confirmed on bgryo2_1** (B-Garden dormitory, formation [1,0,5,255]): all six party entities filter as `named party member` — squalls (model 3), squallsd (model 5), zell/zells/selphies (model -1), selphie (model 11). Zero misses. Catalog holds only real targets (Hall 10 exit, save point, camera, 2nd exit); auto-drive to camera logged `Arrived`, GPS `In range` — nothing needed was removed. The model-11 selphie required widening the name branch to be model-independent (the first model<10 attempt left it as an NPC).
+
+**Why name-based, not model-based:** Fire Cavern's `drpoint` reuses model 9 with all flags zero; a blanket model filter would delete it before draw-point reclassification. `IsPartyCharacterSym` is the safe discriminator — draw points ('drpoint'), save points ('savePoint'), exits ('l1') are never named after characters. Real exits come from the trigger-line/gateway path, not the runtime entity, so filtering a character-named actor never removes an exit (verified: 'squalls' exit still present after the 'squalls' actor is filtered).
+
+**`[party-filter-miss]` diagnostic REMOVED** (fix confirmed). The permanent `[party-filter]` log stays. Draw-point safety holds by construction.
+
+### NEW bugs found in the first Laguna dream (gwgrass1) — separate chapters
+
+7. **Laguna dream field nav fully broken.** Player entity not detected: log shows `player=ent-1` and every auto-drive attempt logs `[drive] REFUSED ... player_pos_known=0 player_entityIdx=-1`. The `setpc==0` player-detection heuristic in RefreshCatalog/Update fails in the Laguna dream (no entity has setpc==0, or the dream player uses a different marker). This breaks F9 navigation entirely in Laguna sequences. Needs its own diagnostic (dump setpc for all entities on gwgrass1).
+8. **Laguna dream battle announces the real party.** Battle TTS says Squall/Zell/Selphie instead of Laguna/Kiros/Ward. The savemap formation still holds the real party char IDs during the dream (gwgrass1 formation logged as [5,0,1,255] = the real party). Battle-side fix — the dream party is swapped in via a different mechanism than the savemap formation array. Separate chapter.
+
+**v0.17.8.1.1 (pushed) closed bug #3.** Fire Cavern playthrough bug list (Aaron's 2026-05-18 report) progress:
 1. Quistis' FMV in the Infirmary fired prematurely — deferred
 2. ~~Manual field navigation direction lag and inaccurate direction guidance~~ — ✅ closed by v0.17.7.6.2
-3. Garbage announced by TTS following completion of a tutorial scene — ✅ closed by v0.17.8.1.1 (BAT'd 2026-05-21)
-4. Party member announced as NPC in catalog when party consists of just two members — deferred
+3. ~~Garbage announced by TTS following completion of a tutorial scene~~ — ✅ closed by v0.17.8.1.1
+4. ~~Party member announced as NPC in catalog~~ — ✅ closed by v0.17.8.3 (BAT-confirmed bgryo2_1; pending push)
 5. ~~Breakpoint on display timer announced when GF sequence starts~~ — ✅ closed by v0.17.8.0
 6. ~~Damage not announced when a character is summoning and the GF takes the damage in place of the character~~ — ✅ closed by v0.17.8.0
+7. Laguna dream field nav broken (player not detected) — NEW, deferred
+8. Laguna dream battle announces real party not Laguna/Kiros/Ward — NEW, deferred
 
-**Tooling lesson (carry forward):** `filesystem:edit_file` corrupts a file when the replacement text contains a literal dollar-sign character — it truncates the replacement and appends the original content, doubling file size. Use the hex literal `0x24` in source instead, or rewrite the whole file with `filesystem:write_file`. This bit us once on `field_dialog_scan.inl` (11.46 KB → 27.07 KB) during the v0.17.8.1 work.
+**Tooling lesson (carry forward):** `filesystem:edit_file` corrupts a file when the replacement text contains a literal dollar-sign character — it truncates the replacement and appends the original content, doubling file size. Use the hex literal `0x24` in source instead, or rewrite the whole file with `filesystem:write_file`. This bit us once on `field_dialog_scan.inl` (11.46 KB → 27.07 KB) during the v0.17.8.1 work. (Also: OneDrive occasionally throws a transient EPERM on `edit_file` rename — just retry once.)
 
 ---
 

@@ -18,6 +18,29 @@
 //            the v0.12.17 VARBLOCK-POS unreachable `if (false)` block is
 //            dropped. Git history at v0.17.6.2 preserves it.
 
+// v0.17.8.3: Known FF8 field SYM names for playable / party-swap characters.
+// Field scripts name the party entities after the character (with optional
+// shadow/duplicate suffixes like 'squalls', 'squallsd', 'zells'), so a prefix
+// match against these bases identifies a party member regardless of which
+// field-local model slot the engine assigned. Draw points ('drpoint'), save
+// points ('savePoint'/'saveline'), and generic NPCs never match, so this is a
+// safe discriminator for the party filter (see RefreshCatalog). Includes the
+// Laguna dream party (laguna/kiros/ward) and the intro/tutorial playables
+// (seifer/edea).
+static bool IsPartyCharacterSym(const char* sym)
+{
+    if (!sym || sym[0] == '\0') return false;
+    static const char* const kBases[] = {
+        "squall", "zell", "selphie", "quistis", "rinoa", "irvine",
+        "laguna", "kiros", "ward", "seifer", "edea"
+    };
+    for (int b = 0; b < (int)(sizeof(kBases) / sizeof(kBases[0])); b++) {
+        size_t n = strlen(kBases[b]);
+        if (_strnicmp(sym, kBases[b], n) == 0) return true;
+    }
+    return false;
+}
+
 static void RefreshCatalog()
 {
     if (!FF8Addresses::pFieldStateOthers || !FF8Addresses::pFieldStateOtherCount) return;
@@ -56,7 +79,17 @@ static void RefreshCatalog()
             int32_t  fpX          = *(int32_t*)(block + 0x190);
             int32_t  fpY          = *(int32_t*)(block + 0x194);
 
-            // v0.14.108: Party-member / non-interactive-character filter.
+            // v0.17.8.3: Resolve this entity's SYM name now (needed by the
+            // party filter below). Same offset mapping used elsewhere in this
+            // function for JSM lookups.
+            const char* symName = "";
+            {
+                int symIdxFilt = s_symOthersOffset + i;
+                if (symIdxFilt >= 0 && symIdxFilt < s_symNameCount)
+                    symName = s_symNames[symIdxFilt];
+            }
+
+            // v0.14.108 / v0.17.8.3: Party-member / non-interactive-character filter.
             //
             // Earlier (v0.14.107) attempt cross-referenced canonical model→charId
             // map against the savemap active formation. That failed on bggate_1
@@ -65,36 +98,74 @@ static void RefreshCatalog()
             // Followers showed up as model 2 and 4 there even with a Squall +
             // Zell + Selphie party (formation [1,0,5,255]).
             //
-            // The behavioral fingerprint is what actually defines a follower:
-            // a visible character that the player walks through with no
-            // interaction. That holds regardless of which model slot the field
-            // assigned them. Same logic catches non-interactive cutscene
-            // characters that walk through scenes — also correctly skipped
-            // since they're not navigation targets either.
+            // The behavioral fingerprint is what defines a FOLLOWING party
+            // member: a visible character (model 0-9) the player walks through
+            // (throughonoff > 0) with no talk/push interaction. That holds
+            // regardless of which model slot the field assigned them.
             //
-            //   modelId in [0, 9]   visible character (party-character model range)
-            //   throughonoff  > 0   player walks through them
-            //   talkonoff    == 0   not talkable
-            //   pushonoff    == 0   no collision
+            // v0.17.8.3 adds the STANDING / high-model party member cases. In
+            // scripted scenes (dormitory, Laguna dream intro) party members are
+            // placed as static or walk-through actors with no talk/push, and
+            // they don't always use a low follower model:
+            //   - bgryo2_1 ent1 'squalls' model 3, ent2 'squallsd' model 5,
+            //     all interaction flags 0 (standing). Caught by model OR name.
+            //   - bgryo2_1 ent5 'selphie' model 11, thru>0, no talk/push (a
+            //     scene actor using a full NPC model). model >= 10 so the
+            //     model-based follower rule misses it -- only the NAME catches it.
+            // All showed as 'NPC' before this fix (Fire Cavern bug #4).
             //
-            // The modelId < 10 guard excludes save points (model 24) and other
-            // non-character interactive objects with throughonoff. Save point
-            // detection runs later in this function (see modelId == 24 check),
-            // so save points qualify and reach the JSM/model-based
-            // reclassification regardless of this filter.
+            // We cannot simply drop the throughonoff>0 / model<10 requirements:
+            // some draw points reuse a party-character model with all flags zero
+            // (Fire Cavern 'drpoint' uses model 9), and filtering those would
+            // delete the draw point before the JSM reclassification can find it.
+            // The safe discriminator is the SYM NAME: party members are named
+            // after the character (squall/zell/laguna/...), while draw points are
+            // 'drpoint'/'dp*', save points 'savePoint'/'saveline', and exits
+            // 'l1' etc. -- none match IsPartyCharacterSym(). So:
+            //   - model 0-9 + no talk/push + thru>0   -> following party member
+            //     (model-based; also catches followers whose SYM didn't resolve)
+            //   - character SYM + no talk/push (any model, any thru) -> party
+            //     member placed in the scene (standing or walk-through actor)
+            //   - non-character SYM (e.g. 'drpoint') -> KEEP, so the draw-point
+            //     reclassification downstream still works.
             //
-            // Race risk: if TALKRADIUS sets talkonoff after this scan but
-            // before the next refresh, a real NPC could be transiently
-            // filtered. Mitigated by the catalog refreshing on every F9 press.
-            if (i != s_playerEntityIdx &&
-                modelId >= 0 && modelId < 10 &&
-                throughonoff > 0 &&
-                talkonoff == 0 &&
-                pushonoff == 0) {
-                Log::Field("FieldNavigation: [party-filter] ent%d model=%d filtered "
-                           "(visible walk-through, no interaction)", i, (int)modelId);
-                continue;
+            // A talkable character (talk>0, e.g. a scripted 'talk to Seifer')
+            // is NOT filtered -- noInteract is false -- so it stays navigable.
+            // Real exits are added via the trigger-line / gateway path, not the
+            // runtime entity, so filtering a character-named runtime actor never
+            // removes a real exit (verified on bgryo2_1: the 'squalls' screen-
+            // boundary exit still appears as cat2 after ent1 'squalls' is filtered).
+            //
+            // Race risk: if TALKRADIUS sets talkonoff after this scan, a real NPC
+            // could be transiently filtered; mitigated by the per-F9 refresh.
+            {
+                bool isVisibleChar = (modelId >= 0 && modelId < 10);
+                bool noInteract    = (talkonoff == 0 && pushonoff == 0);
+                // Model-based: an unnamed visible character the player walks
+                // through is a following party member.
+                bool isFollower    = isVisibleChar && noInteract && throughonoff > 0;
+                // Name-based: a party-character SYM with no talk/push, regardless
+                // of model or walk-through. Covers standing members (model 0-9,
+                // thru=0) and high-model scene actors (model >= 10, thru>0).
+                bool isNamedParty  = noInteract && IsPartyCharacterSym(symName);
+                if (i != s_playerEntityIdx && (isFollower || isNamedParty)) {
+                    Log::Field("FieldNavigation: [party-filter] ent%d model=%d sym='%s' "
+                               "filtered (%s; thru=%d)",
+                               i, (int)modelId, symName,
+                               isFollower ? "following party member"
+                                          : "named party member",
+                               (int)throughonoff);
+                    continue;
+                }
             }
+
+            // v0.17.8.3: the v0.17.8.2 [party-filter-miss] diagnostic was
+            // removed here once the fix was BAT-confirmed on bgryo2_1 (all six
+            // party entities -- squalls/squallsd/zell/zells/selphie/selphies,
+            // including the model-11 selphie -- filtered as named party members,
+            // zero misses, navigation intact). Draw-point safety holds by
+            // construction: 'drpoint' is not a character name and has thru=0, so
+            // neither the follower nor the named-party branch touches it.
 
             // v0.17.7.1: Walkmesh exclusion rule.
             //
