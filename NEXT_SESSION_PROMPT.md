@@ -1,140 +1,66 @@
-# Next Session Prompt: v0.17.8.1 — Bug #3 (tutorial TTS garbage)
+# Next Session Prompt: v0.17.8.7 BAT triage + the runtime confirmation/disk layer
 
 ## Greeting
 
-Start with `## Claude Says`. Read `DEVNOTES.md` and THIS file before any work.
+Start every response with `## Claude Says`. Read `DEVNOTES.md` and THIS file before any work.
 
 ## Where we are at session open
 
-**v0.17.8.0 BAT'd CLEAN.** Aaron confirmed both fixes:
-- Bug #5 (GF-BP diagnostic spam) — no GF breakpoint TTS announcement heard.
-- Bug #6 (GF damage announce during HP-SUB window) — heard the GF take damage in place of the character.
+**v0.17.8.7 IS IN TREE, awaiting BAT.** `FF8OPC_VERSION` = `0.17.8.7`; CHANGELOG top heading matches. GitHub HEAD = v0.17.8.6 (`e415be44`, pushed and BAT-confirmed). Aaron pushes via `Utilities/push_to_github.ps1` — **Claude never pushes.** Diagnostic-only builds stay LOCAL (never pushed).
 
-**Two possible session-open paths:**
+v0.17.8.7 adds ONE thing: a static **test-battle reference filter** that stops debug leftover entities (e.g. bgroad_5 `ent20 'cardgamemaster'`, the `cardmaster` phantom) from being promoted to INTERACTIVE_OBJECT and surfaced in the catalog. The larger runtime layer was deliberately NOT bundled so this filter can BAT in isolation.
 
-### Path A: Aaron has already pushed v0.17.8.0
+### What changed in v0.17.8.7 (files)
 
-GitHub HEAD is now at the v0.17.8.0 commit. Verify by calling `github:list_commits` and confirming the top commit is titled `v0.17.8.0`. Then proceed to bug #3 work.
+- `field_archive_jsm_scan.inl` — new `static bool EntityRefsTestField(int e)` helper (just above `ScanJSMScripts`): true if any `s_initVarMaps[e].writes[].value` resolves via `GetFieldNameById` to a name starting with `testbl`. Guard added to the v0.07.98 INTERACTIVE_OBJECT promotion AND the v0.08.01 paired-entity inheritance promotion.
+- `field_archive_jsm_state.inl` — forward declaration of `EntityRefsTestField` (next to the `RunDirectorDetection` forward decl), so the earlier-included `director.inl` can call it.
+- `field_archive_jsm_director.inl` — same guard in the Director promotion loop (after the `camera` filter). **This one is essential:** the main-scan guard leaves the entity UNKNOWN, and without this the Director post-pass would re-promote it straight back.
+- `src/ff8_accessibility.h` — version `0.17.8.7`. `CHANGELOG.md` — v0.17.8.7 entry on top.
 
-### Path B: Aaron hasn't pushed yet
+## Step 1: BAT the filter
 
-Local tree has v0.17.8.0 ready to push (CHANGELOG top heading matches `FF8OPC_VERSION`). Push utility: `Utilities/push_to_github.ps1`. Aaron pushes; Claude doesn't. Confirm push completed via `github:list_commits` before starting v0.17.8.1 work.
+Ask Aaron to build, reload **bgroad_5** (B-Garden dormitory corridor), and cycle the catalog with F9.
 
-Either way: once pushed, proceed to bug #3.
+PASS criteria:
+- The `Card Player` / `cardmaster` entry is GONE. Catalog lists only the two real exits (Dormitory Double 1, Hall 10).
+- Field log shows `ent20 'cardgamemaster' NOT promoted to INTERACTIVE_OBJECT: init-var writes reference a test-battle field` and no `[refresh] JSM-injected Card Player at (607,334)`.
 
-## Bug #3: Tutorial TTS garbage
+Regression check (important): on a dormitory/classroom field with a real Director (bed, desk, wardrobe, the B-Garden Directory `dic`), those real interactables MUST still appear. If a real interactable vanished, an entity is coincidentally writing a `testbl*` field id — capture its `[JSMScan] ... NOT promoted` log line and tighten the helper (e.g. require the write to go to the field-jump var / require >1 testbl ref).
 
-### What we know
+If PASS: mark v0.17.8.7 ✅ in DEVNOTES; Aaron pushes (`Utilities/push_to_github.ps1`). Then proceed to Step 2.
 
-From the 2026-05-18 Fire Cavern playthrough (v0.16.5.2 BAT triage):
+## Step 2 (next chapter): runtime dialog-confirmation + disk persistence
 
-```
-[POLL] win[0] Speaking: ",e 3in*retone3 e~HP~B:All08E%~!/..."
-```
+This is the larger piece Aaron approved and explicitly wants persisted across restarts. It is the general, principled answer to phantom/missed interactive objects, complementing the static filters (extDisp lines from v0.17.8.6, test-field suppression from v0.17.8.7).
 
-…fires after `[TUTO]` mode transitions from 10 → 1 (tutorial scene completes). The text is garbled — looks like tokens / unprintable bytes / unset character codes. SAPI then attempts to speak this garbage, which the screen reader reads as a string of nonsense.
+**Goal.** An entity that actually fires MES/ASK/AMES/AASK at runtime is interactive, period. Record that fact, persist it to disk per-field, and re-apply it to the catalog on every load. Conversely, a surfaced object the player reaches that NEVER fires dialog can be demoted.
 
-### Two candidate fixes
+**Design (validated against the real code earlier):**
+- The six dialog hooks in `field_dialog_opcodes.inl` (`Hook_opcode_mes/mesw/ask/ames/aask/amesw`, each `__cdecl Hook(int entityPtr)`) each call a new `FieldNavigation::NoteRuntimeDialogEntity(entityPtr)`.
+- Resolve `entityPtr` to a stable identity: match against `s_capturedLines[].entityAddr` (a Line, e.g. the dorm bed) using the proven runtime stride `0x1A0`, or against the runtime others/background array range (`FF8Addresses::pFieldStateOthers`, ENTITY_STRIDE) for a bg/other entity. Stable key = fieldName + lineOrder (lines) / entity index (others).
+- Persist the confirmed set to a DISK file (per-field; survives restart; becomes a shippable known-objects DB). Need to find the codebase's existing file-I/O pattern (look at how Logs/CameraFiles are written) and pick a path under the mod folder.
+- `RefreshCatalog` (`field_nav_catalog.inl`) re-applies the set each build: surface confirmed entities as Interactions at their SETLINE-center / struct position.
+- Purposes: (a) catch interactive objects the static extDisp proxy misses, (b) confirm/label static guesses, (c) DEMOTE static phantoms the player reaches that never fire dialog (general catch-all for non-debug story-dormant NPCs).
 
-**Option A (preferred): Token rejection in POLL path.** Filter out `[…]` tokens (FF8 dialog control codes that weren't decoded), unprintable bytes (< 0x20 except whitespace), and characters above the standard ASCII range that aren't part of valid encoded text. Reject the whole speak attempt if it fails some validity threshold (e.g. >25% non-letters).
+**UX constraint (Aaron, firm):** detection MUST surface real objects BEFORE they are triggered — runtime-only is useless for FINDING things. So static pre-detection always leads; this runtime layer is the refinement/persistence/pruning layer.
 
-Pro: catches similar future cases regardless of source.
-Con: needs careful threshold tuning so legitimate punctuation-heavy text isn't rejected.
+**Files:** `field_dialog_opcodes.inl`, `field_navigation.h` (decl), `field_navigation.cpp` (registry + `NoteRuntimeDialogEntity` + re-apply at RefreshCatalog start + disk read/write), `field_nav_catalog.inl` (surface confirmed entities).
 
-**Option B (alternative): Suppress POLL win[0] briefly on tutorial-end.** Track the `[TUTO]` mode 10→1 transition and suppress any POLL speech from win[0] for ~500 ms after.
+Also consider, when convenient (alt root-cause for the whole phantom class): gate `ResolveStructPositions` (`field_nav_catalog_lateres.inl`) against the live `*pFieldStateOtherCount` instead of the hardcoded `sIdx >= 31`, so beyond-active-window stale struct positions don't surface phantoms generally. Verify first that it doesn't regress legit beyond-window save/draw points (e.g. Fire Cavern `drpoint`).
 
-Pro: surgical, no risk of rejecting legitimate text.
-Con: tutorial-specific. If garbage appears in other contexts, this won't catch it.
+## Deferred backlog (unchanged)
 
-**Suggested approach**: implement Option A as the primary fix (general-purpose) and consider Option B as a fallback if Option A proves too aggressive.
+Fire Cavern: #1 Quistis FMV premature; #7 Laguna dream field-nav broken (player=ent-1, `setpc==0` detection fails on gwgrass1); #8 Laguna dream battle announces real party not Laguna/Kiros/Ward. (#2/#3/#4/#5/#6 closed.) Steam 2013 savemap header = 76 bytes (0x4C), not 96 — community offsets need −0x14 (battle-side).
 
-### Investigation steps
+## Working rules (carry forward)
 
-1. **Locate the POLL pipeline.** Likely in `dialog_inject.cpp`, `src/dialog_inject.h`, or one of the field/menu TTS files. The log line `[POLL] win[0] Speaking: ...` should be searchable via `filesystem:edit_file` dryRun across `src/`.
+- **Mod files are on Windows** under `FF8_OriginalPC_mod/`. Use `filesystem:`-prefixed MCP tools. Bare bash/view hit a different Linux container — NOT OneDrive. Aaron's uploaded logs land at `/mnt/user-data/uploads/` (Linux side) — read those with bash/view, not filesystem MCP.
+- **Claude never pushes.** Aaron BATs, then pushes via `Utilities/push_to_github.ps1`. The utility refuses to push unless `FF8OPC_VERSION` == the top `## vX.Y.Z` heading in `CHANGELOG.md`.
+- **80 KB hard limit per source file.** `field_archive_jsm_scan.inl` is the big one — check its size after edits.
+- **`filesystem:edit_file` corrupts a file when the replacement text contains a literal dollar-sign** — it truncates and duplicates. Use the hex literal `0x24` in source, or rewrite the whole file with `filesystem:write_file`. (OneDrive also occasionally throws a transient EPERM on edit_file rename — just retry once.)
+- Aaron is blind, uses NVDA. Give instructions that need no sighted spot-checking — he sends logs and F11 screenshots (`Logs/screenshots/f11_HHMMSS_mmm.png`, read with `filesystem:read_media_file`) and Claude reads them.
+- F-keys: F5 repeat dialog; F9 nearest/cycle catalog; F10 player field+pos; F11 screenshot; F12 session diagnostics.
 
-2. **Find the `[TUTO]` mode tracker.** Search for `[TUTO]` log emissions to identify which file emits the mode 10→1 transition log.
+## Session checkpoint rule
 
-3. **Find the win[0] data source.** The POLL path likely reads from FF8's window object array (`ff8_win_obj` per memory notes). Identify the read site and the text buffer.
-
-4. **Trace the text encoding.** FF8 dialog text uses encoded byte values (the FF8 character map). The mod has `DecodeFF8String()` somewhere — if the POLL path bypasses that, raw bytes would look garbled. Alternatively, the engine may have already started overwriting the buffer before the POLL fires (race condition).
-
-5. **Reproduce the garble.** Aaron's 2026-05-18 Fire Cavern playthrough should have logged a clean example. Search `Logs/ff8_dialog.log` (or wherever `[POLL]` lives) for the date/time of that playthrough.
-
-### Implementation plan (Option A)
-
-Pseudocode for the filter:
-
-```cpp
-static bool IsGarbledText(const char* text) {
-    if (!text || !text[0]) return false;  // empty is fine, not garbled
-    int len = (int)strlen(text);
-    int badCount = 0;
-    int totalCount = 0;
-    
-    for (int i = 0; i < len; i++) {
-        unsigned char c = (unsigned char)text[i];
-        totalCount++;
-        
-        // Reject control codes (except whitespace)
-        if (c < 0x20 && c != ' ' && c != '\t' && c != '\n') { badCount++; continue; }
-        
-        // Reject undecoded FF8 control tokens (typically '~' followed by hex)
-        // — Actual character depends on what the tokens look like in the log
-        if (c == '~' && i + 1 < len && (isxdigit(text[i+1]) || text[i+1] == ' ')) {
-            badCount++;
-            continue;
-        }
-        
-        // Reject extended ASCII / control bytes
-        if (c >= 0x7F && c < 0xA0) { badCount++; continue; }
-    }
-    
-    if (totalCount == 0) return false;
-    return (badCount * 100 / totalCount) > 25;  // >25% bad → reject
-}
-
-// In the POLL Speak path, before calling SAPI:
-if (IsGarbledText(textBuf)) {
-    Log::Battle("[POLL] win[0] REJECTED garbled text: \"%s\"", textBuf);
-    return;  // don't speak
-}
-```
-
-The exact tokens to reject need to be matched against the actual sample (`",e 3in*retone3 e~HP~B:All08E%~!/..."`). The `~HP~`, `~B:`, `%~` patterns look like undecoded FF8 dialog macros — `~` followed by a letter/code is a strong garble signal.
-
-### Files likely involved
-
-- `src/dialog_inject.cpp` / `src/dialog_inject.h` — dialog injection pipeline (per memory notes)
-- `src/field_dialog.cpp` (or similar field dialog file) — field-side POLL hooks
-- `src/ff8_text_decode.cpp` / `.h` — text decoder (if it exists)
-- `src/battle_tts.cpp` — has its own DecodeFF8String? Worth checking.
-
-Step 1 will narrow it down.
-
-## File-access reminder
-
-**Mod files are on Windows.** Use `filesystem:`-prefixed MCP tools. BAT logs at `Logs/ff8_*.log`. F11 screenshots at `Logs/screenshots/f11_HHMMSS_NNN.png` — use `filesystem:read_media_file` to view (load via `tool_search("read image media file")` if not already loaded).
-
-For mid-file log searches, use `filesystem:edit_file` with `dryRun=true` and a unique `oldText` anchor.
-
-## Session checkpoint rule reminder
-
-After v0.17.8.1 implementation:
-1. Bump `FF8OPC_VERSION` in `src/ff8_accessibility.h` to `0.17.8.1`.
-2. Add top entry `## v0.17.8.1` in `CHANGELOG.md`.
-3. Update `DEVNOTES.md` to reflect the new in-tree state.
-4. Rewrite this `NEXT_SESSION_PROMPT.md` for the BAT-triage step.
-
-After BAT:
-1. Mark v0.17.8.1 ✅ in DEVNOTES (move bug #3 from active to closed).
-2. If pushing: Aaron runs `Utilities/push_to_github.ps1`. Claude never pushes.
-3. Suggest next chapter — likely bug #4 (party-as-NPC) or bug #1 (Quistis FMV race) depending on Aaron's priority.
-
-## Remaining Fire Cavern bug list
-
-1. Quistis' FMV in the Infirmary fired prematurely — deferred
-2. ~~Manual field navigation direction lag~~ — ✅ closed by v0.17.7.6.2
-3. Garbage announced by TTS following completion of a tutorial scene — **current target (v0.17.8.1)**
-4. Party member announced as NPC in catalog when party consists of just two members — deferred
-5. ~~Breakpoint on display timer announced when GF sequence starts~~ — ✅ closed by v0.17.8.0
-6. ~~Damage not announced when a character is summoning and the GF takes the damage in place of the character~~ — ✅ closed by v0.17.8.0
+After implementing a build: bump `FF8OPC_VERSION`, add the top `## vX.Y.Z` CHANGELOG entry, update `DEVNOTES.md`, rewrite this file for the BAT-triage step. After BAT: mark the version ✅ in DEVNOTES; Aaron pushes.

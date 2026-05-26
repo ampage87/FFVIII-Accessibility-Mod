@@ -11,6 +11,37 @@
 //      and replaced here with a single function call.
 // All other behavior is byte-for-byte identical to the pre-split source.
 
+// v0.17.8.7: Detect debug / test-battle leftover entities that must NOT be
+// promoted to INTERACTIVE_OBJECT (they surface as phantoms in the catalog --
+// a navigable entry with nothing actually there). Two signals:
+//   (a) SYM NAME == "cardgamemaster*". These are debug card-game scaffolding:
+//       invisible (model=-1), appear as numbered copies (cardgamemaster,
+//       cardgamemaster2, cardgamemaster3), reference test-battle fields, and do
+//       nothing when reached (confirmed by BAT + an F11 screenshot of an empty
+//       spot on bgroad_5). The real FF8 card challenges are launched from
+//       visible CC-group NPCs via the CARDGAME opcode, not these entities. This
+//       is the reliable signal -- it works regardless of whether the entity has
+//       any init-var writes (on bghall_1 'cardgamemaster' has none) and is the
+//       same name-scoped approach already used for 'camera' and party members.
+//   (b) init-var (POPM_W) writes target a field named "testbl*". A secondary,
+//       conservative signal for other debug entities; harmless if it never
+//       fires. GetFieldNameById returns nullptr for out-of-range IDs.
+static bool EntityIsDebugLeftover(int e, const char* sym)
+{
+    if (sym && _strnicmp(sym, "cardgamemaster", 14) == 0)
+        return true;
+    if (e >= 0 && e < 128) {
+        for (int w = 0; w < s_initVarMaps[e].count; w++) {
+            int32_t v = s_initVarMaps[e].writes[w].value;
+            if (v < 0 || v > 0x7FFE) continue;  // skip non-field values + sentinels
+            const char* nm = GetFieldNameById((uint16_t)v);
+            if (nm && _strnicmp(nm, "testbl", 6) == 0)
+                return true;
+        }
+    }
+    return false;
+}
+
 bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEntities, int& outCount)
 {
     outCount = 0;
@@ -917,7 +948,15 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         if ((info.type == JSM_ENT_BACKGROUND || info.type == JSM_ENT_UNKNOWN) &&
             (foundDialogOp || foundExtDispatch) &&
             (info.hasPosition || info.hasPshmCoords) && !foundSetmodel) {
-            info.type = JSM_ENT_INTERACTIVE_OBJECT;
+            // v0.17.8.7: skip debug leftovers (e.g. bgroad_5 / bghall_1
+            // 'cardgamemaster') that would otherwise surface as phantoms.
+            if (EntityIsDebugLeftover(e, info.symName)) {
+                Log::Field("FieldArchive: [JSMScan] ent%d '%s' NOT promoted to "
+                           "INTERACTIVE_OBJECT: debug leftover "
+                           "(cardgamemaster/test-battle, v0.17.8.7)", e, info.symName);
+            } else {
+                info.type = JSM_ENT_INTERACTIVE_OBJECT;
+            }
         }
 
         // v0.08.01: Paired entity position inheritance.
@@ -936,7 +975,8 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
             (foundDialogOp || foundExtDispatch) && !foundSetmodel &&
             !info.hasPosition && !info.hasPshmCoords &&
             outCount > 0 &&
-            !strstr(info.symName, "light")) {
+            !strstr(info.symName, "light") &&
+            !EntityIsDebugLeftover(e, info.symName)) {  // v0.17.8.7: skip debug leftovers here too
             JSMEntityInfo& prev = outEntities[outCount - 1];
             if (prev.hasPshmCoords && prev.jsmIndex == e - 1 &&
                 (prev.jsmCategory == 3 || prev.jsmCategory == 2) &&

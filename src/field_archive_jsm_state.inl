@@ -93,3 +93,11 @@ static void RunDirectorDetection(const char* fieldName,
                                  int countBg,
                                  char symNames[][32],
                                  int symCount);
+
+// v0.17.8.7: Debug-leftover detector. Returns true for the 'cardgamemaster*'
+// debug card-game entities (and, secondarily, entities whose init-var writes
+// reference a "testbl*" field). Used to skip the INTERACTIVE_OBJECT promotion
+// in BOTH the main scan and the Director post-pass. Defined in
+// field_archive_jsm_scan.inl; forward-declared here so director.inl (included
+// earlier) can call it.
+static bool EntityIsDebugLeftover(int e, const char* sym);

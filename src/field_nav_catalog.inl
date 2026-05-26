@@ -599,9 +599,22 @@ static void RefreshCatalog()
                     // v0.12.12: Also skip UNKNOWN lines — these are unclassified trigger lines
                     // that don't fire any player-visible event. Showing them as "Event"
                     // is confusing (player arrives and nothing happens).
+                    // v0.17.8.7: ALSO skip LINE_INTERACTIVE. With campan/event/screenbound/
+                    // unknown all skipped, LINE_INTERACTIVE was the ONLY type this block still
+                    // emitted -- and the Interaction block below ALSO emits it (same -200-t
+                    // sentinel), so every interactive line was injected TWICE: once as "Event"
+                    // (type ENT_OBJECT) and once as "Interaction N" (type ENT_INTERACTION). On
+                    // bghall_1 line5 (a pathway sign) showed as both, and the F9 cursor appeared
+                    // to "flicker" between Event and Interaction. Worse, the bogus ENT_OBJECT
+                    // "Event" entry tripped the JSM-injection block's `alreadyInCatalog`
+                    // (type==ENT_OBJECT) test, suppressing the real Directory (igyous1, also
+                    // ENT_OBJECT). Skipping LINE_INTERACTIVE here makes this block emit nothing
+                    // (its original UNKNOWN-only purpose was already removed in v0.12.12); genuine
+                    // interactions still surface once, via the Interaction block.
                     if (s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_CAMERA_PAN ||
                         s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_EVENT ||
                         s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_SCREEN_BOUND ||
+                        s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_INTERACTIVE ||
                         s_capturedLines[t].lineType == FieldArchive::JSM_ENT_UNKNOWN)
                         continue;
                     // Reachability check (same as screen transitions).

@@ -195,6 +195,16 @@ static void RunDirectorDetection(const char* fieldName,
                     continue;  // skip camera-control entity
                 }
 
+                // v0.17.8.7: skip debug leftovers (e.g. 'cardgamemaster'). The
+                // main-scan promotion already skips these, but that leaves them
+                // UNKNOWN -- without this guard the Director pass would re-promote
+                // them right back into the catalog as phantoms.
+                if (EntityIsDebugLeftover(tgt, tgtSym)) {
+                    Log::Field("FieldArchive: [DIRECTOR]   skipped ent%d '%s': debug leftover "
+                               "(cardgamemaster/test-battle, v0.17.8.7)", tgt, tgtSym);
+                    continue;
+                }
+
                 // Skip if already classified as something useful
                 JSMEntityType tType = outEntities[tc].type;
                 if (tType == JSM_ENT_INTERACTIVE_OBJECT ||

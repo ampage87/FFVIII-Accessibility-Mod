@@ -6,6 +6,100 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.8.7
+
+Field navigation catalog: two related correctness fixes, both surfaced during
+the v0.17.8.6 BAT on the B-Garden hub fields.
+
+## Fix 1 — phantom `cardmaster` / `Card Player`
+
+A phantom interactive object was read out in the B-Garden corridors and Main
+Hall but nothing was there when the player reached it. Pre-existing bug, NOT a
+regression from v0.17.8.6.
+
+### Root cause
+
+The phantom is the `cardgamemaster` family of entities (`cardgamemaster`,
+`cardgamemaster2`, `cardgamemaster3`). They are debug card-game scaffolding:
+invisible (`model=-1`), appear as numbered copies, sit among other debug/dummy
+entities (`dammy`, `synkun`, `seito*`), reference test-battle fields (`testbl2`,
+`testbl8`, `testbl14`, `test5`), and do nothing when reached -- confirmed by an
+F11 screenshot of an empty spot on bgroad_5. The real FF8 card challenges are
+launched from visible CC-group NPCs via the CARDGAME opcode, not these entities.
+
+They reach the catalog through the INTERACTIVE_OBJECT promotion plus a resolved
+position (SET3 shift-pattern or runtime LATE-RESOLVE). On bghall_1 the
+entity is promoted specifically by the Director post-pass, which aggressively
+promotes any cat-3 entity with extended-dispatch when a Director is present.
+
+### Fix: name-scoped debug-leftover filter
+
+New `EntityIsDebugLeftover(e, sym)` helper (`field_archive_jsm_scan.inl`,
+forward-declared in `field_archive_jsm_state.inl`): true when the entity SYM
+name begins with `cardgamemaster`, or (secondary) when its init-var writes
+reference a `testbl*` field. The name signal is the reliable one -- it works
+regardless of whether the entity has any init-var writes (on bghall_1
+`cardgamemaster` has none) and mirrors the existing name-scoped filters for
+`camera` and party members. The guard is applied in all three INTERACTIVE_OBJECT
+promotion paths so the entity cannot be re-promoted after being skipped:
+  1. the main-scan direct promotion (dialog/extDispatch + position),
+  2. the paired-entity coordinate-inheritance promotion, and
+  3. the Director post-pass promotion (`field_archive_jsm_director.inl`).
+Skips log `NOT promoted to INTERACTIVE_OBJECT` / `[DIRECTOR] skipped ... debug
+leftover`, so the suppression is visible in the field log.
+
+### Why this is safe
+
+`cardgamemaster*` is debug scaffolding, not a real interactable, on every field
+observed. The filter is scoped to the INTERACTIVE_OBJECT promotion only -- it
+does not touch Line classification, save/draw/shop/card detection, MAP_EXIT
+detection, or the runtime entity loop. Real interactables (the B-Garden
+Directory `igyous1`, dorm beds, examinable objects like `water`) are not named
+`cardgamemaster` and are unaffected.
+
+## Fix 2 — interactive lines double-listed ("Event" + "Interaction"), and the Directory vanishing
+
+Reported in the same BAT: B-Garden Main Hall pathway signs (now surfaced thanks
+to the v0.17.8.6 extended-dispatch Line rule) appeared to flicker between
+"Event" and "Interaction" in the catalog, and the Directory stopped appearing.
+
+Root cause is one vestigial code path in `RefreshCatalog`
+(`field_nav_catalog.inl`). The legacy "Event" block skips Lines of type
+CAMERA_PAN / EVENT / SCREEN_BOUND / UNKNOWN -- which, after v0.12.12 removed its
+original UNKNOWN-only purpose, left `LINE_INTERACTIVE` as the ONLY type it still
+emitted. The "Interaction" block immediately below emits that same
+`LINE_INTERACTIVE` line again (identical `-200-t` sentinel). So every interactive
+Line was injected twice -- once as "Event" (catalog type `ENT_OBJECT`) and once as
+"Interaction N" (`ENT_INTERACTION`) -- and cycling landed on both, reading as a
+flicker. The bogus `ENT_OBJECT` "Event" entry then tripped the JSM-injection
+block's `alreadyInCatalog` test (`type == ENT_OBJECT`), causing it to skip the
+real Directory (`igyous1`, also `ENT_OBJECT`). The v0.17.8.6 rule only made the
+problem visible by classifying more Lines as `LINE_INTERACTIVE`.
+
+Fix: the "Event" block now also skips `LINE_INTERACTIVE`. This makes the block
+emit nothing (its UNKNOWN-only purpose was already gone), so interactive Lines
+surface exactly once -- as "Interaction N" -- and the `ENT_OBJECT` collision that
+hid the Directory disappears. No legitimate entry is lost.
+
+## Expected BAT outcome
+
+Reload bghall_1 (B-Garden Main Hall) and/or bgroad_5 (dormitory corridor) and
+cycle the catalog with F9. Expected: (1) no `Card Player` / `cardmaster` entry;
+(2) each pathway sign appears ONCE, as "Interaction N" -- no "Event" duplicate,
+no flicker between Event and Interaction; (3) the Directory appears again. Real
+entries (Directory, exits, save point, dorm bed) remain. The field log should
+show `cardgamemaster' NOT promoted to INTERACTIVE_OBJECT` / `[DIRECTOR] skipped
+... debug leftover`, a single `cat... TRIGGER line... name='Interaction 1'` per
+sign (no paired `name='Event'`), and `JSM-injected Directory ... sym='igyous1'`.
+
+### Not in this build (staged follow-up)
+
+The runtime dialog-confirmation + disk-persistence layer (catch objects the
+static proxy misses; confirm/label static guesses; demote phantoms that never
+fire dialog when reached; persist a known-objects DB across restarts) is the
+larger next piece and is the general answer to the Director's over-promotion;
+it is intentionally not bundled here.
+
 ## v0.17.8.6
 
 Fix: the B-Garden dormitory bed (field bgryo2_1) now appears in the navigation
