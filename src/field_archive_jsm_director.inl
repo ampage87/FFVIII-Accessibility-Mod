@@ -178,6 +178,23 @@ static void RunDirectorDetection(const char* fieldName,
                     continue;  // skip party character
                 }
 
+                // v0.17.8.4: Filter out camera-control entities. The promotion
+                // criterion below accepts a target with dialog OR extDispatch.
+                // The 0x1C extended-dispatch opcode is a catch-all used for
+                // camera moves, sound, and particle effects -- not only player
+                // interaction -- so a scene-camera entity with no dialog slips
+                // through the OR and gets promoted to a bogus Interactive
+                // Object. Confirmed on bgryo2_1: ent18 'camera' (dialog=0,
+                // extDisp=1) was promoted and injected into the field catalog
+                // as a navigable "Camera" that does nothing when reached. These
+                // entities are conventionally named 'camera'/'cameraman'; the
+                // prefix match covers both. Kept name-scoped (rather than
+                // tightening the OR to require dialog) so genuine no-dialog
+                // interactables on other fields aren't dropped.
+                if (_strnicmp(tgtSym, "camera", 6) == 0) {
+                    continue;  // skip camera-control entity
+                }
+
                 // Skip if already classified as something useful
                 JSMEntityType tType = outEntities[tc].type;
                 if (tType == JSM_ENT_INTERACTIVE_OBJECT ||

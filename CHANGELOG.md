@@ -6,6 +6,52 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.8.4
+
+Field navigation catalog: a non-interactive camera-control entity was listed
+as a navigable "Camera" object (reported on bgryo2_1, the B-Garden dormitory).
+Reaching it does nothing -- it is a scene-camera script, not a player object.
+
+### Root cause
+
+The Director-detection post-pass in `field_archive_jsm_director.inl` promotes a
+script entity to `JSM_ENT_INTERACTIVE_OBJECT` when it has dialog OR extended
+dispatch (`!s_hasDialogAny[tgt] && !s_hasExtDispatchArr[tgt]` -> continue, else
+promote). The `0x1C` extended-dispatch opcode is a catch-all -- camera moves,
+sound, particle effects -- not only player interaction. On bgryo2_1 the scan
+recorded `ent18 'camera' ... dialog=0 extDisp=1`: no dialog at all, but it
+drives the scene camera via `0x1C`, so it slipped through the OR, was promoted,
+and was injected into the catalog as a "Camera" (JSM entity 18, beyond the
+7-entity runtime window, so the promotion is its only path into the catalog).
+
+### Fix
+
+A name-scoped guard in the promotion loop, alongside the existing
+party-character filter: skip targets whose SYM begins with `camera` (covers
+`camera` and `cameraman`). Camera entities are conventionally named, have no
+dialog, and are never navigation targets. Kept name-scoped rather than
+tightening the promotion criterion to require dialog, because that broader
+change could drop genuine no-dialog interactables (levers, switches) on other
+fields; the dormitory/classroom Director heuristic depends on the looser rule.
+
+### Regression safety
+
+- Only camera-named targets are affected; every other promotion path is
+  unchanged.
+- Real interactables (bed, desk, wardrobe, sign) are not named `camera`, so
+  they still promote normally.
+- The guard sits in the promotion loop only; it does not touch runtime-entity
+  classification, save/draw point detection, or exit handling.
+
+### Expected BAT outcome
+
+Reload bgryo2_1 (B-Garden dormitory) and cycle the catalog with F9. The `Camera`
+entry should be gone; the catalog should list only the Hall 10 exit, the save
+point, and the second exit. The scan log should no longer show
+`[DIRECTOR]   promoted ent18 'camera' ... -> Interactive Object`. Regression
+check: on a dormitory/classroom field with a real Director (bed/desk/wardrobe),
+those interactables should still appear.
+
 ## v0.17.8.3
 
 Fire Cavern playthrough bug #4: a party member is announced as an NPC in the

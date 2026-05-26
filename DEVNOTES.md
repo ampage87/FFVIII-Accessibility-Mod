@@ -4,27 +4,27 @@ Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` inj
 
 **Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
 
-GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.17.8.1.1** (commit `54f6f9f3`, parent `d29b6050` v0.17.8.0). Local tree at **v0.17.8.3** (bug #4 fix, BAT-confirmed, ready to push). Bugs #2, #3, #4, #5, #6 from the Fire Cavern list all closed.
+GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.17.8.3** (commit `17e6bd77`, parent `54f6f9f3` v0.17.8.1.1). Local tree at **v0.17.8.4** (camera-entity catalog fix, awaiting BAT). Bugs #2, #3, #4, #5, #6 from the Fire Cavern list all closed.
 
-The v0.17.7.6.x chapter closed the bgroad_5 hallway calibration failure (full narrative in `DEVNOTES_HISTORY.md`); v0.17.8.0 closed bugs #5 and #6, v0.17.8.1.1 closed bug #3, v0.17.8.3 closed bug #4, from Aaron's 2026-05-18 Fire Cavern playthrough report. Next active chapter: **Laguna dream bugs #7 (field-nav player detection) and #8 (battle announces wrong party).**
+The v0.17.7.6.x chapter closed the bgroad_5 hallway calibration failure (full narrative in `DEVNOTES_HISTORY.md`); v0.17.8.0 closed bugs #5 and #6, v0.17.8.1.1 closed bug #3, v0.17.8.3 closed bug #4, from Aaron's 2026-05-18 Fire Cavern playthrough report. Current chapter: **v0.17.8.4 catalog cleanup (camera entity), then the Laguna dream bugs #7 (field-nav player detection) and #8 (battle announces wrong party).**
 
 ---
 
 ## Where we are at session open
 
-**v0.17.8.3 in tree — bug #4 FIX, BAT-CONFIRMED, ready to push.** `FF8OPC_VERSION` = `0.17.8.3`, CHANGELOG matches. GitHub HEAD = v0.17.8.1.1 (`54f6f9f3`). Aaron pushes via `Utilities/push_to_github.ps1` (Claude never pushes).
+**v0.17.8.4 in tree — camera-entity catalog fix, awaiting BAT.** `FF8OPC_VERSION` = `0.17.8.4`, CHANGELOG matches. GitHub HEAD = v0.17.8.3 (`17e6bd77`, pushed). Aaron pushes via `Utilities/push_to_github.ps1` (Claude never pushes).
 
-### Bug #4 — party member announced as NPC — CLOSED
+### v0.17.8.4 — camera entity wrongly cataloged as navigable Object
+
+Reported by Aaron on bgryo2_1: a "Camera" entry appeared in the field catalog but does nothing when reached. Root cause: the Director-detection promotion in `field_archive_jsm_director.inl` promotes any non-party Others entity with `dialog OR extDispatch` to Interactive Object. The `0x1C` extended-dispatch opcode is a catch-all (camera/sound/particles), so `ent18 'camera'` (dialog=0, extDisp=1) was swept in and injected as a "Camera". Fix: name-scoped guard skipping SYM prefix `camera` (covers camera/cameraman), placed beside the party-character filter in the promotion loop. Kept name-scoped rather than tightening the OR to require dialog, to avoid dropping genuine no-dialog interactables (levers/switches) on other fields. **BAT plan:** reload bgryo2_1, F9 — the `Camera` entry should be gone (only exits + save point remain), and the scan log should no longer show `[DIRECTOR] promoted ent18 'camera' ... -> Interactive Object`.
+
+### Bug #4 — party member announced as NPC — CLOSED (pushed v0.17.8.3)
 
 The v0.17.8.2 diagnostic (`[party-filter-miss]`) caught it. The party-member filter in `src/field_nav_catalog.inl` skips an entity with no talk/push interaction in two ways:
 - **Following party member** (model-based, existing v0.14.108 rule): model 0-9, `throughonoff>0`. Caught correctly on Training Center (bgmon_2/bgmon_5).
 - **Named party member** (v0.17.8.3, name-based via `IsPartyCharacterSym()`, ANY model / ANY thru): SYM is a party-character name. Covers standing members AND high-model scene actors.
 
-**BAT confirmed on bgryo2_1** (B-Garden dormitory, formation [1,0,5,255]): all six party entities filter as `named party member` — squalls (model 3), squallsd (model 5), zell/zells/selphies (model -1), selphie (model 11). Zero misses. Catalog holds only real targets (Hall 10 exit, save point, camera, 2nd exit); auto-drive to camera logged `Arrived`, GPS `In range` — nothing needed was removed. The model-11 selphie required widening the name branch to be model-independent (the first model<10 attempt left it as an NPC).
-
-**Why name-based, not model-based:** Fire Cavern's `drpoint` reuses model 9 with all flags zero; a blanket model filter would delete it before draw-point reclassification. `IsPartyCharacterSym` is the safe discriminator — draw points ('drpoint'), save points ('savePoint'), exits ('l1') are never named after characters. Real exits come from the trigger-line/gateway path, not the runtime entity, so filtering a character-named actor never removes an exit (verified: 'squalls' exit still present after the 'squalls' actor is filtered).
-
-**`[party-filter-miss]` diagnostic REMOVED** (fix confirmed). The permanent `[party-filter]` log stays. Draw-point safety holds by construction.
+BAT-confirmed on bgryo2_1 (formation [1,0,5,255]): all six party entities filter as `named party member` — squalls (model 3), squallsd (model 5), zell/zells/selphies (model -1), selphie (model 11). Zero misses; catalog holds only real targets; navigation intact. The model-11 selphie required widening the name branch to be model-independent. Diagnostic removed; permanent `[party-filter]` log kept. Draw-point safety holds by construction (`drpoint` is not a character name). Pushed as commit `17e6bd77`.
 
 ### NEW bugs found in the first Laguna dream (gwgrass1) — separate chapters
 
