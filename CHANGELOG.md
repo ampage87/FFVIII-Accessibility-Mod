@@ -6,6 +6,207 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.8.6
+
+Fix: the B-Garden dormitory bed (field bgryo2_1) now appears in the navigation
+catalog, and the duplicate/dead second "Exit" is gone. Rolls up the v0.17.8.5.x
+diagnostic chain into a fix and removes all of that diagnostic logging.
+
+### What the diagnostics settled
+
+The runtime entity-ID probe (v0.17.8.5.2) was decisive: the bed is **ent0
+'squall'**, the trigger Line, at SETLINE center (-50,496). Its "I should get
+some rest" AASK prompt fires in ent0's own script, reached through a *bare
+0x1C ext-dispatch* whose sub-opcode index is supplied at runtime (logged
+"0x1C EMPTY STACK: ent=0 method=1"). The opcode constants are correct
+(verified against the engine's dispatch table in ff8_addresses.h: AASK=0x6F);
+the encoding is high-byte. The static scanner simply cannot resolve a
+runtime-supplied 0x1C to a dialog opcode, so `foundDialogOp` is false for the
+bed and it was classified `LINE_EVENT` -- which the catalog hides. That is why
+it was missing, and no amount of better static decoding can see it.
+
+### Fix 1 — pre-detect runtime-0x1C interactive Lines (so blind players can FIND them)
+
+Line classification (`field_archive_jsm_scan.inl`) now routes a Line whose own
+0x1C usage (`extDisp`) is NOT a screen-exit (mapjump), battle trigger, or
+camera-scroll to `LINE_INTERACTIVE`, surfaced by the existing catalog Block 3
+at its SETLINE center. This is the same `extDisp` interactivity proxy the
+cat2/3 INTERACTIVE_OBJECT promotion already uses for background objects (e.g.
+the Directory) -- Lines were the asymmetric gap. Crucially this works at field
+load, BEFORE the player crosses the line, which runtime detection alone cannot
+do. Dialog-op beds (foundDialogOp) are unaffected; exits, battle lines, and
+camera pans keep their classification.
+
+Known tradeoff: a Line whose 0x1C only drives a sound/particle effect (no
+dialog) can surface as a phantom "Interaction" on some fields. The v0.17.8.7
+runtime dialog-confirmation + disk-persistence layer is intended to prune and
+label these (an object that actually fires MES/ASK when reached is confirmed;
+one that never does can be demoted), and to persist confirmed interactions
+across restarts as a shippable known-objects database.
+
+### Fix 2 — suppress the dead duplicate exit
+
+The catalog's JSM MAP_EXIT injection now drops an exit that has neither a
+navigable position nor a resolvable/world-map destination (`field_nav_catalog.inl`).
+bgryo2_1 ent15 'l1' is a positionless MAP_EXIT with an unresolved runtime-var
+destination (param=INT_MIN); with no INF gateways on the field the existing
+gateway-suppression never fired, so it injected a bare second "Exit". The real
+exit (ent1 'squalls' -> Hallway) is unaffected.
+
+### Cleanup
+
+Removed the `[dorm-diag]` scan block and the `[ASK-ENTITY]`/`[AASK-ENTITY]`
+dialog logging added across v0.17.8.5.x.
+
+## v0.17.8.5.2
+
+DIAGNOSTIC build (no behavior change), iteration 3 of the bgryo2_1 dorm
+investigation. Runtime entity-ID probe.
+
+### What v0.17.8.5.1 settled and what it didn't
+
+The widened dump confirmed the dialog log: the dorm bed fires an **AASK**
+("Squall 'I should get some rest.'" / Rest / Don't rest). It also nailed the
+root cause of `dialog=0` everywhere: on this field the dialog opcodes are
+dispatched through the `0x1C` ext-dispatch prefix (the histogram tops out at
+`0x34`; everything higher, dialog included, is a `0x1C` sub-opcode), so the
+scanner's high-byte-only dialog check never sees MES/ASK/AMES/AASK and records
+`extDisp=1` instead.
+
+What it did NOT settle: WHICH entity owns the AASK. `ent0 'squall'` is the
+scene controller (its method[2] writes the post-event destination var to Hotel
+111 / 2F Hallway 139 / Classroom 232 / Secret Area 248 / Dorm Double 239), but
+its dumped methods contain no `0x1C` dispatch at all -- the `PUSH 111 (0x6F)`
+instructions there are writing the field-id 111 (Hotel) into a variable, not
+dispatching AASK (0x6F). The AASK is reached elsewhere (possibly via ent0's
+`REQEW`, or in an entity not yet pinned). Two static red herrings (the earlier
+fallback-heuristic hit, now the 111 coincidence) make clear that hand-decoding
+the branch-heavy bytecode is too error-prone to identify the entity reliably.
+
+### Change (decisive, minimal)
+
+Log the executing field-script entity pointer in the existing `opcode_aask`
+and `opcode_ask` hooks (`field_dialog_opcodes.inl`). These hooks already
+receive the entity pointer (`int entityPtr`). The JSM entity index resolves as
+`(entityPtr - line0SetlinePtr) / 0x1A0`: the runtime entity stride is `0x1A0`
+(proven by the three `[SETLINE]` line pointers `0x0188B818 / 0x0188B9B8 /
+0x0188BB58`, exactly `0x1A0` apart), and lines are entities 0/1/2, so the
+`[SETLINE] call#1` pointer (idx>>8==0) is the entity-0 base.
+
+### Expected BAT outcome
+
+Reload bgryo2_1 and interact with the bed, then send `Logs/ff8_dialog.log`
+(tiny -- contains `[AASK-ENTITY] entityPtr=0x...`) and the head of
+`Logs/ff8_field.log` (for the `[SETLINE]` base pointer). That pins the bed
+entity with certainty. v0.17.8.6 then: (1) teach the scanner to resolve
+`0x1C`-dispatched MES/ASK/AMES/AASK so the bed entity gets real `dialog=1`;
+(2) surface it in the catalog with a position (line center if it's a line, or
+SET3/paired coords otherwise); (3) suppress the positionless `l1` exit; and
+remove all dorm diagnostics.
+
+## v0.17.8.5.1
+
+DIAGNOSTIC build (no behavior change), iteration 2 of the bgryo2_1 dorm
+investigation.
+
+### What the v0.17.8.5 run proved
+
+- There are ZERO MES/ASK opcodes anywhere on the field (every entity
+  `dialog=0`). A text "rest?" prompt is therefore not how the bed works here.
+- The only Interactive Object, `ent19 'suit'`, is a cutscene controller, not a
+  bed: its script has no position-setting opcode and just fires `REQ`/`REQEW`
+  at the `'zell'`/`'zells'` background animation methods (global methods
+  130-141) -- it orchestrates the SeeD-uniform-change sequence. It is
+  misclassified as an Interactive Object (ext-dispatch + REQ) but is
+  positionless, so it never reaches the catalog anyway.
+- The duplicate exit is confirmed: `ent15 'l1'` is a positionless MAP_EXIT with
+  an unresolved runtime-variable destination (`param=-2147483648`); the real
+  navigable exit is the positioned `'squalls'` SCREEN_BOUND -> Hall 10.
+
+### Why iteration 2
+
+Aaron confirms the bed IS interactable at this story point, so a trigger exists
+in one of the Other entities whose script the v0.17.8.5 dump did not cover
+(it only dumped Lines, Backgrounds, and Interactive Objects). The flag summary
+flags `ent12 'hon'` (the only mystery Other with activity: 2 REQ ops and a SET3
+position that failed to resolve, tri=229) and `ent11 'kigaeyarou'` (the
+change-clothes handler) as the prime suspects. The bed most likely REQs the
+`'suit'` cutscene rather than showing text -- consistent with `dialog=0`.
+
+### Change
+
+Widen the `[dorm-diag]` script dump from "Lines + Backgrounds + Interactive
+Objects" to "Lines + Backgrounds + every Other with reqOps<=30" -- i.e. dump
+every entity EXCEPT the 95-op `'l1'` dispatcher (still excluded; its param/pos
+in the summary already characterize it). This surfaces `'hon'`, `'kigaeyarou'`,
+`'dic'`, etc. so the bed's trigger entity, its REQ target, and its position
+handling become visible.
+
+### Expected BAT outcome
+
+Reload bgryo2_1 and send `Logs/ff8_field.log`. The widened dump identifies the
+bed trigger; combined with Aaron's note on what interacting with the bed does
+in-game (text / clothes-change / fade), the v0.17.8.6 fix then surfaces the bed
+and suppresses the positionless `'l1'` exit, removing this diagnostic block.
+
+## v0.17.8.5
+
+DIAGNOSTIC build (no behavior change). Investigates two pre-existing catalog
+gaps on bgryo2_1 (Squall's B-Garden dormitory, the SeeD-uniform scene) reported
+by Aaron after the v0.17.8.4 camera fix: the bed interaction is missing, and a
+second, positionless "Exit" is listed alongside the real Hall 10 exit. Expected
+catalog is 1 interaction (bed) + 1 save point + 1 exit; actual is save point +
+two exits, no bed. Both gaps predate the recent builds -- not regressions.
+
+### What the JSM scan already tells us
+
+- Every Others entity on this field has `dialog=0` (no MES/ASK). The room's
+  interaction is not a normal dialog entity. The scan logs
+  `REQ-interact: Line ent0 'squall' REQs interactive entity ->
+  hasDialogReqTarget=1`, but that fired via the FALLBACK heuristic (unresolved
+  REQ opcodes + some Interactive Object exists on the field), so we do NOT yet
+  know ent0's real target. ent0 'squall' is classified `JSM_ENT_LINE_EVENT`,
+  and the catalog deliberately skips Event lines (v0.12.12), so if the bed is
+  this line it is dropped.
+- `ent19 'suit'` is classified Interactive Object but is unpositioned (PSHM
+  coords inherited from the unresolved 'camera'), so it never reaches the
+  catalog either. It is a second candidate for the "missing interaction".
+- The extra exit is `ent15 'l1'`: a MAP_EXIT with no captured position (0,0)
+  and `param=-2147483648` (0x80000000, an unresolved varblock marker, not a
+  field id). Its destination is runtime-variable (initVars list Dormitory
+  Double 3, Master Room 5, Hall 3, etc.). The real exit is the positioned
+  'squalls' SCREEN_BOUND -> Hall 10. bgryo2_1 has 0 INF gateways, so the
+  catalog's gateway-based exit suppression never applies and the positionless
+  'l1' is injected as a generic "Exit".
+
+### Diagnostic added
+
+A field-gated `[dorm-diag]` block at the end of `ScanJSMScripts()`
+(`field_archive_jsm_scan.inl`), active only on bgryo2_1. It logs:
+
+1. A per-entity flag summary for every scanned entity: category, type,
+   position, `dialog` / `extDisp` / `reqOps` flags, resolved REQ targets,
+   `dialogReqTarget`, and `param`.
+2. The full decoded script (via `DumpEntityScript`) of every Line (cat=1),
+   Background (cat=2), and Interactive Object on the field. This shows whether
+   `ent0 'squall'` does an ASK/MES (a real bed/rest prompt), a MAPJUMP (an
+   exit), or only camera/sound (a cutscene trigger), and what `'suit'` is.
+
+The big `'l1'` MAP_EXIT dispatcher (95 REQ opcodes) is intentionally NOT dumped
+to avoid log truncation; the summary line's `param`/`pos` already confirm it is
+positionless with an unresolved destination, which is enough to design the exit
+suppression in the follow-up fix.
+
+### Expected BAT outcome
+
+Reload bgryo2_1 (no navigation needed -- the diagnostic fires at field load) and
+send `Logs/ff8_field.log`. The `[dorm-diag]` summary plus the Line/Background/
+Interactive-Object script dumps will identify which entity is the bed and how
+it triggers its prompt, and confirm the `'l1'` exit is a positionless duplicate.
+The v0.17.8.6 fix then surfaces the bed (a small, targeted line/object
+classification change) and suppresses the positionless unresolved exit, and this
+diagnostic block is removed.
+
 ## v0.17.8.4
 
 Field navigation catalog: a non-interactive camera-control entity was listed

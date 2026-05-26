@@ -1015,6 +1015,23 @@ static void RefreshCatalog()
                         continue;
                 }
             }
+            // v0.17.8.6: Suppress dead positionless exits with unresolved
+            // destinations. bgryo2_1 ent15 'l1' is a JSM_ENT_MAP_EXIT with no
+            // SET3/SETLINE position and param=INT_MIN (0x80000000 -- a runtime-var
+            // destination the static scan could not resolve). On a field with no
+            // INF gateways the gateway-suppression check below never fires, so
+            // without this the entity injects a bare second "Exit" with no
+            // position -- the duplicate, useless exit Aaron reported. An exit that
+            // has neither a navigable position nor a resolvable/world-map
+            // destination cannot be driven to or named; drop it. (param==-2 is the
+            // world-map sentinel and is kept.)
+            if (!hasPos && je.param != -2 &&
+                (je.param < 0 || je.param >= FIELD_DISPLAY_NAMES_COUNT)) {
+                Log::Field("FieldNavigation: [refresh] MAP_EXIT '%s' dropped: "
+                           "no position, unresolved dest (param=%d)",
+                           je.symName, je.param);
+                continue;
+            }
             EntityInfo mapExit = {};
             // v0.07.95: Suppress JSM exits with runtime-resolved destinations
             // when INF gateways exist on this field. The INF gateway system

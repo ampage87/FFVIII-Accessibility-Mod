@@ -280,6 +280,7 @@ static int __cdecl Hook_opcode_ames(int entityPtr)
 static int __cdecl Hook_opcode_aask(int entityPtr)
 {
     int result = s_origAask(entityPtr);
+
     EnterCriticalSection(&s_cs);
     ScanAndSpeakChoiceWindows("AASK");
     LeaveCriticalSection(&s_cs);

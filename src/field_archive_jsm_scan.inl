@@ -755,10 +755,42 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                 info.type = JSM_ENT_LINE_INTERACTIVE;
             } else if (foundMapjump) {
                 info.type = JSM_ENT_LINE_SCREEN_BOUND;
-            } else if (foundBattle || foundEventOp) {
+            } else if (foundBattle) {
                 info.type = JSM_ENT_LINE_EVENT;
             } else if (foundBgdraw || foundScroll) {
                 info.type = JSM_ENT_LINE_CAMERA_PAN;
+            } else if (foundExtDispatch) {
+                // v0.17.8.6: Runtime-0x1C-dispatched interactive line.
+                // The B-Garden dorm bed (bgryo2_1 ent0 'squall') reaches its
+                // "I should get some rest" AASK prompt through a runtime-supplied
+                // 0x1C dispatch (a bare EXT_DISPATCH whose sub-opcode index is
+                // provided at runtime, logged "0x1C EMPTY STACK: ent=0 method=1").
+                // The static scan provably cannot resolve that to a dialog opcode,
+                // so foundDialogOp is false and the line would otherwise fall to
+                // LINE_EVENT, which the catalog hides -- making the bed impossible
+                // for a blind player to FIND before crossing it.
+                //
+                // extDisp (the entity's own 0x1C usage) is the SAME interactivity
+                // proxy the cat2/3 JSM_ENT_INTERACTIVE_OBJECT promotion already
+                // relies on (it surfaces the B-Garden Directory before you touch
+                // it). Treating Line entities symmetrically pre-detects the bed at
+                // field load. Surfaced at its SETLINE center by catalog Block 3.
+                //
+                // Ordering matters: this sits AFTER mapjump (screen exits),
+                // battle (battle triggers), and bgdraw/scroll (camera-pan lines
+                // whose 0x1C drives the scroll, not a dialog), so those keep
+                // their existing classification. Only a Line whose 0x1C is NOT
+                // any of those reaches here.
+                //
+                // Over-surfacing tradeoff: a Line whose 0x1C only fires a sound
+                // or particle effect (no dialog) surfaces as a phantom
+                // "Interaction". That is the unavoidable cost of pre-detecting
+                // without being able to read the dialog statically; the runtime
+                // dialog-confirmation + disk-persistence layer (v0.17.8.7) is
+                // what prunes/labels these once the player reaches them.
+                info.type = JSM_ENT_LINE_INTERACTIVE;
+            } else if (foundEventOp) {
+                info.type = JSM_ENT_LINE_EVENT;
             } else {
                 info.type = JSM_ENT_LINE_CAMERA_PAN;
             }
@@ -1220,6 +1252,11 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                    destName,
                    e.hasPshmCoords ? " [PSHM_W]" : "");
     }
+
+    // v0.17.8.5.x [dorm-diag] DIAGNOSTIC removed in v0.17.8.6. The bgryo2_1 dorm
+    // bed was identified as ent0 'squall' (a Line whose "rest?" AASK is reached via a
+    // runtime-supplied 0x1C dispatch); it is now classified LINE_INTERACTIVE by the
+    // extDisp rule in the Line-classification block above. See DEVNOTES.
 
     return true;
 }
