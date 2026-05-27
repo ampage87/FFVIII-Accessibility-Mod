@@ -1134,12 +1134,36 @@ static void RefreshCatalog()
             float gwPlayerX = 0, gwPlayerY = 0;
             bool gotPlayer = GetEntityPos(s_playerEntityIdx, gwPlayerX, gwPlayerY);
             for (int d = 0; d < s_dedupGatewayCount && newCount < MAX_CATALOG; d++) {
-                // Screen filter: skip if center is separated from player by trigger lines.
+                // Screen filter: skip the gateway only if the player->gateway
+                // SEGMENT actually crosses a screen-boundary line SEGMENT.
+                // v0.17.8.10: replaced IsSeparatedByTriggerLine() here -- that
+                // does an INFINITE-line side test, so a short SCREEN_BOUND line
+                // on a far edge (bghall_5's Hall 6 doorway, x in [4206,5042])
+                // wrongly "separated" the Hall 4 INF gateway on the opposite
+                // (west) edge because the gateway's Y lay almost on that line's
+                // infinite extension. A gateway is a real exit you walk to; it
+                // is on another screen only if the path to it actually crosses a
+                // boundary segment. Entity screen-filtering still uses the
+                // infinite-line helper; only the gateway test changed.
                 if (gotPlayer && s_capturedLineCount > 0) {
-                    if (IsSeparatedByTriggerLine(gwPlayerX, gwPlayerY,
-                                                 s_dedupGateways[d].centerX,
-                                                 s_dedupGateways[d].centerY))
-                        continue;
+                    bool crossed = false;
+                    for (int dt = 0; dt < s_capturedLineCount && !crossed; dt++) {
+                        if (!s_capturedLines[dt].active) continue;
+                        if (s_capturedLines[dt].lineType != FieldArchive::JSM_ENT_LINE_SCREEN_BOUND &&
+                            s_capturedLines[dt].lineType != FieldArchive::JSM_ENT_UNKNOWN)
+                            continue;
+                        if (SegmentsCross(gwPlayerX, gwPlayerY,
+                                          s_dedupGateways[d].centerX, s_dedupGateways[d].centerY,
+                                          (float)s_capturedLines[dt].x1, (float)s_capturedLines[dt].y1,
+                                          (float)s_capturedLines[dt].x2, (float)s_capturedLines[dt].y2)) {
+                            crossed = true;
+                            Log::Field("FieldNavigation: [refresh] INF-GW group %d '%s' "
+                                       "center=(%.0f,%.0f) filtered: path crosses screen-bound line%d",
+                                       d, s_dedupGateways[d].displayName,
+                                       s_dedupGateways[d].centerX, s_dedupGateways[d].centerY, dt);
+                        }
+                    }
+                    if (crossed) continue;
                 }
                 // Dedup against JSM exits already in catalog with same destination.
                 bool dupExit = false;

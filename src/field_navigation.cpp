@@ -1007,6 +1007,31 @@ static bool IsSeparatedByTriggerLine(float px, float py, float ex, float ey, int
     return false;  // same side of all trigger lines
 }
 
+// v0.17.8.10: Proper bounded segment-vs-segment intersection. Returns true only
+// when segment AB actually crosses segment CD (orientation test). Unlike the
+// infinite-line side test in IsSeparatedByTriggerLine, a short line that lies
+// off to one side does NOT count as a crossing. Used by the INF-gateway screen
+// filter so a far-edge screen-boundary doorway no longer falsely "separates" a
+// gateway on the opposite edge (the bug behind the missing bghall_5 -> Hall 4
+// exit). Collinear/endpoint-touch cases return false: a gateway grazing a
+// boundary endpoint is not "behind" it.
+static int Orient2D(float px, float py, float qx, float qy, float rx, float ry)
+{
+    float v = (qx - px) * (ry - py) - (qy - py) * (rx - px);
+    if (v >  1.0f) return  1;
+    if (v < -1.0f) return -1;
+    return 0;
+}
+static bool SegmentsCross(float ax, float ay, float bx, float by,
+                          float cx, float cy, float dx, float dy)
+{
+    int o1 = Orient2D(ax, ay, bx, by, cx, cy);
+    int o2 = Orient2D(ax, ay, bx, by, dx, dy);
+    int o3 = Orient2D(cx, cy, dx, dy, ax, ay);
+    int o4 = Orient2D(cx, cy, dx, dy, bx, by);
+    return (o1 != o2 && o3 != o4 && o1 != 0 && o2 != 0 && o3 != 0 && o4 != 0);
+}
+
 // v06.05: Check if moving from (px,py) in direction (dx,dy) by RECOVERY_CHECK_DIST
 // would cross any non-target active trigger line. Returns true if the projected
 // endpoint is on the opposite side of any trigger line from the start point.

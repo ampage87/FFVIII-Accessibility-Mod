@@ -1,4 +1,4 @@
-# Next Session Prompt: v0.17.8.7 BAT triage + the runtime confirmation/disk layer
+# Next Session Prompt: push v0.17.8.10, then bug #10 (Xu) model-id classifier
 
 ## Greeting
 
@@ -6,61 +6,60 @@ Start every response with `## Claude Says`. Read `DEVNOTES.md` and THIS file bef
 
 ## Where we are at session open
 
-**v0.17.8.7 IS IN TREE, awaiting BAT.** `FF8OPC_VERSION` = `0.17.8.7`; CHANGELOG top heading matches. GitHub HEAD = v0.17.8.6 (`e415be44`, pushed and BAT-confirmed). Aaron pushes via `Utilities/push_to_github.ps1` — **Claude never pushes.** Diagnostic-only builds stay LOCAL (never pushed).
+**v0.17.8.10 IS IN TREE, BAT-confirmed, ready to push.** `FF8OPC_VERSION` = `0.17.8.10`; CHANGELOG top heading matches. GitHub HEAD = v0.17.8.9 (`1c5f530e`, pushed + BAT-confirmed). Aaron pushes via `Utilities/push_to_github.ps1` — **Claude never pushes.** Diagnostic-only builds stay LOCAL.
 
-v0.17.8.7 adds ONE thing: a static **test-battle reference filter** that stops debug leftover entities (e.g. bgroad_5 `ent20 'cardgamemaster'`, the `cardmaster` phantom) from being promoted to INTERACTIVE_OBJECT and surfaced in the catalog. The larger runtime layer was deliberately NOT bundled so this filter can BAT in isolation.
+v0.17.8.10 fixes **bug #9** (B-Garden hub missing its Hall 4 exit), BAT-confirmed 2026-05-27: Hall 4 now appears in the hub (`bghall_5`, "Hall 10"), Hall 6's exits unchanged. ONE change: the INF-gateway screen filter switched from the infinite-line `IsSeparatedByTriggerLine()` to a new bounded `SegmentsCross()` test, so a short screen-boundary line on a far edge no longer falsely "separates" a gateway on the opposite edge. Full root-cause in DEVNOTES (#9 entry) and CHANGELOG.
 
-### What changed in v0.17.8.7 (files)
+### What changed in v0.17.8.10 (files)
 
-- `field_archive_jsm_scan.inl` — new `static bool EntityRefsTestField(int e)` helper (just above `ScanJSMScripts`): true if any `s_initVarMaps[e].writes[].value` resolves via `GetFieldNameById` to a name starting with `testbl`. Guard added to the v0.07.98 INTERACTIVE_OBJECT promotion AND the v0.08.01 paired-entity inheritance promotion.
-- `field_archive_jsm_state.inl` — forward declaration of `EntityRefsTestField` (next to the `RunDirectorDetection` forward decl), so the earlier-included `director.inl` can call it.
-- `field_archive_jsm_director.inl` — same guard in the Director promotion loop (after the `camera` filter). **This one is essential:** the main-scan guard leaves the entity UNKNOWN, and without this the Director post-pass would re-promote it straight back.
-- `src/ff8_accessibility.h` — version `0.17.8.7`. `CHANGELOG.md` — v0.17.8.7 entry on top.
+- `field_navigation.cpp` — new `static int Orient2D(...)` + `static bool SegmentsCross(...)` (proper bounded segment-vs-segment intersection), inserted right after `IsSeparatedByTriggerLine`, before the `field_nav_catalog.inl` include so the gateway block can call it.
+- `field_nav_catalog.inl` — the INF-gateway screen filter now loops SCREEN_BOUND/UNKNOWN captured lines and drops a gateway only if the player->gateway SEGMENT crosses a line SEGMENT (was: `IsSeparatedByTriggerLine` infinite-line side test). Entity screen-filtering is UNCHANGED (still infinite-line). The v0.17.8.9-diag [gw-diag] logging was reverted.
+- `field_archive_jsm_scan.inl` — the v0.17.8.9-diag [npc-class] dump was reverted (it had served its purpose for #10; see Step 2).
+- `src/ff8_accessibility.h` — version `0.17.8.10`. `CHANGELOG.md` — v0.17.8.10 entry on top.
 
-## Step 1: BAT the filter
+## Step 1: push v0.17.8.10
 
-Ask Aaron to build, reload **bgroad_5** (B-Garden dormitory corridor), and cycle the catalog with F9.
+It is BAT-confirmed and the tree is clean (all diagnostics reverted). Aaron pushes via `Utilities/push_to_github.ps1`. After push, GitHub HEAD = v0.17.8.10.
 
-PASS criteria:
-- The `Card Player` / `cardmaster` entry is GONE. Catalog lists only the two real exits (Dormitory Double 1, Hall 10).
-- Field log shows `ent20 'cardgamemaster' NOT promoted to INTERACTIVE_OBJECT: init-var writes reference a test-battle field` and no `[refresh] JSM-injected Card Player at (607,334)`.
+## Step 2 (current chapter): bug #10 — Xu mislabeled "Interaction 3"
 
-Regression check (important): on a dormitory/classroom field with a real Director (bed, desk, wardrobe, the B-Garden Directory `dic`), those real interactables MUST still appear. If a real interactable vanished, an entity is coincidentally writing a `testbl*` field id — capture its `[JSMScan] ... NOT promoted` log line and tighten the helper (e.g. require the write to go to the field-jump var / require >1 testbl ref).
+**What we know (this is solid):** Xu is a real walk-up-and-Confirm NPC. She is JSM `kanban2` (ent25, cat3, PSHM pos (4626,-3459)). The F11 screenshot `Logs/screenshots/f11_220226_490.png` shows her character model on the Hall 6 walkway; the dialog log shows her line. The "Director over-promotion / shu" hypothesis is dead.
 
-If PASS: mark v0.17.8.7 ✅ in DEVNOTES; Aaron pushes (`Utilities/push_to_github.ps1`). Then proceed to Step 2.
+**Why static signals alone failed (proven by the removed [npc-class] dump on bghall_3):** every cat-3 object is identical — `talkSetup=0` for EVERYTHING including Xu (her talk is runtime-dispatched via a bare 0x1C; she sets no static TALKRADIUS), and `setmodelInit=1` for Xu AND `water` AND `walllight`. So neither flag is a discriminator. The ONLY thing separating Xu from a sign/light/water is the MODEL she loads, which the JSM scan does not currently capture.
 
-## Step 2 (next chapter): runtime dialog-confirmation + disk persistence
+**Confirmed anchor:** the runtime classifier already labels live character models correctly. This run had a live `ent5 model=15` surfaced as "NPC" (cat1) right alongside kanban2's "Interaction 3" (cat7). Real character-model NPCs (model >= 10) classify fine at runtime; the gap is that at catalog-build time Xu is NOT an active runtime entity (she's Director-placed via PSHM, like signs/lights), so her model is never read.
 
-This is the larger piece Aaron approved and explicitly wants persisted across restarts. It is the general, principled answer to phantom/missed interactive objects, complementing the static filters (extDisp lines from v0.17.8.6, test-field suppression from v0.17.8.7).
+**Plan (the model-id route — matches Aaron's "has a character model" intuition):**
 
-**Goal.** An entity that actually fires MES/ASK/AMES/AASK at runtime is interactive, period. Record that fact, persist it to disk per-field, and re-apply it to the catalog on every load. Conversely, a surfaced object the player reaches that NEVER fires dialog can be demoted.
+1. **Capture SETMODEL's model-id operand statically.** In `field_archive_jsm_scan.inl`, where the scan already detects `opcode == JSM_OP_SETMODEL && m == 0` (sets `foundSetmodelInit`), also grab the operand pushed immediately before SETMODEL (the model index) and store it — add a field to `JSMEntityInfo` in `field_archive.h` (e.g. `int16_t setmodelId; // -1 = none`) or a parallel `s_setmodelId[128]` in `*_state.inl`.
 
-**Design (validated against the real code earlier):**
-- The six dialog hooks in `field_dialog_opcodes.inl` (`Hook_opcode_mes/mesw/ask/ames/aask/amesw`, each `__cdecl Hook(int entityPtr)`) each call a new `FieldNavigation::NoteRuntimeDialogEntity(entityPtr)`.
-- Resolve `entityPtr` to a stable identity: match against `s_capturedLines[].entityAddr` (a Line, e.g. the dorm bed) using the proven runtime stride `0x1A0`, or against the runtime others/background array range (`FF8Addresses::pFieldStateOthers`, ENTITY_STRIDE) for a bg/other entity. Stable key = fieldName + lineOrder (lines) / entity index (others).
-- Persist the confirmed set to a DISK file (per-field; survives restart; becomes a shippable known-objects DB). Need to find the codebase's existing file-I/O pattern (look at how Logs/CameraFiles are written) and pick a path under the mod folder.
-- `RefreshCatalog` (`field_nav_catalog.inl`) re-applies the set each build: surface confirmed entities as Interactions at their SETLINE-center / struct position.
-- Purposes: (a) catch interactive objects the static extDisp proxy misses, (b) confirm/label static guesses, (c) DEMOTE static phantoms the player reaches that never fire dialog (general catch-all for non-debug story-dormant NPCs).
+2. **Diagnostic (read-only, LOCAL, no version bump):** dump per cat-3 entity its captured `setmodelId`, AND dump the runtime "others" array (index, SYM, runtime model-id, position) once on bghall_3. Two questions to answer:
+   - Does `kanban2`'s SETMODEL load a character-range model (>= ~10, like ent5's 15), while `water` / `walllight` / signs load distinct prop ids? (Need a clean split.)
+   - Is the runtime NPC `ent5 model=15` at the same position as `kanban2` (4626,-3459)? If yes, Xu is being surfaced TWICE (runtime "NPC" + JSM "Interaction 3") and the JSM injection should be deduped against the runtime entity. If ent5 is elsewhere, ent5 is a different student and Xu is specifically kanban2.
 
-**UX constraint (Aaron, firm):** detection MUST surface real objects BEFORE they are triggered — runtime-only is useless for FINDING things. So static pre-detection always leads; this runtime layer is the refinement/persistence/pruning layer.
+3. **If the model-id split is clean (pending the data):** classify a cat-3 INTERACTIVE_OBJECT whose `setmodelId` is in the character range as an NPC, so it surfaces as a person BEFORE the player reaches it (no caching, no runtime trigger needed — satisfies the find-before-approach rule). Also add the position-dedupe so an active Xu doesn't appear as both "NPC" and "Interaction 3".
 
-**Files:** `field_dialog_opcodes.inl`, `field_navigation.h` (decl), `field_navigation.cpp` (registry + `NoteRuntimeDialogEntity` + re-apply at RefreshCatalog start + disk read/write), `field_nav_catalog.inl` (surface confirmed entities).
+**UX constraint (Aaron, firm):** detection MUST surface real NPCs BEFORE they are triggered. The static model-id is what makes that possible here; the runtime classifier is the confirmation/dedupe layer, not the primary find.
 
-Also consider, when convenient (alt root-cause for the whole phantom class): gate `ResolveStructPositions` (`field_nav_catalog_lateres.inl`) against the live `*pFieldStateOtherCount` instead of the hardcoded `sIdx >= 31`, so beyond-active-window stale struct positions don't surface phantoms generally. Verify first that it doesn't regress legit beyond-window save/draw points (e.g. Fire Cavern `drpoint`).
+**Diagnostic discipline:** one change per BAT. F12 reserved for diagnostics (search/remove old `VK_F12` first). Remove the diagnostic before the #10 fix ships.
+
+## Larger backlog piece (Aaron approved, deferred)
+
+Runtime dialog-confirmation + DISK persistence — the general answer to Director over/under-promotion: the six dialog hooks call `NoteRuntimeDialogEntity(entityPtr)`, resolve to a stable per-field identity (line via `s_capturedLines[].entityAddr` + stride `0x1A0`, or others/bg array), persist to a per-field disk DB that survives restarts, and re-apply in `RefreshCatalog` to (a) catch objects the static proxy misses, (b) confirm static guesses, (c) demote reached-but-never-fired phantoms. Static pre-detection always leads; this is the refinement/persistence layer. Files: `field_dialog_opcodes.inl`, `field_navigation.h/.cpp`, `field_nav_catalog.inl`.
 
 ## Deferred backlog (unchanged)
 
-Fire Cavern: #1 Quistis FMV premature; #7 Laguna dream field-nav broken (player=ent-1, `setpc==0` detection fails on gwgrass1); #8 Laguna dream battle announces real party not Laguna/Kiros/Ward. (#2/#3/#4/#5/#6 closed.) Steam 2013 savemap header = 76 bytes (0x4C), not 96 — community offsets need −0x14 (battle-side).
+Fire Cavern: #1 Quistis FMV premature; #7 Laguna dream field-nav broken (player=ent-1, `setpc==0` detection fails on gwgrass1); #8 Laguna dream battle announces real party not Laguna/Kiros/Ward. (#2/#3/#4/#5/#6 closed.) Steam 2013 savemap header = 76 bytes (0x4C), not 96 — community offsets need -0x14 (battle-side).
 
 ## Working rules (carry forward)
 
-- **Mod files are on Windows** under `FF8_OriginalPC_mod/`. Use `filesystem:`-prefixed MCP tools. Bare bash/view hit a different Linux container — NOT OneDrive. Aaron's uploaded logs land at `/mnt/user-data/uploads/` (Linux side) — read those with bash/view, not filesystem MCP.
-- **Claude never pushes.** Aaron BATs, then pushes via `Utilities/push_to_github.ps1`. The utility refuses to push unless `FF8OPC_VERSION` == the top `## vX.Y.Z` heading in `CHANGELOG.md`.
-- **80 KB hard limit per source file.** `field_archive_jsm_scan.inl` is the big one — check its size after edits.
-- **`filesystem:edit_file` corrupts a file when the replacement text contains a literal dollar-sign** — it truncates and duplicates. Use the hex literal `0x24` in source, or rewrite the whole file with `filesystem:write_file`. (OneDrive also occasionally throws a transient EPERM on edit_file rename — just retry once.)
-- Aaron is blind, uses NVDA. Give instructions that need no sighted spot-checking — he sends logs and F11 screenshots (`Logs/screenshots/f11_HHMMSS_mmm.png`, read with `filesystem:read_media_file`) and Claude reads them.
+- **Mod files are on Windows** under `FF8_OriginalPC_mod/`. Use `filesystem:`-prefixed MCP tools. Bare bash/view hit a different Linux container — NOT OneDrive. Large `filesystem:read_text_file` results spill to `/mnt/user-data/tool_results/*.json` (Linux side) — extract with python/bash there.
+- **Claude never pushes.** Aaron BATs, then pushes via `Utilities/push_to_github.ps1`. The utility refuses unless `FF8OPC_VERSION` == the top `## vX.Y.Z` heading in `CHANGELOG.md`. (GitHub MCP push tools may be visible in-session — do not use them.)
+- **80,000-byte hard limit per source file** (CI-enforced). `field_archive_jsm_scan.inl` (~73.8 KB) and `field_nav_catalog.inl` (~72.6 KB) are the ones near the line — check sizes after edits. `field_nav_autodrive.inl` is pre-existing at 80,517 B (untouched).
+- **`filesystem:edit_file` corrupts a file when the replacement text contains a literal dollar-sign** — it truncates and duplicates. Use hex `0x24` in source, or rewrite the whole file with `filesystem:write_file`. (OneDrive also occasionally throws a transient EPERM on edit_file rename — retry once.)
+- Aaron is blind, uses NVDA. Give instructions that need no sighted spot-checking — he sends logs and F11 screenshots (`Logs/screenshots/f11_HHMMSS_mmm.png`, read with `filesystem:read_media_file`).
 - F-keys: F5 repeat dialog; F9 nearest/cycle catalog; F10 player field+pos; F11 screenshot; F12 session diagnostics.
 
 ## Session checkpoint rule
 
-After implementing a build: bump `FF8OPC_VERSION`, add the top `## vX.Y.Z` CHANGELOG entry, update `DEVNOTES.md`, rewrite this file for the BAT-triage step. After BAT: mark the version ✅ in DEVNOTES; Aaron pushes.
+After implementing a build: bump `FF8OPC_VERSION`, add the top `## vX.Y.Z` CHANGELOG entry, update `DEVNOTES.md`, rewrite this file. After BAT: mark the version confirmed in DEVNOTES; Aaron pushes. (DEVNOTES is over the 10 KB guideline — a `DEVNOTES_HISTORY.md` trim of the closed v0.17.8.7 chapter is overdue.)

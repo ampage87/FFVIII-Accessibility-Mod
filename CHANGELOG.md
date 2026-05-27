@@ -6,6 +6,39 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.8.10
+
+Field navigation: the B-Garden hub (bghall_5, "Hall 10") now lists its exit to
+Hall 4. The INF-gateway exit was being silently dropped by a faulty screen
+filter; the fix makes the gateway visibility test geometrically correct.
+
+### The bug
+
+The hub's only path to Hall 4 (bghall_2, field 168) is an INF gateway, with no
+SETLINE trigger. The catalog's gateway screen filter called
+`IsSeparatedByTriggerLine()`, which does an INFINITE-line side test: it asks
+which side of a line's infinite extension each point falls on. A BAT capture
+(read-only [gw-diag] logging, since removed) showed the Hall 4 gateway
+(center -4572,3777, far west) was "separated" from the player by line9 -- the
+Hall 6 doorway exit, a short SCREEN_BOUND segment on the far EAST edge
+(x in [4206,5042]). Extended to infinity that nearly-horizontal line passes
+between the two points because the gateway's Y (3777) sits almost exactly on
+the line's extension, so the gateway was filtered on every refresh. The same
+single-gateway pipeline surfaces Hall 6's gateway to Hall 10 fine -- no short
+edge-line happens to be collinear with it -- which is what made this
+field-specific.
+
+### The fix (`field_navigation.cpp`, `field_nav_catalog.inl`)
+
+Added `SegmentsCross()` -- a proper bounded segment-vs-segment intersection
+(orientation test). The INF-gateway screen filter now skips a gateway only when
+the player->gateway SEGMENT actually crosses a screen-boundary line SEGMENT,
+not its infinite extension. A gateway is a real exit you walk to; it is on a
+different screen only if the path to it genuinely crosses a boundary. Entity
+screen-filtering is unchanged -- it still uses the infinite-line
+`IsSeparatedByTriggerLine()`; only the gateway test moved to the bounded test,
+keeping the blast radius minimal.
+
 ## v0.17.8.9
 
 Field save-point detection: the B-Garden hub hallway (bghall_1, "Hall 1") save
