@@ -1,4 +1,4 @@
-# Next Session Prompt: push v0.17.8.10, then bug #10 (Xu) model-id classifier
+# Next Session Prompt: BAT v0.17.8.15.1 (label/announce follow-on fixes)
 
 ## Greeting
 
@@ -6,60 +6,58 @@ Start every response with `## Claude Says`. Read `DEVNOTES.md` and THIS file bef
 
 ## Where we are at session open
 
-**v0.17.8.10 IS IN TREE, BAT-confirmed, ready to push.** `FF8OPC_VERSION` = `0.17.8.10`; CHANGELOG top heading matches. GitHub HEAD = v0.17.8.9 (`1c5f530e`, pushed + BAT-confirmed). Aaron pushes via `Utilities/push_to_github.ps1` — **Claude never pushes.** Diagnostic-only builds stay LOCAL.
+**v0.17.8.15.1 IS IN TREE, AWAITING BUILD + BAT.** `FF8OPC_VERSION` = `0.17.8.15.1`; CHANGELOG top heading matches. GitHub HEAD = v0.17.8.10 (`59f1a9dd`). v0.17.8.11 through .15.1 are local-only deltas (the entire chara.one chain, its revert, and now this label/announce follow-on).
 
-v0.17.8.10 fixes **bug #9** (B-Garden hub missing its Hall 4 exit), BAT-confirmed 2026-05-27: Hall 4 now appears in the hub (`bghall_5`, "Hall 10"), Hall 6's exits unchanged. ONE change: the INF-gateway screen filter switched from the infinite-line `IsSeparatedByTriggerLine()` to a new bounded `SegmentsCross()` test, so a short screen-boundary line on a far edge no longer falsely "separates" a gateway on the opposite edge. Full root-cause in DEVNOTES (#9 entry) and CHANGELOG.
+## What v0.17.8.15.1 does, in one paragraph
 
-### What changed in v0.17.8.10 (files)
+The v0.17.8.15 BAT confirmed the JSM-behavior-signal NPC relabel works — kanban2 (Xu) is correctly typed NPC now instead of Interaction. But two follow-on bugs surfaced in the label + announce path: (A) the dedupe counter inflated kanban2 to "NPC 2" because it counted friendly-named ENT_NPC entries like Cid toward the generic "NPC N" sequence; (B) the announce sameType test used the legacy `entityIdx >= 0` heuristic which failed for JSM-injected NPCs (entityIdx ≤ -300), producing the "1 of 0" suffix Aaron heard as "NPC 2, 1 of 0". v0.17.8.15.1 fixes both: counter in `field_nav_catalog_dedupe.inl` now counts entries whose name matches the `"NPC %d"` prefix only; announce code in `field_nav_announce.inl` adds type-based sameType matching for both ENT_NPC and ENT_INTERACTION (plus a typeLabel branch for ENT_INTERACTION that was missing entirely). The Interaction fix also closes the watch-list item from v0.17.8.13/.14 ("Interaction 3 1 of 0").
 
-- `field_navigation.cpp` — new `static int Orient2D(...)` + `static bool SegmentsCross(...)` (proper bounded segment-vs-segment intersection), inserted right after `IsSeparatedByTriggerLine`, before the `field_nav_catalog.inl` include so the gateway block can call it.
-- `field_nav_catalog.inl` — the INF-gateway screen filter now loops SCREEN_BOUND/UNKNOWN captured lines and drops a gateway only if the player->gateway SEGMENT crosses a line SEGMENT (was: `IsSeparatedByTriggerLine` infinite-line side test). Entity screen-filtering is UNCHANGED (still infinite-line). The v0.17.8.9-diag [gw-diag] logging was reverted.
-- `field_archive_jsm_scan.inl` — the v0.17.8.9-diag [npc-class] dump was reverted (it had served its purpose for #10; see Step 2).
-- `src/ff8_accessibility.h` — version `0.17.8.10`. `CHANGELOG.md` — v0.17.8.10 entry on top.
+## Step 1: BAT triage
 
-## Step 1: push v0.17.8.10
+1. **Build check.** `Logs/build_latest.log` tail must show `Version: 0.17.8.15.1` and `Build successful`. The change is small (two file edits, no new symbols), unlikely to break compilation.
 
-It is BAT-confirmed and the tree is clean (all diagnostics reverted). Aaron pushes via `Utilities/push_to_github.ps1`. After push, GitHub HEAD = v0.17.8.10.
+2. **Headline expectation on bghall_3.** Walk to kanban2, F9-cycle until selected, listen:
+   - Expected: `"NPC 1 1 of 1"` (or `"NPC 1 X of Y"` where Y includes friendly-named NPCs in the catalog now that they all count in the NPC group).
+   - Old (buggy): `"NPC 2, 1 of 0"` — should be gone.
 
-## Step 2 (current chapter): bug #10 — Xu mislabeled "Interaction 3"
+3. **Log lines to verify in `Logs/ff8_field.log`:**
+   - `[dedup] relabeled raw-SYM object 'kanban2' -> NPC 1 (Other + SETMODEL-init) [v0.17.8.15.1]` — note `NPC 1` (was `NPC 2`) and version tag `[v0.17.8.15.1]`.
+   - `[nav] cat6 ent-325 rank=6/7 'NPC 1 1 of 1'` (or with Y>1 if Cid-like NPC is in catalog) — note both the corrected `NPC 1` AND a non-zero "of Y".
 
-**What we know (this is solid):** Xu is a real walk-up-and-Confirm NPC. She is JSM `kanban2` (ent25, cat3, PSHM pos (4626,-3459)). The F11 screenshot `Logs/screenshots/f11_220226_490.png` shows her character model on the Hall 6 walkway; the dialog log shows her line. The "Director over-promotion / shu" hypothesis is dead.
+4. **Trigger-line interactions still work unchanged:** line3 → `"Interaction 1 1 of 2"`, line4 → `"Interaction 2 2 of 2"`. Those go through the pre-existing `"Event"` typeLabel branch, which v0.17.8.15.1 didn't touch.
 
-**Why static signals alone failed (proven by the removed [npc-class] dump on bghall_3):** every cat-3 object is identical — `talkSetup=0` for EVERYTHING including Xu (her talk is runtime-dispatched via a bare 0x1C; she sets no static TALKRADIUS), and `setmodelInit=1` for Xu AND `water` AND `walllight`. So neither flag is a discriminator. The ONLY thing separating Xu from a sign/light/water is the MODEL she loads, which the JSM scan does not currently capture.
+5. **Friendly-named runtime NPCs.** If there's a Cid/Quistis/etc. in the bghall_3 catalog (one of cat0-cat4 is suspicious — that's where my counter saw an existing ENT_NPC), cycling to them now announces them with the NEW combined NPC count. E.g. `"Cid 1 of 2"` if Cid + kanban2 are both NPCs in the catalog. This is the correct behavior — same group, type-based total. No regression risk: pre-fix, runtime entities already counted (entityIdx ≥ 0), just kanban2 was excluded; post-fix, kanban2 is included too. Numbers go UP, never down.
 
-**Confirmed anchor:** the runtime classifier already labels live character models correctly. This run had a live `ent5 model=15` surfaced as "NPC" (cat1) right alongside kanban2's "Interaction 3" (cat7). Real character-model NPCs (model >= 10) classify fine at runtime; the gap is that at catalog-build time Xu is NOT an active runtime entity (she's Director-placed via PSHM, like signs/lights), so her model is never read.
+## Step 2: known issue to watch
 
-**Plan (the model-id route — matches Aaron's "has a character model" intuition):**
+The "NPC X of Y" suffix now uses pure type-based matching for JSM-injected entries (`ce.type == ENT_NPC` OR `ce.type == ENT_BG_NPC`). Combined with the legacy `entityIdx >= 0` clause via OR. If on some field this over-counts (e.g. a runtime entity happens to be typed ENT_NPC AND has entityIdx ≥ 0 — would only count once because the OR is short-circuit and `sameType` is set once), or under-counts, that's a separate bug — log it.
 
-1. **Capture SETMODEL's model-id operand statically.** In `field_archive_jsm_scan.inl`, where the scan already detects `opcode == JSM_OP_SETMODEL && m == 0` (sets `foundSetmodelInit`), also grab the operand pushed immediately before SETMODEL (the model index) and store it — add a field to `JSMEntityInfo` in `field_archive.h` (e.g. `int16_t setmodelId; // -1 = none`) or a parallel `s_setmodelId[128]` in `*_state.inl`.
+The pre-existing `"Event"` sameType branch for trigger-line interactions wasn't touched. If those start showing `"Interaction X of 0"` after this build, that's a regression and means my Interaction branch is being entered when it shouldn't — investigate the typeLabel cascade order (Interaction branch sits after NPC/Object/Event, so it should only fire when nothing earlier matched).
 
-2. **Diagnostic (read-only, LOCAL, no version bump):** dump per cat-3 entity its captured `setmodelId`, AND dump the runtime "others" array (index, SYM, runtime model-id, position) once on bghall_3. Two questions to answer:
-   - Does `kanban2`'s SETMODEL load a character-range model (>= ~10, like ent5's 15), while `water` / `walllight` / signs load distinct prop ids? (Need a clean split.)
-   - Is the runtime NPC `ent5 model=15` at the same position as `kanban2` (4626,-3459)? If yes, Xu is being surfaced TWICE (runtime "NPC" + JSM "Interaction 3") and the JSM injection should be deduped against the runtime entity. If ent5 is elsewhere, ent5 is a different student and Xu is specifically kanban2.
+## Step 3: if BAT passes
 
-3. **If the model-id split is clean (pending the data):** classify a cat-3 INTERACTIVE_OBJECT whose `setmodelId` is in the character range as an NPC, so it surfaces as a person BEFORE the player reaches it (no caching, no runtime trigger needed — satisfies the find-before-approach rule). Also add the position-dedupe so an active Xu doesn't appear as both "NPC" and "Interaction 3".
+- Aaron can push the whole stack: v0.17.8.11 through .15.1 (5+1 = 6 local commits). The push utility reads only the top CHANGELOG heading + FF8OPC_VERSION; whatever shape the commit takes, the macro/heading need to stay at 0.17.8.15.1.
+- Move the v0.17.8.11-.14 chapter from DEVNOTES.md to DEVNOTES_HISTORY.md (still overdue — that entire chara.one chain narrative is closed history now).
+- Move the v0.17.8.7 cardgamemaster chapter to DEVNOTES_HISTORY.md (also overdue from previous sessions).
 
-**UX constraint (Aaron, firm):** detection MUST surface real NPCs BEFORE they are triggered. The static model-id is what makes that possible here; the runtime classifier is the confirmation/dedupe layer, not the primary find.
+## Step 4: if "NPC 1 1 of 0" still shows
 
-**Diagnostic discipline:** one change per BAT. F12 reserved for diagnostics (search/remove old `VK_F12` first). Remove the diagnostic before the #10 fix ships.
+That would mean my type-based sameType clause isn't firing. Sanity checks:
+- Did the build actually pick up the announce.inl changes? Grep build_latest.log for `field_nav_announce.inl`.
+- In the field log, is the `[nav]` line still saying `1 of 0`? If so, the typeNum/typeTotal counter isn't matching kanban2 — re-read announce.inl around lines 95-105 for the NPC sameType clause. Verify `ce.type == ENT_NPC` is in the cascade.
+- Is kanban2 actually typed ENT_NPC after dedupe? Search for the `[dedup]` log line and verify it says `-> NPC N (Other + SETMODEL-init)` — that branch explicitly sets `newCatalog[a].type = ENT_NPC`. If the dedupe line says something else, the dedupe path is misrouting.
 
-## Larger backlog piece (Aaron approved, deferred)
+## Step 5: if "NPC 2" still shows (counter bug not fixed)
 
-Runtime dialog-confirmation + DISK persistence — the general answer to Director over/under-promotion: the six dialog hooks call `NoteRuntimeDialogEntity(entityPtr)`, resolve to a stable per-field identity (line via `s_capturedLines[].entityAddr` + stride `0x1A0`, or others/bg array), persist to a per-field disk DB that survives restarts, and re-apply in `RefreshCatalog` to (a) catch objects the static proxy misses, (b) confirm static guesses, (c) demote reached-but-never-fired phantoms. Static pre-detection always leads; this is the refinement/persistence layer. Files: `field_dialog_opcodes.inl`, `field_navigation.h/.cpp`, `field_nav_catalog.inl`.
+That would mean my counter fix in dedupe.inl isn't taking effect. Sanity:
+- Build picked up dedupe.inl change? Grep build_latest.log.
+- The new counter uses `strncmp(nm, "NPC ", 4) == 0 && nm[4] >= '0' && nm[4] <= '9'`. If the catalog has an entry whose name already matches that pattern (e.g. a leftover "NPC 1" from somewhere else), kanban2 would still get "NPC 2". Read the field log for any other `[dedup] relabeled` lines or any pre-existing "NPC %d" names in catalog dumps.
 
-## Deferred backlog (unchanged)
+## Key files touched in v0.17.8.15.1
 
-Fire Cavern: #1 Quistis FMV premature; #7 Laguna dream field-nav broken (player=ent-1, `setpc==0` detection fails on gwgrass1); #8 Laguna dream battle announces real party not Laguna/Kiros/Ward. (#2/#3/#4/#5/#6 closed.) Steam 2013 savemap header = 76 bytes (0x4C), not 96 — community offsets need -0x14 (battle-side).
-
-## Working rules (carry forward)
-
-- **Mod files are on Windows** under `FF8_OriginalPC_mod/`. Use `filesystem:`-prefixed MCP tools. Bare bash/view hit a different Linux container — NOT OneDrive. Large `filesystem:read_text_file` results spill to `/mnt/user-data/tool_results/*.json` (Linux side) — extract with python/bash there.
-- **Claude never pushes.** Aaron BATs, then pushes via `Utilities/push_to_github.ps1`. The utility refuses unless `FF8OPC_VERSION` == the top `## vX.Y.Z` heading in `CHANGELOG.md`. (GitHub MCP push tools may be visible in-session — do not use them.)
-- **80,000-byte hard limit per source file** (CI-enforced). `field_archive_jsm_scan.inl` (~73.8 KB) and `field_nav_catalog.inl` (~72.6 KB) are the ones near the line — check sizes after edits. `field_nav_autodrive.inl` is pre-existing at 80,517 B (untouched).
-- **`filesystem:edit_file` corrupts a file when the replacement text contains a literal dollar-sign** — it truncates and duplicates. Use hex `0x24` in source, or rewrite the whole file with `filesystem:write_file`. (OneDrive also occasionally throws a transient EPERM on edit_file rename — retry once.)
-- Aaron is blind, uses NVDA. Give instructions that need no sighted spot-checking — he sends logs and F11 screenshots (`Logs/screenshots/f11_HHMMSS_mmm.png`, read with `filesystem:read_media_file`).
-- F-keys: F5 repeat dialog; F9 nearest/cycle catalog; F10 player field+pos; F11 screenshot; F12 session diagnostics.
-
-## Session checkpoint rule
-
-After implementing a build: bump `FF8OPC_VERSION`, add the top `## vX.Y.Z` CHANGELOG entry, update `DEVNOTES.md`, rewrite this file. After BAT: mark the version confirmed in DEVNOTES; Aaron pushes. (DEVNOTES is over the 10 KB guideline — a `DEVNOTES_HISTORY.md` trim of the closed v0.17.8.7 chapter is overdue.)
+- `src/field_nav_catalog_dedupe.inl` — NPC counter changed from type-based to name-prefix-based
+- `src/field_nav_announce.inl` — added ENT_INTERACTION to typeLabel cascade, added type-based sameType matching for both NPC and Interaction in both typeNum and typeTotal loops
+- `src/ff8_accessibility.h` — version bump to 0.17.8.15.1
+- `CHANGELOG.md` — new top entry
+- `DEVNOTES.md` — chapter updated
+- `NEXT_SESSION_PROMPT.md` — this file, rewritten

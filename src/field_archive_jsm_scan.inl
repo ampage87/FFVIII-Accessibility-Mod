@@ -640,7 +640,18 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
 
                 // Model assignment / talk.
                 if (opcode == JSM_OP_SETMODEL) foundSetmodel = true;
-                if (opcode == JSM_OP_SETMODEL && m == 0) foundSetmodelInit = true;  // v0.12.20
+                if (opcode == JSM_OP_SETMODEL && m == 0) {
+                    foundSetmodelInit = true;  // v0.12.20
+                    // v0.17.8.15: chara.one slot capture removed. v0.17.8.11-.14
+                    // tried cross-referencing the slot operand against a
+                    // parsed chara.one model archive to distinguish NPC from
+                    // prop, but the bghall_3 BAT screenshot proved this was
+                    // the wrong mechanism entirely (kanban2 IS Xu standing
+                    // in the world, regardless of how p048's textures
+                    // classify). The catalog now uses the behavior signal
+                    // `jsmCategory == 3 && foundSetmodelInit` instead --
+                    // exposed via info.hasSetmodelInit below.
+                }
                 if (opcode == JSM_OP_TALKON)   foundTalkon = true;
                 if (opcode == JSM_OP_TALKRADIUS) foundTalkradius = true;  // v0.17.7.1
 
@@ -881,6 +892,15 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         // True when the script uses TALKRADIUS or TALKON, indicating the player
         // can interact via confirm-press (vs. crossing a Line trigger).
         info.hasTalkSetup = foundTalkradius || foundTalkon;
+
+        // v0.17.8.15: Export the behavior signal the catalog dedupe pass uses
+        // to distinguish raw-SYM Others-with-models (NPCs) from raw-SYM
+        // walk-across Lines (Interactions). Replaces v0.17.8.11's setmodelSlot
+        // + chara.one cross-reference. The persistent s_hasSetmodelInit[]
+        // array below still tracks the same signal for the Director-detection
+        // post-pass; this field exposes it on the per-entity export used by
+        // field_nav_catalog_dedupe.inl.
+        info.hasSetmodelInit = foundSetmodelInit;
 
         // v0.12.20: Store persistent flags for Director/interaction detection.
         if (e < 128) {

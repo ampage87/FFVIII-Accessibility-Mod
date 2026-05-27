@@ -199,6 +199,19 @@ struct JSMEntityInfo {
     // position to inject as a standalone Save Point -- it only surfaces via its
     // co-located trigger line.
     bool           isSaveLine;
+    // v0.17.8.15: True if this entity's init script (method 0) contains a
+    // SETMODEL opcode -- i.e. the entity loads a 3D model at field load and
+    // stands in the world (rather than being a script-only Background, an
+    // invisible Director, or a walk-across Line trigger). Combined with
+    // `jsmCategory == 3` (Other), this is the catalog's NPC discriminator:
+    // a positioned Other-entity with a model that the player walks up to
+    // and presses Confirm to interact with, vs. a Line walk-across trigger.
+    // Replaces v0.17.8.11's `int setmodelSlot` + chara.one cross-reference,
+    // which was reverted after the bghall_3 BAT screenshot showed the
+    // model-classification approach was the wrong signal entirely (kanban2
+    // IS Xu standing in the world; her chara.one slot p048 was misclassified
+    // as a prop but that doesn't matter -- the behavior signal is enough).
+    bool           hasSetmodelInit;
 };
 
 const char* JSMEntityTypeName(JSMEntityType t);

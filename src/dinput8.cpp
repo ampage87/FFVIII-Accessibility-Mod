@@ -384,6 +384,11 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     MH_STATUS mhStatus = MH_Initialize();
     Log::Mod("AccessibilityThread: MH_Initialize = %s", MH_StatusToString(mhStatus));
     
+    // v0.17.8.15: FieldCharaOneParse::Initialize() removed -- the chara.one
+    // cross-reference chain (v0.17.8.11-.14) was reverted. The catalog now
+    // uses JSM behavior signals (jsmCategory + hasSetmodelInit) instead of
+    // model-file classification to distinguish NPCs from interactions.
+    
     // Initialize accessibility modules
     TitleScreen::Initialize();
     FmvSkip::Initialize();
@@ -569,6 +574,8 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     FmvAudioDesc::Shutdown();
     GfAudioDesc::Shutdown();
     FmvSkip::Shutdown();
+    // v0.17.8.15: FieldCharaOneParse::Shutdown() removed with the rest of
+    // the chara.one chain (see Initialize comment above).
     MH_DisableHook(MH_ALL_HOOKS);
     MH_Uninitialize();
     TitleScreen::Shutdown();

@@ -72,16 +72,43 @@
     newCount = dw;
 
     // v0.17.8.8: Relabel any surviving raw-SYM interactive object as a
-    // generic "Interaction N". A standalone JSM object whose only name
-    // is its internal SYM (e.g. bghall_3 'Kanban2', a signboard with no
-    // friendly mapping and no coincident line to dedupe against) must
-    // not expose that symbol to the player -- per Aaron, "Interaction"
-    // is the familiar term. Friendly-named objects (Directory) and named
-    // specials (Save/Draw/Shop/Card) are not ENT_OBJECT-with-raw-SYM, so
-    // they keep their labels. Runs AFTER dedupe so the objIsRawSym test
-    // above still sees the raw name (preserving the Hall 4 dedupe). Only
-    // positioned objects reach the catalog, so every relabel stays
-    // navigable. Numbering continues from existing Interactions.
+    // generic "Interaction N" or "NPC N". A standalone JSM object whose only
+    // name is its internal SYM (e.g. bghall_3 'Kanban2') must not expose that
+    // symbol to the player -- SYM names are unreliable internal identifiers
+    // that don't always reflect what an entity actually is (kanban2 looks
+    // like a signpost name but the entity IS Xu, a character, on bghall_3).
+    // Friendly-named objects (Directory) and named specials (Save/Draw/Shop/
+    // Card) are not ENT_OBJECT-with-raw-SYM, so they keep their labels.
+    // Runs AFTER dedupe so the objIsRawSym test above still sees the raw
+    // name (preserving the Hall 4 dedupe). Only positioned objects reach the
+    // catalog, so every relabel stays navigable. Numbering for each label
+    // type continues from existing entries of that type.
+    //
+    // v0.17.8.15: NPC vs Interaction discriminator. Replaces the v0.17.8.11
+    // chara.one cross-reference, which was reverted after the bghall_3
+    // screenshot proved kanban2 IS Xu standing in the world (not a signpost),
+    // and the chara.one classifier had misclassified her model p048 as a
+    // prop. The classifier was the wrong mechanism entirely -- what matters
+    // for the player is whether the entity stands in the world and is talked
+    // to (NPC) vs. is a walk-across line trigger (Interaction). The behavior
+    // signal:
+    //   jsmCategory == 3 (Other) AND hasSetmodelInit  -> "NPC N"
+    //   everything else (Background, no SETMODEL, etc.) -> "Interaction N"
+    //
+    // The signal is grounded in observable game behavior, not file-level
+    // classification: an Other-category entity that loads a 3D model in init
+    // is by construction "someone standing somewhere" -- whether the model
+    // file is conventionally a 'd'-prefix character or a 'p'-prefix prop
+    // doesn't matter, because both are used for characters across the game.
+    // Validated against bghall_3:
+    //   line3 (cat 1, Line)         -> Interaction 1  (signpost, walk-across)
+    //   line4 (cat 1, Line)         -> Interaction 2  (signpost, walk-across)
+    //   ent25 kanban2 (cat 3, SETMODEL=1) -> NPC 1   (Xu, walk-up + Confirm)
+    //
+    // Per Aaron's directive, NPC labels are pure "NPC N" -- no SYM-derived
+    // names ever exposed to the player. The nav-cycle code adds the
+    // " X of Y" suffix at announce time based on how many NPCs are on the
+    // current field.
     for (int a = 0; a < newCount; a++) {
         if (newCatalog[a].entityIdx > -300) continue;   // JSM-injected only
         if (newCatalog[a].type != ENT_OBJECT) continue;
@@ -89,6 +116,39 @@
         if (ja < 0 || ja >= s_jsmEntityCount) continue;
         const char* sym = s_jsmEntities[ja].symName;
         if (sym[0] == '\0' || _stricmp(newCatalog[a].name, sym) != 0) continue;
+
+        // v0.17.8.15: NPC discriminator. Other-category entity (cat 3) with
+        // a SETMODEL in its init method is by definition a positioned, model-
+        // bearing entity the player walks up to and Confirms -- i.e. an NPC.
+        bool isNpcCandidate = (s_jsmEntities[ja].jsmCategory == 3 &&
+                               s_jsmEntities[ja].hasSetmodelInit);
+
+        if (isNpcCandidate) {
+            // v0.17.8.15.1: Count entries already named "NPC N" (the generic
+            // relabel sequence), NOT all ENT_NPC entries. Friendly-named NPCs
+            // (Cid, Quistis, etc.) are also typed ENT_NPC but are announced
+            // by their actual name -- counting them inflated kanban2's number
+            // to "NPC 2" on bghall_3 even though it was the first/only raw-SYM
+            // NPC relabel (Aaron never heard an "NPC 1" because the catalog's
+            // other ENT_NPC announced as e.g. "Cid"). Match the "NPC %d"
+            // prefix only.
+            int n = 0;
+            for (int c = 0; c < newCount; c++) {
+                const char* nm = newCatalog[c].name;
+                if (strncmp(nm, "NPC ", 4) == 0 && nm[4] >= '0' && nm[4] <= '9')
+                    n++;
+            }
+            n++;
+            snprintf(newCatalog[a].name, sizeof(newCatalog[a].name), "NPC %d", n);
+            newCatalog[a].type = ENT_NPC;
+            Log::Field("FieldNavigation: [dedup] relabeled raw-SYM object '%s' -> "
+                       "NPC %d (Other + SETMODEL-init) [v0.17.8.15.1]", sym, n);
+            continue;
+        }
+
+        // Fall-through: not an NPC by the behavior signal. Generic
+        // "Interaction N" -- background script object, Other with no model,
+        // etc. Numbering continues from existing ENT_INTERACTION entries.
         int n = 0;
         for (int c = 0; c < newCount; c++)
             if (newCatalog[c].type == ENT_INTERACTION) n++;

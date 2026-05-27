@@ -6,6 +6,377 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.8.15.1
+
+Field navigation: two follow-on fixes from the v0.17.8.15 BAT, both in the
+label + announce path for the new JSM-behavior-signal NPC relabel.
+
+**Symptom Aaron heard:** on bghall_3, kanban2 announced as `"NPC 2, 1 of 0"`.
+The NPC relabel had worked (Xu is now correctly typed NPC, not Interaction)
+but the number was wrong ("NPC 2" with no "NPC 1" anywhere) and the suffix
+was nonsensical ("1 of 0").
+
+**Bug A -- dedupe counter inflated by friendly-named NPCs.** The v0.17.8.15
+relabel counter looped `if (newCatalog[c].type == ENT_NPC) n++` to pick the
+next sequential number. But friendly-named NPCs like Cid and Quistis are ALSO
+typed `ENT_NPC` -- they're just announced by their friendly name, not as
+"NPC N". On bghall_3 the catalog already had at least one such friendly-named
+ENT_NPC entry (one of cat0-cat4, runtime entity surviving party-filter), so
+the count started at 1 and kanban2 became "NPC 2" with no "NPC 1" ever
+heard. Fix: count only entries whose name already matches the `"NPC %d"`
+prefix (the generic relabel sequence). Friendly-named NPCs are excluded;
+the first raw-SYM NPC relabel is `"NPC 1"`. (`field_nav_catalog_dedupe.inl`)
+
+**Bug B -- announce sameType test missed JSM-injected NPCs and Interactions.**
+In `AnnounceCurrentTarget()` the `typeNum`/`typeTotal` cascades had:
+```
+else if (strcmp(typeLabel, "NPC") == 0 && ce.entityIdx >= 0 && ...)
+```
+This was the legacy heuristic from before type classification was reliable:
+"any runtime entity (entityIdx >= 0) is an NPC". But JSM-injected NPC
+relabels (entityIdx <= -300) failed this test, so kanban2 didn't count
+itself in either typeNum or typeTotal. `if (typeNum == 0) typeNum = 1`
+defaulted it to 1, typeTotal stayed 0, label became "NPC 2 1 of 0". The
+same pre-existing bug affected `ENT_INTERACTION` -- there was NO typeLabel
+branch for it at all, and no sameType clause matched it, so JSM-injected
+Interaction relabels also got "1 of 0" (this was the watch-list item flagged
+from v0.17.8.13/.14's `"Interaction 3 1 of 0"`). Three fixes in
+`field_nav_announce.inl`:
+
+  1. Add `else if (catEnt.type == ENT_INTERACTION) typeLabel = "Interaction";`
+     to the typeLabel cascade so JSM-injected interactions get a proper
+     typeLabel instead of defaulting to "Entity".
+  2. Update the NPC sameType clause in BOTH the typeNum and typeTotal loops:
+     `ce.entityIdx >= 0` becomes `(ce.entityIdx >= 0) || (ce.type == ENT_NPC
+     || ce.type == ENT_BG_NPC)`. Legacy runtime path preserved; new
+     type-based clause catches JSM-injected NPCs. Disjoint conditions, no
+     double-counting.
+  3. Add Interaction sameType clause to both loops: `strcmp(typeLabel,
+     "Interaction") == 0 && ce.type == ENT_INTERACTION`. Generic
+     "Interaction N" relabels now self-count.
+
+**Expected post-fix announce on bghall_3:**
+  - kanban2 (cat6): `"NPC 1 1 of 1"` (only raw-SYM NPC; runtime ENT_NPCs are
+    announced by their friendly name with their own count).
+  - line3 / line4: `"Interaction 1 1 of 2"` / `"Interaction 2 2 of 2"`
+    (unchanged for trigger-line interactions -- their typeLabel was already
+    `"Event"` and that path is untouched; this fix only adds new coverage,
+    doesn't change existing paths).
+  - Friendly-named runtime ENT_NPCs (if any in the catalog): now counted in
+    the same group as kanban2 for typeTotal. E.g. if Cid is in the catalog,
+    Cid announces as `"Cid 1 of 2"` and kanban2 as `"NPC 1 2 of 2"`.
+
+**Regression safety.** The dedupe counter change is local to the NPC branch
+and affects only the numbering of the new `"NPC N"` label sequence; the
+Interaction fall-through branch's counter is unchanged (it was already
+correct -- trigger lines ARE named `"Interaction N"` so type-counting
+works for them). The announce changes ADD matching clauses without removing
+any existing ones; legacy runtime-NPC counting is preserved verbatim.
+
+## v0.17.8.15
+
+Field navigation: full revert of the v0.17.8.11 - v0.17.8.14 chara.one
+cross-reference chain + clean replacement using JSM behavior signals.
+
+**Why the revert.** Aaron took a screenshot of bghall_3 at the spot the
+v0.17.8.14 BAT had concluded was a signpost (kanban2, the only remaining
+"Interaction 3" entry on B-Garden Hall 6). The screenshot showed Xu visibly
+standing there as a character model in front of Squall, with the dialog
+box reading `Xu "Hey, Squall, heard you got your first mission already!"`.
+There is no signpost. The internal SYM name "kanban2" is just a misleading
+leftover identifier in the field data.
+
+This disproved the v0.17.8.13 BAT's central conclusion ("kanban2 IS a
+sign"). It also disproved the deeper assumption underneath v0.17.8.11-.14:
+that the chara.one classifier could distinguish NPCs from props by reading
+the model archive header. The classifier was returning `isChar=0` for
+kanban2's model slot (p048), but p048 IS Xu's character model on this
+field. The classifier was wrong, and -- more fundamentally -- the file-
+level "is this a character model" question was the wrong mechanism
+entirely. What matters for the player is the entity's gameplay role: does
+the player walk up to it and press Confirm (NPC), or walk across it (line
+trigger / interaction)?
+
+**The clean fix.** That gameplay distinction is already in the data we
+scan, no new mechanism needed:
+
+  - Line entities (`jsmCategory == 1`) are walk-across triggers (signposts,
+    beds, save lines, screen boundaries). They surface as TRIGGER entries
+    in the catalog and were already labeled "Interaction N".
+  - Other-category entities (`jsmCategory == 3`) with a SETMODEL opcode
+    in their init method are by construction "someone standing somewhere":
+    the entity loads a 3D model at field load and the player walks up to
+    interact. That's an NPC, regardless of whether the model file is a
+    'd'-prefix or 'p'-prefix.
+  - Other-category entities without SETMODEL-init (script-only Directors,
+    invisible dispatchers) stay as "Interaction N".
+
+Replaces the `info.setmodelSlot` (int) field on `JSMEntityInfo` with
+`info.hasSetmodelInit` (bool). Populated directly from the existing
+`foundSetmodelInit` local variable in the JSM scanner (no new opcode
+parsing). Used in `field_nav_catalog_dedupe.inl`: when a raw-SYM JSM-
+injected ENT_OBJECT is being relabeled, branch on `jsmCategory == 3 &&
+hasSetmodelInit` to choose between "NPC N" (set type ENT_NPC) and
+"Interaction N" (set type ENT_INTERACTION).
+
+**Per Aaron's directive, NPC labels never expose SYM names.** SYM names
+are unreliable internal identifiers; the catalog only ever announces
+generic "NPC N" plus the existing " X of Y" suffix the announce code
+appends based on per-type counts. Friendly names (Cid, Quistis) and named
+specials (Save Point, Draw Point, Shop, Card Game) continue to be applied
+via their own paths and are not affected.
+
+**What got reverted, file by file.**
+
+  - `src/field_charaone_parse.h` / `.cpp` -- stubbed to comment-only
+    placeholders explaining their removal. No longer compiled (dropped
+    from `src/deploy.bat`). Files retained as stubs so the next
+    housekeeping pass can delete them outright; nothing references them
+    any more.
+  - `src/ff8_addresses.h` -- removed the v0.17.8.11 chara.one block:
+    `load_field_models_addr`, `chara_one_set_data_start_addr`,
+    `pCharaOneDataStart`, `chara_one_read_file_addr` and the
+    `HasCharaOneDataStart()` / `HasCharaOneReadFile()` inlines.
+  - `src/ff8_addresses.cpp` -- removed the four corresponding variable
+    definitions and the chara.one resolution `__try` block inside
+    `Resolve()` (the `read_field_data` + 0xF0F / +0x15F / +0xAFF chain
+    and the SEH fallback path).
+  - `src/dinput8.cpp` -- removed `#include "field_charaone_parse.h"` and
+    the two `FieldCharaOneParse::Initialize()` / `Shutdown()` calls in
+    `AccessibilityThread`. Replaced with v0.17.8.15 explainer comments.
+  - `src/field_navigation.cpp` -- removed the chara.one include there too.
+  - `src/deploy.bat` -- removed `field_charaone_parse.cpp` from the
+    compile list.
+  - `src/field_archive.h` -- replaced `int setmodelSlot;` on
+    `JSMEntityInfo` with `bool hasSetmodelInit;`.
+  - `src/field_archive_jsm_scan.inl` -- removed the
+    `int setmodelSlotInit = -1;` local, the v0.17.8.14 inline-opcParam
+    capture block inside the `JSM_OP_SETMODEL && m == 0` branch (kept
+    `foundSetmodelInit = true` -- v0.12.20, pre-existing), and replaced
+    `info.setmodelSlot = setmodelSlotInit` with
+    `info.hasSetmodelInit = foundSetmodelInit`. The persistent
+    `s_hasSetmodelInit[]` array used by the Director-detection post-pass
+    is unchanged; this just adds an export to the per-entity struct.
+  - `src/field_nav_catalog_dedupe.inl` -- removed the v0.17.8.11 chara.one
+    NPC-override block and the v0.17.8.12 `[NPC-skip]` diagnostic, and
+    inserted the new behavior-signal block above (jsmCategory + SETMODEL).
+
+**BAT expectation on bghall_3.**
+
+  - line3 -> Interaction 1 (unchanged)
+  - line4 -> Interaction 2 (unchanged)
+  - kanban2 -> NPC 1 (was: Interaction 3)
+  - F9 nav-cycle says "NPC 1, 1 of 1" (or whatever the type-counted suffix
+    becomes) at kanban2's position
+  - No `[NPC-skip]` lines anywhere (diagnostic removed with v0.17.8.12)
+  - No `[JSMScan] SETMODEL-init` lines anywhere (removed in v0.17.8.13)
+  - No chara.one parse / hook log lines (the entire module is gone)
+
+Open pre-existing issue not addressed here: in the v0.17.8.13/.14 BAT,
+the announce code reported `"Interaction 3 1 of 0"` for the JSM-injected
+entry -- the "of 0" suffix is wrong. After v0.17.8.15 the kanban2 entry
+should speak as "NPC 1, 1 of 1" but if the same counter bug appears (e.g.
+"NPC 1, 1 of 0"), that's the next thing to investigate in field_navigation.cpp's
+announce path. Flagged for follow-up only if observed.
+
+## v0.17.8.14
+
+Field navigation: bug-#10 mechanism fix. v0.17.8.13's SETMODEL-init
+diagnostic resolved the long-standing question of how SETMODEL encodes
+its chara.one slot index: **inline in the opcode word's low 24 bits,
+not on the script VM stack.** The BAT log showed `pushCount=0
+stk=(empty)` for every single SETMODEL-init firing across four fields
+(bgryo2_1 12 slots, bgroad_5 16 slots, bghall_5 17 slots, bghall_3 18
+slots), with `opcParam` matching the chara.one slot ordering 1:1 in
+every case. The v0.17.8.11 stack-based capture was looking in the
+wrong place and silently failed for every entity.
+
+Fix: read `opcParam` instead of `pushStack[pushCount-1]` (same
+range/sentinel guards: `setmodelSlotInit < 0 && opcParam >= 0 &&
+opcParam < 64`). The v0.17.8.13 diagnostic block is removed in the
+same commit, so the file's net change is a small reduction. Two
+distinct entities can share a slot (e.g. bghall_5 ent25 'l2' and
+ent26 'l3' both `opcParam=0x0A`); the existing `setmodelSlotInit < 0`
+gate means the first SETMODEL-init in init wins per-entity, which is
+the correct semantics.
+
+Downstream effect: `info.setmodelSlot` is now populated correctly for
+every entity that has a SETMODEL in its init method. The dedupe NPC
+override from v0.17.8.11 ("if the SYM-named object loads a character
+model slot, label it NPC") finally has data to act on. The
+v0.17.8.12 `[NPC-skip]` diagnostic in the fallthrough path stays in
+place for one more BAT cycle so the next session can see steady-state
+behavior; if quiet on success, it will be removed in v0.17.8.15.
+
+**Important user-facing caveat:** The v0.17.8.13 BAT also revealed
+that kanban2 on bghall_3 -- the entity Aaron experiences as Xu --
+loads chara.one slot 13 = `p048`, which the classifier correctly
+identifies as a PROP (signpost). So after this build, kanban2 will
+have `setmodelSlot=13`, `isChar=0`, and the NPC override correctly
+won't fire. kanban2 will continue to label as "Interaction 3" -- the
+mechanism is now correct, but kanban2 itself is genuinely a bulletin
+board. Xu (`ent13 'shu'`, loading character slot 1 = d000) is a
+separate character entity whose dialog is summoned by story script
+when the player examines kanban2. Changing kanban2's label requires a
+different approach (REQ-chain analysis, or prop-name labeling) and is
+queued for a future build.
+
+**BAT expectation:** the previously-spammy `[JSMScan] SETMODEL-init
+...` lines are gone (diagnostic removed). The `[NPC-skip]
+'kanban2': fid=170 setmodelSlot=13 fieldParsed=1 isChar=0` line now
+shows the captured slot number (was -1). On other fields where a
+raw-SYM character entity is positioned and visible, the dedupe path
+should now relabel it to NPC via the v0.17.8.11 path. kanban2 itself
+stays "Interaction 3".
+
+## v0.17.8.13
+
+Field navigation: bug-#10 diagnostic. v0.17.8.12's Mch=Char fix to
+`IsCharacterModel` was correct but couldn't take effect -- the v0.17.8.12
+NPC-skip diagnostic in the dedupe fallthrough reported
+`setmodelSlot=-1 fieldParsed=1 isChar=0` for kanban2 on every catalog
+refresh. The chara.one parse landed (fieldParsed=1) and the classifier
+is now correctly inclusive, but the JSM scanner's SETMODEL operand
+capture never wrote a slot into `JSMEntityInfo::setmodelSlot`. The
+v0.17.8.11 capture rejects values that are absent (pushCount==0), PSHM
+markers (0x8000xxxx), or outside `[0, 64)` -- and we don't yet know
+which gate is firing for kanban2 (or whether SETMODEL pops from stack
+at all vs. takes an inline arg in the opcode word).
+
+This build adds one diagnostic log line at the SETMODEL-init detection
+in `field_archive_jsm_scan.inl` that dumps `opcParam` (the inline arg)
+and the last few stack values whenever SETMODEL fires in init for an
+entity whose setmodelSlot capture has not yet succeeded. The BAT after
+this build will show, for kanban2 and every other character entity, the
+exact encoding shape -- e.g. a stack-top `0x00000003` (literal slot 3,
+should pass capture) vs. `0x80000004` (PSHM marker rejected) vs.
+`(empty)` (inline arg path via `opcParam`).
+
+v0.17.8.14 will use the dump to write the correct capture. No behavioral
+changes in v0.17.8.13 -- diagnostic only.
+
+## v0.17.8.12
+
+Field navigation: bug-#10 follow-on. The v0.17.8.11 chara.one classifier
+hooked correctly and parsed every field's archive, but on bghall_3 (B-Garden
+Hall 6) Xu still announced as "Interaction 3". The first BAT's per-slot log
+lines (`field=170 slot=K name='...' isMch=N textures=M -> CHARACTER/MCH/prop`)
+revealed the misclassification:
+
+- Every visited field's slots 0-N classified as `MCH` (the `flag>>24 == 0xD0`
+  branch). Their names had the canonical FF8 disc-character pattern:
+  `d000`, `d002`, `d005`, `d009`, ... These are the field's loaded character
+  models -- party plus named story NPCs (Xu, Quistis, Edea, Cid).
+- The remaining slots had `p0xx` names and classified as `prop`.
+- The texture-count branch (intended discriminator) never fired in a way
+  that mattered: every non-MCH entry read exactly `textures=1` and dropped
+  out as prop.
+
+The `0xD0` flag is FF8's "character model" marker, not "party MCH". All
+d-prefix entries are people; the Mch/Char split in `IsCharacterModel` was
+the wrong axis. The fix is one line: `IsCharacterModel` now returns true
+for `ClassChar` OR `ClassMch`. The enum keeps both names for log clarity
+(per-slot lines still distinguish them), but for the NPC-override question
+they're equivalent answers.
+
+If this build still announces "Interaction 3" on bghall_3, a second
+fallthrough condition is in play: either the JSM scanner's SETMODEL slot
+operand capture isn't firing (kanban2's `setmodelSlot` stays -1), or the
+chara.one parse hadn't landed before the catalog refresh. A one-line
+diagnostic was added to the dedupe fallthrough path that logs
+`setmodelSlot`, `fieldParsed`, and `isChar` whenever the v0.17.8.11 NPC
+override is skipped -- the next BAT will show exactly which condition
+failed and v0.17.8.13 can target it precisely. (Removed once the override
+is firing reliably.)
+
+The textures=1 misread of the inline texture table remains -- the prop
+branch terminates after one iteration because the next u32 reads as the
+`0xFFFFFFFF` terminator. It doesn't matter for classification anymore
+(d-prefix entries take the 0xD0/Mch path that never reads textures), so
+the parser walk is left as-is rather than churning more code in this
+fix. If a non-d-prefix character model ever surfaces in a field, the
+threshold logic can be revisited then.
+
+## v0.17.8.11
+
+Field navigation: script-injected NPCs whose interactivity is dispatched via
+REQ from another entity now announce as "NPC" instead of a generic
+"Interaction N". The canonical case is Xu on bghall_3 (B-Garden, Hall 6),
+whose visible entity (kanban2) is a signboard-style proxy with no own dialog
+opcodes; the actual Xu interaction is fired by a REQ from kanban2 to another
+entity. The catalog had no way to tell whether such a JSM-injected raw-SYM
+object was a person or a prop, and was labeling every such entry
+"Interaction N".
+
+### How the new signal works
+
+FF8 field scripts run SETMODEL in their init method to load a 3D model from
+the field's `chara.one` archive. The model itself is what tells a person
+apart from a prop: character models hold an inline texture-offset table
+with many entries (FF8 NPCs use multiple body-part + animation-frame
+textures); props have at most a few. Reading the slot's classification
+from the archive gives a one-bit person-or-prop answer for every entity
+that called SETMODEL.
+
+Getting at that archive at the right moment was the difficult part. The
+in-game pointer `chara_one_data_start` is a moving cursor that the engine
+advances through the file as it streams model bodies and textures; by the
+time the catalog refreshes, the cursor is mid-stream, not at the index --
+a v0.17.8.10-diag probe (read-only, since reverted) parsed garbage from
+it and ruled this approach out. FFNx itself only parses the archive ONCE
+per field, via a `replace_call` patch on the call site of
+`chara_one_read_file` inside `load_field_models`, capturing the buffer at
+the moment of the header read.
+
+The new `FieldCharaOneParse` module installs a MinHook on the entry point
+of `chara_one_read_file`, in parallel with FFNx's call-site replacement
+(the two hook mechanisms touch different bytes, so they coexist). On every
+invocation our hook calls through to the original, then sniffs the
+post-read buffer: if the first u32 is a small model count (0 < n <= 32)
+and the field hasn't been parsed yet, the buffer is the header read and
+we walk the per-entry records exactly as FFNx does (count, offset,
+section_size, flag, optional size-echo skip, MCH branch for `flag>>24 ==
+0xD0` or inline texture table terminated by `0xFFFFFFFF`, name-and-trailer
+skip). Each slot is tagged Char / Prop / MCH and stored in a per-field
+classification table; MCH-tagged slots are party characters that the
+upstream party filter handles separately. Pass-through wrapper, never
+modifies the read.
+
+The character-vs-prop split uses a texture-count threshold of 6: the
+threshold was set conservatively high so the first BAT cycle won't
+false-positive props as NPCs; per-slot lines are logged at parse time so
+the number can be retuned from observed data if real NPCs slip through.
+
+### Wiring
+
+The JSM scanner already detected SETMODEL in init scripts via
+`foundSetmodelInit` (a bool) -- this version also captures the slot
+operand from top-of-stack at the same opcode site, rejecting PSHM markers
+and out-of-range values, and surfaces it on `JSMEntityInfo::setmodelSlot`
+(-1 when no SETMODEL was found). The catalog's raw-SYM relabel pass in
+`field_nav_catalog_dedupe.inl` runs the NPC check first: if
+`FieldCharaOneParse::IsCharacterModel(currentFieldId, setmodelSlot)`
+returns true, the entry becomes "NPC" / `ENT_NPC`; otherwise it falls
+through to the existing "Interaction N" relabel. `IsCharacterModel` is
+gated internally on `IsFieldParsed`, so before the chara.one read has
+landed for the field, the call returns false and the entry stays
+"Interaction N" -- which is what we want for the very first F9 after a
+field transition; subsequent refreshes pick up the NPC label.
+
+Address chain (US Steam, resolved at startup, SEH-wrapped):
+`read_field_data + 0xF0F` -> `load_field_models`,
+`load_field_models + 0x15F` -> `chara_one_read_file`. JP/non-US builds
+disable the feature cleanly (the catalog falls back to "Interaction N"
+for everything, which is the prior behavior).
+
+### Why not name the NPC
+
+This change deliberately does NOT try to identify Xu specifically. The
+4-byte name field in chara.one is truncated (`cardgamemaster` becomes
+`card`) and not useful as a friendly label. The goal here is solely to
+stop calling people "Interactions"; identifying them by name remains
+out of scope.
+
 ## v0.17.8.10
 
 Field navigation: the B-Garden hub (bghall_5, "Hall 10") now lists its exit to

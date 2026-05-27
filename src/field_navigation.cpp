@@ -46,6 +46,9 @@
 #include "minhook/include/MinHook.h"
 #include "field_display_names.h"
 #include "entity_classifications.h"
+// v0.17.8.15: chara.one cross-reference removed; the catalog dedupe pass now
+// uses JSM behavior signals (jsmCategory + hasSetmodelInit) for the NPC vs
+// Interaction discriminator. See field_nav_catalog_dedupe.inl.
 
 // v0.15.9.11.3: chase_keyboard header included BEFORE the FieldNavigation
 // namespace opens so its global-scope namespace (::ChaseKeyboard) is

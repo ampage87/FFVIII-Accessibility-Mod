@@ -1,0 +1,110 @@
+// field_nav_charaone_probe.inl — v0.17.8.10 LOCAL DIAGNOSTIC (Bug #10 / Xu)
+//
+// Included once from field_navigation.cpp (after field_nav_catalog_diag.inl,
+// before field_nav_catalog.inl). Defines LogCharaOneProbe(), called from
+// RefreshCatalog with a one-shot per-field guard.
+//
+// PURPOSE (Iteration 2 — Hex Dump)
+//   Iteration 1 (the parsed walker) aborted at slot 0 with "texture count
+//   runaway" on bghall_3 and bghall_5. That means my FFNx-port of the parser
+//   misread the entry layout for FF8 1.2 US Steam (the FFNx parser may be
+//   tuned for a slightly different layout, or my port has an off-by-one).
+//   Before I fix the parse blind, I need to SEE what's actually at the
+//   address. This iteration logs the first 384 bytes of the buffer as raw
+//   hex, plus a side-by-side ASCII strip. Pattern-matching the bytes against
+//   a known set of model names (cid/shu/kadowaki for bghall_3; kanban1/kanban2
+//   /water/walllight for the same field) tells us the real layout: where the
+//   count lives, where each per-entry record starts, where the 4-char name
+//   sits within it. Then iteration 3 ports the correct parser.
+//
+//   We deliberately do NOT attempt to walk entries here — a misaligned walk
+//   produces useless data (or worse, crashes). One careful hex dump is more
+//   informative than five guessing-game parsers.
+//
+// Safety
+//   - Pure read-only. SEH-wrapped on every memory access.
+//   - Static cap of 384 bytes dumped.
+//   - One log line per 16-byte row; printable bytes shown on the right.
+//
+// Lifecycle
+//   LOCAL diagnostic only. Not version-bumped, not pushed. Will be removed
+//   along with its #include and call site once the parse is nailed down.
+
+#pragma once
+
+namespace {  // file-local; only used by RefreshCatalog
+
+static uint16_t s_charaOneProbeLastFieldId = 0xFFFF;
+
+static void LogCharaOneProbe(uint16_t fieldId, const char* fieldName)
+{
+    if (fieldId == s_charaOneProbeLastFieldId) return;  // one-shot per field
+    s_charaOneProbeLastFieldId = fieldId;
+
+    if (!FF8Addresses::HasCharaOneDataStart()) {
+        Log::Field("FieldNavigation: [chara-one] field %u '%s': pCharaOneDataStart "
+                   "not resolved -- probe disabled.",
+                   (unsigned)fieldId, fieldName ? fieldName : "?");
+        return;
+    }
+
+    const uint8_t* base = nullptr;
+    __try {
+        base = *FF8Addresses::pCharaOneDataStart;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log::Field("FieldNavigation: [chara-one] field %u '%s': exception reading "
+                   "*pCharaOneDataStart.",
+                   (unsigned)fieldId, fieldName ? fieldName : "?");
+        return;
+    }
+    if (base == nullptr) {
+        Log::Field("FieldNavigation: [chara-one] field %u '%s': *pCharaOneDataStart "
+                   "is NULL (archive not loaded yet?).",
+                   (unsigned)fieldId, fieldName ? fieldName : "?");
+        return;
+    }
+
+    static const int kDumpBytes = 384;  // 24 rows of 16
+
+    __try {
+        Log::Field("FieldNavigation: [chara-one] field %u '%s' base=0x%08X "
+                   "(raw hex dump, first %d bytes):",
+                   (unsigned)fieldId, fieldName ? fieldName : "?",
+                   (uint32_t)(uintptr_t)base, kDumpBytes);
+
+        for (int row = 0; row < kDumpBytes; row += 16) {
+            char hex[64];   // "XX XX XX XX XX XX XX XX  XX XX XX XX XX XX XX XX"
+            char asc[20];   // "................"
+            int hp = 0, ap = 0;
+            for (int col = 0; col < 16; col++) {
+                uint8_t b = base[row + col];
+                hp += snprintf(hex + hp, sizeof(hex) - hp, "%02X ", (unsigned)b);
+                if (col == 7) hp += snprintf(hex + hp, sizeof(hex) - hp, " ");
+                asc[ap++] = (b >= 0x20 && b < 0x7F) ? (char)b : '.';
+            }
+            asc[ap] = '\0';
+            Log::Field("FieldNavigation: [chara-one]   +%03X: %s |%s|",
+                       row, hex, asc);
+        }
+
+        // Also log a few interesting candidate interpretations of the first
+        // 16 bytes, so we can spot which one matches a known model count.
+        uint32_t w0 = *(uint32_t*)(base +  0);
+        uint32_t w4 = *(uint32_t*)(base +  4);
+        uint32_t w8 = *(uint32_t*)(base +  8);
+        uint32_t wC = *(uint32_t*)(base + 12);
+        Log::Field("FieldNavigation: [chara-one]   interpretation: "
+                   "u32@+0=0x%08X (%u) u32@+4=0x%08X (%u) "
+                   "u32@+8=0x%08X (%u) u32@+12=0x%08X (%u)",
+                   w0, w0, w4, w4, w8, w8, wC, wC);
+        // For reference: bghall_3 has the runtime entities cid/shu/igyous1/dic/
+        // s1/meskun/cardgamemaster/l3/kanban1/kanban2/ej1/ejl2/ejl3/water/walllight/
+        // gatelight/cornerlight, so a reasonable model_count is in the range
+        // 10-20. Look for the field that matches.
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log::Field("FieldNavigation: [chara-one] field %u '%s': exception during hex dump.",
+                   (unsigned)fieldId, fieldName ? fieldName : "?");
+    }
+}
+
+}  // anonymous namespace
