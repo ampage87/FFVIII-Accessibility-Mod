@@ -6,6 +6,183 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.8.9
+
+Field save-point detection: the B-Garden hub hallway (bghall_1, "Hall 1") save
+point now reads "Save Point" instead of "Interaction 1". Also a size refactor of
+the two impacted .inl files to restore headroom under the 80,000-byte ceiling.
+
+### Save point (the fix)
+
+bghall_1's save spot is the trigger line `ent5 'selphie'` (SETLINE center
+-700,-8593). A LOCAL one-shot script dump (added, used, and now removed)
+proved the static signal: selphie's own bytecode literally pushes the
+save-enable opcode CONSTANTS -- PUSH 303 (0x12F SAVEENABLE) and PUSH 304 (0x130
+PHSENABLE), in two methods. It dispatches the save through a runtime-supplied
+0x1C (empty-stack, like the dorm bed), so the opcode-resolved foundSaveenable
+never fires; and neither save-POINT entity can carry the label (savePoint has
+PSHM-only X/Y so it never gets a position, and saveline0 is a REQ-chain
+controller with a MAPJUMP that classifies it MAP_EXIT). The sibling control line
+`ent4 'zells'` has none of these constants -- a clean discriminator.
+
+Fix (`field_archive_jsm_scan.inl`): the per-instruction literal-push branch now
+notes literal pushes of MENUSAVE (0x12E) / SAVEENABLE (0x12F) / PHSENABLE
+(0x130). Save-line signal-(a) gained an `ownSaveConst` term -- true when MENUSAVE
+appears alone, or SAVEENABLE and PHSENABLE both appear -- which sets isSaveLine
+and forces the line LINE_INTERACTIVE so the catalog relabels it "Save Point" at
+the line's own SETLINE center (where auto-drive already arrives). The tight
+two-constant rule, scoped to Line entities, keeps non-line entities and the
+control line `zells` unaffected; no proximity/heuristic guess is used.
+
+### Size refactor (no behavior change)
+
+Both impacted files were within ~300 bytes of the 80,000-byte CI ceiling, so the
+fix could not land without first reclaiming space:
+  - `field_archive_jsm_scan.inl` 79,696 -> 75,590 bytes: removed the LOCAL
+    bghall_1 dump diagnostic (its job is done) and four long-disabled `if
+    (false)` diagnostic blocks (POPM_W-address dump, PSHM_W-coords summary,
+    per-method MAPJUMP dump, INF-gateway dump). All dead code, recoverable from
+    git. `DumpEntityScript` itself (field_archive_jsm_dump.inl) is kept.
+  - `field_nav_catalog.inl` 79,718 -> 74,387 bytes: the v0.17.8.8 object/line
+    dedupe + raw-SYM relabel pass moved verbatim into a new statement-fragment
+    file `field_nav_catalog_dedupe.inl`, `#include`d inline at the same point in
+    RefreshCatalog (it still operates on the local newCatalog[]/newCount, so
+    behavior is byte-identical).
+
+### Expected BAT outcome
+
+Enter bghall_1 (Hall 1, off the dorm corridor): the save point now reads "Save
+Point" at (-700,-8593) -- previously "Interaction 1". Regression checks: the dorm
+(bgryo2_1) Save Point still works; the bghall_2/bghall_3 kanban dedupe/relabel
+still works; no false "Save Point" appears on other fields. Field log shows
+`save-line(own): ... isSaveLine=1 (resolved=0 const=1)` for selphie.
+
+## v0.17.8.8
+
+Field navigation catalog: filter duplicate entries where the same physical
+interactable is surfaced twice. Reported by Aaron on bghall_2 (a B-Garden hub
+hallway), where a signboard appeared as BOTH "Interaction 2" and "Kanban1".
+
+### Root cause
+
+The signboard `ent23 'kanban1'` is a real interactive object, so it reaches the
+catalog two independent ways: the JSM scanner classifies it INTERACTIVE_OBJECT
+and the injection block adds it as an object entry ("Kanban1" -- the raw SYM,
+capitalized, since there is no friendly-name mapping for it), AND its walk-on
+trigger line is classified INTERACTIVE and added as "Interaction 2". Both sit at
+the same coordinates (-3886,-5070)/(-3886,-5069). Nothing in `RefreshCatalog`
+reconciled an object against a coincident line, so both showed.
+
+### Fix: general object/line dedupe
+
+New pass at the end of catalog assembly (`field_nav_catalog.inl`, before the
+change-detect/commit step): when a JSM-injected object (sentinel <= -300) and an
+interactive trigger LINE (sentinel -200..-299, type ENT_INTERACTION) resolve to
+the same position (within 128 world units), they are treated as one physical
+interactable and only one entry is kept. Which one follows the more-informative
+name:
+  - A named object -- a special type (Save/Draw/Shop/Card) or one that resolved
+    to a friendly name like "Directory" -- is kept; the coincident line is
+    dropped.
+  - An object whose only name is its raw (capitalized) SYM, like "Kanban1", is
+    dropped in favour of the line, because "Interaction N" is the term the
+    player already understands. (Per Aaron: that name is sufficient.)
+Exits are never touched here -- they already dedupe by destination in the INF
+gateway / MAP_EXIT blocks. Drops log `[dedup] dropped ...` so the filtering is
+visible in the field log.
+
+### Why this is safe
+
+The match is tight (128 units; the kanban overlap is ~1 unit, real distinct
+interactables are hundreds of units apart) and scoped to the object-vs-
+interaction-line class only. NPCs (positive entity indices) and exits are not
+considered, so no real navigation target is lost. The informative-name rule
+protects meaningfully-labelled objects: a Directory or Save Point that ever
+coincides with a trigger line keeps its specific label rather than being reduced
+to "Interaction".
+
+### Expected BAT outcome
+
+Reload bghall_2 and cycle the catalog with F9: the signboard appears once, as
+"Interaction 2" -- no separate "Kanban1" entry. The field log shows `[dedup]
+dropped JSM 'Kanban1' ... duplicate of Interaction line1`. Regression check on
+bghall_1: the Directory and the save-point Interaction remain (they sit far
+apart, so the dedupe does not fire), and the dorm bed/save point/exit are
+unchanged.
+
+*BAT-confirmed:* on bghall_2 ("Hall 4") the duplicate Kanban1 was removed.
+
+### Also: raw-SYM object relabel
+
+The dedupe only fires when an object is coincident with a trigger line. On
+bghall_3 ("Hall 6") the `kanban2` signboard is a STANDALONE interactive object
+(nearest line ~696 units away), so it survived dedupe and surfaced as "Kanban2"
+-- exposing the raw internal symbol. A post-dedupe pass now relabels any
+surviving JSM object whose only name is its raw SYM to a generic "Interaction N"
+(numbering continued from existing interactions), so internal symbols like
+"Kanban2" never reach the player. It runs AFTER the dedupe so the raw name is
+still intact for the dedupe's own raw-SYM test (Hall 4 behavior preserved).
+Friendly-named objects (Directory) and named specials (Save/Draw/Shop/Card) are
+unaffected. Only positioned objects reach the catalog, so the relabeled entry
+stays navigable. Logs `[dedup] relabeled raw-SYM object ...`.
+
+### Not in this build
+
+(none — the Hall 1 save-point label is addressed below.)
+
+### Also in v0.17.8.8: save-point label via script association
+
+The B-Garden Hall 1 (bghall_1) save point read as a generic "Interaction 1"
+rather than "Save Point" — a regression introduced when interactive object/line
+detection (bed, signposts) was added. Root cause: the scanner DOES detect the
+'savePoint' entity as a Save Point (it finds MENUSAVE), but that entity's X and Y
+are both PSHM runtime variables, so it never resolves a navigable position and is
+never injected as a standalone Save Point. The save spot reaches the catalog only
+via its co-located trigger line, which the Line-classification block labels a
+generic Interaction.
+
+Fix (script association, per the mechanism Aaron identified): a Line is now
+flagged `isSaveLine` when EITHER (a) its own script invokes the save menu
+(MENUSAVE/SAVEENABLE/PHSENABLE) — the type cascade detects this but the Line
+block used to discard it — OR (b) it REQs an entity that is a Save Point (type
+SAVE_POINT, or a save*/svpt SYM name, covering a 'saveline' that was classified
+MAP_EXIT because its script also has a MAPJUMP). The catalog then surfaces that
+line as "Save Point" (type ENT_SAVE_POINT) at its own SETLINE-center position
+instead of "Interaction N" — no save-point positioning required. Cannot mislabel:
+it fires only on a provable save signal in the script.
+
+A one-shot `[save-wiring]` log reports, per save-point entity, whether it has a
+position and how many save-lines the field flagged — so the BAT is conclusive
+even if a given field wires its save differently (e.g. pure proximity with no
+line link), revealing exactly what to extend.
+
+### BAT result (save point) — did NOT fire; root cause confirmed
+
+Reloaded bghall_1. The `[save-wiring]` log reads: `ent27 'savePoint'
+hasPosition=0 hasPshmCoords=1 -- field has 0 save-line(s) flagged`. So both
+signals correctly did not fire, and the surrounding log shows why this field
+cannot be handled statically:
+  - `savePoint` has no navigable position (X and Y are both PSHM runtime
+    variables AND its runtime entity-struct slot reads zero -- it is an
+    invisible script entity, unlike the kanban which positions fine via the
+    struct read). So it can never be injected as a standalone Save Point.
+  - No line statically REQs it. Across bghall_1/bghall_3 the scanner reports
+    `reqResolved=0` for nearly every entity and the resolver logs `stack
+    underflow ... unresolved` -- the static abstract stack loses the REQ
+    targets, so `selphie`'s save line ("Interaction 1" at -700,-8593) cannot be
+    linked to `savePoint` even though it almost certainly REQs it.
+
+The save-line detection is KEPT (it is correct and will fire on any field whose
+save line has its own MENUSAVE or a resolvable REQ to a save point), but
+bghall_1 has neither. Labeling it requires one of: (1) extending the
+MapjumpResolver-style basic-block re-walk to also capture REQ targets (a real
+scanner improvement, also helps dual-purpose lines), or (2) a focused local
+diagnostic that dumps `savePoint`'s full runtime others-struct to see if its
+position lives at a non-standard offset, or (3) runtime detection when the save
+menu actually opens. The player can still reach and use the save spot as
+"Interaction 1"; only the label is missing. No proximity/heuristic guess will be
+shipped -- a wrong "Save Point" label would mislead a blind player.
+
 ## v0.17.8.7
 
 Field navigation catalog: two related correctness fixes, both surfaced during

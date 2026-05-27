@@ -188,6 +188,17 @@ struct JSMEntityInfo {
     // exclusion filter (off-walkmesh entities with talk setup are kept because
     // the player can interact from on-walkmesh).
     bool           hasTalkSetup;
+    // v0.17.8.8: True if this is a Line entity that the script ties to a save
+    // point -- either its own script invokes the save menu (MENUSAVE/SAVEENABLE),
+    // or it REQs an entity that is a Save Point (type SAVE_POINT or a save*/svpt
+    // SYM name). The Line-classification block reclassifies all Line entities to
+    // LINE_* types, which loses the save-ness the type cascade detected; this
+    // flag preserves it so the catalog can label the surfaced Interaction as a
+    // "Save Point" instead of a generic "Interaction N". Fixes the bghall_1 save
+    // point, whose savePoint entity has PSHM-only X/Y and so never resolves a
+    // position to inject as a standalone Save Point -- it only surfaces via its
+    // co-located trigger line.
+    bool           isSaveLine;
 };
 
 const char* JSMEntityTypeName(JSMEntityType t);

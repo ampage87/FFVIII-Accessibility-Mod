@@ -90,54 +90,24 @@ static void RefreshCatalog()
             }
 
             // v0.14.108 / v0.17.8.3: Party-member / non-interactive-character filter.
-            //
-            // Earlier (v0.14.107) attempt cross-referenced canonical model→charId
-            // map against the savemap active formation. That failed on bggate_1
-            // because field entity model IDs are field-local slot indices, not
-            // canonical character IDs — the engine reuses model slots per-field.
-            // Followers showed up as model 2 and 4 there even with a Squall +
-            // Zell + Selphie party (formation [1,0,5,255]).
-            //
-            // The behavioral fingerprint is what defines a FOLLOWING party
-            // member: a visible character (model 0-9) the player walks through
-            // (throughonoff > 0) with no talk/push interaction. That holds
-            // regardless of which model slot the field assigned them.
-            //
-            // v0.17.8.3 adds the STANDING / high-model party member cases. In
-            // scripted scenes (dormitory, Laguna dream intro) party members are
-            // placed as static or walk-through actors with no talk/push, and
-            // they don't always use a low follower model:
-            //   - bgryo2_1 ent1 'squalls' model 3, ent2 'squallsd' model 5,
-            //     all interaction flags 0 (standing). Caught by model OR name.
-            //   - bgryo2_1 ent5 'selphie' model 11, thru>0, no talk/push (a
-            //     scene actor using a full NPC model). model >= 10 so the
-            //     model-based follower rule misses it -- only the NAME catches it.
-            // All showed as 'NPC' before this fix (Fire Cavern bug #4).
-            //
-            // We cannot simply drop the throughonoff>0 / model<10 requirements:
-            // some draw points reuse a party-character model with all flags zero
-            // (Fire Cavern 'drpoint' uses model 9), and filtering those would
-            // delete the draw point before the JSM reclassification can find it.
-            // The safe discriminator is the SYM NAME: party members are named
-            // after the character (squall/zell/laguna/...), while draw points are
-            // 'drpoint'/'dp*', save points 'savePoint'/'saveline', and exits
-            // 'l1' etc. -- none match IsPartyCharacterSym(). So:
-            //   - model 0-9 + no talk/push + thru>0   -> following party member
-            //     (model-based; also catches followers whose SYM didn't resolve)
-            //   - character SYM + no talk/push (any model, any thru) -> party
-            //     member placed in the scene (standing or walk-through actor)
-            //   - non-character SYM (e.g. 'drpoint') -> KEEP, so the draw-point
-            //     reclassification downstream still works.
-            //
-            // A talkable character (talk>0, e.g. a scripted 'talk to Seifer')
-            // is NOT filtered -- noInteract is false -- so it stays navigable.
-            // Real exits are added via the trigger-line / gateway path, not the
-            // runtime entity, so filtering a character-named runtime actor never
-            // removes a real exit (verified on bgryo2_1: the 'squalls' screen-
-            // boundary exit still appears as cat2 after ent1 'squalls' is filtered).
-            //
-            // Race risk: if TALKRADIUS sets talkonoff after this scan, a real NPC
-            // could be transiently filtered; mitigated by the per-F9 refresh.
+            // A FOLLOWING party member is identified by behavioral fingerprint:
+            // a visible character (model 0-9) the player walks through
+            // (throughonoff>0) with no talk/push -- model slots are field-local
+            // so canonical-ID matching (the failed v0.14.107 approach) doesn't
+            // work. v0.17.8.3 adds STANDING / high-model scene actors (dorm,
+            // Laguna dream): party members placed static or walk-through with no
+            // talk/push, sometimes on full NPC models (model>=10), caught by the
+            // SYM NAME. The name is also the safe discriminator that protects
+            // draw points reusing a party model (Fire Cavern 'drpoint' = model 9,
+            // flags 0): 'drpoint'/'savePoint'/'l1' don't match IsPartyCharacterSym
+            // so they're KEPT for downstream reclassification. Rules:
+            //   - model 0-9 + no talk/push + thru>0       -> following member
+            //   - character SYM + no talk/push (any model) -> scene-placed member
+            //   - non-character SYM                        -> KEEP
+            // Talkable characters (talk>0) are never filtered. Real exits come
+            // from the trigger-line/gateway path, not runtime entities, so this
+            // never drops an exit. Race: TALKRADIUS setting talkonoff after this
+            // scan could transiently filter an NPC; mitigated by per-F9 refresh.
             {
                 bool isVisibleChar = (modelId >= 0 && modelId < 10);
                 bool noInteract    = (talkonoff == 0 && pushonoff == 0);
@@ -737,14 +707,40 @@ static void RefreshCatalog()
                     float tcy = (float)(s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2.0f;
                     if (IsSeparatedByTriggerLine(intPlayerX, intPlayerY, tcx, tcy))
                         continue;
-                    interactionNum++;
+                    // v0.17.8.8: If the scanner flagged this line's owning
+                    // entity as a save line (own MENUSAVE, or REQ to a save
+                    // point), surface it as "Save Point" not "Interaction N".
+                    // This restores the bghall_1 Hall 1 save-point label: its
+                    // 'savePoint' has PSHM-only X/Y, never injects standalone,
+                    // and reaches the catalog only via this trigger line.
+                    // Map: captured line t -> JSM line entity jsmIndex (doors+t).
+                    bool lineIsSave = false;
+                    {
+                        int wantIdx = s_jsmDoors + t;
+                        for (int j = 0; j < s_jsmEntityCount; j++) {
+                            if (s_jsmEntities[j].jsmCategory == 1 &&
+                                s_jsmEntities[j].jsmIndex == wantIdx &&
+                                s_jsmEntities[j].isSaveLine) {
+                                lineIsSave = true; break;
+                            }
+                        }
+                    }
                     EntityInfo intEntry = {};
                     intEntry.entityIdx  = -200 - t;  // same sentinel as exits -- position lookup works identically
                     intEntry.modelId    = -1;
                     intEntry.triangleId = 0;
-                    intEntry.type       = ENT_INTERACTION;
                     intEntry.gatewayIdx = -1;
-                    snprintf(intEntry.name, sizeof(intEntry.name), "Interaction %d", interactionNum);
+                    if (lineIsSave) {
+                        intEntry.type = ENT_SAVE_POINT;
+                        strncpy(intEntry.name, "Save Point", sizeof(intEntry.name) - 1);
+                        intEntry.name[sizeof(intEntry.name) - 1] = '\0';
+                        Log::Field("FieldNavigation: [refresh] line%d surfaced as "
+                                   "Save Point (isSaveLine) [v0.17.8.8]", t);
+                    } else {
+                        interactionNum++;
+                        intEntry.type = ENT_INTERACTION;
+                        snprintf(intEntry.name, sizeof(intEntry.name), "Interaction %d", interactionNum);
+                    }
                     newCatalog[newCount++] = intEntry;
                 }
             }
@@ -1171,6 +1167,12 @@ static void RefreshCatalog()
                            s_dedupGateways[d].count);
             }
         }
+
+        // v0.17.8.8 object/line dedupe + raw-SYM relabel. Extracted to
+        // field_nav_catalog_dedupe.inl (v0.17.8.9) to keep this file under the
+        // size ceiling; the fragment runs inline here (own braces) and operates
+        // on the local newCatalog[]/newCount. See that file for the full logic.
+        #include "field_nav_catalog_dedupe.inl"
 
         // Detect changes and log.
         bool changed = (newCount != s_catalogCount || added > 0);

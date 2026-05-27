@@ -236,6 +236,13 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         bool foundDrawpoint    = false;
         bool foundMenusave     = false;
         bool foundSaveenable   = false;
+        // v0.17.8.8: literal PUSH of the save-enable opcode constants (NOT via a
+        // resolvable 0x1C). A save LINE like bghall_1 'selphie' pushes 0x12F/0x130
+        // for a runtime-supplied 0x1C, so the opcode-resolved flags above never
+        // catch it. Consumed only by the line-scoped signal-(a) below.
+        bool sawLitMenusave    = false;
+        bool sawLitSaveenable  = false;
+        bool sawLitPhsenable   = false;
         bool foundMenushop     = false;
         bool foundCardgame     = false;
         bool foundLadder       = false;
@@ -298,6 +305,11 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                 if (highByte == 0) {
                     // Push literal: value = full dword (high byte is 0, so max 0x00FFFFFF)
                     int32_t pushVal = (int32_t)word;
+                    // v0.17.8.8: note literal pushes of the save-enable opcodes so a
+                    // save line whose 0x1C dispatch is runtime-supplied is still seen.
+                    if (pushVal == (int32_t)JSM_OP_MENUSAVE)        sawLitMenusave   = true;
+                    else if (pushVal == (int32_t)JSM_OP_SAVEENABLE) sawLitSaveenable = true;
+                    else if (pushVal == (int32_t)JSM_OP_PHSENABLE)  sawLitPhsenable  = true;
                     if (detailDump) {
                         Log::Field("FieldArchive: [SVDUMP] ent=%d m=%d ip=%d PUSH 0x%X (%d) stk=%d",
                                    e, m, ip, (unsigned)pushVal, (int)pushVal, pushCount + 1);
@@ -827,6 +839,41 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
             }
         }
 
+        // v0.17.8.8: Save-line detection, signal (a) -- own-script save.
+        // The Line-classification block just above reclassifies EVERY Line
+        // entity to a LINE_* type, which discards the JSM_ENT_SAVE_POINT the
+        // type cascade would otherwise assign to a Line whose own script
+        // invokes the save menu (MENUSAVE/SAVEENABLE/PHSENABLE). Preserve that
+        // signal on a side flag the catalog can read, so the surfaced
+        // Interaction can be labelled "Save Point" instead of "Interaction N".
+        // (foundSaveenable also covers PHSENABLE -- see the opcode scan.)
+        //
+        // Two detection paths feed this:
+        //   * foundMenusave/foundSaveenable -- save opcode resolved through a
+        //     0x1C dispatch (works when the dispatch index is a readable
+        //     literal/PSHM the scan can follow).
+        //   * ownSaveConst -- the save opcode CONSTANTS appear as literal pushes
+        //     in the line's own bytecode. bghall_1 'selphie' dispatches save via
+        //     a runtime-supplied 0x1C (empty-stack, like the dorm bed) so the
+        //     resolved flags never fire, but it literally pushes 0x12F
+        //     (SAVEENABLE) and 0x130 (PHSENABLE). Requiring MENUSAVE alone, or
+        //     SAVEENABLE+PHSENABLE together, keeps it tight -- the sibling
+        //     control line 'zells' has neither and is unaffected.
+        bool ownSaveConst = sawLitMenusave || (sawLitSaveenable && sawLitPhsenable);
+        if (info.jsmCategory == 1 && (foundMenusave || foundSaveenable || ownSaveConst)) {
+            info.isSaveLine = true;
+            // Ensure the line actually surfaces in the catalog. A pure save
+            // line might have no dialog/extDispatch and would otherwise fall to
+            // CAMERA_PAN (hidden); force INTERACTIVE so it appears (and gets
+            // relabelled to Save Point by the catalog).
+            if (info.type != JSM_ENT_LINE_INTERACTIVE)
+                info.type = JSM_ENT_LINE_INTERACTIVE;
+            Log::Field("FieldArchive: [JSMScan] save-line(own): Line ent%d '%s' "
+                       "invokes save menu -> isSaveLine=1 (resolved=%d const=%d) [v0.17.8.8]",
+                       e, info.symName,
+                       (foundMenusave || foundSaveenable) ? 1 : 0, ownSaveConst ? 1 : 0);
+        }
+
         // v0.12.24: Store ext dispatch flag for dual-purpose Line detection.
         info.hasExtDispatch = foundExtDispatch;
 
@@ -1083,113 +1130,11 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                              outEntities, outCount);
     }
 
-    // v0.07.88: Diagnostic — log POPM_W addresses for unclassified "Other" entities.
-    // This helps identify which memory addresses real exit entities write to.
-    // v0.12.11: DISABLED — served its purpose, clutters log.
-    if (false)
-    for (int e2 = 0; e2 < outCount && e2 < 128; e2++) {
-        const JSMEntityInfo& ei = outEntities[e2];
-        if (ei.jsmCategory != 3) continue;  // only Others
-        if (ei.type != JSM_ENT_UNKNOWN && ei.type != JSM_ENT_NPC) continue;  // only unclassified
-        if (s_entityPopms[ei.jsmIndex].count == 0) continue;
-        char addrBuf[256] = {};
-        int pos = 0;
-        for (int p = 0; p < s_entityPopms[ei.jsmIndex].count && pos < 240; p++)
-            pos += snprintf(addrBuf + pos, 256 - pos, "%d ", (int)s_entityPopms[ei.jsmIndex].addrs[p]);
-        Log::Field("FieldArchive: [JSMScan] POPM_W diag: ent%d '%s' type=%s writes=[%s]",
-                   ei.jsmIndex, ei.symName, JSMEntityTypeName(ei.type), addrBuf);
-    }
-
-    // v0.07.99: Diagnostic — log entities with PSHM_W coordinate markers.
-    // These are entities whose SET3 coordinates come from runtime memory variables.
-    // The logged addresses tell us which game memory holds X/Y/Z for each entity.
-    // v0.12.11: DISABLED — served its purpose, clutters log.
-    if (false)
-    for (int e2 = 0; e2 < outCount; e2++) {
-        const JSMEntityInfo& ei = outEntities[e2];
-        if (!ei.hasPshmCoords) continue;
-        Log::Field("FieldArchive: [SET3-DIAG] SUMMARY ent%d '%s' cat=%d type=%s "
-                   "pshmAddr X=%d Y=%d Z=%d tri=%u litX=%d litY=%d litZ=%d",
-                   ei.jsmIndex, ei.symName, ei.jsmCategory,
-                   JSMEntityTypeName(ei.type),
-                   (int)ei.pshmAddrX, (int)ei.pshmAddrY, (int)ei.pshmAddrZ,
-                   (unsigned)ei.posTriangle,
-                   (int)ei.posX, (int)ei.posY, (int)ei.posZ);
-    }
-
-    // v0.07.89: Diagnostic — dump ALL s_methodMapjumps entries for the field.
-    // v0.12.11: DISABLED — served its purpose, clutters log.
-    if (false)
-    {
-        int mjCount = 0;
-        for (int mi = 0; mi < totalMethods && mi < MAX_METHOD_MAPJUMPS; mi++) {
-            if (!s_methodMapjumps[mi].found) continue;
-            mjCount++;
-            // Find which entity owns this method by checking group boundaries.
-            int ownerEnt = -1;
-            for (int oe = 0; oe < totalEntities; oe++) {
-                int mStart = groups[oe].startMethodIdx;
-                int mEnd   = mStart + groups[oe].methodCount;  // inclusive range is [mStart..mEnd]
-                if (mi >= mStart && mi <= mEnd) {
-                    ownerEnt = oe;
-                    break;
-                }
-            }
-            int ownerSym = ownerEnt - countDoors;
-            const char* ownerName = (ownerSym >= 0 && ownerSym < symCount) ? symNames[ownerSym] : "?";
-            // Build PSHM_W address list.
-            char pshmBuf[256] = {};
-            int pp = 0;
-            for (int r = 0; r < s_methodMapjumps[mi].pshmCount && pp < 240; r++)
-                pp += snprintf(pshmBuf + pp, 256 - pp, "%d ", (int)s_methodMapjumps[mi].pshmAddrs[r]);
-            Log::Field("FieldArchive: [JSMScan] MAPJUMP-method diag: method=%d owner=ent%d '%s' dest=%d pshm=[%s]",
-                       mi, ownerEnt, ownerName, s_methodMapjumps[mi].destFieldId, pshmBuf);
-        }
-        Log::Field("FieldArchive: [JSMScan] MAPJUMP-method diag: %d methods with MAPJUMP out of %d total",
-                   mjCount, totalMethods);
-    }
-
-    // v0.07.93: INF gateway diagnostic using correct Deling format.
-    // v0.12.11: DISABLED — served its purpose, clutters log.
-    if (false)
-    {
-        std::vector<uint8_t> infDiag;
-        if (ExtractInnerFile(fieldName, ".inf", infDiag) && infDiag.size() >= 676) {
-            const uint8_t* infBase = infDiag.data();
-            // Log field name from INF header (first 9 bytes).
-            char infName[10] = {};
-            memcpy(infName, infBase, 9);
-            Log::Field("FieldArchive: [INF-DIAG] '%s' size=%d infName='%s'",
-                       fieldName, (int)infDiag.size(), infName);
-            for (int gi = 0; gi < 12; gi++) {
-                const uint8_t* gw = infBase + 0x64 + gi * 32;
-                int16_t  x1 = *(const int16_t*)(gw + 0);
-                int16_t  y1 = *(const int16_t*)(gw + 2);
-                int16_t  z1 = *(const int16_t*)(gw + 4);
-                int16_t  x2 = *(const int16_t*)(gw + 6);
-                int16_t  y2 = *(const int16_t*)(gw + 8);
-                int16_t  z2 = *(const int16_t*)(gw + 10);
-                // Destination point (spawn position in target field)
-                int16_t  dx = *(const int16_t*)(gw + 12);
-                int16_t  dy = *(const int16_t*)(gw + 14);
-                int16_t  dz = *(const int16_t*)(gw + 16);
-                uint16_t destId = *(const uint16_t*)(gw + 18);
-                const char* destName = (destId < 0x7FFF && destId < (uint16_t)s_fieldNames.size())
-                                       ? GetFieldNameById(destId) : nullptr;
-                float cx = (float)(x1 + x2) / 2.0f;
-                float cy = (float)(y1 + y2) / 2.0f;
-                Log::Field("FieldArchive: [INF-DIAG] gw[%d] line=(%d,%d,%d)->(%d,%d,%d) center=(%.0f,%.0f) "
-                           "dest=(%d,%d,%d) fieldId=%u '%s'",
-                           gi, (int)x1, (int)y1, (int)z1, (int)x2, (int)y2, (int)z2,
-                           cx, cy, (int)dx, (int)dy, (int)dz,
-                           (unsigned)destId,
-                           destName ? destName : (destId == 0xFFFF ? "UNUSED" : (destId == 0x7FFF ? "SENTINEL" : "?")));
-            }
-        } else {
-            Log::Field("FieldArchive: [INF-DIAG] no INF or too small for '%s' (size=%d)",
-                       fieldName, infDiag.empty() ? 0 : (int)infDiag.size());
-        }
-    }
+    // v0.17.8.9 [size]: four long-disabled `if (false)` diagnostic blocks were
+    // removed here to keep this file under the size ceiling -- POPM_W-address
+    // dump (v0.07.88), PSHM_W-coords summary (v0.07.99), per-method MAPJUMP dump
+    // (v0.07.89), and the INF-gateway dump (v0.07.93). All were dead code
+    // (guarded by `if (false)`) and are recoverable from git history if needed.
 
     // v0.12.24 / v0.17.7.5.4: REQ-following for Line entity interaction detection.
     // If a Line entity REQs another entity that has dialog opcodes or ext dispatch,
@@ -1233,6 +1178,55 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
             outEntities[i].hasDialogReqTarget = true;
             Log::Field("FieldArchive: [JSMScan] REQ-interact: Line ent%d '%s' REQs interactive entity -> hasDialogReqTarget=1",
                        e, outEntities[i].symName);
+        }
+
+        // v0.17.8.8: Save-line detection, signal (b) -- REQ to a save point.
+        // A Line that REQs an entity classified SAVE_POINT (or with a save*/svpt
+        // SYM name, in case that entity was classified MAP_EXIT because its
+        // script also contains a MAPJUMP -- e.g. bghall_1 'saveline0') is the
+        // walk-on trigger that opens the save menu. Flag the Line so the catalog
+        // labels it "Save Point". The Line already has a position (its SETLINE
+        // center), so no save-point positioning is needed.
+        if (!outEntities[i].isSaveLine) {
+            for (int r = 0; r < s_entityReqs[e].count && !outEntities[i].isSaveLine; r++) {
+                int tgt = s_entityReqs[e].calls[r].targetEntity;
+                for (int t2 = 0; t2 < outCount; t2++) {
+                    if (outEntities[t2].jsmIndex != tgt) continue;
+                    bool tgtIsSave = (outEntities[t2].type == JSM_ENT_SAVE_POINT) ||
+                                     (_strnicmp(outEntities[t2].symName, "save", 4) == 0) ||
+                                     (_strnicmp(outEntities[t2].symName, "svpt", 4) == 0);
+                    if (tgtIsSave) {
+                        outEntities[i].isSaveLine = true;
+                        outEntities[i].hasDialogReqTarget = true;  // ensure it surfaces
+                        Log::Field("FieldArchive: [JSMScan] save-line(req): Line ent%d '%s' "
+                                   "REQs save point ent%d '%s' -> isSaveLine=1 [v0.17.8.8]",
+                                   e, outEntities[i].symName, tgt, outEntities[t2].symName);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // v0.17.8.8: Save-point wiring diagnostic. For every entity classified as a
+    // Save Point, report whether it resolved a navigable position (so it can be
+    // injected as a standalone "Save Point") and whether any Line was flagged as
+    // its trigger (signal a/b above). When a field's save point has neither -- as
+    // on bghall_1, whose 'savePoint' has PSHM-only X/Y -- this line tells us the
+    // save must be wired some other way (e.g. proximity on the sparkle with no
+    // line link), which is the data needed to extend detection. One line per save
+    // point; save points are rare (0-1 per field), so this is not log spam.
+    {
+        int saveLineCount = 0;
+        for (int i = 0; i < outCount; i++)
+            if (outEntities[i].isSaveLine) saveLineCount++;
+        for (int i = 0; i < outCount; i++) {
+            if (outEntities[i].type != JSM_ENT_SAVE_POINT) continue;
+            Log::Field("FieldArchive: [JSMScan] save-wiring: ent%d '%s' hasPosition=%d "
+                       "hasPshmCoords=%d -- field has %d save-line(s) flagged [v0.17.8.8]",
+                       outEntities[i].jsmIndex, outEntities[i].symName,
+                       outEntities[i].hasPosition ? 1 : 0,
+                       outEntities[i].hasPshmCoords ? 1 : 0, saveLineCount);
         }
     }
 
@@ -1297,6 +1291,11 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
     // bed was identified as ent0 'squall' (a Line whose "rest?" AASK is reached via a
     // runtime-supplied 0x1C dispatch); it is now classified LINE_INTERACTIVE by the
     // extDisp rule in the Line-classification block above. See DEVNOTES.
+
+    // v0.17.8.9 [save-point]: the LOCAL bghall_1 script-dump diagnostic was removed
+    // once it confirmed the save signal -- 'selphie' literally pushes SAVEENABLE
+    // (0x12F) + PHSENABLE (0x130), now detected by the own-script-constant path in
+    // the Line-classification block (signal-a). See DEVNOTES / field_archive_jsm_dump.inl.
 
     return true;
 }
