@@ -32,6 +32,25 @@ static void EnterSubmenu(uint8_t cmdId, const char* source)
 
 static const char* GetBattleCharName(uint8_t partySlot) {
     if (partySlot >= 3) return "???";
+    // v0.17.8.17.2: In Laguna dream battles the savemap party formation is
+    // stale -- it still holds the regular field party (Squall/Zell/Selphie),
+    // so reading it mis-names the dream party. The live battle identity lives
+    // in the compStats actor-kind byte at +0x1C3. Confirmed by the
+    // v0.17.8.17.1 BAT [LAGU-DIAG] block: slot0 kind=10 (Ward), slot1 kind=8
+    // (Laguna), slot2 kind=9 (Kiros), matching sub_47EAF0's decoded names
+    // exactly, while savemap.party read [05 00 01] (Selphie/Squall/Zell).
+    // Actor-kinds 8/9/10 are Laguna/Kiros/Ward -- they appear ONLY in dream
+    // sequences, so when we see one we know the savemap is stale and use the
+    // actor-kind directly. For regular characters (actor-kind 0-7) we fall
+    // through to the battle-tested savemap path below, guaranteeing zero
+    // behavior change for normal battles.
+    __try {
+        uint8_t actorKind = *(uint8_t*)(BATTLE_COMP_STATS_BASE
+                                        + partySlot * BATTLE_COMP_STATS_STRIDE + 0x1C3);
+        if (actorKind == 8)  return "Laguna";
+        if (actorKind == 9)  return "Kiros";
+        if (actorKind == 10) return "Ward";
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
     __try {
         uint8_t charIdx = *(uint8_t*)(SAVEMAP_PARTY_FORMATION + partySlot);
         if (charIdx < 8) return CHAR_NAMES[charIdx];
@@ -45,7 +64,28 @@ static void BuildCharCommandList(uint8_t partySlot) {
     s_turnCharCommands[2] = 0x00;
     s_turnCharCommands[3] = 0x00;
     if (partySlot >= 3) return;
-    
+
+    // v0.17.8.17.5: Dream-party command list uses the SAME savemap path as
+    // regular characters -- no special case. During a Laguna dream the engine
+    // loads the dream party's data into the regular character-data array, and
+    // SAVEMAP_PARTY_FORMATION[slot] indexes the active dream character's struct
+    // within it. This is already proven by BuildMagicList (+0x10) and
+    // BuildGFList (+0x58), which read this exact char struct and are validated
+    // working in dreams; commands[3] lives at +0x50 in the same struct and is
+    // stored in the mod's ability encoding (0x14 Magic, 0x15 GF, 0x16 Draw,
+    // 0x17 Item) -- exactly what GetCommandName expects. The v0.17.8.17.4
+    // [LIMIT-DIAG] dump for Laguna confirmed +0x50 = [14 15 17] = Magic, GF,
+    // Item, matching her on-screen menu and reflecting a live Draw->Item
+    // re-junction. (The v0.17.8.17.2..4 attempt to special-case dream chars by
+    // parsing the compStats command table at +0x1C was abandoned: that table
+    // has interleaved hidden entries and no reliable terminator, so the parser
+    // over-ran into adjacent struct bytes that decoded as a phantom command --
+    // the "4th command read Magic" bug. The savemap path avoids all of that.)
+    //
+    // NOTE: the NAME still needs the actor-kind override in GetBattleCharName,
+    // because the char struct here does not carry the dream display name and
+    // CHAR_NAMES[formation[slot]] would mis-name the dream party. Commands and
+    // names are independent lookups.
     __try {
         uint8_t charIdx = *(uint8_t*)(SAVEMAP_PARTY_FORMATION + partySlot);
         if (charIdx >= 8) return;

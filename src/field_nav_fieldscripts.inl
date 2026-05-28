@@ -143,7 +143,18 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                 uint8_t lim = (entCount < MAX_ENTITIES) ? entCount : (uint8_t)MAX_ENTITIES;
                 for (int i = 0; i < (int)lim; i++) {
                     uint8_t  setpc = *(base + ENTITY_STRIDE * i + 0x255);
-                    if (setpc == 0) {
+                    // v0.17.8.17.1: Accept any valid character ID (0..10), not
+                    // just `setpc == 0`. The old check matched only Squall (ID 0)
+                    // and so failed on Laguna dream fields like gwgrass1 where
+                    // the playable entity has setpc=8 (Laguna), 9 (Kiros), or
+                    // 10 (Ward). The first entity with a character ID is the
+                    // player; NPCs use the sentinel 254 (0xFE) and are excluded
+                    // by the < 11 bound. Confirmed by the v0.17.8.17 BAT
+                    // [LAGU-FLD] block on gwgrass1: ent0/1/2 had setpc=8/9/10
+                    // (Laguna/Kiros/Ward), ent3/4 had setpc=254 (NPCs), and the
+                    // old heuristic found nothing. Regular fields still work
+                    // because Squall's ID is 0, which satisfies `< 11`.
+                    if (setpc < 11) {
                         s_playerEntityIdx = i;
                         break;
                     }

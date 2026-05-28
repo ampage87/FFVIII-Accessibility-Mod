@@ -156,6 +156,37 @@ static const int CHR_EXISTS    = 0x94;  // uint8
 static const int CHR_STATUS    = 0x96;  // uint8
 
 // ============================================================================
+// v0.17.8.17.7: Dream-aware character identity resolver (SHARED)
+// ----------------------------------------------------------------------------
+// THE recurring Laguna-dream bug: a subsystem has a party FORMATION/character
+// index and names the character by indexing a name table with it. During a
+// dream the savemap party formation holds the STALE regular party (e.g.
+// [5,0,1] = Selphie/Squall/Zell), so that naming is wrong -- even though the
+// DATA is right, because the engine loads the dream character's struct into
+// char-data[idx]. That struct's model_id (+0x08) reads 8/9/10 for
+// Laguna/Kiros/Ward.
+//
+// This helper converts a formation/character index into the correct id to feed
+// the existing id->name mappers: it returns the model_id when that identifies
+// a dream member (8/9/10), else the original index (identical to normal play,
+// where model_id == idx for the 8 main characters -> zero regression).
+//
+// Route EVERY "formation index -> name" lookup through this. New code that
+// needs a party member's name from an index should call this first, then
+// GetCharacterNameByPortrait() (which already maps 0..10).
+// ============================================================================
+static uint8_t ResolveDreamAwareCharId(uint8_t charIdx)
+{
+    if (charIdx > 10) return charIdx;
+    __try {
+        uint8_t modelId = *((uint8_t*)SAVEMAP_BASE + CHARS_OFFSET
+                            + charIdx * CHAR_STRUCT_SIZE + CHR_MODEL_ID);
+        if (modelId >= 8 && modelId <= 10) return modelId;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return charIdx;
+}
+
+// ============================================================================
 // v0.08.27: Savemap offset verification — compare current offsets vs deep research
 // ============================================================================
 static void VerifySavemapOffsets()
@@ -525,7 +556,16 @@ static void AnnounceMenuSummary()
         if (idx > 7) continue;  // 0xFF = empty slot
         uint8_t* ch = charBase + CHAR_STRUCT_SIZE * idx;
         uint16_t hp = *(uint16_t*)(ch + CHR_CURR_HP);
-        const char* name = (idx < 8) ? CHAR_NAMES[idx] : "Unknown";
+        // v0.17.8.17.7: Dream-aware name via the shared resolver (replaces the
+        // .17.6 inline block). idx is the formation index (stale regular party
+        // during a dream); ResolveDreamAwareCharId maps it to the dream member's
+        // model_id when applicable, then GetCharacterNameByPortrait names 0..10.
+        uint8_t modelId = *(ch + CHR_MODEL_ID);
+        uint8_t nameId  = ResolveDreamAwareCharId(idx);
+        const char* name = GetCharacterNameByPortrait(nameId);
+        if (!name) name = "Unknown";
+        Log::Menu("[MenuTTS] party slot %d: formIdx=%u modelId=%u -> %s",
+                  i, (unsigned)idx, (unsigned)modelId, name);
         if (pp > 0) pp += sprintf(partyBuf + pp, ". ");
         uint32_t exp = *(uint32_t*)(ch + CHR_EXP);
         int charLvl;

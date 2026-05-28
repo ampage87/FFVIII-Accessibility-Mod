@@ -361,6 +361,35 @@ static const char* GetCharNameById(uint8_t id)
     return "Unknown";
 }
 
+// v0.17.8.17.6: Dream-party identity snapshot for the victory screen.
+// VICTORY_PARTY_ADDR (== SAVEMAP_PARTY_FORMATION) holds the STALE regular
+// field formation during a Laguna dream (e.g. [05 00 01] = Selphie/Squall/
+// Zell), so feeding party[i] straight into GetCharNameById mis-names the
+// victory EXP screen even though the EXP DATA is correct (it reads
+// char-data[formation[slot]], which holds the dream character's data).
+//
+// The live dream identity is the battle compStats actor-kind byte at +0x1C3
+// (8=Laguna, 9=Kiros, 10=Ward), the same source the in-battle name fix uses.
+// We snapshot it per ally slot every frame while in battle (where it is
+// validated valid) so it is reliably available to the victory thread, which
+// runs on a separate thread during mode 4 (right after the battle, same
+// battle module). s_isDreamBattle is set whenever any slot reads 8-10.
+// Reset in OnBattleEnter. On a normal battle these stay 0xFF / false and
+// GetVictoryCharName falls through to GetCharNameById -- zero behavior change.
+static volatile uint8_t s_dreamSlotCharId[3] = { 0xFF, 0xFF, 0xFF };
+static volatile bool    s_isDreamBattle = false;
+
+// Slot-aware victory name: prefer the snapshotted dream actor-kind for this
+// ally slot; otherwise fall back to the (battle-tested) id->name mapping.
+static const char* GetVictoryCharName(int slot, uint8_t fallbackId)
+{
+    if (s_isDreamBattle && slot >= 0 && slot < 3) {
+        uint8_t k = s_dreamSlotCharId[slot];
+        if (k >= 8 && k <= 10) return GetCharNameById(k);
+    }
+    return GetCharNameById(fallbackId);
+}
+
 static int s_victoryAutoCapture = 0;
 
 // v0.13.28: Pre-battle EXP snapshots for level-up detection
@@ -409,6 +438,12 @@ static void OnBattleEnter()
     s_turnActiveCharId = 0xFF;
     s_turnCmdCursor = 0xFF;
     memset(s_turnCharCommands, 0, sizeof(s_turnCharCommands));
+
+    // v0.17.8.17.6: Reset dream-party identity snapshot (for victory names).
+    s_dreamSlotCharId[0] = 0xFF;
+    s_dreamSlotCharId[1] = 0xFF;
+    s_dreamSlotCharId[2] = 0xFF;
+    s_isDreamBattle = false;
     
     // Reset sub-menu state
     s_inSubmenu = false;
@@ -926,6 +961,30 @@ void Update()
     // v0.13.46: Mid-battle enemy detection (e.g. Elvoret after Biggs/Wedge die)
     if (s_initAnnounceDone && s_enemyAnnounceDone) {
         RefreshEnemyNameCache();
+    }
+
+    // v0.17.8.17.6: Snapshot per-slot dream actor-kind for the victory screen.
+    // compStats[slot]+0x1C3 is 8/9/10 for Laguna/Kiros/Ward during a dream
+    // (same source the in-battle name fix uses, validated). We capture it here
+    // each frame so the value is reliably available to the separate victory
+    // thread at mode 4. Cheap (3 byte reads), SEH-guarded, no-op for normal
+    // battles (kinds 0-7 -> s_isDreamBattle stays false).
+    if (s_initAnnounceDone) {
+        __try {
+            bool anyDream = false;
+            for (int slot = 0; slot < BATTLE_ALLY_SLOTS && slot < 3; slot++) {
+                uint8_t k = *(uint8_t*)(BATTLE_COMP_STATS_BASE
+                                        + slot * BATTLE_COMP_STATS_STRIDE + 0x1C3);
+                s_dreamSlotCharId[slot] = k;
+                if (k >= 8 && k <= 10) anyDream = true;
+            }
+            if (anyDream && !s_isDreamBattle) {
+                s_isDreamBattle = true;
+                Log::Battle("BattleTTS: [DREAM-ID] Dream party detected: slot0=%u slot1=%u slot2=%u",
+                           (unsigned)s_dreamSlotCharId[0], (unsigned)s_dreamSlotCharId[1],
+                           (unsigned)s_dreamSlotCharId[2]);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
     if (s_initAnnounceDone && s_enemyAnnounceDone) {

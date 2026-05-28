@@ -152,7 +152,8 @@ static const char* GetPartyMemberName(uint8_t cursorPos)
                (unsigned)cursorPos,
                (unsigned)party[0], (unsigned)party[1], (unsigned)party[2],
                (unsigned)charIdx);
-    return GetCharacterNameByPortrait(charIdx);
+    // v0.17.8.17.7: dream-aware name (charIdx is a formation index; stale in dreams)
+    return GetCharacterNameByPortrait(ResolveDreamAwareCharId(charIdx));
 }
 
 // ============================================================================
@@ -505,7 +506,7 @@ static void PollItemSubmenu()
                 uint8_t targetCur = *(base + ITEM_TARGET_CURSOR_OFFSET);
                 s_prevTargetCursor = targetCur;
                 uint8_t charIdx = GetPartyCharAtVisualPos(targetCur);
-                const char* name = GetCharacterNameByPortrait(charIdx);
+                const char* name = GetCharacterNameByPortrait(ResolveDreamAwareCharId(charIdx));  // v0.17.8.17.7 dream-aware
                 char buf[256];
                 if (name) {
                     FormatPartyMemberAnnouncement(charIdx, name, true, buf, sizeof(buf));
@@ -620,7 +621,7 @@ static void PollItemSubmenu()
             uint8_t targetCur = *(base + ITEM_TARGET_CURSOR_OFFSET);
             if (targetCur != s_prevTargetCursor) {
                 uint8_t charIdx = GetPartyCharAtVisualPos(targetCur);
-                const char* name = GetCharacterNameByPortrait(charIdx);
+                const char* name = GetCharacterNameByPortrait(ResolveDreamAwareCharId(charIdx));  // v0.17.8.17.7 dream-aware
                 char buf[256];
                 if (name) {
                     FormatPartyMemberAnnouncement(charIdx, name, false, buf, sizeof(buf));

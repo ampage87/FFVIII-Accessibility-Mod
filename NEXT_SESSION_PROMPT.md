@@ -1,4 +1,4 @@
-# Next Session Prompt: Chapter 1 ready to push, Chapter 2 queued
+# Next Session Prompt: v0.17.8.17.7 Main-Menu (Junction char-select) dream-NAME follow-up BAT pending
 
 ## Greeting
 
@@ -6,88 +6,81 @@ Start every response with `## Claude Says`. Read `DEVNOTES.md` and THIS file bef
 
 ## Where we are at session open
 
-**v0.17.8.16 BAT-CONFIRMED, awaiting Aaron's push.** Chapter 1 (Bug #1 -- Quistis infirmary FMV premature) is closed. BAT (2026-05-27 18:10-18:12) showed the gate holding for 17 seconds on `disc00_01h.avi` then clearing on engine PLAY, all 4 cues firing at exact absolute offsets in lockstep with the FMV. No regressions on other FMVs.
+**v0.17.8.17.7 staged, Main-Menu dream-NAME follow-up BAT pending.** Victory screen (v0.17.8.17.6) is VALIDATED. The Main Menu was NOT fixed by .17.6: reading that BAT's `ff8_menu.log` showed the wrong names came from `AnnounceJuncCharSelect` (Junction character-select), not `AnnounceMenuSummary` (the M-key summary .17.6 had patched, which Aaron never invoked -- `party slot` never logged). Same stale-formation-index root cause; the game's own GCW-rendered text correctly shows Ward/Laguna/Kiros, so the dream identity is present.
 
-GitHub HEAD still `c7b80872` (v0.17.8.15.1) -- the v0.17.8.16 build is local-only until Aaron runs `Utilities/push_to_github.ps1`. The push utility validates that `CHANGELOG.md` top heading (`## v0.17.8.16`) matches `FF8OPC_VERSION` (`0.17.8.16`); both are in sync.
+**.17.7 fix.** `AnnounceJuncCharSelect` (`menu_tts_junction.inl`) now reads the displayed char's `model_id` (+0x08 in `char-data[charIdx]`) and names Laguna/Kiros/Ward when it is 8/9/10, else falls back to the formation-index name table (unchanged for normal play). Its existing per-navigation log line now prints `modelId=` so the next dream BAT confirms the value. The `AnnounceMenuSummary` model_id fix from .17.6 is retained. Victory fix untouched.
 
-## If Aaron has already pushed v0.17.8.16
+**The one open assumption:** model_id at `char-data[formation[slot]]+0x08` is 8/9/10 in the field menu (strongly supported -- in a dream you ARE Laguna's party in the field, and victory EXP confirmed char-data[formation] holds dream data -- but not yet directly observed in mode-6). The `modelId=` log line resolves it on the next BAT either way; the fallback prevents any regression.
 
-Open Chapter 2 (Laguna bundle). The first concrete step is Phase 0 research, which needs NO Laguna trigger:
+**Shared root cause (same family as the command fix).** Both subsystems read party member IDs from the savemap party formation, which during a dream holds the STALE regular field formation `[05 00 01]`, and feed those indices into a name table. The DATA they show (EXP/HP/level) is already correct, because it reads `char-data[formation[slot]]` — which the engine has loaded with the dream character's struct (same mechanism the v0.17.8.17.5 command fix relies on). Only the NAME used the wrong source.
 
-1. **Disassembly search.** In `Game Files/disassembly/`, find char-ID reads inside battle init. Compare to known savemap-formation reads. Look for any conditional read path or different source field. The goal is to identify where the engine resolves the active-battle character IDs during a Laguna dream battle.
-2. **FFNx-canary grep.** In `FFNx-Steam-v1.23.0.182\\Source Code\\FFNx-canary\\src\\`, grep for any reference to `dream`, `laguna`, or `fake party`. FFNx's struct definitions and address constants often point straight at the right field.
+**Victory screen fix (battle module — high confidence).** `GetCharNameById` already maps 8/9/10 → Laguna/Kiros/Ward; the victory code was feeding it the stale formation IDs from `VICTORY_PARTY_ADDR` (the same address as `SAVEMAP_PARTY_FORMATION`). The live dream identity is the battle `compStats` actor-kind at `+0x1C3` — the SAME source the validated in-battle name fix uses. New code in `battle_tts.cpp`:
+  - `s_dreamSlotCharId[3]` + `s_isDreamBattle`, snapshotted per ally slot every frame while in battle (where actor-kind is validated valid) so the value is reliably readable by the separate victory thread at mode 4. Reset in `OnBattleEnter`. Logs `[DREAM-ID]` once on detection.
+  - `GetVictoryCharName(slot, fallbackId)` → dream name when the slot snapshot is 8–10, else `GetCharNameById(fallbackId)`.
+  - All 7 spoken EXP announce sites in `battle_tts_victory.inl` use it (Phase 1 all-same + grouped, in both the BTXT-hook and thread-fallback paths; the 3 Phase 2 level lines). Log-only lines left as-is. No-op for normal battles.
 
-Once Phase 0 produces a hypothesis (or rules out a static-analysis answer), design the Phase 1 F12 diagnostic build that captures data for BOTH bug #7 (gwgrass1 entity dump for player-detection heuristic) AND bug #8 (compStats during dream battle init) in one Laguna playthrough.
+**Main Menu fix (no battle compStats — model_id based).** `AnnounceMenuSummary` (M key, in `menu_tts_diagnostics.inl`) read the formation index from savemap `+0xAF1` and named via `CHAR_NAMES[idx]`. It now reads the displayed character's own `model_id` (+0x08 in the loaded char struct at `char-data[idx]`) and names Laguna/Kiros/Ward when it is 8/9/10, falling back to the index table otherwise. In normal play `model_id == idx` for the 8 mains → behavior unchanged outside dreams (no regression). A `[MenuTTS] party slot N: formIdx=.. modelId=.. -> ..` log line records the actual model_id so the dream BAT confirms the mapping without a separate diagnostic.
 
-## If Aaron has NOT yet pushed v0.17.8.16
+**Confidence:** high for victory; medium-high for menu — the menu fix assumes the loaded dream char struct's `model_id` is 8/9/10 (well-supported by the field `setpc` convention and the command-fix evidence that the struct holds the dream char's data, but not yet directly observed). If the BAT log shows a different model_id, that line gives the exact value to remap; the fallback guarantees no regression either way.
 
-Don't open Chapter 2. The push is what closes the chapter. Aaron runs `Utilities/push_to_github.ps1` to push; the utility refuses if `CHANGELOG.md` and version mismatch (they don't, so the push will succeed). If Aaron wants help interpreting any push output, read `Logs/push_diagnostic.log` and `Logs/git_latest.log`.
+## If Aaron has already run the BAT
 
-## Chapter 1 summary (for context if a future session asks \"what was v0.17.8.16?\")
+Read `Logs/build_latest.log` (confirm v0.17.8.17.7 + success), then `Logs/ff8_menu.log`:
+  - Find `[JuncTTS] CharSelect: NAME ... formation[i]=U modelId=V`. Expect NAME = Ward/Laguna/Kiros and V in 8/9/10 for the dream party.
+    - **If V is 8/9/10 and the name is right** → menu fixed. Proceed to v0.17.8.17.8 cleanup.
+    - **If V is NOT 8/9/10** (e.g. the model_id held a stale 0-7 or some other value) → the menu's dream identity is not in model_id. The log gives the exact V; if it is consistent per slot, map it. Otherwise the robust fallback is to read the game's own rendered names from the GCW buffer (the `[MenuGCW]` dumps show `...SaveWardLagunaKiros<location>` — the 3 names sit right after "Save" and before the location). Do NOT guess; use the logged value.
+  - If Aaron also pressed M, check `[MenuTTS] party slot N ... modelId=V` similarly.
+  - Zero-regression: confirm a normal (non-dream) Junction char-select still announces correct names.
 
-- **Bug:** AD for Quistis infirmary FMV `disc00_01h.avi` fired ~17-22 seconds ahead of engine playback.
-- **Root cause:** `FmvAudioDesc::OnFrame` started the cue timer on AVI file-handle open via `FmvSkip::GetCurrentAviName`, but the engine can open the handle long before it actually begins playback.
-- **Fix:** Replaced the wall-clock cue timer in `src/fmv_audio_desc.cpp` with an engine-active-time accumulator (`g_engineActiveSeconds`) that only advances on frames where `FF8Addresses::IsMoviePlaying()` returns true. Gates `StartPlayback` on engine-confirmed playback; accumulator handles mid-FMV STOP/PLAY pause-resume for free.
-- **New log lines:** `[FMV_AD] AVI handle open: <name> -- waiting for engine playback` (gate deferring), `[FMV_AD] AVI detected via FmvSkip: <name> (engine confirmed playing)` (gate clearing), `[FMV_AD] Engine stopped/resumed at cue clock X.X s` (mid-FMV pause edges).
-- **Files touched:** `src/fmv_audio_desc.cpp` (the fix), `src/ff8_accessibility.h` (version), `CHANGELOG.md` (top entry).
-- **BAT result:** Perfect. 17-second gate hold, then 4/4 cues fired at correct offsets, no regressions.
+## v0.17.8.17.8 cleanup (after validation)
 
-## Chapter 2: bundled Laguna bugs (#7 + #8)
+Remove the entire F12 Laguna diagnostic, then squash-push:
+  - Delete `src/battle_tts_laguna_diag.inl` and `src/field_nav_laguna_diag.inl`.
+  - Remove their `#include`s (battle_tts.cpp after victory.inl; field_navigation.cpp after directiondrive.inl).
+  - Remove the `LagunaDiag()` wrappers + decls in battle_tts.cpp/.h and field_navigation.cpp/.h.
+  - Remove the F12 dispatcher block in dinput8.cpp.
+  - KEEP the new log lines: `[DREAM-ID]` (battle_tts.cpp), `[CMD] charIdx` (BuildCharCommandList), `[MenuTTS] party slot` (AnnounceMenuSummary), and `[JuncTTS] CharSelect ... modelId` (AnnounceJuncCharSelect) — all cheap and useful.
+  - BAT for clean build + no behavior change.
+  - Then Aaron runs `Utilities/push_to_github.ps1` to squash-push v0.17.8.17 .. .17.8 as ONE Chapter 2 commit. Confirm `github:list_commits` before/after. GitHub HEAD before push = `b6afa8cb`.
 
-Both bugs surface on `gwgrass1` (first Laguna dream field). Two Laguna playthroughs total: one for diagnostic capture, one for fix validation. The two fixes live in different files (`field_navigation.cpp` vs `battle_tts.cpp`) and different code paths, so bundling is safe.
+## BAT steps for Aaron (copy into the assistant's next message)
 
-### Phase 0: pre-build research (no build, no Laguna trigger)
-
-1. **Disassembly search** in `Game Files/disassembly/` for char-ID reads inside battle init. Compare to savemap-formation reads we already know about. Look for any divergence or conditional path.
-2. **FFNx-canary grep** for `dream`, `laguna`, or `fake party` in the FFNx source.
-
-If Phase 0 pinpoints where the dream party lives, Phase 1's compStats dump becomes a narrow byte read instead of a wide region scan.
-
-### Phase 1: shared diagnostic build (one F12 diagnostic, one Laguna BAT)
-
-Search source for existing `VK_F12` references and remove old handlers before binding the new one.
-
-**For Bug #7 (field nav, gwgrass1):** On `gwgrass1` field-load, dump every entity once to `[gwgrass-diag]` in `ff8_field.log`:
-- entity index, SYM name, model file, `setpc` value, `jsmCategory`, position (X,Y), `hasSetmodelInit`/`foundExtDispatch`/`hasTalkSetup` signals
-
-Auto-disable after one dump.
-
-**For Bug #8 (battle party):** On battle init during a Laguna dream battle, dump per active battler (slots 0/1/2) to `[gwgrass-batt-diag]` in `ff8_battle.log`:
-- First ~0x80 bytes of `compStats[N]` (narrower if Phase 0 pinpointed the field)
-- Savemap formation array `[0..3]` for comparison
-- Whatever the battle-side code currently reads to identify the character for TTS
-
-Fire once per battle init, then auto-disable.
-
-### Phase 2: shared fix build (one Laguna BAT)
-
-- **Bug #7 fix:** Extend `setpc==0` player-detection heuristic in `RefreshCatalog`/`Update` to accept the dream-player marker. File: `field_navigation.cpp`.
-- **Bug #8 fix:** Adjust active-battle character ID resolver to read the dream-party source. File: `battle_tts.cpp`.
-
-Keep both diagnostics ON in the fix build so the same BAT re-captures data on regression. Strip them in a follow-on cleanup build after BAT passes.
+  1. Close FF8 if running. Rebuild via `deploy.vbs`. Confirm `Logs/build_latest.log` shows `Version 0.17.8.17.7` + "Build successful".
+  2. In a Laguna dream, open the menu and go into Junction. Arrow across the 3 party members — confirm they announce as Ward/Laguna/Kiros (matching on-screen order), not Selphie/Squall/Zell. (Optionally press M for the summary too — also fixed.)
+  3. Open a normal (non-dream) menu and Junction char-select — confirm names are still correct (zero-regression).
+  4. Say "BAT" with what the Junction char-select announced in the dream.
 
 ## Other open work (NOT this session's focus)
 
 - Chase-chapter carry-over (v0.15.9.8.3 bridge catch + v0.15.3.1 chase-agent summary log)
-- Source-file refactor queue (only if something is about to cross 80 KB)
-- `DEVNOTES_HISTORY.md` trim (mechanical work; v0.17.8.7 cardgamemaster + bug #10 chara.one narrative)
+- Source-file refactor queue (only if approaching 80 KB)
+- `DEVNOTES_HISTORY.md` trim
 - Plan & Research Documents update (Dollet countdown doc)
+- GitHub issue #27 (R key "No SeeD rank yet" — `FIELD_H_OFFSET=0xF94` hypothesis)
 
 ## Session-start ritual reminders
 
-- Read `DEVNOTES.md` and THIS file at session start. Read `DEVNOTES_HISTORY.md` only to trace past decisions.
+- Read `DEVNOTES.md` and THIS file at session start. `DEVNOTES_HISTORY.md` only when tracing past decisions.
 - Filesystem MCP for all Windows project files. Bare `view`/`str_replace`/`create_file` reach the Linux container only.
-- `filesystem:edit_file` corrupts files when the replacement text contains a literal `$`. Use hex `0x24` in source, or `filesystem:write_file` to rewrite whole files.
-- OneDrive throws a transient EPERM on first `edit_file` rename sometimes. Retry once.
-- Aaron pushes via `Utilities/push_to_github.ps1`. Claude NEVER pushes. The utility refuses if `CHANGELOG.md` top heading doesn't match `FF8OPC_VERSION`.
-- Diagnostics on F12 only. Search source for existing `VK_F12` references and remove old handlers before binding new ones.
+- `filesystem:edit_file` corrupts files when the replacement contains a literal `$`. Use hex `0x24` in source, or `filesystem:write_file`.
+- OneDrive transient EPERM on first `edit_file` rename — retry once.
+- Aaron pushes via `Utilities/push_to_github.ps1`. Claude NEVER pushes. Utility refuses if CHANGELOG top heading != FF8OPC_VERSION.
+- Diagnostics on F12 only.
 - F-key handlers gated on `!(GetAsyncKeyState(VK_MENU) & 0x8000)`.
-- **One change per BAT cycle, with explicit exception for the Laguna chapter.** Don't generalize that exception to other chapters.
-- BAT response: read `Logs/build_latest.log` first for build errors, then the relevant domain log (`ff8_field.log` for #7, `ff8_battle.log` for #8).
-- Update DEVNOTES.md + this file at every version bump AND after every BAT result.
+- Laguna-chapter multi-change exception still in force.
+- **Minimize BAT cycles** — the dream is slow to reach. Leverage existing logs, disassembly, and FFNx source before asking for a BAT. A BAT to verify a fix or pin something down is OK; diagnostic-only round-trips are not.
+- BAT response: read `Logs/build_latest.log` first, then domain logs.
+- Update DEVNOTES + this file at every version bump AND after every BAT.
 
-## What NOT to do on session open
+## Key carry-forward learnings
 
-- Don't open Chapter 2 (Laguna bundle) until v0.17.8.16 is pushed.
-- Don't BAT or build anything before Aaron confirms direction.
-- Don't pivot to refactors, history trim, or research-doc updates unless Aaron explicitly redirects.
+- **Dream-party data lives in the regular char-data array (CONFIRMED v0.17.8.17.5).** `char-data[SAVEMAP_PARTY_FORMATION[slot]]` IS the active dream character's struct: `commands[3]`@+0x50, `magics[32]`@+0x10, GF mask@+0x58, `exp`@+0x04, `model_id`@+0x08. The savemap formation (`SAVEMAP_PARTY_FORMATION` = `VICTORY_PARTY_ADDR` = 0x1CFE74C; menu reads it at savemap `+0xAF1`) holds the STALE regular field formation `[05 00 01]` during a dream — correct for INDEXING char-data, wrong as a NAME source.
+- **Three dream-identity sources, by context:**
+  - In battle / victory (battle module live): `compStats[slot]+0x1C3` actor-kind (8=Laguna, 9=Kiros, 10=Ward). compStats base 0x1CFF000, stride 0x1D0.
+  - Main menu (no battle): the loaded char struct's `model_id` (+0x08) — assumed 8/9/10 for dream chars (BAT-confirming via the `[MenuTTS] party slot` log).
+  - Field: `setpc` (field entity +0x255).
+- **`GetCharNameById(id)`** (battle_tts.cpp): id<8→CHAR_NAMES, 8→Laguna, 9→Kiros, 10→Ward. Already correct — bugs were wrong INPUTS, not a missing mapping.
+- **`GetVictoryCharName(slot, fallbackId)`** (battle_tts.cpp, v0.17.8.17.6): dream-aware victory name; reads `s_dreamSlotCharId[slot]` snapshot.
+- **`GetCommandName`** maps ability IDs: Attack=0x01, Magic=0x14, GF=0x15, Draw=0x16, Item=0x17, Card=0x18, Devour=0x19, MiniMog=0x21, Defend=0x22, Recover=0x24, Absorb=0x25, Revive=0x26, LV Down=0x27, LV Up=0x28, Mug=0x36, Treatment=0x38. Unknown→"???".
+- **Disassembly on disk:** `Game Files/disassembly/` (8 `.text_*.asm` + index txts; NOT in container, NOT content-greppable). FFNx canary C++ at `FFNx-Steam-v1.23.0.182/Source Code/FFNx-canary/src/` has named structs (`ff8/save_data.h`: `savemap_ff8_character` model_id@0x08, commands[3]@0x50, etc.).
+- **`filesystem:edit_file` with `dryRun:true`** = content-grep substitute (empty diff on a no-op self-replace confirms the string exists in that file).

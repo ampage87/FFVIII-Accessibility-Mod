@@ -14,14 +14,38 @@ The v0.17.7.6.x chapter closed the bgroad_5 hallway calibration failure (full na
 
 ## Where we are at session open
 
-**v0.17.8.16.1 BUILT, AD-CONTENT BAT PENDING.** Chapter 1 has two stacked patches awaiting a single push:
+**v0.17.8.17.8 staged (awaits rebuild + BAT). Cleanup pass; Chapter 2 ready to close with squash-push after BAT.** v0.17.8.17.7 (dream-NAME full audit) was VALIDATED last BAT -- log evidence captured ward/laguna/kiros with modelId=10/8/9 in dream junction char-select. .17.8 removes the F12 Laguna diagnostic infrastructure with no behavior change:
 
-- **v0.17.8.16** (engine cue-clock fix) -- BAT-confirmed 2026-05-27 18:10-18:12. 17-second gate held on `disc00_01h.avi`, all 4 cues fired at exact absolute offsets in lockstep with engine playback.
-- **v0.17.8.16.1** (Quistis infirmary AD rewrite) -- the 22-second sync fix revealed the AD content itself was wrong: original described "Squall leaving the infirmary" and "Dr. Kadowaki in instructor uniform," but the scene is actually Quistis arriving to collect Squall, seeing him in the bed, and sighing in patient exasperation. Frame-verified via `ffmpeg` (27 frames at 0.5s intervals). Rewrote `Audio Descriptions/disc00_01h.vtt` with 4 tight cues (29 total words / 2.15 wps, under the project's 2.5 wps ceiling) and corrected the `FMV_SCENE_REFERENCE.md` entry so future AD authors don't repeat the misidentification. No source-code changes; the rebuild re-embeds the VTT via `resources.rc`. **Pending BAT:** Aaron rebuilds, replays the infirmary FMV, confirms the new descriptions sound right.
+  - Deleted (stubs left with `git rm` notice): `src/battle_tts_laguna_diag.inl`, `src/field_nav_laguna_diag.inl`.
+  - Removed: `LagunaDiag()` wrappers + decls in battle_tts.cpp/.h and field_navigation.cpp/.h.
+  - Removed: F12 dispatcher block + `s_f12was`/`f12` polling in dinput8.cpp.
+  - Removed: the two `#include` lines.
+  - Kept (cheap, useful log artifacts): `[DREAM-ID]` (battle_tts.cpp), `[CMD] charIdx` (BuildCharCommandList), `[MenuTTS] party slot ... modelId=` (AnnounceMenuSummary), `[JuncTTS] CharSelect ... modelId=` (AnnounceJuncCharSelect).
 
-GitHub HEAD still `c7b80872` (v0.17.8.15.1). Both v0.17.8.16 and v0.17.8.16.1 ship together in the next push.
+**Laguna bundle status (Chapter 2 closed except FIELD entity catalog follow-up):**
+  - Bug #7 (field nav): fixed v0.17.8.17.1, validated.
+  - Bug #8 NAMES (in-battle): fixed v0.17.8.17.2, validated.
+  - Bug #8 COMMAND MENU: fixed v0.17.8.17.5, validated.
+  - Bug #8 NAMES (Victory screen): fixed v0.17.8.17.6, validated.
+  - Bug #8 NAMES (Main Menu audit -- Junction char-select + M-summary + Item Use-target + GF owner): fixed v0.17.8.17.7, VALIDATED.
+  - Bug #8 NAMES (FIELD entity catalog): documented follow-up; needs dream-field model-ID observation before fixing.
+  - v0.17.8.17.8 cleanup: BAT PENDING.
 
-### Last chapter closed: bug #10 -- Hall 6 Xu mislabeled (v0.17.8.11 - v0.17.8.15.1, single-commit on GitHub)
+**Pending BAT (final one for Chapter 2):**
+  1. Rebuild via `deploy.vbs`. Confirm `Logs/build_latest.log` shows `Version 0.17.8.17.8` + `Build successful` -- the build is the verification (no behavior changes to test).
+  2. Optionally launch + take one normal battle to victory and one normal Junction char-select to confirm zero regression. F12 should now do nothing.
+  3. Aaron then `git rm src/battle_tts_laguna_diag.inl src/field_nav_laguna_diag.inl` (the stubs) and runs `Utilities/push_to_github.ps1` to squash-push v0.17.8.17 .. .17.8 as ONE Chapter 2 commit. GitHub HEAD before push = `b6afa8cb`.
+
+GitHub HEAD = `b6afa8cb` (v0.17.8.16.1, Chapter 1 closed).
+
+### Last chapter closed: Chapter 1 (Fire Cavern bug #1, Quistis infirmary FMV premature)
+
+Closed across two stacked patches squashed into one commit:
+
+- **v0.17.8.16** -- engine cue-clock fix (`fmv_audio_desc.cpp`). Replaced wall-clock cue timer with engine-active-time accumulator that only advances when `FF8Addresses::IsMoviePlaying()` returns true. BAT-confirmed 2026-05-27 18:10-18:12 on `disc00_01h.avi`: 17-second gate held, cues fired at correct offsets.
+- **v0.17.8.16.1** -- AD content rewrite for the same FMV. Engine fix BAT revealed the AD itself was wrong (misidentified Quistis as Dr. Kadowaki; framed Squall as leaving rather than lying in bed). Frame-verified via ffmpeg (27 frames @ 0.5s intervals). Rewrote `Audio Descriptions/disc00_01h.vtt` and corrected the `FMV_SCENE_REFERENCE.md` entry so future AD authors don't repeat the misidentification. BAT-confirmed 2026-05-28 (Aaron: "sounded good").
+
+### Earlier closed chapter: bug #10 -- Hall 6 Xu mislabeled (v0.17.8.11 - v0.17.8.15.1, single-commit on GitHub)
 
 Nine builds across two days. The wrong path was a chara.one model-archive parser (v0.17.8.11-.14): MinHooked `chara_one_read_file`, parsed Mch/Char headers, cross-referenced SETMODEL's chara.one slot index against the parsed model class. Successive bug fixes through this chain (Bug A isMch flag in .12; Bug B SETMODEL opcParam vs stack in .14) concluded kanban2 = prop because p048 classified as prop. The disproof: Aaron's F11 screenshot of bghall_3 (`Logs/screenshots/f11_204546_707.png`) showed Xu visibly standing as a character model in front of Squall at the kanban2 spot, dialog box reading `Xu "Hey, Squall, heard you got your first mission already!"`. There is no signpost. The chara.one classifier was wrong about p048 (p048 IS a character model on this field, regardless of the 'p' prefix convention), AND more fundamentally: file-level model classification was the wrong mechanism entirely. The right question is gameplay behavior, not model identity.
 
@@ -48,7 +72,7 @@ The full bug #10 chapter narrative (v0.17.8.11-.14 chara.one chain + v0.17.8.15/
 10. **B-Garden Hall 6 (`bghall_3`, field 170) -- NPC Xu labeled "Interaction 3" -- SOLVED (v0.17.8.15.1, BAT-confirmed + pushed 2026-05-27).** Xu was JSM `kanban2` (ent25, cat3, PSHM pos (4626,-3459)) -- the SYM name was misleading; kanban2 IS Xu. Nine builds across two days: v0.17.8.11-.14 attempted a chara.one model-archive classifier (NPC vs prop by reading model file headers, MinHooked on `chara_one_read_file`), disproved by Aaron's F11 screenshot (`Logs/screenshots/f11_204546_707.png`) showing Xu visibly standing as a character at the kanban2 spot. v0.17.8.15 ripped out the entire chara.one chain and replaced it with a clean JSM behavior signal: `jsmCategory == 3 (Other) && hasSetmodelInit` -> "NPC N". v0.17.8.15.1 added two follow-on fixes: dedupe counter (name-prefix match instead of all ENT_NPC, so friendly-named NPCs like Cid don't inflate the count) and announce sameType (type-based matching for JSM-injected entityIdx <= -300, so the "X of Y" suffix works for both NPC and Interaction). Final BAT showed `'NPC 1 1 of 1'` on bghall_3 with all expected log lines. The whole chapter pushed as single commit `c7b80872`. **Carry-forward learnings in the "Last chapter closed" section above.**
 
 **v0.17.8.1.1 (pushed) closed bug #3.** Fire Cavern playthrough bug list (Aaron's 2026-05-18 report) progress:
-1. **Quistis' FMV in the Infirmary fired prematurely** — ✅ closed by v0.17.8.16 (BAT-confirmed 2026-05-27 18:10-18:12 on infirmary FMV `disc00_01h.avi`; 17-second gate held, all 4 cues fired in lockstep with engine playback)
+1. **Quistis' FMV in the Infirmary fired prematurely** -- ✅ closed by v0.17.8.16 (timing fix) + v0.17.8.16.1 (AD content rewrite), squashed into commit `b6afa8cb`.
 2. ~~Manual field navigation direction lag and inaccurate direction guidance~~ — ✅ closed by v0.17.7.6.2
 3. ~~Garbage announced by TTS following completion of a tutorial scene~~ — ✅ closed by v0.17.8.1.1
 4. ~~Party member announced as NPC in catalog~~ — ✅ closed by v0.17.8.3 (BAT-confirmed bgryo2_1; pushed)

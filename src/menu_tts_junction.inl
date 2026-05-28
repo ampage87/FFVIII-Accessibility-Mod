@@ -118,7 +118,18 @@ static void AnnounceJuncCharSelect(uint8_t cursorPos)
             "Squall", "Zell", "Irvine", "Quistis", "Rinoa", "Selphie", "Seifer", "Edea",
             "Laguna", "Kiros", "Ward"
         };
-        const char* name = (charIdx < 11) ? JUNC_CHAR_NAMES[charIdx] : "Unknown";
+        // v0.17.8.17.7: Dream-party name fix (same model as victory screen). The
+        // formation index (charIdx, e.g. [5,0,1] = Selphie/Squall/Zell) is the
+        // STALE regular party during a Laguna dream; the dream character's data
+        // is loaded into char-data[charIdx], whose model_id (+0x08) reads 8/9/10
+        // for Laguna/Kiros/Ward. Prefer model_id when it names a dream member,
+        // else fall back to the formation index (unchanged for normal play, where
+        // model_id == charIdx for the 8 mains). The modelId is added to the log
+        // line below so a dream BAT confirms the value without a separate diag.
+        uint8_t modelId = *(sm + 0x48C + charIdx * 0x98 + 0x08);
+        const char* name;
+        if (modelId >= 8 && modelId <= 10) name = JUNC_CHAR_NAMES[modelId];
+        else                               name = (charIdx < 11) ? JUNC_CHAR_NAMES[charIdx] : "Unknown";
         
         // Get HP from computed stats (0x1CFF000, stride 0x1D0, curHP +0x172, maxHP +0x174)
         // Map charIdx to party slot via party array
@@ -153,8 +164,8 @@ static void AnnounceJuncCharSelect(uint8_t cursorPos)
             sprintf(buf, "%s, Level %d, HP %u", name, level, (unsigned)curHP);
         
         ScreenReader::Speak(buf, true);
-        Log::Menu("[JuncTTS] CharSelect: %s (cursor=%u formation[%u]=%u)",
-                   buf, (unsigned)cursorPos, (unsigned)cursorPos, (unsigned)charIdx);
+        Log::Menu("[JuncTTS] CharSelect: %s (cursor=%u formation[%u]=%u modelId=%u)",
+                   buf, (unsigned)cursorPos, (unsigned)cursorPos, (unsigned)charIdx, (unsigned)modelId);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         Log::Menu("[JuncTTS] Exception in AnnounceJuncCharSelect");
     }
@@ -570,12 +581,25 @@ static void PollJunctionSubmenu()
                 };
                 uint8_t owner = FindGfOwner(realGfIdx);
                 uint8_t selChar = GetJuncSelectedCharIdx();
+                // v0.17.8.17.7: dream-aware owner name. owner is a regular char
+                // index (0-7) from FindGfOwner; during a dream the dream member's
+                // struct is loaded into char-data[owner] and its model_id (+0x08)
+                // reads 8/9/10. Map through that so "on <name>" says Laguna/Kiros/
+                // Ward, not the stale regular name. (Literal savemap addr used
+                // because the shared resolver is defined in a later include.)
+                uint8_t ownerName = owner;
+                if (owner < 11) {
+                    __try {
+                        uint8_t m = *((uint8_t*)0x1CFDC5C + 0x48C + owner * 0x98 + 0x08);
+                        if (m >= 8 && m <= 10) ownerName = m;
+                    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                }
                 
                 char buf[128];
                 if (owner != 0xFF && owner == selChar) {
                     sprintf(buf, "%s, junctioned", gfName);
                 } else if (owner != 0xFF && owner < 11) {
-                    sprintf(buf, "%s, on %s", gfName, JUNC_CHAR_NAMES2[owner]);
+                    sprintf(buf, "%s, on %s", gfName, JUNC_CHAR_NAMES2[ownerName]);
                 } else {
                     sprintf(buf, "%s", gfName);
                 }

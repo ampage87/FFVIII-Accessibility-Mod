@@ -250,7 +250,7 @@ static uint32_t __cdecl HookedBtCandidate1(uint32_t a1, uint32_t a2, uint32_t a3
                                         else if (i > 0)
                                             pos += snprintf(buf + pos, sizeof(buf) - pos, ", ");
                                         pos += snprintf(buf + pos, sizeof(buf) - pos, "%s",
-                                                       GetCharNameById(party[i]));
+                                                       GetVictoryCharName(i, party[i]));
                                     }
                                     pos += snprintf(buf + pos, sizeof(buf) - pos,
                                                    " received %u EXP.", expEarned[0]);
@@ -267,7 +267,7 @@ static uint32_t __cdecl HookedBtCandidate1(uint32_t a1, uint32_t a2, uint32_t a3
                                                 if (groupCount > 0)
                                                     pos += snprintf(buf + pos, sizeof(buf) - pos, " and ");
                                                 pos += snprintf(buf + pos, sizeof(buf) - pos, "%s",
-                                                               GetCharNameById(party[j]));
+                                                               GetVictoryCharName(j, party[j]));
                                                 announced[j] = true;
                                                 groupCount++;
                                             }
@@ -1326,7 +1326,7 @@ static DWORD WINAPI VictoryScreenThreadFunc(LPVOID)
                         for (int i = 0; i < partyCount; i++) {
                             if (i > 0 && i == partyCount - 1) pos += snprintf(buf + pos, sizeof(buf) - pos, " and ");
                             else if (i > 0) pos += snprintf(buf + pos, sizeof(buf) - pos, ", ");
-                            pos += snprintf(buf + pos, sizeof(buf) - pos, "%s", GetCharNameById(party[i]));
+                            pos += snprintf(buf + pos, sizeof(buf) - pos, "%s", GetVictoryCharName(i, party[i]));
                         }
                         pos += snprintf(buf + pos, sizeof(buf) - pos, " received %u EXP.", expEarned[0]);
                     } else {
@@ -1340,7 +1340,7 @@ static DWORD WINAPI VictoryScreenThreadFunc(LPVOID)
                             for (int j = i; j < partyCount; j++) {
                                 if (expEarned[j] == expEarned[i] && !announced[j]) {
                                     if (groupCount > 0) pos += snprintf(buf + pos, sizeof(buf) - pos, " and ");
-                                    pos += snprintf(buf + pos, sizeof(buf) - pos, "%s", GetCharNameById(party[j]));
+                                    pos += snprintf(buf + pos, sizeof(buf) - pos, "%s", GetVictoryCharName(j, party[j]));
                                     announced[j] = true;
                                     groupCount++;
                                 }
@@ -1403,7 +1403,7 @@ static DWORD WINAPI VictoryScreenThreadFunc(LPVOID)
                             if (curLevel >= 100) {
                                 if (leveledUp) {
                                     pos += snprintf(buf + pos, sizeof(buf) - pos,
-                                        "%s reached level 100. ", GetCharNameById(party[ps]));
+                                        "%s reached level 100. ", GetVictoryCharName(ps, party[ps]));
                                 }
                             } else {
                                 uint32_t nextThreshold = (uint32_t)curLevel * 1000;
@@ -1413,11 +1413,11 @@ static DWORD WINAPI VictoryScreenThreadFunc(LPVOID)
                                 if (leveledUp) {
                                     pos += snprintf(buf + pos, sizeof(buf) - pos,
                                         "%s reached level %d and has %u EXP to reach level %d. ",
-                                        GetCharNameById(party[ps]), curLevel, expToNext, nextLevel);
+                                        GetVictoryCharName(ps, party[ps]), curLevel, expToNext, nextLevel);
                                 } else {
                                     pos += snprintf(buf + pos, sizeof(buf) - pos,
                                         "%s has %u EXP to reach level %d. ",
-                                        GetCharNameById(party[ps]), expToNext, nextLevel);
+                                        GetVictoryCharName(ps, party[ps]), expToNext, nextLevel);
                                 }
                             }
                         }

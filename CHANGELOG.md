@@ -6,6 +6,427 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.8.17.8
+
+Chapter 2 cleanup. Closes the Laguna chapter by retiring the F12 Phase 1
+diagnostic infrastructure. No behavior change for normal gameplay -- the dream
+fixes from v0.17.8.17.1 .. .17.7 remain in place and validated.
+
+**Removed:**
+  - `src/battle_tts_laguna_diag.inl` (battle-mode diag: sub_47EAF0 / compStats /
+    savemap.party dump). Stub left containing only a `git rm` notice.
+  - `src/field_nav_laguna_diag.inl` (field-mode diag: Others/Background entity
+    dump with player-detection signals). Stub left containing only a `git rm`
+    notice.
+  - `BattleTTS::LagunaDiag()` wrapper + declaration (battle_tts.cpp / .h).
+  - `FieldNavigation::LagunaDiag()` wrapper + declaration (field_navigation.cpp
+    / .h).
+  - F12 dispatcher block in `src/dinput8.cpp` (game-mode routed between battle
+    and field diag). The F12 key is once again reserved for the next session's
+    diagnostic, with no active binding.
+  - The two corresponding `#include` lines (battle_tts.cpp after victory.inl,
+    field_navigation.cpp after directiondrive.inl).
+
+**Kept (the useful artifacts from this chapter):**
+  - `[DREAM-ID]` log line in battle_tts.cpp (one-shot dream-party detection).
+  - `[CMD] charIdx` log line in BuildCharCommandList.
+  - `[MenuTTS] party slot ... modelId=` in AnnounceMenuSummary.
+  - `[JuncTTS] CharSelect ... modelId=` in AnnounceJuncCharSelect.
+  These are cheap, fire only on already-logged paths, and document the
+  observed dream-identity values for future reference.
+
+## v0.17.8.17.7
+
+Chapter 2 bug #8 dream-party names: Main Menu fix + a PROACTIVE AUDIT of every
+character-naming site, so the dream-name issue stops surfacing one screen at a
+time. The v0.17.8.17.6 Victory-screen fix validated; the Main Menu did not,
+because the wrong names came from a different function than the one .17.6
+patched -- which prompted auditing the whole codebase for the same pattern.
+
+**The shared root cause (whole bundle).** A subsystem has a party FORMATION /
+character index and names the character by indexing a name table with it.
+During a Laguna dream the savemap formation holds the STALE regular party
+(e.g. [5,0,1] = Selphie/Squall/Zell), so the NAME is wrong even though the
+DATA is right (the engine loads the dream character's struct -- incl. model_id
+at +0x08 = 8/9/10 -- into char-data[idx]).
+
+**New shared resolver.** `ResolveDreamAwareCharId(charIdx)` (menu_tts_diagnostics.inl)
+converts a formation index to the correct id: returns model_id when it names a
+dream member (8/9/10), else the index (identical to normal play, where
+model_id == idx -> zero regression). Feed its result to the existing
+GetCharacterNameByPortrait()/id->name mappers. All new menu naming routes
+through it.
+
+**Menu sites fixed (the audit's hits):**
+  - `AnnounceJuncCharSelect` (Junction character select) -- the actual source
+    of the reported Main Menu bug; the M-key summary .17.6 patched was never
+    invoked in that BAT. Now model_id-aware.
+  - `AnnounceMenuSummary` (M-key summary) -- refactored from the .17.6 inline
+    block to the shared resolver + GetCharacterNameByPortrait (also fixes the
+    prior 8-name table ceiling).
+  - `menu_tts_item.inl`: item Use-target announce (entry + cursor) and
+    `GetPartyMemberName` -- named the target party member via the formation
+    index; now dream-aware. HP/level reads stay keyed on the index (correct --
+    dream data lives there).
+  - `menu_tts_junction.inl` GF-list owner display ("GF on <name>") -- the
+    FindGfOwner index is now mapped through model_id so a GF on a dream member
+    reads Laguna/Kiros/Ward.
+
+**Verified already dream-safe (no change needed):**
+  - All in-battle ally naming -- turn announce, target selection, HP keys
+    (1/2/3/H), command menu, victory EXP, and the Draw "drawer" -- routes
+    through `GetBattleCharName` (compStats actor-kind +0x1C3) or
+    `GetVictoryCharName`, both dream-aware. The battle `CHAR_NAMES[8]` table is
+    only reached as the actor-kind fallback for regular characters.
+  - Scan TTS -- operates on enemy data only; no party naming.
+  - Battle status ailment TTS -- announces ailments, no character name table.
+  - Menu help bar (/ key) and save-screen party list -- read the game's own
+    rendered text (GCW) or save-file portrait IDs, not the live formation.
+
+**Known follow-up (NOT fixed -- needs observation, not a guess):** the FIELD
+entity catalog's `ResolveNameByModelId` (field_nav_names.inl) uses a separate,
+partly-unconfirmed FIELD model-ID convention (field 8=Quistis-uniform, 9=
+"Laguna?") that differs from the savemap convention. Naming dream party
+followers in the field would need the dream field model IDs captured first;
+guessing risks regressing the confirmed field models 0-8. Logged for a future
+dream-field catalog observation.
+
+Each fixed menu site logs its decode (`[JuncTTS] CharSelect ... modelId=`,
+`[MenuTTS] party slot ... modelId=`) so a dream BAT confirms the model_id
+assumption holds without a separate diagnostic.
+
+## v0.17.8.17.6
+
+Chapter 2 bug #8 dream-party NAMES on the Victory screen and Main Menu. During
+a Laguna dream both announced the regular party (Selphie/Squall/Zell) instead
+of Laguna/Kiros/Ward. These are separate subsystems from the in-battle command
+menu, so the in-battle actor-kind name fix never reached them.
+
+**Shared root cause.** Both read party member IDs from the savemap party
+formation, which during a dream holds the STALE regular field formation (e.g.
+`[05 00 01]`), and feed those indices into a name table. The character DATA
+they display (EXP, HP, level) is already correct, because that is read from
+`char-data[formation[slot]]`, which the engine has loaded with the dream
+character's struct -- the same mechanism the v0.17.8.17.5 command fix relies
+on. Only the NAME lookup used the wrong (stale-index) source.
+
+**Victory screen fix.** The live dream identity is the battle `compStats`
+actor-kind byte at `+0x1C3` (8=Laguna, 9=Kiros, 10=Ward) -- the same source
+the validated in-battle name fix uses. It is snapshotted per ally slot every
+frame while in battle (where it is validated valid) into `s_dreamSlotCharId[3]`
+/ `s_isDreamBattle`, so it is reliably available to the victory thread at mode
+4 (right after the battle, same battle module). A new `GetVictoryCharName(slot,
+fallbackId)` helper returns the dream name when the slot's snapshot is 8-10 and
+otherwise falls through to the existing id->name mapping. All seven spoken EXP
+announce sites (Phase 1 all-same + grouped, in both the BTXT-hook and
+thread-fallback paths, and the three Phase 2 level lines) now use it. Reset in
+`OnBattleEnter`; no-op for normal battles (kinds 0-7 -> snapshot stays false).
+
+**Main Menu fix.** `AnnounceMenuSummary` (M key) read the formation index from
+savemap `+0xAF1` and named via `CHAR_NAMES[idx]`. It now reads the displayed
+character's own `model_id` (+0x08 in the loaded char struct) and names
+Laguna/Kiros/Ward when it is 8/9/10, falling back to the index table otherwise.
+In normal play `model_id == idx` for the 8 main characters, so behavior is
+unchanged outside dreams. A `[MenuTTS] party slot N: formIdx=.. modelId=.. ->
+..` log line records the actual `model_id` so a dream BAT confirms the mapping
+without a separate diagnostic.
+
+The command menu fix (v0.17.8.17.5) remains validated; this build only adds the
+Victory/Main-Menu name handling and does not touch the command path.
+
+## v0.17.8.17.5
+
+Chapter 2 bug #8 command menu, fixed properly. The Laguna dream command menu
+now reads out every option correctly, sourced from the same savemap character
+struct that the (already-working) Magic and GF submenus use, so it tracks the
+player's junctions live.
+
+**Root cause.** v0.17.8.17.2 abandoned the normal savemap `commands[3]` path
+for dream characters and special-cased them by parsing the in-battle compStats
+command table at `compStats[slot]+0x1C`. That table interleaves hidden/disabled
+entries among the visible ones and has no reliable end marker, so the parser
+ran past the real list into adjacent struct bytes that happened to decode as a
+valid command -- producing the "4th command reads Magic" bug and failing to
+track a Draw->Item re-junction.
+
+**Why the savemap path is correct for dreams.** During a Laguna dream the
+engine loads the dream party's data into the regular character-data array, and
+`SAVEMAP_PARTY_FORMATION[slot]` indexes the active dream character's struct
+within it. `BuildMagicList` (+0x10) and `BuildGFList` (+0x58) already rely on
+this and are validated working in dreams. `commands[3]` lives at +0x50 in that
+same struct, stored in the mod's ability encoding (0x14 Magic, 0x15 GF, 0x16
+Draw, 0x17 Item) -- exactly what `GetCommandName` expects. The v0.17.8.17.4
+battle log confirms it: the `[LIMIT-DIAG]` dump for Laguna's turn read +0x50 =
+`14 15 17` (Magic, GF, Item) -- matching her on-screen menu and reflecting the
+live Draw->Item swap -- and its magics region was byte-identical to the magic
+list the mod read out, proving it is the same struct the command path reads.
+
+`BuildCharCommandList` now uses the ordinary savemap `commands[3]` path for all
+characters (the dream-specific compStats parser is removed). The actor-kind
+name override in `GetBattleCharName` is unchanged -- names still need it,
+because the char struct here does not carry the dream display name; commands
+and names are independent lookups.
+
+The F12 `[LAGU-CMD]`/`[LAGU-DIAG]` diagnostic stays in for this validation
+build; it is removed in the v0.17.8.17.6 cleanup.
+
+**Known separate issue (not addressed here):** the Victory screen and Main
+Menu still show the regular party names (Squall/Zell/Selphie) during dreams.
+Those are different text subsystems (tkbtl victory render / tkmenu) that the
+in-battle name fix never covered; tracked as its own follow-up.
+
+**Modified files:**
+  - `src/battle_tts_menu_helpers.inl` (dream command list now uses savemap path)
+  - `src/ff8_accessibility.h` (version bump)
+  - `CHANGELOG.md` (this entry)
+
+## v0.17.8.17.4
+
+Chapter 2 bug #8: the Laguna dream battle command menu now reads out every
+option, sourced from the engine's LIVE per-character command list so it
+reflects whatever the player has junctioned (the dream party is fully
+junctionable, so the command set is dynamic and must never be hard-coded).
+
+**What broke.** v0.17.8.17.2 left `s_turnCharCommands` at `[Attack, 0, 0, 0]`
+for dream characters, so the cursor announcer in `battle_tts_menu_poll.inl`
+(which speaks `GetCommandName(s_turnCharCommands[cursor])`) read 0x00 for
+cursors 1-3 and said nothing.
+
+**The source.** Decoded from the v0.17.8.17.3 `[LAGU-CMD]` dump,
+cross-referenced against an F11 screenshot of Ward's menu:
+  - The live command list sits at `compStats[slot] + 0x1C`, 4-byte entries
+    `{ u16 param, u8 cmdId, u8 flags }`. The engine's own command-window
+    pointer at `0x01D76834` references this region.
+  - `cmdId` is battle-command encoding; the ability id `GetCommandName`
+    expects is `cmdId + 0x12` (Magic 0x02->0x14, GF 0x03->0x15,
+    Draw 0x04->0x16, ...). `cmdId 0x01` is Attack (slot 0).
+  - `flags` bit `0x02` set means the command is present but hidden/disabled
+    (not shown in the player menu).
+  - The list ends at `cmdId 0x00`, or at the first entry whose `cmdId+0x12`
+    isn't a known command (i.e. we've walked into adjacent struct data).
+  Ward decodes to `[Attack, Magic, GF, Draw]` exactly matching the
+  screenshot, with Card (0x06) and LV Up (0x16) present-but-hidden.
+
+`BuildCharCommandList` now walks that live list for dream characters
+(actor-kind 8/9/10), collecting up to three shown, non-Attack commands into
+slots 1-3. Regular battles (actor-kind 0-7) keep the unchanged savemap path,
+so normal play is unaffected. The decoded result is logged per turn as
+`[CMD] dream-party slot N ... cmds=[Attack ...]` for BAT verification.
+
+The F12 `[LAGU-CMD]`/`[LAGU-DIAG]` diagnostic stays in for this validation
+build; it is removed in the v0.17.8.17.5 cleanup.
+
+**Modified files:**
+  - `src/battle_tts_menu_helpers.inl` (live command-list parser for dream party)
+  - `src/ff8_accessibility.h` (version bump)
+  - `CHANGELOG.md` (this entry)
+
+## v0.17.8.17.3
+
+Chapter 2 bug #8 follow-up: command-menu source diagnostic. The
+v0.17.8.17.2 BAT confirmed the dream party is now correctly NAMED
+(Laguna/Kiros/Ward) and field navigation works, but surfaced a
+secondary issue: while moving through the battle command menu during a
+Laguna dream battle, most command options don't read out.
+
+**Cause.** The command-menu cursor announcer in `battle_tts_menu_poll.inl`
+reads `s_turnCharCommands[cursor]` and speaks `GetCommandName(...)`.
+v0.17.8.17.2's `BuildCharCommandList` returns early for dream characters
+(actor-kind 8/9/10), leaving `s_turnCharCommands = [Attack, 0, 0, 0]`.
+So cursor 0 says "Attack" but cursors 1-3 read `0x00` and announce
+nothing useful. The earlier assumption that the live cursor announcer
+would cover the rest was wrong -- that announcer IS this code, and it
+depends on `s_turnCharCommands` being populated.
+
+**Why a diagnostic and not a fix.** The dream party's command list isn't
+in the savemap (the savemap character struct only covers the 8 permanent
+characters, IDs 0-7), and none of the compStats offsets sampled by the
+v0.17.8.17.1 `[LAGU-DIAG]` dump contained the command IDs. Hard-coding
+the commands is fragile -- FF8 has several Laguna dream sequences that
+may use different command sets. So this build extends the F12 battle
+diagnostic to locate the engine's runtime command source precisely:
+  - active char id + command cursor + current `s_turnCharCommands[]`
+  - FULL compStats slab (0x000..0x1CF) for each ally slot
+  - battle menu region 0x01D76800..0x01D768FF (the structure the command
+    cursor at 0x01D76843 indexes)
+All under the `[LAGU-CMD]` tag, appended to the existing `[LAGU-DIAG]`
+dump. v0.17.8.17.4 will read the located source and populate
+`s_turnCharCommands` for dream characters.
+
+The v0.17.8.17.2 name fix is unchanged and still in effect.
+
+**Modified files:**
+  - `src/battle_tts_laguna_diag.inl` (command-menu source hunt added to the battle diagnostic)
+  - `src/ff8_accessibility.h` (version bump)
+  - `CHANGELOG.md` (this entry)
+
+## v0.17.8.17.2
+
+Chapter 2 bug #8 fix: Laguna dream battles now announce the correct party
+(Laguna/Kiros/Ward) instead of the regular party (Squall/Zell/Selphie).
+
+**Root cause (confirmed by the v0.17.8.17.1 BAT `[LAGU-DIAG]` block).**
+`GetBattleCharName` and `BuildCharCommandList` in
+`battle_tts_menu_helpers.inl` both read the savemap party formation at
+`SAVEMAP_PARTY_FORMATION` (`0x1CFE74C`). During a dream battle that array
+is stale -- it still holds the regular field party. The BAT dump showed
+`savemap.party = [05 00 01]` (Selphie/Squall/Zell) while the live battle
+slots were Ward/Laguna/Kiros. So the mod announced "Zell's turn" for a
+slot that was actually Kiros, etc. The live, correct identity is the
+compStats actor-kind byte at `+0x1C3`: the BAT showed slot0=10 (Ward),
+slot1=8 (Laguna), slot2=9 (Kiros), matching `sub_47EAF0`'s decoded name
+strings exactly.
+
+**Fix.** Both functions now read `compStats[slot]:0x1C3` first. When the
+actor-kind is 8, 9, or 10 (Laguna/Kiros/Ward -- IDs that appear ONLY in
+dream sequences), the function uses the dream identity directly:
+  - `GetBattleCharName` returns "Laguna"/"Kiros"/"Ward".
+  - `BuildCharCommandList` leaves the command list at just "Attack"
+    (the dream party has no savemap character-data entry to source
+    equipped commands from; the live cursor-navigation announcer covers
+    the rest of the menu as the player moves through it).
+For any other actor-kind (the 8 permanent characters, IDs 0-7) both
+functions fall through to the original savemap path completely unchanged,
+so normal battles have zero behavior change. The gate is safe because
+actor-kinds 8/9/10 are exclusively the dream characters -- a regular
+battle never produces them.
+
+This closes Chapter 2's bug #8. Combined with the v0.17.8.17.1 bug #7 fix
+(field navigation on Laguna fields) the Laguna bundle is functionally
+complete. The F12 Laguna diagnostic (`battle_tts_laguna_diag.inl` /
+`field_nav_laguna_diag.inl` and their wiring) is left in place for this
+validation BAT and should be removed in a cleanup pass before the
+Chapter 2 squash-push.
+
+**Modified files:**
+  - `src/battle_tts_menu_helpers.inl` (`GetBattleCharName` + `BuildCharCommandList` dream-party gate)
+  - `src/ff8_accessibility.h` (version bump)
+  - `CHANGELOG.md` (this entry)
+
+## v0.17.8.17.1
+
+Chapter 2 (Laguna bundle) Phase 1+2 stacked patch. The v0.17.8.17 BAT
+revealed two bugs in v0.17.8.17 itself plus confirmed the bug #7 root
+cause, so this build folds the diagnostic dispatch fix together with
+the bug #7 fix. The bug #8 diagnostic stays in -- the same Laguna BAT
+that validates bug #7 will capture the still-missing battle-side data
+for the v0.17.8.17.2 bug #8 fix.
+
+**Fix 1: F12 dispatch (`src/dinput8.cpp`).** The v0.17.8.17 dispatcher
+branched on `mode == 999`, expecting that to be the active-battle mode.
+The v0.17.8.17 BAT proved otherwise: during a battle on `gwgrass1` with
+continuous battle-engine activity in `ff8_battle.log` (turn announces,
+ATB caps, GF-HOOK, EWM-DIAG), the F12 press at 20:28:13 routed to the
+*field* diagnostic, not the battle diagnostic -- because `*pGameMode`
+at that moment was 3, not 999. `BattleTTS::Update` itself checks
+`mode == 3` for battle detection, and that path works in normal
+gameplay (HP tracking, turn announces, etc. all fire correctly). The
+`MODE_BATTLE = 999` enum in `ff8_addresses.h` is mislabeled or used
+for a different layer; the active-battle game-mode value is 3 (what
+the enum calls `MODE_SWIRL`, which is actually held the entire battle,
+not just the entry animation). The dispatcher now uses `mode == 3`
+and the battle diagnostic will fire when F12 is pressed during a
+battle.
+
+**Fix 2: Player detection on Laguna fields (`src/field_nav_fieldscripts.inl`).**
+The at-field-load player-detection loop in `HookedFieldScriptsInit`
+checked `setpc == 0`, expecting that to identify Squall. The
+v0.17.8.17 BAT `[LAGU-FLD]` block on `gwgrass1` proved `setpc` is
+the *character ID*, not a boolean: ent0 had `setpc=8` (Laguna), ent1
+`setpc=9` (Kiros), ent2 `setpc=10` (Ward), ent3/4 `setpc=254` (NPC
+sentinel). On regular fields Squall has `setpc=0` and the old check
+worked by accident -- ID 0 is one valid character ID among 11. The
+fix accepts any `setpc < 11` (covering all 11 playable characters:
+Squall=0 through Ward=10) and rejects the NPC sentinel 254. Regular
+fields still work because Squall=0 satisfies the bound; Laguna fields
+now work because ent0=8 also satisfies it.
+
+**Diagnostic stays in.** The `[LAGU-DIAG]` / `[LAGU-FLD]` blocks from
+v0.17.8.17 are unchanged. Re-running the Laguna BAT with this build
+should: (1) demonstrate field navigation works correctly on
+`gwgrass1` (bug #7 fix validation), and (2) capture the battle-side
+dump in `ff8_battle.log` when F12 is pressed during the dream
+battle (bug #8 data collection that v0.17.8.17 missed). The next
+build (v0.17.8.17.2) ships the bug #8 fix from that data.
+
+**Modified files:**
+  - `src/dinput8.cpp` (dispatch fix: `mode == 999` -> `mode == 3`)
+  - `src/field_nav_fieldscripts.inl` (player detection: `setpc == 0` -> `setpc < 11`)
+  - `src/ff8_accessibility.h` (version bump)
+  - `CHANGELOG.md` (this entry)
+
+## v0.17.8.17
+
+Chapter 2 (Laguna bundle, bugs #7 + #8) Phase 1 diagnostic build. No fixes
+in this build -- data collection only. F12 is the trigger; it dispatches
+by game mode:
+
+  - In battle (mode 999) -> `BattleTTS::LagunaDiag()` writes a one-shot
+    `[LAGU-DIAG]` block to `ff8_battle.log`.
+  - Anywhere else -> `FieldNavigation::LagunaDiag()` writes a one-shot
+    `[LAGU-FLD]` block to `ff8_field.log`.
+
+The previous F12 binding (`DialogInject::Phase1_TestMes` /
+`Phase2_TestAsk` from v0.17.7.x) is removed per the F12 diagnostic-key
+rule. The DialogInject test functions themselves remain in source --
+they just aren't keyboard-triggered anymore.
+
+**Battle dump (bug #8).** For each ally slot 0..2:
+  - Calls `sub_47EAF0(slot)` (the engine's actor-name function) and logs
+    both the raw pointer and the FF8-decoded string. Disassembly of
+    `sub_47EAF0` shows it reads `compStats[slot]:0x1C3` (an "actor kind"
+    byte), then either returns a fallback string for kind 0/4 or indexes
+    a 36-byte-stride table at `0x1CF75EC` to compute the final string
+    pointer. If this returns Laguna/Kiros/Ward during a dream battle, the
+    v0.17.8.17.1 fix is to route `GetBattleCharName` through this function
+    instead of the savemap-side party-formation read.
+  - Logs `compStats[slot]:0x1C3` explicitly (actor-kind byte).
+  - Hex-dumps `compStats[slot][0x00..0x1F]` (early common fields),
+    `[0x40..0x5F]` (savemap mirrors equipped commands at +0x50; if
+    compStats follows the same layout the dream-party command IDs land
+    here), and `[0x1B0..0x1CF]` (context around the actor-kind byte).
+  - Logs HP from compStats (+0x172/+0x174) vs the entity array as a
+    sanity-check that the slab is the correct slot.
+  - Logs `savemap.party[0..3]` at `0x1CFE74C` so we can confirm the
+    savemap-side formation still holds the regular party during a dream
+    sequence (the root cause of `GetBattleCharName` returning wrong
+    names from `battle_tts_menu_helpers.inl`).
+
+**Field dump (bug #7).** Logs the current `fieldId` then iterates every
+entity in the field's Others array (`pFieldStateOthers`,
+`pFieldStateOtherCount`, stride `0x264`) and Background array
+(`pFieldStateBackgrounds`, stride `0x1B4`). Per entity logs the signals
+the player-detection heuristic depends on: `model_id` (+0x218),
+`triangle_id` (+0x1FA), `setpc` (+0x255), `talkonoff` (+0x24B),
+`pushonoff` (+0x249), `throughonoff` (+0x24C), `execFlags` (+0x160),
+field position (+0x190/0x198) and simulated position (+0x20/0x28). On
+gwgrass1 the dump should reveal whether the player entity has
+`setpc != 0` (matching the current heuristic) or a different discriminator
+(triggering bug #7).
+
+**Pre-build research (Phase 0) carried in this commit.** Disassembly of
+`sub_47EAF0`. Confirmation that `SAVEMAP_PARTY_FORMATION` (`0x1CFE74C`)
+is the savemap-side regular party, separate from `party_other[4]` later
+in the savemap struct (FFNx `save_data.h`). Identification of
+`savemap_ff8_battle.special_flags` bit 0 = `dream` discriminator.
+Review of `battle_tts_menu_helpers.inl::GetBattleCharName` and
+`BuildCharCommandList`, both of which currently read
+`SAVEMAP_PARTY_FORMATION` and gate on `charIdx < 8` -- the dual mechanism
+behind bug #8 (wrong source + missing IDs 8/9/10 for Laguna/Kiros/Ward).
+
+**New source files (textual includes; no `deploy.bat` change required):**
+  - `src/battle_tts_laguna_diag.inl`
+  - `src/field_nav_laguna_diag.inl`
+
+**Modified files:**
+  - `src/battle_tts.cpp` (include + public `LagunaDiag()` wrapper)
+  - `src/battle_tts.h` (public declaration)
+  - `src/field_navigation.cpp` (include + public `LagunaDiag()` wrapper)
+  - `src/field_navigation.h` (public declaration)
+  - `src/dinput8.cpp` (F12 dispatcher; old DialogInject binding removed)
+  - `src/ff8_accessibility.h` (version bump)
+  - `CHANGELOG.md` (this entry)
+
 ## v0.17.8.16.1
 
 Audio descriptions: rewrite the Quistis-infirmary FMV (`disc00_01h.vtt`)
