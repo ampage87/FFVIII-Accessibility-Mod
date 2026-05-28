@@ -6,6 +6,61 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.8.18.1
+
+Chapter 3: Scan-on-allies fix. BAT-confirmed 2026-05-28: scanning Squall in
+a regular battle announced the full canonical description ("Uses a sword
+called a gunblade. Special skill is Renzokuken, using the gunblade. Silent,
+and a bit cold."). `[SCAN-CACHE]` log captured `monsterId=0x00 hasDesc=1`
+for Squall, confirming the `+0xB3` lookup chain is universal across allies
+and enemies. Zero-regression check passed: Bite Bug enemy scan worked
+identically (`monsterId=0x2C hasDesc=1`, full description played).
+
+Before the fix, casting Scan on any ally (regular party or Laguna dream
+party) announced "No description available." Aaron confirmed FF8 ships
+canonical Scan descriptions for ALL playable characters: Squall, Zell,
+Irvine, Quistis, Rinoa, Selphie, Seifer, Edea, Laguna, Kiros, Ward. The
+mod has been silently dropping the description on every ally Scan since
+the feature shipped -- not just dream party.
+
+**Root cause.** Two code sites in `src/scan_tts.cpp` enforced an `isAlly`
+guard based on a wrong architectural assumption. The inline comment read:
+"Allies don't have a meaningful entry (the byte at 0xB3 is whatever the
+engine has loaded there -- usually 0 or stale data); the auto-announce omits
+the description for ally targets." Both claims wrong. The game DOES have
+descriptions for every playable character, and the engine reads them via
+the same `+0xB3 -> monster_id -> SCAN_TEXT_POSITIONS -> SCAN_TEXT_DATA`
+chain it uses for enemies. The in-game Scan UI renders them on screen --
+proof that the lookup chain works for allies.
+
+**Fix.** Lift both guards. The existing safety filters in
+`ResolveDescriptionSafe` (`monsterId == 0xFF` sentinel, `pos == 0xFFFF`
+sentinel, `pos >= 0x4000` garbage filter, empty-decode filter) already
+handle any genuinely-invalid byte, so attempting the lookup for an ally
+is no worse than v0.17.8.17.8 behavior in any failure mode. In the
+success case (the norm per Aaron's confirmation), the description gets
+announced.
+
+  - `CaptureSnapshot` (around the monsterId / description read): removed
+    `!snap.isAlly` from the lookup gate. Same `+0xB3` read, same
+    `ResolveDescriptionSafe` call, applied unconditionally.
+  - `BuildAutoAnnounce`: removed `!snap.isAlly` from the description-
+    append check. `if (snap.hasDescription)` alone now gates the
+    auto-announce description.
+  - `SpeakField` case 2 (key `2` description query): collapsed the
+    ally branch into the generic `snap.hasDescription ? description :
+    "No description available."` path.
+  - Architectural comment block at the top of the file rewritten to
+    document the actual universal-lookup behavior.
+
+**Zero-regression observation.** The `[SCAN-CACHE]` log line already prints
+`monsterId=` and `hasDesc=` for the captured slot regardless of ally/enemy,
+so the BAT log surfaces whether the ally lookup succeeded without any new
+diagnostic. If a particular ally slot turns out to have a stale +0xB3 byte
+(`hasDesc=0` in the log), the fallback message is the exact same
+"No description available." as v0.17.8.17.8 -- no behavior worse than
+shipped.
+
 ## v0.17.8.17.8
 
 Chapter 2 cleanup. Closes the Laguna chapter by retiring the F12 Phase 1

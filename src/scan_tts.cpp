@@ -94,16 +94,23 @@ namespace ScanTTS {
 //
 // monster_id / description lookup chain (from deep research, see
 // Plan & Research Documents/Scan spell deep research results.md).
-// For an enemy at battle entity slot N, the Scan UI fetches its
-// description like so:
+// For any battle entity slot N (ally OR enemy), the Scan UI fetches
+// its description like so:
 //   monster_id = *(uint8_t*) (entity_base + 0xB3)
 //   pos        = *(uint16_t*)(SCAN_TEXT_POSITIONS + monster_id * 2)
 //   raw bytes  = (const uint8_t*)(SCAN_TEXT_DATA + pos)
 //   string     = FF8TextDecode::Decode(raw, 256)
 // FFNx names these tables `scan_text_positions` and `scan_text_data`.
-// Allies don't have a meaningful entry (the byte at 0xB3 is whatever
-// the engine has loaded there — usually 0 or stale data); the auto-
-// announce omits the description for ally targets.
+// v0.17.8.18.1: prior comment claimed allies have no meaningful entry
+// at +0xB3; that was wrong. FF8 ships canonical Scan descriptions for
+// ALL playable characters (Squall, Zell, Irvine, Quistis, Rinoa,
+// Selphie, Seifer, Edea, Laguna, Kiros, Ward) -- the in-game Scan UI
+// renders them via this same +0xB3 lookup chain. The mod now attempts
+// the lookup for both ally and enemy slots. ResolveDescriptionSafe's
+// filters (monsterId == 0xFF sentinel, pos == 0xFFFF, pos >= 0x4000,
+// empty decode) catch any genuinely-invalid byte values, so the
+// universal lookup is safe even on slots where +0xB3 happens to be
+// stale (the fallback path announces "No description available.").
 static const uint32_t SCAN_TEXT_POSITIONS = 0x01887474;
 static const uint32_t SCAN_TEXT_DATA      = 0x018875B4;
 static const uint32_t BENT_MONSTER_ID     = 0xB3;  // u8
@@ -529,10 +536,18 @@ static void CaptureSnapshot(int slot)
         snap.hpHidden = (snap.maxHP > HIDDEN_HP_SOFT_THRESHOLD);
     }
 
-    // monster_id + description (enemies only — ally byte at 0xB3 is
-    // whatever the engine has loaded; description lookup would index
-    // into the wrong table and produce garbage).
-    if (!snap.isAlly && ReadSlotMonsterId(slot, &snap.monsterId)) {
+    // monster_id + description. v0.17.8.18.1: lifted the prior
+    // !isAlly guard -- the original assumption that allies have no
+    // meaningful entry at +0xB3 was wrong. FF8 ships canonical Scan
+    // descriptions for ALL playable characters (regular and dream
+    // party), and the engine reads them via the same +0xB3 ->
+    // monster_id lookup it uses for enemies. ResolveDescriptionSafe's
+    // existing filters (0xFF sentinel, 0xFFFF pos sentinel, pos >=
+    // 0x4000 garbage filter, empty-decode filter) handle the case
+    // where some slot's byte is genuinely stale -- the announce then
+    // falls back to "No description available." which is exactly
+    // the .17.8 behavior.
+    if (ReadSlotMonsterId(slot, &snap.monsterId)) {
         snap.hasDescription = ResolveDescriptionSafe(
             snap.monsterId, snap.description, sizeof(snap.description));
     }
@@ -629,7 +644,7 @@ static void BuildAutoAnnounce(const ScanSnapshot& snap, char* out, int outSize)
 {
     int pos = 0;
     pos += snprintf(out + pos, outSize - pos, "%s.", snap.name);
-    if (!snap.isAlly && snap.hasDescription) {
+    if (snap.hasDescription) {
         // v0.14.60: Strip trailing period from description before composing.
         // The decoded scan text from the game data ends in '.' and our
         // template appends another '.' — producing "...may be a shark..
@@ -1245,9 +1260,14 @@ void SpeakField(int fieldId)
         snprintf(msg, sizeof(msg), "%s.", snap.name);
         break;
     case 2:  // Description
-        if (snap.isAlly) {
-            snprintf(msg, sizeof(msg), "No description available.");
-        } else if (snap.hasDescription) {
+        // v0.17.8.18.1: ally branch removed. All playable characters
+        // (regular and dream party) have canonical Scan descriptions;
+        // lookup uses the same +0xB3 -> table chain as enemies, and
+        // succeeds for valid character slots. The fallback applies
+        // only if the lookup actually failed (sentinel byte, out-of-
+        // range pos, decode failure) -- no longer hardcoded by
+        // ally/enemy.
+        if (snap.hasDescription) {
             snprintf(msg, sizeof(msg), "%s", snap.description);
         } else {
             snprintf(msg, sizeof(msg), "No description available.");

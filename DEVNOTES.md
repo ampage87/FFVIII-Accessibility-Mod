@@ -4,7 +4,7 @@ Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` inj
 
 **Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
 
-GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.17.8.15.1** (commit `c7b80872`, bug-#10 Hall 6 Xu mislabeled fix, BAT-confirmed + pushed 2026-05-27 23:34 UTC). The push folded the entire v0.17.8.11-.15.1 chapter (chara.one classifier attempt + full revert + clean JSM-behavior-signal fix + label/announce follow-on) into a single commit. **Local tree = v0.17.8.15.1** (matches HEAD). Aaron pushes via `Utilities/push_to_github.ps1` (Claude never pushes); diagnostic builds stay LOCAL. **Size status:** all source files comfortably under the 80 KB ceiling.
+GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.17.8.17.8** (commit `b7067354`, Chapter 2 cleanup -- Laguna F12 diagnostic infrastructure removed; pushed 2026-05-28 22:52 UTC). The push folded v0.17.8.17.1 .. .17.8 (the full Laguna dream chapter: field nav player-detection fix, in-battle / command-menu / victory / main-menu / item-Use / GF-owner dream-NAME fixes, then F12 cleanup) into a single commit. Parent is `b6afa8cb` (v0.17.8.16.1, Chapter 1 close). **Local tree = v0.17.8.17.8** (matches HEAD; Chapter 3 patch staged on top -- see below). Aaron pushes via `Utilities/push_to_github.ps1` (Claude never pushes); diagnostic builds stay LOCAL. **Size status:** all source files comfortably under the 80 KB ceiling.
 
 **bghall_1 save point — SOLVED + SHIPPED in v0.17.8.9 (BAT-confirmed; signal found via a now-removed LOCAL script dump):** the LOCAL dump of bghall_1 entities (zells/selphie/savePoint/saveline0) proved the save line is `ent5 'selphie'` (the SETLINE at (-700,-8593) currently shown as "Interaction 1"). Its script literally pushes the save-enable opcodes as constants: PUSH 303 (0x12F SAVEENABLE) and PUSH 304 (0x130 PHSENABLE) in BOTH method[6] (dwords 3624/3632) and method[7] (3657/3665). The control line `ent4 'zells'` has NONE of these (clean discriminator). Why the scanner missed it: selphie's ONLY 0x1C is the bare runtime-supplied dispatch in method[1] (`EXT_DISPATCH` empty-stack, like the dorm bed) — the save constants live in methods 6/7 and are never popped by a local 0x1C, so dispatch-resolution can't set foundSaveenable. savePoint (ent27) is unpositioned (X=PSHM135 Y=PSHM588, no SET3-shift) and its 0x1C resolves to a runtime PSHM; saveline0 (ent36) is a REQ-chain controller with a MAPJUMP (classified MAP_EXIT) and no statically-visible save op — so neither save-POINT entity can carry the label. **FIX (the chosen association, field-load, no cache, no heuristic guess): in the JSM scan, for a Line entity (jsmCategory==1) scan its full bytecode for literal PUSH of the save opcodes — set foundSaveenable when MENUSAVE(302) is present OR both SAVEENABLE(303) and PHSENABLE(304) are present. That makes signal-(a) fire -> isSaveLine -> the catalog surfaces selphie as "Save Point" at its own SETLINE center (-700,-8593), exactly where auto-drive already arrives.** Contrast (why the dorm bgryo2_1 already works): its savePoint gets a SET3-SHIFT position (229,97) and injects directly, and its saveline0 has a statically-visible save op + LATE-RESOLVE position — bghall_1 has neither, which is why the own-script-constant route on the LINE is the right fix here.
 
@@ -14,29 +14,54 @@ The v0.17.7.6.x chapter closed the bgroad_5 hallway calibration failure (full na
 
 ## Where we are at session open
 
-**v0.17.8.17.8 staged (awaits rebuild + BAT). Cleanup pass; Chapter 2 ready to close with squash-push after BAT.** v0.17.8.17.7 (dream-NAME full audit) was VALIDATED last BAT -- log evidence captured ward/laguna/kiros with modelId=10/8/9 in dream junction char-select. .17.8 removes the F12 Laguna diagnostic infrastructure with no behavior change:
+**Chapter 3 BAT-VALIDATED, ready to push (v0.17.8.18.1). Scan-on-allies fix.** Chapter 2 closed cleanly at GitHub HEAD `b7067354` on 2026-05-28 22:52 UTC. Chapter 3 opened, fixed, and BAT-confirmed in a single session.
 
-  - Deleted (stubs left with `git rm` notice): `src/battle_tts_laguna_diag.inl`, `src/field_nav_laguna_diag.inl`.
-  - Removed: `LagunaDiag()` wrappers + decls in battle_tts.cpp/.h and field_navigation.cpp/.h.
-  - Removed: F12 dispatcher block + `s_f12was`/`f12` polling in dinput8.cpp.
-  - Removed: the two `#include` lines.
-  - Kept (cheap, useful log artifacts): `[DREAM-ID]` (battle_tts.cpp), `[CMD] charIdx` (BuildCharCommandList), `[MenuTTS] party slot ... modelId=` (AnnounceMenuSummary), `[JuncTTS] CharSelect ... modelId=` (AnnounceJuncCharSelect).
+**BAT evidence (2026-05-28 17:05-17:07):** Squall scanned in regular battle, slot 1 (ally):
+```
+[SCAN-CACHE] Captured slot=1 name='Squall' monsterId=0x00 hasDesc=1
+[SCAN-TTS] Auto-announce slot=1 msg='Squall. Uses a sword called a gunblade.
+           Special skill is Renzokuken, using the gunblade. Silent, and a
+           bit cold. Press numbers 0 through 9 for details.'
+[SCAN-TTS] SpeakField slot=1 fieldId=2 msg='Uses a sword called a gunblade...'
+```
+The full canonical description played. Aaron also pressed `2` to re-query (the field-2 description path) -- both code paths work. Zero-regression check: Bite Bug at slot 3 also scanned (`monsterId=0x2C hasDesc=1`, full description played).
 
-**Laguna bundle status (Chapter 2 closed except FIELD entity catalog follow-up):**
-  - Bug #7 (field nav): fixed v0.17.8.17.1, validated.
-  - Bug #8 NAMES (in-battle): fixed v0.17.8.17.2, validated.
-  - Bug #8 COMMAND MENU: fixed v0.17.8.17.5, validated.
-  - Bug #8 NAMES (Victory screen): fixed v0.17.8.17.6, validated.
-  - Bug #8 NAMES (Main Menu audit -- Junction char-select + M-summary + Item Use-target + GF owner): fixed v0.17.8.17.7, VALIDATED.
+**Chapter 3 carry-forward learnings:**
+  - **The architectural assumption was wrong on every count.** The original `scan_tts.cpp` comment claimed allies had no meaningful entry at `+0xB3`. Squall's BAT-captured byte was `0x00` -- a valid, specific scan-table index pointing to his canonical description. The `+0xB3 -> monster_id -> SCAN_TEXT_POSITIONS -> SCAN_TEXT_DATA` lookup chain is genuinely universal across allies and enemies.
+  - **Squall is monster_id 0x00 in the scan table** (incidentally; not a magic value -- just where his entry happens to live). If we ever want the complete playable-cast mapping documented we can collect it during a future session, but the universal lookup makes that unnecessary -- it just works for every slot.
+  - **One-patch fix shape.** No diagnostic infrastructure was added because the existing `[SCAN-CACHE]` log line printed `monsterId` and `hasDesc` for every captured slot regardless of ally/enemy. That was enough to verify both the success case and the would-be failure case without writing a new diagnostic. Worth remembering as a pattern: when a fix removes a guard, the log line beyond the guard often already gives you the verification you need.
+
+**Code change shape (in `src/scan_tts.cpp`):**
+  - `CaptureSnapshot`: removed `!snap.isAlly` from the lookup gate. Same `+0xB3` read, same `ResolveDescriptionSafe` call, applied unconditionally.
+  - `BuildAutoAnnounce`: removed `!snap.isAlly` from the description-append check. `if (snap.hasDescription)` alone now gates the auto-announce description.
+  - `SpeakField` case 2 (key `2` description query): collapsed the ally branch into the generic `snap.hasDescription ? description : "No description available."` path.
+  - Architectural comment block rewritten to document the actual universal-lookup behavior. `ResolveDescriptionSafe`'s existing filters (`monsterId == 0xFF` sentinel, `pos == 0xFFFF`, `pos >= 0x4000`, empty decode) catch any genuinely-stale byte without needing the ally guard.
+
+**Ready to push.** Aaron runs `Utilities/push_to_github.ps1` to push v0.17.8.18.1 as a single commit. GitHub HEAD before push = `b7067354`.
+
+**Laguna bundle (Chapter 2, all PUSHED):**
+  - Bug #7 (field nav): fixed v0.17.8.17.1.
+  - Bug #8 NAMES (in-battle): fixed v0.17.8.17.2.
+  - Bug #8 COMMAND MENU: fixed v0.17.8.17.5.
+  - Bug #8 NAMES (Victory screen): fixed v0.17.8.17.6.
+  - Bug #8 NAMES (Main Menu audit -- Junction char-select + M-summary + Item Use-target + GF owner): fixed v0.17.8.17.7.
+  - v0.17.8.17.8 cleanup: F12 Laguna diagnostic infrastructure removed.
   - Bug #8 NAMES (FIELD entity catalog): documented follow-up; needs dream-field model-ID observation before fixing.
-  - v0.17.8.17.8 cleanup: BAT PENDING.
 
-**Pending BAT (final one for Chapter 2):**
-  1. Rebuild via `deploy.vbs`. Confirm `Logs/build_latest.log` shows `Version 0.17.8.17.8` + `Build successful` -- the build is the verification (no behavior changes to test).
-  2. Optionally launch + take one normal battle to victory and one normal Junction char-select to confirm zero regression. F12 should now do nothing.
-  3. Aaron then `git rm src/battle_tts_laguna_diag.inl src/field_nav_laguna_diag.inl` (the stubs) and runs `Utilities/push_to_github.ps1` to squash-push v0.17.8.17 .. .17.8 as ONE Chapter 2 commit. GitHub HEAD before push = `b6afa8cb`.
+GitHub HEAD = `b7067354` (v0.17.8.17.8, Chapter 2 closed).
 
-GitHub HEAD = `b6afa8cb` (v0.17.8.16.1, Chapter 1 closed).
+### Last chapter closed: Chapter 2 (Laguna dream bundle -- bugs #7 + #8)
+
+Seven incremental fixes squashed into commit `b7067354` on 2026-05-28. Detailed narrative in `CHANGELOG.md` v0.17.8.17.1 .. .17.8 entries. Key carry-forwards:
+
+  - **Dream party data lives in regular char-data array (CONFIRMED v0.17.8.17.5 + .17.7).** `char-data[SAVEMAP_PARTY_FORMATION[slot]]` IS the active dream character's struct: `commands[3]@+0x50`, `magics[32]@+0x10`, GF mask@+0x58, `exp@+0x04`, `model_id@+0x08`. The savemap formation (`SAVEMAP_PARTY_FORMATION = 0x1CFE74C`; menu reads `+0xAF1`) holds the STALE regular field formation `[05 00 01]` during a dream -- correct for INDEXING char-data, wrong as a NAME source.
+  - **Three dream-identity sources, by context (BAT-confirmed during this chapter):**
+    - In battle / victory (battle module live): `compStats[slot]+0x1C3` actor-kind (8=Laguna, 9=Kiros, 10=Ward). compStats base 0x1CFF000, stride 0x1D0.
+    - Main menu (no battle): the loaded char struct's `model_id` (+0x08) -- the v0.17.8.17.7 BAT log captured `modelId=10/8/9` for Ward/Laguna/Kiros in mode-6 dream junction.
+    - Field: `setpc` (field entity +0x255). v0.17.8.17.1 used this to fix bug #7.
+  - **`ResolveDreamAwareCharId(charIdx)` (menu_tts_diagnostics.inl, v0.17.8.17.7):** THE canonical resolver for formation-index -> dream-aware name. Returns model_id when 8/9/10, else original index. Used by AnnounceMenuSummary, GetPartyMemberName, item Use-target naming; Junction GF-owner uses inline literal-address version.
+  - **`GetBattleCharName(partySlot)` (battle_tts_menu_helpers.inl):** in-battle actor-kind override for dream, falls back to savemap for regular. All in-battle ally naming (turn/target/HP keys/command menu/victory/drawer) routes through this. Battle `CHAR_NAMES[8]` is only the actor-kind fallback for regular characters.
+  - **`GetVictoryCharName(slot, fallbackId)` (battle_tts.cpp, v0.17.8.17.6):** dream-aware victory name; reads `s_dreamSlotCharId[slot]` snapshot captured per-frame during battle for cross-thread reach to the victory thread at mode 4.
 
 ### Last chapter closed: Chapter 1 (Fire Cavern bug #1, Quistis infirmary FMV premature)
 
