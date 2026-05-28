@@ -1,4 +1,4 @@
-# Next Session Prompt: BAT v0.17.8.15.1 (label/announce follow-on fixes)
+# Next Session Prompt: Chapter 1 ready to push, Chapter 2 queued
 
 ## Greeting
 
@@ -6,58 +6,88 @@ Start every response with `## Claude Says`. Read `DEVNOTES.md` and THIS file bef
 
 ## Where we are at session open
 
-**v0.17.8.15.1 IS IN TREE, AWAITING BUILD + BAT.** `FF8OPC_VERSION` = `0.17.8.15.1`; CHANGELOG top heading matches. GitHub HEAD = v0.17.8.10 (`59f1a9dd`). v0.17.8.11 through .15.1 are local-only deltas (the entire chara.one chain, its revert, and now this label/announce follow-on).
+**v0.17.8.16 BAT-CONFIRMED, awaiting Aaron's push.** Chapter 1 (Bug #1 -- Quistis infirmary FMV premature) is closed. BAT (2026-05-27 18:10-18:12) showed the gate holding for 17 seconds on `disc00_01h.avi` then clearing on engine PLAY, all 4 cues firing at exact absolute offsets in lockstep with the FMV. No regressions on other FMVs.
 
-## What v0.17.8.15.1 does, in one paragraph
+GitHub HEAD still `c7b80872` (v0.17.8.15.1) -- the v0.17.8.16 build is local-only until Aaron runs `Utilities/push_to_github.ps1`. The push utility validates that `CHANGELOG.md` top heading (`## v0.17.8.16`) matches `FF8OPC_VERSION` (`0.17.8.16`); both are in sync.
 
-The v0.17.8.15 BAT confirmed the JSM-behavior-signal NPC relabel works — kanban2 (Xu) is correctly typed NPC now instead of Interaction. But two follow-on bugs surfaced in the label + announce path: (A) the dedupe counter inflated kanban2 to "NPC 2" because it counted friendly-named ENT_NPC entries like Cid toward the generic "NPC N" sequence; (B) the announce sameType test used the legacy `entityIdx >= 0` heuristic which failed for JSM-injected NPCs (entityIdx ≤ -300), producing the "1 of 0" suffix Aaron heard as "NPC 2, 1 of 0". v0.17.8.15.1 fixes both: counter in `field_nav_catalog_dedupe.inl` now counts entries whose name matches the `"NPC %d"` prefix only; announce code in `field_nav_announce.inl` adds type-based sameType matching for both ENT_NPC and ENT_INTERACTION (plus a typeLabel branch for ENT_INTERACTION that was missing entirely). The Interaction fix also closes the watch-list item from v0.17.8.13/.14 ("Interaction 3 1 of 0").
+## If Aaron has already pushed v0.17.8.16
 
-## Step 1: BAT triage
+Open Chapter 2 (Laguna bundle). The first concrete step is Phase 0 research, which needs NO Laguna trigger:
 
-1. **Build check.** `Logs/build_latest.log` tail must show `Version: 0.17.8.15.1` and `Build successful`. The change is small (two file edits, no new symbols), unlikely to break compilation.
+1. **Disassembly search.** In `Game Files/disassembly/`, find char-ID reads inside battle init. Compare to known savemap-formation reads. Look for any conditional read path or different source field. The goal is to identify where the engine resolves the active-battle character IDs during a Laguna dream battle.
+2. **FFNx-canary grep.** In `FFNx-Steam-v1.23.0.182\\Source Code\\FFNx-canary\\src\\`, grep for any reference to `dream`, `laguna`, or `fake party`. FFNx's struct definitions and address constants often point straight at the right field.
 
-2. **Headline expectation on bghall_3.** Walk to kanban2, F9-cycle until selected, listen:
-   - Expected: `"NPC 1 1 of 1"` (or `"NPC 1 X of Y"` where Y includes friendly-named NPCs in the catalog now that they all count in the NPC group).
-   - Old (buggy): `"NPC 2, 1 of 0"` — should be gone.
+Once Phase 0 produces a hypothesis (or rules out a static-analysis answer), design the Phase 1 F12 diagnostic build that captures data for BOTH bug #7 (gwgrass1 entity dump for player-detection heuristic) AND bug #8 (compStats during dream battle init) in one Laguna playthrough.
 
-3. **Log lines to verify in `Logs/ff8_field.log`:**
-   - `[dedup] relabeled raw-SYM object 'kanban2' -> NPC 1 (Other + SETMODEL-init) [v0.17.8.15.1]` — note `NPC 1` (was `NPC 2`) and version tag `[v0.17.8.15.1]`.
-   - `[nav] cat6 ent-325 rank=6/7 'NPC 1 1 of 1'` (or with Y>1 if Cid-like NPC is in catalog) — note both the corrected `NPC 1` AND a non-zero "of Y".
+## If Aaron has NOT yet pushed v0.17.8.16
 
-4. **Trigger-line interactions still work unchanged:** line3 → `"Interaction 1 1 of 2"`, line4 → `"Interaction 2 2 of 2"`. Those go through the pre-existing `"Event"` typeLabel branch, which v0.17.8.15.1 didn't touch.
+Don't open Chapter 2. The push is what closes the chapter. Aaron runs `Utilities/push_to_github.ps1` to push; the utility refuses if `CHANGELOG.md` and version mismatch (they don't, so the push will succeed). If Aaron wants help interpreting any push output, read `Logs/push_diagnostic.log` and `Logs/git_latest.log`.
 
-5. **Friendly-named runtime NPCs.** If there's a Cid/Quistis/etc. in the bghall_3 catalog (one of cat0-cat4 is suspicious — that's where my counter saw an existing ENT_NPC), cycling to them now announces them with the NEW combined NPC count. E.g. `"Cid 1 of 2"` if Cid + kanban2 are both NPCs in the catalog. This is the correct behavior — same group, type-based total. No regression risk: pre-fix, runtime entities already counted (entityIdx ≥ 0), just kanban2 was excluded; post-fix, kanban2 is included too. Numbers go UP, never down.
+## Chapter 1 summary (for context if a future session asks \"what was v0.17.8.16?\")
 
-## Step 2: known issue to watch
+- **Bug:** AD for Quistis infirmary FMV `disc00_01h.avi` fired ~17-22 seconds ahead of engine playback.
+- **Root cause:** `FmvAudioDesc::OnFrame` started the cue timer on AVI file-handle open via `FmvSkip::GetCurrentAviName`, but the engine can open the handle long before it actually begins playback.
+- **Fix:** Replaced the wall-clock cue timer in `src/fmv_audio_desc.cpp` with an engine-active-time accumulator (`g_engineActiveSeconds`) that only advances on frames where `FF8Addresses::IsMoviePlaying()` returns true. Gates `StartPlayback` on engine-confirmed playback; accumulator handles mid-FMV STOP/PLAY pause-resume for free.
+- **New log lines:** `[FMV_AD] AVI handle open: <name> -- waiting for engine playback` (gate deferring), `[FMV_AD] AVI detected via FmvSkip: <name> (engine confirmed playing)` (gate clearing), `[FMV_AD] Engine stopped/resumed at cue clock X.X s` (mid-FMV pause edges).
+- **Files touched:** `src/fmv_audio_desc.cpp` (the fix), `src/ff8_accessibility.h` (version), `CHANGELOG.md` (top entry).
+- **BAT result:** Perfect. 17-second gate hold, then 4/4 cues fired at correct offsets, no regressions.
 
-The "NPC X of Y" suffix now uses pure type-based matching for JSM-injected entries (`ce.type == ENT_NPC` OR `ce.type == ENT_BG_NPC`). Combined with the legacy `entityIdx >= 0` clause via OR. If on some field this over-counts (e.g. a runtime entity happens to be typed ENT_NPC AND has entityIdx ≥ 0 — would only count once because the OR is short-circuit and `sameType` is set once), or under-counts, that's a separate bug — log it.
+## Chapter 2: bundled Laguna bugs (#7 + #8)
 
-The pre-existing `"Event"` sameType branch for trigger-line interactions wasn't touched. If those start showing `"Interaction X of 0"` after this build, that's a regression and means my Interaction branch is being entered when it shouldn't — investigate the typeLabel cascade order (Interaction branch sits after NPC/Object/Event, so it should only fire when nothing earlier matched).
+Both bugs surface on `gwgrass1` (first Laguna dream field). Two Laguna playthroughs total: one for diagnostic capture, one for fix validation. The two fixes live in different files (`field_navigation.cpp` vs `battle_tts.cpp`) and different code paths, so bundling is safe.
 
-## Step 3: if BAT passes
+### Phase 0: pre-build research (no build, no Laguna trigger)
 
-- Aaron can push the whole stack: v0.17.8.11 through .15.1 (5+1 = 6 local commits). The push utility reads only the top CHANGELOG heading + FF8OPC_VERSION; whatever shape the commit takes, the macro/heading need to stay at 0.17.8.15.1.
-- Move the v0.17.8.11-.14 chapter from DEVNOTES.md to DEVNOTES_HISTORY.md (still overdue — that entire chara.one chain narrative is closed history now).
-- Move the v0.17.8.7 cardgamemaster chapter to DEVNOTES_HISTORY.md (also overdue from previous sessions).
+1. **Disassembly search** in `Game Files/disassembly/` for char-ID reads inside battle init. Compare to savemap-formation reads we already know about. Look for any divergence or conditional path.
+2. **FFNx-canary grep** for `dream`, `laguna`, or `fake party` in the FFNx source.
 
-## Step 4: if "NPC 1 1 of 0" still shows
+If Phase 0 pinpoints where the dream party lives, Phase 1's compStats dump becomes a narrow byte read instead of a wide region scan.
 
-That would mean my type-based sameType clause isn't firing. Sanity checks:
-- Did the build actually pick up the announce.inl changes? Grep build_latest.log for `field_nav_announce.inl`.
-- In the field log, is the `[nav]` line still saying `1 of 0`? If so, the typeNum/typeTotal counter isn't matching kanban2 — re-read announce.inl around lines 95-105 for the NPC sameType clause. Verify `ce.type == ENT_NPC` is in the cascade.
-- Is kanban2 actually typed ENT_NPC after dedupe? Search for the `[dedup]` log line and verify it says `-> NPC N (Other + SETMODEL-init)` — that branch explicitly sets `newCatalog[a].type = ENT_NPC`. If the dedupe line says something else, the dedupe path is misrouting.
+### Phase 1: shared diagnostic build (one F12 diagnostic, one Laguna BAT)
 
-## Step 5: if "NPC 2" still shows (counter bug not fixed)
+Search source for existing `VK_F12` references and remove old handlers before binding the new one.
 
-That would mean my counter fix in dedupe.inl isn't taking effect. Sanity:
-- Build picked up dedupe.inl change? Grep build_latest.log.
-- The new counter uses `strncmp(nm, "NPC ", 4) == 0 && nm[4] >= '0' && nm[4] <= '9'`. If the catalog has an entry whose name already matches that pattern (e.g. a leftover "NPC 1" from somewhere else), kanban2 would still get "NPC 2". Read the field log for any other `[dedup] relabeled` lines or any pre-existing "NPC %d" names in catalog dumps.
+**For Bug #7 (field nav, gwgrass1):** On `gwgrass1` field-load, dump every entity once to `[gwgrass-diag]` in `ff8_field.log`:
+- entity index, SYM name, model file, `setpc` value, `jsmCategory`, position (X,Y), `hasSetmodelInit`/`foundExtDispatch`/`hasTalkSetup` signals
 
-## Key files touched in v0.17.8.15.1
+Auto-disable after one dump.
 
-- `src/field_nav_catalog_dedupe.inl` — NPC counter changed from type-based to name-prefix-based
-- `src/field_nav_announce.inl` — added ENT_INTERACTION to typeLabel cascade, added type-based sameType matching for both NPC and Interaction in both typeNum and typeTotal loops
-- `src/ff8_accessibility.h` — version bump to 0.17.8.15.1
-- `CHANGELOG.md` — new top entry
-- `DEVNOTES.md` — chapter updated
-- `NEXT_SESSION_PROMPT.md` — this file, rewritten
+**For Bug #8 (battle party):** On battle init during a Laguna dream battle, dump per active battler (slots 0/1/2) to `[gwgrass-batt-diag]` in `ff8_battle.log`:
+- First ~0x80 bytes of `compStats[N]` (narrower if Phase 0 pinpointed the field)
+- Savemap formation array `[0..3]` for comparison
+- Whatever the battle-side code currently reads to identify the character for TTS
+
+Fire once per battle init, then auto-disable.
+
+### Phase 2: shared fix build (one Laguna BAT)
+
+- **Bug #7 fix:** Extend `setpc==0` player-detection heuristic in `RefreshCatalog`/`Update` to accept the dream-player marker. File: `field_navigation.cpp`.
+- **Bug #8 fix:** Adjust active-battle character ID resolver to read the dream-party source. File: `battle_tts.cpp`.
+
+Keep both diagnostics ON in the fix build so the same BAT re-captures data on regression. Strip them in a follow-on cleanup build after BAT passes.
+
+## Other open work (NOT this session's focus)
+
+- Chase-chapter carry-over (v0.15.9.8.3 bridge catch + v0.15.3.1 chase-agent summary log)
+- Source-file refactor queue (only if something is about to cross 80 KB)
+- `DEVNOTES_HISTORY.md` trim (mechanical work; v0.17.8.7 cardgamemaster + bug #10 chara.one narrative)
+- Plan & Research Documents update (Dollet countdown doc)
+
+## Session-start ritual reminders
+
+- Read `DEVNOTES.md` and THIS file at session start. Read `DEVNOTES_HISTORY.md` only to trace past decisions.
+- Filesystem MCP for all Windows project files. Bare `view`/`str_replace`/`create_file` reach the Linux container only.
+- `filesystem:edit_file` corrupts files when the replacement text contains a literal `$`. Use hex `0x24` in source, or `filesystem:write_file` to rewrite whole files.
+- OneDrive throws a transient EPERM on first `edit_file` rename sometimes. Retry once.
+- Aaron pushes via `Utilities/push_to_github.ps1`. Claude NEVER pushes. The utility refuses if `CHANGELOG.md` top heading doesn't match `FF8OPC_VERSION`.
+- Diagnostics on F12 only. Search source for existing `VK_F12` references and remove old handlers before binding new ones.
+- F-key handlers gated on `!(GetAsyncKeyState(VK_MENU) & 0x8000)`.
+- **One change per BAT cycle, with explicit exception for the Laguna chapter.** Don't generalize that exception to other chapters.
+- BAT response: read `Logs/build_latest.log` first for build errors, then the relevant domain log (`ff8_field.log` for #7, `ff8_battle.log` for #8).
+- Update DEVNOTES.md + this file at every version bump AND after every BAT result.
+
+## What NOT to do on session open
+
+- Don't open Chapter 2 (Laguna bundle) until v0.17.8.16 is pushed.
+- Don't BAT or build anything before Aaron confirms direction.
+- Don't pivot to refactors, history trim, or research-doc updates unless Aaron explicitly redirects.

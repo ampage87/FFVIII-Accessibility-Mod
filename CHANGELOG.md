@@ -6,6 +6,134 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.8.16.1
+
+Audio descriptions: rewrite the Quistis-infirmary FMV (`disc00_01h.vtt`)
+based on frame-verified scene content. The original AD was wrong on both
+identity and action.
+
+**What the original AD said.** Four cues that described "Squall's perspective
+as he leaves the infirmary," the room itself, "Dr. Kadowaki stands in the
+infirmary in her instructor uniform," and a close-up of "Dr. Kadowaki --
+auburn hair, glasses, speaking." Both character attribution and the
+direction of the action were wrong.
+
+**What the FMV actually shows.** Frame extraction via `ffmpeg` (27 frames
+at 0.5 s intervals, 1280x896 VP8 source) confirms the scene is Quistis
+arriving at the infirmary to collect Squall after his training injury.
+Sequence: angular doorway close-up as she steps through; close-ups of her
+face and the SeeD instructor's uniform (navy blazer with red trim and
+gold piping); wide shot of the teal infirmary; medium close-up of Quistis;
+then a critical reverse to Squall's POV from the bed (his boot/leg in
+foreground, Quistis standing across the room watching him); close-up of
+Quistis as her eyes lower and close, a soft sigh of patient exasperation,
+then eyes open again, composed. No Dr. Kadowaki at any point in this FMV.
+Squall is in the bed throughout, not leaving.
+
+**Why the original AD was wrong.** The auburn hair plus glasses on a
+character in an "instructor uniform" was misattributed to Dr. Kadowaki
+(who is the infirmary doctor but does not wear an instructor's uniform).
+The instructor's uniform actually belongs to Quistis -- she is a SeeD
+instructor. The original AD also flipped the direction of the scene: it
+framed Squall as leaving the infirmary when in fact he is the patient in
+the bed being collected.
+
+**New cues (29 words across 13.5 s, ~2.15 wps -- well under the project's
+2.5 wps TTS pacing ceiling).** Each cue stays under the 7-word/3-sec rule
+from `FMV_SCENE_REFERENCE.md`:
+
+  - `00:00.000 --> 00:03.500` -- "Quistis enters the infirmary, instructor's uniform, glasses."
+  - `00:03.500 --> 00:07.000` -- "Teal room -- desk, retro monitor, eye chart."
+  - `00:07.000 --> 00:10.000` -- "From Squall's bed, Quistis watches him."
+  - `00:10.000 --> 00:13.500` -- "Eyes closed, she sighs softly -- gently exasperated."
+
+The `FMV_SCENE_REFERENCE.md` entry for `disc00_01h` is also corrected to
+match the frame-verified content, so future AD authors don't repeat the
+misidentification.
+
+**Why this is a content-only patch on top of v0.17.8.16.** The v0.17.8.16
+engine cue-clock fix BAT-confirmed that the AD now plays in sync with FMV
+playback. That sync revealed Aaron could now actually evaluate the AD
+content -- previously the 22-second pre-roll obscured how wrong it was.
+The VTT files are embedded into `dinput8.dll` via Win32 resources
+(`resources.rc`), so the rebuild picks up the new content automatically;
+no source-code changes in this patch.
+
+## v0.17.8.16
+
+FMV audio descriptions: fix the 22-second pre-roll on the Quistis infirmary
+FMV (Fire Cavern bug list bug #1). Cue clock is now driven by engine
+playback state, not by AVI file-handle open/close.
+
+**Symptom Aaron reported (Fire Cavern playthrough).** The audio description
+for Quistis's Infirmary FMV started speaking the scene about 22 seconds
+BEFORE the engine actually began playback of the FMV. All cues were
+offset by the same gap, so the AD narrative was permanently ~22s ahead
+of what was happening visually/audibly in the game.
+
+**Root cause.** `FmvAudioDesc::OnFrame` was starting the cue timer the
+moment `FmvSkip::GetCurrentAviName()` returned a non-empty new AVI name.
+That name becomes available as soon as the AVI file handle is opened via
+`CreateFileA`/`CreateFileW` -- but the engine can open the AVI handle
+long before it actually begins playback. On the infirmary FMV that gap
+is 22 seconds. Cue startTimes are absolute offsets within the FMV
+(WebVTT format), so a cue at startTime=0 fired immediately on handle
+open, then a cue at startTime=5 fired five seconds later (still pre-
+playback), and so on -- the entire AD ran end-to-end before the engine
+ever started rendering the video.
+
+The disc04 (Square logo) intro hid the bug in normal play: the handle-
+open and engine-start are milliseconds apart there, so the offset isn't
+noticeable. The infirmary scene exposes it because the engine pre-loads
+the AVI and waits on some other event (likely the surrounding dialog /
+fade-in sequence) before actually playing.
+
+**Fix (`fmv_audio_desc.cpp`).** Replace the wall-clock-from-StartPlayback
+elapsed time with a cue-clock accumulator (`g_engineActiveSeconds`) that
+only advances on frames where the engine reports it is playing. The
+source of truth for engine-playing state is `FF8Addresses::IsMoviePlaying()`,
+which reads `movie_object + 0x4C4A8` (the engine's own `movie_is_playing`
+flag) -- the exact same address `FmvSkip` cross-references in its
+`Game movie state changed: PLAYING` log line. Two changes wire it up:
+
+  1. **Gate StartPlayback on engine-playing.** In `OnFrame`, the
+     "new AVI detected" block now only enters StartPlayback if the
+     engine is actually playing. If the engine hasn't yet begun, log
+     `[FMV_AD] AVI handle open: <name> -- waiting for engine playback`
+     once and defer. When the engine starts playing on a subsequent
+     frame, the same condition triggers and StartPlayback runs.
+  2. **Accumulator-based elapsed time.** In the cue-firing section,
+     compute a per-frame delta from `QueryPerformanceCounter` and add
+     it to `g_engineActiveSeconds` only when the engine is currently
+     playing. If the engine pauses mid-FMV (the original "STOP/PLAY"
+     scenario from the v0.16.5.2 BAT report), the accumulator freezes;
+     when it resumes, the accumulator picks up where it left off. Edge
+     transitions in either direction log once so the BAT trace shows
+     when pauses happen. `GetElapsedSeconds()` now returns the
+     accumulator instead of wall-clock-since-g_startTime; cue firing
+     compares cue startTimes against it directly.
+
+The wall-clock `g_startTime` is still recorded in StartPlayback for
+legacy compatibility with any code path that might read it, but it no
+longer drives cue timing. Reset paths in `StartPlayback`/`StopPlayback`
+bring the accumulator and edge-tracking flags back to a clean baseline
+so the next FMV starts from zero.
+
+**Expected behaviour on next BAT (infirmary FMV).** Aaron triggers the
+Quistis infirmary scene. `ff8_mod.log` should show:
+
+  - `[FMV_AD] AVI handle open: <infirmary AVI name> -- waiting for engine playback`
+    (one line, at the moment the file handle opens)
+  - ~22 seconds of no further `[FMV_AD]` activity
+  - `[FMV_AD] AVI detected via FmvSkip: <name> (engine confirmed playing)`
+  - `[FMV_AD] Matched ... -> ...`
+  - `[FMV_AD] Started playback: ...`
+  - Cues fire in step with what Aaron hears in the FMV.
+
+Also unblocks the broader "STOP/PLAY" pause/resume pattern on any other
+FMV where the engine pauses playback mid-stream: the accumulator handles
+that case for free.
+
 ## v0.17.8.15.1
 
 Field navigation: two follow-on fixes from the v0.17.8.15 BAT, both in the
