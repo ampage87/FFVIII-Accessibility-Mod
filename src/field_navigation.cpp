@@ -759,6 +759,13 @@ static const int MAX_DEAD_CLUSTERS = 32;
 static DeadEndCluster s_deadClusters[MAX_DEAD_CLUSTERS] = {};
 static int            s_deadClusterCount = 0;
 
+// --- Auto-drive helpers + CALIB (extracted v0.17.8.20 from field_nav_autodrive.inl
+//     for size relief). helpers MUST precede calib (RunCalibration calls
+//     SetHeldDirections); both MUST precede autodrive (UpdateAutoDrive calls
+//     RunCalibration and the helpers). All three share the file-scope statics
+//     declared above. See those files' headers + DEVNOTES. ---
+#include "field_nav_autodrive_helpers.inl"
+#include "field_nav_autodrive_calib.inl"
 #include "field_nav_autodrive.inl"
 
 // --- Direction-based auto-drive for chase scenes (v0.15.9.1) ---

@@ -6,6 +6,41 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.8.20
+
+Refactor (zero behavior change): split field_nav_autodrive.inl to relieve size
+pressure. The file had reached 79.83 KB — ~170 bytes under the 80 KB hard cap the
+CI mirror enforces at push time — so any logic edit in UpdateAutoDrive would have
+pushed it over and forced another emergency comment trim (the Chapter 4 push
+hiccup that motivated this).
+
+Extracted into two new files, both included immediately before
+field_nav_autodrive.inl in field_navigation.cpp (helpers before calib before
+autodrive, so the call graph resolves top-down):
+  - field_nav_autodrive_helpers.inl (12.5 KB): InjectKey, ReleaseAllDirections,
+    SetHeldDirections, SetAnalogFromVector, StopAutoDrive — the analog/keyboard
+    injection primitives and the drive-stop lifecycle.
+  - field_nav_autodrive_calib.inl (7.6 KB): the CALIB phase statics plus a new
+    RunCalibration() holding the heading-calibration state machine that used to
+    sit inline at the top of UpdateAutoDrive. The call site is now
+    `if (RunCalibration()) return;`, faithfully replicating the two inline
+    `return;`s (true = a calibration tick was consumed, caller returns; false =
+    idle/done, fall through to normal nav). Only structural change: phase 2's
+    `if` became an `else if` so both phases fall to one trailing `return true;`.
+
+field_nav_autodrive.inl now holds only UpdateAutoDrive and is 62.9 KB (~17 KB
+under the cap). No logic changed; the v0.15.9.11.3.4 InjectKey comment and the
+v0.17.8.19.4 gateway pass-through block are untouched. The calib statics moved
+out of autodrive.inl into the new calib file but keep the same compilation-order
+position, so directiondrive/handlekeys/fieldscripts (included later) still see
+them.
+
+BAT: F9 path-finding on any field (confirm `[CALIB] phase 1 done` / `phase 2
+done` still fire) plus an X-ATM092 chase auto-pilot run from before the Lapin
+Beach FMV (confirm 0 catches and that `[chase-drive] STARTED`,
+`[funnel-prune] skipped for chase-drive`, and `chase-drive gateway pass-through`
+all still fire).
+
 ## v0.17.8.19.4
 
 Chapter 4 ACTUAL fix: chase-drive gateway pass-through. The previous three
