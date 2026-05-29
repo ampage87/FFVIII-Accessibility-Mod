@@ -3,6 +3,68 @@
 
 ---
 
+## v0.17.8.17.1 → .17.8: Chapter 2 — Laguna dream bundle (bugs #7 + #8, commit `b7067354`)
+
+Seven incremental fixes squashed into commit `b7067354` on 2026-05-28. Per-build detail in `CHANGELOG.md` v0.17.8.17.1 .. .17.8 entries.
+
+  - Bug #7 (field nav): fixed v0.17.8.17.1.
+  - Bug #8 NAMES (in-battle): fixed v0.17.8.17.2.
+  - Bug #8 COMMAND MENU: fixed v0.17.8.17.5.
+  - Bug #8 NAMES (Victory screen): fixed v0.17.8.17.6.
+  - Bug #8 NAMES (Main Menu audit -- Junction char-select + M-summary + Item Use-target + GF owner): fixed v0.17.8.17.7.
+  - v0.17.8.17.8 cleanup: F12 Laguna diagnostic infrastructure removed.
+  - FIELD entity catalog is N/A -- the catalog uses generic category labels (NPC, Event, Interaction, Exit, Gateway), not proper character names, so there is no dream-aware naming to fix there.
+
+### Key carry-forwards (dream-party identity resolution)
+
+  - **Dream party data lives in regular char-data array (CONFIRMED v0.17.8.17.5 + .17.7).** `char-data[SAVEMAP_PARTY_FORMATION[slot]]` IS the active dream character's struct: `commands[3]@+0x50`, `magics[32]@+0x10`, GF mask@+0x58, `exp@+0x04`, `model_id@+0x08`. The savemap formation (`SAVEMAP_PARTY_FORMATION = 0x1CFE74C`; menu reads `+0xAF1`) holds the STALE regular field formation `[05 00 01]` during a dream -- correct for INDEXING char-data, wrong as a NAME source.
+  - **Three dream-identity sources, by context (BAT-confirmed during this chapter):**
+    - In battle / victory (battle module live): `compStats[slot]+0x1C3` actor-kind (8=Laguna, 9=Kiros, 10=Ward). compStats base 0x1CFF000, stride 0x1D0.
+    - Main menu (no battle): the loaded char struct's `model_id` (+0x08) -- the v0.17.8.17.7 BAT log captured `modelId=10/8/9` for Ward/Laguna/Kiros in mode-6 dream junction.
+    - Field: `setpc` (field entity +0x255). v0.17.8.17.1 used this to fix bug #7.
+  - **`ResolveDreamAwareCharId(charIdx)` (menu_tts_diagnostics.inl, v0.17.8.17.7):** THE canonical resolver for formation-index -> dream-aware name. Returns model_id when 8/9/10, else original index. Used by AnnounceMenuSummary, GetPartyMemberName, item Use-target naming; Junction GF-owner uses inline literal-address version.
+  - **`GetBattleCharName(partySlot)` (battle_tts_menu_helpers.inl):** in-battle actor-kind override for dream, falls back to savemap for regular. All in-battle ally naming (turn/target/HP keys/command menu/victory/drawer) routes through this. Battle `CHAR_NAMES[8]` is only the actor-kind fallback for regular characters.
+  - **`GetVictoryCharName(slot, fallbackId)` (battle_tts.cpp, v0.17.8.17.6):** dream-aware victory name; reads `s_dreamSlotCharId[slot]` snapshot captured per-frame during battle for cross-thread reach to the victory thread at mode 4.
+
+---
+
+## v0.17.8.11 → .15.1: Bug #10 — B-Garden Hall 6 NPC Xu mislabeled (single commit `c7b80872`)
+
+Nine builds across two days. Xu was JSM `kanban2` (ent25, cat3, PSHM pos (4626,-3459)) on `bghall_3` (field 170) -- the SYM name was misleading; kanban2 IS Xu. The wrong path was a chara.one model-archive parser (v0.17.8.11-.14): MinHooked `chara_one_read_file`, parsed Mch/Char headers, cross-referenced SETMODEL's chara.one slot index against the parsed model class. Successive bug fixes through this chain (Bug A isMch flag in .12; Bug B SETMODEL opcParam vs stack in .14) concluded kanban2 = prop because p048 classified as prop. The disproof: Aaron's F11 screenshot of bghall_3 (`Logs/screenshots/f11_204546_707.png`) showed Xu visibly standing as a character model in front of Squall at the kanban2 spot, dialog box reading `Xu "Hey, Squall, heard you got your first mission already!"`. There is no signpost. The chara.one classifier was wrong about p048 (p048 IS a character model on this field, regardless of the 'p' prefix convention), AND more fundamentally: file-level model classification was the wrong mechanism entirely. The right question is gameplay behavior, not model identity.
+
+**The clean fix (v0.17.8.15 + .15.1):** the JSM scan already had the behavior signal -- `jsmCategory == 3 (Other) && hasSetmodelInit` -> "NPC N". Everything else (Line walk-across, Background script-only) -> "Interaction N". Per Aaron's directive, NPC labels stay generic "NPC N" -- no SYM names exposed. v0.17.8.15 BAT confirmed the mechanism works (Xu announces as NPC). v0.17.8.15.1 added two follow-on fixes: dedupe counter (name-prefix match instead of all ENT_NPC, so friendly-named NPCs like Cid don't inflate the count) and announce sameType (type-based matching for JSM-injected entityIdx <= -300, so the "X of Y" suffix works for both NPC and Interaction). Final BAT showed `'NPC 1 1 of 1'` on bghall_3, all expected log lines present, no regressions. The whole chapter pushed as single commit `c7b80872`.
+
+**Carry-forward learnings:**
+- **SYM names are unreliable as identity hints.** kanban2 IS Xu. The internal name was placed for the script author, not for us. Don't infer entity behavior from SYM.
+- **File-level model classification is the wrong primitive for behavior questions.** p048's filename prefix is a convention, not a contract; on this field it loads a character. When asking "how does the player interact with this entity", look at the JSM behavior signals (`jsmCategory`, `hasSetmodelInit`, `hasDialogReqTarget`, `hasTalkSetup`, `foundExtDispatch`), not at the model file.
+- **NPC label policy:** generic `"NPC N"` / `"Interaction N"` only. Friendly names (Cid, Quistis) come from a different path (the runtime entity name resolver). The raw-SYM relabel sequence must never expose SYM names.
+- **Announce-time counters need type-based matching for JSM-injected entries.** Legacy `entityIdx >= 0` test was "is this a runtime entity" -- it fails for JSM-injected NPCs/Interactions (entityIdx <= -300). When adding a new entity TYPE to the catalog, also extend the corresponding announce sameType branch.
+
+---
+
+## v0.17.8.7: cardgamemaster debug phantom filter + Event/Interaction double-injection fix
+
+Filtered the `cardgamemaster` debug phantom from the field entity catalog and fixed the Event/Interaction double-injection that was also hiding the Directory. Full per-build detail in `CHANGELOG.md` v0.17.8.7 entry. (No standalone narrative was carried in DEVNOTES beyond the closure-paragraph one-liner; recorded here for completeness during the 2026-05-29 DEVNOTES trim.)
+
+---
+
+## v0.17.8.16 + .16.1: Chapter 1 — Fire Cavern bug #1 (Quistis infirmary FMV premature, commit `b6afa8cb`)
+
+Closed across two stacked patches squashed into one commit:
+
+- **v0.17.8.16** -- engine cue-clock fix (`fmv_audio_desc.cpp`). Replaced wall-clock cue timer with engine-active-time accumulator that only advances when `FF8Addresses::IsMoviePlaying()` returns true. BAT-confirmed 2026-05-27 18:10-18:12 on `disc00_01h.avi`: 17-second gate held, cues fired at correct offsets.
+- **v0.17.8.16.1** -- AD content rewrite for the same FMV. Engine fix BAT revealed the AD itself was wrong (misidentified Quistis as Dr. Kadowaki; framed Squall as leaving rather than lying in bed). Frame-verified via ffmpeg (27 frames @ 0.5s intervals). Rewrote `Audio Descriptions/disc00_01h.vtt` and corrected the `FMV_SCENE_REFERENCE.md` entry so future AD authors don't repeat the misidentification. BAT-confirmed 2026-05-28 (Aaron: "sounded good").
+
+---
+
+## v0.17.8.9: bghall_1 save point label (save-line script-association detection)
+
+SOLVED + SHIPPED in v0.17.8.9 (BAT-confirmed; signal found via a now-removed LOCAL script dump). The LOCAL dump of bghall_1 entities (zells/selphie/savePoint/saveline0) proved the save line is `ent5 'selphie'` (the SETLINE at (-700,-8593) then shown as "Interaction 1"). Its script literally pushes the save-enable opcodes as constants: PUSH 303 (0x12F SAVEENABLE) and PUSH 304 (0x130 PHSENABLE) in BOTH method[6] (dwords 3624/3632) and method[7] (3657/3665). The control line `ent4 'zells'` has NONE of these (clean discriminator). Why the scanner missed it: selphie's ONLY 0x1C is the bare runtime-supplied dispatch in method[1] (`EXT_DISPATCH` empty-stack, like the dorm bed) -- the save constants live in methods 6/7 and are never popped by a local 0x1C, so dispatch-resolution can't set foundSaveenable. savePoint (ent27) is unpositioned (X=PSHM135 Y=PSHM588, no SET3-shift) and its 0x1C resolves to a runtime PSHM; saveline0 (ent36) is a REQ-chain controller with a MAPJUMP (classified MAP_EXIT) and no statically-visible save op -- so neither save-POINT entity can carry the label.
+
+**FIX (the chosen association, field-load, no cache, no heuristic guess): in the JSM scan, for a Line entity (jsmCategory==1) scan its full bytecode for literal PUSH of the save opcodes -- set foundSaveenable when MENUSAVE(302) is present OR both SAVEENABLE(303) and PHSENABLE(304) are present. That makes signal-(a) fire -> isSaveLine -> the catalog surfaces selphie as "Save Point" at its own SETLINE center (-700,-8593), exactly where auto-drive already arrives.** Contrast (why the dorm bgryo2_1 already works): its savePoint gets a SET3-SHIFT position (229,97) and injects directly, and its saveline0 has a statically-visible save op + LATE-RESOLVE position -- bghall_1 has neither, which is why the own-script-constant route on the LINE is the right fix here.
+
+---
+
 ## v0.17.7.6 → v0.17.7.6.2: Empirical camera-axes calibration chapter (pushed 2026-05-20 05:47 UTC as `d3321665` squashed onto `6abcb8f`)
 
 Closed-loop empirical correction for fields whose .ca file produces a degenerate 2D camera projection. Three iterations, each a stepping stone:

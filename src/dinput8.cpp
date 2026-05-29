@@ -359,6 +359,96 @@ extern "C" HRESULT WINAPI DirectInput8Create(
 static volatile bool s_running = false;
 static HANDLE s_thread = nullptr;
 
+// ============================================================================
+// Chapter 5 / Surface 2: automatic SeeD salary announcement
+// ============================================================================
+//
+// When the player is paid their SeeD salary, the game flashes a small window
+// (S-Lv. <rank> / <gil>G) with a chime, then clears it on its own with no
+// input -- a blind player gets only the chime and can't read the rank/amount,
+// so we announce it via TTS. The v0.17.9.0.2/.0.3 BATs pinned the trigger: at
+// the chime, in ONE frame, gil (+0x0B08) jumps by the salary amount, SeeD
+// points (+0x0D6C) drop a few (conduct), and steps-since-pay (+0x0D64) resets
+// from near the ~24,575 threshold to ~0 -- while the salary counter (+0x0CDE)
+// does NOT move (it lags to the next save, which is why the counter-tick
+// detector failed; the window text is a runtime-archive number sprite, not exe
+// text, so memory is the value source). PollSeedSalary triggers on the
+// steps-reset + gil-up signature, reads the new rank from points/100 and the
+// amount from the gil delta, and speaks it. The salary table below only
+// sanity-checks the amount in the [SALARY] PAY log line.
+static int SeedSalaryForRank(int rank)
+{
+    // FF8 SeeD salary table (gil per payment). Index = rank; 31 = Rank A.
+    static const int T[32] = {
+            0,   500,  1000,  1500,  2000,  3000,  4000,  5000,  6000,  7000,
+         8000,  9000, 10000, 11000, 12000, 12500, 13000, 13500, 14000, 14500,
+        15000, 15500, 16000, 16500, 17000, 17500, 18000, 18500, 19000, 19500,
+        20000, 30000
+    };
+    if (rank < 0) rank = 0;
+    if (rank > 31) rank = 31;
+    return T[rank];
+}
+
+static void PollSeedSalary()
+{
+    const uint32_t SM = 0x1CFDC5C;  // confirmed live savemap base
+    static bool     s_primed      = false;
+    static uint16_t s_prevPoints  = 0;
+    static uint32_t s_prevGil     = 0;
+    static uint16_t s_prevSteps   = 0;
+
+    uint16_t pts   = *(volatile uint16_t*)(SM + 0x0D6C);
+    uint32_t gil   = *(volatile uint32_t*)(SM + 0x0B08);
+    uint16_t steps = *(volatile uint16_t*)(SM + 0x0D64);
+
+    if (!s_primed) {
+        s_primed = true;
+        s_prevPoints = pts; s_prevGil = gil; s_prevSteps = steps;
+        return;
+    }
+
+    // Salary signature, all in one frame (v0.17.9.0.3 BAT): steps reset from
+    // near the ~24,575 threshold to ~0 (huge negative delta), gil increased,
+    // and points dropped by a small conduct amount. The big steps drop + small
+    // points drop together exclude save loads (arbitrary jumps, usually a large
+    // points delta) and battle rewards (no steps reset, no points change).
+    bool stepsReset   = (steps < s_prevSteps) && ((uint32_t)(s_prevSteps - steps) > 10000);
+    bool gilUp        = (gil > s_prevGil);
+    int  pointsDrop   = (int)s_prevPoints - (int)pts;
+    bool smallPtsDrop = (pointsDrop >= 0 && pointsDrop <= 100);
+
+    if (stepsReset && gilUp && smallPtsDrop) {
+        int amount     = (int)gil - (int)s_prevGil;
+        int rankAfter  = pts / 100;
+        int rankBefore = s_prevPoints / 100;
+
+        wchar_t rankStr[24];
+        if (rankAfter >= 31) wsprintfW(rankStr, L"Rank A");
+        else                 wsprintfW(rankStr, L"Rank %d", rankAfter);
+
+        wchar_t msg[160];
+        if (rankAfter > rankBefore)
+            wsprintfW(msg, L"SeeD salary. Promoted to %s. %d gil.", rankStr, amount);
+        else if (rankAfter < rankBefore)
+            wsprintfW(msg, L"SeeD salary. Dropped to %s. %d gil.", rankStr, amount);
+        else
+            wsprintfW(msg, L"SeeD salary. %s. %d gil.", rankStr, amount);
+
+        ScreenReader::Speak(msg, true);
+        Log::Mod("[SALARY] PAY: rank %d->%d | amount %d gil (gil %u->%u) | "
+                 "points %u->%u | steps %u->%u | tableExpect(rank %d)=%d",
+                 rankBefore, rankAfter, amount, s_prevGil, gil,
+                 (unsigned)s_prevPoints, (unsigned)pts,
+                 (unsigned)s_prevSteps, (unsigned)steps,
+                 rankAfter, SeedSalaryForRank(rankAfter));
+    }
+
+    s_prevPoints = pts;
+    s_prevGil    = gil;
+    s_prevSteps  = steps;
+}
+
 DWORD WINAPI AccessibilityThread(LPVOID lpParam)
 {
     // Give the game a moment to initialize its memory structures.
@@ -466,6 +556,10 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
         // var 724 (0x01CFECCC, uint16) each frame and fires scheduled TTS
         // at boundaries. Polls T (announce) / Shift+T (freeze) internally.
         CountdownTimer::Update();
+        
+        // Chapter 5 / Surface 2: automatic SeeD salary announcement. Gated to
+        // non-title so we never read an uninitialised savemap on the title screen.
+        if (!titleActive) PollSeedSalary();
         
         // --- Accessibility keyboard shortcuts (v0.14.45 layout) ---
         // `  = Repeat last dialog

@@ -6,6 +6,209 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.9.1
+
+Chapter 5 COMPLETE — SeeD rank R-key fix + automatic SeeD salary announcement
+(GitHub issue #27 + the related salary-announcement gap). Both surfaces
+BAT-confirmed; diagnostics removed; push-ready.
+
+Surface 1 — R key now reports the real SeeD rank. `AnnounceSeedRank()`
+(`menu_tts_hotkeys.inl`) reads SeeD points at savemap +0x0D6C (uint16) and
+announces rank = points/100 ("SeeD Rank N"; "SeeD Rank A" at 3100+). This
+replaces the old +0xF9C read, which landed on dead zeros and always produced
+"No SeeD rank yet" (the issue #27 bug). Pre-SeeD gate: announces "No SeeD rank
+ yet" when points == 500 && salaryCount == 0 (salaryCount = uint16 at +0x0CDE),
+since pre-Dollet the pool sits at the base 500 with no salary paid.
+
+Surface 2 — automatic TTS when the SeeD salary is paid. The salary window
+flashes the rank and gil on screen and clears itself with no input, so a blind
+player previously got only the chime. `PollSeedSalary()` (`dinput8.cpp`, polled
+each non-title frame) detects a payment by its one-frame memory signature:
+steps-since-pay (+0x0D64) resets from near the ~24,575 threshold to ~0 (drop
+>10000), gameplay gil (+0x0B08) increases, and SeeD points (+0x0D6C) fall by a
+small conduct amount. That triple is unique to a payment — it excludes save
+loads (arbitrary jumps / large points deltas) and battle gil (no steps reset,
+no points change). On a hit it speaks rank + amount + direction:
+- same rank: "SeeD salary. Rank N. <amount> gil."
+- higher:    "SeeD salary. Promoted to Rank N. <amount> gil."
+- lower:     "SeeD salary. Dropped to Rank N. <amount> gil."
+(Rank 31 = "Rank A".) Rank is read live (points/100), the amount is the actual
+gil delta (correct even across a rank boundary), and direction compares the
+rank before vs after. One `[SALARY] PAY:` line is logged per payment.
+
+Investigation note (kept for the record): the salary-payment counter at +0x0CDE
+is NOT synced to the chime — a BAT with the salary window confirmed on screen
+logged the counter unchanged; it only ticks over later (next save). The earlier
+counter-tick detector (v0.17.9.0.2) was therefore replaced by the change-logger
+(v0.17.9.0.3) that pinned the gil-up + steps-reset trigger, then the wired
+announcement (v0.17.9.0.4), and finally this build which strips the verification
+heartbeat. The promoted/dropped wordings share the exact code path as the
+BAT-confirmed same-rank line (only the verb/branch differs) and will surface in
+normal play; the amount and rank are ground-truth regardless of direction.
+
+BAT-confirmed: R announces "SeeD Rank 3" on a SeeD save and "No SeeD rank yet"
+pre-SeeD; a world-map salary spoke "SeeD salary. Rank 3. 1500 gil." with
+`[SALARY] PAY: rank 3->3 | amount 1500 gil | points 392->383 | steps 24575->0`.
+
+## v0.17.9.0.4
+
+Chapter 5 / Surface 2 — automatic SeeD salary announcement WIRED (verification build).
+
+The v0.17.9.0.3 change-logger BAT pinned the real-time trigger. At the salary
+chime, in a single frame: gil (+0x0B08) jumped 7400->8900 (+1500 = the rank-3
+table value), SeeD points (+0x0D6C) dropped 392->383, and steps-since-pay
+(+0x0D64) reset from 24494 to 0 — while the counter (+0x0CDE) stayed at 14
+through close. So the counter never was the trigger; the gil-up + steps-reset
+pair (plus a small points drop) is, and it fires in real time with the window.
+
+`PollSalaryDiag` is replaced by `PollSeedSalary` (dinput8.cpp, each non-title
+frame). It detects a payment when, in one poll: steps dropped by >10000 (reset
+from near the ~24,575 threshold), gil increased, and points dropped by 0..100
+(small conduct change). That triple excludes save loads (arbitrary jumps, large
+points delta) and battle gil (no steps reset, no points change). On a hit it
+speaks rank + amount + direction via SAPI:
+- same rank: "SeeD salary. Rank N. <amount> gil."
+- higher:    "SeeD salary. Promoted to Rank N. <amount> gil."
+- lower:     "SeeD salary. Dropped to Rank N. <amount> gil."
+(Rank 31 says "Rank A".) Rank = points/100 after the drop; amount = gil delta
+(ground truth, so it stays correct even across a rank boundary); direction =
+rank-after vs rank-before. It also logs one `[SALARY] PAY: ...` line per payment.
+
+The `[SALARYDIAG] HB` ~1s heartbeat is kept as a verification aid for this BAT
+and will be removed before the chapter is pushed (Build 4 = strip HB + squash).
+
+Test: load save20, travel on the world map until the salary chime — you should
+hear "SeeD salary. Rank 3. 1500 gil." Send the `[SALARY] PAY:` line. Not pushed.
+
+## v0.17.9.0.3
+
+Chapter 5 / Surface 2 investigation build #2 (LOCAL).
+
+The v0.17.9.0.2 BAT disproved the counter-tick approach: a screenshot taken
+while the SeeD salary window was on screen ("S-Lv. 3 / 1500G", rank 3 = 1500
+gil) showed the counter at +0x0CDE still reading 14 across every poll until the
+game closed -- no `[SALARYDIAG] PAY:` ever fired. So +0x0CDE is NOT synced to
+the chime/window; it ticks over later (window dismiss or next save). The
+file-diff that originally showed 14->15 just captured a post-dismiss state.
+
+Reworked PollSalaryDiag from a counter-tick detector into a change-logger over
+all four salary-related savemap fields, so the next BAT reveals which field
+actually moves at the chime (and in what frame order):
+
+1. Emits `[SALARYDIAG] CHANGE ...` the instant counter (+0x0CDE), gil (+0x0B08),
+or points (+0x0D6C) changes, each line carrying the full context of the other
+fields + stepsSincePay (+0x0D64) so the ordering around the chime is visible.
+2. Emits a `[SALARYDIAG] HB ...` heartbeat ~once per second while the party is
+moving (gated on stepsSincePay changing) so we can watch the step counter climb
+toward the ~24,575 payment threshold and confirm the poll is reading correctly.
+3. Primes silently on first observation; logs `[SALARYDIAG] primed: ...` once.
+
+Test protocol: load save20, travel on the world map until you hear the salary
+chime (the window shows and clears on its own -- no button press), then keep
+moving ~10 seconds so the logger captures anything that updates during/after the
+window, and close. Send all `[SALARYDIAG]` lines. The CHANGE lines will pin
+which field (gil and/or points) moves at window-appear vs. which lags, which
+decides the real-time trigger for the Surface 2 TTS. LOCAL diagnostic -- not for
+push; ships no salary TTS yet.
+
+## v0.17.9.0.2
+
+Chapter 5 housekeeping + Surface 2 investigation build (LOCAL).
+
+1. Removed the Surface 1 F12 SeeD-membership diagnostic from dinput8.cpp now
+that the pre-SeeD gate is BAT-confirmed (F12 is free again). Surface 1's code
+(rank read at +0x0D6C, points==500 && salaryCount==0 gate) is unchanged and now
+in push-clean form.
+
+2. Added a LOCAL automatic SeeD-salary detector (PollSalaryDiag in dinput8.cpp,
+called each non-title frame). A payment increments the counter at +0x0CDE by 1,
+adds rank-based gil to +0x0B08, and drops points at +0x0D6C by 10; when the
+counter ticks up by exactly 1 it logs `[SALARYDIAG] PAY:` to ff8_mod.log with
+the gil delta (= amount received), points/rank before-and-after, an instant
+direction (rank vs the pre-decrement rank), a vs-last-pay direction (rank vs the
+rank at the previous payment), and the salary-table expectation for the new
+rank. Counter jumps of !=1 are treated as save loads and rebaseline silently.
+
+Rationale: the salary window text is in a runtime archive (not the exe) and the
+values render as number sprites, so memory is the reliable source for rank, gil
+and direction. Unlike the victory screen (multi-phase, player presses through
+several screens, so a memory dump desyncs), salary is a single instantaneous
+event, so detecting the counter tick and announcing IS synced to the display --
+the same pattern as the existing level-up / item-received auto-announcements.
+
+Test: walk (or drive/chocobo on the world map) until a salary is paid; send the
+`[SALARYDIAG] PAY:` line(s) from ff8_mod.log. The data confirms the gil delta
+and pins the exact rank-direction semantics for the Surface 2 TTS (next build).
+This build ships no salary TTS yet and is LOCAL (diagnostic) -- not for push.
+
+## v0.17.9.0.1
+
+Chapter 5 (Surface 1) follow-up to v0.17.9.0: add the pre-SeeD gate so R stops
+announcing a false "Rank 5" before the Dollet exam, plus a LOCAL F12 diagnostic
+to validate the gate and catch edge cases. (Includes the LOCAL-ONLY F12 hook, so
+this build is not for push as-is; the diagnostic comes out before the chapter is
+pushed, per the F12-reserved rule.)
+
+Gate (`AnnounceSeedRank` in menu_tts_hotkeys.inl): before the field exam grades
+the player, the SeeD points pool sits at exactly the formula base (500) and no
+salary has been paid; pre-promotion rank modifiers are deferred to graduation,
+so the live value stays exactly 500 until promotion. R now treats
+(points == 500 && salaryCount == 0) as "No SeeD rank yet". A paid SeeD that
+happens to sit at exactly 500 points (Rank 5) still announces correctly because
+salaryCount > 0. salaryCount is the salary-payment counter at +0x0CDE (0 in the
+pre-SeeD save, 14 then 15 across one payment in the SeeD saves).
+
+F12 diagnostic (dinput8.cpp, !alt-gated, edge-triggered) dumps to ff8_mod.log
+under `[SEEDDIAG]`: context (locId/fieldId/mode/Gil), points at +0x0D6C with
+computed rank, salary count (+0x0CDE), steps-since-pay (+0x0D64), save count,
+and a labelled hex window of +0x0CD8..+0x0E70 (SeeD struct + start of the
+field-variable block). Test: press F12 once on a pre-SeeD save and once on a
+SeeD save; compare the two blocks to confirm the gate fields and, if a cleaner
+story "became a SeeD" flag is wanted later, to spot it.
+
+BAT: (1) R on a SeeD save -> correct "SeeD Rank N" (cross-check vs salary table);
+(2) R on the pre-SeeD save -> "No SeeD rank yet"; (3) F12 on both saves -> send
+the two `[SEEDDIAG]` blocks from ff8_mod.log.
+
+## v0.17.9.0
+
+Chapter 5 (Surface 1): fix the R hotkey, which always announced "No SeeD rank
+yet" regardless of actual rank (GitHub issue #27).
+
+Root cause: AnnounceSeedRank() read a uint16 at savemap +0xF94 + 0x08 (= +0xF9C).
+That 0xF94 was derived by summing section sizes in a code comment and was never
+measured; it lands in the field-variable block and reads dead zeros in every
+save examined, so the "value == 0 => no rank" branch always fired.
+
+Fix: read SeeD points (SeeD experience) at the measured offset +0x0D6C (uint16)
+and announce rank = points / 100 (each rank = 100 points). 1..30 announce as
+"SeeD Rank N"; 3100+ points announce as "SeeD Rank A" (the 31st rank); below 100
+still says "No SeeD rank yet". Wording changed from "SeeD Level" to "SeeD Rank"
+to match in-game terminology (Aaron's call: R announces rank only).
+
+Offset confirmed empirically by diffing three of Aaron's .ff8 saves. The .ff8
+files are FF7/FF8 LZSS-compressed (4-byte LE size header, then the stream); once
+decompressed they carry the original-PC slot layout, and the savemap maps to
+live memory as live_offset == decompressed_file_offset - 0x184 (anchored on
+Squall HP/EXP + Gil + location, all matching). Across the saves: a pre-SeeD save
+reads points = 500 (exactly the documented base of the initial-rank formula
+before the Dollet exam grades it); a Rank 3 save reads 392 (392/100 = 3); the
+same save right after one salary reads 383 (-9 = lose 10 per payment + 1 from a
+kill, matching the documented -10-per-pay decay). 392/100 = 3 matched the
+observed 7400->8900 Gil salary (1500 = Rank 3) exactly. A neighbouring value at
++0x0D62 that happened to read 3 was rejected: it is the high word of the u32
+total-step counter at +0x0D60, not an independent rank field.
+
+Known minor edge: between the point pool initializing (~500) and the Dollet exam
+formally promoting Squall, R will announce a provisional rank (e.g. "Rank 5")
+rather than "No SeeD rank yet", because the game stores the base 500 before
+grading and there is no separately-confirmed membership flag yet. This window is
+brief and pre-Dollet; revisit with a membership-flag diagnostic if it matters.
+
+BAT: open the in-game menu (mode 6) and press R as a SeeD; confirm it speaks the
+correct "SeeD Rank N" (cross-check against the salary amount via the table) and
+logs `[MenuTTS] SeeD: Rank N (points=...)` in Logs/ff8_menu.log.
+
 ## v0.17.8.20
 
 Refactor (zero behavior change): split field_nav_autodrive.inl to relieve size
