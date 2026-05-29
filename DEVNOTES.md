@@ -4,19 +4,19 @@ Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` inj
 
 **Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
 
-GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.17.8.17.8** (commit `b7067354`, Chapter 2 cleanup -- Laguna F12 diagnostic infrastructure removed; pushed 2026-05-28 22:52 UTC). The push folded v0.17.8.17.1 .. .17.8 (the full Laguna dream chapter: field nav player-detection fix, in-battle / command-menu / victory / main-menu / item-Use / GF-owner dream-NAME fixes, then F12 cleanup) into a single commit. Parent is `b6afa8cb` (v0.17.8.16.1, Chapter 1 close). **Local tree = v0.17.8.17.8** (matches HEAD; Chapter 3 patch staged on top -- see below). Aaron pushes via `Utilities/push_to_github.ps1` (Claude never pushes); diagnostic builds stay LOCAL. **Size status:** all source files comfortably under the 80 KB ceiling.
+GitHub: `ampage87/FFVIII-Accessibility-Mod`. **GitHub HEAD = v0.17.8.18.1** (commit `10e776e5`, Chapter 3 Scan-on-allies fix, BAT-confirmed + pushed 2026-05-28 23:14 UTC). Parent is `b7067354` (v0.17.8.17.8, Chapter 2 close). **Local tree = v0.17.8.19.4** (Chapter 4 chase regression fix — chase-drive gateway pass-through. **BAT CONFIRMED 2026-05-28 19:39 by Aaron**: chase reached Lapin Beach with 0 catches, `[drive] chase-drive gateway pass-through` log fired correctly. Ready for push as Chapter 4 squash commit. The four-build chain .19.1 → .19.4 represents iterative debugging — .19.4 is the actual fix, but .19.1-.19.3 are kept as defensive infrastructure that produces a denser, more robust chase path). Chapter 3 shipped as exactly one commit (the BAT log alone was enough verification -- no diagnostic infrastructure needed). Aaron pushes via `Utilities/push_to_github.ps1` (Claude never pushes); diagnostic builds stay LOCAL. **Size status:** `field_nav_autodrive.inl` is at 79.83 KB (81,750 bytes) after v0.17.8.19.4's emergency comment trim — needs a split refactor before any further change touches `UpdateAutoDrive`. All other source files under 80 KB.
 
 **bghall_1 save point — SOLVED + SHIPPED in v0.17.8.9 (BAT-confirmed; signal found via a now-removed LOCAL script dump):** the LOCAL dump of bghall_1 entities (zells/selphie/savePoint/saveline0) proved the save line is `ent5 'selphie'` (the SETLINE at (-700,-8593) currently shown as "Interaction 1"). Its script literally pushes the save-enable opcodes as constants: PUSH 303 (0x12F SAVEENABLE) and PUSH 304 (0x130 PHSENABLE) in BOTH method[6] (dwords 3624/3632) and method[7] (3657/3665). The control line `ent4 'zells'` has NONE of these (clean discriminator). Why the scanner missed it: selphie's ONLY 0x1C is the bare runtime-supplied dispatch in method[1] (`EXT_DISPATCH` empty-stack, like the dorm bed) — the save constants live in methods 6/7 and are never popped by a local 0x1C, so dispatch-resolution can't set foundSaveenable. savePoint (ent27) is unpositioned (X=PSHM135 Y=PSHM588, no SET3-shift) and its 0x1C resolves to a runtime PSHM; saveline0 (ent36) is a REQ-chain controller with a MAPJUMP (classified MAP_EXIT) and no statically-visible save op — so neither save-POINT entity can carry the label. **FIX (the chosen association, field-load, no cache, no heuristic guess): in the JSM scan, for a Line entity (jsmCategory==1) scan its full bytecode for literal PUSH of the save opcodes — set foundSaveenable when MENUSAVE(302) is present OR both SAVEENABLE(303) and PHSENABLE(304) are present. That makes signal-(a) fire -> isSaveLine -> the catalog surfaces selphie as "Save Point" at its own SETLINE center (-700,-8593), exactly where auto-drive already arrives.** Contrast (why the dorm bgryo2_1 already works): its savePoint gets a SET3-SHIFT position (229,97) and injects directly, and its saveline0 has a statically-visible save op + LATE-RESOLVE position — bghall_1 has neither, which is why the own-script-constant route on the LINE is the right fix here.
 
-The v0.17.7.6.x chapter closed the bgroad_5 hallway calibration failure (full narrative in `DEVNOTES_HISTORY.md`); v0.17.8.0 closed bugs #5/#6, v0.17.8.1.1 closed #3, v0.17.8.3 closed #4, v0.17.8.4 removed a bogus camera catalog entry, v0.17.8.6 added the dorm bed + killed its duplicate exit, v0.17.8.7 filtered the `cardgamemaster` debug phantom + fixed the Event/Interaction double-injection that was also hiding the Directory, v0.17.8.8 added a general object/line dedupe (kanban signboard showed as both "Interaction 2" and "Kanban1" on bghall_2) plus a raw-SYM object relabel (standalone "Kanban2" on bghall_3 → "Interaction N"), and added save-line script-association detection. v0.17.8.9 completed that detection — the bghall_1 save point now labels via selphie's own-script save constants (see the save-point section above) — and refactored the two impacted .inl files back under the size ceiling. **Bugs #9 and #10 SOLVED + pushed: #9 in v0.17.8.10 (SegmentsCross), #10 in v0.17.8.15.1 (JSM behavior signal). Backlog: the runtime dialog-confirmation/disk-persistence layer (general answer to Director over-promotion).** Still deferred: Fire Cavern bug #1 (Quistis infirmary FMV premature), Laguna dream bugs #7 (field-nav player detection) and #8 (battle announces wrong party).
+The v0.17.7.6.x chapter closed the bgroad_5 hallway calibration failure (full narrative in `DEVNOTES_HISTORY.md`); v0.17.8.0 closed bugs #5/#6, v0.17.8.1.1 closed #3, v0.17.8.3 closed #4, v0.17.8.4 removed a bogus camera catalog entry, v0.17.8.6 added the dorm bed + killed its duplicate exit, v0.17.8.7 filtered the `cardgamemaster` debug phantom + fixed the Event/Interaction double-injection that was also hiding the Directory, v0.17.8.8 added a general object/line dedupe (kanban signboard showed as both "Interaction 2" and "Kanban1" on bghall_2) plus a raw-SYM object relabel (standalone "Kanban2" on bghall_3 → "Interaction N"), and added save-line script-association detection. v0.17.8.9 completed that detection — the bghall_1 save point now labels via selphie's own-script save constants (see the save-point section above) — and refactored the two impacted .inl files back under the size ceiling. **Bugs #9 and #10 SOLVED + pushed:** #9 in v0.17.8.10 (SegmentsCross), #10 in v0.17.8.15.1 (JSM behavior signal). **Bug #1 (Fire Cavern Quistis infirmary FMV premature) CLOSED + pushed** in v0.17.8.16/.16.1 (Chapter 1 squash, commit `b6afa8cb`). **Bugs #7 (Laguna field nav) and #8 (Laguna battle announces wrong party) CLOSED + pushed** in Chapter 2 (commit `b7067354`, v0.17.8.17.1 .. .17.8). **Chapter 3 Scan-on-allies fix CLOSED + pushed** in v0.17.8.18.1 (commit `10e776e5`). Backlog noted in `NEXT_SESSION_PROMPT.md`; primary item is the SeeD rank/salary chapter (R-key fix + automatic salary-event announcement).
 
 ---
 
 ## Where we are at session open
 
-**Chapter 3 BAT-VALIDATED, ready to push (v0.17.8.18.1). Scan-on-allies fix.** Chapter 2 closed cleanly at GitHub HEAD `b7067354` on 2026-05-28 22:52 UTC. Chapter 3 opened, fixed, and BAT-confirmed in a single session.
+**Chapter 3 CLOSED + PUSHED (v0.17.8.18.1, GitHub HEAD `10e776e5`).** Scan-on-allies fix BAT-confirmed and shipped as a single commit on 2026-05-28 23:14 UTC. The mod now announces canonical Scan descriptions for all playable characters (regular party + Laguna dream party) in addition to enemies.
 
-**BAT evidence (2026-05-28 17:05-17:07):** Squall scanned in regular battle, slot 1 (ally):
+**BAT evidence (2026-05-28 17:05-17:07, captured before push):** Squall scanned in regular battle, slot 1 (ally):
 ```
 [SCAN-CACHE] Captured slot=1 name='Squall' monsterId=0x00 hasDesc=1
 [SCAN-TTS] Auto-announce slot=1 msg='Squall. Uses a sword called a gunblade.
@@ -37,18 +37,52 @@ The full canonical description played. Aaron also pressed `2` to re-query (the f
   - `SpeakField` case 2 (key `2` description query): collapsed the ally branch into the generic `snap.hasDescription ? description : "No description available."` path.
   - Architectural comment block rewritten to document the actual universal-lookup behavior. `ResolveDescriptionSafe`'s existing filters (`monsterId == 0xFF` sentinel, `pos == 0xFFFF`, `pos >= 0x4000`, empty decode) catch any genuinely-stale byte without needing the ally guard.
 
-**Ready to push.** Aaron runs `Utilities/push_to_github.ps1` to push v0.17.8.18.1 as a single commit. GitHub HEAD before push = `b7067354`.
+**Open chapters awaiting next session:** **Chapter 4 (chase regression) IN FLIGHT at v0.17.8.19.1** -- protected-waypoint fix shipped, awaiting Aaron's BAT to confirm 0 chase catches. After Chapter 4 closes, **Chapter 5 (SeeD rank + automatic salary announcement)** is queued -- GitHub issue #27 (R key 'No SeeD rank yet') expanded to also cover automatic SeeD salary/rank-change announcement. Other backlog items in `NEXT_SESSION_PROMPT.md`.
 
-**Laguna bundle (Chapter 2, all PUSHED):**
+**Laguna bundle (Chapter 2, all PUSHED, commit `b7067354`):**
   - Bug #7 (field nav): fixed v0.17.8.17.1.
   - Bug #8 NAMES (in-battle): fixed v0.17.8.17.2.
   - Bug #8 COMMAND MENU: fixed v0.17.8.17.5.
   - Bug #8 NAMES (Victory screen): fixed v0.17.8.17.6.
   - Bug #8 NAMES (Main Menu audit -- Junction char-select + M-summary + Item Use-target + GF owner): fixed v0.17.8.17.7.
   - v0.17.8.17.8 cleanup: F12 Laguna diagnostic infrastructure removed.
-  - Bug #8 NAMES (FIELD entity catalog): documented follow-up; needs dream-field model-ID observation before fixing.
+  - **FIELD entity catalog is N/A** -- the catalog uses generic category labels (NPC, Event, Interaction, Exit, Gateway), not proper character names, so there is no dream-aware naming to fix there. Earlier note suggesting a follow-up here was stale and has been removed.
 
-GitHub HEAD = `b7067354` (v0.17.8.17.8, Chapter 2 closed).
+### Last chapter closed: Chapter 3 (Scan-on-allies, commit `10e776e5`)
+
+### Current chapter: Chapter 4 (chase regression on domt2_1, **BAT CONFIRMED**, push pending)
+
+v0.17.8.19.4 (local, not pushed): chase-drive gateway pass-through. **BAT CONFIRMED 2026-05-28 19:39 by Aaron.** Chase reached Lapin Beach with 0 catches. BAT signals all fired correctly:
+- `[funnel-prune] skipped for chase-drive (32 waypoints kept; ...)` ✓
+- `[drive] chase-drive gateway pass-through: player=(...) gw=(-93,-3414) toGwLen=457 → 428 → 398 → ... -> steer overridden to (..., -371X) (300 units past gateway)` ✓ (toGwLen decreases monotonically as party walks through)
+- Zero `[CBF] PASS chase BATTLE` lines anywhere ✓
+- `[drive-vec]` at t=810 shows `corSteer=(-135,-3711)` with `finalDelta=(-98.2,-691.0)` — strong sustained southward push, no UR oscillation ✓
+- MAPJUMP to Lapin Beach fired cleanly ✓
+
+**Ready for push as Chapter 4 squash commit.** The four-build chain .19.1 → .19.4 represents iterative debugging; only .19.4 is the actual fix, but .19.1-.19.3 are kept as defensive infrastructure producing a denser, more robust chase path. CHANGELOG.md has the full narrative.
+
+**Root cause of the chase regression.** In `UpdateAutoDrive` (`src/field_nav_autodrive.inl`), the v0.15.9.2.15 'offset 300 units past line' logic correctly mutates `tx, tz, dx, dz` to push the target through the gateway. But the waypoint chain-advance block LATER in the same function overwrites `dx, dz` with `steerX/steerY = s_waypoints[last]`, which is the gateway CENTER. The offset is silently discarded. Party aims AT the gateway, not THROUGH it. Engine wall-sliding produces the UR-direction wobble at the corner of the goal triangle. Battleyarou catches the wobbling party.
+
+**The actual fix (`src/field_nav_autodrive.inl`, v0.17.8.19.4).** ~25-line block inserted directly after the waypoint chain-advance sets `vecWpRawX/Y`. Gated on `s_chaseDriveActive && s_driveCrossLineActive && s_waypointIdx == s_waypointCount - 1`. Computes player→gateway unit vector, sets `steerX/steerY` to a point 300 units PAST the gateway center along that direction. Arrival is still owned by the cross-product sign-flip check in the `gotCrossLine` block above.
+
+**Why .19.1, .19.2, .19.3 are kept (not reverted).**
+- v0.17.8.19.1 (protected wall-parallel midpoint): real fix for the v0.17.5.2 regression that deletes v0.16.1.2's COLLAPSE'd doorway waypoint at (-13,-1508). Prevents future doorway-threading regressions even though not the cause of THIS bug.
+- v0.17.8.19.2 (skip prune for chase-drive): reasonable design — the TTS micro-corner motivation for prune doesn't apply to chase (chase is silent), and dense waypoints help corridor navigation.
+- v0.17.8.19.3 (flag-set ordering): made .19.2's gate actually engage by setting `s_chaseDriveActive=true` before `FunnelPath` runs.
+
+Protected waypoints + skipped prune produce a denser, more robust chase path that the gateway pass-through then steers through cleanly. The combination is correct; the previous three builds individually didn't solve the failure mode because the failure was in the pass-through, not the path quality.
+
+**Diagnostic chain that found the actual root cause.** Aaron's question 'are we stopping right before [the gateway], or walking through it?' unlocked the real diagnosis. Per-tick `[drive-vec]` reading of the v0.17.8.19.3 BAT log revealed the oscillation pattern: party reached the gateway midpoint then wobbled in a ~30x6 unit box for ~2 seconds (t=750-900), Y never going more negative than -3410, analog flipping DL (south-west) / UR (north-east) every other sample. Three consecutive BATs caught at the same coordinates (-110,-3407) — that was the should-have-noticed-earlier signal that the path-quality theory was wrong.
+
+**Lessons (carry-forward).**
+1. When a fix doesn't engage as expected, READ THE LOG before iterating. v0.17.8.19.2's new 'skipped for chase-drive' log line didn't fire in the BAT — that should have been the first clue (caught only in v0.17.8.19.3).
+2. When 'fix' after 'fix' leaves the BAT outcome IDENTICAL, the original diagnosis is probably wrong.
+3. Chase-drive's chain-advance NEVER advances past the last waypoint. The funnel's last waypoint sits at the gateway center. Without an explicit override, `steerX/steerY` aims AT the gateway, not THROUGH it.
+4. The v0.15.9.2.15 'offset 300 units past line' logic IS NOT ENOUGH on its own. It mutates `tx, tz, dx, dz` but those values are overwritten by the waypoint chain-advance later in the same function. Both pieces are needed: gotCrossLine handles arrival detection, gateway pass-through handles the analog vector.
+
+### Earlier chapter close: Chapter 3 (Scan-on-allies, commit `10e776e5`)
+
+Single-patch chapter. Aaron raised the bug after the Chapter 2 .17.8 cleanup BAT ("scanning Laguna in the dream battle announces 'No description available'"), then clarified during diagnosis that ALL playable characters have canonical Scan descriptions in FF8 -- not just dream party. That correction reframed the fix scope from "add dream-party override" to "lift the bogus ally guard entirely." The fix landed in a single editing pass, BAT-validated in the next build, and pushed without a cleanup pass. Carry-forwards documented above.
 
 ### Last chapter closed: Chapter 2 (Laguna dream bundle -- bugs #7 + #8)
 

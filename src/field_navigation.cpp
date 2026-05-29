@@ -697,6 +697,22 @@ static int          s_navObsSampleCount[OBS_NUM_ARROWS] = {};
 static bool         s_camAxesEmpiricalApplied = false;
 
 
+// --- v0.15.9.2.1 / moved earlier in v0.17.8.19.2: Chase-drive state
+// declared at file scope so all .inl files that need it can reference
+// s_chaseDriveActive / s_chaseDriveTargetX/Y. Originally declared just
+// before the autodrive.inl include, but v0.17.8.19.2 added a chase-drive
+// gate inside PruneCollinearWaypoints (field_nav_pathfinding.inl) which is
+// included earlier in this file, so the declarations had to move up.
+// The chase-drive IMPLEMENTATION (StartChaseDrive / StopChaseDrive /
+// IsChaseDriveActive) still lives in field_nav_directiondrive.inl which is
+// included later, after autodrive.inl, so it can use SetHeldDirections /
+// InjectKey from autodrive. File-scope statics in textual includes share one
+// translation unit, so these definitions are visible to every .inl below.
+static volatile bool s_chaseDriveActive = false;  // owned by directiondrive.inl, read by autodrive.inl + pathfinding.inl
+static bool          s_chaseDriveWalk   = false;  // owned by directiondrive.inl
+static int32_t       s_chaseDriveTargetX = 0;     // cached by StartChaseDrive, read by autodrive's UpdateAutoDrive
+static int32_t       s_chaseDriveTargetY = 0;
+
 // --- Engine input hooks (extracted v0.12.18) ---
 #include "field_nav_input_hooks.inl"
 
@@ -722,17 +738,11 @@ static bool         s_camAxesEmpiricalApplied = false;
 #include "field_nav_announce.inl"
 
 // --- Auto-drive state machine, steering, recovery (extracted v0.12.18) ---
-// v0.15.9.2.1: Chase-drive state declared here so field_nav_autodrive.inl
-// can reference s_chaseDriveActive / s_chaseDriveTargetX/Y. The chase-drive
-// IMPLEMENTATION (StartChaseDrive / StopChaseDrive / IsChaseDriveActive)
-// lives in field_nav_directiondrive.inl which is included later, after
-// autodrive.inl, so it can use SetHeldDirections / InjectKey from autodrive.
-// File-scope statics in textual includes share one translation unit, so
-// these definitions are visible to both .inl files.
-static volatile bool s_chaseDriveActive = false;  // owned by directiondrive.inl, read by autodrive.inl
-static bool          s_chaseDriveWalk   = false;  // owned by directiondrive.inl
-static int32_t       s_chaseDriveTargetX = 0;     // cached by StartChaseDrive, read by autodrive's UpdateAutoDrive
-static int32_t       s_chaseDriveTargetY = 0;
+// v0.15.9.2.1 / v0.17.8.19.2: Chase-drive state (s_chaseDriveActive,
+// s_chaseDriveWalk, s_chaseDriveTargetX/Y) was declared here originally but
+// moved up above the field_nav_pathfinding.inl include in v0.17.8.19.2 so
+// the prune chase-drive gate could reference it. See the new declaration
+// block earlier in this file for the full rationale.
 
 // v0.15.9.2.6: File-scope dead-end cluster state populated by the walkmesh
 // dead-end scanner in HookedFieldScriptsInit (was a local variable before;

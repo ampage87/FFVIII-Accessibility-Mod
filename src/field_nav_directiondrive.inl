@@ -514,6 +514,36 @@ bool StartChaseDrive(int32_t targetX, int32_t targetY,
     s_driveProgressDist    = 1e30f;
     s_driveNoProgressCount = 0;
 
+    // v0.17.8.19.3: Activate s_chaseDriveActive BEFORE the path computation
+    // below. v0.17.8.19.2 added a `if (!s_chaseDriveActive)` gate in
+    // PruneCollinearWaypoints (field_nav_pathfinding.inl) to keep the
+    // micro-corner prune from over-trimming the dense funnel output chase
+    // needs. That gate failed silently because FunnelPath runs from the path
+    // computation block below, and historically s_chaseDriveActive wasn't
+    // set until near the bottom of this function -- so the flag was false
+    // when the prune ran, the prune executed unchanged, and the v0.17.8.19.2
+    // BAT showed the same 8 post-prune waypoints we had pre-fix. Setting
+    // the flag here (along with target coord caching, which UpdateAutoDrive
+    // needs the moment Update() runs after we return) closes that window.
+    // The recovery re-paths in UpdateAutoDrive's wiggle-completion block
+    // already happen with s_chaseDriveActive=true, so the prune gate has
+    // always worked for them -- only the initial StartChaseDrive call was
+    // exposed.
+    //
+    // Safe to set early because:
+    //  - The mutex check at the top of this function already passed; no
+    //    other drive owner conflict can resurface.
+    //  - No failure path between here and the original set-site clears the
+    //    flag, so we're not creating a half-engaged state on failure (the
+    //    pre-v0.17.8.19.3 ordering would have set it true at the bottom
+    //    regardless of A*/walkmesh failure too).
+    //  - UpdateAutoDrive's chase-drive branches read s_chaseDriveActive
+    //    but only after this function returns and Update() ticks; same
+    //    thread, no race.
+    s_chaseDriveTargetX = targetX;
+    s_chaseDriveTargetY = targetY;
+    s_chaseDriveActive  = true;
+
     // Calibration setup. F9 calibrates the camera-to-world heading on first
     // drive per field; chase-drive piggybacks on the same flag so a single
     // calibration run covers both paths.
@@ -718,11 +748,11 @@ bool StartChaseDrive(int32_t targetX, int32_t targetY,
         s_chaseDriveWalk = false;
     }
 
-    // v0.15.9.2.1: Cache target coords for UpdateAutoDrive to read.
-    s_chaseDriveTargetX = targetX;
-    s_chaseDriveTargetY = targetY;
-
-    s_chaseDriveActive = true;
+    // v0.17.8.19.3: s_chaseDriveTargetX/Y and s_chaseDriveActive moved
+    // earlier in this function (see the v0.17.8.19.3 block right after the
+    // drive state init). The pre-final-log set-site is now redundant; the
+    // earlier set is the one that matters for the prune gate in
+    // field_nav_pathfinding.inl.
 
     Log::Field("FieldNavigation: [chase-drive] STARTED tgt=(%d,%d) walk=%d "
                "player=(%.0f,%.0f) waypoints=%d startDist=%.0f trigIdx=%d "

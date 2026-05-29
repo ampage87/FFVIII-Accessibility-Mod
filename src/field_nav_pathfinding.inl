@@ -562,12 +562,39 @@ static bool FindPortal(uint16_t triA, uint16_t triB,
 // First and last waypoints are preserved (loop runs i = 1 to count-2).
 static const float PRUNE_PERP_EPSILON = 50.0f;
 
+// v0.17.8.19.1: Protected waypoint positions populated by FunnelPath's
+// wall-parallel-portal COLLAPSE branch. Those waypoints are constraint-
+// forced -- the path MUST aim at them so the player threads a narrow
+// doorway rather than sliding along its parallel wall. Without protection
+// they are geometrically near-collinear with their neighbors (the whole
+// point of a doorway through a wall is that it sits ON the corridor line)
+// and would be deleted by PruneCollinearWaypoints. Removing them regresses
+// v0.16.1.2's COLLAPSE fix and reproduces the v0.16.1.1 stuck-at-wall
+// behavior on domt2_1 (chase catch by battleyarou at the south exit) and
+// any other field with a wall-parallel exit portal.
+//
+// Cleared at the top of every FunnelPath call so the protection list is
+// fresh per re-path; populated in the COLLAPSE branch with the post-
+// AGENT_RADIUS-shift midpoint that the funnel emits as a forced waypoint;
+// consulted in PruneCollinearWaypoints which skips any candidate-for-prune
+// whose position lies within PROTECTED_WP_EPSILON of a recorded entry.
+//
+// Sized to MAX_CORRIDOR because that's the upper bound on portals per
+// path; in practice <=5 protected waypoints per field is typical, well
+// under the threshold where preserving them would resurrect the TTS
+// micro-corner spam that motivated PruneCollinearWaypoints' original
+// design (hundreds of waypoints on bg2f_2's classroom hallway).
+static float s_protectedWaypointPos[MAX_CORRIDOR][2];
+static int   s_protectedWaypointCount = 0;
+static const float PROTECTED_WP_EPSILON = 1.0f;
+
 static int PruneCollinearWaypoints(float wp[][2], int count)
 {
     if (count < 3) return count;
     bool changed = true;
     int iterations = 0;
     int totalRemoved = 0;
+    int totalSkipped = 0;
     while (changed && iterations < 100) {  // safety bound
         changed = false;
         iterations++;
@@ -587,6 +614,23 @@ static int PruneCollinearWaypoints(float wp[][2], int count)
                 perpDist = fabsf(cross) / aclen;
             }
             if (perpDist < PRUNE_PERP_EPSILON) {
+                // v0.17.8.19.1: Skip if this waypoint is a protected
+                // wall-parallel-portal COLLAPSE midpoint. See the
+                // s_protectedWaypointPos declaration above for the full
+                // rationale.
+                bool isProtected = false;
+                for (int p = 0; p < s_protectedWaypointCount; p++) {
+                    float pdx = bx - s_protectedWaypointPos[p][0];
+                    float pdy = by - s_protectedWaypointPos[p][1];
+                    if (pdx*pdx + pdy*pdy < PROTECTED_WP_EPSILON*PROTECTED_WP_EPSILON) {
+                        isProtected = true;
+                        break;
+                    }
+                }
+                if (isProtected) {
+                    totalSkipped++;
+                    continue;  // leave protected waypoint in place
+                }
                 // Remove B by shifting subsequent waypoints left.
                 for (int k = i; k + 1 < count; k++) {
                     wp[k][0] = wp[k+1][0];
@@ -599,16 +643,22 @@ static int PruneCollinearWaypoints(float wp[][2], int count)
             }
         }
     }
-    if (totalRemoved > 0) {
+    if (totalRemoved > 0 || totalSkipped > 0) {
         Log::Field("FieldNavigation: [funnel-prune] removed %d collinear waypoints "
-                   "(eps=%.0f units, %d sweeps)",
-                   totalRemoved, PRUNE_PERP_EPSILON, iterations);
+                   "(eps=%.0f units, %d sweeps, %d protected wall-parallel midpoints preserved)",
+                   totalRemoved, PRUNE_PERP_EPSILON, iterations, totalSkipped);
     }
     return count;
 }
 
 static void FunnelPath(float startX, float startY, float goalX, float goalY)
 {
+    // v0.17.8.19.1: Fresh protected-waypoint list per call. The COLLAPSE
+    // branch below populates it with wall-parallel doorway midpoints so
+    // PruneCollinearWaypoints (called at the bottom of this function)
+    // won't delete them.
+    s_protectedWaypointCount = 0;
+
     // Build portal list from corridor.
     // Each portal is the shared edge between corridor[i] and corridor[i+1].
     struct Portal { float lx, ly, rx, ry; };
@@ -702,6 +752,18 @@ static void FunnelPath(float startX, float startY, float goalX, float goalY)
                 portals[numPortals].ly = my;
                 portals[numPortals].rx = mx;
                 portals[numPortals].ry = my;
+                // v0.17.8.19.1: Record this midpoint as a protected
+                // waypoint position so PruneCollinearWaypoints doesn't
+                // delete it later. Without this, the funnel emits the
+                // collapsed point correctly but the prune pass (added in
+                // v0.17.5.2) removes it because it's near-collinear with
+                // its neighbors in the path -- which is the entire reason
+                // it's a useful constraint, but defeats v0.16.1.2's fix.
+                if (s_protectedWaypointCount < MAX_CORRIDOR) {
+                    s_protectedWaypointPos[s_protectedWaypointCount][0] = mx;
+                    s_protectedWaypointPos[s_protectedWaypointCount][1] = my;
+                    s_protectedWaypointCount++;
+                }
                 numPortals++;
                 degenerateSkipped++;  // reused as "encountered" counter for the summary log
                 Log::Field("FieldNavigation: [funnel] COLLAPSE wall-parallel portal %d "
@@ -836,13 +898,31 @@ static void FunnelPath(float startX, float startY, float goalX, float goalY)
     int oldCount = s_waypointCount;
     memcpy(s_waypoints, result, sizeof(float) * 2 * resultCount);
     s_waypointCount = resultCount;
-    // v0.17.5.2: Prune near-collinear waypoints from the funnel output.
-    // SSFA on walkmesh corridors with small zigzag triangles emits a waypoint
-    // at each portal-vertex alternation, even when those alternations don't
-    // represent meaningful turns from the player's perspective. The prune
-    // pass collapses such micro-corners while preserving real bends.
+    // v0.17.8.19.2: Skip the prune for chase-drive. v0.17.5.2's prune
+    // motivation (TTS micro-corner spam on bg2f_2 classroom) doesn't apply
+    // to chase auto-pilot, which runs silent. Chase needs the dense funnel
+    // output to navigate long Dollet corridors like domt2_1 -- v0.17.8.19.1
+    // protected the COLLAPSE'd doorway midpoint but the prune still deleted
+    // 24 of 32 OTHER intermediate waypoints, leaving the path so sparse
+    // that the party wedged on tri 25 geometry between the doorway exit
+    // (-13,-1508) and the next surviving waypoint (-306,-1919). v0.16.1.4
+    // had 0 chase catches without any prune; restore that by gating the
+    // call on !s_chaseDriveActive.
+    //
+    // Manual nav (F9 path-finding to NPCs) still runs the prune and keeps
+    // the v0.17.5.2 TTS fix. The s_protectedWaypointPos mechanism added in
+    // v0.17.8.19.1 stays in place for F9 path-finding that happens to cross
+    // a wall-parallel-portal field (same scenario applies there if a player
+    // F9s to an NPC behind a doorway).
     int prePruneCount = s_waypointCount;
-    s_waypointCount = PruneCollinearWaypoints(s_waypoints, s_waypointCount);
+    if (!s_chaseDriveActive) {
+        s_waypointCount = PruneCollinearWaypoints(s_waypoints, s_waypointCount);
+    } else {
+        Log::Field("FieldNavigation: [funnel-prune] skipped for chase-drive "
+                   "(%d waypoints kept; PRUNE_PERP_EPSILON=%.0f only applies "
+                   "to F9 nav to avoid TTS micro-corner spam)",
+                   s_waypointCount, PRUNE_PERP_EPSILON);
+    }
     s_waypointIdx = 0;
     s_usingFunnel = true;  // v05.95: use tighter arrive distance for funnel waypoints
 

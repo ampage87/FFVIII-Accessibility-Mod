@@ -587,6 +587,26 @@ static void UpdateAutoDrive()
         steerY = s_waypoints[s_waypointIdx][1];
         vecWpRawX = steerX;  // v0.17.6.1: capture pre-corridor waypoint for [drive-vec]
         vecWpRawY = steerY;
+
+        // v0.17.8.19.4: Chase-drive gateway pass-through. Override final-wp
+        // steerX/Y to 300 units past the gateway so the party walks THROUGH
+        // instead of oscillating at it (chain-advance can't pass the last wp;
+        // v0.15.9.2.15 tx/tz offset gets overwritten here). See CHANGELOG.
+        if (s_chaseDriveActive && s_driveCrossLineActive &&
+            s_waypointIdx == s_waypointCount - 1) {
+            float toGwX = (float)s_chaseDriveTargetX - px;
+            float toGwY = (float)s_chaseDriveTargetY - pz;
+            float toGwLen = sqrtf(toGwX*toGwX + toGwY*toGwY);
+            if (toGwLen > 1.0f) {
+                steerX = (float)s_chaseDriveTargetX + (toGwX / toGwLen) * 300.0f;
+                steerY = (float)s_chaseDriveTargetY + (toGwY / toGwLen) * 300.0f;
+                Log::Field("FieldNavigation: [drive] chase-drive gateway pass-through: "
+                           "player=(%.0f,%.0f) gw=(%d,%d) toGwLen=%.0f -> steer=(%.0f,%.0f)",
+                           px, pz, (int)s_chaseDriveTargetX, (int)s_chaseDriveTargetY,
+                           toGwLen, steerX, steerY);
+                // vecWpRawX/Y left as raw funnel wp for [drive-vec] aim-vs-override.
+            }
+        }
     }
     // v06.17: Corridor-level steering — steer toward the shared-edge midpoint
     // of the next corridor triangle instead of distant funnel waypoints.

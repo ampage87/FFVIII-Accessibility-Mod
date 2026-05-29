@@ -6,6 +6,387 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.8.19.4
+
+Chapter 4 ACTUAL fix: chase-drive gateway pass-through. The previous three
+builds (v0.17.8.19.1, .2, .3) were all chasing a wrong diagnosis (prune
+over-trimming the path). The v0.17.8.19.3 BAT proved the prune theory was
+wrong: with the prune fully skipped and the full 32-waypoint funnel output
+used, the party still got caught at the south exit of domt2_1. Trajectory
+analysis from the v0.17.8.19.3 log revealed the real bug: party reaches
+the gateway midpoint and **oscillates around it without ever crossing
+the gateway line**, getting caught while wobbling in place.
+
+**v0.17.8.19.3 BAT evidence (2026-05-28 19:12:50-19:13:06).**
+  - `[funnel-prune] skipped for chase-drive (32 waypoints kept; ...)`
+    confirmed -- the prune-skip is now wired correctly.
+  - Path: 32-waypoint dense funnel from `(520,1391)` to `(-93,-3414)`.
+    Party traversed cleanly in ~15 seconds with no stuck behavior.
+  - Per-tick steering (gateway line is at Y=-3414, target (-93,-3414)):
+      t=720: pp=(-27,-3283), 131N of gateway, analog lX=67 lY=979 (S)
+      t=750: pp=(-80,-3401),  13N of gateway, analog lX=-248 lY=993 (DL)
+      t=780: pp=(-110,-3407),  7N of gateway, analog lX=989 lY=-273 (**UR -- NE!**)
+      t=870: pp=(-82,-3404), 10N of gateway, analog lX=-293 lY=986 (DL)
+      t=900: pp=(-113,-3410), 4N of gateway, analog lX=989 lY=-276 (**UR**)
+  - Party stuck in a ~30x6-unit box at the gateway approach, Y never
+    going more negative than -3410. Battleyarou (TALKRAD ~500) caught
+    the wobbling party.
+
+**Root cause diagnosis.** `UpdateAutoDrive` has v0.15.9.2.15 "offset 300
+units past line" logic in the `gotCrossLine` block:
+```
+if (gotCrossLine) {
+    // ... compute heading toward cross-line ...
+    tx += (dx/dirLen) * 300.0f;   // push target 300 units past the line
+    tz += (dz/dirLen) * 300.0f;
+    dx = tx - px;  dz = tz - pz;
+}
+```
+This correctly offsets `tx, tz, dx, dz` past the gateway. **But later in
+the same function**, the waypoint chain-advance block OVERWRITES `dx, dz`:
+```
+float steerX = tx, steerY = tz;
+if (s_waypointCount > 0 && s_waypointIdx < s_waypointCount) {
+    // chain-advance (never advances past final waypoint)
+    steerX = s_waypoints[s_waypointIdx][0];   // <-- gateway CENTER point
+    steerY = s_waypoints[s_waypointIdx][1];
+}
+dx = steerX - px;  // <-- OVERWRITES the offset-adjusted dx
+SetAnalogFromVector(dx, dz);
+```
+The funnel's last waypoint sits at the gateway midpoint (passed in to
+FunnelPath as the goal), so once `s_waypointIdx == s_waypointCount-1`,
+`steerX/steerY` lock onto the gateway center, the offset is silently
+discarded, and the analog aims **at** the gateway rather than
+**through** it. Engine wall-sliding then produces the UR-direction
+wobble once the party gets pinned at the corner of the goal triangle.
+
+**Fix shape (`src/field_nav_autodrive.inl`).** Single ~25-line block
+inserted directly after the waypoint chain-advance sets `vecWpRawX/Y`,
+gated on `s_chaseDriveActive && s_driveCrossLineActive &&
+s_waypointIdx == s_waypointCount-1`:
+```
+float toGwX = (float)s_chaseDriveTargetX - px;
+float toGwY = (float)s_chaseDriveTargetY - pz;
+float toGwLen = sqrtf(toGwX*toGwX + toGwY*toGwY);
+if (toGwLen > 1.0f) {
+    steerX = (float)s_chaseDriveTargetX + (toGwX/toGwLen) * 300.0f;
+    steerY = (float)s_chaseDriveTargetY + (toGwY/toGwLen) * 300.0f;
+}
+```
+Now the analog points 300 units PAST the gateway along the
+player->gateway direction. The party walks straight through. Arrival is
+still owned by the cross-product sign-flip check in the `gotCrossLine`
+block above (which fires the instant the player's Y crosses the line),
+so we don't blow past the destination on the other side.
+
+**Scope.**
+  - F9 path-finding: unaffected (s_chaseDriveActive guard).
+  - Direction-drive: unaffected (different code path entirely).
+  - Chase-drive without crossing line: unaffected (none currently exist;
+    s_driveCrossLineActive guard).
+  - Chase-drive with crossing line but not on last waypoint: unaffected.
+  - The corridor-steering block below this point is disabled for
+    chase-drive (existing `false &&` guard from v0.15.9.2.3 + v0.17.6.2),
+    so the override flows directly to `SetAnalogFromVector`.
+  - `vecWpRawX/Y` is intentionally NOT updated -- the `[drive-vec]` log
+    keeps showing the raw funnel waypoint so we can compare aim vs
+    override.
+
+**Why the previous three builds were not the actual fix (but are kept):**
+  - v0.17.8.19.1 (protected wall-parallel midpoint): Real fix for a real
+    bug -- v0.17.5.2's `PruneCollinearWaypoints` was deleting v0.16.1.2's
+    COLLAPSE'd doorway waypoint at (-13,-1508), which made some chase
+    paths thread the wrong side of the door geometry. The protection
+    mechanism prevents that from regressing. Not the cause of THIS bug.
+  - v0.17.8.19.2 (skip prune entirely for chase-drive): Reasonable design
+    -- the TTS micro-corner motivation for the prune doesn't apply to
+    chase (chase is silent), and chase benefits from dense waypoints for
+    tight corridor navigation. Not the cause of THIS bug.
+  - v0.17.8.19.3 (flag-set ordering): Made v0.17.8.19.2 actually engage
+    by setting `s_chaseDriveActive=true` before `FunnelPath` runs. The
+    prune-skip gate now works as intended. Not the cause of THIS bug.
+
+All three are kept as defensive infrastructure: protected waypoints +
+skipped prune produce a denser, more robust chase path that the
+gateway pass-through logic then steers through cleanly. The combination
+is correct; the previous three builds individually didn't solve the
+failure mode because the failure was in the pass-through logic, not in
+the path quality.
+
+**Expected BAT outcome.**
+  - Chase reaches Lapin Beach FMV (`disc00_07h.avi`) with 0 catches.
+  - No `[CBF] PASS chase BATTLE` lines anywhere in the run.
+  - New log line: `[drive] chase-drive gateway pass-through: player=(...)
+    gw=(-93,-3414) toGwLen=... -> steer overridden to (...) (300 units
+    past gateway)` fires when the party gets within range of the south
+    exit of `domt2_1`.
+  - Party traverses the gateway in a single pass, no oscillation.
+
+**Modified files:**
+  - `src/field_nav_autodrive.inl` (gateway pass-through block in
+    `UpdateAutoDrive` after waypoint chain-advance)
+  - `src/ff8_accessibility.h` (version bump)
+  - `CHANGELOG.md` (this entry)
+  - `DEVNOTES.md` (Chapter 4 status update)
+
+## v0.17.8.19.3
+
+Chapter 4 fix-the-fix: move `s_chaseDriveActive = true` BEFORE the path
+computation block in `StartChaseDrive`. v0.17.8.19.2's prune gate worked
+but never fired during chase-drive because the flag was set near the
+bottom of `StartChaseDrive` -- AFTER `ComputeAStarPath` / `FunnelPath`
+had already run. Same `[CBF] PASS` outcome at the south exit; same
+8-waypoint post-prune path; identical [funnel-prune] log line as
+v0.17.8.19.1.
+
+**v0.17.8.19.2 BAT evidence (2026-05-28 18:55:13-18:55:26).**
+  - `[funnel-prune] removed 24 collinear waypoints (eps=50 units, 25 sweeps,
+    2 protected wall-parallel midpoints preserved)` -- IDENTICAL to
+    v0.17.8.19.1. The prune ran, removing 24 waypoints. The new
+    `[funnel-prune] skipped for chase-drive` log line that v0.17.8.19.2
+    was supposed to add NEVER FIRED, because `s_chaseDriveActive` was
+    `false` at the time `FunnelPath` ran.
+  - Subsequent log sequence confirms the ordering:
+      line 1610: `[funnel-prune] removed 24` (FunnelPath finished)
+      line 1611: `35 triangles -> 8 waypoints (post-prune...)` (funnel summary)
+      line 1612: `[chase-drive] A*+funnel: 8 waypoints from tri 71 to 6`
+      line 1613: `[chase-drive] STARTED tgt=(-93,-3414) walk=0 ...` -- the
+        STARTED line is logged at the END of `StartChaseDrive`, AFTER the
+        flag was set. By the time the chase-drive STARTED log fires, the
+        path is already computed and pruned.
+  - Same wedge at (-64,-1562) for 5 seconds (because the path is the same
+    8 sparse waypoints we had in v0.17.8.19.1), velocity-stuck recoveries
+    skipped wp 5->6->7, party crawled to (-110,-3407), `[CBF] PASS` fired
+    with battleyarou as caller at 18:55:26.
+
+**Diagnosis.** `StartChaseDrive` in `src/field_nav_directiondrive.inl`
+performed work in this order:
+  1. Mutex / prereq checks (s_driveActive, s_directionDriveActive, dialog,
+     field, player entity, position read).
+  2. Drive state init (s_driveActive=true, stuck counters, position seed).
+  3. Calibration setup, fake gamepad install, crossing-line setup.
+  4. **Path computation: ComputeAStarPath + FunnelPath.** <-- prune runs
+     here, sees `s_chaseDriveActive == false`, runs the prune unmodified.
+  5. Walk modifier setup.
+  6. `s_chaseDriveTargetX/Y` cached, `s_chaseDriveActive = true` set, final
+     `[chase-drive] STARTED` log fires.
+
+Step 6's flag-set was too late for step 4's prune gate.
+
+**Fix shape (`src/field_nav_directiondrive.inl`).** Move steps 6's three
+statements (`s_chaseDriveTargetX = targetX`, `s_chaseDriveTargetY = targetY`,
+`s_chaseDriveActive = true`) up to right after step 2's drive state init,
+before step 3's calibration setup. Replace the old set-site with a comment
+pointing at the new location. No new flag, no logic change beyond ordering.
+
+**Safety analysis.**
+  - The mutex check at the top of `StartChaseDrive` (refuses if another
+    drive is active) is unchanged; we only reach the new set-site if that
+    check passed. No risk of setting the flag while another owner thinks
+    it has the drive.
+  - No failure path between the new set-site and the original (now-removed)
+    set-site clears the flag. The pre-v0.17.8.19.3 code path always reached
+    the bottom `s_chaseDriveActive = true` line regardless of walkmesh or
+    A* failure -- if the walkmesh was invalid, the code logged and fell
+    through; if A* failed, same. So pre-v0.17.8.19.3 ALSO had no failure
+    path that left the flag false after a successful mutex check. The new
+    ordering preserves this property.
+  - `UpdateAutoDrive`'s chase-drive branches read `s_chaseDriveActive` only
+    after `StartChaseDrive` returns and the next `Update()` tick fires.
+    Same thread (chase_auto_pilot's `Update` -> `StartChaseDrive`, and
+    `FieldNavigation::Update` -> `UpdateAutoDrive`; both called from the
+    mod thread), no race.
+  - The recovery re-paths in `UpdateAutoDrive`'s wiggle-completion block
+    already call `FunnelPath` with `s_chaseDriveActive=true` (because they
+    run during an active chase-drive), so the v0.17.8.19.2 prune gate has
+    always worked correctly for them. Only the initial `StartChaseDrive`
+    call was exposed. This fix doesn't change recovery behavior.
+
+**Expected BAT outcome.** Identical to v0.17.8.19.2's stated expectations:
+chase reaches Lapin Beach with 0 catches, no `[CBF] PASS chase BATTLE`
+lines anywhere, and now the `[funnel-prune] skipped for chase-drive (N
+waypoints kept; ...)` log line ACTUALLY fires (with N >= 30 on domt2_1
+instead of the 8 we got with the prune running).
+
+**Modified files:**
+  - `src/field_nav_directiondrive.inl` (move chase-drive flag set earlier)
+  - `src/ff8_accessibility.h` (version bump)
+  - `CHANGELOG.md` (this entry)
+
+## v0.17.8.19.2
+
+Chapter 4 follow-up: skip `PruneCollinearWaypoints` entirely when chase-drive
+owns the wheel. The v0.17.8.19.1 protected-waypoint mechanism preserved the
+doorway-threading COLLAPSE midpoint correctly, but the v0.17.8.19.1 BAT showed
+the prune was also deleting too many OTHER intermediate funnel waypoints --
+the party threaded the doorway at (-13,-1508) and then immediately wedged
+at (-64,-1562) heading to the next surviving waypoint (-306,-1919). Same
+`[CBF] PASS` outcome at the south exit -- different proximate cause.
+
+**v0.17.8.19.1 BAT evidence (2026-05-28 18:30:48-18:31:02).**
+  - `[funnel] COLLAPSE wall-parallel portal 23 ... wp=(-13,-1508)` fired as
+    expected.
+  - `[funnel-prune] removed 24 collinear waypoints (eps=50 units, 25 sweeps,
+    2 protected wall-parallel midpoints preserved)` -- the new "2 protected"
+    counter confirmed the v0.17.8.19.1 protection mechanism engaged. (The
+    "2" is the number of times the protected waypoint was encountered as
+    a near-collinear candidate during sweeps, not the count of distinct
+    protected waypoints. Only one COLLAPSE log line fired, so there's one
+    distinct protected midpoint at (-13,-1508).)
+  - `[drive-vec]` line 1636: `wp 4/8 reached (dist=37)` while heading toward
+    `(-13,-1508)`. Protected waypoint REACHED. v0.16.1.2 fix restored.
+  - But: next `wpRaw=(-306,-1919)` from t=300 onward. Player at (4,-1475)
+    -> (-64,-1562), then STUCK at (-64,-1562) from t=330 through t=420 (5
+    seconds), velocity-stuck recoveries skipped wp 5->6->7. Player reached
+    (-110,-3407) by t=780; `[CBF] PASS` fired with battleyarou as caller.
+
+**Diagnosis.** The funnel emitted 32 waypoints; prune kept 8. Even with
+(-13,-1508) preserved, the remaining 7 waypoints are too sparse to traverse
+the full domt2_1 corridor. Between the doorway exit (-13,-1508) and the
+south-corridor turn point (-306,-1919) the original 32-waypoint path had
+several intermediate steering points the funnel emitted at portal-vertex
+alternations -- all of which were near-collinear with their neighbors (the
+whole point of SSFA's funnel-pull behavior) and got deleted by the prune.
+
+**Fix shape.** Skip the prune entirely when `s_chaseDriveActive == true`.
+v0.17.5.2's prune was introduced because each waypoint advance triggers a
+TTS announcement during F9 navigation; on bg2f_2's classroom hallway the
+funnel emitted hundreds of micro-corner waypoints and the TTS was rattling
+through cardinal direction changes. Chase auto-pilot is silent (no per-
+waypoint TTS), so the TTS spam motivation doesn't apply, and chase needs
+the path density to navigate long Dollet corridors. v0.16.1.4 ran clean
+with 0 catches on the full unpruned funnel output.
+
+**Code change (`src/field_nav_pathfinding.inl`).** Single conditional in
+FunnelPath right before the prune call:
+  - `if (!s_chaseDriveActive)` gates the `PruneCollinearWaypoints` call.
+  - The else branch logs `[funnel-prune] skipped for chase-drive` with the
+    waypoint count so chase BATs surface the skip action.
+
+Not touched:
+  - `PruneCollinearWaypoints` itself (with the v0.17.8.19.1 protection check).
+    F9 navigation still calls it and benefits from the TTS micro-corner fix
+    AND the v0.17.8.19.1 protection (if a player F9-paths to an NPC behind
+    a wall-parallel doorway, the doorway midpoint survives).
+  - The v0.17.8.19.1 protected-waypoint mechanism in FunnelPath (still
+    populates s_protectedWaypointPos during COLLAPSE; if FunnelPath is
+    invoked for F9 to a target behind a wall-parallel portal, the
+    protection engages).
+
+**Expected BAT outcome.** Identical to v0.17.8.19.1's stated expectations:
+chase reaches Lapin Beach with 0 catches, no `[CBF] PASS chase BATTLE`
+lines anywhere. The new `[funnel-prune] skipped for chase-drive` log line
+should appear once per chase field (each FunnelPath invocation). Chase-
+field waypoints will be denser; the per-tick `[drive-vec]` log will show
+more frequent `wp N/M reached` advances reflecting the un-pruned 30+ wp
+path instead of 8.
+
+**Modified files:**
+  - `src/field_nav_pathfinding.inl` (FunnelPath: chase-drive skip + log)
+  - `src/field_navigation.cpp` (move `s_chaseDriveActive` + sibling state
+    declarations above the `field_nav_pathfinding.inl` include so the new
+    chase-drive gate compiles -- the first build attempt errored out with
+    `error C2065: 's_chaseDriveActive': undeclared identifier` because
+    pathfinding.inl is included earlier than the original declaration spot)
+  - `src/ff8_accessibility.h` (version bump)
+  - `CHANGELOG.md` (this entry)
+
+## v0.17.8.19.1
+
+Chapter 4 (chase regression): restore X-ATM092 chase auto-pilot to 0-catch behavior
+on `domt2_1` by protecting wall-parallel-portal COLLAPSE waypoints from
+`PruneCollinearWaypoints`. The Aaron BAT 2026-05-28 (built on v0.17.8.18.1)
+showed battleyarou catching the party at the south exit of `domt2_1` --
+identical to the pre-v0.16.1.2 symptom this code was supposed to have fixed.
+
+**Root cause.** v0.17.5.2 added `PruneCollinearWaypoints` to collapse micro-
+corner waypoints emitted by SSFA on zigzag walkmesh corridors (motivated by
+TTS spam on the bg2f_2 classroom hallway). The prune runs at the bottom of
+`FunnelPath` and removes any waypoint whose perpendicular distance from the
+line through its neighbors is below `PRUNE_PERP_EPSILON = 50.0f`. Geometrically
+that's the right call for ordinary funnel output -- but the wall-parallel-
+portal COLLAPSE waypoints emitted by v0.16.1.2 are constraint-forced doorway
+midpoints that sit ON the corridor line by construction (a doorway through a
+wall IS a near-collinear point). v0.17.5.2's prune deleted them, defeating
+the v0.16.1.2 fix and reproducing the v0.16.1.1 stuck-at-wall behavior.
+
+The BAT log on `domt2_1` made the regression explicit:
+  - Line 1573: `[funnel] COLLAPSE wall-parallel portal 23 dX=0.0 dY=278.0
+    L=(-42,-1638) R=(-42,-1360) -> wp=(-13,-1508) tri 26->27` -- COLLAPSE
+    fired correctly, producing the (-13,-1508) constraint midpoint.
+  - Line 1595: `[funnel-prune] removed 24 collinear waypoints (eps=50 units,
+    25 sweeps)` -- prune deleted 24 of 32 waypoints, including (-13,-1508).
+  - Lines 1604-1629 (per-tick [drive-vec] log): the final 8 surviving
+    waypoints contained NO (-13,-1508). wp 4 was at (-64,-1658), essentially
+    on the L endpoint of the portal (at x=-42 wall corner).
+  - 17:36:09-13: party stuck at (-31,-1588) for ~4 seconds, velocity-stuck
+    recoveries skipped wp 4->5->6->7. Y=-1588 sits between the L=-1638 and
+    R=-1360 portal endpoints; the party slid along the x=-42 wall instead of
+    threading the doorway.
+  - 17:36:16: `[CBF] PASS chase BATTLE` (cap=INT_MAX in AUTO mode is the
+    v0.15.9.9 verification setting, intentionally letting through any battle
+    the auto-pilot fails to avoid). caller entityPtr=0x0188C284 = battleyarou
+    (TALKRAD=500, set at field load on line 1543).
+
+The pre-v0.16.1.2 narrative in `field_nav_pathfinding.inl` describes this
+exact failure mode verbatim: "on domt2_1, the wall-parallel portal between
+tri 26 and tri 27 at x=-42 (L=(-42,-1638), R=(-42,-1360)) is the ONLY exit
+from tri 26 going south. Skipping it left the player with no aim point
+inside the doorway, so they slid along the x=-42 wall accumulating
+moveDist=160 over 2s with zero net displacement, then froze entirely
+(moveDist=0) for another 2s before velocity-stuck recovery advanced
+wp 23 -> 24 -> 25 -> 26 over 5 seconds total."
+
+**Fix.** New protected-waypoint mechanism in `field_nav_pathfinding.inl`:
+  - `s_protectedWaypointPos[MAX_CORRIDOR][2]` + `s_protectedWaypointCount`
+    static arrays at file scope. Hold the positions of any waypoints the
+    prune must not delete.
+  - `FunnelPath` resets the counter to 0 at the top of every call (fresh
+    protection list per re-path).
+  - The wall-parallel-portal COLLAPSE branch records the post-AGENT_RADIUS-
+    shift midpoint `(mx, my)` into the array right where it sets
+    `portals[numPortals].lx = mx; ...; portals[numPortals].rx = mx`.
+  - `PruneCollinearWaypoints` checks each candidate-for-prune against the
+    protected list (squared-distance vs `PROTECTED_WP_EPSILON = 1.0f`).
+    Matches are skipped with `continue` so they survive into the final
+    waypoint list. The summary log line now reports both `removed` and
+    `protected wall-parallel midpoints preserved` so BATs surface the
+    protection action.
+
+No other prune callers exist (`PruneCollinearWaypoints` is invoked only at
+the bottom of `FunnelPath`), so the protection state is well-scoped. Fields
+without wall-parallel portals see no change in behavior (counter stays 0,
+prune runs unchanged). Fields with them (domt2_1 south exit, doopen2a, and
+any other field where COLLAPSE was the right call in v0.16.1.2) regain the
+doorway-threading aim point.
+
+The v0.15.9.9 `cap=INT_MAX` AUTO-mode setting in `chase_battle_freeze.cpp`
+is CORRECT and stays unchanged. It's the chase-catch verification cap; the
+fact that it let a battle through this BAT is exactly the signal it was
+designed to produce when the auto-pilot has a real hole. Now that the hole
+is identified and the fix shipped, the next BAT should show 0 `[CBF] PASS`
+lines on the entire chase.
+
+**Expected BAT outcome.** Load a save before X-ATM092 chase, pick Auto, run
+through to Lapin Beach FMV. Field log should show:
+  - `[funnel] COLLAPSE wall-parallel portal ...` for `domt2_1` as before.
+  - `[funnel-prune] removed N collinear waypoints (eps=50 units, M sweeps,
+    1 protected wall-parallel midpoints preserved)` -- the new "1 protected"
+    is the new diagnostic that confirms (-13,-1508) survived.
+  - No `[CBF] PASS chase BATTLE` lines on any chase field.
+  - Party reaches Lapin Beach (`disc00_07h.avi`) with 0 catches.
+
+If a `[CBF] PASS` still fires, something else is wrong and we open a new
+diagnostic build. If 0 catches but the chase still feels off, refine in
+v0.17.8.19.2 and beyond.
+
+**Modified files:**
+  - `src/field_nav_pathfinding.inl` (s_protectedWaypointPos array, COLLAPSE
+    recording, PruneCollinearWaypoints protection check, FunnelPath reset)
+  - `src/ff8_accessibility.h` (version bump)
+  - `CHANGELOG.md` (this entry)
+
 ## v0.17.8.18.1
 
 Chapter 3: Scan-on-allies fix. BAT-confirmed 2026-05-28: scanning Squall in
