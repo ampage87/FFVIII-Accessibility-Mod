@@ -1,0 +1,59 @@
+{
+  "video_file": "disc02_23h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc02_23h.avi",
+  "folder": "disc02_23h",
+  "duration_seconds": 13.33,
+  "scene_frames_found": 0,
+  "frame_count": 7,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    },
+    {
+      "file": "frame_006_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    },
+    {
+      "file": "frame_007_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    }
+  ],
+  "audio_description": "Squall, cradling Rinoa, drifts through space beside a small pod.\nAhead, a dark winged vessel hangs silhouetted against the moon.",
+  "context": {
+    "scene_title": "Squall and Rinoa drift through space toward a derelict vessel (Disc 3, leading to the Ragnarok).",
+    "locations": [
+      "Open space near the moon, with a darkened vessel ahead"
+    ],
+    "characters": [
+      {
+        "name": "Squall Leonhart",
+        "recognition": "Brown-haired, face visible in his helmet, holding Rinoa as they drift beside a piece of machinery/escape pod."
+      },
+      {
+        "name": "Rinoa Heartilly",
+        "recognition": "Held in Squall's arms in her spacesuit."
+      }
+    ],
+    "summary": "Squall, cradling Rinoa, drifts through space beside a small craft/pod; ahead, a dark winged vessel hangs silhouetted against the moon — the derelict ship they make for after the rescue.",
+    "context_confidence": "medium",
+    "context_note": "High confidence on Squall and Rinoa adrift; the dark vessel ahead is read as the derelict ship (the Ragnarok), which the next clips confirm."
+  },
+  "ad_updated": true
+}

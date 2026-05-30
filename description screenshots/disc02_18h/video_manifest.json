@@ -1,0 +1,39 @@
+{
+  "video_file": "disc02_18h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc02_18h.avi",
+  "folder": "disc02_18h",
+  "duration_seconds": 6.0,
+  "scene_frames_found": 0,
+  "frame_count": 3,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    }
+  ],
+  "audio_description": "Close on Rinoa in her helmet, eyes drifting shut as she floats alone.",
+  "context": {
+    "scene_title": "Rinoa drifting in space, losing consciousness (Disc 3, the space rescue).",
+    "locations": [
+      "Open space among the stars"
+    ],
+    "characters": [
+      {
+        "name": "Rinoa Heartilly",
+        "recognition": "Dark-haired woman in a domed space helmet, eyes closing as she drifts; running low on air."
+      }
+    ],
+    "summary": "A close shot of Rinoa in her helmet, eyes drifting shut and breath shallow, slipping toward unconsciousness as she floats alone in space.",
+    "context_confidence": "high",
+    "context_note": "High confidence: Rinoa adrift and fading (space rescue)."
+  },
+  "ad_updated": true
+}

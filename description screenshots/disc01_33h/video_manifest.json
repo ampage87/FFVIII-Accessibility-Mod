@@ -1,0 +1,195 @@
+{
+  "video_file": "disc01_33h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc01_33h.avi",
+  "folder": "disc01_33h",
+  "duration_seconds": 79.07,
+  "scene_frames_found": 4,
+  "frame_count": 41,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    },
+    {
+      "file": "frame_006_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    },
+    {
+      "file": "frame_007_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    },
+    {
+      "file": "frame_008_t0014.0s.jpg",
+      "timestamp_seconds": 14.0
+    },
+    {
+      "file": "frame_009_t0016.0s.jpg",
+      "timestamp_seconds": 16.0
+    },
+    {
+      "file": "frame_010_t0018.0s.jpg",
+      "timestamp_seconds": 18.0
+    },
+    {
+      "file": "frame_011_t0020.0s.jpg",
+      "timestamp_seconds": 20.0
+    },
+    {
+      "file": "frame_012_t0022.0s.jpg",
+      "timestamp_seconds": 22.0
+    },
+    {
+      "file": "frame_013_t0024.0s.jpg",
+      "timestamp_seconds": 24.0
+    },
+    {
+      "file": "frame_014_t0026.0s.jpg",
+      "timestamp_seconds": 26.0
+    },
+    {
+      "file": "frame_015_t0028.0s.jpg",
+      "timestamp_seconds": 28.0
+    },
+    {
+      "file": "frame_016_t0030.0s.jpg",
+      "timestamp_seconds": 30.0
+    },
+    {
+      "file": "frame_017_t0032.0s.jpg",
+      "timestamp_seconds": 32.0
+    },
+    {
+      "file": "frame_018_t0034.0s.jpg",
+      "timestamp_seconds": 34.0
+    },
+    {
+      "file": "frame_019_t0036.0s.jpg",
+      "timestamp_seconds": 36.0
+    },
+    {
+      "file": "frame_020_t0038.0s.jpg",
+      "timestamp_seconds": 38.0
+    },
+    {
+      "file": "frame_021_t0040.0s.jpg",
+      "timestamp_seconds": 40.0
+    },
+    {
+      "file": "frame_022_t0042.0s.jpg",
+      "timestamp_seconds": 42.0
+    },
+    {
+      "file": "frame_023_t0043.1s.jpg",
+      "timestamp_seconds": 43.07
+    },
+    {
+      "file": "frame_024_t0044.0s.jpg",
+      "timestamp_seconds": 44.0
+    },
+    {
+      "file": "frame_025_t0046.0s.jpg",
+      "timestamp_seconds": 46.0
+    },
+    {
+      "file": "frame_026_t0048.0s.jpg",
+      "timestamp_seconds": 48.0
+    },
+    {
+      "file": "frame_027_t0050.0s.jpg",
+      "timestamp_seconds": 50.0
+    },
+    {
+      "file": "frame_028_t0052.0s.jpg",
+      "timestamp_seconds": 52.0
+    },
+    {
+      "file": "frame_029_t0054.0s.jpg",
+      "timestamp_seconds": 54.0
+    },
+    {
+      "file": "frame_030_t0056.0s.jpg",
+      "timestamp_seconds": 56.0
+    },
+    {
+      "file": "frame_031_t0058.0s.jpg",
+      "timestamp_seconds": 58.0
+    },
+    {
+      "file": "frame_032_t0060.0s.jpg",
+      "timestamp_seconds": 60.0
+    },
+    {
+      "file": "frame_033_t0062.0s.jpg",
+      "timestamp_seconds": 62.0
+    },
+    {
+      "file": "frame_034_t0064.0s.jpg",
+      "timestamp_seconds": 64.0
+    },
+    {
+      "file": "frame_035_t0066.0s.jpg",
+      "timestamp_seconds": 66.0
+    },
+    {
+      "file": "frame_036_t0068.0s.jpg",
+      "timestamp_seconds": 68.0
+    },
+    {
+      "file": "frame_037_t0070.0s.jpg",
+      "timestamp_seconds": 70.0
+    },
+    {
+      "file": "frame_038_t0072.0s.jpg",
+      "timestamp_seconds": 72.0
+    },
+    {
+      "file": "frame_039_t0074.0s.jpg",
+      "timestamp_seconds": 74.0
+    },
+    {
+      "file": "frame_040_t0076.0s.jpg",
+      "timestamp_seconds": 76.0
+    },
+    {
+      "file": "frame_041_t0078.0s.jpg",
+      "timestamp_seconds": 78.0
+    }
+  ],
+  "audio_description": "The camera sweeps through Balamb Garden's interior ring.\nIt moves out across the Garden's exterior.\nRinoa grips a cable and slides down from the Garden's underside, over the cliffs.\nBelow, soldiers exchange fire across the open ground.",
+  "context": {
+    "scene_title": "Battle of the Gardens — Rinoa descends on a cable amid the fighting in and around Balamb Garden (Disc 2).",
+    "locations": [
+      "Balamb Garden interior (ring balcony, wooden floors) and exterior (the parked Garden, a cliffside), and the ground battlefield outside"
+    ],
+    "characters": [
+      {
+        "name": "Rinoa Heartilly",
+        "recognition": "Dark-haired young woman in a pale-blue duster over a black top and shorts; shown clinging to and sliding down a rope/cable beneath the Garden's overhang, high above the cliffs."
+      },
+      {
+        "name": "(soldiers, ground battle)",
+        "recognition": "Uniformed troops fighting with rifles on the open ground outside the Garden; anonymous."
+      }
+    ],
+    "summary": "Views sweep through Balamb Garden's interior ring and out across its exterior. Rinoa grips a cable and slides down from the Garden's underside, dangling over the cliffs, while below, soldiers exchange fire across the open ground — the chaos of the Garden battle on every front.",
+    "context_confidence": "high",
+    "context_note": "High confidence on Rinoa's cable descent and the Battle-of-the-Gardens setting."
+  },
+  "ad_updated": true
+}

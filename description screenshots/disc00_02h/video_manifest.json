@@ -1,0 +1,46 @@
+{
+  "video_file": "disc00_02h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc00_02h.avi",
+  "folder": "disc00_02h",
+  "duration_seconds": 10.73,
+  "scene_frames_found": 1,
+  "frame_count": 5,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    }
+  ],
+  "audio_description": "Zell Dincht throws punches at the Garden's ornate gate.\nZell leaps high into the air before the gate.\nZell faces the blue Garden emblem.",
+  "context": {
+    "scene_title": "Zell Dincht character introduction — part of the early Disc 1 'Balamb Garden' montage introducing the cast.",
+    "locations": [
+      "Balamb Garden main gate / entrance archway, beneath the Garden (SeeD) crest"
+    ],
+    "characters": [
+      {
+        "name": "Zell Dincht",
+        "recognition": "Energetic young man with bright spiky blonde hair, a tribal tattoo on the left side of his face, fingerless gloves; a martial-artist cadet who strikes punching/jumping poses. Seen here in a dark uniform at the Garden gate."
+      }
+    ],
+    "summary": "A brief character-introduction clip for Zell Dincht. He bounds around energetically at the front gate of Balamb Garden, throwing martial-arts punches and jumps beneath the ornate Garden crest, then is shown from behind gazing up at the blue Garden emblem. It establishes his hyperactive, fighter personality.",
+    "context_confidence": "high"
+  },
+  "ad_updated": true
+}

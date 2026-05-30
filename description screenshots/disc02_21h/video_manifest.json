@@ -1,0 +1,67 @@
+{
+  "video_file": "disc02_21h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc02_21h.avi",
+  "folder": "disc02_21h",
+  "duration_seconds": 18.67,
+  "scene_frames_found": 1,
+  "frame_count": 9,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0001.9s.jpg",
+      "timestamp_seconds": 1.93
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    },
+    {
+      "file": "frame_006_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    },
+    {
+      "file": "frame_007_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    },
+    {
+      "file": "frame_008_t0014.0s.jpg",
+      "timestamp_seconds": 14.0
+    },
+    {
+      "file": "frame_009_t0016.0s.jpg",
+      "timestamp_seconds": 16.0
+    }
+  ],
+  "audio_description": "Squall holds Rinoa close, their helmets pressed together against the stars.\nRinoa's face eases as she comes back to consciousness.\nThe shot fades to the black of space.",
+  "context": {
+    "scene_title": "Squall and Rinoa reunited in space — Rinoa revived (Disc 3).",
+    "locations": [
+      "Open space, near a fragment of the destroyed station"
+    ],
+    "characters": [
+      {
+        "name": "Squall Leonhart",
+        "recognition": "Spacesuited, holding Rinoa close, their helmets together."
+      },
+      {
+        "name": "Rinoa Heartilly",
+        "recognition": "Dark-haired woman in a space helmet, face relaxing as she revives in Squall's hold."
+      }
+    ],
+    "summary": "Squall holds Rinoa close, their helmets pressed together against the stars; Rinoa's face eases as she comes back to consciousness, before the shot fades to the black of space.",
+    "context_confidence": "high",
+    "context_note": "High confidence: Squall and Rinoa's reunion in space."
+  },
+  "ad_updated": true
+}

@@ -1,0 +1,91 @@
+{
+  "video_file": "disc01_10h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc01_10h.avi",
+  "folder": "disc01_10h",
+  "duration_seconds": 27.73,
+  "scene_frames_found": 5,
+  "frame_count": 16,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    },
+    {
+      "file": "frame_006_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    },
+    {
+      "file": "frame_007_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    },
+    {
+      "file": "frame_008_t0013.0s.jpg",
+      "timestamp_seconds": 13.0
+    },
+    {
+      "file": "frame_009_t0014.0s.jpg",
+      "timestamp_seconds": 14.0
+    },
+    {
+      "file": "frame_010_t0016.0s.jpg",
+      "timestamp_seconds": 16.0
+    },
+    {
+      "file": "frame_011_t0017.7s.jpg",
+      "timestamp_seconds": 17.67
+    },
+    {
+      "file": "frame_012_t0020.0s.jpg",
+      "timestamp_seconds": 20.0
+    },
+    {
+      "file": "frame_013_t0021.0s.jpg",
+      "timestamp_seconds": 21.0
+    },
+    {
+      "file": "frame_014_t0022.0s.jpg",
+      "timestamp_seconds": 22.0
+    },
+    {
+      "file": "frame_015_t0024.0s.jpg",
+      "timestamp_seconds": 24.0
+    },
+    {
+      "file": "frame_016_t0026.0s.jpg",
+      "timestamp_seconds": 26.0
+    }
+  ],
+  "audio_description": "Inside the Garden's glass-domed bridge, light flares as it charges with power.\nA blinding wave of blue energy washes the screen.\nOverhead, a smoking crater is blasted into a green field.",
+  "context": {
+    "scene_title": "Balamb Garden powers up / the missile strike — energy surges through the Garden as a missile impact craters the ground (Disc 2).",
+    "locations": [
+      "Inside Balamb Garden's domed bridge/observation deck (green control consoles, peaks visible outside), a burst of blue energy, and an aerial view of a smoking impact crater on a grassy field"
+    ],
+    "characters": [
+      {
+        "name": "(none individually visible)",
+        "recognition": "No characters featured; the focus is the Garden interior, the energy burst and the impact crater."
+      }
+    ],
+    "summary": "Inside the Garden's glass-domed bridge, light flares as the academy charges with power; a blinding wave of blue energy washes the screen, and an overhead shot shows a fresh, smoking crater blasted into a green field — a missile detonation as the Garden tears itself free.",
+    "context_confidence": "medium",
+    "context_note": "Read as the Balamb-Garden-goes-mobile / missile-strike sequence; the crater is a missile impact. Exact framing inferred."
+  },
+  "ad_updated": true
+}

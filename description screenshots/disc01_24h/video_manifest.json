@@ -1,0 +1,87 @@
+{
+  "video_file": "disc01_24h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc01_24h.avi",
+  "folder": "disc01_24h",
+  "duration_seconds": 22.0,
+  "scene_frames_found": 19,
+  "frame_count": 15,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0000.9s.jpg",
+      "timestamp_seconds": 0.93
+    },
+    {
+      "file": "frame_003_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_004_t0003.2s.jpg",
+      "timestamp_seconds": 3.2
+    },
+    {
+      "file": "frame_005_t0004.3s.jpg",
+      "timestamp_seconds": 4.27
+    },
+    {
+      "file": "frame_006_t0005.2s.jpg",
+      "timestamp_seconds": 5.2
+    },
+    {
+      "file": "frame_007_t0006.3s.jpg",
+      "timestamp_seconds": 6.27
+    },
+    {
+      "file": "frame_008_t0007.3s.jpg",
+      "timestamp_seconds": 7.27
+    },
+    {
+      "file": "frame_009_t0008.3s.jpg",
+      "timestamp_seconds": 8.33
+    },
+    {
+      "file": "frame_010_t0009.7s.jpg",
+      "timestamp_seconds": 9.67
+    },
+    {
+      "file": "frame_011_t0011.3s.jpg",
+      "timestamp_seconds": 11.33
+    },
+    {
+      "file": "frame_012_t0013.3s.jpg",
+      "timestamp_seconds": 13.27
+    },
+    {
+      "file": "frame_013_t0015.4s.jpg",
+      "timestamp_seconds": 15.4
+    },
+    {
+      "file": "frame_014_t0018.0s.jpg",
+      "timestamp_seconds": 18.0
+    },
+    {
+      "file": "frame_015_t0019.6s.jpg",
+      "timestamp_seconds": 19.6
+    }
+  ],
+  "audio_description": "A gloved hand twists a motorcycle throttle.\nA squad of armored riders pours down a ramp from the airborne Garden.\nTheir motorcycles leap into the sky over the countryside.\nThe Galbadian assault force attacks.",
+  "context": {
+    "scene_title": "Galbadian motorcycle assault — armored troops deploy on motorcycles down a ramp to attack (Battle of the Gardens, Disc 2).",
+    "locations": [
+      "A deployment ramp off the mobile Galbadia Garden, descending over open countryside and mountains"
+    ],
+    "characters": [
+      {
+        "name": "(Galbadian assault troops)",
+        "recognition": "Helmeted, dark-armored soldiers astride military motorcycles, gripping the throttle and riding in formation down the ramp."
+      }
+    ],
+    "summary": "A gloved hand twists a motorcycle throttle, then a squad of armored riders pours down a long ramp from the airborne Garden, their bikes leaping into the sky over the countryside as the Galbadian assault force launches its attack.",
+    "context_confidence": "high",
+    "context_note": "High confidence: Galbadian motorcycle troops deploying during the Battle of the Gardens."
+  },
+  "ad_updated": true
+}

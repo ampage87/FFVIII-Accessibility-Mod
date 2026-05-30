@@ -1,0 +1,83 @@
+{
+  "video_file": "disc00_10h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc00_10h.avi",
+  "folder": "disc00_10h",
+  "duration_seconds": 26.2,
+  "scene_frames_found": 4,
+  "frame_count": 14,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0007.0s.jpg",
+      "timestamp_seconds": 7.0
+    },
+    {
+      "file": "frame_006_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    },
+    {
+      "file": "frame_007_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    },
+    {
+      "file": "frame_008_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    },
+    {
+      "file": "frame_009_t0014.0s.jpg",
+      "timestamp_seconds": 14.0
+    },
+    {
+      "file": "frame_010_t0016.0s.jpg",
+      "timestamp_seconds": 16.0
+    },
+    {
+      "file": "frame_011_t0018.0s.jpg",
+      "timestamp_seconds": 18.0
+    },
+    {
+      "file": "frame_012_t0020.0s.jpg",
+      "timestamp_seconds": 20.0
+    },
+    {
+      "file": "frame_013_t0022.0s.jpg",
+      "timestamp_seconds": 22.0
+    },
+    {
+      "file": "frame_014_t0024.0s.jpg",
+      "timestamp_seconds": 24.0
+    }
+  ],
+  "audio_description": "A sleek dark green-and-black armored train races along the tracks.\nThe camera follows it from behind, speeding through green countryside.\nA high aerial view watches the long train cross the landscape.",
+  "context": {
+    "scene_title": "The Galbadian railway — the party's high-speed armored train speeding across the continent (Disc 1 travel, tied to the Timber resistance mission / journey toward Galbadia).",
+    "locations": [
+      "Open Galbadian countryside — sunlit green grassland, pine forest and rolling hills along the rail line"
+    ],
+    "characters": [
+      {
+        "name": "(none individually visible)",
+        "recognition": "Entirely exterior shots of the train; no named character appears on screen in this FMV."
+      }
+    ],
+    "summary": "A sleek, dark green-and-black armored bullet train trimmed with gold filigree and red panels races along the tracks. Sweeping external camera angles follow it from the side, from behind, and from high above as it speeds through bright green countryside under a cloudy blue sky.",
+    "context_confidence": "high",
+    "context_note": "High confidence this is the FF8 luxury/express train; exact story placement (ride to Timber vs. the President Deling carriage mission) is inferred, so treat the specific plot beat as medium confidence."
+  },
+  "ad_updated": true
+}

@@ -1,0 +1,75 @@
+{
+  "video_file": "disc01_12h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc01_12h.avi",
+  "folder": "disc01_12h",
+  "duration_seconds": 22.33,
+  "scene_frames_found": 4,
+  "frame_count": 12,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0007.3s.jpg",
+      "timestamp_seconds": 7.33
+    },
+    {
+      "file": "frame_006_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    },
+    {
+      "file": "frame_007_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    },
+    {
+      "file": "frame_008_t0013.9s.jpg",
+      "timestamp_seconds": 13.93
+    },
+    {
+      "file": "frame_009_t0016.0s.jpg",
+      "timestamp_seconds": 16.0
+    },
+    {
+      "file": "frame_010_t0017.0s.jpg",
+      "timestamp_seconds": 17.0
+    },
+    {
+      "file": "frame_011_t0018.0s.jpg",
+      "timestamp_seconds": 18.0
+    },
+    {
+      "file": "frame_012_t0020.0s.jpg",
+      "timestamp_seconds": 20.0
+    }
+  ],
+  "audio_description": "Fire and shrapnel rake across the Garden's hull as a missile detonates.\nA huge blast erupts on the grassy field below.\nThe Garden weathers the strike and pulls away.",
+  "context": {
+    "scene_title": "The missiles strike — explosions tear at the newly mobile Balamb Garden and the surrounding field (Disc 2).",
+    "locations": [
+      "Balamb Garden's exterior surface and the green plain below"
+    ],
+    "characters": [
+      {
+        "name": "(none)",
+        "recognition": "No characters featured; the subject is the missile impacts."
+      }
+    ],
+    "summary": "Fire and shrapnel rake across the Garden's hull as a missile detonates against its structure, and a huge blast erupts on the grassy field below. The Garden weathers the Galbadian missile strike as it pulls away.",
+    "context_confidence": "high",
+    "context_note": "High confidence: missile impacts on/around the mobile Balamb Garden."
+  },
+  "ad_updated": true
+}

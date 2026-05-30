@@ -1,0 +1,47 @@
+{
+  "video_file": "disc01_07h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc01_07h.avi",
+  "folder": "disc01_07h",
+  "duration_seconds": 10.67,
+  "scene_frames_found": 1,
+  "frame_count": 5,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    }
+  ],
+  "audio_description": "The view climbs through banks of cloud.\nCruise missiles streak across the sky, vapor trails converging.",
+  "context": {
+    "scene_title": "The Galbadian cruise missiles in flight — speeding through the clouds toward their target (Disc 2).",
+    "locations": [
+      "High above the clouds"
+    ],
+    "characters": [
+      {
+        "name": "(none)",
+        "recognition": "No characters; the missiles' contrails are the subject."
+      }
+    ],
+    "summary": "The view climbs through banks of cloud as multiple cruise missiles streak across the sky, their white vapor trails converging as they race toward the Gardens.",
+    "context_confidence": "high",
+    "context_note": "High confidence: launched Galbadian missiles in flight."
+  },
+  "ad_updated": true
+}

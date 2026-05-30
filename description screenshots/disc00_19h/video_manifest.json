@@ -1,0 +1,43 @@
+{
+  "video_file": "disc00_19h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc00_19h.avi",
+  "folder": "disc00_19h",
+  "duration_seconds": 8.07,
+  "scene_frames_found": 1,
+  "frame_count": 4,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    }
+  ],
+  "audio_description": "A vast crowd packs Deling City's floodlit streets, seen from high above.\nThe golden parade podium below.",
+  "context": {
+    "scene_title": "The Deling City parade crowd — sweeping overhead view of the vast gathering for the Sorceress's celebration.",
+    "locations": [
+      "Deling City — the main plaza and boulevards at night, seen from above Edea's golden parade podium"
+    ],
+    "characters": [
+      {
+        "name": "(none individually visible)",
+        "recognition": "A massive anonymous crowd fills the streets; Edea's golden parade podium/float is in the foreground but no faces are distinguishable."
+      }
+    ],
+    "summary": "A dramatic high-angle shot looks down over an enormous crowd packing the floodlit streets of Deling City, scattered confetti drifting through the air, with the ornate golden parade podium of the Sorceress in the foreground. It conveys the scale of the citywide spectacle around Edea's ascension.",
+    "context_confidence": "high",
+    "context_note": "High confidence: crowd view of the Deling City Sorceress parade."
+  },
+  "ad_updated": true
+}

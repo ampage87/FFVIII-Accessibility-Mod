@@ -1,0 +1,63 @@
+{
+  "video_file": "disc03_02h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc03_02h.avi",
+  "folder": "disc03_02h",
+  "duration_seconds": 19.0,
+  "scene_frames_found": 0,
+  "frame_count": 9,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    },
+    {
+      "file": "frame_006_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    },
+    {
+      "file": "frame_007_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    },
+    {
+      "file": "frame_008_t0014.0s.jpg",
+      "timestamp_seconds": 14.0
+    },
+    {
+      "file": "frame_009_t0016.0s.jpg",
+      "timestamp_seconds": 16.0
+    }
+  ],
+  "audio_description": "Out of dark, moonlit clouds rises Ultimecia's Castle.\nA gothic fortress of spires set upon an enormous clawed black structure.\nIt stands against a huge pale moon.",
+  "context": {
+    "scene_title": "Ultimecia's Castle revealed — the gothic final-dungeon castle looms against the moon (endgame).",
+    "locations": [
+      "Ultimecia's Castle — a vast gothic castle of spires perched on a huge dark, clawed structure, beneath a large moon and storm clouds"
+    ],
+    "characters": [
+      {
+        "name": "(none)",
+        "recognition": "Establishing FMV of the castle; no characters shown."
+      }
+    ],
+    "summary": "Out of dark, moonlit clouds rises Ultimecia's Castle — a towering gothic fortress of spires set upon an enormous, clawed black structure, silhouetted against a huge pale moon.",
+    "context_confidence": "high",
+    "context_note": "High confidence: Ultimecia's Castle, the game's final location."
+  },
+  "ad_updated": true
+}

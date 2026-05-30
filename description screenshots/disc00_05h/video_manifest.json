@@ -1,0 +1,178 @@
+{
+  "video_file": "disc00_05h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc00_05h.avi",
+  "folder": "disc00_05h",
+  "duration_seconds": 74.27,
+  "scene_frames_found": 13,
+  "frame_count": 38,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    },
+    {
+      "file": "frame_006_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    },
+    {
+      "file": "frame_007_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    },
+    {
+      "file": "frame_008_t0014.0s.jpg",
+      "timestamp_seconds": 14.0
+    },
+    {
+      "file": "frame_009_t0015.0s.jpg",
+      "timestamp_seconds": 15.0
+    },
+    {
+      "file": "frame_010_t0016.0s.jpg",
+      "timestamp_seconds": 16.0
+    },
+    {
+      "file": "frame_011_t0018.0s.jpg",
+      "timestamp_seconds": 18.0
+    },
+    {
+      "file": "frame_012_t0020.0s.jpg",
+      "timestamp_seconds": 20.0
+    },
+    {
+      "file": "frame_013_t0022.0s.jpg",
+      "timestamp_seconds": 22.0
+    },
+    {
+      "file": "frame_014_t0024.0s.jpg",
+      "timestamp_seconds": 24.0
+    },
+    {
+      "file": "frame_015_t0026.0s.jpg",
+      "timestamp_seconds": 26.0
+    },
+    {
+      "file": "frame_016_t0028.0s.jpg",
+      "timestamp_seconds": 28.0
+    },
+    {
+      "file": "frame_017_t0030.0s.jpg",
+      "timestamp_seconds": 30.0
+    },
+    {
+      "file": "frame_018_t0032.0s.jpg",
+      "timestamp_seconds": 32.0
+    },
+    {
+      "file": "frame_019_t0033.3s.jpg",
+      "timestamp_seconds": 33.27
+    },
+    {
+      "file": "frame_020_t0036.0s.jpg",
+      "timestamp_seconds": 36.0
+    },
+    {
+      "file": "frame_021_t0037.3s.jpg",
+      "timestamp_seconds": 37.27
+    },
+    {
+      "file": "frame_022_t0040.0s.jpg",
+      "timestamp_seconds": 40.0
+    },
+    {
+      "file": "frame_023_t0042.0s.jpg",
+      "timestamp_seconds": 42.0
+    },
+    {
+      "file": "frame_024_t0044.0s.jpg",
+      "timestamp_seconds": 44.0
+    },
+    {
+      "file": "frame_025_t0046.0s.jpg",
+      "timestamp_seconds": 46.0
+    },
+    {
+      "file": "frame_026_t0047.3s.jpg",
+      "timestamp_seconds": 47.27
+    },
+    {
+      "file": "frame_027_t0050.0s.jpg",
+      "timestamp_seconds": 50.0
+    },
+    {
+      "file": "frame_028_t0052.0s.jpg",
+      "timestamp_seconds": 52.0
+    },
+    {
+      "file": "frame_029_t0054.0s.jpg",
+      "timestamp_seconds": 54.0
+    },
+    {
+      "file": "frame_030_t0056.0s.jpg",
+      "timestamp_seconds": 56.0
+    },
+    {
+      "file": "frame_031_t0058.0s.jpg",
+      "timestamp_seconds": 58.0
+    },
+    {
+      "file": "frame_032_t0060.0s.jpg",
+      "timestamp_seconds": 60.0
+    },
+    {
+      "file": "frame_033_t0062.0s.jpg",
+      "timestamp_seconds": 62.0
+    },
+    {
+      "file": "frame_034_t0064.0s.jpg",
+      "timestamp_seconds": 64.0
+    },
+    {
+      "file": "frame_035_t0066.0s.jpg",
+      "timestamp_seconds": 66.0
+    },
+    {
+      "file": "frame_036_t0068.0s.jpg",
+      "timestamp_seconds": 68.0
+    },
+    {
+      "file": "frame_037_t0070.0s.jpg",
+      "timestamp_seconds": 70.0
+    },
+    {
+      "file": "frame_038_t0072.0s.jpg",
+      "timestamp_seconds": 72.0
+    }
+  ],
+  "audio_description": "Inside the Dollet tower — pipes, scaffolding and green-lit machinery.\nLarge turbines and gears spin up inside the tower.\nThe camera rises through the tower's tall internal shaft.\nAt the top, the antenna apparatus extends outward against the dusk sky.\nThe antenna array deploys fully, gleaming against the sunset.\nA signal beams skyward over the sea.",
+  "context": {
+    "scene_title": "Reactivation of the Dollet communication tower — Disc 1 SeeD field exam. Galbadian forces bring the dormant tower back online, the mission objective the SeeD candidates are sent to investigate.",
+    "locations": [
+      "Interior and exterior of the Dollet communication tower (a tall coastal radio/satellite tower)"
+    ],
+    "characters": [
+      {
+        "name": "(none)",
+        "recognition": "No characters appear; the clip is entirely of the tower's machinery and structure."
+      }
+    ],
+    "summary": "Inside the long-dormant Dollet communication tower, internal machinery comes to life: gears, turbines and pistons spin up amid a green glow. The shot rises through the tower's lattice structure to the top, where a large satellite/antenna dish unfolds and rotates into position. The fully reactivated tower then beams a signal skyward against a sunset sea, signaling the success of the enemy's plan.",
+    "context_confidence": "high"
+  },
+  "ad_updated": true
+}

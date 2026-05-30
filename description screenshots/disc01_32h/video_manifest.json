@@ -1,0 +1,71 @@
+{
+  "video_file": "disc01_32h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc01_32h.avi",
+  "folder": "disc01_32h",
+  "duration_seconds": 21.8,
+  "scene_frames_found": 4,
+  "frame_count": 11,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0001.5s.jpg",
+      "timestamp_seconds": 1.53
+    },
+    {
+      "file": "frame_003_t0003.5s.jpg",
+      "timestamp_seconds": 3.53
+    },
+    {
+      "file": "frame_004_t0005.9s.jpg",
+      "timestamp_seconds": 5.93
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    },
+    {
+      "file": "frame_006_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    },
+    {
+      "file": "frame_007_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    },
+    {
+      "file": "frame_008_t0014.0s.jpg",
+      "timestamp_seconds": 14.0
+    },
+    {
+      "file": "frame_009_t0016.0s.jpg",
+      "timestamp_seconds": 16.0
+    },
+    {
+      "file": "frame_010_t0018.0s.jpg",
+      "timestamp_seconds": 18.0
+    },
+    {
+      "file": "frame_011_t0020.0s.jpg",
+      "timestamp_seconds": 20.0
+    }
+  ],
+  "audio_description": "Balamb Garden's courtyard becomes a battlefield.\nCadets and Galbadian soldiers clash with blades and magic across the tiles.\nTurquoise energy and fire flash; Galbadia Garden presses in at the edge.",
+  "context": {
+    "scene_title": "Battle of the Gardens — the open melee in Balamb Garden's courtyard (Disc 2).",
+    "locations": [
+      "Balamb Garden's tiled exterior quad/courtyard, the red Galbadia Garden looming at the edge"
+    ],
+    "characters": [
+      {
+        "name": "(SeeD cadets and Galbadian soldiers)",
+        "recognition": "Dozens of small figures battling across the quad with weapons and bursts of turquoise magic/GF energy and fire; an anonymous mass combat, no individual faces."
+      }
+    ],
+    "summary": "Balamb Garden's wide courtyard becomes a battlefield: scores of cadets and Galbadian soldiers clash with blades and magic, turquoise energy and fire flashing across the tiles as the red Galbadia Garden presses in at the edge.",
+    "context_confidence": "high",
+    "context_note": "High confidence: the courtyard melee of the Battle of the Gardens."
+  },
+  "ad_updated": true
+}

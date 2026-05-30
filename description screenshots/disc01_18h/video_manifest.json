@@ -1,0 +1,59 @@
+{
+  "video_file": "disc01_18h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc01_18h.avi",
+  "folder": "disc01_18h",
+  "duration_seconds": 17.0,
+  "scene_frames_found": 0,
+  "frame_count": 8,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    },
+    {
+      "file": "frame_006_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    },
+    {
+      "file": "frame_007_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    },
+    {
+      "file": "frame_008_t0014.0s.jpg",
+      "timestamp_seconds": 14.0
+    }
+  ],
+  "audio_description": "A long-decked wooden ship rides the sea at sunset.\nIt spreads three enormous fan-shaped wings — the White SeeD Ship.\nIt glides toward the glowing sun.",
+  "context": {
+    "scene_title": "The White SeeD Ship — the wooden, fan-winged vessel of the White SeeDs, which intercepts Balamb Garden at sea (Disc 2).",
+    "locations": [
+      "The open ocean at sunset"
+    ],
+    "characters": [
+      {
+        "name": "(White SeeDs, crew unseen)",
+        "recognition": "The ship itself is the subject — a medium wooden vessel with a long deck; no crew faces are shown."
+      }
+    ],
+    "summary": "A long-decked wooden ship rides the sea at sunset, then spreads three enormous fan-shaped membrane wings/sails and glides across the water toward a glowing sun. This is the White SeeD Ship, the vessel of the White SeeDs who guard Ellone, shown intercepting/encountering the drifting Garden.",
+    "context_confidence": "high",
+    "context_note": "High confidence: the White SeeD Ship, confirmed by the Final Fantasy Wiki description of a wooden vessel with large wings at the back."
+  },
+  "ad_updated": true
+}

@@ -1,0 +1,47 @@
+{
+  "video_file": "disc00_26h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc00_26h.avi",
+  "folder": "disc00_26h",
+  "duration_seconds": 6.73,
+  "scene_frames_found": 6,
+  "frame_count": 4,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0003.7s.jpg",
+      "timestamp_seconds": 3.73
+    },
+    {
+      "file": "frame_004_t0005.1s.jpg",
+      "timestamp_seconds": 5.07
+    }
+  ],
+  "audio_description": "The parade gate and its two gargoyle statues.\nBlue magic flares.",
+  "context": {
+    "scene_title": "The gate gargoyles and a magic burst — Deling City parade, the moment of Edea's spellcasting/Iguion summoning (Disc 1).",
+    "locations": [
+      "Deling City at night — the parade gate with the two flanking gargoyle (Iguion) statues and the central throne, then a blinding blue magical flash"
+    ],
+    "characters": [
+      {
+        "name": "Iguion statues (x2)",
+        "recognition": "The fanged reptilian gargoyles perched on pink/purple drum-like pedestals on either side of the gate, framing the empty throne."
+      },
+      {
+        "name": "Sorceress Edea (implied)",
+        "recognition": "Not directly shown; the blue magical burst is consistent with her spellcasting at the gate."
+      }
+    ],
+    "summary": "A symmetrical view shows the parade gate flanked by the two reptilian gargoyle statues and the central throne under a starry night sky. The shot then erupts into a brilliant blue magical flash — the energy of Edea's spell (the Iguion summoning / her magic during the parade).",
+    "context_confidence": "medium",
+    "context_note": "High confidence on the gate/Iguion imagery; the blue flash is interpreted as Edea's magic, but the exact spell beat is inferred."
+  },
+  "ad_updated": true
+}

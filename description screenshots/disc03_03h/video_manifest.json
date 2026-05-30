@@ -1,0 +1,55 @@
+{
+  "video_file": "disc03_03h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc03_03h.avi",
+  "folder": "disc03_03h",
+  "duration_seconds": 15.0,
+  "scene_frames_found": 1,
+  "frame_count": 7,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    },
+    {
+      "file": "frame_006_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    },
+    {
+      "file": "frame_007_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    }
+  ],
+  "audio_description": "The castle's jagged spires stand against a blood-red moon.\nInside, a sumptuous red-and-gold throne room of carvings, statues and a towering throne.",
+  "context": {
+    "scene_title": "Ultimecia's Castle — its spires under a red moon and its ornate throne room (endgame).",
+    "locations": [
+      "Ultimecia's Castle — the gothic exterior spires against a blood-red moon, and the opulent red-and-gold throne room within"
+    ],
+    "characters": [
+      {
+        "name": "(none)",
+        "recognition": "Architectural FMV; no characters shown (the throne sits empty in-frame)."
+      }
+    ],
+    "summary": "The castle's jagged spires stand against a blood-red moon; inside, the camera moves through a sumptuous red-and-gold throne room of ornate carvings, statues and a towering throne — the seat of the sorceress Ultimecia.",
+    "context_confidence": "high",
+    "context_note": "High confidence: Ultimecia's Castle (exterior spires and throne room)."
+  },
+  "ad_updated": true
+}

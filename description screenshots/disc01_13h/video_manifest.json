@@ -1,0 +1,87 @@
+{
+  "video_file": "disc01_13h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc01_13h.avi",
+  "folder": "disc01_13h",
+  "duration_seconds": 25.4,
+  "scene_frames_found": 2,
+  "frame_count": 15,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    },
+    {
+      "file": "frame_006_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    },
+    {
+      "file": "frame_007_t0011.0s.jpg",
+      "timestamp_seconds": 11.0
+    },
+    {
+      "file": "frame_008_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    },
+    {
+      "file": "frame_009_t0014.0s.jpg",
+      "timestamp_seconds": 14.0
+    },
+    {
+      "file": "frame_010_t0016.0s.jpg",
+      "timestamp_seconds": 16.0
+    },
+    {
+      "file": "frame_011_t0017.1s.jpg",
+      "timestamp_seconds": 17.07
+    },
+    {
+      "file": "frame_012_t0018.0s.jpg",
+      "timestamp_seconds": 18.0
+    },
+    {
+      "file": "frame_013_t0020.0s.jpg",
+      "timestamp_seconds": 20.0
+    },
+    {
+      "file": "frame_014_t0022.0s.jpg",
+      "timestamp_seconds": 22.0
+    },
+    {
+      "file": "frame_015_t0024.0s.jpg",
+      "timestamp_seconds": 24.0
+    }
+  ],
+  "audio_description": "A lone missile streaks across the sky.\nTop-down, winged cruise missiles plunge toward Balamb Garden's ring.\nThey burst in orange against the hull as the Garden is swarmed.",
+  "context": {
+    "scene_title": "Cruise missiles dive on the mobile Balamb Garden (Disc 2).",
+    "locations": [
+      "The sky and airspace around the now-airborne Balamb Garden, over green countryside"
+    ],
+    "characters": [
+      {
+        "name": "(Galbadian cruise missiles)",
+        "recognition": "Finned cruise missiles with deployed white wings (one marked '08') diving toward the Garden, trailing fire and detonating against it."
+      }
+    ],
+    "summary": "A lone missile streaks across the sky, then a top-down view shows winged Galbadian cruise missiles plunging toward Balamb Garden's ring, exploding in bursts of orange against the hull as the mobile academy is swarmed.",
+    "context_confidence": "high",
+    "context_note": "High confidence: the cruise-missile assault on the mobile Balamb Garden."
+  },
+  "ad_updated": true
+}

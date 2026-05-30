@@ -1,0 +1,70 @@
+{
+  "video_file": "disc00_00h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc00_00h.avi",
+  "folder": "disc00_00h",
+  "duration_seconds": 21.73,
+  "scene_frames_found": 0,
+  "frame_count": 11,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    },
+    {
+      "file": "frame_006_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    },
+    {
+      "file": "frame_007_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    },
+    {
+      "file": "frame_008_t0014.0s.jpg",
+      "timestamp_seconds": 14.0
+    },
+    {
+      "file": "frame_009_t0016.0s.jpg",
+      "timestamp_seconds": 16.0
+    },
+    {
+      "file": "frame_010_t0018.0s.jpg",
+      "timestamp_seconds": 18.0
+    },
+    {
+      "file": "frame_011_t0020.0s.jpg",
+      "timestamp_seconds": 20.0
+    }
+  ],
+  "audio_description": "The camera glides across sunlit walkways and hedges at Balamb Garden's entrance.\nInside, cadets walk through the curved interior.\nA tree-lined courtyard with benches; cadets in dark uniforms cross it.\nThe view rises to reveal the Garden, crowned by its golden ring.",
+  "context": {
+    "scene_title": "Balamb Garden establishing shot — early Disc 1 introduction of the SeeD military academy that serves as the heroes' home base.",
+    "locations": [
+      "Balamb Garden — exterior grounds, front gate/quad courtyard, and the main directory/concourse hall; final reveal of the entire Garden structure"
+    ],
+    "characters": [
+      {
+        "name": "(none individually identified)",
+        "recognition": "Only anonymous Garden cadets/students in dark SeeD-style uniforms are seen walking the grounds; no named main character is clearly featured in this establishing FMV."
+      }
+    ],
+    "summary": "A sweeping introduction to Balamb Garden. The camera moves across sunlit walkways and hedges near the entrance, then through the tree-lined main concourse where cadets and students mill about the futuristic curved interior. It finally pulls back to reveal the whole Garden from outside, crowned by its distinctive ornate golden ring against a blue sky.",
+    "context_confidence": "high"
+  },
+  "ad_updated": true
+}

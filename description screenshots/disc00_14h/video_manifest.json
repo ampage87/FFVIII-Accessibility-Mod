@@ -1,0 +1,75 @@
+{
+  "video_file": "disc00_14h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc00_14h.avi",
+  "folder": "disc00_14h",
+  "duration_seconds": 24.0,
+  "scene_frames_found": 2,
+  "frame_count": 12,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    },
+    {
+      "file": "frame_006_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    },
+    {
+      "file": "frame_007_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    },
+    {
+      "file": "frame_008_t0014.0s.jpg",
+      "timestamp_seconds": 14.0
+    },
+    {
+      "file": "frame_009_t0016.0s.jpg",
+      "timestamp_seconds": 16.0
+    },
+    {
+      "file": "frame_010_t0018.0s.jpg",
+      "timestamp_seconds": 18.0
+    },
+    {
+      "file": "frame_011_t0020.0s.jpg",
+      "timestamp_seconds": 20.0
+    },
+    {
+      "file": "frame_012_t0022.0s.jpg",
+      "timestamp_seconds": 22.0
+    }
+  ],
+  "audio_description": "Cadets fly jetpack machines around Galbadia Garden's vast gold-and-red structure.\nThe camera sweeps past ornate machinery and a turquoise-ringed central dais.\nIt settles on the grand front entrance, a glowing orb above the walkway.",
+  "context": {
+    "scene_title": "Arrival at Galbadia Garden — the establishing FMV that plays when the party first reaches Galbadia Garden (Disc 1), shortly before they meet Irvine.",
+    "locations": [
+      "Galbadia Garden — its enormous ornate red-and-gold exterior, built atop an ancient Centra structure (hence the glowing ring), set among rocky cliffs; ending on the grand front entrance and approach walkway"
+    ],
+    "characters": [
+      {
+        "name": "(anonymous Galbadia Garden students/cadets)",
+        "recognition": "Figures pilot small green-and-white and gold mechanical flying units (jetpack-like pods) that dart around the Garden; no named main character is individually identifiable in this FMV."
+      }
+    ],
+    "summary": "Galbadia Garden's establishing sequence: cadets zip through the sky on jetpack-style flying machines around the academy's vast, ornate gold-and-red architecture. The camera sweeps past the elaborate mechanical structures and a central dais ringed with glowing turquoise energy (the Centra ring the Garden is built upon), then settles on the grand ornamented front entrance with its glowing central orb and approach walkway.",
+    "context_confidence": "high",
+    "context_note": "Corrected from an earlier mis-identification as 'Balamb Garden becomes mobile.' Per the Final Fantasy Wiki, the FMV of students flying around in jetpacks plays on first arriving at Galbadia Garden; this matches the visible content and the scene order (train -> Galbadia Garden -> meeting Irvine)."
+  },
+  "ad_updated": true
+}

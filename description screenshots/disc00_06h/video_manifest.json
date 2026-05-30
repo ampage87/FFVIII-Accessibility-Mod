@@ -1,0 +1,31 @@
+{
+  "video_file": "disc00_06h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc00_06h.avi",
+  "folder": "disc00_06h",
+  "duration_seconds": 2.73,
+  "scene_frames_found": 0,
+  "frame_count": 1,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    }
+  ],
+  "audio_description": "An ornate car in Dollet.",
+  "context": {
+    "scene_title": "Brief shot of a classic car in the town of Dollet — a very short transitional FMV during the Disc 1 Dollet sequence.",
+    "locations": [
+      "Dollet town streets (a shop/street sign reading 'Dollet' is visible in the background)"
+    ],
+    "characters": [
+      {
+        "name": "(none visible)",
+        "recognition": "No characters are clearly visible in the single captured frame."
+      }
+    ],
+    "summary": "A very short clip (under 3 seconds, one captured frame) showing a low close-up of an ornate vintage automobile, bronze-colored with chromed fan-style headlights, in the streets of the seaside town of Dollet. It appears to be a brief transitional/establishing shot of a vehicle in Dollet.",
+    "context_confidence": "low",
+    "context_note": "Only a single frame (2.7s clip) was available, so the exact narrative beat could not be fully confirmed; the Dollet location is certain from the on-screen sign."
+  },
+  "ad_updated": true
+}

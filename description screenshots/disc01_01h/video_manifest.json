@@ -1,0 +1,67 @@
+{
+  "video_file": "disc01_01h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc01_01h.avi",
+  "folder": "disc01_01h",
+  "duration_seconds": 18.53,
+  "scene_frames_found": 3,
+  "frame_count": 10,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    },
+    {
+      "file": "frame_006_t0009.0s.jpg",
+      "timestamp_seconds": 9.0
+    },
+    {
+      "file": "frame_007_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    },
+    {
+      "file": "frame_008_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    },
+    {
+      "file": "frame_009_t0014.0s.jpg",
+      "timestamp_seconds": 14.0
+    },
+    {
+      "file": "frame_010_t0016.0s.jpg",
+      "timestamp_seconds": 16.0
+    }
+  ],
+  "audio_description": "A gantry leads out from the prison structure.\nThe view pulls back: the prison's three colossal corkscrew legs driven into the desert.\nThe red prison perches atop them.",
+  "context": {
+    "scene_title": "The D-District Prison rises — exterior of the Galbadian Desert Prison extending on its giant drill-legs.",
+    "locations": [
+      "The Galbadian desert — the D-District Prison's enormous corkscrew/drill legs and red superstructure standing over the sand"
+    ],
+    "characters": [
+      {
+        "name": "(none)",
+        "recognition": "Exterior structural FMV; no characters shown."
+      }
+    ],
+    "summary": "A walkway and gantry lead the eye out from the prison structure, then the camera pulls back to reveal the D-District Prison's three colossal corkscrew legs driven into the desert, the red prison body perched atop them against a bright blue sky — the iconic silhouette of the Desert Prison.",
+    "context_confidence": "high",
+    "context_note": "High confidence: the D-District Prison's distinctive drill-leg exterior."
+  },
+  "ad_updated": true
+}

@@ -1,0 +1,43 @@
+{
+  "video_file": "disc02_05h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc02_05h.avi",
+  "folder": "disc02_05h",
+  "duration_seconds": 7.07,
+  "scene_frames_found": 1,
+  "frame_count": 4,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0003.3s.jpg",
+      "timestamp_seconds": 3.33
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    }
+  ],
+  "audio_description": "The launch mechanism reaches full power.\nThe capsule sits centered amid surging energy.",
+  "context": {
+    "scene_title": "The Lunar Gate launch (continued) — the capsule loaded and fired into space (Disc 3).",
+    "locations": [
+      "The Lunar Gate launch facility — the central capsule within the cannon-like launch mechanism, ablaze with blue and magenta energy"
+    ],
+    "characters": [
+      {
+        "name": "(launch capsule, occupant unseen)",
+        "recognition": "The circuit-patterned launch capsule at the heart of the apparatus; occupant sealed inside, not visible."
+      }
+    ],
+    "summary": "The Lunar Gate's launch mechanism reaches full power: the circuit-etched capsule sits centered in the towering apparatus as blinding blue and magenta energy surges around it, ready to be shot out toward the Lunar Base.",
+    "context_confidence": "medium",
+    "context_note": "Read as the Lunar Gate launch apparatus firing a capsule into space (Disc 3); occupant not visible in-frame."
+  },
+  "ad_updated": true
+}

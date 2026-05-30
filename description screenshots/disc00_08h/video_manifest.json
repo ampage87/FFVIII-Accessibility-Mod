@@ -1,0 +1,78 @@
+{
+  "video_file": "disc00_08h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc00_08h.avi",
+  "folder": "disc00_08h",
+  "duration_seconds": 21.6,
+  "scene_frames_found": 5,
+  "frame_count": 11,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    },
+    {
+      "file": "frame_006_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    },
+    {
+      "file": "frame_007_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    },
+    {
+      "file": "frame_008_t0014.0s.jpg",
+      "timestamp_seconds": 14.0
+    },
+    {
+      "file": "frame_009_t0016.0s.jpg",
+      "timestamp_seconds": 16.0
+    },
+    {
+      "file": "frame_010_t0018.0s.jpg",
+      "timestamp_seconds": 18.0
+    },
+    {
+      "file": "frame_011_t0020.0s.jpg",
+      "timestamp_seconds": 20.0
+    }
+  ],
+  "audio_description": "The camera sweeps through the ball's grand hall, arched windows framing a huge moon.\nOn the crowded floor, Rinoa, in a cream dress, approaches Squall in his dress uniform.\nThey pair off and waltz together among the other couples.",
+  "context": {
+    "scene_title": "'Waltz for the Moon' — the SeeD graduation/inauguration ball on Disc 1, where Squall and Rinoa first meet and dance. One of the game's most iconic romantic scenes.",
+    "locations": [
+      "The Balamb Garden ballroom/grand hall, with tall arched windows opening onto a starlit night sky and a large moon"
+    ],
+    "characters": [
+      {
+        "name": "Rinoa Heartilly",
+        "recognition": "Young woman with long straight black hair (with caramel-brown highlights) wearing a pale cream/ivory halter cocktail dress with a crossed neckline; warm, confident smile. The female lead."
+      },
+      {
+        "name": "Squall Leonhart",
+        "recognition": "Seen here in his dark SeeD dress uniform with gold trim; the brooding male protagonist. He is the partner she pulls onto the dance floor."
+      },
+      {
+        "name": "Other SeeD cadets/guests",
+        "recognition": "Background couples in formal dress dancing in the ballroom."
+      }
+    ],
+    "summary": "At the SeeD graduation ball, the camera sweeps past the grand hall's arched windows framing a huge moon. On the crowded dance floor, Rinoa, radiant in a cream halter dress, approaches and pairs off with Squall in his dress uniform amid other dancing couples. The clip captures their celebrated first encounter and waltz under the moonlight.",
+    "context_confidence": "high"
+  },
+  "ad_updated": true
+}

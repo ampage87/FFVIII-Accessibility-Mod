@@ -1,0 +1,39 @@
+{
+  "video_file": "disc02_17h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc02_17h.avi",
+  "folder": "disc02_17h",
+  "duration_seconds": 6.0,
+  "scene_frames_found": 0,
+  "frame_count": 3,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    }
+  ],
+  "audio_description": "Rinoa floats in the starry void inside her space helmet, conscious but stranded.",
+  "context": {
+    "scene_title": "Rinoa adrift in space — set loose from the station, she drifts helplessly (Disc 3, the space rescue).",
+    "locations": [
+      "Open space among the stars"
+    ],
+    "characters": [
+      {
+        "name": "Rinoa Heartilly",
+        "recognition": "Dark-haired young woman inside a domed space helmet, face visible through the visor; drifting in a spacesuit."
+      }
+    ],
+    "summary": "Rinoa floats in the starry void inside her space helmet, conscious but stranded, set adrift after the disaster at the Lunar Base.",
+    "context_confidence": "high",
+    "context_note": "High confidence: Rinoa adrift in space (the Disc 3 space rescue)."
+  },
+  "ad_updated": true
+}

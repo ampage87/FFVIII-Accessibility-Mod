@@ -1,0 +1,63 @@
+{
+  "video_file": "disc02_15h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc02_15h.avi",
+  "folder": "disc02_15h",
+  "duration_seconds": 17.0,
+  "scene_frames_found": 1,
+  "frame_count": 9,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0005.0s.jpg",
+      "timestamp_seconds": 5.0
+    },
+    {
+      "file": "frame_005_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_006_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    },
+    {
+      "file": "frame_007_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    },
+    {
+      "file": "frame_008_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    },
+    {
+      "file": "frame_009_t0014.0s.jpg",
+      "timestamp_seconds": 14.0
+    }
+  ],
+  "audio_description": "Within a churning red field, the towering form of Sorceress Adel stirs and emerges.\nHer crowned silhouette is wreathed in crimson power.\nThe spider-like station is swallowed by the red energy.",
+  "context": {
+    "scene_title": "Sorceress Adel released amid the Lunar Cry — her tomb breaks open as the station is engulfed in red energy (Disc 3).",
+    "locations": [
+      "Space within the red maelstrom of the Lunar Cry, around the Lunar Base station"
+    ],
+    "characters": [
+      {
+        "name": "Sorceress Adel",
+        "recognition": "A large, imposing sorceress with blue-grey skin, long dark hair and an ornate crown-like headdress, wreathed in red energy as she is freed."
+      }
+    ],
+    "summary": "Within a churning red field, the towering form of Sorceress Adel stirs and emerges, her crowned silhouette wreathed in crimson power; the spider-like space station is swallowed by the same red energy of the Lunar Cry as Adel is unleashed.",
+    "context_confidence": "medium",
+    "context_note": "Read as Sorceress Adel's release during the Lunar Cry (Disc 3); Adel identified by her crowned, blue-skinned form, though the exact beat is inferred."
+  },
+  "ad_updated": true
+}

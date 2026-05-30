@@ -1,0 +1,51 @@
+{
+  "video_file": "disc01_04h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc01_04h.avi",
+  "folder": "disc01_04h",
+  "duration_seconds": 11.2,
+  "scene_frames_found": 0,
+  "frame_count": 6,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    },
+    {
+      "file": "frame_006_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    }
+  ],
+  "audio_description": "Rows of launch towers stand behind the missile base's perimeter fence.\nA volley of cruise missiles streaks up into the dark sky.",
+  "context": {
+    "scene_title": "Galbadia Missile Base — the cruise missiles launch (Disc 2; Galbadia fires on Balamb and Trabia Gardens).",
+    "locations": [
+      "The Galbadia Missile Base in the desert — missile silos/launchers behind perimeter fencing, then the night sky filled with rising missiles"
+    ],
+    "characters": [
+      {
+        "name": "(none)",
+        "recognition": "No characters shown; the focus is the missile launch."
+      }
+    ],
+    "summary": "Rows of launch towers stand behind the base's chain-link perimeter, and a volley of cruise missiles streaks up into the darkened sky trailing vapor — the Galbadian missile strike being launched toward the Gardens.",
+    "context_confidence": "high",
+    "context_note": "High confidence: the Galbadia Missile Base launch sequence."
+  },
+  "ad_updated": true
+}

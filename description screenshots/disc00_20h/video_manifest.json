@@ -1,0 +1,83 @@
+{
+  "video_file": "disc00_20h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc00_20h.avi",
+  "folder": "disc00_20h",
+  "duration_seconds": 26.73,
+  "scene_frames_found": 0,
+  "frame_count": 13,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    },
+    {
+      "file": "frame_006_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    },
+    {
+      "file": "frame_007_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    },
+    {
+      "file": "frame_008_t0014.0s.jpg",
+      "timestamp_seconds": 14.0
+    },
+    {
+      "file": "frame_009_t0016.0s.jpg",
+      "timestamp_seconds": 16.0
+    },
+    {
+      "file": "frame_010_t0018.0s.jpg",
+      "timestamp_seconds": 18.0
+    },
+    {
+      "file": "frame_011_t0020.0s.jpg",
+      "timestamp_seconds": 20.0
+    },
+    {
+      "file": "frame_012_t0022.0s.jpg",
+      "timestamp_seconds": 22.0
+    },
+    {
+      "file": "frame_013_t0024.0s.jpg",
+      "timestamp_seconds": 24.0
+    }
+  ],
+  "audio_description": "The ornate reptilian Iguion statues on the Deling gate shudder and come alive.\nThe Iguions writhe down from their perches, fanged and clawed.\nOne lands in the floodlit boulevard amid a panicking crowd.",
+  "context": {
+    "scene_title": "The Iguions attack — during the Deling City parade, Sorceress Edea brings the two gargoyle statues flanking the gate to life to attack (part of the Sorceress assassination mission, Disc 1).",
+    "locations": [
+      "Deling City at night — the Presidential Residence gate/parade dais and the boulevard before it, with the crowd"
+    ],
+    "characters": [
+      {
+        "name": "Iguion (x2)",
+        "recognition": "Large green-and-gold reptilian/dragon gargoyle creatures that sat as statues on either side of the parade gate before animating; long necks, fanged snouts, clawed limbs."
+      },
+      {
+        "name": "(crowd / fleeing civilians)",
+        "recognition": "Anonymous parade attendees scattering in the street; no named hero is clearly featured here."
+      }
+    ],
+    "summary": "The ornate reptilian statues mounted on the Deling City gate shudder and come alive as Edea's magic animates them. The Iguions writhe down from their perches, fanged and clawed, and one lands in the floodlit boulevard amid a panicking crowd at night, the illuminated parade gate glowing behind.",
+    "context_confidence": "high",
+    "context_note": "High confidence: the Iguion gargoyle creatures Edea summons during the Deling City parade."
+  },
+  "ad_updated": true
+}

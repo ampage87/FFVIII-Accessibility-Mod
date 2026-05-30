@@ -1,0 +1,43 @@
+{
+  "video_file": "disc01_30h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc01_30h.avi",
+  "folder": "disc01_30h",
+  "duration_seconds": 8.0,
+  "scene_frames_found": 0,
+  "frame_count": 4,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    }
+  ],
+  "audio_description": "Balamb Garden's dome wedged against the red Galbadia Garden.\nThe two structures stay locked together.",
+  "context": {
+    "scene_title": "Battle of the Gardens — the two Gardens locked together over the landscape (Disc 2).",
+    "locations": [
+      "The exteriors of Balamb Garden (tiered grey dome) and Galbadia Garden (red), jammed together beside cliffs"
+    ],
+    "characters": [
+      {
+        "name": "(none)",
+        "recognition": "Structural FMV; no characters shown."
+      }
+    ],
+    "summary": "Close exterior views show Balamb Garden's tiered dome wedged against the red bulk of Galbadia Garden as the two enormous structures remain locked together during the battle.",
+    "context_confidence": "high",
+    "context_note": "High confidence: the Garden-vs-Garden collision."
+  },
+  "ad_updated": true
+}

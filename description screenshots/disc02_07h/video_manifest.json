@@ -1,0 +1,75 @@
+{
+  "video_file": "disc02_07h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc02_07h.avi",
+  "folder": "disc02_07h",
+  "duration_seconds": 20.0,
+  "scene_frames_found": 10,
+  "frame_count": 12,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    },
+    {
+      "file": "frame_006_t0009.0s.jpg",
+      "timestamp_seconds": 9.0
+    },
+    {
+      "file": "frame_007_t0009.9s.jpg",
+      "timestamp_seconds": 9.93
+    },
+    {
+      "file": "frame_008_t0011.1s.jpg",
+      "timestamp_seconds": 11.13
+    },
+    {
+      "file": "frame_009_t0012.7s.jpg",
+      "timestamp_seconds": 12.67
+    },
+    {
+      "file": "frame_010_t0014.0s.jpg",
+      "timestamp_seconds": 14.0
+    },
+    {
+      "file": "frame_011_t0016.0s.jpg",
+      "timestamp_seconds": 16.0
+    },
+    {
+      "file": "frame_012_t0018.0s.jpg",
+      "timestamp_seconds": 18.0
+    }
+  ],
+  "audio_description": "A capsule slides down the Lunar Gate's launch tube.\nThe screen whites out in the blaze of launch.\nThe view settles on the facility beneath an enormous moon.",
+  "context": {
+    "scene_title": "The Lunar Gate launch — the capsule rides the tube and is fired toward the moon (Disc 3).",
+    "locations": [
+      "The colorful interior launch tube of the Lunar Gate; a blinding launch flash; and the exterior facility under a huge moon at dusk"
+    ],
+    "characters": [
+      {
+        "name": "(launch capsule, occupant sealed)",
+        "recognition": "A small pod travels down the bright tube; occupant (Squall/Rinoa/party member) sealed inside, not visible."
+      }
+    ],
+    "summary": "A capsule slides down the Lunar Gate's vivid launch tube, the screen whites out in the blaze of the launch, and the view settles on the facility beneath an enormous moon — the destination toward which the capsule is fired.",
+    "context_confidence": "medium",
+    "context_note": "Read as the Lunar Gate launch and the moon (Disc 3); occupant not visible."
+  },
+  "ad_updated": true
+}

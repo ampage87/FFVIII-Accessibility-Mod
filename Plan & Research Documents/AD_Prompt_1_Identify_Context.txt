@@ -1,0 +1,39 @@
+Prefix your status updates with "## Claude Says".
+
+BATCH LIMIT: Process at most 10 videos in this run. Once you have processed 10
+videos this run (skipped/already-done videos do NOT count toward this limit),
+STOP and print the list of videos still remaining, so I can continue in a fresh
+session. Do not attempt the whole list in one session.
+
+Read the manifest at:
+C:\Users\ampag\OneDrive\Documents\FFVIII-Accessibility-Mod\FF8_OriginalPC_mod\description screenshots\manifest.json
+
+It lists every FF8 FMV, each with a folder of timestamped screenshot frames
+(filenames encode the timestamp, e.g. frame_007_t0042.5s.jpg) and a
+video_manifest.json. For EACH video where the "context" field is missing or
+empty (up to the batch limit above), do the following, then move to the next
+video automatically -- do not stop to ask me between videos:
+
+1. Note the video filename and read a representative spread of its frames
+   (first, several middle, last; read all of them if there are fewer than ~20).
+2. Use web search to identify which FF8 cutscene this is. The video filename and
+   the visual content are strong anchors; FF8 cutscenes are well documented on the
+   Final Fantasy Wiki, fan cutscene catalogs, and the qhimm modding community.
+3. Determine and write into that video's video_manifest.json, in a "context"
+   field, a concise block containing:
+     - scene_title: what this cutscene is and where it falls in the story
+     - location(s): where it takes place
+     - characters: each character present, their CANONICAL name (Squall, Rinoa,
+       Seifer, etc.), and a one-line note on how to recognize them visually, so
+       the description step can use names instead of "a man with a scar"
+     - summary: 2-4 sentences on what happens, in order
+4. If you cannot confidently identify a video, still write your best-guess context
+   and set "context_confidence" to "low" with a note. NEVER invent details you
+   can't see or verify -- uncertainty recorded honestly is fine.
+
+Skip any video that already has a non-empty "context" field (resumable); skipped
+videos do not count toward the batch limit.
+
+When you stop (batch limit reached or no videos remain), print a summary: number
+identified confidently this run, number low-confidence, any videos you could not
+match to a known cutscene, and the list of videos still remaining to process.

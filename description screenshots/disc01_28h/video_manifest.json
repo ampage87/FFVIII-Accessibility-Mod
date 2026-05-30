@@ -1,0 +1,47 @@
+{
+  "video_file": "disc01_28h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc01_28h.avi",
+  "folder": "disc01_28h",
+  "duration_seconds": 8.0,
+  "scene_frames_found": 2,
+  "frame_count": 5,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0005.0s.jpg",
+      "timestamp_seconds": 5.0
+    },
+    {
+      "file": "frame_005_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    }
+  ],
+  "audio_description": "Galbadia Garden drives into Balamb Garden's entrance.\nThe structures smash together in twisting metal and energy.",
+  "context": {
+    "scene_title": "The Gardens crash together — the violent collision climax of the Battle of the Gardens (Disc 2).",
+    "locations": [
+      "Balamb Garden's entrance gate and the point of impact between the two Gardens"
+    ],
+    "characters": [
+      {
+        "name": "(none)",
+        "recognition": "Collision FMV; no characters shown."
+      }
+    ],
+    "summary": "Galbadia Garden drives into Balamb Garden's entrance, and the two structures smash together in a chaos of twisting ornate metal and red-and-blue magical energy — the crashing climax of the Garden battle.",
+    "context_confidence": "high",
+    "context_note": "High confidence: the Battle of the Gardens collision climax."
+  },
+  "ad_updated": true
+}

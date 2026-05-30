@@ -1,0 +1,47 @@
+{
+  "video_file": "disc00_16h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc00_16h.avi",
+  "folder": "disc00_16h",
+  "duration_seconds": 10.0,
+  "scene_frames_found": 0,
+  "frame_count": 5,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    }
+  ],
+  "audio_description": "Aboard the parade float, the view descends interior steps.\nThrough a banner-flanked archway, Deling City's floodlit gate and fountain appear at night.",
+  "context": {
+    "scene_title": "Sorceress Edea's parade in Deling City — the procession approaching the Presidential Gate (opening of the parade / assassination-attempt sequence).",
+    "locations": [
+      "Deling City at night — the grand boulevard with its central fountain and the illuminated triumphal Presidential Residence gate, viewed from the moving parade float"
+    ],
+    "characters": [
+      {
+        "name": "Sorceress Edea",
+        "recognition": "Present at the frame edge via her purple ornamented parade carriage / a purple-gloved hand; Edea is the sorceress associated with deep purple regalia."
+      }
+    ],
+    "summary": "From aboard the moving parade float — descending interior steps, then an open archway flanked by tall heraldic banners — the view sweeps out toward Deling City's floodlit gate and central fountain at night. Edea's purple parade carriage advances toward the ornate Presidential Residence as crowds and searchlights fill the scene.",
+    "context_confidence": "high",
+    "context_note": "High confidence this is the Deling City Sorceress parade sequence."
+  },
+  "ad_updated": true
+}

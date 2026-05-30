@@ -1,0 +1,43 @@
+{
+  "video_file": "disc04_00h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc04_00h.avi",
+  "folder": "disc04_00h",
+  "duration_seconds": 8.81,
+  "scene_frames_found": 0,
+  "frame_count": 4,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    }
+  ],
+  "audio_description": "The 'Square Enix' logo on black.\nThen the line: 'Published by Square Electronic Arts L.L.C.'",
+  "context": {
+    "scene_title": "Closing logo card — the Square Enix / Square Electronic Arts publisher screen at the very end of the game.",
+    "locations": [
+      "A black screen with the publisher logos and text"
+    ],
+    "characters": [
+      {
+        "name": "(none)",
+        "recognition": "Logo/text card; no characters."
+      }
+    ],
+    "summary": "The final card: the 'SQUARE ENIX' logo on black, followed by the line 'Published by Square Electronic Arts L.L.C.' — the closing publisher screen that ends the game.",
+    "context_confidence": "high",
+    "context_note": "High confidence: the closing Square Enix / Square Electronic Arts publisher logo card (legible text)."
+  },
+  "ad_updated": true
+}

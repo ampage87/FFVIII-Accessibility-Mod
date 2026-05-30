@@ -1,0 +1,54 @@
+{
+  "video_file": "disc00_01h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc00_01h.avi",
+  "folder": "disc00_01h",
+  "duration_seconds": 13.67,
+  "scene_frames_found": 4,
+  "frame_count": 7,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0003.1s.jpg",
+      "timestamp_seconds": 3.13
+    },
+    {
+      "file": "frame_004_t0005.1s.jpg",
+      "timestamp_seconds": 5.13
+    },
+    {
+      "file": "frame_005_t0007.6s.jpg",
+      "timestamp_seconds": 7.6
+    },
+    {
+      "file": "frame_006_t0009.5s.jpg",
+      "timestamp_seconds": 9.47
+    },
+    {
+      "file": "frame_007_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    }
+  ],
+  "audio_description": "Quistis Trepe is glimpsed through foreground bars.\nThe teal infirmary — desk, retro monitor, eye chart.\nQuistis stands in her dark instructor uniform, hands clasped.\nClose-up of Quistis, expression softening.",
+  "context": {
+    "scene_title": "Quistis Trepe character introduction — part of the early Disc 1 'Balamb Garden' montage that introduces the playable cast.",
+    "locations": [
+      "Balamb Garden interior (corridor/classroom area)"
+    ],
+    "characters": [
+      {
+        "name": "Quistis Trepe",
+        "recognition": "Young woman with long honey-blonde hair pulled up in a clip with two long front strands, thin oval wire-rim glasses, blue eyes; wears the dark SeeD instructor uniform with orange/gold trim and a red tie. She is a SeeD instructor at Balamb Garden."
+      }
+    ],
+    "summary": "A short character-introduction clip focusing on Quistis Trepe. She is first glimpsed partly obscured behind structural elements, then shown standing composed in her instructor uniform, ending on a calm close-up of her face. It establishes her as a poised young SeeD instructor.",
+    "context_confidence": "high"
+  },
+  "ad_updated": true
+}

@@ -6,6 +6,137 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.9.6
+
+Bug 4 (dormitory/corridor exit-destination mislabeling) — FIX PROMOTED. The
+forward concrete JSM exit interpreter, validated log-only as `[SHADOW]` in
+v0.17.9.5 against the live `[MAPJUMP-HOOK]` engine oracle (bgryo2_1 gate-true
+fall-through -> 228; bgroad_5 gate-false JPF-taken -> 245; both correct where
+the old addr-as-literal labeling gave 174 / 237), is now the authoritative
+destField resolver for SCREEN_BOUND lines.
+
+In `field_archive_jsm_mapjump_resolver.inl`: the validated interpreter is
+renamed `ShadowInterpretMethod` -> `InterpretExitMethod` (body unchanged) and
+wrapped in a leaf SEH guard `SafeInterpretExitMethod` (returns -1 on a wild
+varblock read so `Run` stays free of `__try`). `MapjumpResolver::Run` now, for
+each `JSM_ENT_LINE_SCREEN_BOUND` entity, interprets the first method containing
+a MAPJUMP-family op and sets `info.param` to the concrete destField it returns
+(logged ` [INTERP]`). The old abstract `ResolveMapjumpDest` is kept only as a
+fallback (` [LITERAL fallback]` / ` [VARBLOCK fallback]`) for methods the
+interpreter can't complete (RET/underflow/unmodeled). Because the interpreter
+returns a plain positive literal (masked to 16 bits, never bit31), it flows
+straight through the existing literal path in `HookedFieldScriptsInit` — no
+downstream change. This runs on ALL fields now (the diagnostic field allow-list
+is gone), so this BAT is also the multi-field regression.
+
+Diagnostics stripped: `[BC-DUMP]` (`DumpLineBytecode`/`BcDumpGated`/
+`BcIsLineType`), `[MAPJUMP-CTX]` (`DumpBytecodeContext`), and `[SHADOW]`
+(`ShadowValidateExits`) from the resolver; both `[OPDUMP]` blocks
+(`DumpOpcodeHandlers` + its `Install()` call) from `field_nav_mapjump_diag.inl`.
+The `[MAPJUMP-HOOK]` live engine hooks are retained (low-volume transition
+oracle). No source files added/removed; `deploy.bat` unchanged.
+
+Expected BAT: on a fresh gated-field load, `[MAPJUMP-RES] ... (SCREEN_BOUND):
+param 0x... -> 0x000000E4 [INTERP]` (228) for bgryo2_1 and `-> 0x000000F5
+[INTERP]` (245) for bgroad_5, and the catalog exit labels read "Exit to
+B-Garden - Hallway 5" / "...Dormitory Single 1" with no `[PSHM-DEST]`
+addr-as-literal mislabel. Still open (separate BAT): the dropped real-door
+`MAP_EXIT 'l1'` in bgryo2_1 (ent15, param=-2147483648).
+
+## v0.17.9.5
+
+LOCAL DIAGNOSTIC (do not ship) — bug 4, step 4: the forward concrete JSM exit
+interpreter, landed FIRST as a log-only shadow validator. Adds `[SHADOW]`
+(`ShadowInterpretMethod` + `ShadowValidateExits`) to
+`field_archive_jsm_mapjump_resolver.inl`, called from `MapjumpResolver::Run`
+after the `[BC-DUMP]`, gated to {bgryo2_1, bgroad_5, bghall_5}. It does NOT
+touch `info.param` — no behavior change yet.
+
+Unlike the abstract resolver (which resets the operand stack at every basic
+block because it can't choose a branch), this interpreter FOLLOWS control flow
+with one continuous stack and reads the live field varblock, so it computes the
+exact destField the engine will use. Implements the opcode model locked in
+v0.17.9.3/.4 + the deep-research cross-check: `0x00`/`0x07` push literal/
+immediate; `0x0A`/`0x0C`/`0x11` varblock byte/word-unsigned/word-signed reads
+at `0x01CFE9B8+param`; `0x0B`/`0x0D` pop (no write in shadow); `0x01` CAL
+(pop2/push1, operator table 6=EQ…9=LS…, 5=NEG/F=NOT unary); `0x02` JMP, `0x03`
+JPF, target = ip+1+param (k=1); `0x05` LBL no-op; `0x06` RET stop; `0x2A`/`0x38`
+MAPJUMP3/DISCJUMP -> stack[-5]; `0x29`/`0x5C` MAPJUMP/MAPJUMPO -> stack[-4].
+SEH-guarded; 200k-step cap.
+
+Validation target for the BAT: `[SHADOW]` must log **interpDest=228** for
+bgryo2_1's exit line, and **237 (pre-SeeD) / 245 (post-SeeD)** for bgroad_5 —
+matched against the live `[MAPJUMP-HOOK]` engine truth. Once confirmed, a
+follow-up build wires the interpreter into the catalog labeling path (replacing
+addr-as-literal), fixes the dropped `MAP_EXIT 'l1'`, and strips ALL diagnostics.
+Strip before any push.
+
+## v0.17.9.4
+
+LOCAL DIAGNOSTIC (do not ship) — bug 4, step 3. Extends `[OPDUMP]` in
+`field_nav_mapjump_diag.inl` to also dump the opcode-0x01 secondary operator
+table at `0x00B8DE4C` (entries 0x00..0x11, address + 96 raw bytes each).
+
+The v0.17.9.3 `[OPDUMP]` + capstone nailed the JSM opcode model and corrected
+the mod's mislabeled opcode names: `0x01` is a binary-op/compare (param selects
+the operator via the `0x00B8DE4C` sub-table; pops 2, pushes 1), `0x02` is the
+unconditional JMP (IP += param), `0x03` is JPF (pop; if zero, IP += param),
+`0x07` pushes a sign-extended immediate, `0x0C`/`0x0A` push a varblock
+word/byte at `0x01CFE9B8 + param`, `0x0B`/`0x0D` pop to varblock byte/word.
+This solved the control-flow puzzle: the dorm exit gate is
+`push varblock[0x100]; push <imm>; compare(op N); JPF` — fall through to the
+first MAPJUMP3 when true. The last unknown is which relations operators 6 and 9
+are; this dump captures their handlers for offline disassembly. Passive, fires
+once at hook install; no behavior change. Strip before any push.
+
+## v0.17.9.3
+
+LOCAL DIAGNOSTIC (do not ship) — bug 4 (dormitory/corridor exit mislabeling),
+step 2 toward the sandbox interpreter. Adds a one-shot `[OPDUMP]` to
+`field_nav_mapjump_diag.inl` (`DumpOpcodeHandlers`, called once from
+`MapjumpDiag::Install`). It logs the JSM opcode dispatch-table handler address
+for opcodes 0x00..0x40 and the first 160 raw bytes of the key handlers
+(0x01/0x02/0x03 jumps, 0x05/0x06, 0x07/0x08/0x0A/0x0B/0x0C/0x0D push/pop,
+0x1C ext-dispatch), read read-only from the loaded `.text` under SEH.
+
+Purpose: the v0.17.9.2 `[BC-DUMP]` BAT proved the engine fires the FIRST of
+squalls m7's three MAPJUMP3s (-> 228 Hallway 5) but a forward trace under the
+current "`0x01` = unconditional JMP" model skips it, so the opcode model is
+wrong and the interpreter can't be built on it. The dispatch table that maps
+opcodes to handlers lives in `.data` (no `.asm` dump), and the on-disk
+disassembly is only readable through a ~3-line peephole, so this dumps the
+handler bytes to the log instead; they get disassembled offline with capstone
+to pin down the true semantics of the jump/push/pop opcodes (esp. whether
+`0x01` is a conditional compare-and-branch). Passive, fires once at hook
+install; no behavior change. Strip before any push.
+
+## v0.17.9.2
+
+LOCAL DIAGNOSTIC (do not ship) — bug 4 (dormitory/corridor exit mislabeling),
+step 1 of the sandbox-interpreter fix. Adds a `[BC-DUMP]` full-method bytecode
+disassembler to `field_archive_jsm_mapjump_resolver.inl`, gated to a small
+field allow-list (bgryo2_1, bgroad_5, bghall_5). For every Door/Line entity in
+those fields it dumps each method's instructions: IP, raw dword, decoded
+opcode (high-byte model), signed low-24 param, absolute jump targets for
+JMP/JPF/JMPB, immediate-vs-varAddr annotation for the PSHM/push family, and a
+destField marker on MAPJUMP/MAPJUMP3/DISCJUMP/MAPJUMPO. Basic-block starts
+(jump targets) are flagged with `*`.
+
+Purpose: the walk-through BAT proved the exit destination is NOT a single
+varblock value — it is a hardcoded immediate operand of whichever MAPJUMP3 the
+script branches to (bgryo2_1 'squalls' carries three: ->228 Hallway 5, ->231,
+->174 Hall 10), selected at runtime by flag-gated control flow. Engine ground
+truth this run: destField=228 (Hallway 5), while addr-as-literal mislabels it
+174 (Hall 10). The current static resolver fails because (a) it resets its
+stack at every jump target so it never follows the taken branch, and (b) it
+treats the push opcode's operand as a varblock address, ignoring the bank
+field (bank 0 = immediate). This dump exposes the real branch structure so a
+forward concrete interpreter (next build) can reproduce the engine's
+destination by following branches with live variable reads — no caching, no
+manual traversal. Acceptance test for the interpreter: bgryo2_1 must resolve
+to 228 against current memory. Passive log only; no behavior change; strip
+before any push.
+
 ## v0.17.9.1
 
 Chapter 5 COMPLETE — SeeD rank R-key fix + automatic SeeD salary announcement

@@ -1,0 +1,47 @@
+{
+  "video_file": "disc01_16h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc01_16h.avi",
+  "folder": "disc01_16h",
+  "duration_seconds": 9.93,
+  "scene_frames_found": 1,
+  "frame_count": 5,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    }
+  ],
+  "audio_description": "Balamb Garden's underside passes low over a marina of masts.\nIt surges through the sea, throwing up white spray.",
+  "context": {
+    "scene_title": "Balamb Garden plows into the harbor — the mobile Garden arriving at the coastal town (Fishermans Horizon), Disc 2.",
+    "locations": [
+      "A harbor/marina full of sailboat masts beside a coastal town, the Garden moving through the water"
+    ],
+    "characters": [
+      {
+        "name": "(none)",
+        "recognition": "Exterior FMV; no characters shown."
+      }
+    ],
+    "summary": "The underside of Balamb Garden passes low over a marina crowded with sailboat masts, then the great structure surges through the sea throwing up a wall of white spray, seen past an ornamental iron railing — the drifting Garden grinding to a halt at the coastal town.",
+    "context_confidence": "medium",
+    "context_note": "Read as the mobile Garden's arrival/collision at the coastal town (Fishermans Horizon); the marina is visible but the town is identified from context."
+  },
+  "ad_updated": true
+}

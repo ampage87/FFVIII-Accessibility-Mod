@@ -1,0 +1,43 @@
+{
+  "video_file": "disc01_22h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc01_22h.avi",
+  "folder": "disc01_22h",
+  "duration_seconds": 8.0,
+  "scene_frames_found": 0,
+  "frame_count": 4,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    }
+  ],
+  "audio_description": "A forest with a grazing deer, mountains beyond.\nGalbadia Garden slides in behind the trees.",
+  "context": {
+    "scene_title": "Galbadia Garden on the move — the mobile red Garden glides through forested wilderness (lead-up to the Battle of the Gardens, Disc 2).",
+    "locations": [
+      "A forest of tall trees with distant mountains; the red bulk of Galbadia Garden passing behind the treeline"
+    ],
+    "characters": [
+      {
+        "name": "(woodland deer)",
+        "recognition": "A spotted deer grazes peacefully in the foreground before the Garden appears; ambient wildlife, not a character."
+      }
+    ],
+    "summary": "A tranquil forest with a spotted deer grazing, mountains beyond — then the massive red form of the now-mobile Galbadia Garden slides into view behind the trees, revealing that Galbadia Garden too has taken to moving in pursuit.",
+    "context_confidence": "high",
+    "context_note": "High confidence: the mobile Galbadia Garden (its distinctive red form) traveling, presaging the Battle of the Gardens."
+  },
+  "ad_updated": true
+}

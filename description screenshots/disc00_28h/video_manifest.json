@@ -1,0 +1,87 @@
+{
+  "video_file": "disc00_28h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc00_28h.avi",
+  "folder": "disc00_28h",
+  "duration_seconds": 28.8,
+  "scene_frames_found": 0,
+  "frame_count": 14,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    },
+    {
+      "file": "frame_006_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    },
+    {
+      "file": "frame_007_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    },
+    {
+      "file": "frame_008_t0014.0s.jpg",
+      "timestamp_seconds": 14.0
+    },
+    {
+      "file": "frame_009_t0016.0s.jpg",
+      "timestamp_seconds": 16.0
+    },
+    {
+      "file": "frame_010_t0018.0s.jpg",
+      "timestamp_seconds": 18.0
+    },
+    {
+      "file": "frame_011_t0020.0s.jpg",
+      "timestamp_seconds": 20.0
+    },
+    {
+      "file": "frame_012_t0022.0s.jpg",
+      "timestamp_seconds": 22.0
+    },
+    {
+      "file": "frame_013_t0024.0s.jpg",
+      "timestamp_seconds": 24.0
+    },
+    {
+      "file": "frame_014_t0026.0s.jpg",
+      "timestamp_seconds": 26.0
+    }
+  ],
+  "audio_description": "Through wrought-iron railings, a dark figure moves across the red-carpeted gate.\nThe camera settles on a close-up of Sorceress Edea, composed and still.",
+  "context": {
+    "scene_title": "The gate confrontation — a figure (Squall) advancing across the parade gate toward Sorceress Edea during the assassination attempt (Disc 1).",
+    "locations": [
+      "Deling City — the ornate iron-railed parade gate dais with its red carpet, leading up to Edea"
+    ],
+    "characters": [
+      {
+        "name": "Squall Leonhart (implied)",
+        "recognition": "A dark-clad figure rushes/moves across the ornate gate in motion-blurred mid-shots; consistent with Squall charging the Sorceress, though his face is not clearly shown here."
+      },
+      {
+        "name": "Sorceress Edea",
+        "recognition": "Golden-skinned face, ram-horn headpiece, golden radial-web headdress and black feather collar, shown in close-up as the confrontation reaches her."
+      }
+    ],
+    "summary": "Through the wrought-iron railings and over the red-carpeted gate, a dark figure moves swiftly across the parade dais. The camera settles on a close-up of Sorceress Edea, composed and imperious, as the confrontation at the gate comes to a head.",
+    "context_confidence": "high",
+    "context_note": "High confidence on Edea and the gate-confrontation setting; the advancing figure is inferred to be Squall."
+  },
+  "ad_updated": true
+}

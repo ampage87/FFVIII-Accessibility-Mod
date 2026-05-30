@@ -1,0 +1,43 @@
+{
+  "video_file": "disc02_06h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc02_06h.avi",
+  "folder": "disc02_06h",
+  "duration_seconds": 7.33,
+  "scene_frames_found": 0,
+  "frame_count": 4,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    }
+  ],
+  "audio_description": "Robotic units glide along blue rails.\nThey tend a capsule with a glowing orange core.",
+  "context": {
+    "scene_title": "The Lunar Gate launch mechanism — robotic handlers prepare/load the cold-sleep capsule (Disc 3).",
+    "locations": [
+      "Inside the Lunar Gate launch facility — a dark mechanical bay with glowing blue rail-conduits, robotic units and a capsule with a glowing core"
+    ],
+    "characters": [
+      {
+        "name": "(automated handler units)",
+        "recognition": "Small grey robotic pods with green optical lights moving along blue energy rails; Esthar machinery, no human characters shown."
+      }
+    ],
+    "summary": "Within the Lunar Gate, automated robotic units glide along glowing blue rails around a capsule whose core glows hot orange, as the facility's machinery prepares a cold-sleep pod for launch into space.",
+    "context_confidence": "medium",
+    "context_note": "Read as the Lunar Gate's capsule-loading machinery (Disc 3 space launch); clearly Esthar tech, exact mechanism inferred."
+  },
+  "ad_updated": true
+}

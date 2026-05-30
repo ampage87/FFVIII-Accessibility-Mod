@@ -1,0 +1,31 @@
+{
+  "video_file": "disc00_12h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc00_12h.avi",
+  "folder": "disc00_12h",
+  "duration_seconds": 3.0,
+  "scene_frames_found": 0,
+  "frame_count": 1,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    }
+  ],
+  "audio_description": "A blurred dark shape above a cluster of buildings.",
+  "context": {
+    "scene_title": "Brief transitional shot — likely the train near a town/station (very short ~3s clip).",
+    "locations": [
+      "Ambiguous — appears to show a dark train or vehicle over a townscape/station at dusk"
+    ],
+    "characters": [
+      {
+        "name": "(none identifiable)",
+        "recognition": "No character discernible in the single heavily-compressed frame."
+      }
+    ],
+    "summary": "The only extracted frame is a noisy, low-clarity image showing a dark elongated shape (consistent with the train) above a cluster of buildings, possibly a station, with faint reddish lettering. It reads as a brief transition between the train sequence and the next scene.",
+    "context_confidence": "low",
+    "context_note": "Only one degraded frame is available for a ~3s clip; identification as a train/station transition is a best guess and not verified."
+  },
+  "ad_updated": true
+}

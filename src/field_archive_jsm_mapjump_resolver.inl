@@ -1,49 +1,49 @@
-// field_archive_jsm_mapjump_resolver.inl - v0.17.7.5.2
+// field_archive_jsm_mapjump_resolver.inl - v0.17.9.6
 //
 // Static destField resolver for MAPJUMP-family instructions. Runs as a
 // follow-up pass after ScanJSMScripts() main entity scan. For each entity
-// classified as JSM_ENT_LINE_SCREEN_BOUND, walks the entity's bytecode
-// method-by-method to find the actual destField source of every MAPJUMP /
-// MAPJUMP3 / DISCJUMP / MAPJUMPO instruction.
+// classified as JSM_ENT_LINE_SCREEN_BOUND, computes the actual destField the
+// engine will jump to and writes it into info.param.
 //
-// Why this exists:
-//   The forward scanner in field_archive_jsm_scan.inl accumulates pushCount
-//   across basic block boundaries and does not model the stack effect of
-//   most opcodes. By the time it reaches a MAPJUMP3 at the end of a complex
-//   walk-on method, pushStack[pushCount - 5] is far away from the actual
-//   5th-most-recent push the engine consumes. v0.17.7.4 BAT confirmed:
-//   scanner-reported destField PSHM addresses (0x0002, 0x023A, 0x01F6) hold
-//   values (14381, 0, 0) at MAPJUMP3 fire time that don't match the actual
-//   destination (field 170 then 165).
+// Two engines live here:
 //
-// What this fixes:
-//   Per-method bytecode simulation with proper basic-block awareness:
-//     1. Pre-build the set of jump-target IPs within the method.
-//     2. Forward-walk from method start to the MAPJUMP3 instruction.
-//     3. Reset the simulated stack at every jump target (basic block start) --
-//        only pushes that reach MAPJUMP3 through its own basic block count.
-//     4. Model the stack effect of every known opcode; unknown opcodes are
-//        treated as no-op (safer than guessing wrong).
-//     5. At the MAPJUMP instruction, inspect the deepest of the top-N stack
-//        values. If LITERAL -> destField is the literal. If PSHM_W ref ->
-//        store 0x80000000 | addr (downstream [PSHM-DEST] resolves via the
-//        live varblock at field load).
+//   1. InterpretExitMethod() -- the AUTHORITATIVE forward concrete interpreter
+//      (v0.17.9.6 promotion of the v0.17.9.5 [SHADOW] validator). It follows
+//      live control flow with one continuous operand stack and reads the field
+//      varblock, so it picks the branch the engine will actually take and
+//      returns the exact hardcoded-immediate destField. Validated against the
+//      live [MAPJUMP-HOOK] oracle on bgryo2_1 (gate-true fall-through -> 228)
+//      and bgroad_5 (gate-false JPF-taken -> 245), both correct where the old
+//      addr-as-literal labeling was wrong (174 / 237).
+//
+//   2. ResolveMapjumpDest() -- the older abstract resolver, kept only as a
+//      FALLBACK for the rare method the interpreter can't complete (RET before
+//      a MAPJUMP / stack underflow / unmodeled opcode chain). It resets the
+//      simulated stack at every basic-block boundary because it can't choose a
+//      branch, so on flag-gated multi-MAPJUMP3 methods it underflows or
+//      mis-resolves -- which is exactly the Bug-4 failure the interpreter fixes.
 //
 // Output:
-//   Per-line MAPJUMP-RES log entries showing the resolved destField (literal
-//   or marker), and a summary line per field. info.param is rewritten in
-//   place for each successfully resolved entity. The existing PSHM-DEST
-//   resolution in HookedFieldScriptsInit then reads info.param and resolves
-//   PSHM markers via varblock at field load.
+//   Per-line [MAPJUMP-RES] log entries showing the resolved destField and the
+//   source ([INTERP] / [LITERAL fallback] / [VARBLOCK fallback]), plus a
+//   per-field summary. info.param is rewritten in place ONLY for
+//   JSM_ENT_LINE_SCREEN_BOUND entities; the downstream [PSHM-DEST] / catalog
+//   labeling path in HookedFieldScriptsInit reads info.param. A plain positive
+//   literal (what the interpreter returns) flows straight through as the
+//   destination field id; a 0x80000000|addr marker (fallback only) is resolved
+//   downstream.
 //
 // Cross-reference:
 //   Stack effect verified by FF8_EN.exe disassembly:
 //     opcode_mapjump  @ 0x00521A20 pops 4 (destField is 4th-from-top)
 //     opcode_mapjump3 @ 0x00521AC0 pops 5 (destField is 5th-from-top)
 //     Both store destField at 0x01CE4762 (transition request global).
+//   Opcode model confirmed v0.17.9.3/.4 [OPDUMP] + capstone, cross-checked vs
+//   the canonical Makou Reactor list and the live runtime oracle.
 //
 // Included from field_archive_jsm.inl AFTER scan.inl. Do not compile
-// independently.
+// independently. The including TU (field_archive.cpp) pulls in <windows.h>,
+// so the SEH guard in SafeInterpretExitMethod compiles here.
 
 namespace MapjumpResolver {
 
@@ -108,14 +108,12 @@ static inline StackEffect GetStackEffect(uint8_t op)
         case 0x60: return {0, 0};   // SHOW
         case 0x61: return {0, 0};   // HIDE
 
-        // Default: assume no stack effect. Safer than guessing wrong. If a
-        // real-world MAPJUMP-RES result later shows arithmetic-mediated
-        // unknown-destField cases we can extend this table from BAT logs.
+        // Default: assume no stack effect. Safer than guessing wrong.
         default:   return {0, 0};
     }
 }
 
-// Abstract value tracked on the simulated stack.
+// Abstract value tracked on the simulated stack (fallback resolver only).
 enum ValueKind { VK_UNKNOWN = 0, VK_LITERAL, VK_VARBLOCK };
 struct Value {
     ValueKind kind;
@@ -164,62 +162,30 @@ static inline bool IsJumpTarget(const int* targets, int count, int ip)
     return false;
 }
 
-// v0.17.7.5.2: Dump 9 bytecode words around a MAPJUMP-family instruction
-// (ip-7 through ip+1). One log line per MAPJUMP3 scanned. Used to decode the
-// basic-block structure around each MAPJUMP3 by hand and identify the
-// unmodeled push opcode that causes the underflow at MAPJUMP3 #2 in each
-// SCREEN_BOUND line's method 7.
-static void DumpBytecodeContext(const uint32_t* scriptData, int scriptDataDwords,
-                                int targetIp, const char* fieldName,
-                                int entityIdx, const char* symName, int methodIdx)
-{
-    char buf[512] = {};
-    int off = 0;
-    for (int rel = -7; rel <= 1 && off < 480; rel++) {
-        int ip = targetIp + rel;
-        if (ip < 0 || ip >= scriptDataDwords) {
-            off += snprintf(buf + off, 512 - off, "%+d=OOB ", rel);
-            continue;
-        }
-        uint32_t w = scriptData[ip];
-        const char* mark = (rel == 0) ? "*" : "";
-        off += snprintf(buf + off, 512 - off, "%s%+d=0x%08X ",
-                        mark, rel, (unsigned)w);
-    }
-    Log::Field("FieldArchive: [MAPJUMP-CTX] %s ent%d '%s' m%d ip=%d ctx: %s",
-               fieldName, entityIdx, symName, methodIdx, targetIp, buf);
-}
-
-// Resolve the destField source of a single MAPJUMP-family instruction by
-// forward-walking the method bytecode and inspecting the simulated stack at
-// the moment of the instruction.
-//
-//   scriptData       - whole JSM script data section as native LE dwords
-//   methodStart/End  - dword indices bounding this method's bytecode
-//   targetIp         - dword index of the MAPJUMP* instruction
-//   argCount         - how many args the opcode pops (4 for MAPJUMP, 5 for MAPJUMP3)
-//   fieldName/ent... - for log labeling
+// ----------------------------------------------------------------------------
+// FALLBACK resolver: resolve the destField source of a single MAPJUMP-family
+// instruction by forward-walking the method bytecode and inspecting the
+// simulated stack at the moment of the instruction. Resets the stack at every
+// basic-block boundary (can't pick a branch), so it underflows or mis-resolves
+// on flag-gated multi-MAPJUMP3 methods -- the interpreter is preferred. Kept
+// for methods the interpreter can't complete.
 //
 // Returns either:
 //   * a positive literal field ID  (info.param can adopt directly)
 //   * a 0x80000000 | addr marker   (downstream [PSHM-DEST] resolves)
 //   * -1 on failure (stack underflow or unresolvable due to unmodeled chain)
+// ----------------------------------------------------------------------------
 static int32_t ResolveMapjumpDest(const uint32_t* scriptData,
                                   int methodStart, int methodEnd,
                                   int targetIp, int argCount,
                                   const char* fieldName, int entityIdx,
                                   const char* symName, int methodIdx)
 {
-    // Pre-build jump-target set for this method. Cap at 1024 -- big enough
-    // for any single method we've observed.
     static const int MAX_TARGETS = 1024;
     int targets[MAX_TARGETS];
     int numTargets = BuildJumpTargets(scriptData, methodStart, methodEnd,
                                        targets, MAX_TARGETS);
 
-    // Simulated stack. Wider than the forward scanner (32 slots vs 8) so
-    // intra-block underestimates are less common. We still reset at jump
-    // targets to keep cross-block contamination out.
     static const int STACK_MAX = 32;
     Value stack[STACK_MAX];
     int sp = 0;
@@ -227,7 +193,6 @@ static int32_t ResolveMapjumpDest(const uint32_t* scriptData,
         if (sp < STACK_MAX) {
             stack[sp++] = v;
         } else {
-            // Shift out oldest -- matches the forward scanner's overflow policy.
             for (int i = 0; i < STACK_MAX - 1; i++) stack[i] = stack[i+1];
             stack[STACK_MAX - 1] = v;
         }
@@ -239,17 +204,12 @@ static int32_t ResolveMapjumpDest(const uint32_t* scriptData,
     };
 
     for (int ip = methodStart; ip <= targetIp; ip++) {
-        // Reset stack at basic-block boundaries (jump targets). Skip the
-        // reset at methodStart -- method entry is reached with an empty
-        // stack, no contamination possible.
         if (ip != methodStart && IsJumpTarget(targets, numTargets, ip)) {
             sp = 0;
         }
         uint32_t word = scriptData[ip];
         uint8_t hb = (uint8_t)(word >> 24);
         if (hb == 0) {
-            // PSHN_L: push literal value. High byte == 0 means the entire
-            // dword IS the literal (max 0x00FFFFFF since high byte must be 0).
             Value v = { VK_LITERAL, (int32_t)word };
             push(v);
             continue;
@@ -259,14 +219,10 @@ static int32_t ResolveMapjumpDest(const uint32_t* scriptData,
         if (word & 0x00800000) param |= (int32_t)0xFF000000;  // sign-extend
 
         if (ip == targetIp) {
-            // At the MAPJUMP instruction itself, don't apply its stack
-            // effect -- we want to inspect the args it WILL pop.
             break;
         }
 
         if (hb == 0x07 || hb == 0x09 || hb == 0x0A || hb == 0x0C || hb == 0x0D) {
-            // PSHM family (W/B/L + savemap variants): track as varblock ref.
-            // The downstream PSHM-DEST resolver handles varblock lookup.
             Value v = { VK_VARBLOCK, param & 0xFFFF };
             push(v);
             continue;
@@ -312,32 +268,145 @@ static int32_t ResolveMapjumpDest(const uint32_t* scriptData,
     return -1;
 }
 
+// ============================================================================
+// v0.17.9.6: forward concrete JSM exit interpreter (Bug-4 fix, PROMOTED).
+// Authoritative destField resolver for SCREEN_BOUND lines. Unlike the abstract
+// fallback above (which resets the stack at every basic-block boundary because
+// it can't pick a branch), this FOLLOWS control flow with one continuous
+// operand stack and reads the live field varblock, so it computes the exact
+// destField the engine will use.
+//
+// Opcode model (confirmed v0.17.9.3/.4 OPDUMP + capstone, cross-checked vs the
+// canonical Makou Reactor list and the live [MAPJUMP-HOOK] oracle):
+//   op = word>>24; param = sign-extend(low 24).
+//   0x00 PSHN_L push whole word | 0x07 push sign-extended immediate
+//   0x0A/0x0C/0x11 push varblock byte / word-unsigned / word-signed @ base+param
+//   0x0B/0x0D pop->varblock (interp: pop only, never writes) | 0x08 local read (push 0)
+//   0x01 CAL: pop2 push1 value1<op>value2 (op 5=NEG / F=NOT are unary pop1)
+//             ops: 0 ADD,1 SUB,2 MUL,3 DIV,4 MOD,6 EQ,7 GT,8 GE,9 LS,A LE,
+//             B NT,C AND,D OR,E EOR,10 RSH,11 LSH
+//   0x02 JMP IP+=param | 0x03 JPF pop; if==0 IP+=param | target = ip+1+param (k=1)
+//   0x05 LBL no-op | 0x06 RET stop
+//   0x2A MAPJUMP3 / 0x38 DISCJUMP stop, dest = stack[-5]
+//   0x29 MAPJUMP  / 0x5C MAPJUMPO stop, dest = stack[-4]
+// Validated v0.17.9.5 (shadow) on bgryo2_1->228 + bgroad_5->245 vs live engine.
+// ============================================================================
+static const uintptr_t EXIT_VARBLOCK_BASE = 0x01CFE9B8;  // field var block (Steam 2013)
+
+// Forward-execute one method from its entry. Returns destField (>=0, low 16
+// bits) at the first MAPJUMP-family opcode reached, or -1 (RET / underflow /
+// out-of-range / step-cap). POD locals only so the caller's SEH guard covers
+// any wild varblock read.
+static int32_t InterpretExitMethod(const uint32_t* scriptData, int scriptDataDwords,
+                                   int mStart, int mEnd)
+{
+    static const int STK = 64;
+    int32_t stack[STK];
+    int sp = 0;
+    const uint8_t* vb = (const uint8_t*)EXIT_VARBLOCK_BASE;
+    int ip = mStart;
+    int steps = 0;
+    const int MAX_STEPS = 200000;
+
+    while (ip >= mStart && ip < mEnd && ip < scriptDataDwords && steps++ < MAX_STEPS) {
+        uint32_t word = scriptData[ip];
+        uint8_t hb = (uint8_t)(word >> 24);
+        if (hb == 0x00) { if (sp < STK) stack[sp++] = (int32_t)word; ip++; continue; }
+
+        int32_t param = (int32_t)(word & 0x00FFFFFF);
+        if (word & 0x00800000) param |= (int32_t)0xFF000000;  // sign-extend 24->32
+        int off = param & 0xFFFF;  // varblock byte offset
+
+        switch (hb) {
+            case 0x07: if (sp < STK) stack[sp++] = param; ip++; break;                       // push immediate
+            case 0x0A: if (sp < STK) stack[sp++] = *(const uint8_t*)(vb + off);  ip++; break;  // varblock byte (unsigned)
+            case 0x0C: if (sp < STK) stack[sp++] = *(const uint16_t*)(vb + off); ip++; break;  // varblock word (unsigned)
+            case 0x11: if (sp < STK) stack[sp++] = *(const int16_t*)(vb + off);  ip++; break;  // varblock word (signed)
+            case 0x08: if (sp < STK) stack[sp++] = 0; ip++; break;                            // local-frame read (unknown at scan)
+            case 0x0B: case 0x0D: if (sp > 0) sp--; ip++; break;                              // pop->varblock (no write in interp)
+            case 0x01: {                                                                      // CAL
+                uint8_t cop = (uint8_t)(param & 0xFF);
+                if (cop == 0x05) { if (sp < 1) return -1; int32_t a = stack[--sp]; if (sp < STK) stack[sp++] = -a; }
+                else if (cop == 0x0F) { if (sp < 1) return -1; int32_t a = stack[--sp]; if (sp < STK) stack[sp++] = ~a; }
+                else {
+                    if (sp < 2) return -1;
+                    int32_t b = stack[--sp];
+                    int32_t a = stack[--sp];
+                    int32_t r = 0;
+                    switch (cop) {
+                        case 0x00: r = a + b; break;
+                        case 0x01: r = a - b; break;
+                        case 0x02: r = a * b; break;
+                        case 0x03: r = (b != 0) ? a / b : 0; break;
+                        case 0x04: r = (b != 0) ? a % b : 0; break;
+                        case 0x06: r = (a == b) ? 1 : 0; break;
+                        case 0x07: r = (a >  b) ? 1 : 0; break;
+                        case 0x08: r = (a >= b) ? 1 : 0; break;
+                        case 0x09: r = (a <  b) ? 1 : 0; break;
+                        case 0x0A: r = (a <= b) ? 1 : 0; break;
+                        case 0x0B: r = (a != b) ? 1 : 0; break;
+                        case 0x0C: r = a & b; break;
+                        case 0x0D: r = a | b; break;
+                        case 0x0E: r = a ^ b; break;
+                        case 0x10: r = (int32_t)((uint32_t)a >> (b & 31)); break;
+                        case 0x11: r = a << (b & 31); break;
+                        default:   r = 0; break;
+                    }
+                    if (sp < STK) stack[sp++] = r;
+                }
+                ip++;
+                break;
+            }
+            case 0x02: ip = ip + 1 + param; break;                                            // JMP unconditional
+            case 0x03: {                                                                      // JPF
+                if (sp < 1) return -1;
+                int32_t c = stack[--sp];
+                ip = (c == 0) ? (ip + 1 + param) : (ip + 1);
+                break;
+            }
+            case 0x05: ip++; break;                                                           // LBL (no-op)
+            case 0x06: return -1;                                                             // RET (no dest)
+            case 0x2A: case 0x38:                                                             // MAPJUMP3 / DISCJUMP
+                if (sp < 5) return -1;
+                return stack[sp - 5] & 0xFFFF;
+            case 0x29: case 0x5C:                                                             // MAPJUMP / MAPJUMPO
+                if (sp < 4) return -1;
+                return stack[sp - 4] & 0xFFFF;
+            default: {                                                                        // unknown: conservative stack delta
+                StackEffect eff = GetStackEffect(hb);
+                for (int i = 0; i < eff.pops && sp > 0; i++) sp--;
+                for (int i = 0; i < eff.pushes && sp < STK; i++) stack[sp++] = 0;
+                ip++;
+                break;
+            }
+        }
+    }
+    return -1;  // fell off the end / RET / step cap
+}
+
+// SEH-guarded wrapper. The interpreter reads the live field varblock; a wild
+// read (malformed/early-lifecycle field) is caught here and reported as
+// "no concrete result" (-1) so Run falls back to the abstract resolver.
+// Leaf function so Run stays free of __try (no C++ unwinding conflict).
+static int32_t SafeInterpretExitMethod(const uint32_t* scriptData, int scriptDataDwords,
+                                       int mStart, int mEnd)
+{
+    __try {
+        return InterpretExitMethod(scriptData, scriptDataDwords, mStart, mEnd);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
 // Public entry point: run the resolver pass over EVERY entity in the JSM.
-// v0.17.7.5.1: widened from SCREEN_BOUND-only to all entity types. v0.17.7.5
-// BAT confirmed the engine fires MAPJUMP3 from entities OTHER than the four
-// SCREEN_BOUND lines we were scanning (Event Trigger lines, Background
-// scripts, or Other entities reached via REQ). The 4 destFields the engine
-// resolved (165, 227, 224, 170) didn't match any varblock value at the
-// addresses my v0.17.7.5 resolver picked, which means those 4 SCREEN_BOUND
-// lines aren't the ones firing. We need to scan everywhere and log all
-// MAPJUMP instructions found so we can identify the actual firing entity.
-//
-// info.param is still ONLY overwritten for JSM_ENT_LINE_SCREEN_BOUND --
-// other entities have their own classification semantics. The log lines
-// produced for non-SCREEN_BOUND entities are pure diagnostic.
-//
-// v0.17.7.5.1 also adds a LITERAL-preference policy: when an entity has
-// multiple MAPJUMP-family instructions across its methods that all resolve
-// successfully, prefer a LITERAL result over a VARBLOCK marker. The
-// LITERAL is statically self-contained and doesn't need a downstream
-// varblock lookup at field load; the VARBLOCK marker risks reading 0
-// (or a stale value) at the field-load lifecycle point.
+// info.param is overwritten ONLY for JSM_ENT_LINE_SCREEN_BOUND entities (the
+// downstream [PSHM-DEST] / catalog labeling path treats info.param as the
+// destination field for those). Other entity types are logged diagnostically.
 //
 //   methodStartIdxs/methodCounts/totalEntities describe the EntityGroup
-//   layout the scan loop built up. Caller passes them as parallel arrays so
-//   this resolver doesn't have to share the function-local EntityGroup type.
-//   methodCounts[e] is the INCLUSIVE max method index offset (matching the
-//   `m <= methodCount` loop convention used inside ScanJSMScripts).
+//   layout the scan loop built up. methodCounts[e] is the INCLUSIVE max method
+//   index offset (matching the `m <= methodCount` loop convention in scan).
 static void Run(const char* fieldName,
                 const uint32_t* scriptData, int scriptDataDwords,
                 const uint16_t* entryPoints, int totalMethods,
@@ -355,11 +424,14 @@ static void Run(const char* fieldName,
         int mStartIdx = methodStartIdxs[ei];
         int mCount    = methodCounts[ei];
 
-        // v0.17.7.5.1: collect ALL successful resolutions for this entity,
-        // then pick the best (LITERAL preferred over VARBLOCK).
+        // Fallback-resolver accumulators (LITERAL preferred over VARBLOCK).
         int32_t bestLiteral = -1;     // first LITERAL resolved (>= 0)
         int32_t bestMarker  = -1;     // first VARBLOCK marker (0x8000xxxx)
         bool    anyResolved = false;
+        // First method containing a MAPJUMP-family op -- the interpreter
+        // entry point. Interpreting from the method start lets it follow the
+        // live branch to whichever MAPJUMP3 the engine actually reaches.
+        int mjMethodStart = -1, mjMethodEnd = -1;
 
         for (int m = 0; m <= mCount; m++) {
             int methodIdx = mStartIdx + m;
@@ -380,65 +452,63 @@ static void Run(const char* fieldName,
                 else if (hb == 0x5C) argCount = 4;  // MAPJUMPO
                 else continue;
                 scanned++;
-                // v0.17.7.5.2: Dump bytecode context (9 dwords) per MAPJUMP3.
-                // One log line per scanned instruction; lets us decode by
-                // hand which opcode in the gap between MAPJUMP3 #1 and #2
-                // is the unmodeled push causing the underflow.
-                DumpBytecodeContext(scriptData, scriptDataDwords, ip,
-                                    fieldName, ei, info.symName, m);
+                if (mjMethodStart < 0) { mjMethodStart = (int)mStart; mjMethodEnd = (int)mEnd; }
                 int32_t r = ResolveMapjumpDest(scriptData, mStart, mEnd, ip,
                                                 argCount, fieldName, ei,
                                                 info.symName, m);
                 if (r == -1) continue;
                 anyResolved = true;
                 if (((uint32_t)r & 0x80000000u) == 0) {
-                    // LITERAL (positive int) -- take the first one.
                     if (bestLiteral == -1) bestLiteral = r;
                 } else {
-                    // VARBLOCK marker -- take the first one.
                     if (bestMarker == -1) bestMarker = r;
                 }
             }
         }
 
-        if (anyResolved) {
-            resolved++;
-            // LITERAL wins over VARBLOCK marker.
-            int32_t newParam = (bestLiteral != -1) ? bestLiteral : bestMarker;
+        // v0.17.9.6: the forward concrete interpreter is authoritative for
+        // SCREEN_BOUND exits. It follows live control flow (reads the field
+        // varblock, picks the taken branch) and returns the exact destField
+        // the engine will use -- validated on bgryo2_1->228 and bgroad_5->245
+        // against the live [MAPJUMP-HOOK] oracle. The abstract resolver result
+        // (bestLiteral/bestMarker) is kept only as a fallback for the rare
+        // method the interpreter can't complete (RET/underflow/unmodeled).
+        int32_t interpDest = -1;
+        if (info.type == JSM_ENT_LINE_SCREEN_BOUND && mjMethodStart >= 0) {
+            interpDest = SafeInterpretExitMethod(scriptData, scriptDataDwords,
+                                                 mjMethodStart, mjMethodEnd);
+        }
 
-            // Only overwrite info.param for SCREEN_BOUND lines -- the
-            // existing downstream [PSHM-DEST] / catalog labeling path treats
-            // info.param as the destination field for those. Other entity
-            // types have their own param semantics; we log only.
-            if (info.type == JSM_ENT_LINE_SCREEN_BOUND) {
-                int32_t oldParam = info.param;
-                info.param = newParam;
-                paramUpdates++;
-                Log::Field("FieldArchive: [MAPJUMP-RES] %s ent%d '%s' (SCREEN_BOUND): "
-                           "param 0x%08X -> 0x%08X%s",
-                           fieldName, ei, info.symName,
-                           (unsigned)oldParam, (unsigned)newParam,
-                           (bestLiteral != -1) ? " [LITERAL]" :
-                           (bestMarker  != -1) ? " [VARBLOCK]" : "");
-            } else {
-                Log::Field("FieldArchive: [MAPJUMP-RES] %s ent%d '%s' (%s): "
-                           "would-be param 0x%08X%s -- not a SCREEN_BOUND line, "
-                           "diagnostic only",
-                           fieldName, ei, info.symName,
-                           JSMEntityTypeName(info.type),
-                           (unsigned)newParam,
-                           (bestLiteral != -1) ? " [LITERAL]" :
-                           (bestMarker  != -1) ? " [VARBLOCK]" : "");
-            }
+        if (info.type == JSM_ENT_LINE_SCREEN_BOUND && (interpDest >= 0 || anyResolved)) {
+            int32_t newParam;
+            const char* src;
+            if (interpDest >= 0)        { newParam = interpDest;  src = " [INTERP]"; }
+            else if (bestLiteral != -1) { newParam = bestLiteral; src = " [LITERAL fallback]"; }
+            else                        { newParam = bestMarker;  src = " [VARBLOCK fallback]"; }
+            int32_t oldParam = info.param;
+            info.param = newParam;
+            paramUpdates++;
+            resolved++;
+            Log::Field("FieldArchive: [MAPJUMP-RES] %s ent%d '%s' (SCREEN_BOUND): "
+                       "param 0x%08X -> 0x%08X%s",
+                       fieldName, ei, info.symName,
+                       (unsigned)oldParam, (unsigned)newParam, src);
+        } else if (anyResolved) {
+            resolved++;
+            int32_t newParam = (bestLiteral != -1) ? bestLiteral : bestMarker;
+            Log::Field("FieldArchive: [MAPJUMP-RES] %s ent%d '%s' (%s): "
+                       "would-be param 0x%08X%s -- not a SCREEN_BOUND line, "
+                       "diagnostic only",
+                       fieldName, ei, info.symName,
+                       JSMEntityTypeName(info.type),
+                       (unsigned)newParam,
+                       (bestLiteral != -1) ? " [LITERAL]" :
+                       (bestMarker  != -1) ? " [VARBLOCK]" : "");
         } else {
-            // No MAPJUMP-family instruction in this entity (or all underflowed).
-            // Most entities fall here -- it's silent unless we actually saw
-            // a MAPJUMP that failed to resolve. The per-instruction
-            // "stack underflow" / "UNKNOWN destField" lines already log
-            // each failure case so no per-entity log line is needed here.
             unresolved++;
         }
     }
+
     Log::Field("FieldArchive: [MAPJUMP-RES] %s summary: %d MAPJUMP instructions "
                "scanned, %d entities with at least one resolution, %d without, "
                "%d SCREEN_BOUND params updated",

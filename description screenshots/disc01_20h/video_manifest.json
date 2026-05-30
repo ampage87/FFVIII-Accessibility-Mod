@@ -1,0 +1,47 @@
+{
+  "video_file": "disc01_20h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc01_20h.avi",
+  "folder": "disc01_20h",
+  "duration_seconds": 10.0,
+  "scene_frames_found": 0,
+  "frame_count": 5,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    }
+  ],
+  "audio_description": "A vast pale moon hangs above Fishermans Horizon.\nThe town's huge circular solar array glitters over the sea.",
+  "context": {
+    "scene_title": "Fishermans Horizon establishing shot — the town's great solar array beneath a huge moon (Disc 2).",
+    "locations": [
+      "Fishermans Horizon — the large circular solar-panel collector dish, surrounded by windmills and industrial structures over the ocean"
+    ],
+    "characters": [
+      {
+        "name": "(none)",
+        "recognition": "Scenic establishing FMV; no characters shown."
+      }
+    ],
+    "summary": "A vast pale sphere (a low, oversized moon) hangs in the sky above Fishermans Horizon, then the camera reveals the town's enormous circular solar-panel array glittering in the sun, ringed by windmills and rusted gantries over the sea.",
+    "context_confidence": "high",
+    "context_note": "High confidence: Fishermans Horizon's solar array; the sphere read as a large moon."
+  },
+  "ad_updated": true
+}

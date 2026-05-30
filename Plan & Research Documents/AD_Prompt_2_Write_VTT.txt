@@ -1,0 +1,63 @@
+Prefix your status updates with "## Claude Says".
+
+BATCH LIMIT: Process at most 8 videos in this run. Once you have written
+descriptions for 8 videos this run (skipped/already-done videos do NOT count
+toward this limit), STOP and print the list of videos still remaining, so I can
+continue in a fresh session. Do not attempt the whole list in one session.
+
+FIRST, learn the exact target format. Open this folder and read 2-3 existing .vtt files:
+C:\Users\ampag\OneDrive\Documents\FFVIII-Accessibility-Mod\FF8_OriginalPC_mod\Audio Descriptions
+
+Note precisely: the WEBVTT header and any header metadata, the timestamp format
+(MM:SS.mmm vs HH:MM:SS.mmm and digit count), whether cues have identifier lines,
+and the blank-line spacing between cues. Your output must match this format exactly
+so it is a drop-in replacement.
+
+Then read:
+C:\Users\ampag\OneDrive\Documents\FFVIII-Accessibility-Mod\FF8_OriginalPC_mod\description screenshots\manifest.json
+
+For EACH video (up to the batch limit above), work through them automatically
+without stopping between videos:
+
+1. Match the video to its existing .vtt by base name. No match -> record and skip.
+2. Read that video's "context" block (from the previous step) and its frames. For
+   long FMVs with many frames, review in batches of ~35 and combine your
+   understanding before writing -- do not absorb 150+ frames at once.
+3. Write a NEW set of VTT cues. These FMVs have NO speech, so the full runtime is
+   open, but follow these rules:
+     CONTENT
+     - Present tense, third person, objective. Describe what is visible, not how it
+       "feels". No editorializing ("beautiful", "tense", "dramatic").
+     - Use canonical character names from the context block. Once named, never
+       revert to "the young man".
+     - Cover meaningful beats in order: who is present, what they do, where, scene
+       changes, key actions and reveals. Skip filler. Don't narrate every frame of
+       a slow pan or held shot -- one calm cue covers it.
+     CUE PLACEMENT & TIMING (critical)
+     - Put each cue's START at the frame timestamp of the beat it describes (frame
+       filenames encode the time, e.g. frame_007_t0042.5s.jpg).
+     - Order cues by start time; they must NOT overlap.
+     - Each cue must be SPEAKABLE before the next cue starts. Budget its words to
+       the window = (next cue start - this cue start), at ~2.3 words/second, and
+       leave a ~0.3s buffer. For the final cue, the window runs to
+       duration_seconds (in the video_manifest.json). If a beat needs more words
+       than its window allows, either tighten the wording or move the next cue
+       later -- never let narration run past the following cue.
+     - Set each cue's END = start + estimated spoken duration, but never beyond the
+       next cue's start.
+     - Don't pack cues edge to edge during quiet stretches; spacing them out is
+       fine and usually better.
+4. Validate before writing: file begins with WEBVTT, every timestamp well-formed and
+   matching the existing digit format, starts strictly increasing, no overlaps.
+5. Back up the existing .vtt to "Audio Descriptions\_backup_old\" (same name) BEFORE
+   overwriting.
+6. Overwrite the existing .vtt in place, keeping its exact name and format.
+7. Store the final cue text in the video's video_manifest.json under
+   "audio_description" and set "ad_updated": true.
+
+Skip any video whose video_manifest.json already has "ad_updated": true
+(resumable); skipped videos do not count toward the batch limit.
+
+When you stop (batch limit reached or no videos remain), print a summary: number
+updated this run, number skipped (already done), number with no matching .vtt, any
+cues you had to compress hard to fit timing, and the list of videos still remaining.

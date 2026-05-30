@@ -1,0 +1,91 @@
+{
+  "video_file": "disc02_01h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc02_01h.avi",
+  "folder": "disc02_01h",
+  "duration_seconds": 31.47,
+  "scene_frames_found": 2,
+  "frame_count": 16,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0007.3s.jpg",
+      "timestamp_seconds": 7.33
+    },
+    {
+      "file": "frame_006_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    },
+    {
+      "file": "frame_007_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    },
+    {
+      "file": "frame_008_t0014.0s.jpg",
+      "timestamp_seconds": 14.0
+    },
+    {
+      "file": "frame_009_t0016.0s.jpg",
+      "timestamp_seconds": 16.0
+    },
+    {
+      "file": "frame_010_t0018.0s.jpg",
+      "timestamp_seconds": 18.0
+    },
+    {
+      "file": "frame_011_t0020.0s.jpg",
+      "timestamp_seconds": 20.0
+    },
+    {
+      "file": "frame_012_t0022.0s.jpg",
+      "timestamp_seconds": 22.0
+    },
+    {
+      "file": "frame_013_t0024.0s.jpg",
+      "timestamp_seconds": 24.0
+    },
+    {
+      "file": "frame_014_t0026.0s.jpg",
+      "timestamp_seconds": 26.0
+    },
+    {
+      "file": "frame_015_t0028.0s.jpg",
+      "timestamp_seconds": 28.0
+    },
+    {
+      "file": "frame_016_t0030.0s.jpg",
+      "timestamp_seconds": 30.0
+    }
+  ],
+  "audio_description": "From an Esthar gateway, the camera sweeps over the sprawling futuristic city.\nIt rushes along glowing magenta-and-green energy skyways between crystalline towers.\nIt passes through an industrial girdered transport bay.",
+  "context": {
+    "scene_title": "Esthar city — travel through the futuristic capital and its energy skyways (Disc 3).",
+    "locations": [
+      "Esthar City — crystalline blue-green skyscrapers, hexagonal platforms, and the colored energy-tube transport roadways winding between the towers"
+    ],
+    "characters": [
+      {
+        "name": "(none)",
+        "recognition": "Cityscape/travel FMV; no characters shown."
+      }
+    ],
+    "summary": "From an Esthar gateway the camera sweeps out over the sprawling futuristic city, then rushes along its glowing magenta-and-green energy skyways between towering crystalline structures, before passing through an industrial girdered transport bay.",
+    "context_confidence": "high",
+    "context_note": "High confidence: Esthar City and its energy-tube transit system."
+  },
+  "ad_updated": true
+}

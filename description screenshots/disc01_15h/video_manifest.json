@@ -1,0 +1,43 @@
+{
+  "video_file": "disc01_15h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc01_15h.avi",
+  "folder": "disc01_15h",
+  "duration_seconds": 8.0,
+  "scene_frames_found": 0,
+  "frame_count": 4,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    }
+  ],
+  "audio_description": "A pale-walled building with shop signs and greenery.\nBalamb Garden sits among the town's buildings.",
+  "context": {
+    "scene_title": "The mobile Balamb Garden comes to rest among a coastal town's buildings — its arrival at Fishermans Horizon (Disc 2).",
+    "locations": [
+      "A seaside town of pale curved/stucco buildings with shop signage and trees — consistent with Fishermans Horizon, where the drifting Garden lodges"
+    ],
+    "characters": [
+      {
+        "name": "(none)",
+        "recognition": "Establishing FMV; no characters shown."
+      }
+    ],
+    "summary": "The camera pans across a curved, pale-walled building with ornamental shop signage and greenery, then reveals the huge ringed bulk of Balamb Garden settled in close among the town's structures — the mobile Garden having drifted into the coastal settlement.",
+    "context_confidence": "medium",
+    "context_note": "Read as Balamb Garden's arrival at Fishermans Horizon (the town where the drifting Garden lodges); the town is identified from context rather than a label."
+  },
+  "ad_updated": true
+}

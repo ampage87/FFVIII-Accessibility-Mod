@@ -1,0 +1,123 @@
+{
+  "video_file": "disc02_09h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc02_09h.avi",
+  "folder": "disc02_09h",
+  "duration_seconds": 48.53,
+  "scene_frames_found": 3,
+  "frame_count": 24,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0005.9s.jpg",
+      "timestamp_seconds": 5.93
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    },
+    {
+      "file": "frame_006_t0010.0s.jpg",
+      "timestamp_seconds": 10.0
+    },
+    {
+      "file": "frame_007_t0012.0s.jpg",
+      "timestamp_seconds": 12.0
+    },
+    {
+      "file": "frame_008_t0014.0s.jpg",
+      "timestamp_seconds": 14.0
+    },
+    {
+      "file": "frame_009_t0016.0s.jpg",
+      "timestamp_seconds": 16.0
+    },
+    {
+      "file": "frame_010_t0018.0s.jpg",
+      "timestamp_seconds": 18.0
+    },
+    {
+      "file": "frame_011_t0020.0s.jpg",
+      "timestamp_seconds": 20.0
+    },
+    {
+      "file": "frame_012_t0022.0s.jpg",
+      "timestamp_seconds": 22.0
+    },
+    {
+      "file": "frame_013_t0024.0s.jpg",
+      "timestamp_seconds": 24.0
+    },
+    {
+      "file": "frame_014_t0026.0s.jpg",
+      "timestamp_seconds": 26.0
+    },
+    {
+      "file": "frame_015_t0028.0s.jpg",
+      "timestamp_seconds": 28.0
+    },
+    {
+      "file": "frame_016_t0030.0s.jpg",
+      "timestamp_seconds": 30.0
+    },
+    {
+      "file": "frame_017_t0032.0s.jpg",
+      "timestamp_seconds": 32.0
+    },
+    {
+      "file": "frame_018_t0034.0s.jpg",
+      "timestamp_seconds": 34.0
+    },
+    {
+      "file": "frame_019_t0036.0s.jpg",
+      "timestamp_seconds": 36.0
+    },
+    {
+      "file": "frame_020_t0038.0s.jpg",
+      "timestamp_seconds": 38.0
+    },
+    {
+      "file": "frame_021_t0040.0s.jpg",
+      "timestamp_seconds": 40.0
+    },
+    {
+      "file": "frame_022_t0042.0s.jpg",
+      "timestamp_seconds": 42.0
+    },
+    {
+      "file": "frame_023_t0044.0s.jpg",
+      "timestamp_seconds": 44.0
+    },
+    {
+      "file": "frame_024_t0046.0s.jpg",
+      "timestamp_seconds": 46.0
+    }
+  ],
+  "audio_description": "The vast ring of the Esthar Lunar Base turns against the stars.\nSpacesuited figures float outside the station near a glowing green console.\nOne drifts free on a tether along the station's long spine.\nThe station begins to come apart.",
+  "context": {
+    "scene_title": "The Lunar Base — Squall and Rinoa in spacesuits at the Esthar space station (Disc 3).",
+    "locations": [
+      "The Lunar Base, Esthar's ring-shaped orbital space station (marked 'ESTHAR'), and the open space around it"
+    ],
+    "characters": [
+      {
+        "name": "(spacesuited figures — Squall and Rinoa)",
+        "recognition": "White-suited, helmeted astronauts drifting in space near the station and a green holographic panel; their faces are hidden by helmets but they are Squall and Rinoa (with another party member)."
+      }
+    ],
+    "summary": "The vast ring of the Esthar Lunar Base turns against the stars. Spacesuited figures float outside the station near a glowing green console; one drifts free on a tether along the station's long spine as the structure begins to come apart — the perilous spacewalk sequence at the Lunar Base.",
+    "context_confidence": "high",
+    "context_note": "High confidence: the Lunar Base space station and the spacewalk (the suited figures are Squall and Rinoa; faces hidden)."
+  },
+  "ad_updated": true
+}

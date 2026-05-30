@@ -1,0 +1,51 @@
+{
+  "video_file": "disc00_22h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc00_22h.avi",
+  "folder": "disc00_22h",
+  "duration_seconds": 9.4,
+  "scene_frames_found": 0,
+  "frame_count": 5,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    },
+    {
+      "file": "frame_005_t0008.0s.jpg",
+      "timestamp_seconds": 8.0
+    }
+  ],
+  "audio_description": "Overhead, Edea's parade float rolls through the red-lit crowd.\nCostumed dancers lift their arms as fireworks streak overhead.",
+  "context": {
+    "scene_title": "The Deling City parade procession — Edea's float advancing through the crowd, with parade performers and fireworks (Sorceress assassination mission, Disc 1).",
+    "locations": [
+      "Deling City at night — the red-lit parade route through the packed crowd, beneath a sky full of fireworks"
+    ],
+    "characters": [
+      {
+        "name": "Sorceress Edea (on her float)",
+        "recognition": "Atop the ornate parade carriage ringed with glowing light loops, moving through the crowd (seen from directly overhead)."
+      },
+      {
+        "name": "(parade dancers/performers)",
+        "recognition": "Two costumed performers with fan-like winged shoulder pieces, raising their arms toward the fireworks; anonymous Thriller-style parade dancers."
+      }
+    ],
+    "summary": "An overhead shot follows Edea's glowing parade float as it rolls along the red-lit route hemmed in by an enormous crowd. The view cuts to two elaborately costumed parade dancers silhouetted against the night sky, lifting their arms as a cascade of golden fireworks streaks overhead.",
+    "context_confidence": "high",
+    "context_note": "High confidence: the Deling City parade spectacle (float and dancers)."
+  },
+  "ad_updated": true
+}

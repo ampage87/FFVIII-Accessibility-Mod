@@ -1,0 +1,43 @@
+{
+  "video_file": "disc02_27h.avi",
+  "video_path": "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod\\FF8_OriginalPC_mod\\Game Files\\FINAL FANTASY VIII\\Data\\movies\\disc02_27h.avi",
+  "folder": "disc02_27h",
+  "duration_seconds": 8.67,
+  "scene_frames_found": 0,
+  "frame_count": 4,
+  "frames": [
+    {
+      "file": "frame_001_t0000.0s.jpg",
+      "timestamp_seconds": 0.0
+    },
+    {
+      "file": "frame_002_t0002.0s.jpg",
+      "timestamp_seconds": 2.0
+    },
+    {
+      "file": "frame_003_t0004.0s.jpg",
+      "timestamp_seconds": 4.0
+    },
+    {
+      "file": "frame_004_t0006.0s.jpg",
+      "timestamp_seconds": 6.0
+    }
+  ],
+  "audio_description": "The red Ragnarok skims over a hazy green landscape.\nIt plunges into a swirl of green-blue energy.",
+  "context": {
+    "scene_title": "The Ragnarok flies over the planet, entering an energy field (Disc 3).",
+    "locations": [
+      "Over a greenish landscape on the planet, the Ragnarok passing into a swirling energy vortex"
+    ],
+    "characters": [
+      {
+        "name": "(the Ragnarok)",
+        "recognition": "The crimson dragon-shaped Esthar spaceship with its green eye-port, in flight."
+      }
+    ],
+    "summary": "The red Ragnarok skims over a hazy green landscape, then plunges toward and into a swirling green-and-blue burst of energy as it flies across the planet.",
+    "context_confidence": "medium",
+    "context_note": "High confidence the craft is the Ragnarok; the energy field it enters is not specifically identified."
+  },
+  "ad_updated": true
+}
