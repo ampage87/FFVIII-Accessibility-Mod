@@ -47,6 +47,13 @@
 
 namespace MapjumpResolver {
 
+// EXIT_TRACE_DIAG: gated diagnostic instrumentation — the [EXIT-TRACE] survey,
+// [EXIT-OPSEQ] op-walk, and [EXIT-DISASM] linear disassembler used to validate
+// the exit interpreter (v0.17.9.7-.10). OFF for production; set to 1 to re-enable
+// the survey + disassembler when probing a new field. Behavior-neutral: the
+// production resolve path (info.param via [INTERP]) is identical either way.
+#define EXIT_TRACE_DIAG 0
+
 // (pops, pushes) stack effect for a JSM opcode.
 // Returns {0, 0} (no-op) for any opcode we don't know -- conservative.
 // PSHN_L (high byte == 0) is special-cased by the caller before this is consulted.
@@ -285,7 +292,8 @@ static int32_t ResolveMapjumpDest(const uint32_t* scriptData,
 //   0x01 CAL: pop2 push1 value1<op>value2 (op 5=NEG / F=NOT are unary pop1)
 //             ops: 0 ADD,1 SUB,2 MUL,3 DIV,4 MOD,6 EQ,7 GT,8 GE,9 LS,A LE,
 //             B NT,C AND,D OR,E EOR,10 RSH,11 LSH
-//   0x02 JMP IP+=param | 0x03 JPF pop; if==0 IP+=param | target = ip+1+param (k=1)
+//   0x02 JMP IP+=param | 0x03 JPF pop; if==0 IP+=param
+//   JMP target = ip+1+param (k=1); JPF taken-target = ip+param (k=0, v0.17.9.10)
 //   0x05 LBL no-op | 0x06 RET stop
 //   0x2A MAPJUMP3 / 0x38 DISCJUMP stop, dest = stack[-5]
 //   0x29 MAPJUMP  / 0x5C MAPJUMPO stop, dest = stack[-4]
@@ -297,8 +305,21 @@ static const uintptr_t EXIT_VARBLOCK_BASE = 0x01CFE9B8;  // field var block (Ste
 // bits) at the first MAPJUMP-family opcode reached, or -1 (RET / underflow /
 // out-of-range / step-cap). POD locals only so the caller's SEH guard covers
 // any wild varblock read.
+// v0.17.9.7 LOCAL: interpreter bail/trace capture (see EXIT_TRACE_DIAG).
+struct InterpTrace {
+    int32_t result; int bailIp; uint8_t bailOp; int bailSp; int reason; int steps;
+    int nrec; struct { int ip; uint8_t op; int sp; } rec[48];  // v0.17.9.8: per-step op trace (sp BEFORE exec)
+};
+// reason: 0=reached MAPJUMP (success) | 1=RET(0x06) | 2=MAPJUMP-arg underflow
+//         | 3=fell off [mStart,mEnd) range | 4=step cap | 5=CAL/JPF underflow | -1=SEH/none
+static inline int32_t IT_ret(InterpTrace* tr, int ip, int op, int sp, int reason, int steps, int32_t val)
+{
+    if (tr) { tr->result = val; tr->bailIp = ip; tr->bailOp = (uint8_t)op; tr->bailSp = sp; tr->reason = reason; tr->steps = steps; }
+    return val;
+}
+
 static int32_t InterpretExitMethod(const uint32_t* scriptData, int scriptDataDwords,
-                                   int mStart, int mEnd)
+                                   int mStart, int mEnd, InterpTrace* tr = nullptr)
 {
     static const int STK = 64;
     int32_t stack[STK];
@@ -311,6 +332,7 @@ static int32_t InterpretExitMethod(const uint32_t* scriptData, int scriptDataDwo
     while (ip >= mStart && ip < mEnd && ip < scriptDataDwords && steps++ < MAX_STEPS) {
         uint32_t word = scriptData[ip];
         uint8_t hb = (uint8_t)(word >> 24);
+        if (tr && tr->nrec < 48) { tr->rec[tr->nrec].ip = ip; tr->rec[tr->nrec].op = hb; tr->rec[tr->nrec].sp = sp; tr->nrec++; }  // v0.17.9.8 op trace
         if (hb == 0x00) { if (sp < STK) stack[sp++] = (int32_t)word; ip++; continue; }
 
         int32_t param = (int32_t)(word & 0x00FFFFFF);
@@ -326,10 +348,10 @@ static int32_t InterpretExitMethod(const uint32_t* scriptData, int scriptDataDwo
             case 0x0B: case 0x0D: if (sp > 0) sp--; ip++; break;                              // pop->varblock (no write in interp)
             case 0x01: {                                                                      // CAL
                 uint8_t cop = (uint8_t)(param & 0xFF);
-                if (cop == 0x05) { if (sp < 1) return -1; int32_t a = stack[--sp]; if (sp < STK) stack[sp++] = -a; }
-                else if (cop == 0x0F) { if (sp < 1) return -1; int32_t a = stack[--sp]; if (sp < STK) stack[sp++] = ~a; }
+                if (cop == 0x05) { if (sp < 1) return IT_ret(tr, ip, hb, sp, 5, steps, -1); int32_t a = stack[--sp]; if (sp < STK) stack[sp++] = -a; }
+                else if (cop == 0x0F) { if (sp < 1) return IT_ret(tr, ip, hb, sp, 5, steps, -1); int32_t a = stack[--sp]; if (sp < STK) stack[sp++] = ~a; }
                 else {
-                    if (sp < 2) return -1;
+                    if (sp < 2) return IT_ret(tr, ip, hb, sp, 5, steps, -1);
                     int32_t b = stack[--sp];
                     int32_t a = stack[--sp];
                     int32_t r = 0;
@@ -359,19 +381,24 @@ static int32_t InterpretExitMethod(const uint32_t* scriptData, int scriptDataDwo
             }
             case 0x02: ip = ip + 1 + param; break;                                            // JMP unconditional
             case 0x03: {                                                                      // JPF
-                if (sp < 1) return -1;
+                if (sp < 1) return IT_ret(tr, ip, hb, sp, 5, steps, -1);
                 int32_t c = stack[--sp];
-                ip = (c == 0) ? (ip + 1 + param) : (ip + 1);
+                // v0.17.9.10: JPF taken-target is ip+param (k=0), NOT ip+1+param.
+                // Proven by the bgryo2_1 l1 [EXIT-DISASM]: every taken JPF must land
+                // on the per-case `PSHM_W var[0x100]` reload (else those reloads are
+                // unreachable dead code, since each prior case ends with JMP->RET).
+                // JMP (0x02) stays k=1 (its case-end jumps land exactly on RET).
+                ip = (c == 0) ? (ip + param) : (ip + 1);
                 break;
             }
             case 0x05: ip++; break;                                                           // LBL (no-op)
-            case 0x06: return -1;                                                             // RET (no dest)
+            case 0x06: return IT_ret(tr, ip, hb, sp, 1, steps, -1);                           // RET (no dest)
             case 0x2A: case 0x38:                                                             // MAPJUMP3 / DISCJUMP
-                if (sp < 5) return -1;
-                return stack[sp - 5] & 0xFFFF;
+                if (sp < 5) return IT_ret(tr, ip, hb, sp, 2, steps, -1);
+                return IT_ret(tr, ip, hb, sp, 0, steps, stack[sp - 5] & 0xFFFF);
             case 0x29: case 0x5C:                                                             // MAPJUMP / MAPJUMPO
-                if (sp < 4) return -1;
-                return stack[sp - 4] & 0xFFFF;
+                if (sp < 4) return IT_ret(tr, ip, hb, sp, 2, steps, -1);
+                return IT_ret(tr, ip, hb, sp, 0, steps, stack[sp - 4] & 0xFFFF);
             default: {                                                                        // unknown: conservative stack delta
                 StackEffect eff = GetStackEffect(hb);
                 for (int i = 0; i < eff.pops && sp > 0; i++) sp--;
@@ -381,7 +408,7 @@ static int32_t InterpretExitMethod(const uint32_t* scriptData, int scriptDataDwo
             }
         }
     }
-    return -1;  // fell off the end / RET / step cap
+    return IT_ret(tr, ip, 0xFF, sp, (steps >= MAX_STEPS ? 4 : 3), steps, -1);  // fell off end / range / step cap
 }
 
 // SEH-guarded wrapper. The interpreter reads the live field varblock; a wild
@@ -389,15 +416,96 @@ static int32_t InterpretExitMethod(const uint32_t* scriptData, int scriptDataDwo
 // "no concrete result" (-1) so Run falls back to the abstract resolver.
 // Leaf function so Run stays free of __try (no C++ unwinding conflict).
 static int32_t SafeInterpretExitMethod(const uint32_t* scriptData, int scriptDataDwords,
-                                       int mStart, int mEnd)
+                                       int mStart, int mEnd, InterpTrace* tr = nullptr)
 {
     __try {
-        return InterpretExitMethod(scriptData, scriptDataDwords, mStart, mEnd);
+        return InterpretExitMethod(scriptData, scriptDataDwords, mStart, mEnd, tr);
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         return -1;
     }
 }
+
+#if EXIT_TRACE_DIAG
+// v0.17.9.7 LOCAL: limit [EXIT-TRACE] volume to the survey fields.
+static inline bool ExitTraceFieldGated(const char* f)
+{
+    return f && (strcmp(f, "bgryo2_1") == 0 || strcmp(f, "bgroad_5") == 0 ||
+                 strcmp(f, "bcport_2") == 0 || strcmp(f, "dotown_2") == 0);
+}
+
+// v0.17.9.9 LOCAL: linear disassembly of a bailing exit method. Decodes EVERY
+// instruction in [mStart,mEnd) (capped), showing operands the [EXIT-OPSEQ]
+// path-walk omits: varblock offsets + their LIVE values, immediates, CAL
+// sub-ops, jump targets, and MAPJUMP destinations. This answers "what does the
+// gate actually test, and is it a readable story global?". Logs [EXIT-DISASM].
+static const char* CalSubOpName(uint8_t c)
+{
+    switch (c) {
+        case 0x00: return "ADD"; case 0x01: return "SUB"; case 0x02: return "MUL";
+        case 0x03: return "DIV"; case 0x04: return "MOD"; case 0x05: return "NEG";
+        case 0x06: return "EQ";  case 0x07: return "GT";  case 0x08: return "GE";
+        case 0x09: return "LS";  case 0x0A: return "LE";  case 0x0B: return "NT";
+        case 0x0C: return "AND"; case 0x0D: return "OR";  case 0x0E: return "EOR";
+        case 0x0F: return "NOT"; case 0x10: return "RSH"; case 0x11: return "LSH";
+        default:   return "?";
+    }
+}
+
+static void LinearDisasmExitMethod(const char* fieldName, int ei, const char* sym,
+                                   const uint32_t* scriptData, int scriptDataDwords,
+                                   int mStart, int mEnd)
+{
+    const uint8_t* vb = (const uint8_t*)EXIT_VARBLOCK_BASE;
+    int cap = mStart + 1024;
+    int end = (mEnd < cap) ? mEnd : cap;
+    if (end > scriptDataDwords) end = scriptDataDwords;
+    Log::Field("FieldArchive: [EXIT-DISASM] %s ent%d '%s' method [%d,%d)%s:",
+               fieldName, ei, sym, mStart, mEnd, (end < mEnd) ? " (capped@1024)" : "");
+    for (int ip = mStart; ip < end; ip++) {
+        uint32_t word = scriptData[ip];
+        uint8_t hb = (uint8_t)(word >> 24);
+        if (hb == 0x00) {
+            Log::Field("FieldArchive: [EXIT-DISASM]   %d: PSHN_L lit=%d", ip, (int)(int32_t)word);
+            continue;
+        }
+        int32_t param = (int32_t)(word & 0x00FFFFFF);
+        if (word & 0x00800000) param |= (int32_t)0xFF000000;
+        int off = param & 0xFFFF;
+        switch (hb) {
+            case 0x07: Log::Field("FieldArchive: [EXIT-DISASM]   %d: PSHN_L imm=%d", ip, (int)param); break;
+            case 0x0A: Log::Field("FieldArchive: [EXIT-DISASM]   %d: PSHM_B  var[0x%04X]=%d", ip, off, (int)*(const uint8_t*)(vb+off)); break;
+            case 0x0C: Log::Field("FieldArchive: [EXIT-DISASM]   %d: PSHM_W  var[0x%04X]=%d", ip, off, (int)*(const uint16_t*)(vb+off)); break;
+            case 0x11: Log::Field("FieldArchive: [EXIT-DISASM]   %d: PSHSM_W var[0x%04X]=%d", ip, off, (int)*(const int16_t*)(vb+off)); break;
+            case 0x0B: Log::Field("FieldArchive: [EXIT-DISASM]   %d: POPM_B  var[0x%04X]", ip, off); break;
+            case 0x0D: Log::Field("FieldArchive: [EXIT-DISASM]   %d: POPM_W  var[0x%04X]", ip, off); break;
+            case 0x08: Log::Field("FieldArchive: [EXIT-DISASM]   %d: PSHI_L  local[%d] (interp pushes 0)", ip, off); break;
+            case 0x01: Log::Field("FieldArchive: [EXIT-DISASM]   %d: CAL %s", ip, CalSubOpName((uint8_t)(param & 0xFF))); break;
+            case 0x02: Log::Field("FieldArchive: [EXIT-DISASM]   %d: JMP -> %d", ip, ip + 1 + param); break;
+            case 0x03: Log::Field("FieldArchive: [EXIT-DISASM]   %d: JPF iffalse-> %d", ip, ip + 1 + param); break;
+            case 0x05: Log::Field("FieldArchive: [EXIT-DISASM]   %d: LBL", ip); break;
+            case 0x06: Log::Field("FieldArchive: [EXIT-DISASM]   %d: RET", ip); break;
+            case 0x29: Log::Field("FieldArchive: [EXIT-DISASM]   %d: <<< MAPJUMP  (wmId=%d) dest=stack[-4]", ip, off); break;
+            case 0x2A: Log::Field("FieldArchive: [EXIT-DISASM]   %d: <<< MAPJUMP3 (wmId=%d) dest=stack[-5]", ip, off); break;
+            case 0x38: Log::Field("FieldArchive: [EXIT-DISASM]   %d: <<< DISCJUMP dest=stack[-5]", ip); break;
+            case 0x5C: Log::Field("FieldArchive: [EXIT-DISASM]   %d: <<< MAPJUMPO dest=stack[-4]", ip); break;
+            default:   Log::Field("FieldArchive: [EXIT-DISASM]   %d: op=0x%02X param=0x%06X", ip, (unsigned)hb, (unsigned)(word & 0x00FFFFFF)); break;
+        }
+    }
+}
+
+static void SafeLinearDisasmExitMethod(const char* fieldName, int ei, const char* sym,
+                                       const uint32_t* scriptData, int scriptDataDwords,
+                                       int mStart, int mEnd)
+{
+    __try {
+        LinearDisasmExitMethod(fieldName, ei, sym, scriptData, scriptDataDwords, mStart, mEnd);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log::Field("FieldArchive: [EXIT-DISASM] %s ent%d '%s' SEH fault during disasm", fieldName, ei, sym);
+    }
+}
+#endif
 
 // Public entry point: run the resolver pass over EVERY entity in the JSM.
 // info.param is overwritten ONLY for JSM_ENT_LINE_SCREEN_BOUND entities (the
@@ -507,6 +615,45 @@ static void Run(const char* fieldName,
         } else {
             unresolved++;
         }
+
+#if EXIT_TRACE_DIAG
+        // v0.17.9.7 LOCAL survey: for EVERY exit-bearing entity (any type) on the
+        // gated fields, run the interpreter with trace capture and log result +
+        // bail point next to the abstract decode. Does NOT touch info.param.
+        if (mjMethodStart >= 0 && ExitTraceFieldGated(fieldName)) {
+            InterpTrace tr; tr.result = 0; tr.bailIp = -1; tr.bailOp = 0; tr.bailSp = 0; tr.reason = -1; tr.steps = 0; tr.nrec = 0;
+            int32_t d = SafeInterpretExitMethod(scriptData, scriptDataDwords,
+                                                mjMethodStart, mjMethodEnd, &tr);
+            static const char* const RZ[] = { "reached-MAPJUMP", "RET", "MAPJUMP-arg-underflow",
+                                              "fell-off-range", "step-cap", "CAL/JPF-underflow" };
+            const char* rstr = (tr.reason >= 0 && tr.reason <= 5) ? RZ[tr.reason] : "SEH-fault/none";
+            Log::Field("FieldArchive: [EXIT-TRACE] %s ent%d '%s' type=%s interp=%d reason=%s "
+                       "bailIp=%d bailOp=0x%02X bailSp=%d steps=%d | abstract lit=%d marker=0x%08X",
+                       fieldName, ei, info.symName, JSMEntityTypeName(info.type),
+                       (int)d, rstr, tr.bailIp, (unsigned)tr.bailOp, tr.bailSp, tr.steps,
+                       (int)bestLiteral, (unsigned)bestMarker);
+            // v0.17.9.8: on any bail (interp<0) dump the op walk so the opcode that
+            // shorts the stack before the CAL is visible. Format ip:op/spBEFORE.
+            if (d < 0) {
+                char seq[640]; int n = 0;
+                for (int k = 0; k < tr.nrec; k++) {
+                    int rem = (int)sizeof(seq) - n; if (rem <= 1) break;
+                    int w = snprintf(seq + n, (size_t)rem, "%d:%02X/sp%d ",
+                                     tr.rec[k].ip, (unsigned)tr.rec[k].op, tr.rec[k].sp);
+                    if (w < 0 || w >= rem) { n = (int)sizeof(seq) - 1; break; }
+                    n += w;
+                }
+                seq[(n >= 0 && n < (int)sizeof(seq)) ? n : (int)sizeof(seq) - 1] = '\0';
+                Log::Field("FieldArchive: [EXIT-OPSEQ] %s ent%d '%s' nrec=%d (ip:op/spBEFORE): %s",
+                           fieldName, ei, info.symName, tr.nrec, seq);
+                // v0.17.9.9: full linear disasm of the bailing method so the
+                // tested operands (varblock offset + live value) are visible.
+                SafeLinearDisasmExitMethod(fieldName, ei, info.symName,
+                                           scriptData, scriptDataDwords,
+                                           mjMethodStart, mjMethodEnd);
+            }
+        }
+#endif
     }
 
     Log::Field("FieldArchive: [MAPJUMP-RES] %s summary: %d MAPJUMP instructions "

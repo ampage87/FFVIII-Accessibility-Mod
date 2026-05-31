@@ -6,6 +6,38 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.9.11
+
+Exit interpreter: fix the JPF (conditional-jump) target offset, generalizing
+correct exit-destination resolution to flag-gated multi-case (switch-on-
+game_moment) exits beyond the dorm SCREEN_BOUND fields.
+
+In `field_archive_jsm_mapjump_resolver.inl`, `InterpretExitMethod`: a taken JPF
+(0x03) now jumps to `ip + param` (k=0), not `ip + 1 + param` (k=1). JMP (0x02)
+is unchanged at k=1. The off-by-one was invisible until a JPF was actually
+taken: the dorm exits' gate falls through (condition true), so their target was
+never used and they still resolved correctly (228 / 245). Multi-case exits
+(e.g. the bgryo2_1 `l1` switch on var[0x100] = game_moment) compile as a chain
+of `reload var[0x100]; push <threshold>; CAL EQ; JPF <next-case>` blocks; with
+k=1 each JPF skipped the per-case reload, so after the first compare the stack
+ran dry and the interpreter bailed (`CAL/JPF-underflow`) and fell back to the
+wrong addr-as-literal label. The bgryo2_1 `l1` [EXIT-DISASM] proved k=0: every
+taken JPF must land on the reload at the start of the next case, else those
+reloads are unreachable dead code (each prior case ends with `JMP -> RET`).
+
+Validated against the live `[MAPJUMP-HOOK]` engine oracle: bcport_2 'Director'
+now resolves `[INTERP] -> 120` (Balamb Harbor 1), matching the engine's actual
+MAPJUMP3 destField=120 on crossing, and replacing the confirmed-wrong fallback
+label 121. No regression: bgryo2_1 squalls still 228, bgroad_5 squalls still
+245, bcport_1 Director still 125; bgryo2_1 `l1` now walks its full switch to a
+clean RET with no map jump at game_moment=205 (correctly inactive — a story-
+forced door; the squalls boundary 228 is the real navigable exit). No SEH /
+crashes across the dorm + Dollet/Balamb chase regression.
+
+The v0.17.9.7-.10 diagnostic instrumentation ([EXIT-TRACE]/[EXIT-OPSEQ]/
+[EXIT-DISASM]) is retained behind `#define EXIT_TRACE_DIAG 0` (off; flip to 1
+to re-probe a field). Production resolve path is unchanged by the flag.
+
 ## v0.17.9.6
 
 Bug 4 (dormitory/corridor exit-destination mislabeling) — FIX PROMOTED. The
