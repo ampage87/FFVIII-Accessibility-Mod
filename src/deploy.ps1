@@ -139,6 +139,117 @@ $exitCode = $process.ExitCode
 
 Get-EventSubscriber | Unregister-Event
 
+# ============================================================
+# Step 0 chase-protection guard (DEVNOTES Track A).
+# Runs AFTER every build so a chase-route-breaking change is visible the
+# instant a deploy finishes -- before the game launches.
+#
+# NON-BLOCKING: this NEVER changes $exitCode. A guard failure must not block a
+# deploy/BAT (mid-edit deploys are expected during nav work). It only appends a
+# clearly marked block to the END of build_latest.log so a FAIL is impossible
+# to miss on "BAT". The push-time / CI gate (.github/workflows/safety-checks.yml)
+# is the BLOCKING authority.
+#
+# Two layers:
+#   (A) C++ harness  - compiles the REAL src/field_nav_pathfinding.inl against
+#                      generated real-walkmesh fixtures and runs it. The compile
+#                      itself catches incompatible nav-core refactors; the run
+#                      hard-gates walkmesh mesh integrity and reports route /
+#                      out-of-mesh / robot-distance metrics.
+#   (B) portal check - fast pure-Python portal-correctness model (complement).
+# ============================================================
+function Add-GuardLine([string]$text) { [void]$shared.LogContent.AppendLine($text) }
+
+$pyExe = $null
+foreach ($cand in @("python", "py", "python3")) {
+    if (Get-Command $cand -ErrorAction SilentlyContinue) { $pyExe = $cand; break }
+}
+
+Add-GuardLine ""
+Add-GuardLine "============================================================"
+Add-GuardLine "CHASEGUARD (C++ harness) - real nav core on real Dollet fixtures"
+Add-GuardLine "------------------------------------------------------------"
+
+$harnessSrc  = Join-Path $projectDir "tests\chase_harness.cpp"
+$harnessExe  = Join-Path $projectDir "tests\chase_harness.exe"
+$genScript   = Join-Path $projectDir "tests\gen_chase_fixture.py"
+$walkmeshJson = Join-Path $projectDir "Plan & Research Documents\ff8_walkmeshes.json"
+$fixtureHdr  = Join-Path $projectDir "tests\chase_fixtures.h"
+
+$cppRan = $false
+if (-not (Test-Path $harnessSrc)) {
+    Add-GuardLine "*** NOT RUN *** - tests\chase_harness.cpp missing (non-blocking)"
+} elseif ($null -eq $pyExe) {
+    Add-GuardLine "*** NOT RUN *** - no python on PATH to generate the fixture (non-blocking)"
+} elseif (-not (Test-Path $walkmeshJson)) {
+    Add-GuardLine "*** NOT RUN *** - Plan & Research Documents\ff8_walkmeshes.json missing (non-blocking)"
+} else {
+    # 1) Generate the fixture header from the committed walkmesh extract.
+    $genOut = & $pyExe $genScript $walkmeshJson $fixtureHdr 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $fixtureHdr)) {
+        Add-GuardLine "*** NOT RUN *** - fixture generation failed (non-blocking):"
+        foreach ($gl in $genOut) { Add-GuardLine "  $gl" }
+    } else {
+        # 2) Compile: prefer g++ if present, else MSVC cl via vcvars64.
+        if (Test-Path $harnessExe) { Remove-Item $harnessExe -ErrorAction SilentlyContinue }
+        $compileLog = ""
+        if (Get-Command "g++" -ErrorAction SilentlyContinue) {
+            $compileLog = & g++ -std=c++17 -O0 -o $harnessExe $harnessSrc 2>&1
+        } else {
+            # Locate Visual Studio's vcvars64.bat via vswhere, then compile in a
+            # cmd subprocess that has the MSVC environment loaded.
+            $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+            $vcvars  = $null
+            if (Test-Path $vswhere) {
+                $vsPath = (& $vswhere -latest -property installationPath 2>$null | Select-Object -First 1)
+                if ($vsPath) {
+                    $cand = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
+                    if (Test-Path $cand) { $vcvars = $cand }
+                }
+            }
+            if ($null -eq $vcvars) {
+                $compileLog = "no g++ and no MSVC vcvars64.bat found"
+            } else {
+                $clCmd = "call `"$vcvars`" >NUL 2>&1 && cl /nologo /EHsc /std:c++17 /Fe:`"$harnessExe`" /Fo:`"$($projectDir)\tests\`" `"$harnessSrc`""
+                $compileLog = & cmd.exe /c $clCmd 2>&1
+            }
+        }
+        # 3) Run the harness if it built.
+        if (Test-Path $harnessExe) {
+            $runOut  = & $harnessExe 2>&1
+            $runExit = $LASTEXITCODE
+            foreach ($rl in $runOut) { Add-GuardLine "  $rl" }
+            if ($runExit -ne 0) {
+                Add-GuardLine "  (harness exit $runExit -- mesh-integrity FAIL; investigate before pushing) (non-blocking)"
+            }
+            $cppRan = $true
+        } else {
+            Add-GuardLine "*** NOT RUN *** - harness compile failed (non-blocking):"
+            foreach ($cl in $compileLog) { Add-GuardLine "  $cl" }
+        }
+    }
+}
+
+# (B) Fast Python portal-correctness complement.
+Add-GuardLine "------------------------------------------------------------"
+Add-GuardLine "CHASEGUARD (portal check) - pure-Python portal-correctness model"
+$guardPath = Join-Path $projectDir "tests\chase_pathfinding_guard.py"
+if (-not (Test-Path $guardPath)) {
+    Add-GuardLine "*** NOT RUN *** - tests\chase_pathfinding_guard.py missing (non-blocking)"
+} elseif ($null -eq $pyExe) {
+    Add-GuardLine "*** NOT RUN *** - no python on PATH (non-blocking)"
+} else {
+    $guardOut  = & $pyExe $guardPath 2>&1
+    $guardExit = $LASTEXITCODE
+    if ($guardExit -eq 0) {
+        Add-GuardLine "PASS - portal check OK (non-blocking)"
+    } else {
+        Add-GuardLine "*** FAIL *** - portal check exit $guardExit (non-blocking; investigate before pushing)"
+    }
+    foreach ($gl in $guardOut) { Add-GuardLine "  $gl" }
+}
+Add-GuardLine "============================================================"
+
 # Write the log file
 [System.IO.File]::WriteAllText($logPath, $shared.LogContent.ToString())
 

@@ -79,6 +79,31 @@ namespace NavLog {
 namespace FieldNavigation {
 
 // ============================================================================
+// v0.17.9.12: bggate_6 (front gate) push-through gate diagnostic (Track A).
+// LOCAL ONLY. When 1, a one-shot [GATEDIAG] walkmesh/reachability dump plus
+// the [TTRACE] turnstile path tracer fire on field bggate_6 (id 0x00A3).
+// Behaviour-neutral; only adds logging. See DumpGateDiagnostic() +
+// TurnstileTrace() in field_nav_diagnostics.inl and the arm site in
+// field_nav_fieldscripts.inl. v0.17.9.17: set to 0 for push -- Track A Step 3
+// (the turnstile) is BAT-passed, so GATEDIAG/TTRACE have served their purpose.
+// Flip back to 1 to re-probe the front gate.
+// ============================================================================
+#define FEPIC1_GATE_DIAG 0
+
+// ============================================================================
+// v0.17.9.17: per-field captured-trigger-line dump toggle. When 1, a
+// [LINEDIAG] line fires on EVERY field load for each captured SETLINE,
+// reporting its assigned lineType / destFieldId / center / JSM name (see the
+// arm site in field_nav_fieldscripts.inl). Behaviour-neutral; only adds
+// logging. Set to 0 for push. Flip to 1 when verifying a field's trigger-line
+// classification or exit destinations -- e.g. the pending bgryo1_1 'squalls'
+// and dotown_2 'Selphie' exit-label checks, or any future screen-bound / exit
+// bug. (Was an always-on raw loop through v0.17.9.16.2; gated here so it's a
+// one-line re-enable instead of a code edit.)
+// ============================================================================
+#define LINEDIAG_ENABLED 0
+
+// ============================================================================
 // Constants
 // ============================================================================
 
@@ -516,6 +541,16 @@ static bool  s_varblockPollActive = false;
 static DWORD s_varblockPollStart = 0;
 static int   s_varblockPollCount = 0;
 static DWORD s_varblockPollLastCheck = 0;
+
+#if FEPIC1_GATE_DIAG
+// v0.17.9.12: fepic1 gate diagnostic one-shot arming. Set in
+// HookedFieldScriptsInit when the loaded field is fepic1; the dump fires once
+// from Update() after GATEDIAG_DELAY_MS so the init scripts have populated the
+// captured trigger lines and the player entity has settled at its spawn.
+static bool  s_gateDiagPending = false;
+static DWORD s_gateDiagArmTime = 0;
+static const DWORD GATEDIAG_DELAY_MS = 1500;
+#endif
 
 // v0.08.24: One-shot hex dump of PSHM_W entity-scope functions.
 // Reads raw x86 instruction bytes from the two key subroutines so we can
@@ -1052,6 +1087,37 @@ static bool SegmentsCross(float ax, float ay, float bx, float by,
     return (o1 != o2 && o3 != o4 && o1 != 0 && o2 != 0 && o3 != 0 && o4 != 0);
 }
 
+// v0.17.9.15: Local bounded screen-bound crossing test for A* avoidance.
+// Forward-declared in field_nav_pathfinding.inl. Unlike IsSeparatedByTriggerLine
+// (which side-splits an INFINITE line from the start centre, so a short
+// screen-bound segment near the spawn fences off the whole far side of the
+// field via its extension), this returns true only when the actual traversal
+// edge (ax,ay)->(bx,by) crosses a screen-bound line's FINITE segment, via the
+// bounded SegmentsCross. ComputeAStarPath calls it per current->neighbor
+// expansion so A* routes AROUND a boundary instead of being globally walled
+// off by the boundary's infinite extension. Same filter as
+// IsSeparatedByTriggerLine (only SCREEN_BOUND / UNKNOWN lines are barriers;
+// camera-pans and interactive lines are transparent) and the same
+// skipTriggerIdx exemption (used when driving TO a screen transition).
+// Validated on bcsaka_1 (Balamb Hotel): the global test gives No path
+// tri 13->196; this gives the 65-triangle route. nav-core shared with the
+// Dollet chase -> gated on a chase-first BAT. See DEVNOTES "Track A Step 2".
+static bool EdgeCrossesScreenBound(float ax, float ay, float bx, float by, int skipTriggerIdx)
+{
+    for (int t = 0; t < s_capturedLineCount; t++) {
+        if (!s_capturedLines[t].active) continue;
+        if (t == skipTriggerIdx) continue;
+        if (s_capturedLines[t].lineType != FieldArchive::JSM_ENT_LINE_SCREEN_BOUND &&
+            s_capturedLines[t].lineType != FieldArchive::JSM_ENT_UNKNOWN)
+            continue;
+        if (SegmentsCross(ax, ay, bx, by,
+                          (float)s_capturedLines[t].x1, (float)s_capturedLines[t].y1,
+                          (float)s_capturedLines[t].x2, (float)s_capturedLines[t].y2))
+            return true;
+    }
+    return false;
+}
+
 // v06.05: Check if moving from (px,py) in direction (dx,dy) by RECOVERY_CHECK_DIST
 // would cross any non-target active trigger line. Returns true if the projected
 // endpoint is on the opposite side of any trigger line from the start point.
@@ -1100,6 +1166,17 @@ void Update()
     UpdateAutoDrive();
     UpdateGPS();  // v0.12.02: GPS guided navigation polling
     ObserveArrowResponse();  // v0.17.3: log empirical arrow->world response vs CA prediction
+
+#if FEPIC1_GATE_DIAG
+    // v0.17.9.12: fire the one-shot fepic1 push-through gate dump once the
+    // post-load settle delay elapses (armed in HookedFieldScriptsInit).
+    if (s_gateDiagPending && (GetTickCount() - s_gateDiagArmTime) >= GATEDIAG_DELAY_MS) {
+        s_gateDiagPending = false;
+        DumpGateDiagnostic();
+    }
+    // v0.17.9.16.1: per-tick turnstile path tracer (bggate_6, auto-drive OFF).
+    TurnstileTrace();
+#endif
 
     // v0.14.45: POPM varblock write capture summary block removed (F12 diagnostic retired).
 

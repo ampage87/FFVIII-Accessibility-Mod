@@ -458,7 +458,54 @@ static void HandleKeys()
                                            driveSkipTrigIdx);
                             }
                             s_driveSkipTrigIdx = driveSkipTrigIdx;  // v06.05: save for recovery
-                            if (ComputeAStarPath(startTri, goalTri, drTgt.entityIdx, driveSkipTrigIdx)) {
+
+                            // v0.17.9.16.2: bggate_6 front-gate TURNSTILE slot
+                            // selection. The gate is a closed walkmesh loop with
+                            // two offset one-way lanes -- WEST lane = IN/up to the
+                            // B-Garden Hall, EAST lane = OUT/down the gate path --
+                            // and the turnstile collision separating them is not in
+                            // the walkmesh, so plain A* picks the shorter/wrong lane
+                            // and the party wedges (confirmed by the [TTRACE] manual
+                            // walk: IN goes straight up X=-1312, OUT goes right then
+                            // down X=-1093). When the route crosses the turnstile
+                            // band (between the two interaction-line "bars" at
+                            // Y=-428 and Y=-907), force a via triangle in the correct
+                            // lane's mid-band, chosen by travel direction. F9-only,
+                            // bggate_6-only -- every other field/drive is unchanged.
+                            int viaTri = -1;
+                            if (FF8Addresses::pCurrentFieldId &&
+                                *FF8Addresses::pCurrentFieldId == 0x00A3) {
+                                const float TURNSTILE_MID_Y = -667.0f;  // midway between the two bars
+                                bool startSouth = (_pz < TURNSTILE_MID_Y);
+                                bool goalSouth  = (_tz < TURNSTILE_MID_Y);
+                                if (startSouth != goalSouth) {
+                                    if (!goalSouth) {
+                                        // goal north of start -> IN -> WEST lane
+                                        viaTri = FindNearestTriangle(-1312.0f, -532.0f);
+                                    } else {
+                                        // goal south of start -> OUT -> EAST lane
+                                        viaTri = FindNearestTriangle(-1093.0f, -586.0f);
+                                    }
+                                    Log::Field("FieldNavigation: [drive] bggate_6 turnstile: "
+                                               "start=(%.0f,%.0f) goal=(%.0f,%.0f) dir=%s -> via lane tri %d",
+                                               _px, _pz, _tx, _tz,
+                                               goalSouth ? "OUT/east" : "IN/west", viaTri);
+                                }
+                            }
+
+                            bool pathOk = false;
+                            if (viaTri >= 0 && viaTri != startTri && viaTri != goalTri) {
+                                pathOk = ComputeAStarPathVia(startTri, viaTri, goalTri,
+                                                             drTgt.entityIdx, driveSkipTrigIdx);
+                                if (!pathOk) {
+                                    Log::Field("FieldNavigation: [drive] bggate_6 via-lane path failed; "
+                                               "falling back to direct A*");
+                                }
+                            }
+                            if (!pathOk) {
+                                pathOk = ComputeAStarPath(startTri, goalTri, drTgt.entityIdx, driveSkipTrigIdx);
+                            }
+                            if (pathOk) {
                                 FunnelPath(_px, _pz, _tx, _tz);
                                 Log::Field("FieldNavigation: [drive] A*+funnel path: %d waypoints from tri %d to %d",
                                            s_waypointCount, startTri, goalTri);

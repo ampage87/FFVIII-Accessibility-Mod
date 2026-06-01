@@ -39,6 +39,9 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
     s_usingFunnel        = false;  // v05.95
     // v0.15.9.2.6: reset cluster state (will be repopulated by the dead-end scanner below)
     s_deadClusterCount   = 0;
+#if FEPIC1_GATE_DIAG
+    s_gateDiagPending    = false;  // re-armed below only if this field is fepic1
+#endif
     // Free previous walkmesh before loading new one.
     FieldArchive::FreeWalkmesh(s_walkmesh);
     // Reset camera axes for new field.
@@ -777,6 +780,29 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                            s_capturedLineCount, linesMapped,
                            cameraPans, screenBounds, lineEvents, lineInteractive, lineUnknown);
 
+                // v0.17.9.14.1 DIAG: per-captured-line dump. Greppable
+                // [LINEDIAG] anchor. Reports each SETLINE's assigned lineType +
+                // destFieldId + center + JSM name. v0.17.9.17: gated behind
+                // LINEDIAG_ENABLED (field_navigation.cpp); set 0 for push, flip
+                // to 1 to verify a field's trigger-line classification / exits
+                // (e.g. pending bgryo1_1 'squalls' / dotown_2 'Selphie' checks).
+#if LINEDIAG_ENABLED
+                for (int dt = 0; dt < s_capturedLineCount; dt++) {
+                    int dji = s_jsmDoors + dt;
+                    const char* dsym = (dji < s_jsmEntityCount) ? s_jsmEntities[dji].symName : "?";
+                    int dcat = (dji < s_jsmEntityCount) ? s_jsmEntities[dji].jsmCategory : -1;
+                    Log::Field("FieldNavigation: [LINEDIAG] field='%s' line%d order=%d center=(%d,%d) "
+                               "type=%s destFieldId=%d extDisp=%d (jsm%d '%s' cat=%d)",
+                               fieldName, dt, s_capturedLines[dt].lineOrder,
+                               (int)(s_capturedLines[dt].x1 + s_capturedLines[dt].x2) / 2,
+                               (int)(s_capturedLines[dt].y1 + s_capturedLines[dt].y2) / 2,
+                               FieldArchive::JSMEntityTypeName(s_capturedLines[dt].lineType),
+                               s_capturedLines[dt].destFieldId,
+                               (int)s_capturedLines[dt].hasExtDispatch,
+                               dji, dsym, dcat);
+                }
+#endif
+
                 // v0.17.7.2: MAPJUMP destination resolver DIAGNOSTIC (observation only).
                 //
                 // For each SCREEN_BOUND line whose param is an unresolved bit31
@@ -1097,6 +1123,25 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                        s_walkmesh.valid ? "OK" : "NONE");
             Log::Field("FieldNavigation: [fieldload] JSM: doors=%d lines=%d bg=%d others=%d",
                        s_jsmDoors, s_jsmLines, s_jsmBackgrounds, s_jsmOthers);
+
+#if FEPIC1_GATE_DIAG
+            // v0.17.9.12 / corrected v0.17.9.13: arm the one-shot push-through
+            // gate dump for the B-Garden front gate. The Track A notes called
+            // this field 'fepic1' but the live engine name is 'bggate_6'
+            // (fieldId 0x00A3, display 'B-Garden - Front Gate 5'); the v0.17.9.12
+            // build armed on the wrong name so the dump never fired. Key on the
+            // authoritative fieldId. Walkmesh, INF gateways/triggers, JSM scan
+            // and captured SETLINE trigger lines are all populated by this point;
+            // the dump itself fires from Update() after GATEDIAG_DELAY_MS so the
+            // player entity has settled at its spawn triangle.
+            if (fieldId == 0x00A3 || _stricmp(fieldName, "bggate_6") == 0) {
+                s_gateDiagPending = true;
+                s_gateDiagArmTime = GetTickCount();
+                Log::Field("FieldNavigation: [GATEDIAG] bggate_6 (front gate, id=0x%04X) detected "
+                           "— gate diagnostic armed (fires ~%ums after load).",
+                           (unsigned)fieldId, (unsigned)GATEDIAG_DELAY_MS);
+            }
+#endif
 
             // v06.08: NavLog field load
             NavLog::FieldLoad(fieldName, (int)fieldId,

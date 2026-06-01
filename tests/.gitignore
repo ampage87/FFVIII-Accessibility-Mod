@@ -1,0 +1,8 @@
+# Generated at build/CI time from Plan & Research Documents/ff8_walkmeshes.json
+chase_fixtures.h
+
+# Harness build outputs
+chase_harness
+chase_harness.exe
+*.obj
+*.o

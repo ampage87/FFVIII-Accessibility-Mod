@@ -6,6 +6,269 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.17.9.17
+
+Track A complete — diagnostics gated off for push. This is the push build for
+all three Track A auto-drive fixes (Steps 1+2+3), which are each BAT-passed:
+
+- **Step 1 (v0.17.9.14):** `FindPortal` / `GetSharedEdgeLength` /
+  `EdgeMidpointPath` read the walkmesh neighbour edge as the (edge, edge+1)
+  vertex pair the FF8 .id format actually stores (was the wrong (edge+1,
+  edge+2) pair, which emitted wall edges as funnel portals and wedged
+  auto-drive on narrow/rounded fields). Full Dollet chase = 0 catches.
+- **Step 2 (v0.17.9.15–.16):** F9 path-finding auto-drive uses a LOCAL bounded
+  `EdgeCrossesScreenBound` test in the A* screen-bound avoidance instead of the
+  global infinite-line `IsSeparatedByTriggerLine`, so a screen-bound line near
+  the spawn no longer fences off the far side of a field (Balamb Hotel
+  bcsaka_1). Gated on `s_chaseDriveActive` so the chase keeps the byte-identical
+  global test (0 catches preserved).
+- **Step 3 (v0.17.9.16.2):** bggate_6 front-gate turnstile slot selection via
+  the new `ComputeAStarPathVia` two-segment A*; the F9 drive forces the correct
+  one-way lane's mid-band triangle when the route crosses the turnstile.
+  F9-only, bggate_6-only.
+
+Diagnostics gated off (no behaviour change, all compiled out of the shipped
+DLL): `FEPIC1_GATE_DIAG` set to 0 (removes the [GATEDIAG] dump and the
+[TTRACE] turnstile tracer); the per-field [LINEDIAG] captured-trigger-line
+dump moved behind a new `LINEDIAG_ENABLED` toggle (set to 0). Both are a
+one-line flip to re-enable for future field-trigger / exit-label diagnosis.
+
+## v0.17.9.16.2
+
+Track A Step 3 — bggate_6 front-gate TURNSTILE auto-drive fix (LOCAL; still
+carries the `FEPIC1_GATE_DIAG`/`[TTRACE]`/`[LINEDIAG]` diagnostics, strip before
+push).
+
+The front gate is a closed walkmesh loop with two offset one-way lanes — WEST
+lane (X≈-1312) = IN, up to the B-Garden Hall; EAST lane (X≈-1093) = OUT, down
+the gate path — and the turnstile collision separating them is not in the
+walkmesh. Plain A* therefore picked the geometrically shorter lane, which is
+the wrong (one-way, blocked) lane, and the party wedged. The `[TTRACE]` manual
+walk confirmed the lanes: IN = straight up X=-1312; OUT = right, then down
+X=-1093, each crossing both interaction-line "bars" (Y=-428 'squalls',
+Y=-907 'squall').
+
+Fix: a new `ComputeAStarPathVia(start, via, goal, ...)` runs A* in two segments
+and stitches the triangle corridors so the funnel threads a forced "via"
+triangle. The F9 drive setup (`field_nav_handlekeys.inl`) detects bggate_6
+(field 0x00A3) and, when the route crosses the turnstile band (midline
+Y=-667 between the two bars), forces the via triangle in the correct lane's
+mid-band chosen by travel direction: goal north of start -> WEST lane
+(via ≈(-1312,-532)); goal south -> EAST lane (via ≈(-1093,-586)). On a via-path
+failure it falls back to plain A*. Strictly F9-only and bggate_6-only — every
+other field, the chase, and all non-crossing drives are byte-identical
+(`viaTri` stays -1 -> the original `ComputeAStarPath` call).
+
+## v0.17.9.16.1
+
+LOCAL DIAGNOSTIC build (NOT for push). Adds a `[TTRACE]` turnstile path tracer
+for Track A Step 3 (`field_nav_diagnostics.inl`, gated under the existing
+`FEPIC1_GATE_DIAG` flag, called per-tick from the gate-diag block in
+`Update()`). Behaviour-neutral -- logging only.
+
+Purpose: capture the player's MANUAL walk-through path at the `bggate_6`
+front-gate turnstiles so the auto-drive thread-the-needle fix can be built from
+real coordinates. Step 3 is diagnosed as a turnstile collision (`ent22
+'doorbig'`): A* finds a path and the exemption resolves correctly, but the
+party jams at wide walkmesh portals (13->148 going out, 157->156 going in)
+because the turnstile's collision isn't in the walkmesh. The two Interactive
+Lines ('squall' = line[0], 'squalls' = line[1]) are positioned exactly where
+the manual maneuvers aim (line[0] is right-then-down from the exit jam; line[1]
+is straight-up from the in jam), so they are the natural thread targets.
+
+The tracer fires only in `bggate_6` (field 0x00A3) and only while auto-drive is
+OFF (we want the hand-walked path, not the AD attempts). It logs `[TTRACE]
+pos=(x,y) tri=N` at ~10 Hz while moving, and `[TTRACE] CROSSED line[i] ...` the
+instant the player's side of any captured line flips -- showing which
+interaction line is threaded for each turnstile and where.
+
+Strip `FEPIC1_GATE_DIAG` (which now also removes `[TTRACE]`) and the `[LINEDIAG]`
+block before any push.
+
+## v0.17.9.16
+
+Track A Step 2, chase-safety fix: scope the v0.17.9.15 avoidance-localization to
+F9 path-finding only; chase-drive keeps the original global test. Still carries
+the `[LINEDIAG]` + `FEPIC1_GATE_DIAG` diagnostics -- STRIP before push. LOCAL
+build for a chase-first re-BAT.
+
+Why: the v0.17.9.15 chase BAT REGRESSED -- the robot caught the party. The
+avoidance localization is shared nav-core (StartChaseDrive also calls
+ComputeAStarPath), and `doopen2a` (the Dollet town-square chase field) has two
+SCREEN_BOUND lines (confirmed by the `[LINEDIAG]` dump: dest 321 + 344). The
+local bounded test is strictly more permissive than the global infinite-line
+test, so on doopen2a A* opened a different route and the X-ATM092 robot caught
+up. The chase is tuned around the global test (v0.17.9.14 = 0 catches); the
+hotel needs the local test. They conflict only because both went through the
+same code path.
+
+Fix: in ComputeAStarPath's neighbour-avoidance, branch on s_chaseDriveActive --
+chase-drive uses `IsSeparatedByTriggerLine(startCX,startCY,nb...)` (the exact
+v0.17.9.14 behaviour, byte-identical, so the chase route is unchanged and
+should return to 0 catches), F9 uses `EdgeCrossesScreenBound(curX,curY,nb...)`
+(the Step-2 Balamb Hotel fix). This mirrors the existing s_chaseDriveActive
+splits elsewhere in nav-core (the funnel prune, calibration). One branch added;
+no other logic changed.
+
+v0.17.9.15 BAT context: the hotel half WORKED -- F9 auto-drive now steers
+around `bcsaka_1` (the Step-2 fix is correct). The front gate still fails (the
+FF8 door-collision = Step 3) and a Garden-exit NPC trigger blocked further
+testing; both are separate from this fix.
+
+Gate order unchanged: re-BAT the full Dollet chase FIRST (must be 0 catches),
+then re-confirm the hotel.
+
+## v0.17.9.15
+
+Track A Step 2 (Balamb Hotel `bcsaka_1` auto-drive): make the A* screen-bound
+trigger-line avoidance LOCAL. Carries forward the v0.17.9.14 FindPortal fix and
+the v0.17.9.14.1 `[LINEDIAG]` + `FEPIC1_GATE_DIAG` diagnostics -- STRIP all the
+diagnostics before any push. LOCAL build for a chase-first BAT.
+
+Root cause: `ComputeAStarPath`'s neighbour-avoidance rejected any neighbour
+whose centre was on the far side of an active screen-bound line as tested by
+`IsSeparatedByTriggerLine` -- an INFINITE-line side split measured from the
+START triangle's centre. On `bcsaka_1` the party spawns beside the harbour
+screen-bound exit (call#41, the only `Screen Boundary` line on the field; the
+other two captured lines are `Interactive Line`s the filter already ignores).
+That exit's short segment sits up at the harbour, off the route to the Town
+Square, but its infinite extension cuts the whole field, so every far-west
+neighbour was rejected and A* returned "No path from tri 13 to 196" -> 0
+waypoints -> auto-drive never moved (the symptom Aaron reported).
+
+Fix: add `EdgeCrossesScreenBound(ax,ay,bx,by,skip)` (field_navigation.cpp, next
+to `SegmentsCross`; forward-declared in field_nav_pathfinding.inl) and call it
+in place of `IsSeparatedByTriggerLine` in the A* neighbour loop, testing the
+ACTUAL traversal edge (current->neighbour centre) against each screen-bound
+line's FINITE segment via the bounded `SegmentsCross`. Same SCREEN_BOUND/UNKNOWN
+filter and skipTriggerIdx exemption as before; `IsSeparatedByTriggerLine` itself
+is unchanged and still used by the recovery-wiggle projection and the
+line-of-sight pre-pass. One call-site swap + one new helper; no other logic
+touched.
+
+Proven offline before BAT: the real `ComputeAStarPath` compiled against
+`bcsaka_1`'s real walkmesh + its three captured lines (line types taken from
+the live v0.17.9.14.1 `[LINEDIAG]` dump) gives "No path" under the old global
+test and the full 65-triangle route under the new local test.
+
+nav-core is SHARED with the X-ATM092 Dollet chase (StartChaseDrive also calls
+ComputeAStarPath), and the offline guards do NOT exercise this path (the C++
+harness stubs the trigger-line functions; the Python guard only checks portal
+correctness). So the real safety gate is the in-game chase: BAT the full Dollet
+chase FIRST and confirm 0 catches before the hotel BAT.
+
+## v0.17.9.14.1
+
+LOCAL DIAGNOSTIC build (NOT for push). Adds a greppable `[LINEDIAG]` per-
+captured-line dump at field load (`field_nav_fieldscripts.inl`, right after the
+existing "lineType assigned" summary): for each SETLINE it logs the assigned
+lineType, destFieldId, hasExtDispatch, and the mapped JSM entity (index, sym,
+category). Purpose: confirm the classification + MAPJUMP destination of the
+three bcsaka_1 (Balamb Hotel exterior) screen-bound trigger lines so the Step-2
+A* avoidance/exemption fix can key on destFieldId (e.g. don't fence off a
+section line whose destination is the current field or the auto-drive target's
+own destination).
+
+Why: the offline proof this session (real ComputeAStarPath compiled against
+bcsaka_1's real walkmesh + the 3 captured lines) DISPROVED the planned Step-2
+"make avoidance local" one-liner as sufficient. Current code reproduces the live
+"No path" exactly; the local edge test alone still fails; only the local test
+PLUS exempting the mid-route section line (call#42) reaches the town-square exit.
+The live exemption picks the wrong line: a gateway target's entityIdx (<= -400)
+falls through the `<= -200` trigger-exempt branch and computes a bogus
+skipTriggerIdx of 201 that matches no captured line, so nothing is exempted.
+
+Carries forward the v0.17.9.14 Track A FindPortal fix and the FEPIC1_GATE_DIAG
+diagnostic -- STRIP this `[LINEDIAG]` block AND FEPIC1_GATE_DIAG before any push.
+
+## v0.17.9.14
+
+Track A fix (Step 1): correct the walkmesh neighbour-edge vertex pair in the
+field nav core. STILL CONTAINS the local `FEPIC1_GATE_DIAG` diagnostic from
+v0.17.9.12/.13 -- STRIP BEFORE PUSH.
+
+Root cause: for a triangle's neighbour on edge `e`, the FF8 .id walkmesh stores
+that neighbour across edge (vertex[e], vertex[(e+1)%3]). Three functions in
+`field_nav_pathfinding.inl` instead read the (vertex[(e+1)%3], vertex[(e+2)%3])
+pair -- rotated one vertex off -- so they named the WRONG edge. On rectilinear /
+narrow fields the mis-named edge is a wall, so the funnel emitted wall edges as
+portals and the wall-parallel COLLAPSE slammed a waypoint onto the wall, wedging
+auto-drive (the B-Garden front gate turnstile, B-Garden Hall 6, Balamb Hotel
+exterior). AGENT_RADIUS + FF8 wall-slide + stuck-recovery masked it everywhere
+else, which is why it presented only on narrow/rounded gates.
+
+Fix: use the (vertex[edge], vertex[(edge+1)%3]) pair in all three sites --
+`FindPortal`, `GetSharedEdgeLength`, and `EdgeMidpointPath`. One-vertex rotation,
+no other logic changed.
+
+Validated offline before BAT by the Step-0 harness (`tests/chase_harness.cpp`)
+compiling this exact nav core against the real Dollet walkmeshes: the fix is
+NEUTRAL on the chase fallback field domt2_1 (its spawn sits in a 42-triangle
+walkmesh island with no A* path to the goal under both old and new code -- that
+field clears by direct chase-drive steering, not the funnel) and IMPROVES
+dotown_3 (funnel 30 waypoints with 5 out-of-mesh -> 6 waypoints with 0
+out-of-mesh; closest approach to the inert robot slot 895 -> 803, both far
+outside catch range). bggate_6's logged (-1686,-553) wall-hug is gone under the
+fix.
+
+Test order per the chase-risk plan: BAT the X-ATM092 Dollet chase FIRST (must
+stay 0 catches) before the gate fields. The chase clears today via hacks tuned
+on the old portals (COLLAPSE, protected waypoints, prune-skip), so the chase is
+the regression to watch.
+
+## v0.17.9.13
+
+LOCAL diagnostic build (Track A, front-gate push-through). STRIP BEFORE PUSH.
+
+Fixes the arm condition of the v0.17.9.12 `[GATEDIAG]` dump. v0.17.9.12 armed on
+`_stricmp(fieldName, "fepic1")`, but the live engine name of the B-Garden front
+gate (fieldId 0x00A3, display "B-Garden - Front Gate 5") is `bggate_6` — the
+Track A notes' "fepic1" engine string was wrong (the fieldId was right). The
+dump therefore never fired on the BAT. Now armed on the authoritative fieldId
+(`fieldId == 0x00A3`, or name `bggate_6`), and the `[GATEDIAG]` log strings say
+bggate_6. Still gated behind `#define FEPIC1_GATE_DIAG` (token kept; it is a
+throwaway local that gets stripped). No production behaviour change.
+
+Field facts confirmed from the v0.17.9.12 BAT's standard logging (bggate_6,
+159 walkmesh triangles): exits resolve via the working `[MAPJUMP-RES]`
+interpreter — `squallsd` SCREEN_BOUND -> 165 (B-Garden Hall 1, north/back in);
+`zell`/`zells` SCREEN_BOUND -> 162 (south/out of Garden, the OUT turnstile);
+`squall`/`squalls` are interactive Lines (turnstile interaction). Still missing
+the decisive connectivity/reachability datum, which only `[GATEDIAG]` produces
+— hence this re-fire.
+
+## v0.17.9.12
+
+LOCAL diagnostic build (Track A, fepic1 push-through gate). STRIP BEFORE PUSH.
+
+Adds a one-shot `[GATEDIAG]` walkmesh/reachability dump that auto-fires ~1.5s
+after entering field `fepic1` (B-Garden Front Gate 5), gated behind
+`#define FEPIC1_GATE_DIAG` in `field_navigation.cpp`. Armed in
+`HookedFieldScriptsInit` when the field is fepic1; fired once from `Update()`
+after a short settle delay (no keypress required). Behaviour-neutral: the
+production nav/drive path is untouched; the build only adds logging.
+
+Purpose: decide why F9 auto-drive can't route through fepic1's scripted gate.
+The dump distinguishes three hypotheses — (a) TRUE WALL: the south exit's
+triangle is in a different connected component from the player's spawn
+triangle; (b) MISSED/NARROW TRIANGLE: connected but A*'s `MIN_EDGE_WIDTH`
+gate refuses the only portal; (c) TRIGGER-LINE BLOCK: connected but a
+SCREEN_BOUND trigger line crosses the only portal so A*'s
+`IsSeparatedByTriggerLine` refuses it.
+
+Logs (all tagged `[GATEDIAG]`): walkmesh vertex/triangle counts + connected-
+component labeling (island count and per-island sizes); player spawn pos +
+triangle + component; each INF gateway and each captured SCREEN_BOUND trigger
+line with its nearest triangle, component, raw reachability
+(`AreTrianglesConnected` from spawn), and trigger-line separation; the INF
+proximity trigger zones (the push-through trigger candidates) with entity
+index / interaction type / endpoints; positioned + SETLINE JSM entities
+(type, position, talk-setup) to identify the gate trigger entity; and a full
+per-triangle dump (center, 3 vertices, 3 neighbors with WALL marks, component)
+for offline geometry reconstruction.
+
+No production behaviour change; no version-gated push expected from this build.
+
 ## v0.17.9.11
 
 Exit interpreter: fix the JPF (conditional-jump) target offset, generalizing

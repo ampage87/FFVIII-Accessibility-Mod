@@ -25,4 +25,4 @@
 // heading in CHANGELOG.md or `Utilities/push_to_github.ps1` will
 // refuse to push.
 // ================================================================
-#define FF8OPC_VERSION "0.17.9.11"
+#define FF8OPC_VERSION "0.17.9.17"

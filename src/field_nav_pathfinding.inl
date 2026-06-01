@@ -89,14 +89,16 @@ struct AStarNode {
 };
 
 // v05.81: Compute the length of the shared edge between triangle triIdx and
-// its neighbor on edge edgeIdx (0-2). The shared edge connects the two
-// vertices that are NOT vertexIdx[edgeIdx]. Returns 0 if data is invalid.
+// its neighbor on edge edgeIdx (0-2). v0.17.9.14: the shared edge for
+// neighbor[edge] connects vertexIdx[edge] and vertexIdx[(edge+1)%3] (the FF8
+// .id walkmesh convention) -- NOT the (edge+1,edge+2) pair this comment used
+// to claim. Returns 0 if data is invalid.
 static float GetSharedEdgeLength(int triIdx, int edgeIdx)
 {
     if (!s_walkmesh.valid || triIdx < 0 || triIdx >= s_walkmesh.numTriangles) return 0;
-    // Shared edge connects vertex[(edge+1)%3] and vertex[(edge+2)%3]
-    int vi1 = s_walkmesh.triangles[triIdx].vertexIdx[(edgeIdx + 1) % 3];
-    int vi2 = s_walkmesh.triangles[triIdx].vertexIdx[(edgeIdx + 2) % 3];
+    // v0.17.9.14: neighbor[edge] is across edge (vertex[edge], vertex[(edge+1)%3]).
+    int vi1 = s_walkmesh.triangles[triIdx].vertexIdx[edgeIdx];
+    int vi2 = s_walkmesh.triangles[triIdx].vertexIdx[(edgeIdx + 1) % 3];
     if (vi1 >= s_walkmesh.numVertices || vi2 >= s_walkmesh.numVertices) return 0;
     float dx = (float)(s_walkmesh.vertices[vi1].x - s_walkmesh.vertices[vi2].x);
     float dy = (float)(s_walkmesh.vertices[vi1].y - s_walkmesh.vertices[vi2].y);
@@ -134,6 +136,13 @@ static const float NARROW_EDGE_PENALTY = 3.0f;
 // v06.02: skipTriggerIdx allows exempting one trigger line (used when
 // driving TO a screen transition — we need to cross that specific line).
 static bool IsSeparatedByTriggerLine(float px, float py, float ex, float ey, int skipTriggerIdx = -1);
+// v0.17.9.15: LOCAL bounded screen-bound crossing test (the actual cur->nb
+// traversal edge vs a screen-bound line's FINITE segment). Replaces the global
+// IsSeparatedByTriggerLine in the A* avoidance so a screen-bound line near the
+// spawn no longer fences off the far side of the field via its infinite
+// extension (Balamb Hotel bcsaka_1: "No path tri 13->196"). Defined in
+// field_navigation.cpp next to SegmentsCross. See DEVNOTES "Track A Step 2".
+static bool EdgeCrossesScreenBound(float ax, float ay, float bx, float by, int skipTriggerIdx = -1);
 // v06.05: Check if moving from (px,py) in direction (dx,dy) by RECOVERY_CHECK_DIST
 // would cross any non-target active trigger line. Used to prevent recovery
 // wiggle from accidentally pushing the player through screen transitions.
@@ -367,15 +376,38 @@ static bool ComputeAStarPath(int startTri, int goalTri, int targetEntityIdx = -1
                 if (IsTriangleBlockedByNPC(nbX, nbY, targetEntityIdx)) continue;
             }
 
-            // v05.91: Skip triangles on the other side of active trigger lines.
-            // This prevents the A* path from routing through screen transition
-            // zones, which would cause the player to accidentally leave the field.
-            // We check if the neighbor triangle's center is separated from the
-            // start triangle's center by any active trigger line.
+            // v05.91 / v0.17.9.15 / v0.17.9.16: Skip a neighbor that the
+            // traversal would put on the far side of a screen-bound trigger
+            // line. TWO tests, split by drive type:
+            //
+            //  - Chase-drive (s_chaseDriveActive): the ORIGINAL global
+            //    start->neighbor infinite-line side test. The X-ATM092 Dollet
+            //    chase is tuned around this exact behavior (v0.17.9.14 = 0
+            //    catches). v0.17.9.15 made the test local for everyone and
+            //    regressed the chase -- doopen2a has 2 SCREEN_BOUND lines, so
+            //    the more-permissive local test opened a different route and
+            //    the robot caught the party. Keep the chase byte-identical to
+            //    the 0-catch build.
+            //
+            //  - F9 path-finding auto-drive (else): the LOCAL bounded cur->nb
+            //    test (the Step-2 Balamb Hotel fix). The global test fenced the
+            //    spawn off from the far side of bcsaka_1 via the harbor-exit
+            //    line's infinite extension ("No path tri 13->196"); the local
+            //    test only blocks edges that physically cross a screen-bound
+            //    segment, so A* routes around it. F9 is player-initiated, not a
+            //    timed chase, so the more permissive route is safe there.
+            //
+            // Both honor the same SCREEN_BOUND/UNKNOWN filter + skipTriggerIdx.
             if (s_capturedLineCount > 0 && nb != (uint16_t)goalTri) {
-                float startCX = s_walkmesh.triangles[startTri].centerX;
-                float startCY = s_walkmesh.triangles[startTri].centerY;
-                if (IsSeparatedByTriggerLine(startCX, startCY, nbX, nbY, skipTriggerIdx)) continue;
+                bool blocked;
+                if (s_chaseDriveActive) {
+                    float startCX = s_walkmesh.triangles[startTri].centerX;
+                    float startCY = s_walkmesh.triangles[startTri].centerY;
+                    blocked = IsSeparatedByTriggerLine(startCX, startCY, nbX, nbY, skipTriggerIdx);
+                } else {
+                    blocked = EdgeCrossesScreenBound(curX, curY, nbX, nbY, skipTriggerIdx);
+                }
+                if (blocked) continue;
             }
 
             // v05.81: Check shared edge width. Block edges too narrow to navigate.
@@ -450,6 +482,65 @@ static bool ComputeAStarPath(int startTri, int goalTri, int targetEntityIdx = -1
     return (s_waypointCount > 0);
 }
 
+// v0.17.9.16.2: Two-segment A* through a forced "via" triangle.
+//
+// Runs A* start->via, then via->goal, and stitches the two triangle corridors
+// into s_corridor[] (dropping the duplicate via at the seam) so FunnelPath
+// threads the via triangle. Built for the bggate_6 front-gate TURNSTILE: that
+// field is a closed walkmesh loop with two offset one-way lanes (west lane =
+// IN/up to the Hall, east lane = OUT/down to the gate path), and the turnstile
+// collision that separates them is NOT in the walkmesh. Plain A* therefore
+// freely picks the geometrically shorter lane -- which is the wrong/blocked
+// one-way lane -- and the party wedges. Forcing a via triangle in the correct
+// lane's mid-band pins A* to that lane. Returns true only if BOTH segments
+// path; the caller falls back to a plain ComputeAStarPath on false.
+//
+// Shares ComputeAStarPath's avoidance (chase vs F9 split, skipTriggerIdx,
+// NPC push-radius). Only ever called for F9 drives on bggate_6, so
+// s_chaseDriveActive is false here and the chase path is untouched.
+static bool ComputeAStarPathVia(int startTri, int viaTri, int goalTri,
+                                int targetEntityIdx, int skipTriggerIdx)
+{
+    if (!s_walkmesh.valid) return false;
+    if (startTri < 0 || viaTri < 0 || goalTri < 0) return false;
+
+    // Segment 1: start -> via. Capture its corridor before the second call
+    // overwrites s_corridor[].
+    if (!ComputeAStarPath(startTri, viaTri, targetEntityIdx, skipTriggerIdx))
+        return false;
+    static uint16_t corridorA[MAX_CORRIDOR];
+    int countA = s_corridorCount;
+    if (countA <= 0 || countA > MAX_CORRIDOR) return false;
+    for (int i = 0; i < countA; i++) corridorA[i] = s_corridor[i];
+
+    // Segment 2: via -> goal.
+    if (!ComputeAStarPath(viaTri, goalTri, targetEntityIdx, skipTriggerIdx))
+        return false;
+    int countB = s_corridorCount;
+    if (countB <= 0) return false;
+
+    // Stitch: corridorA (start..via) + segment-2 minus its leading via.
+    static uint16_t stitched[MAX_CORRIDOR];
+    int n = 0;
+    for (int i = 0; i < countA && n < MAX_CORRIDOR; i++) stitched[n++] = corridorA[i];
+    for (int i = 1; i < countB && n < MAX_CORRIDOR; i++) stitched[n++] = s_corridor[i];
+    s_corridorCount = n;
+    for (int i = 0; i < n; i++) s_corridor[i] = stitched[i];
+
+    // Rebuild center waypoints from the stitched corridor (FunnelPath will
+    // overwrite these; kept consistent as the non-funnel fallback path).
+    s_waypointCount = 0;
+    for (int i = 0; i < s_corridorCount && s_waypointCount < MAX_WAYPOINTS; i++) {
+        s_waypoints[s_waypointCount][0] = s_walkmesh.triangles[s_corridor[i]].centerX;
+        s_waypoints[s_waypointCount][1] = s_walkmesh.triangles[s_corridor[i]].centerY;
+        s_waypointCount++;
+    }
+    s_usingFunnel = false;
+    Log::Field("FieldNavigation: [A*-via] stitched start->via (%d tris) + via->goal (%d tris) "
+               "= %d corridor tris (via=%d)", countA, countB, s_corridorCount, viaTri);
+    return (s_waypointCount > 0);
+}
+
 // v05.90: Simple Stupid Funnel Algorithm (SSFA) for path smoothing.
 // Takes the triangle corridor from A* and produces the shortest path through
 // it by "string-pulling" — finding the tightest rope through the portal edges.
@@ -487,9 +578,12 @@ static bool FindPortal(uint16_t triA, uint16_t triB,
         if (tA.neighbor[e] == triB) { edgeIdx = e; break; }
     }
     if (edgeIdx < 0) return false;
-    // Shared edge connects vertex[(edge+1)%3] and vertex[(edge+2)%3].
-    int vi1 = tA.vertexIdx[(edgeIdx + 1) % 3];
-    int vi2 = tA.vertexIdx[(edgeIdx + 2) % 3];
+    // v0.17.9.14: neighbor[edge] is across edge (vertex[edge], vertex[(edge+1)%3]).
+    // The old (edge+1,edge+2) pair named the wrong edge -- off by one vertex --
+    // which emitted WALL edges as funnel portals and wedged auto-drive on
+    // narrow/rounded fields. See DEVNOTES_HISTORY "Track A".
+    int vi1 = tA.vertexIdx[edgeIdx];
+    int vi2 = tA.vertexIdx[(edgeIdx + 1) % 3];
     if (vi1 >= s_walkmesh.numVertices || vi2 >= s_walkmesh.numVertices) return false;
     float x1 = (float)s_walkmesh.vertices[vi1].x;
     float y1 = (float)s_walkmesh.vertices[vi1].y;
@@ -968,9 +1062,9 @@ static void EdgeMidpointPath(float startX, float startY, float goalX, float goal
         }
         if (edgeIdx < 0) continue;
 
-        // Shared edge connects vertex[(edge+1)%3] and vertex[(edge+2)%3].
-        int vi1 = tA.vertexIdx[(edgeIdx + 1) % 3];
-        int vi2 = tA.vertexIdx[(edgeIdx + 2) % 3];
+        // v0.17.9.14: neighbor[edge] is across edge (vertex[edge], vertex[(edge+1)%3]).
+        int vi1 = tA.vertexIdx[edgeIdx];
+        int vi2 = tA.vertexIdx[(edgeIdx + 1) % 3];
         if (vi1 >= s_walkmesh.numVertices || vi2 >= s_walkmesh.numVertices) continue;
 
         float x1 = (float)s_walkmesh.vertices[vi1].x;
