@@ -6,6 +6,318 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.0.15
+
+GF learn-list readout polish (#44):
+- Cursor-move readout no longer reads the help description — just the ability
+  name + AP (cuts repeats). Learned abilities read "&lt;name&gt;, Learned".
+- AP now always uses one format, "C out of R AP", including at 0 ("0 out of 60
+  AP") for consistency across learned-progress and untouched abilities.
+- The `/` key now reads ONLY the help description (no name repeat); falls back
+  to the row name / "Empty Ability Slot" when there's no description.
+
+## v0.18.0.14
+
+**AP readout (#44) implemented.** The v0.18.0.13 probe confirmed the on-screen AP
+numbers are sprite-drawn (absent from the GCW text), so AP is now computed from
+a baked table instead of scraped:
+- `ability_ap_cost[116]` — required AP per unified ability id (per-ability
+  constant), and `gf_ability_slots[16][22]` — each GF's slot order, used only to
+  map an ability id to its savemap `APs[+0x24]` slot. From the Hyne-sourced deep
+  research (anchor-validated), cross-checked against live BAT data: Quezacotl
+  learning SumMag+30% (id 85) -> slot 2 -> `APs[2]=117` toward cost 140.
+- **Learn-list rows** now carry AP: learning -> "now learning, C of R AP";
+  learned -> "learned"; otherwise the cost to learn -> "R AP".
+- **Detail key 5** now reads "Learning <name>, C of R AP" (current of required).
+- `GF_AP_DIAG` gated to 0 (its question is answered; probe retained).
+- Known caveat: Auto-Haste (id 73) cost is uncertain (Hyne 250 vs FF Wiki 150);
+  Cerberus-only, flagged in-code for in-game verification.
+
+The display list is sorted by ability id and is a subset of the 22 slots, but
+all AP lookups key off the ability id (cost) or map id->slot (current), so the
+on-screen order is irrelevant.
+
+## v0.18.0.13
+
+GF screen (#41) enhancement + AP-readout probe (#44). Holding the push until the
+whole GF submenu is finished; this is an iterative BAT build.
+- **`/` key re-reads the selected ability's help (#41 enhancement).** On the
+  ability-to-learn list, `/` now speaks the help/description of the ability
+  currently under the cursor ("<name>. <help text>"), distinct from detail key 5
+  (which reads the ability being *learned*). Implemented as a single override at
+  the existing `/` dispatch in `MenuTTS::Update`: `GFSpeakSelectedAbilityHelp()`
+  returns true and speaks when the learn list is up, otherwise the normal
+  help-bar reader runs unchanged. The selected row's name + description are
+  captured as the cursor moves (mirrors what was just announced); empty slots
+  read "Empty Ability Slot".
+- **AP-readout feasibility probe `GF_AP_DIAG` (#44).** New diagnostic toggle
+  (independent of the broad `GF_DIAG`, which stays 0). On each learn-list row
+  move it logs the parsed ability list, the displayed GF's savemap AP array
+  (`APs[24]` @ +0x24) with the raw learning bytes (+0x40 / +0x41), the raw GCW
+  hex, and the full decoded GCW. Purpose: settle whether the on-screen AP
+  numbers render as text (scrapeable from the GCW) or as sprites (absent ->
+  use the kernel / deep-research AP-cost table). Gated off once decided.
+
+## v0.18.0.12
+
+**Ship #41 — main-menu GF screen TTS.** The empty-slot announce (v0.18.0.11)
+is BAT-confirmed (Shiva: 5 real rows speak with learned/now-learning status,
+the 6 empty rows below say "Empty Ability Slot"). The full GF screen is now
+complete and verified: GF-list name announce, detail-panel keys 1..7, entry
+hint, Q/R displayed-GF cycling, and the paginated ability-to-learn list with
+its per-page cursor (`+0x257` page 1 / `+0x258` page 2), learned/now-learning
+status, descriptions, and empty slots.
+- `GF_DIAG` flipped to **0** — the whole `[GFDIAG]` / `[GFLEARN]` harness
+  (savemap dump, byte-band poll, GCW logging, window dump) compiles out. The
+  dispatch scaffold (`PollGFSubmenu` / `ResetGFSubmenuState`) and all
+  production TTS stay. Per convention the diagnostic code is gated off, not
+  deleted.
+- No functional change to the TTS itself vs v0.18.0.11; this is the clean
+  diagnostics-off build for release.
+
+## v0.18.0.11
+
+GF Learn list (#41): **announce empty ability slots.** The v0.18.0.10 BAT
+confirmed the dual-byte cursor works across both pages (Quezacotl page 1 = 11
+rows via `+0x257`, page 2 = 4 rows via `+0x258`, all names/status/descriptions
+correct, and "now learning" verified against `rec[+0x40]`). The remaining gap:
+the list area pads each page to a fixed height, so a short final page leaves
+empty rows below the abilities (Quez page 2 has 4 abilities but the cursor ran
+0..10 over 7 empty rows), and the cursor can land on them — those rows were
+silent, which felt broken.
+- Empty rows are now detected (active cursor in `[count, 22)` with blank help —
+  empty rows render no name and clear the help window) and announced as
+  "Empty Ability Slot", de-duped per row so each empty speaks once as you pass
+  over it.
+- `GF_DIAG` / `[GFLEARN]` window log still on for this pass.
+
+## v0.18.0.10
+
+GF Learn list (#41): **handle pagination + the per-page cursor byte.** The
+v0.18.0.9 BAT showed page-2 rows announcing perfectly (names, learned status,
+descriptions, and the "Boost GF" space-reject all correct) but page-1 rows
+silent. The log explained both:
+- The ability-to-learn list is **paginated and NOT filtered** — Shiva page 1 is
+  11 rows (Str-J, Vit-J, Spr-J, Magic, GF, Draw, Item, Doom, Spr+20%,
+  SumMag+10%, SumMag+20%), page 2 is 5 rows (SumMag+30%, GFHP+10%, GFHP+20%,
+  Boost, I Mag-RF). (The earlier Siren "8 rows" was a single page.) The parser
+  already reads whichever page is rendered correctly.
+- The highlight cursor lives in a **different byte per page**: page 1 (top)
+  tracked `+0x257`, page 2 (scrolled) tracked `+0x258`, both 0-based into the
+  rendered page. v0.18.0.9 only read `+0x258`, so page 1 was silent.
+- Now reads BOTH bytes and announces off whichever just changed and is in range
+  (page 1 -> +0x257, page 2 -> +0x258), de-duping on the resolved ability id.
+- Added a `[GFLEARN]` window log (16 bytes at `+0x250` + parsed page rows +
+  help text, on any change) to confirm the per-page cursor model in one pass and
+  check it generalizes to 3+ page GFs (e.g. Eden). `GF_DIAG` stays on.
+
+## v0.18.0.9
+
+GF Learn list (#41) **v1**: the ability-to-learn screen is now navigable. On the
+Learn list (which keeps the detail panel up, so `s_gfDetailActive` stays true),
+arrowing through the rows now speaks the highlighted ability as
+"<name>, <status>. <description>" — e.g. "SumMag+10%, learned. Raises SumMag
+damage by 10%" or "Boost, now learning. Boost GF".
+- Row cursor = `pMenuStateA + 0x258` (0-based index into the displayed list;
+  confirmed in the v0.18.0.8 BAT, where it tracked the help text 1:1 across
+  Siren's 8 rows).
+- The displayed list is a filtered subset of the GF's kernel slots, so rather
+  than reconstruct it and replicate the engine's filter, v1 reads the real list
+  straight out of the rendered GCW: the row names sit between the help text and
+  the `<GFName>LV` stat-panel header. `ParseLearnList` walks that run
+  right-to-left, longest-match against the GCW-form ability names, and stops at
+  the first space-preceded candidate — list items concatenate with no space
+  while help words are space-separated, so this cleanly cuts the list off from
+  the help text even when the help ends in an ability word (Boost's "Boost GF").
+- Status (learned / now learning) is read from the savemap: `completeAbilities`
+  bit (+0x14) and the learning-ability id (+0x40). The description is the GCW
+  help text (best-effort slice).
+- **Not yet:** AP progress ("X of Y AP") per row — needs the per-GF kernel
+  ability table (#44), shared with detail key 5 and the #42 Ability screen.
+  Lands in v2.
+- GF_DIAG still on; logs the parsed row list once per Learn-list entry for
+  verification.
+
+## v0.18.0.8
+
+GF detail screen (#41): **finish the Q/R fix** — number keys now follow the
+displayed GF. v0.18.0.7 wired the displayed-index read (`s_gfDetailIdx`) into
+the wrong function: the edit matched the identical `gfIdx = ms[0x253]` line in
+the diagnostic `GFDiagProbeDetail` instead of the production `SpeakGFDetailField`.
+Result: the Q/R name announce worked, but keys 1–7 still read the GF the player
+entered on (same level/HP/etc. regardless of Q/R). Now `SpeakGFDetailField`
+reads `s_gfDetailIdx`, so all fields update with the displayed GF; the
+diagnostic probe is back to its independent grid-cursor read.
+
+## v0.18.0.7
+
+GF detail screen (#41): **fix Q/R GF switching** (v0.18.0.6 item 3 regressed).
+BAT proved Q/R cycle the displayed GF but do NOT move the grid cursor `+0x253`,
+and the displayed-GF index is nowhere in the polled 0x1C0..0x2C0 band — so both
+the v0.18.0.6 auto-announce AND the number keys were reading the GF the player
+*entered* on, not the one on screen.
+- The displayed GF is now resolved from the GCW panel header, which always reads
+  `<GFName>LVHP/Compatibility...` and does follow Q/R. `MatchDetailGFIndex`
+  matches each obtained GF's savemap name against the GCW and takes the
+  right-most (freshest) hit.
+- That resolved index now drives **both** the Q/R auto-announce **and** number
+  keys 1–7, so the keys report the GF actually on screen. Announce is primed on
+  entry (no re-speak of the entry GF) and de-duped on index change.
+- Removed the `+0x25E` rendered-name approach from v0.18.0.6 (it didn't track
+  the switch).
+
+## v0.18.0.6
+
+GF detail screen (#41): three polish items.
+- **Entry hint:** when the detail panel first appears, speaks "Press numbers 1
+  through 7 for details" once (Scan-screen model), so the player knows the
+  number keys are available. 2 s cooldown guards against GCW flicker;
+  interrupt=false so it never clips the GF name.
+- **Keys 6/7** now prefix the readout with "Compatibility:" so the numbers have
+  context (e.g. "Compatibility: Squall 503, Zell 515, Quistis 782").
+- **Q/R GF change:** Q and R cycle the displayed GF on the detail panel; the new
+  GF's name now auto-announces. Detected from the rendered name the engine
+  writes to `pMenuStateA+0x25E` (same +0x20 encoding as the savemap name) —
+  independent of whichever cursor index Q/R drives — primed on entry so it
+  doesn't re-speak the GF you came in on. On the detail panel this replaces the
+  grid's index-based announce so the two never double-fire.
+
+## v0.18.0.5
+
+GF detail screen (#41): **number keys remapped to 1..7.** Level moved off the
+EXP key onto its own key, paired with a new "equipped by" readout; EXP key now
+leads with the more useful EXP-to-next value.
+- **3** = Level + who currently has the GF junctioned (e.g. "Level 9, equipped
+  by Squall", or "Level 9, not equipped"). "Equipped by" reads each existing
+  character's junctioned-GF bitmask (u16 @ char +0x58, bit = canonical GF id;
+  FFNx `savemap_ff8_character.gfs`). Uncalibrated GF omits the level.
+- **4** = EXP, now "EXP to next level X, Current EXP Y" (to-next first).
+- **5** = Currently learning ability (was 4).
+- **6 / 7** = Compatibility first three / next three (were 5 / 6).
+
+## v0.18.0.4
+
+GF detail screen (#41): **key 3 EXP phrasing fix** for screen-reader clarity.
+Was "Level 9, Current EXP 4000, 500 to next level" — the two numbers ran
+together with no label between them. Now "Level 9, Current EXP 4000, EXP to next
+level 500", so each value is preceded by its own label. No logic change.
+
+## v0.18.0.3
+
+GF detail screen (#41): **keys 2 and 3 completed** — max HP, level, and EXP-to-
+next now announced. The v0.18.0.2 wide search proved these aren't in
+`pMenuStateA` (0 hits across all GFs), so they're solved instead from data +
+formula, confirmed against five GFs' detail screenshots:
+- **Max HP**: the stored GF `HPs` u16 (+0x12) equals the displayed max HP
+  (730/2904/1593/1948/1421, each cur==max while rested). Key 2 now says
+  "HP X of X".
+- **Level / EXP-to-next**: FF8 levels GFs at a FLAT per-level EXP cost —
+  level = exp/cost + 1, next = cost - (exp % cost). Verified exactly: Quezacotl
+  L23@11185, Shiva L40@19958, Ifrit L24@11930, Diablos L9@4000 (cost 500);
+  **Siren L26@10192 (cost 400)** — proof the cost is per-GF, and that a flat
+  500-for-all would have misreported Siren as L21. Key 3 now says
+  "Level N, Current EXP X, Y to next level".
+
+`GF_EXP_PER_LEVEL[16]` holds only EMPIRICALLY CONFIRMED per-GF costs (the five
+above); every other GF is 0 = "not yet calibrated", and an uncalibrated GF
+announces EXP only — never a guessed level a blind player can't verify. Each
+GF's cost is filled in from a detail screenshot as it's obtained (Eden is
+documented as 1000 but left uncalibrated until confirmed in-game). The spent
+Diablos-only wide-search probe was removed (it proved its negative); the rest
+of the `GF_DIAG` record/compat harness stays for the upcoming Learn-list work.
+
+## v0.18.0.2
+
+GF detail screen (#41): **discovery probe for the three engine-computed values**
+(GF level, max HP, EXP-to-next) that keys 2/3 don't yet announce. These aren't
+in the savemap and aren't in `pMenuStateA+0..0x800`. FF8 levels GFs at a flat
+per-level EXP cost (most 500, some 400, Eden 1000) — verified: Diablos 4000 EXP
+÷ 500 + 1 = level 9, exact-multiple → "Next LEVEL" 500, matching the screen — but
+the exact 400-EXP GF list isn't reliably documented, so rather than risk a wrong
+level a blind player can't catch, this build locates the engine's already-
+computed values directly. The `GFDiagProbeDetail` harness gains a Diablos-only
+(gfIdx==5) wide sweep of `pMenuStateA 0..0x2000` logging every u16 == 730 or
+500 with 16 bytes of context, to find the menu's GF display struct (500 is the
+unique anchor). No production behaviour change; `GF_DIAG` stays 1. Next build
+wires keys 2/3 (and the max-HP half of the HP line) to the found offsets, then
+gates `GF_DIAG` off to ship #41.
+
+## v0.18.0.1
+
+GF main-menu screen TTS (#41): **GF list name announce + GF detail-screen
+number keys**. First user-facing GF build of the chapter (the v0.18.0 entry
+below was the discovery-only harness). Versioning going forward: 0.18.0.x = GF
+submenu, 0.18.1.x = Ability submenu, 0.18.3+ = other menus.
+
+GF list (the portrait grid): the highlighted GF's name is spoken on cursor
+move, index-driven from `pMenuStateA + 0x253` (canonical GF cell 0..15), gated
+on `+0x1E8 == 4` (GF subsystem active). Names come straight from the savemap GF
+record; un-obtained cells say "Empty" (de-duped across a run). No help-text
+scraping, no timed keypress — solo-testable.
+
+GF detail screen (after selecting a GF): Scan-style number keys, each reading
+one field on demand, gated to the detail/Learn panel so they can't fire on the
+grid or elsewhere:
+- 1 = name
+- 2 = HP (current)
+- 3 = current EXP
+- 4 = currently-learning ability
+- 5 = compatibility, first three existing characters
+- 6 = compatibility, next three existing characters
+
+All values read directly from the savemap (deterministic). The GF record layout
+was confirmed against the Diablos detail screen: name `+0x00`, current EXP u32
+`+0x0C` (4000), obtained flag `+0x11`, current HP u16 `+0x12` (730), learning
+ability id `+0x40`. Compatibility lives in each character's struct
+(`gf_compat[16]` at char `+0x70`, indexed by GF id); the menu display value is
+`(6000 - raw) / 5`, confirmed exactly against Squall 648 / Zell 573 /
+Quistis 600 / Selphie 606. Characters iterate in model order, existing-only, so
+the roster grows from four to six as Rinoa/Irvine are recruited.
+
+Deliberately deferred (engine-COMPUTED, not in the savemap, so a wrong value
+can't be visually verified by a blind player): GF level, max HP, EXP-to-next
+("Next LEVEL"), and the static AP-required for the learning ability. These need
+their live computed-display location found and are the one remaining discovery
+item for the detail screen; keys 2/3/4 announce their savemap-backed portion
+until then.
+
+Implementation: `src/menu_tts_gf.inl` gains `UpdateGFDetailPhase()` (GCW
+"Compatibility" label -> `s_gfDetailActive`, throttled) and `SpeakGFDetailField()`
+(one `__try` frame, char[]/sprintf/Speak only per the C2712 rule). The `GF_DIAG`
+harness stays on one more build as a safety net; flip to 0 to ship #41.
+
+## v0.18.0
+
+Chapter opener + first GF build: **Main-menu GF screen discovery diagnostic**
+(#41). Track A (auto-drive) closed at v0.17.9.17; this starts the GF + Ability
+main-menu TTS chapter.
+
+This build adds the GF dispatch scaffold and a discovery-only harness; there is
+no spoken GF TTS yet. New `src/menu_tts_gf.inl` (textual `#include` from
+`menu_tts.cpp`, after `menu_tts_hotkeys.inl`), with `PollGFSubmenu()` /
+`ResetGFSubmenuState()` dispatched from the `isMenuMode` block on top-level
+cursor index 4 (mirrors the Junction dispatch; suppressed while the item
+submenu is active; reset on menu open and on leaving GF).
+
+While the menu cursor sits on GF (mode 6, index 4) the `[GFDIAG]` harness, gated
+behind `#define GF_DIAG 1`:
+- dumps the savemap GF block once per screen entry (16 records x 0x44 at
+  savemap+0x4C) as raw bytes + decoded name + a uint32 EXP candidate at +0x0C,
+  to correlate on-screen GF order with savemap records;
+- polls a narrow pMenuStateA band (0x1C0..0x2C0, where the Item/Junction
+  cursors were found) every ~150 ms and logs byte changes, surfacing the GF
+  list cursor as the player navigates;
+- logs the rendered GCW menu text on change.
+No on-screen-timed keypress is needed (solo-testable); the generic SUBMON 4KB
+monitor also runs here as an independent cross-check. SEH/C2712-safe: the
+__try band poller and the std::string GCW capture are isolated into separate
+functions per the existing menu-TTS pattern.
+
+Next build will read `ff8_menu.log` `[GFDIAG]` output to fix the GF list cursor
+offset and the GF record field layout, then begin the production announce path
+(GF name + level + junctioned-to, then per-GF detail). Flip `GF_DIAG` to 0 to
+compile the harness out; the dispatch scaffold stays.
+
 ## v0.17.9.17
 
 Track A complete — diagnostics gated off for push. This is the push build for

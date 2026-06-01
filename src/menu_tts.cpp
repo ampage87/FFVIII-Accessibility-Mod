@@ -535,6 +535,9 @@ void MenuTTS::Initialize()
 // --- Help bar + hotkeys (extracted v0.12.18) ---
 #include "menu_tts_hotkeys.inl"
 
+// --- Main-menu GF screen TTS / discovery (#41, v0.18.0) ---
+#include "menu_tts_gf.inl"
+
 void MenuTTS::Update()
 {
     if (!s_initialized) return;
@@ -593,9 +596,12 @@ void MenuTTS::Update()
         if (GetAsyncKeyState('R') & 1) {
             AnnounceSeedRank();
         }
-        // / = Read help bar text (v0.09.41)
+        // / = Read help bar text (v0.09.41). On the GF ability-to-learn list,
+        // re-read the help of the ability under the cursor instead (#3); the
+        // helper returns false off that list so the normal help bar still works.
         if (GetAsyncKeyState(VK_OEM_2) & 1) {
-            AnnounceHelpText();
+            if (!GFSpeakSelectedAbilityHelp())
+                AnnounceHelpText();
         }
     }
     
@@ -660,6 +666,7 @@ void MenuTTS::Update()
         s_submonStableSince = 0;  // v0.08.28: reset submenu monitor
         s_submonActive = false;
         ResetItemSubmenuState();  // v0.08.29
+        ResetGFSubmenuState();    // v0.18.0 (#41)
         Log::Menu("[MenuTTS] Menu opened (mode 6)");
         
 
@@ -732,6 +739,13 @@ void MenuTTS::Update()
                 PollJunctionSubmenu();
             } else if (s_prevCursor != 0) {
                 if (s_juncActive) ResetJunctionState();
+            }
+
+            // v0.18.0 (#41): GF screen TTS / discovery (top-level cursor == 4)
+            if (s_prevCursor == 4 && !s_itemSubmenuActive) {
+                PollGFSubmenu();
+            } else if (s_prevCursor != 4 && s_gfActive) {
+                ResetGFSubmenuState();
             }
         }
         
