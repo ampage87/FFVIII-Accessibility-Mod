@@ -6,6 +6,122 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.1.13
+
+Ability screen (#42) refine flow — recipient magic stock now announced.
+
+The v0.18.1.12 BAT confirmed the savemap character-magic layout and pinned the
+result spell id: **Water = spell id 10** (Quistis's array held `{10, 60}` for her
+panel value of 60, Selphie `{10, 40}`, etc.). The recipe pointer was just preview
+text and there were no `0x0C` spell-insertion codes, so the result magic is mapped
+from its name instead.
+
+The character picker now speaks, e.g., "Squall" immediately and then "has 100
+Waters" after the same 400 ms beat the refinable tag uses. The count is read from
+the recipient's savemap magic array (`SAVEMAP_BASE + 0x048C + charId*152 + 0x10`,
+32 x {spell_id, qty}) by scanning for the result spell id; the id is resolved from
+the stashed result-magic name via a spell-name table (ids 1-40 — elemental, GF-
+tier, healing, support — with Water confirmed in-game). A magic not in the table
+falls back to the plain name (no count) rather than risk announcing a wrong
+number; the status-magic ids (41+) get added once confirmed the same way.
+
+Diagnostics retired (`RECIP_STOCK_DIAG` off). This build carries everything since
+the recipient picker landed (Builds 2b/3/4 + all the polish fixes).
+
+## v0.18.1.12
+
+Ability screen (#42) refine flow — stock-locator retargeted at the savemap.
+
+The v0.18.1.11 BAT (with the four character screenshots) confirmed the recipient
+Water counts — Squall 100, Zell 60, Quistis 40, Selphie 20 — but the menu-struct
+window was byte-identical across recipients, so the panel reads each character's
+magic stock from the savemap, not the menu state. Per the submenu-layout research
+(offsets corrected by -0x14 for the confirmed 0x4C header), the character structs
+start at `SAVEMAP_BASE+0x048C`, 152 bytes each, indexed by character id, with
+`Magics[32]` (32 x {spell_id, qty}) at struct `+0x10`.
+
+This build retargets `RECIP_STOCK_DIAG` to dump, per recipient: (a) that
+character's 64-byte magic array from the savemap (confirms the layout and reveals
+the result spell id — the slot whose qty matches the known panel value), (b) the
+engine refine recipe at `*(+0x2BE)`, and (c) the GCW `0x0C` spell-insertion codes
+— the latter two as id sources so the next build can scan the array for the
+result magic and announce "<name>, has N <Magic>" with the 400 ms beat.
+
+## v0.18.1.11
+
+Ability screen (#42) refine flow — fixes for the two v0.18.1.10 BAT findings.
+
+1. **Double-announced recipient names fixed.** The picker-vs-quantity decision
+   was leaning on the "Number to refine" text in the GCW, which flickers in and
+   out frame-to-frame; that made the sub-phase flap between picker and quantity
+   and re-speak names. Routing is now purely memory-based: `+0x2E9` (255 = item
+   list, 0 = recipient flow) and `+0x2E7` (1 = quantity, 0 = character picker) —
+   both frame-stable, so no flap. (`+0x2E4`/owned can't be used here: it lingers
+   non-zero after backing out of quantity.)
+2. **Broken "already has 100" reverted.** `+0x2E6` turned out to be a transient
+   post-refine value (0 for every hovered recipient), so it never fired. Removed;
+   the picker is back to a clean name announce.
+
+New per-recipient design ("<name>, has N <Magic>" with the 400 ms beat) needs the
+actual stock byte first, which isn't in `2E0..2EB`. A wider locator dump
+(`RECIP_STOCK_DIAG`: `0x2C0..0x33F` on each recipient change, `[RECIPDIAG]` lines)
+is in this build to find it; once located, the next build wires up the stock
+follow-up and gates the dump off.
+
+## v0.18.1.10
+
+Ability screen (#42) — two refine-flow polish fixes on top of Builds 3/4.
+
+1. **No more stray "Squall" on entering the item list.** The recipient/quantity
+   routing is now gated on having actually browsed an item first
+   (`s_abilItemLastCur >= 0`), so the one-frame character-picker blip at item-list
+   entry is suppressed (you can only reach the picker after selecting an item).
+2. **Maxed recipient announced.** When you land on a character who already holds
+   the magic's cap, the picker says e.g. "Zell, already has 100" — read from
+   `+0x2E6` (the recipient's current stock). The game's own "Already has 100" popup
+   renders in a separate window the menu buffer can't see (hence its inconsistent
+   capture), so this proactive read is the dependable signal.
+
+The recipient handler temporarily logs `+0x2E6` plus a small byte window
+(`2E0..2EB`) so the BAT can confirm the stock byte tracks the *hovered* recipient
+(not only the last-refined one); that probe window gets gated off once verified.
+
+## v0.18.1.9
+
+Ability screen (#42) Builds 3 + 4 — the refine flow's last two steps now speak.
+After you pick a refinable item, the **character picker** announces each recipient
+as you move (Squall / Zell / Quistis / …), read from the FF8 character id at
+`+0x2DE`. After picking a recipient, the **quantity selector** announces the
+number to refine plus the running spell total as you change it — e.g. "5, 100
+Waters" (count × per-item yield, taken from the refine preview). The diagnostic is
+gated off (`REFINE_FLOW_DIAG` 0); this build is the shippable refine-flow milestone
+(carries Build 2 item list, 2b refinable tag, 3 recipient, 4 quantity).
+
+Mechanics: `+0x22E` stays 21 across all three sub-screens, so the sub-phase is
+routed on markers instead — quantity = the unique "Number to refine" text (fallback
+`+0x2E4` owned ≠ 0), character picker = `+0x2E9` == 0, item list = `+0x2E9` == 255.
+Quantity counter = `+0x2E5` (1..`+0x2E4` max). New `AbilReadRefineSub`,
+`ParseRefineYield`, `PollRefineCharPicker`, `PollRefineQuantity` in
+`menu_tts_ability.inl`; the per-item yield is stashed from the clean preview
+(item list / character picker) before the quantity popup muddies the text.
+
+Known limits (verify next): total = count × out / in is exact for the common
+1-input recipes (Fish Fin 1→20); multi-input recipes (X→Y, X>1) need a check.
+Recipient names for renameable characters (Squall/Rinoa) use FF8 defaults until a
+savemap-name read is added.
+
+## v0.18.1.8
+
+Ability screen (#42) — DIAGNOSTIC build (refine-flow sub-phase map). No behavior
+change to shipped features (Build 2b still active). Adds `REFINE_FLOW_DIAG` and a
+`RefineFlowDiag()` that logs the phase byte (`+0x22E`) plus the candidate
+recipient / quantity cursor bytes (`+0x2DE`/`+0x2E0`, `+0x2DF`, `+0x2E5`/`+0x2E4`/
+`+0x2E7`, `+0x2E1`/`+0x2E3`/`+0x2E9`) on any change, across the whole flow. One
+pass (item list -> pick item -> character picker -> pick -> quantity selector)
+maps every sub-phase's `+0x22E` value and confirms which byte is each live cursor,
+so Builds 3 (recipient announce) and 4 (quantity announce) can gate correctly.
+Not for push; gate `REFINE_FLOW_DIAG` to 0 once mapped.
+
 ## v0.18.1.7
 
 Ability screen (#42) Build 2b — per-item "Refinable / Cannot be refined" tag, and

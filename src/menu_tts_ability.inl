@@ -35,6 +35,18 @@
 // check). Gate off once Build 2 is confirmed; never delete.
 #define ABIL_DIAG 0
 
+// (diag, v0.18.1.8) Refine-flow sub-phase map: logs the phase byte (+0x22E) plus
+// the candidate recipient / quantity cursor bytes on any change, across the whole
+// refine flow (item list -> character picker -> quantity selector). One pass maps
+// every sub-phase's +0x22E value and confirms which byte is each live cursor,
+// before Builds 3/4 gate on them. Gate off once mapped; never delete.
+#define REFINE_FLOW_DIAG 0
+
+// (diag, retired v0.18.1.13) Recipient magic-stock locator. Job done: the stock
+// lives in the SAVEMAP character magic array (base+0x048C + id*152, Magics[32] at
+// +0x10), confirmed Water = spell id 10 against the in-game panel. Kept gated off.
+#define RECIP_STOCK_DIAG 0
+
 static const int ABIL_GATE_OFFSET   = 0x1E8;   // == 14 on the Ability screen
 static const int ABIL_PHASE_OFFSET  = 0x22E;   // 3 = ability list
 static const int ABIL_CURSOR_P1_OFF = 0x257;   // ability-list cursor (page 1 candidate)
@@ -45,6 +57,16 @@ static const int ABIL_PHASE_ITEM_MIN = 19;     // +0x22E >= this = refine item l
 static const int ABIL_ITEM_CURSOR_OFF = 0x2DF; // refine item-list cursor (0-based)
 static const int   ABIL_REFINE_PTR_OFF  = 0x2BE; // engine refine-result pointer (Build 2b)
 static const DWORD ABIL_REFINE_SETTLE_MS = 400;  // dwell before the pointer is reliable
+// Refine-flow sub-phases (Builds 3/4). +0x22E stays 21 across all three, so the
+// sub-phase is read from these markers instead:
+static const int ABIL_RECIP_ID_OFF   = 0x2DE; // recipient FF8 character id (Build 3)
+static const int ABIL_RECIP_SLOT_OFF = 0x2E0; // recipient party slot 0-3 (Build 3)
+static const int ABIL_QTY_OWNED_OFF  = 0x2E4; // owned/max; non-zero only in quantity
+static const int ABIL_QTY_COUNT_OFF  = 0x2E5; // number to refine (Build 4)
+static const int ABIL_REFINE_SUBPH_OFF = 0x2E9; // 255 = item list, 0 = recipient flow (picker/quantity)
+static const int ABIL_QTY_ACTIVE_OFF   = 0x2E7; // within recipient flow: 1 = quantity, 0 = char picker
+static const int ABIL_RECIP_STOCK_OFF  = 0x2E6; // (unreliable: transient post-refine amount, not stock)
+static const int ABIL_MAGIC_MAX        = 100;   // FF8 per-spell cap
 
 // Menu-usable ("Use GF ability") ability id block: the *-RF refine family (97–113)
 // plus Med LV Up (114) and Card Mod (115). Restricting the GCW name match to this
@@ -76,6 +98,14 @@ static bool  s_abilItemSelValid   = false;
 static char  s_abilItemRefine[192] = {};
 static DWORD s_abilItemSettleAt    = 0;     // (2b) tick when the item cursor last moved
 static bool  s_abilItemStatusSpoken = true; // (2b) refinable status already spoken this item
+// (Build 3) recipient picker + (Build 4) quantity selector dedupe / context.
+static int   s_abilRecipLast   = -1;        // last announced recipient char id
+static int   s_abilQtyLast     = -1;        // last announced number-to-refine
+static int   s_abilYieldIn     = 1;         // per-recipe input count ("<in> will refine into..")
+static int   s_abilYieldOut    = 0;         // per-recipe output count ("..into <out> <Magic>")
+static char  s_abilYieldMagic[48] = {};     // resulting magic name (e.g. "Waters")
+static DWORD s_abilRecipSettleAt    = 0;    // (stock) tick when the recipient last changed
+static bool  s_abilRecipStockSpoken = true; // (stock) "has N <Magic>" already spoken this recipient
 
 static void ResetAbilitySubmenuState()
 {
@@ -93,6 +123,13 @@ static void ResetAbilitySubmenuState()
     s_abilItemRefine[0] = '\0';
     s_abilItemSettleAt     = 0;
     s_abilItemStatusSpoken = true;
+    s_abilRecipLast   = -1;
+    s_abilQtyLast     = -1;
+    s_abilYieldIn     = 1;
+    s_abilYieldOut    = 0;
+    s_abilYieldMagic[0] = '\0';
+    s_abilRecipSettleAt    = 0;
+    s_abilRecipStockSpoken = true;
 }
 
 // SEH raw read of the gate / phase / cursor bytes. No C++ objects (C2712-safe).
@@ -252,6 +289,180 @@ static std::string ParseRefinePreview(const std::string& dec)
     return out;
 }
 
+// SEH read of the refine-flow sub-phase markers + recipient/quantity cursors.
+// C2712-safe (no C++ objects in __try).
+static bool AbilReadRefineSub(int* recipId, int* recipSlot, int* qtyOwned,
+                              int* qtyCount, int* subPhase, int* qtyActive)
+{
+    __try {
+        uint8_t* ms = (uint8_t*)pMenuStateA;
+        if (ms == nullptr) return false;
+        *recipId   = (int)ms[ABIL_RECIP_ID_OFF];
+        *recipSlot = (int)ms[ABIL_RECIP_SLOT_OFF];
+        *qtyOwned  = (int)ms[ABIL_QTY_OWNED_OFF];
+        *qtyCount  = (int)ms[ABIL_QTY_COUNT_OFF];
+        *subPhase  = (int)ms[ABIL_REFINE_SUBPH_OFF];
+        *qtyActive = (int)ms[ABIL_QTY_ACTIVE_OFF];
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// FF8 character ids (the value held in +0x2DE). Squall/Rinoa are renameable; the
+// defaults here are used until/unless a savemap name read is added. std::string-free.
+static const char* REFINE_CHAR_NAMES[] = {
+    "Squall", "Zell", "Irvine", "Quistis", "Rinoa",
+    "Selphie", "Seifer", "Edea", "Laguna", "Kiros", "Ward"
+};
+
+// FF8 magic spell names by spell id (kernel.bin Section 1 order). Maps the refine-
+// result magic name (parsed from the preview, e.g. "Waters") back to its spell id
+// so the recipient's stock can be located in their savemap magic array. Water=10
+// is confirmed against the in-game panel; ids 1-40 follow the documented order
+// (elemental, GF-tier, healing, support). A name not in this table is treated as
+// unknown -> the stock line is skipped (name only) rather than risk a wrong count.
+// Extend with the status-magic ids (41+) once they're confirmed the same way.
+static const char* const MAGIC_NAMES[] = {
+    "",                                                    // 0
+    "Fire", "Fira", "Firaga",                              // 1-3
+    "Blizzard", "Blizzara", "Blizzaga",                    // 4-6
+    "Thunder", "Thundara", "Thundaga",                     // 7-9
+    "Water",                                               // 10 (confirmed)
+    "Aero", "Bio", "Demi", "Holy", "Flare",                // 11-15
+    "Meteor", "Quake", "Tornado", "Ultima", "Apocalypse",  // 16-20
+    "Cure", "Cura", "Curaga", "Life", "Full-life",         // 21-25
+    "Regen", "Esuna", "Dispel", "Protect", "Shell",        // 26-30
+    "Reflect", "Aura", "Double", "Triple", "Haste",        // 31-35
+    "Slow", "Stop", "Float", "Drain", "Pain"               // 36-40
+};
+
+// Map a (possibly pluralised) refine-result magic name to its spell id, or -1.
+static int MagicNameToId(const char* nm)
+{
+    if (!nm || !nm[0]) return -1;
+    const int N = (int)(sizeof(MAGIC_NAMES) / sizeof(MAGIC_NAMES[0]));
+    for (int id = 1; id < N; id++)
+        if (MAGIC_NAMES[id][0] && strcmp(nm, MAGIC_NAMES[id]) == 0) return id;
+    // The preview pluralises the yield ("20 Waters"); retry without a trailing 's'.
+    size_t L = strlen(nm);
+    if (L > 1 && nm[L - 1] == 's') {
+        char base[48];
+        size_t c = (L - 1 < sizeof(base) - 1) ? L - 1 : sizeof(base) - 1;
+        memcpy(base, nm, c); base[c] = '\0';
+        for (int id = 1; id < N; id++)
+            if (MAGIC_NAMES[id][0] && strcmp(base, MAGIC_NAMES[id]) == 0) return id;
+    }
+    return -1;
+}
+
+// Read a character's current stock of spellId from the savemap. The 8 character
+// structs sit at SAVEMAP_BASE+0x048C, 152 bytes each, indexed by character id;
+// Magics[32] (32 x {spell_id, qty}) is at struct+0x10. Returns the qty, 0 if the
+// spell isn't in the character's list, or -1 on bad input / read fault. C2712-safe.
+static int AbilReadRecipStock(int charId, int spellId)
+{
+    if (charId < 0 || charId > 7 || spellId <= 0 || spellId > 255) return -1;
+    __try {
+        uint8_t* mag = (uint8_t*)SAVEMAP_BASE + 0x048C + charId * 152 + 0x10;
+        for (int k = 0; k < 32; k++)
+            if (mag[k * 2] == (uint8_t)spellId) return (int)mag[k * 2 + 1];
+        return 0;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+
+// Pull the per-recipe yield out of a clean refine-preview phrase
+// ("<in> will refine into <out> <Magic>", e.g. "1 will refine into 20 Waters").
+// Used to compute the quantity step's running total. std::string -> no __try.
+static void ParseRefineYield(const std::string& phrase, int* inN, int* outN,
+                             char* magic, size_t magicSz)
+{
+    *inN = 1; *outN = 0; if (magic && magicSz) magic[0] = '\0';
+    if (phrase.empty()) return;
+
+    size_t i = 0; int n = 0; bool any = false;
+    while (i < phrase.size() && phrase[i] >= '0' && phrase[i] <= '9') { n = n*10 + (phrase[i]-'0'); i++; any = true; }
+    if (any && n > 0) *inN = n;
+
+    size_t w = phrase.find("will refine into");
+    if (w == std::string::npos) return;
+    size_t j = w + (sizeof("will refine into") - 1);
+    while (j < phrase.size() && phrase[j] == ' ') j++;
+    int m = 0; any = false;
+    while (j < phrase.size() && phrase[j] >= '0' && phrase[j] <= '9') { m = m*10 + (phrase[j]-'0'); j++; any = true; }
+    if (any) *outN = m;
+    while (j < phrase.size() && phrase[j] == ' ') j++;
+    if (magic && magicSz) {
+        size_t k = 0;
+        while (j < phrase.size() && k < magicSz - 1) magic[k++] = phrase[j++];
+        magic[k] = '\0';
+        while (k > 0 && magic[k-1] == ' ') magic[--k] = '\0';
+    }
+}
+
+// (Build 3 + stock) Character-picker handler. On a +0x2DE (character-id) change,
+// announce the recipient name immediately; then, after the same dwell the item
+// list uses, announce "has <N> <Magic>" — N = that character's current stock of
+// the refine-result magic, read from the savemap. The magic name is the stashed
+// yield (s_abilYieldMagic); its spell id is mapped from the name (MagicNameToId).
+// If the magic isn't in the name table the stock line is skipped (name only).
+// char[]/snprintf/Speak only.
+static void PollRefineCharPicker(int charId, int slot)
+{
+    if (charId != s_abilRecipLast) {
+        s_abilRecipLast = charId;
+        s_abilQtyLast   = -1;              // re-arm the quantity announce
+        s_abilRecipSettleAt    = GetTickCount();
+        s_abilRecipStockSpoken = false;
+
+        const int nNames = (int)(sizeof(REFINE_CHAR_NAMES) / sizeof(REFINE_CHAR_NAMES[0]));
+        char out[64];
+        if (charId >= 0 && charId < nNames) snprintf(out, sizeof(out), "%s", REFINE_CHAR_NAMES[charId]);
+        else                                snprintf(out, sizeof(out), "Character %d", charId);
+        ScreenReader::Speak(out, true);
+        Log::Menu("[MenuTTS] Refine recipient: id=%d slot=%d \"%s\"", charId, slot, out);
+    }
+
+    // Stock follow-up after the settle dwell (mirrors the 2b name-then-detail beat).
+    if (!s_abilRecipStockSpoken &&
+        GetTickCount() - s_abilRecipSettleAt >= ABIL_REFINE_SETTLE_MS) {
+        s_abilRecipStockSpoken = true;
+        if (s_abilYieldMagic[0]) {
+            int sid   = MagicNameToId(s_abilYieldMagic);
+            int stock = (sid > 0) ? AbilReadRecipStock(charId, sid) : -1;
+            if (stock >= 0) {
+                char d[96];
+                snprintf(d, sizeof(d), "has %d %s", stock, s_abilYieldMagic);
+                ScreenReader::Speak(d, false);   // queue so it follows the name
+                Log::Menu("[MenuTTS] Refine recip stock: id=%d magic=\"%s\" sid=%d stock=%d",
+                          charId, s_abilYieldMagic, sid, stock);
+            } else {
+                Log::Menu("[MenuTTS] Refine recip stock: id=%d magic=\"%s\" sid=%d (unmapped, name only)",
+                          charId, s_abilYieldMagic, sid);
+            }
+        }
+    }
+}
+
+// (Build 4) Quantity-selector handler: announce the number to refine + the running
+// spell total on a +0x2E5 change. Total = count * out / in (exact for the common
+// in==1 recipes); yield is taken from the clean preview stashed before the popup.
+static void PollRefineQuantity(int count, int owned)
+{
+    if (count == s_abilQtyLast) return;
+    s_abilQtyLast   = count;
+    s_abilRecipLast = -1;          // re-arm the recipient announce if we back up
+
+    char out[96];
+    if (s_abilYieldOut > 0 && s_abilYieldIn > 0) {
+        long total = (long)count * s_abilYieldOut / s_abilYieldIn;
+        if (s_abilYieldMagic[0]) snprintf(out, sizeof(out), "%d, %ld %s", count, total, s_abilYieldMagic);
+        else                     snprintf(out, sizeof(out), "%d, %ld", count, total);
+    } else {
+        snprintf(out, sizeof(out), "%d", count);
+    }
+    ScreenReader::Speak(out, true);
+    Log::Menu("[MenuTTS] Refine quantity: count=%d owned=%d -> \"%s\"", count, owned, out);
+}
+
 // Refine item-list phase handler (Build 2). Announces the highlighted source
 // item's name + quantity (from the savemap inventory) on +0x2DF move; stashes
 // the refine preview for "/". std::string here -> the raw reads are isolated in
@@ -273,6 +484,34 @@ static void PollAbilityItemList()
     std::string preview = dec.empty() ? std::string() : ParseRefinePreview(dec);
     s_abilItemSelValid = true;
     snprintf(s_abilItemRefine, sizeof(s_abilItemRefine), "%s", preview.c_str());
+
+    // Read the refine-flow sub-phase markers once (memory-only, frame-stable):
+    //   +0x2E9 (subPh):  255 = item list, 0 = recipient flow (picker/quantity)
+    //   +0x2E7 (qActive): within the recipient flow, 1 = quantity, 0 = char picker
+    // Using +0x2E7 — not the flickery "Number to refine" GCW text — keeps the phase
+    // from flapping between picker and quantity, which was double-speaking names.
+    // (+0x2E4/owned can't be used: it lingers non-zero after backing out of quantity.)
+    int rId = -1, rSlot = -1, qOwned = -1, qCount = -1, subPh = -1, qActive = -1;
+    bool haveSub = AbilReadRefineSub(&rId, &rSlot, &qOwned, &qCount, &subPh, &qActive);
+    bool inQuantity = haveSub && subPh == 0 && qActive == 1;
+
+    // Stash the clean per-item yield while it's reliable (item list / character
+    // picker), before the quantity popup muddies the preview text, so the quantity
+    // step can report the running spell total.
+    if (!preview.empty() && !inQuantity)
+        ParseRefineYield(preview, &s_abilYieldIn, &s_abilYieldOut,
+                         s_abilYieldMagic, sizeof(s_abilYieldMagic));
+
+    // Sub-phase routing. Gated on s_abilItemLastCur >= 0 so it never fires before
+    // an item has been browsed (kills the one-frame recipient blip at entry).
+    if (s_abilItemLastCur >= 0 && haveSub && subPh == 0) {
+        if (qActive == 1) PollRefineQuantity(qCount, qOwned);  // quantity selector
+        else              PollRefineCharPicker(rId, rSlot);    // character picker
+        return;
+    }
+    // Item list: re-arm the recipient/quantity announcers for the next drill-in.
+    s_abilRecipLast = -1;
+    s_abilQtyLast   = -1;
 
     uint8_t id = 0, qty = 0;
     bool ok = AbilReadInvSlot(cur, &id, &qty);
@@ -322,6 +561,39 @@ static void PollAbilityItemList()
     }
 }
 
+#if REFINE_FLOW_DIAG
+// (diag) Log the refine-flow phase byte (+0x22E) and the candidate recipient /
+// quantity cursor bytes whenever any of them changes. A single pass through
+// item list -> select item -> character picker (move between chars) -> select
+// -> quantity selector (arrow the count) maps every sub-phase's +0x22E value
+// and confirms which byte is each live cursor. Raw reads isolated in SEH.
+static void RefineFlowDiag()
+{
+    int v22E=-1,v2DE=-1,v2DF=-1,v2E0=-1,v2E1=-1,v2E3=-1,v2E4=-1,v2E5=-1,v2E7=-1,v2E9=-1;
+    bool ok=false;
+    __try {
+        uint8_t* ms=(uint8_t*)pMenuStateA;
+        if (ms) {
+            v22E=ms[0x22E]; v2DE=ms[0x2DE]; v2DF=ms[0x2DF]; v2E0=ms[0x2E0];
+            v2E1=ms[0x2E1]; v2E3=ms[0x2E3]; v2E4=ms[0x2E4]; v2E5=ms[0x2E5];
+            v2E7=ms[0x2E7]; v2E9=ms[0x2E9];
+            ok=true;
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { ok=false; }
+    if (!ok) return;
+
+    static int l22E=-2,l2DE=-2,l2DF=-2,l2E0=-2,l2E1=-2,l2E3=-2,l2E4=-2,l2E5=-2,l2E7=-2,l2E9=-2;
+    if (v22E==l22E && v2DE==l2DE && v2DF==l2DF && v2E0==l2E0 && v2E1==l2E1 &&
+        v2E3==l2E3 && v2E4==l2E4 && v2E5==l2E5 && v2E7==l2E7 && v2E9==l2E9) return;
+    l22E=v22E; l2DE=v2DE; l2DF=v2DF; l2E0=v2E0; l2E1=v2E1; l2E3=v2E3;
+    l2E4=v2E4; l2E5=v2E5; l2E7=v2E7; l2E9=v2E9;
+
+    Log::Menu("[REFINEDIAG] 22E=%d | 2DE=%d 2E0=%d (recip?) | 2DF=%d (item) | "
+              "2E5=%d 2E4=%d 2E7=%d (qty?) | 2E1=%d 2E3=%d 2E9=%d",
+              v22E, v2DE, v2E0, v2DF, v2E5, v2E4, v2E7, v2E1, v2E3, v2E9);
+}
+#endif
+
 // Dispatched from MenuTTS::Update() while mode==6 and top-level cursor == 5.
 // Branches on +0x22E: ability-list phase (==3) vs refine item-list phase (>=19).
 static void PollAbilitySubmenu()
@@ -334,6 +606,10 @@ static void PollAbilitySubmenu()
     int gate = -1, phase = -1, c257 = -1, c258 = -1;
     if (!AbilReadState(&gate, &phase, &c257, &c258)) return;
     if (gate != ABIL_GATE_VALUE) return;          // not actually on the Ability screen
+
+#if REFINE_FLOW_DIAG
+    RefineFlowDiag();   // map +0x22E + cursor bytes across all refine sub-phases
+#endif
 
     if (phase != ABIL_PHASE_LIST) {
         if (phase >= ABIL_PHASE_ITEM_MIN) {
