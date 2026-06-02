@@ -6,6 +6,28 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.1.4
+
+Ability screen (#42) Build 2 — refine ITEM-LIST phase (first pass). When a refine
+ability is selected and the source-item list opens (`+0x22E >= 19`), the
+highlighted item now reads on cursor (`+0x2DF`) move, and `/` reads the refine
+preview.
+
+- Item name + quantity announce on move, read from the savemap inventory
+  (`AbilReadInvSlot`, same source as the Item submenu). Empty/over-range slots
+  say "Empty".
+- `/` reads the refine preview ("N will refine into M <Magic>"), parsed from the
+  GCW (`ParseRefinePreview`); says "No refine information" when the highlighted
+  item can't be refined.
+- `PollAbilitySubmenu` now branches on `+0x22E`: ability list (==3) vs item list
+  (>=19); the item handler is `PollAbilityItemList`.
+- `ABIL_DIAG` back to 1 for this build: `[ABILDIAG-ITEM]` logs cursor + savemap
+  id/qty/name + the GCW so the BAT can confirm the item-list-to-inventory
+  mapping (the working assumption is that the list is the full inventory in
+  order). Flips to 0 once confirmed.
+- Deferred to Build 2b: greyed/non-refinable state detection; pagination for long
+  item lists.
+
 ## v0.18.1.3
 
 Ability screen (#42) Build 1 — ability-list phase COMPLETE; diagnostics gated off.

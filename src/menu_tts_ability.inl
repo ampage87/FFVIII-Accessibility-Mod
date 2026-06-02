@@ -17,14 +17,16 @@
 //                          abilities; +0x257 read too in case longer lists paginate.
 //   +0x2DF               : refine item-list cursor (Build 2)
 //
-// Build 1 (v0.18.1.0): the ABILITY-LIST phase only. Announce the highlighted
-// ability NAME on cursor move; the "/" key reads its help description on demand
-// (mirrors the GF learn-list name-on-move / "/"-for-help split, per Aaron).
-// Build 2 (v0.18.1.1) adds the refine item-list (+0x2DF, phase ~19–21).
+// Build 1 (v0.18.1.0–.3): the ABILITY-LIST phase. Announce the highlighted
+// ability NAME on cursor move; the "/" key reads its help; empty padded slots
+// say "Empty Ability Slot". Build 2 (v0.18.1.4): the refine ITEM-LIST phase
+// (+0x22E >= 19, cursor +0x2DF) — announce the source item's name + quantity on
+// move (read from the savemap inventory), and "/" reads the refine preview
+// ("N will refine into M <Magic>") parsed from the GCW.
 
-// First-build confirmation logging. Gated off post-confirmation (v0.18.1.3);
-// never delete — flip to 1 to re-validate the GCW parse / cursor classification.
-#define ABIL_DIAG 0
+// Confirmation logging (ability-list parse + item-list inventory/preview cross-
+// check). Gate off once Build 2 is confirmed; never delete.
+#define ABIL_DIAG 1
 
 static const int ABIL_GATE_OFFSET   = 0x1E8;   // == 14 on the Ability screen
 static const int ABIL_PHASE_OFFSET  = 0x22E;   // 3 = ability list
@@ -32,6 +34,8 @@ static const int ABIL_CURSOR_P1_OFF = 0x257;   // ability-list cursor (page 1 ca
 static const int ABIL_CURSOR_P2_OFF = 0x258;   // ability-list cursor (confirmed)
 static const int ABIL_GATE_VALUE    = 14;      // +0x1E8 value on this screen
 static const int ABIL_PHASE_LIST    = 3;       // +0x22E value on the ability list
+static const int ABIL_PHASE_ITEM_MIN = 19;     // +0x22E >= this = refine item list (Build 2)
+static const int ABIL_ITEM_CURSOR_OFF = 0x2DF; // refine item-list cursor (0-based)
 
 // Menu-usable ("Use GF ability") ability id block: the *-RF refine family (97–113)
 // plus Med LV Up (114) and Card Mod (115). Restricting the GCW name match to this
@@ -55,6 +59,13 @@ static bool s_abilSelValid     = false;
 static char s_abilSelName[64]  = {};
 static char s_abilSelDesc[192] = {};
 
+// (Build 2) Refine item-list phase state: cursor dedupe + the refine preview
+// stashed for the "/" reader (valid only while the item list is up).
+static int   s_abilItemLastCur    = -1;
+static DWORD s_abilItemPoll       = 0;
+static bool  s_abilItemSelValid   = false;
+static char  s_abilItemRefine[192] = {};
+
 static void ResetAbilitySubmenuState()
 {
     s_abilActive  = false;
@@ -65,6 +76,10 @@ static void ResetAbilitySubmenuState()
     s_abilSelValid    = false;
     s_abilSelName[0]  = '\0';
     s_abilSelDesc[0]  = '\0';
+    s_abilItemLastCur   = -1;
+    s_abilItemPoll      = 0;
+    s_abilItemSelValid  = false;
+    s_abilItemRefine[0] = '\0';
 }
 
 // SEH raw read of the gate / phase / cursor bytes. No C++ objects (C2712-safe).
@@ -137,8 +152,105 @@ static int ParseAbilityList(const std::string& dec, uint8_t outIds[], int maxOut
     return count;
 }
 
+// SEH read of the refine item-list cursor (+0x2DF). C2712-safe.
+static bool AbilReadItemCursor(int* cur)
+{
+    __try {
+        uint8_t* ms = (uint8_t*)pMenuStateA;
+        if (ms == nullptr) return false;
+        *cur = (int)ms[ABIL_ITEM_CURSOR_OFF];
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// SEH read of savemap inventory slot `idx` (item id + quantity). The refine
+// source-item list appears to be the full inventory in order; the ABIL_DIAG
+// cross-check logs the GCW so the BAT can confirm this mapping. C2712-safe.
+static bool AbilReadInvSlot(int idx, uint8_t* id, uint8_t* qty)
+{
+    __try {
+        uint8_t* inv = (uint8_t*)SAVEMAP_BASE + ITEM_INVENTORY_OFFSET;
+        *id  = inv[idx * 2];
+        *qty = inv[idx * 2 + 1];
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// Extract the refine preview ("N will refine into M <Magic>") from the decoded
+// GCW for the "/" reader. It sits between the selected ability name and the
+// party panel; anchor on "will refine into", walk back over the leading
+// "<count> " digits, and stop at the first party-name marker. Empty when the
+// highlighted item can't be refined (no preview rendered). std::string -> no __try.
+static std::string ParseRefinePreview(const std::string& dec)
+{
+    size_t w = dec.rfind("will refine into");
+    if (w == std::string::npos) return std::string();
+    size_t s = w;
+    while (s > 0 && dec[s - 1] == ' ') s--;
+    while (s > 0 && dec[s - 1] >= '0' && dec[s - 1] <= '9') s--;
+    size_t e = dec.size();
+    for (const char** m = HELP_END_MARKERS; *m; m++) {
+        size_t p = dec.find(*m, w);
+        if (p != std::string::npos && p < e) e = p;
+    }
+    if (e <= s) return std::string();
+    std::string out = dec.substr(s, e - s);
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+}
+
+// Refine item-list phase handler (Build 2). Announces the highlighted source
+// item's name + quantity (from the savemap inventory) on +0x2DF move; stashes
+// the refine preview for "/". std::string here -> the raw reads are isolated in
+// the SEH helpers above.
+static void PollAbilityItemList()
+{
+    DWORD now = GetTickCount();
+    if (now - s_abilItemPoll < 80) return;
+    s_abilItemPoll = now;
+
+    int cur = -1;
+    if (!AbilReadItemCursor(&cur)) return;
+    if (cur < 0 || cur >= 198) { s_abilItemSelValid = false; return; }
+
+    // Re-parse the refine preview each poll so the "/" reader tracks the cursor.
+    uint8_t gcw[1024];
+    int len = FieldDialog::SnapshotGcwBuffer(gcw, sizeof(gcw));
+    std::string dec = (len > 0) ? FF8TextDecode::DecodeMenuText(gcw, len) : std::string();
+    std::string preview = dec.empty() ? std::string() : ParseRefinePreview(dec);
+    s_abilItemSelValid = true;
+    snprintf(s_abilItemRefine, sizeof(s_abilItemRefine), "%s", preview.c_str());
+
+    uint8_t id = 0, qty = 0;
+    bool ok = AbilReadInvSlot(cur, &id, &qty);
+
+#if ABIL_DIAG
+    if (cur != s_abilItemLastCur) {
+        const char* dn = (ok && id) ? GetItemName(id) : "(none)";
+        Log::Menu("[ABILDIAG-ITEM] cur=%d invId=%u qty=%u name=\"%s\" preview=\"%s\"",
+                  cur, (unsigned)id, (unsigned)qty, dn ? dn : "?", s_abilItemRefine);
+        Log::Menu("[ABILDIAG-ITEM] gcw=\"%.300s\"", dec.c_str());
+    }
+#endif
+
+    if (cur == s_abilItemLastCur) return;   // announce only on a move
+    s_abilItemLastCur = cur;
+
+    char out[256];
+    if (!ok || id == 0) {
+        snprintf(out, sizeof(out), "Empty");
+    } else {
+        const char* nm = GetItemName(id);
+        if (nm) snprintf(out, sizeof(out), "%s, %u", nm, (unsigned)qty);
+        else    snprintf(out, sizeof(out), "Item %u, %u", (unsigned)id, (unsigned)qty);
+    }
+    ScreenReader::Speak(out, true);
+    Log::Menu("[MenuTTS] Refine item %d: id=%u qty=%u -> \"%s\"",
+              cur, (unsigned)id, (unsigned)qty, out);
+}
+
 // Dispatched from MenuTTS::Update() while mode==6 and top-level cursor == 5.
-// Build 1: the ability-list phase only.
+// Branches on +0x22E: ability-list phase (==3) vs refine item-list phase (>=19).
 static void PollAbilitySubmenu()
 {
     if (!s_abilActive) {
@@ -151,15 +263,31 @@ static void PollAbilitySubmenu()
     if (gate != ABIL_GATE_VALUE) return;          // not actually on the Ability screen
 
     if (phase != ABIL_PHASE_LIST) {
-        // Off the ability list (e.g. drilled into the refine item list — Build 2).
-        // Invalidate the "/" selection so it falls back to the normal help bar,
-        // and re-arm so returning to the list re-announces the current row.
-        s_abilSelValid = false;
-        s_abilLastSel  = -1;
-        s_abilPrev257  = -1;
-        s_abilPrev258  = -1;
+        if (phase >= ABIL_PHASE_ITEM_MIN) {
+            // Drilled into a selected ability's refine source-item list (Build 2).
+            // Re-arm the ability list for when we return; "/" now reads the refine
+            // preview (set inside PollAbilityItemList), not the ability help.
+            s_abilSelValid = false;
+            s_abilLastSel  = -1;
+            s_abilPrev257  = -1;
+            s_abilPrev258  = -1;
+            PollAbilityItemList();
+            return;
+        }
+        // Transitioning between phases / leaving — nothing to announce.
+        s_abilSelValid     = false;
+        s_abilItemSelValid = false;
+        s_abilLastSel     = -1;
+        s_abilPrev257     = -1;
+        s_abilPrev258     = -1;
+        s_abilItemLastCur = -1;
         return;
     }
+
+    // On the ability list: the refine item list isn't up, so "/" uses the ability
+    // help (not the refine preview).
+    s_abilItemSelValid = false;
+    s_abilItemLastCur  = -1;
 
     DWORD now = GetTickCount();
     if (now - s_abilPoll < 80) return;
@@ -256,7 +384,17 @@ static void PollAbilitySubmenu()
 // no description was captured. Char[]/snprintf/Speak only.
 static bool AbilitySpeakSelectedHelp()
 {
-    if (!s_abilActive || !s_abilSelValid) return false;
+    if (!s_abilActive) return false;
+    // Refine item list up: "/" reads the refine preview ("N will refine into M X").
+    if (s_abilItemSelValid) {
+        char out[256];
+        snprintf(out, sizeof(out), "%s",
+                 s_abilItemRefine[0] ? s_abilItemRefine : "No refine information");
+        ScreenReader::Speak(out, true);
+        Log::Menu("[MenuTTS] Refine info (/): \"%s\"", out);
+        return true;
+    }
+    if (!s_abilSelValid) return false;
     char out[256];
     if (s_abilSelDesc[0])
         snprintf(out, sizeof(out), "%s", s_abilSelDesc);

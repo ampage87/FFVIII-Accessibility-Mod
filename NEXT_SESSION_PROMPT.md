@@ -6,7 +6,7 @@ Start every response with `## Claude Says`. Read `DEVNOTES.md` and THIS file bef
 
 ## Where we are at session open
 
-**GitHub HEAD = v0.18.0.15 (`9102689`).** The GF submenu chapter is COMPLETE & PUSHED — #41 (GF screen) and #44 (learning-ability AP) both CLOSED as completed, verified row-by-row against the F11 screenshot. The accidental duplicate #40 (same title as #41) was closed as not-planned during this prep.
+**GitHub HEAD = v0.18.1.3 (`af7bf5b`) — Ability screen (#42) Build 1 (ability-list phase) PUSHED.** Parent v0.18.0.15 (`9102689`), the GF submenu chapter (#41 + #44, both CLOSED, verified row-by-row). The accidental duplicate #40 was closed as not-planned. **Build 1 shipped:** on the "Use GF ability" ability list, the highlighted ability name reads on cursor move, `/` reads its help, and empty padded slots say "Empty Ability Slot" (`/` repeats it). **Build 2 (refine item-list phase) WRITTEN — v0.18.1.4, awaiting BAT (local, NOT pushed):** item name + quantity on `+0x2DF` move (savemap inventory) and `/` reads the refine preview; `PollAbilitySubmenu` branches on `+0x22E` (==3 ability list / >=19 item list). `ABIL_DIAG=1` for the BAT (`[ABILDIAG-ITEM]` confirms the item-list==inventory-order assumption). On BAT: read build_latest.log (expect v0.18.1.4) + ff8_menu.log; if item names match the screen, flip ABIL_DIAG to 0 and push; else pivot to GCW item-name parsing. Build 2b later: greyed state + pagination.
 
 **THIS SESSION: the Ability screen (#42), top-level cursor index 5, under 0.18.1.x.** First bump this chapter: `FF8OPC_VERSION` -> `0.18.1.0` (+ matching new top `CHANGELOG.md` heading) when the first Ability build is ready. Versioning scheme (Aaron): 0.18.0.x = GF submenu (done), 0.18.1.x = Ability submenu, 0.18.3+ = other menus.
 
