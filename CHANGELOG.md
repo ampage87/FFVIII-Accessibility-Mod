@@ -6,6 +6,70 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.1.3
+
+Ability screen (#42) Build 1 — ability-list phase COMPLETE; diagnostics gated off.
+Confirmed in-game: highlighted ability name on cursor move, `/` reads the help
+description, and empty padded slots announce "Empty Ability Slot" (with `/`
+repeating it). `ABIL_DIAG` flipped to 0 (kept in place, never deleted). No
+behavior change from v0.18.1.2 — this is the clean, log-quiet build.
+
+Next: Build 2 — the refine item-list phase (`+0x22E ~19–21`, cursor `+0x2DF`):
+item name + quantity + greyed/eligible state on move, `/` for refine info.
+
+## v0.18.1.2
+
+Ability screen (#42) Build 1 — empty-slot handling. The ability list pads with
+focusable blank rows below the real abilities (BAT: cursor `+0x258` ran 0–10 with
+count=2, help="" on every empty row). `PollAbilitySubmenu` now classifies the
+focused row: cursor `< count` is a real ability; `count..63` is an empty slot.
+
+- An empty slot announces "Empty Ability Slot" on focus (deduped per row, so each
+  slot speaks once as it's entered), and the `/` key repeats "Empty Ability
+  Slot" while one is focused (its stashed help is blank, so the on-demand reader
+  falls back to the slot name).
+- This completes Build 1 (ability-list phase): name on move, `/` for help, empty
+  slots. `ABIL_DIAG` stays 1 for this confirmation BAT; flips to 0 next.
+
+## v0.18.1.1
+
+Ability screen (#42) Build 1 fix — ability-list parse. The v0.18.1.0 BAT showed
+the dispatch, gate (`+0x1E8==14`), phase (`+0x22E==3`), and cursor (`+0x258`) all
+working, but `[ABILDIAG]` logged `count=0` on every poll: the parser anchored on
+`rfind("Junction")`, and on this screen the menu bar scrolls so the GCW renders
+"GFAbilitySwitchCardConfigTutorialSave..." — Junction/Item/Magic/Status scrolled
+off — so the anchor was never found.
+
+- `ParseAbilityList` no longer uses any menu-token anchor. It forward-scans the
+  decoded GCW for the longest contiguous run of menu-ability names (ids 97–115),
+  which appear only in the list, and keeps the rightmost-longest run. Help text
+  is still sliced from the preceding "Save".
+- `ABIL_DIAG` stays 1 for this BAT to confirm the parse now yields the list
+  (expect `count=2 ids=[98,108]`); flip to 0 before push.
+
+## v0.18.1.0
+
+Main-menu Ability screen TTS (#42), Build 1 — the ability list. The Ability
+screen (top-level cursor 5) is the "Use GF ability" action screen (the *-RF
+refine family etc.), confirmed by the SUBMON discovery pass + 3 F11 shots; it is
+NOT a GF/AP/learn screen (that's the GF screen, #41). New `menu_tts_ability.inl`
+(textual include from `menu_tts.cpp`, after `menu_tts_gf.inl`) plus a
+`PollAbilitySubmenu()` dispatch gated on top-level cursor 5.
+
+- Gate `pMenuStateA+0x1E8 == 14`; ability-list phase `+0x22E == 3`; list cursor
+  `+0x258` (with `+0x257` read as a pagination fallback). Offsets confirmed in
+  the 2026-06-01 isolated SUBMON pass.
+- On a cursor move the highlighted ability NAME is announced (name only, per
+  request). The ability list is read from the rendered GCW (right-to-left
+  longest-match against the menu-ability id block 97–115, anchored on the next
+  "Junction" menu cycle), reusing the GF module's `GcwAbilityNames()`.
+- The `/` key reads that ability's help description on demand
+  (`AbilitySpeakSelectedHelp()`, chained after the GF learn-list `/` handler);
+  it returns false off this screen so the normal help bar still works elsewhere.
+- `ABIL_DIAG` logging is ON for this build to confirm the GCW parse against the
+  BAT (logs phase / +0x257 / +0x258 / parsed ids / help); flip to 0 before push.
+- Build 2 will add the refine item-list phase (`+0x22E ~19–21`, cursor `+0x2DF`).
+
 ## v0.18.0.15
 
 GF learn-list readout polish (#44):

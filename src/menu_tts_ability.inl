@@ -1,0 +1,268 @@
+// menu_tts_ability.inl — Main-menu Ability screen TTS (#42), v0.18.1 chapter
+// Included from menu_tts.cpp AFTER menu_tts_gf.inl so it can reuse
+// GcwAbilityNames(), NormalizeAbilityToGcw(), GetAbilityName(), ABILITY_NAMES,
+// pMenuStateA, and the Log/ScreenReader/FieldDialog/FF8TextDecode facilities.
+// Do not compile independently.
+//
+// The main-menu "Ability" screen (top-level cursor 5) is the "Use GF ability"
+// ACTION screen — using a GF menu/command ability (the *-RF refine family plus
+// Med LV Up / Card Mod) from the menu. It is NOT a GF-pick / category / AP-learn
+// screen — that is the GF screen (#41, done). Confirmed offsets (BAT 2026-06-01,
+// isolated SUBMON pass), all relative to pMenuStateA:
+//   +0x1E8 == 14         : Ability screen active (gate; analog of GF==4 / Junc==17)
+//   +0x22E               : phase — 3 = ability list ; ~19–21 = selected ability's
+//                          refine item list (Build 2)
+//   +0x258 (+0x257 page) : ability-list cursor (0-based). +0x258 confirmed toggling
+//                          0<->1 in lockstep with the help-text swap between the two
+//                          abilities; +0x257 read too in case longer lists paginate.
+//   +0x2DF               : refine item-list cursor (Build 2)
+//
+// Build 1 (v0.18.1.0): the ABILITY-LIST phase only. Announce the highlighted
+// ability NAME on cursor move; the "/" key reads its help description on demand
+// (mirrors the GF learn-list name-on-move / "/"-for-help split, per Aaron).
+// Build 2 (v0.18.1.1) adds the refine item-list (+0x2DF, phase ~19–21).
+
+// First-build confirmation logging. Gated off post-confirmation (v0.18.1.3);
+// never delete — flip to 1 to re-validate the GCW parse / cursor classification.
+#define ABIL_DIAG 0
+
+static const int ABIL_GATE_OFFSET   = 0x1E8;   // == 14 on the Ability screen
+static const int ABIL_PHASE_OFFSET  = 0x22E;   // 3 = ability list
+static const int ABIL_CURSOR_P1_OFF = 0x257;   // ability-list cursor (page 1 candidate)
+static const int ABIL_CURSOR_P2_OFF = 0x258;   // ability-list cursor (confirmed)
+static const int ABIL_GATE_VALUE    = 14;      // +0x1E8 value on this screen
+static const int ABIL_PHASE_LIST    = 3;       // +0x22E value on the ability list
+
+// Menu-usable ("Use GF ability") ability id block: the *-RF refine family (97–113)
+// plus Med LV Up (114) and Card Mod (115). Restricting the GCW name match to this
+// block avoids colliding with menu-item tokens (GF/Item/Magic/Card = ids 20–25)
+// and battle-only command abilities, which matters because these names contain
+// internal spaces ("I Mag-RF"). Anything outside this range that ever shows up on
+// the screen will surface as an unmatched/short list under ABIL_DIAG.
+static const int ABIL_MENU_ID_LO = 97;
+static const int ABIL_MENU_ID_HI = 115;
+
+static bool  s_abilActive  = false;   // on the Ability screen (top-level cursor 5)
+static int   s_abilLastSel = -1;      // last announced ability-list index (dedupe)
+static int   s_abilPrev257 = -1;
+static int   s_abilPrev258 = -1;
+static DWORD s_abilPoll    = 0;
+
+// (/) on-demand help: the ability currently under the list cursor. Valid only
+// while the ability list is up (cleared off it) so "/" falls back to the normal
+// help-bar reader everywhere else.
+static bool s_abilSelValid     = false;
+static char s_abilSelName[64]  = {};
+static char s_abilSelDesc[192] = {};
+
+static void ResetAbilitySubmenuState()
+{
+    s_abilActive  = false;
+    s_abilLastSel = -1;
+    s_abilPrev257 = -1;
+    s_abilPrev258 = -1;
+    s_abilPoll    = 0;
+    s_abilSelValid    = false;
+    s_abilSelName[0]  = '\0';
+    s_abilSelDesc[0]  = '\0';
+}
+
+// SEH raw read of the gate / phase / cursor bytes. No C++ objects (C2712-safe).
+static bool AbilReadState(int* gate, int* phase, int* cur257, int* cur258)
+{
+    __try {
+        uint8_t* ms = (uint8_t*)pMenuStateA;
+        if (ms == nullptr) return false;
+        *gate   = (int)ms[ABIL_GATE_OFFSET];
+        *phase  = (int)ms[ABIL_PHASE_OFFSET];
+        *cur257 = (int)ms[ABIL_CURSOR_P1_OFF];
+        *cur258 = (int)ms[ABIL_CURSOR_P2_OFF];
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// Parse the displayed ability list out of the decoded GCW. The menu-ability
+// names (ids 97–115) appear ONLY in the ability list — never in the menu bar
+// ("GF"/"Item"/"Magic"/"Card" are ids 20–25, excluded) nor in the help text —
+// so the list is simply the longest contiguous run of those names in the
+// buffer. We FORWARD-SCAN and keep the rightmost-longest run; no reliance on a
+// menu-token anchor (the menu bar scrolls — when the cursor sits on Ability the
+// bar renders "GFAbilitySwitchCardConfigTutorialSave...", with Junction/Item/
+// Magic/Status scrolled off, so an earlier "Junction"-anchored parse found
+// nothing). Fills outIds in display order; *outListStart = decoded index where
+// row 0 begins (used to slice the preceding help text). std::string -> no __try.
+static int ParseAbilityList(const std::string& dec, uint8_t outIds[], int maxOut,
+                            size_t* outListStart)
+{
+    *outListStart = std::string::npos;
+    const std::vector<std::string>& names = GcwAbilityNames();
+
+    uint8_t best[64]; int bestN = 0; size_t bestStart = std::string::npos;
+    size_t i = 0;
+    while (i < dec.size()) {
+        // Longest menu-ability name matching at i (decides whether a run starts).
+        int    mid = -1; size_t mlen = 0;
+        for (int id = ABIL_MENU_ID_LO; id <= ABIL_MENU_ID_HI; id++) {
+            const std::string& nm = names[id];
+            size_t len = nm.size();
+            if (len == 0 || len <= mlen || i + len > dec.size()) continue;
+            if (dec.compare(i, len, nm) == 0) { mid = id; mlen = len; }
+        }
+        if (mid < 0) { i++; continue; }
+        // Extend a run of back-to-back ability names from here.
+        uint8_t run[64]; int rn = 0; size_t runStart = i;
+        size_t j = i;
+        while (j < dec.size() && rn < 64) {
+            int    rid = -1; size_t rlen = 0;
+            for (int id = ABIL_MENU_ID_LO; id <= ABIL_MENU_ID_HI; id++) {
+                const std::string& nm = names[id];
+                size_t len = nm.size();
+                if (len == 0 || len <= rlen || j + len > dec.size()) continue;
+                if (dec.compare(j, len, nm) == 0) { rid = id; rlen = len; }
+            }
+            if (rid < 0) break;
+            run[rn++] = (uint8_t)rid;
+            j += rlen;
+        }
+        if (rn >= bestN) {                 // rightmost run of the max length wins
+            bestN = rn; bestStart = runStart;
+            for (int k = 0; k < rn; k++) best[k] = run[k];
+        }
+        i = (j > i) ? j : i + 1;
+    }
+    if (bestN <= 0) return 0;
+    *outListStart = bestStart;
+    int count = (bestN < maxOut) ? bestN : maxOut;
+    for (int k = 0; k < count; k++) outIds[k] = best[k];
+    return count;
+}
+
+// Dispatched from MenuTTS::Update() while mode==6 and top-level cursor == 5.
+// Build 1: the ability-list phase only.
+static void PollAbilitySubmenu()
+{
+    if (!s_abilActive) {
+        s_abilActive = true;
+        Log::Menu("[ABILITY] entered Ability screen (top-level cursor 5)");
+    }
+
+    int gate = -1, phase = -1, c257 = -1, c258 = -1;
+    if (!AbilReadState(&gate, &phase, &c257, &c258)) return;
+    if (gate != ABIL_GATE_VALUE) return;          // not actually on the Ability screen
+
+    if (phase != ABIL_PHASE_LIST) {
+        // Off the ability list (e.g. drilled into the refine item list — Build 2).
+        // Invalidate the "/" selection so it falls back to the normal help bar,
+        // and re-arm so returning to the list re-announces the current row.
+        s_abilSelValid = false;
+        s_abilLastSel  = -1;
+        s_abilPrev257  = -1;
+        s_abilPrev258  = -1;
+        return;
+    }
+
+    DWORD now = GetTickCount();
+    if (now - s_abilPoll < 80) return;
+    s_abilPoll = now;
+
+    uint8_t gcw[1024];
+    int len = FieldDialog::SnapshotGcwBuffer(gcw, sizeof(gcw));
+    if (len <= 0) return;
+    std::string dec = FF8TextDecode::DecodeMenuText(gcw, len);
+    if (dec.empty()) return;
+
+    uint8_t ids[64];
+    size_t  listStart = std::string::npos;
+    int count = ParseAbilityList(dec, ids, 64, &listStart);
+
+    // Help description = the text between the menu bar's trailing "Save" and the
+    // first ability row (e.g. "Refine Water/Ice Magic from an item").
+    std::string desc;
+    if (listStart != std::string::npos && listStart > 0) {
+        size_t sp = dec.rfind("Save", listStart);
+        if (sp != std::string::npos) {
+            size_t ds = sp + 4;
+            if (listStart > ds) desc = dec.substr(ds, listStart - ds);
+        }
+    }
+
+    bool ch257 = (c257 != s_abilPrev257);
+    bool ch258 = (c258 != s_abilPrev258);
+
+#if ABIL_DIAG
+    if (ch257 || ch258 || s_abilLastSel < 0) {
+        char lst[256]; int lp = 0;
+        for (int i = 0; i < count && lp < 240; i++)
+            lp += snprintf(lst + lp, sizeof(lst) - lp, "%u%s",
+                           (unsigned)ids[i], (i + 1 < count) ? "," : "");
+        Log::Menu("[ABILDIAG] phase=%d 257=%d 258=%d count=%d ids=[%s] help=\"%s\"",
+                  phase, c257, c258, count, lst, desc.c_str());
+    }
+#endif
+
+    s_abilPrev257 = c257;
+    s_abilPrev258 = c258;
+
+    if (count <= 0) return;   // parse miss (captured under ABIL_DIAG); nothing to say
+
+    // Resolve the active cursor value: whichever byte just moved (prefer the
+    // confirmed +0x258), else the current +0x258 when nothing has been announced
+    // yet (fresh entry; +0x258 is true on the first poll because prev == -1).
+    int cur = -1;
+    if      (ch258) cur = c258;
+    else if (ch257) cur = c257;
+    else if (s_abilLastSel < 0) cur = c258;
+    if (cur < 0) return;
+
+    // Classify the focused row. 0..count-1 = a real ability; count..63 = an empty
+    // slot (the list area pads with focusable blank rows below the abilities —
+    // confirmed in the BAT reaching index 10 with count=2, help=""). >=64 is noise.
+    // Dedupe key: real row -> its index; empty row -> 200 + index (so each empty
+    // slot announces once as it's entered, and never collides with a real row).
+    int  key;
+    bool emptySlot;
+    if      (cur < count) { key = cur;       emptySlot = false; }
+    else if (cur < 64)    { key = 200 + cur; emptySlot = true;  }
+    else return;
+
+    if (key == s_abilLastSel) return;     // announce only on a real change
+    s_abilLastSel = key;
+
+    if (!emptySlot) {
+        uint8_t id = ids[cur];
+        const char* nm = GetAbilityName(id);
+        // Stash for the "/" on-demand help re-read (help text; name as fallback).
+        s_abilSelValid = true;
+        snprintf(s_abilSelName, sizeof(s_abilSelName), "%s", nm ? nm : "Unknown");
+        snprintf(s_abilSelDesc, sizeof(s_abilSelDesc), "%s", desc.c_str());
+        ScreenReader::Speak(nm ? nm : "Unknown", true);
+        Log::Menu("[MenuTTS] Ability row %d/%d: id=%u \"%s\"",
+                  cur, count, (unsigned)id, nm ? nm : "Unknown");
+    } else {
+        // Empty slot: announce it, and stash it so "/" repeats "Empty Ability
+        // Slot" (AbilitySpeakSelectedHelp falls back to the name when desc empty).
+        s_abilSelValid = true;
+        snprintf(s_abilSelName, sizeof(s_abilSelName), "Empty Ability Slot");
+        s_abilSelDesc[0] = '\0';
+        ScreenReader::Speak("Empty Ability Slot", true);
+        Log::Menu("[MenuTTS] Ability row %d/%d: empty slot", cur, count);
+    }
+}
+
+// (/) On-demand help for the ability under the list cursor. Bound after the GF
+// handler in MenuTTS::Update(); returns true when it spoke so every other screen
+// falls back to the normal help bar. Speaks the help description only (no name
+// repeat — the row announce already gave the name); falls back to the name when
+// no description was captured. Char[]/snprintf/Speak only.
+static bool AbilitySpeakSelectedHelp()
+{
+    if (!s_abilActive || !s_abilSelValid) return false;
+    char out[256];
+    if (s_abilSelDesc[0])
+        snprintf(out, sizeof(out), "%s", s_abilSelDesc);
+    else
+        snprintf(out, sizeof(out), "%s", s_abilSelName);
+    ScreenReader::Speak(out, true);
+    Log::Menu("[MenuTTS] Ability help (/): \"%s\"", out);
+    return true;
+}

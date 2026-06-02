@@ -538,6 +538,9 @@ void MenuTTS::Initialize()
 // --- Main-menu GF screen TTS / discovery (#41, v0.18.0) ---
 #include "menu_tts_gf.inl"
 
+// --- Main-menu Ability screen TTS (#42, v0.18.1) ---
+#include "menu_tts_ability.inl"
+
 void MenuTTS::Update()
 {
     if (!s_initialized) return;
@@ -600,7 +603,7 @@ void MenuTTS::Update()
         // re-read the help of the ability under the cursor instead (#3); the
         // helper returns false off that list so the normal help bar still works.
         if (GetAsyncKeyState(VK_OEM_2) & 1) {
-            if (!GFSpeakSelectedAbilityHelp())
+            if (!GFSpeakSelectedAbilityHelp() && !AbilitySpeakSelectedHelp())
                 AnnounceHelpText();
         }
     }
@@ -667,6 +670,7 @@ void MenuTTS::Update()
         s_submonActive = false;
         ResetItemSubmenuState();  // v0.08.29
         ResetGFSubmenuState();    // v0.18.0 (#41)
+        ResetAbilitySubmenuState(); // v0.18.1 (#42)
         Log::Menu("[MenuTTS] Menu opened (mode 6)");
         
 
@@ -746,6 +750,13 @@ void MenuTTS::Update()
                 PollGFSubmenu();
             } else if (s_prevCursor != 4 && s_gfActive) {
                 ResetGFSubmenuState();
+            }
+
+            // v0.18.1 (#42): Ability screen TTS (top-level cursor == 5)
+            if (s_prevCursor == 5 && !s_itemSubmenuActive) {
+                PollAbilitySubmenu();
+            } else if (s_prevCursor != 5 && s_abilActive) {
+                ResetAbilitySubmenuState();
             }
         }
         
