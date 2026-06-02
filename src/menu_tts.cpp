@@ -331,6 +331,8 @@ static DWORD    s_pendingActionTime = 0;            // GetTickCount when pending
 // v0.08.62: Item sub-flow state tracking
 // Use target: focus==14, +0x276 party cursor. Rearrange: focus~97, +0x272. Sort: focus flash 79. Battle: focus~30, +0x285.
 static uint8_t  s_prevTargetCursor = 0xFF;          // tracks +0x276 during Use target selection
+static uint8_t  s_prevTargetCharIdx = 0xFF;         // v0.18.2.7 (#10): char whose HP the Use-target poll is tracking
+static uint16_t s_prevTargetHP = 0xFFFF;            // v0.18.2.7 (#10): last announced Use-target curHP (re-announce on change)
 static uint8_t  s_prevBattleItemCursor = 0xFF;      // tracks +0x285 during Battle items
 static bool     s_inUseTargetMode = false;           // true when focus==14 (Use target selection)
 static bool     s_inRearrangeMode = false;           // true when focus stabilized ~97

@@ -6,6 +6,110 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.2.10
+
+Item > Use target — full-roster party list (issue #46); diagnostics removed.
+
+The v0.18.2.9 diagnostic pinned the source. The Use-target list reads from an
+0xFF-terminated roster array of char indices at `pMenuStateA +0x1DB` (BAT:
+`[1,0,5,3,FF…]` = Zell, Squall, Selphie, Quistis) and the screen renders it sorted
+by character index. The previous code read the 3-member battle formation at
+`+0xAF0`, so a 4th roster member (Quistis) was missing — which also shifted slots
+2 and 3 (the BAT "Selphie" at slot 3 was really Quistis, and the Unknown 4th was
+really Selphie; a Potion errored on slot 3 because Quistis was at full HP).
+
+`GetPartyCharAtVisualPos` now collects the roster from `+0x1DB` (stopping at 0xFF),
+sorts by character index, and maps the cursor — yielding Squall, Zell, Quistis,
+Selphie (0,1,3,5), matching the screen. It falls back to the battle formation only
+if the roster array is unreadable (a safety net). NB: the Use screen lists every
+*available* (joined) character, not the 3-member battle party — here that's 4
+(Rinoa and Irvine haven't joined yet) — and the read grows as characters join.
+The HP-after-use fix from v0.18.2.9 is retained (curHP from savemap, maxHP from
+computed stats), confirmed working for Squall and Zell. All `[ItemDiag]`
+diagnostics are removed.
+
+BAT: menu > Item > Use target — expect Squall, Zell, Quistis, Selphie named
+correctly across the four slots, a Potion accepted on a wounded one with the new
+HP spoken, and no "Unknown". Closes #10 and #46 on confirm.
+
+## v0.18.2.9
+
+Item > Use target — HP-after-use FIX (issue #10) + roster diagnostic (issue #46).
+
+The v0.18.2.8 diagnostic settled the HP question: after a Potion on Squall, the
+savemap curHP read 536 (live, +200) while the computed-stats curHP stayed 336
+(stale until the Item screen is rebuilt). `GetCharacterHP` was overriding curHP
+with the stale computed value. Fix: in `GetCharacterHP`, keep **curHP from the
+savemap** (it updates live on an in-menu item use) and take only **maxHP from the
+computed-stats array** (FF8 derives max HP at runtime; the savemap char struct
+stores 0 for it). This also makes the v0.18.2.7 live re-announce work — the
+Use-target poll now sees the HP change and re-speaks it after each use.
+
+Roster (#46) is now understood but not yet fixed here. The GCW render order proved
+the Use screen lists the **full party roster sorted by char index** (Squall, Zell,
+Quistis, Selphie = 0,1,3,5), not the 3-member battle formation we read from
+`+0xAF0`. The roster set {0,1,3,5} was found in `pMenuStateA` (`+0x1DB`, `+0x6FA`).
+To avoid regressing the common 3-member case, this build does not yet switch the
+source; it widens the `[ItemDiag]` capture to dump the `+0x1DB`/`+0x6FA` array
+windows (length/terminator) and log those arrays against the live cursor on each
+move, so the roster fix can be implemented safely next.
+
+BAT: menu > Item > Use a Potion on a wounded member and stay on them — expect the
+new HP spoken right after the use (issue #10). Then move the cursor across all
+four members and back out. `[ItemDiag]` lines (read from the log) will show the
+`+0x1DB` array structure for the #46 fix. #10 closes on confirm; #46 stays open.
+
+## v0.18.2.8
+
+Item > Use target — DIAGNOSTIC for two BAT findings on v0.18.2.7 (issue #10 + Task 3).
+
+The v0.18.2.7 HP-on-use fix did not work, and BAT surfaced a second, separate bug:
+
+1. HP still stale after a Potion. The fix re-reads HP via `GetCharacterHP`, which
+   prefers the computed-stats array (0x1CFF000); that array evidently is not
+   updated by an in-menu item use, so there is no change to detect (it only
+   re-syncs when the Item screen is re-entered).
+2. A 4-member Use list (Squall, Zell, Selphie, Quistis) reads the 4th as Unknown.
+   The list is built from the 3-member battle formation at +0xAF0, but the Use
+   screen lists the full party roster, so the 4th member isn't in our source.
+
+This build adds an auto-running `[ItemDiag]` (no key) active only on the Use-target
+screen. On entry it scans pMenuStateA and the savemap for a 4-byte run that is a
+permutation of {0,1,3,5} (the present roster char indices) to locate the real list
+array and its on-screen order, and dumps the cursor/formation windows. Every 400 ms
+it logs savemap vs computed-stats HP for Squall and the current target, so using a
+Potion reveals which source updates live in the menu. No behaviour change beyond
+logging; the v0.18.2.7 announce path stays (inert until the HP source is fixed).
+
+BAT: menu > Item > Use a Potion on Squall; wait ~2 s; scroll across all four
+members; back out. Then read `Logs/ff8_menu.log` for `[ItemDiag]` lines — the
+roster run offset(s) and the HP source that changed after the Potion. #10 stays
+open.
+
+## v0.18.2.7
+
+Item > Use target — live HP re-announce after using an item (issue #10, Task 3).
+
+On the Use-target party list, the only thing that triggered a re-announce was the
+cursor moving to a different character. Using an item keeps the cursor on the same
+target, so even though the character's HP updates, nothing re-read or re-spoke it
+until the player backed out of the target list and came back — the player heard
+stale HP after every potion.
+
+The Use-target poll now reads the selected character's current HP every frame and
+re-announces (name + HP + any status) when it changes from the value last spoken,
+in addition to the existing cursor-move announce. The change is gated to the same
+character under the cursor (so it can't fire off a stale comparison), and the HP
+baseline is captured on entry to the target list and reset whenever the item
+submenu or a sub-flow resets, so a fresh selection never produces a phantom
+announce. Fully automated — no key press needed; works for single or repeated uses.
+
+BAT: menu > Item > Use a healing item (Potion etc.) > select a wounded party
+member and confirm one or more uses without moving off them. Expect the new HP to
+be spoken after each use (e.g. "Squall, HP 580 of 580"). Moving between members
+still announces as before. Log: `[MenuTTS] Use target cursor N: charIdx=.. hp=X/Y
+... (HP changed)` on each use. Closes #10 on confirm.
+
 ## v0.18.2.6
 
 Junction Auto submenu — reliable "junctioned automatically" confirmation (Task 1).
