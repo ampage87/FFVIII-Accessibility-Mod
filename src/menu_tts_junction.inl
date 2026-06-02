@@ -54,9 +54,137 @@ static uint8_t  s_abilLastLeftCursor = 0;  // tracks which left slot was last ac
 static uint16_t s_juncCachedGfMasks[8] = {}; // v0.09.49: GF bitmasks for ALL chars, cached at Junction entry (game zeroes them during editing)
 static uint8_t  s_juncSelectedCharIdx = 0xFF;  // v0.09.49: cached charIdx from char select (formation array gets rewritten during editing)
 
+// v0.18.2.1: J-Auto submenu. From the action menu (Junction/Off/Auto) confirming
+// "Auto" opens a 3-option submenu that auto-junctions the character's magic to
+// optimize a stat. Confirmed by SUBMON (BAT 2026-06-02): focus (+0x22E) settles
+// at 11 and stays there while navigating; the option cursor is +0x26A (0/1/2) and
+// the GCW help line tracked it exactly ("Junction magic to up Str/Mag/HP").
+static const int JUNC_AUTO_FOCUS      = 11;     // +0x22E value on the Auto submenu
+static const int JUNC_AUTO_CURSOR_OFF = 0x26A;  // option cursor (0=Atk,1=Mag,2=Def)
+static const int JUNC_AUTO_OPT_COUNT  = 3;
+static const char* const JUNC_AUTO_OPT_NAMES[] = { "Attack", "Magic", "Defense" };
+// Help (read on "/", like the GF/Ability menus): the game's help-bar text per option.
+static const char* const JUNC_AUTO_OPT_HELP[] = {
+    "Junctions magic to raise Strength.",
+    "Junctions magic to raise Magic.",
+    "Junctions magic to raise HP."
+};
+static uint8_t s_juncPrevAutoCursor = 0xFF;     // previous Auto submenu cursor
+static bool    s_juncAutoConfirmPending = false; // Auto option confirmed; speak confirmation when the action menu settles
+static uint8_t s_juncAutoConfirmOpt     = 0xFF;  // which Auto option (0/1/2) was confirmed
+// v0.18.2.6: apply-detection via the auto-junction routine itself. Confirm and
+// cancel of the Auto submenu are byte-identical in the focus path (11 -> 8 -> 3),
+// so apply/cancel can't be read from menu state. BAT (2026-06-02) proved the game
+// routine at 0x004BE790 that rewrites the working junction array runs on a CONFIRM
+// (even a no-op confirm that changes nothing) and does NOT run on a CANCEL. The HW
+// write-BP below sets this flag from inside that routine while the Auto submenu is
+// focused (+0x22E==11); the action-menu resolution reads it: set => confirm
+// (announce), clear => cancel (silent). Replaces the v0.18.2.3 magic-changed
+// snapshot, which was silent on no-op confirms (Aaron: "reads as broken").
+static volatile bool s_juncAutoRoutineRan = false;
+
+
+// ============================================================================
+// v0.18.2.6 — auto-junction CONFIRM detector (HW write BP on the working byte)
+// ============================================================================
+// v0.18.2.4 BAT proved the menu module does NOT update pEngineInputConfirmedButtons
+// (zero [JuncBtnDiag] lines across a full Auto session), so the engine button
+// bitmask can't tell us a confirm happened. Instead we find the routine that
+// rearranges the magic: on a confirm it writes the menu's working junction array
+// at pMenuStateA+0x6C2 (BAT log: 0x6C2 0->18, 0x6C4 32->0). A 1-byte hardware
+// WRITE breakpoint on that fixed address fires INSIDE the auto-junction routine.
+// We log EIP + registers + FF8-.text stack return addresses; the return addresses
+// sets s_juncAutoRoutineRan when it fires while the Auto submenu is focused. DR3
+// is used (DR0/1/2 are the battle BPs); each VEH checks its own DR6 bit so they
+// coexist. Armed on Junction-menu activation, dropped on Junction reset. This is
+// now load-bearing (the apply/cancel signal), not a throwaway diagnostic.
+static const int      JUNC_AUTO_WORK_OFF = 0x6C2;   // working junction byte the routine writes
+static volatile bool  s_juncAutoBPArmed  = false;
+static PVOID          s_juncAutoBPVEH    = nullptr;
+static uint32_t       s_juncAutoBPTarget = 0;       // resolved pMenuStateA + 0x6C2
+
+static LONG CALLBACK JuncAutoBP_VEH(PEXCEPTION_POINTERS pEx)
+{
+    if (pEx->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP)
+        return EXCEPTION_CONTINUE_SEARCH;
+    if (!((DWORD)pEx->ContextRecord->Dr6 & 0x08))  // DR3 condition bit — not our hit
+        return EXCEPTION_CONTINUE_SEARCH;
+    pEx->ContextRecord->Dr6 &= ~0x0F;  // acknowledge
+
+    // The write fires from inside the game's auto-junction routine (0x004BE790),
+    // which runs on a CONFIRM of the Auto submenu (including a no-op confirm) and
+    // NOT on a cancel. Gate on the Auto submenu being focused (+0x22E==11) so the
+    // same byte's menu-load / manual-junction writes don't trip the flag.
+    __try {
+        if (pMenuStateA && ((uint8_t*)pMenuStateA)[0x22E] == 11)
+            s_juncAutoRoutineRan = true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static void JuncAutoBP_SetAllThreads(bool arm)
+{
+    DWORD pid = GetCurrentProcessId();
+    DWORD myTid = GetCurrentThreadId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 te; te.dwSize = sizeof(te);
+    int done = 0;
+    if (Thread32First(snap, &te)) {
+        do {
+            if (te.th32OwnerProcessID != pid) continue;
+            HANDLE h = OpenThread(
+                THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT,
+                FALSE, te.th32ThreadID);
+            if (!h) continue;
+            bool isSelf = (te.th32ThreadID == myTid);
+            if (!isSelf) SuspendThread(h);
+            CONTEXT ctx; ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+            if (GetThreadContext(h, &ctx)) {
+                if (arm) {
+                    ctx.Dr3 = s_juncAutoBPTarget;
+                    ctx.Dr7 &= ~((DWORD)0x40 | ((DWORD)0x0F << 28)); // clear L3 + RW3 + LEN3
+                    ctx.Dr7 |= (DWORD)0x40;                          // L3 local enable (bit 6)
+                    ctx.Dr7 |= ((DWORD)0x01 << 28);                  // RW3 = 01 (write-only)
+                    // LEN3 = 00 (1 byte)
+                } else {
+                    ctx.Dr3 = 0;
+                    ctx.Dr7 &= ~((DWORD)0x40 | ((DWORD)0x0F << 28));
+                }
+                if (SetThreadContext(h, &ctx)) done++;
+            }
+            if (!isSelf) ResumeThread(h);
+            CloseHandle(h);
+        } while (Thread32Next(snap, &te));
+    }
+    CloseHandle(snap);
+    Log::Menu("[JuncAutoBP] %s DR3 on 0x%08X (1-byte write) — threads=%d",
+               arm ? "armed" : "disarmed", s_juncAutoBPTarget, done);
+}
+
+static void JuncAutoBP_Arm()
+{
+    if (s_juncAutoBPArmed) return;
+    if (!pMenuStateA) return;
+    if (!s_juncAutoBPVEH) {
+        s_juncAutoBPVEH = AddVectoredExceptionHandler(1, JuncAutoBP_VEH);
+        Log::Menu("[JuncAutoBP] VEH registered: 0x%08X", (uint32_t)(uintptr_t)s_juncAutoBPVEH);
+    }
+    s_juncAutoBPTarget = (uint32_t)(uintptr_t)((uint8_t*)pMenuStateA + JUNC_AUTO_WORK_OFF);
+    JuncAutoBP_SetAllThreads(true);
+    s_juncAutoBPArmed = true;
+}
+
+static void JuncAutoBP_Disarm()
+{
+    if (!s_juncAutoBPArmed) return;
+    JuncAutoBP_SetAllThreads(false);
+    s_juncAutoBPArmed = false;
+}
 
 static void ResetJunctionState()
 {
+    JuncAutoBP_Disarm();  // v0.18.2.6: drop the HW write BP when the Junction state resets
     s_juncActive = false;
     s_juncPrevCharCursor = 0xFF;
     s_juncPrevFocus = 0xFF;
@@ -72,6 +200,10 @@ static void ResetJunctionState()
     s_abilLastLeftCursor = 0;
     memset(s_juncCachedGfMasks, 0, sizeof(s_juncCachedGfMasks));
     s_juncSelectedCharIdx = 0xFF;
+    s_juncPrevAutoCursor = 0xFF;
+    s_juncAutoConfirmPending = false;
+    s_juncAutoConfirmOpt     = 0xFF;
+    s_juncAutoRoutineRan     = false;
 }
 
 // Compute character level from EXP. FF8: each level needs 1000 EXP flat.
@@ -363,6 +495,7 @@ static void PollJunctionSubmenu()
                            (unsigned)s_juncCachedGfMasks[6], (unsigned)s_juncCachedGfMasks[7]);
             }
             Log::Menu("[JuncTTS] Junction subsystem activated (+0x1E8=17)");
+            JuncAutoBP_Arm();  // v0.18.2.6: arm the HW write BP that detects Auto-submenu confirms
         }
         
         // Detect Junction subsystem deactivation
@@ -378,7 +511,7 @@ static void PollJunctionSubmenu()
         if (!s_juncActive) return;
         
         // DEBUG: Log unhandled focus states
-        if (focus != 0 && focus != 3 && focus != 8 && focus != 37 && focus != 38 && focus != 41 &&
+        if (focus != 0 && focus != 3 && focus != 8 && focus != 11 && focus != 37 && focus != 38 && focus != 41 &&
             !(focus >= 20 && focus <= 28)) {
             static uint8_t s_lastLoggedFocus = 0xFF;
             if (focus != s_lastLoggedFocus) {
@@ -388,6 +521,21 @@ static void PollJunctionSubmenu()
             }
         }
         
+        // ---- Auto submenu CLOSED — resolve apply vs cancel at the action menu ----
+        // Confirm and cancel both leave the Auto submenu (focus 11) via the same
+        // path (11 -> char-select 8 -> action menu 3), so the focus path can't tell
+        // them apart. Mark "pending" on the way out and decide at the action menu
+        // (focus==3 block) from whether the auto-junction routine ran (the HW
+        // write-BP flag). While pending, the
+        // char-select re-announce is muted so it can't precede the confirmation.
+        if (s_juncPrevFocus == JUNC_AUTO_FOCUS && (focus == 0 || focus == 8) &&
+            s_juncPrevAutoCursor < JUNC_AUTO_OPT_COUNT) {
+            s_juncAutoConfirmPending = true;
+            s_juncAutoConfirmOpt     = s_juncPrevAutoCursor;
+            Log::Menu("[JuncTTS] AutoMenu closed: opt=%u (focus %u->%u), awaiting apply check",
+                       (unsigned)s_juncAutoConfirmOpt, (unsigned)s_juncPrevFocus, (unsigned)focus);
+        }
+
         // ---- Ability Screen (focus 20-28 range) ----
         // v0.09.45: Confirmed via v0.09.44 diagnostic:
         //   LEFT panel:  focus=28, cursor at +0x271 (equipped command/ability slots)
@@ -478,7 +626,11 @@ static void PollJunctionSubmenu()
         // focus=0 is the normal char select on first entry.
         if (focus == 0 || focus == 8) {
             uint8_t charCursor = base[JUNC_CHARSEL_CURSOR_OFF];
-            if (charCursor <= 2 && charCursor != s_juncPrevCharCursor) {
+            if (s_juncAutoConfirmPending) {
+                // Auto submenu just closed; this char-select hop is transient and
+                // resolves at the action menu. Stay silent and keep prev in sync.
+                s_juncPrevCharCursor = charCursor;
+            } else if (charCursor <= 2 && charCursor != s_juncPrevCharCursor) {
                 AnnounceJuncCharSelect(charCursor);
                 // v0.09.49: Cache the resolved charIdx NOW, while formation is still intact.
                 // The engine rewrites the formation array once Junction editing starts.
@@ -496,9 +648,37 @@ static void PollJunctionSubmenu()
         // ---- Action Menu (focus == 3) ----
         if (focus == 3) {
             uint8_t actionCursor = base[JUNC_ACTION_CURSOR_OFF];
-            
+            bool spokeConfirm = false;
+
+            // Resolve a just-closed Auto submenu. The HW write-BP set
+            // s_juncAutoRoutineRan iff the game's auto-junction routine ran while
+            // the submenu was focused, which happens on a CONFIRM (even a no-op
+            // confirm) and never on a cancel. Set => speak the confirmation (and
+            // suppress the action re-announce). Clear => it was a cancel; say
+            // nothing here and let the normal action announce run below.
+            if (s_juncAutoConfirmPending) {
+                bool applied = s_juncAutoRoutineRan;
+                if (applied) {
+                    const char* opt = (s_juncAutoConfirmOpt < JUNC_AUTO_OPT_COUNT)
+                                      ? JUNC_AUTO_OPT_NAMES[s_juncAutoConfirmOpt] : "";
+                    char abuf[64];
+                    sprintf(abuf, "Junctioned automatically for %s", opt);
+                    ScreenReader::Speak(abuf, true);
+                    Log::Menu("[JuncTTS] AutoApplied: %s (confirm detected)", opt);
+                    s_juncPrevActionCursor = actionCursor;  // suppress the action re-announce
+                    spokeConfirm = true;
+                } else {
+                    Log::Menu("[JuncTTS] AutoMenu cancelled (auto-junction routine "
+                              "did not run) opt=%u",
+                              (unsigned)s_juncAutoConfirmOpt);
+                }
+                s_juncAutoConfirmPending = false;
+                s_juncAutoConfirmOpt     = 0xFF;
+                s_juncAutoRoutineRan     = false;
+            }
+
             // Announce on entry to action menu OR cursor change
-            if (actionCursor < JUNC_ACTION_COUNT) {
+            if (!spokeConfirm && actionCursor < JUNC_ACTION_COUNT) {
                 if (s_juncPrevFocus != 3 || actionCursor != s_juncPrevActionCursor) {
                     const char* actionName = JUNC_ACTION_NAMES[actionCursor];
                     ScreenReader::Speak(actionName, true);
@@ -516,6 +696,26 @@ static void PollJunctionSubmenu()
             s_juncPrevAbilRightCursor = 0xFF;
             s_juncPrevAbilFocus = 0xFF;
             s_abilRightListCount = 0;
+        }
+
+        // ---- Auto-junction submenu (focus == 11) ----
+        // Confirming "Auto" from the action menu opens a 3-option submenu
+        // (Atk/Mag/Def) selected by +0x26A; focus stays 11 throughout. Announce
+        // the option + what it optimizes on entry and on cursor change.
+        if (focus == JUNC_AUTO_FOCUS) {
+            // On entry, clear the apply flag so the action-menu resolution can
+            // tell this Auto session's confirm (write-BP sets it) from a cancel.
+            if (s_juncPrevFocus != JUNC_AUTO_FOCUS) {
+                s_juncAutoRoutineRan = false;  // fresh apply-window; the write-BP sets it on a confirm
+            }
+            uint8_t autoCursor = base[JUNC_AUTO_CURSOR_OFF];
+            if (autoCursor < JUNC_AUTO_OPT_COUNT &&
+                (s_juncPrevFocus != JUNC_AUTO_FOCUS || autoCursor != s_juncPrevAutoCursor)) {
+                ScreenReader::Speak(JUNC_AUTO_OPT_NAMES[autoCursor], true);
+                Log::Menu("[JuncTTS] AutoMenu: %s (cursor=%u)",
+                           JUNC_AUTO_OPT_NAMES[autoCursor], (unsigned)autoCursor);
+                s_juncPrevAutoCursor = autoCursor;
+            }
         }
         
         // ---- Junction Sub-option (focus == 37 or 38) ----
@@ -628,7 +828,7 @@ static void PollJunctionSubmenu()
         // When returning to char select (focus==0 or 8) after being deeper,
         // force re-announce the current character
         if ((focus == 0 || focus == 8) && s_juncPrevFocus != 0 && s_juncPrevFocus != 8 && s_juncPrevFocus != 0xFF) {
-            s_juncPrevCharCursor = 0xFF;
+            if (!s_juncAutoConfirmPending) s_juncPrevCharCursor = 0xFF;
         }
         
         // Reset sub-phase cursors when leaving those phases
@@ -639,6 +839,9 @@ static void PollJunctionSubmenu()
             s_juncPrevGfListCursor = 0xFF;
             s_juncPrevGfToggle = 0xFF;
         }
+        if (focus != JUNC_AUTO_FOCUS && s_juncPrevFocus == JUNC_AUTO_FOCUS) {
+            s_juncPrevAutoCursor = 0xFF;
+        }
         
         // Track focus changes for transition detection
         s_juncPrevFocus = focus;
@@ -646,6 +849,27 @@ static void PollJunctionSubmenu()
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         Log::Menu("[JuncTTS] Exception in PollJunctionSubmenu");
     }
+}
+
+// (/) On-demand help for the Junction Auto submenu option under the cursor.
+// Returns true (and speaks the help) ONLY while the Auto submenu is up, so the
+// "/" dispatch chain in MenuTTS::Update() falls through to the normal help bar
+// everywhere else. Mirrors GFSpeakSelectedAbilityHelp()/AbilitySpeakSelectedHelp().
+// Reads focus/cursor live (the / hotkey fires earlier in the frame than
+// PollJunctionSubmenu, so the stashed prev-cursor could lag). SEH-safe.
+static bool JunctionAutoSpeakHelp()
+{
+    if (!s_juncActive || !pMenuStateA) return false;
+    __try {
+        uint8_t* base = (uint8_t*)pMenuStateA;
+        if (base[JUNC_ACTIVE_OFFSET] != 17) return false;
+        if (base[JUNC_FOCUS_OFFSET] != JUNC_AUTO_FOCUS) return false;
+        uint8_t cur = base[JUNC_AUTO_CURSOR_OFF];
+        if (cur >= JUNC_AUTO_OPT_COUNT) return false;
+        ScreenReader::Speak(JUNC_AUTO_OPT_HELP[cur], true);
+        Log::Menu("[JuncTTS] AutoHelp (/): cursor=%u \"%s\"", (unsigned)cur, JUNC_AUTO_OPT_HELP[cur]);
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
 // F12 diagnostic: track menu_draw_text / get_character_width call counts

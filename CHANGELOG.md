@@ -6,6 +6,174 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.2.6
+
+Junction Auto submenu — reliable "junctioned automatically" confirmation (Task 1).
+
+The v0.18.2.5 BAT located the game's auto-junction routine (0x004BE790) via the
+hardware write breakpoint and, with Aaron's confirm/cancel labelling, settled the
+behaviour: the routine runs on a CONFIRM of an Auto option — even a no-op confirm
+that changes no spells — and does NOT run on a cancel. The breakpoint stayed
+correctly silent on all three cancels, so it's a clean confirm-vs-cancel signal,
+not a stale one.
+
+This promotes that breakpoint from a diagnostic into the live detector. The VEH
+is now lean: when the write to the working junction byte fires while the Auto
+submenu is focused (+0x22E==11), it sets a flag; the per-fire logging, register/
+stack capture, and hit cap are removed. The Auto submenu's apply resolution now
+reads that flag instead of the v0.18.2.3 magic-changed snapshot: routine ran =>
+speak "Junctioned automatically for <Attack/Magic/Defense>"; routine did not run
+=> it was a cancel, stay silent. The flag is cleared on each entry to the Auto
+submenu so every confirm/cancel cycle is judged fresh. The snapshot (and its
++0x6C0 window) is gone.
+
+Net effect: the confirmation now fires on every confirm, including confirming an
+option that doesn't change the current junction — fixing the old "silent on a
+no-op confirm, reads as broken" problem — while still staying silent on cancel.
+
+BAT: Junction > a character > action menu > Auto, confirm an option (expect
+"Junctioned automatically for ..."); re-open Auto and confirm an option that
+changes nothing (expect the same announcement); open Auto and cancel out (expect
+silence, then the action-menu item). Log: `[JuncTTS] AutoApplied: ... (confirm
+detected)` on confirms, `[JuncTTS] AutoMenu cancelled (auto-junction routine did
+not run)` on cancels.
+
+## v0.18.2.5
+
+Junction Auto submenu — DIAGNOSTIC build (find the auto-junction routine).
+
+The v0.18.2.4 BAT settled the open question: across a full Auto session (opening
+the submenu, arrowing the options, confirming Attack — a real change — confirming
+Defense, plus a cancel) there were ZERO `[JuncBtnDiag]` lines, meaning the engine's
+`pEngineInputConfirmedButtons` bitmask stayed 0 on every menu press. The menu
+module reads input through a separate path, so the button-bitmask approach is out.
+
+This build pivots to the routine itself, as requested. On a confirm the auto-
+junction routine writes the menu's working junction array at pMenuStateA+0x6C2
+(the v0.18.2.4 log caught 0x6C2 0->18, 0x6C4 32->0 on the Attack apply). Since
+pMenuStateA is a fixed address, that write lands at a fixed location, so we set a
+1-byte hardware WRITE breakpoint there (DR3; DR0/1/2 are the battle BPs) armed
+while the Junction menu is open. When it fires — inside the auto-junction routine
+— the VEH logs `[JuncAutoBP]` with EIP, registers, the value written, the focus
+value, the code bytes around EIP, and the FF8-.text stack return addresses. The
+return addresses give the routine entry to MinHook in the follow-up build. This
+is the same hardware-breakpoint technique that pinned down the battle damage-popup
+writer. The v0.18.2.4 button diagnostic is removed; the v0.18.2.3 snapshot announce
+is left in place as interim until the routine hook replaces it.
+
+BAT: open Junction > a character > action menu > Auto, confirm an option (e.g.
+Attack), then re-open Auto and confirm again (ideally one that changes nothing,
+to see whether the routine writes on a no-op), and try a Cancel. The `[JuncAutoBP]`
+lines will show where the write came from. If no `[JuncAutoBP]` lines appear, the
+BP didn't catch the writer (we'll widen to the +0x6C4 byte or revisit thread
+arming).
+
+## v0.18.2.4
+
+Junction Auto submenu — DIAGNOSTIC build (no behavior change to the announce).
+
+The v0.18.2.3 snapshot approach (announce only if junctioned magic changed) was
+too fragile: it goes silent whenever the auto result is unchanged (cancel, or a
+re-confirm of an already-optimal junction), which reads as broken. The right
+signal is the CONFIRM action itself — the OK button press that triggers the auto-
+junction — which happens on every confirm regardless of outcome.
+
+The engine exposes an edge-triggered "buttons pressed this frame" bitmask
+(`pEngineInputConfirmedButtons`, already resolved and used on the field). This
+build logs that bitmask on every button edge while the Junction menu is open
+(`[JuncBtnDiag]` lines in ff8_menu.log) to determine two unknowns: whether the
+menu module updates that global at all, and which bit is OK (confirm) vs Cancel.
+The existing announce logic is unchanged for this build.
+
+BAT: open Junction > a character > action menu > Auto, then press OK on one
+option, Cancel (X) on another, and a few arrow presses. The `[JuncBtnDiag]` lines
+will show the confirmed-button bitmask for each, with the focus value. If the
+bitmask stays 0x00000000 in the menu, the menu uses a separate input path and
+we'll fall back to hooking the auto-junction routine via a write breakpoint on
+the fixed junction working address (pMenuStateA+0x6C2).
+
+## v0.18.2.3
+
+Junction Auto submenu — fixes the two v0.18.2.2 BAT bugs (confirmation worked, but).
+
+Bug 1 (something spoke just before the confirmation): the "force re-announce on
+return to character select" reset was firing on the transient char-select hop and
+un-muting the character name, so "Zell…" leaked out right before the confirmation.
+The char-select hop is now fully muted while an Auto resolution is pending, and
+that reset is gated off while pending, so only the confirmation is heard.
+
+Bug 2 (cancel falsely announced "Junctioned…"): confirm and cancel leave the Auto
+submenu by the IDENTICAL focus path (11 -> 8 -> 3), so the path can't tell them
+apart — the v0.18.2.1 "confirm = goes through char select" theory was wrong. The
+only reliable signal is whether the junction actually changed. The mod now
+snapshots the live junction data (window at +0x6C0, covering the junctioned
+magic-id array at +0x6C2/+0x6C4) on entering the Auto submenu and compares it when
+the submenu closes: changed => speak "Junctioned automatically for <option>";
+unchanged => stay silent. This makes a cancel silent AND a re-confirm of an
+already-optimal auto silent (a true no-op), and only speaks on a real change.
+
+If a real apply ever fails to announce, the snapshot window may be too small; if a
+cancel ever announces, it may be catching a volatile byte — either way the window
+(JUNC_AUTO_SNAP_OFF/LEN in `menu_tts_junction.inl`) is the knob to adjust.
+
+## v0.18.2.2
+
+Junction Auto submenu — spoken "applied" confirmation on confirm.
+
+The v0.18.2.1 BAT (three confirms) showed the confirm/cancel discriminator: when
+an Auto option is CONFIRMED the junction focus `+0x22E` goes 11 -> 8 (a transient
+character-select hop) -> 3 (the action menu re-opens), and the junctioned-magic
+panel updates; a CANCEL pops straight from 11 -> 3 with no char-select hop. So
+prev-focus 11 landing on focus 0/8 means "applied". On that transition the mod
+now sets a pending flag (capturing the chosen option) and mutes the transient
+character re-announce; when the action menu settles (focus 3) it speaks
+"Junctioned automatically for Attack/Magic/Defense" in place of that one action
+re-announce, so the confirmation isn't cut off. Cancel (11 -> 3) sets nothing and
+behaves exactly as before.
+
+Pending caveat for next BAT: the confirm/cancel split is well-evidenced for
+confirm (3/3) but the cancel path (X out of the Auto submenu) wasn't captured, so
+verify a cancel does NOT speak the confirmation. Code in `menu_tts_junction.inl`.
+
+## v0.18.2.1
+
+Junction Auto submenu — option readout (Atk / Mag / Def).
+
+Confirming "Auto" from the Junction action menu opens a three-option submenu
+that auto-junctions a character's magic to optimize a stat. It previously read
+nothing. SUBMON (BAT 2026-06-02, captured automatically as Aaron moved between
+the options) showed the submenu settles at junction focus `+0x22E == 11` and
+stays there throughout, with the option cursor at `+0x26A` (0/1/2) tracking the
+GCW help line exactly ("Junction magic to up Str / Mag / HP"). A new `focus == 11`
+branch in `PollJunctionSubmenu` (mirroring the action-menu branch) now announces
+the terse option name on entry and on each cursor move ("Attack" / "Magic" /
+"Defense"); the "/" key reads that option's help via a new `JunctionAutoSpeakHelp()`
+spliced into the existing GF/Ability "/" fallthrough chain in `MenuTTS::Update()`. focus 11
+was also added to the handled set so it stops logging as Unhandled, and the
+per-phase cursor reset clears the Auto cursor on exit.
+
+Still open for this submenu: the spoken "applied" confirmation when an option is
+actually confirmed — the confirm transition wasn't captured this BAT (Aaron only
+moved between options), so it's deferred to the next build once the post-confirm
+state is logged. Code in `menu_tts_junction.inl` + the one-line `/` chain edit in `menu_tts.cpp`.
+
+## v0.18.2.0
+
+Refine quantity screen — added orienting context (0.18.2.x chapter open).
+
+The "Use GF ability" refine quantity selector previously read out as a bare
+number (e.g. "1, 20 Waters") with nothing telling the player what the screen was
+for. On the first announce after the selector comes up it now prepends an
+orienting phrase that also spells out the format — "Select quantity to refine. 1,
+makes 20 Waters" — while subsequent count moves stay terse ("1, 20 Waters") so
+scrolling the amount is still fast. "First entry" is detected with no new state
+(`s_abilQtyLast < 0`, which the recipient picker already re-arms), so backing out
+to the picker and re-entering quantity re-speaks the orientation. The log line
+now records `first` and the computed `total`, and continues to record `owned`
+(+0x2E4) so a later build can add the selectable maximum once it's confirmed
+against the panel. `PollRefineQuantity` in `menu_tts_ability.inl`; no offset or
+state changes elsewhere.
+
 ## v0.18.1.13
 
 Ability screen (#42) refine flow — recipient magic stock now announced.

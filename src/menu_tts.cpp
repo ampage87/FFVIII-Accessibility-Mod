@@ -33,6 +33,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <tlhelp32.h>   // v0.18.2.5 diag: thread enumeration for the HW write BP
 
 // Forward declarations for namespaces used in .inl files
 namespace Log { void Menu(const char* format, ...); }
@@ -603,7 +604,7 @@ void MenuTTS::Update()
         // re-read the help of the ability under the cursor instead (#3); the
         // helper returns false off that list so the normal help bar still works.
         if (GetAsyncKeyState(VK_OEM_2) & 1) {
-            if (!GFSpeakSelectedAbilityHelp() && !AbilitySpeakSelectedHelp())
+            if (!GFSpeakSelectedAbilityHelp() && !AbilitySpeakSelectedHelp() && !JunctionAutoSpeakHelp())
                 AnnounceHelpText();
         }
     }

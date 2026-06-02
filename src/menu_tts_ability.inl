@@ -448,19 +448,38 @@ static void PollRefineCharPicker(int charId, int slot)
 static void PollRefineQuantity(int count, int owned)
 {
     if (count == s_abilQtyLast) return;
+    bool firstEntry = (s_abilQtyLast < 0);   // first announce of this quantity drill-in
     s_abilQtyLast   = count;
     s_abilRecipLast = -1;          // re-arm the recipient announce if we back up
 
-    char out[96];
-    if (s_abilYieldOut > 0 && s_abilYieldIn > 0) {
-        long total = (long)count * s_abilYieldOut / s_abilYieldIn;
-        if (s_abilYieldMagic[0]) snprintf(out, sizeof(out), "%d, %ld %s", count, total, s_abilYieldMagic);
-        else                     snprintf(out, sizeof(out), "%d, %ld", count, total);
+    long total = (s_abilYieldOut > 0 && s_abilYieldIn > 0)
+                 ? (long)count * s_abilYieldOut / s_abilYieldIn : -1;
+
+    // The quantity screen otherwise reads as a bare number with no context. On
+    // the FIRST announce after the selector comes up, prepend an orienting
+    // phrase that also spells out the format ("<n> makes <m> X"); subsequent
+    // count moves stay terse ("<n>, <m> X") so scrolling the amount is fast.
+    // The recipient + their current stock were spoken on the step just before.
+    char out[160];
+    if (firstEntry) {
+        if (total >= 0 && s_abilYieldMagic[0])
+            snprintf(out, sizeof(out), "Select quantity to refine. %d, makes %ld %s", count, total, s_abilYieldMagic);
+        else if (total >= 0)
+            snprintf(out, sizeof(out), "Select quantity to refine. %d, makes %ld", count, total);
+        else
+            snprintf(out, sizeof(out), "Select quantity to refine. %d", count);
     } else {
-        snprintf(out, sizeof(out), "%d", count);
+        if (total >= 0 && s_abilYieldMagic[0])
+            snprintf(out, sizeof(out), "%d, %ld %s", count, total, s_abilYieldMagic);
+        else if (total >= 0)
+            snprintf(out, sizeof(out), "%d, %ld", count, total);
+        else
+            snprintf(out, sizeof(out), "%d", count);
     }
+
     ScreenReader::Speak(out, true);
-    Log::Menu("[MenuTTS] Refine quantity: count=%d owned=%d -> \"%s\"", count, owned, out);
+    Log::Menu("[MenuTTS] Refine quantity: count=%d owned=%d first=%d total=%ld -> \"%s\"",
+              count, owned, firstEntry ? 1 : 0, total, out);
 }
 
 // Refine item-list phase handler (Build 2). Announces the highlighted source
