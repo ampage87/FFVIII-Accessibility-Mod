@@ -6,6 +6,63 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.1.7
+
+Ability screen (#42) Build 2b — per-item "Refinable / Cannot be refined" tag, and
+the refinable-flag diagnostics gated off. When the refine item list is open, each
+item still announces "name, quantity" the instant the cursor lands; then, after a
+short dwell (~400 ms) on a real item, the mod reads the engine's refine-result
+pointer (`+0x2BE`) and speaks "Refinable" or "Cannot be refined" as a second clip
+(queued, so it never cuts off the name). The brief pause also doubles as a
+scan-vs-detail beat for the player.
+
+Why a dwell: two rounds of full menu-struct dumps showed there is no synchronous
+per-item refinable flag — `+0x2BE` is the only refinability signal and it
+populates a few frames after the cursor lands (and clears when leaving a
+refinable item, so a settled non-zero read means "refinable" with no false
+positives). The rendered preview is unreliable per-move (stale text bleeds across
+items), so it stays limited to the dwelling `/` reader.
+
+- `ABIL_DIAG` flipped to 0; `AbilDumpMenuWindow` wrapped under it (diagnostic
+  only, retained, gated). New `AbilReadRefinePtr` + settle logic in
+  `PollAbilityItemList`. The `[MenuTTS] Refine status` log line is always on for
+  verification.
+- Carries the previously-confirmed Build 2 (item name+qty + `/` preview). Empty
+  slots get no status.
+
+## v0.18.1.6
+
+Ability screen (#42) Build 2b — DIAGNOSTIC build #2 (refinable-flag hunt, widened).
+No behavior change. The v0.18.1.5 window (`+0x200..+0x2FF`) analysis showed NO
+per-item refinable flag there — the refine pointer at `+0x2BE` is set lazily
+(reads 0 at cursor-move time for some refinable items) and there's no static
+per-row array/bitmask in that range. This build widens `AbilDumpMenuWindow` to
+dump the FULL menu struct `+0x000..+0x3FF` (two 512-byte `[ABILDIAG-WIN]` lines)
+on each item-cursor move, to rule a persisted flag in or out anywhere in the
+struct (static per-row array or per-cursor byte).
+
+- To capture: open I Mag-RF item list, arrow slowly through every item.
+- If no flag turns up here either, fall back to baking FF8's refine-recipe data
+  (ability id -> refinable source-item set), which the previews already reveal.
+- `ABIL_DIAG` stays 1. Not for push.
+
+## v0.18.1.5
+
+Ability screen (#42) Build 2b — DIAGNOSTIC build (refinable-flag discovery). No
+behavior change; adds logging only. The rendered refine preview is too laggy to
+tag each item "Refinable / Cannot be refined" reliably as the cursor moves, so
+this build hunts for the engine's own per-item refinable flag in the dynamic
+menu-state struct (the refine display list assembles there at `~+0x296`).
+
+- `AbilDumpMenuWindow` hex-dumps `pMenuState +0x200..+0x2FF` as `[ABILDIAG-WIN]`,
+  twice per item (the instant the cursor lands, then ~80 ms later) so a flag can
+  be located and its timing checked (synchronous vs lazily computed).
+- To capture: open a refine ability's item list (e.g. I Mag-RF), arrow slowly
+  through every item. Diff the window across items of known refinability
+  (M-Stone Piece / Magic Stone refinable; Potion / Tent / Cottage / G-Returner
+  not) to find the flag, then implement the tag from it.
+- `ABIL_DIAG` stays 1. Not for push.
+
 ## v0.18.1.4
 
 Ability screen (#42) Build 2 — refine ITEM-LIST phase (first pass). When a refine

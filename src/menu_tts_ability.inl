@@ -22,11 +22,18 @@
 // say "Empty Ability Slot". Build 2 (v0.18.1.4): the refine ITEM-LIST phase
 // (+0x22E >= 19, cursor +0x2DF) — announce the source item's name + quantity on
 // move (read from the savemap inventory), and "/" reads the refine preview
-// ("N will refine into M <Magic>") parsed from the GCW.
+// ("N will refine into M <Magic>") parsed from the GCW. Build 2b (v0.18.1.7):
+// a settle-based "Refinable / Cannot be refined" tag — on a brief dwell, read
+// the engine's refine-result pointer (+0x2BE; non-zero => the current ability
+// can refine the highlighted item) and speak the status as a second clip.
+// (Memory analysis ruled out any synchronous per-item flag: +0x2BE is the only
+// refinability signal and it populates a few frames after the cursor lands,
+// hence the dwell. The rendered preview is unreliable per-move — stale text
+// bleeds across items — so it is used only for the dwelling "/" reader.)
 
 // Confirmation logging (ability-list parse + item-list inventory/preview cross-
 // check). Gate off once Build 2 is confirmed; never delete.
-#define ABIL_DIAG 1
+#define ABIL_DIAG 0
 
 static const int ABIL_GATE_OFFSET   = 0x1E8;   // == 14 on the Ability screen
 static const int ABIL_PHASE_OFFSET  = 0x22E;   // 3 = ability list
@@ -36,6 +43,8 @@ static const int ABIL_GATE_VALUE    = 14;      // +0x1E8 value on this screen
 static const int ABIL_PHASE_LIST    = 3;       // +0x22E value on the ability list
 static const int ABIL_PHASE_ITEM_MIN = 19;     // +0x22E >= this = refine item list (Build 2)
 static const int ABIL_ITEM_CURSOR_OFF = 0x2DF; // refine item-list cursor (0-based)
+static const int   ABIL_REFINE_PTR_OFF  = 0x2BE; // engine refine-result pointer (Build 2b)
+static const DWORD ABIL_REFINE_SETTLE_MS = 400;  // dwell before the pointer is reliable
 
 // Menu-usable ("Use GF ability") ability id block: the *-RF refine family (97–113)
 // plus Med LV Up (114) and Card Mod (115). Restricting the GCW name match to this
@@ -65,6 +74,8 @@ static int   s_abilItemLastCur    = -1;
 static DWORD s_abilItemPoll       = 0;
 static bool  s_abilItemSelValid   = false;
 static char  s_abilItemRefine[192] = {};
+static DWORD s_abilItemSettleAt    = 0;     // (2b) tick when the item cursor last moved
+static bool  s_abilItemStatusSpoken = true; // (2b) refinable status already spoken this item
 
 static void ResetAbilitySubmenuState()
 {
@@ -80,6 +91,8 @@ static void ResetAbilitySubmenuState()
     s_abilItemPoll      = 0;
     s_abilItemSelValid  = false;
     s_abilItemRefine[0] = '\0';
+    s_abilItemSettleAt     = 0;
+    s_abilItemStatusSpoken = true;
 }
 
 // SEH raw read of the gate / phase / cursor bytes. No C++ objects (C2712-safe).
@@ -163,6 +176,22 @@ static bool AbilReadItemCursor(int* cur)
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
+// SEH read of the engine's refine-result pointer (+0x2BE). It is populated
+// (non-zero) a few frames after the cursor lands on a REFINABLE source item,
+// reads 0 for items the current ability can't refine, and is cleared when the
+// cursor leaves a refinable item — so once the cursor has settled (~400ms) a
+// non-zero value reliably means "refinable" with no false positives. Drives the
+// Build 2b status tag. C2712-safe.
+static bool AbilReadRefinePtr(uint32_t* ptr)
+{
+    __try {
+        uint8_t* ms = (uint8_t*)pMenuStateA;
+        if (ms == nullptr) return false;
+        *ptr = *(volatile uint32_t*)(ms + ABIL_REFINE_PTR_OFF);
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
 // SEH read of savemap inventory slot `idx` (item id + quantity). The refine
 // source-item list appears to be the full inventory in order; the ABIL_DIAG
 // cross-check logs the GCW so the BAT can confirm this mapping. C2712-safe.
@@ -175,6 +204,30 @@ static bool AbilReadInvSlot(int idx, uint8_t* id, uint8_t* qty)
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
+
+#if ABIL_DIAG
+// (diag, v0.18.1.6) Hex dump of the FULL menu-state struct (+0x000..+0x3FF) on
+// each item-cursor move, in two 512-byte halves (keeps log lines a safe length).
+// Widened from the +0x200 window (v0.18.1.5), which contained no per-item
+// refinable flag: this lets us scan the whole struct for either a static
+// per-row refinable array or a per-cursor flag. SEH wraps only the raw copy.
+static void AbilDumpMenuWindow(int cur)
+{
+    uint8_t buf[1024];
+    bool ok = false;
+    __try {
+        uint8_t* ms = (uint8_t*)pMenuStateA;
+        if (ms) { memcpy(buf, ms, sizeof(buf)); ok = true; }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+    if (!ok) return;
+    char hex[512 * 2 + 1];
+    for (int half = 0; half < 2; half++) {
+        int base = half * 512;
+        for (int i = 0; i < 512; i++) sprintf(hex + i * 2, "%02X", buf[base + i]);
+        Log::Menu("[ABILDIAG-WIN] cur=%d base=0x%03X %s", cur, base, hex);
+    }
+}
+#endif
 
 // Extract the refine preview ("N will refine into M <Magic>") from the decoded
 // GCW for the "/" reader. It sits between the selected ability name and the
@@ -229,24 +282,44 @@ static void PollAbilityItemList()
         const char* dn = (ok && id) ? GetItemName(id) : "(none)";
         Log::Menu("[ABILDIAG-ITEM] cur=%d invId=%u qty=%u name=\"%s\" preview=\"%s\"",
                   cur, (unsigned)id, (unsigned)qty, dn ? dn : "?", s_abilItemRefine);
-        Log::Menu("[ABILDIAG-ITEM] gcw=\"%.300s\"", dec.c_str());
+        AbilDumpMenuWindow(cur);   // full struct +0x000..+0x3FF — hunt a persisted refinable flag
     }
 #endif
 
-    if (cur == s_abilItemLastCur) return;   // announce only on a move
-    s_abilItemLastCur = cur;
+    if (cur != s_abilItemLastCur) {          // announce name + quantity on a move
+        s_abilItemLastCur = cur;
 
-    char out[256];
-    if (!ok || id == 0) {
-        snprintf(out, sizeof(out), "Empty");
-    } else {
-        const char* nm = GetItemName(id);
-        if (nm) snprintf(out, sizeof(out), "%s, %u", nm, (unsigned)qty);
-        else    snprintf(out, sizeof(out), "Item %u, %u", (unsigned)id, (unsigned)qty);
+        char out[256];
+        bool empty = (!ok || id == 0);
+        if (empty) {
+            snprintf(out, sizeof(out), "Empty");
+        } else {
+            const char* nm = GetItemName(id);
+            if (nm) snprintf(out, sizeof(out), "%s, %u", nm, (unsigned)qty);
+            else    snprintf(out, sizeof(out), "Item %u, %u", (unsigned)id, (unsigned)qty);
+        }
+        ScreenReader::Speak(out, true);
+        Log::Menu("[MenuTTS] Refine item %d: id=%u qty=%u -> \"%s\"",
+                  cur, (unsigned)id, (unsigned)qty, out);
+
+        // Arm the settle-based refinable tag (2b). Empty slots get no status.
+        s_abilItemSettleAt     = now;
+        s_abilItemStatusSpoken = empty;
     }
-    ScreenReader::Speak(out, true);
-    Log::Menu("[MenuTTS] Refine item %d: id=%u qty=%u -> \"%s\"",
-              cur, (unsigned)id, (unsigned)qty, out);
+
+    // (2b) Once the cursor has rested on a real item long enough for the engine's
+    // refine-result pointer (+0x2BE) to populate, speak "Refinable" / "Cannot be
+    // refined" once, queued after the name. Non-zero pointer => the current
+    // ability can refine the highlighted item.
+    if (!s_abilItemStatusSpoken && (now - s_abilItemSettleAt) >= ABIL_REFINE_SETTLE_MS) {
+        s_abilItemStatusSpoken = true;
+        uint32_t rp = 0;
+        bool refinable = AbilReadRefinePtr(&rp) && rp != 0;
+        const char* status = refinable ? "Refinable" : "Cannot be refined";
+        ScreenReader::Speak(status, false);   // queued after the name (no interrupt)
+        Log::Menu("[MenuTTS] Refine status %d: %s (ptr=0x%08X)",
+                  cur, status, (unsigned)rp);
+    }
 }
 
 // Dispatched from MenuTTS::Update() while mode==6 and top-level cursor == 5.
