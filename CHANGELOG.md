@@ -6,6 +6,47 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.2.12
+
+Item > Use target — benched-member max HP now announced (issue #47); diagnostic removed.
+
+The v0.18.2.11 `[ItemDiag2]` diagnostic located the source: the menu keeps a
+per-character HP display array at `pMenuStateA + 0x71E`, stride `0x20`, indexed by
+character index, with curHP at +0 and maxHP at +2 — and it covers every available
+character, including benched ones the 3-slot computed-stats array (`0x1CFF000`)
+doesn't. BAT v0.18.2.11: Squall(0)=336/916, Zell(1)=64/585,
+Quistis(3, benched)=861/861, Selphie(5)=385/482.
+
+`GetCharacterHP` now reads max HP from that array, confirming the entry belongs to
+the character by requiring its curHP field to match the savemap curHP before
+trusting its maxHP. The old computed-stats / header path remains as a fallback.
+Current HP still comes from the savemap (live on item use, per #10). Net effect:
+benched members now announce "HP X of Y" like the battle party. The `[ItemDiag2]`
+diagnostic has been removed.
+
+BAT: menu > Item > Use target; move onto Quistis (benched) — expect "Quistis, HP
+861 of 861" (full) rather than "HP 861"; confirm the battle members still read
+correctly. If good, #47 closes.
+
+## v0.18.2.11
+
+Item > Use target — DIAGNOSTIC for benched-member max HP (issue #47).
+
+After the #46 roster fix, benched (available but not-in-battle) members like Quistis
+announce current HP but no max HP, because max HP for the listed members comes from
+the computed-stats array at `0x1CFF000`, which only covers the 3 battle slots
+(formation-indexed). This build adds an auto `[ItemDiag2]` (no key, Use-target only)
+that logs, on each cursor move, for the selected character: savemap cur/max HP; the
+first 8 computed-stat slots (to see whether the array is really span-3 or actually
+holds entries for all available characters); and a bounded scan of `pMenuStateA`
+for the character's current HP (to spot a menu display struct that pairs cur+max).
+No behaviour change beyond logging.
+
+BAT: menu > Item > Use target; move the cursor onto Quistis (the benched member)
+and across the others, then back out. Read `Logs/ff8_menu.log` for `[ItemDiag2]`
+lines — they reveal where the menu keeps max HP for benched characters, so the fix
+can read it directly. #47 stays open.
+
 ## v0.18.2.10
 
 Item > Use target — full-roster party list (issue #46); diagnostics removed.

@@ -206,6 +206,17 @@ static const int COMP_STATS_CURHP_OFFSET = 0x172;
 static const int COMP_STATS_MAXHP_OFFSET = 0x174;
 static const int COMP_STATS_STRUCT_SIZE  = 0x1D0;  // 464 bytes per entry (3 entries for party)
 
+// v0.18.2.12 (#47): the menu also keeps a per-CHARACTER HP display array that
+// covers every AVAILABLE character — including benched ones the 3-slot
+// computed-stats array misses. pMenuStateA + 0x71E + charIdx*0x20: curHP at +0,
+// maxHP at +2. BAT v0.18.2.11: Squall(0)=336/916, Zell(1)=64/585,
+// Quistis(3,benched)=861/861, Selphie(5)=385/482 — all matching the battle
+// members' computed stats.
+static const int MENU_HP_ARRAY_OFFSET = 0x71E;  // pMenuStateA-relative
+static const int MENU_HP_ARRAY_STRIDE = 0x20;
+static const int MENU_HP_CUR_OFFSET   = 0x00;
+static const int MENU_HP_MAX_OFFSET   = 0x02;
+
 // v0.08.86: Get character HP + status.
 // Primary source: computed stats at 0x1CFF000 (live, updates on item use).
 // Fallback: savemap character section for curHP, header for lead maxHP.
@@ -218,31 +229,41 @@ static bool GetCharacterHP(uint8_t charIdx, uint16_t& curHP, uint16_t& maxHP)
         curHP = *(uint16_t*)(smChar + CHR_CURR_HP);
         maxHP = *(uint16_t*)(smChar + CHR_MAX_HP);
 
-        // v0.08.86: Try computed stats array for this party slot.
-        // Map charIdx to party slot (0-2) by checking formation.
-        uint8_t* formation = (uint8_t*)SAVEMAP_BASE + 0xAF0;
-        int partySlot = -1;
-        for (int i = 0; i < 4; i++) {
-            if (formation[i] == charIdx) { partySlot = i; break; }
+        // v0.18.2.12 (#47): prefer the menu's per-character HP display array, which
+        // covers ALL available characters — including benched ones. Confirm the entry
+        // belongs to this character by requiring its curHP field to match the savemap
+        // curHP, then take maxHP from it. (FF8 derives max HP at runtime; the savemap
+        // char struct doesn't store it — BAT showed savemap maxHP=0.)
+        bool gotMax = false;
+        if (pMenuStateA && charIdx <= 10) {
+            uint8_t* disp = (uint8_t*)pMenuStateA + MENU_HP_ARRAY_OFFSET + charIdx * MENU_HP_ARRAY_STRIDE;
+            uint16_t dispCur = *(uint16_t*)(disp + MENU_HP_CUR_OFFSET);
+            uint16_t dispMax = *(uint16_t*)(disp + MENU_HP_MAX_OFFSET);
+            if (dispMax > 0 && dispMax < 10000 && dispCur == curHP) {
+                maxHP = dispMax;
+                gotMax = true;
+            }
         }
 
-        // Use computed stats for HP if character is in active party
-        if (partySlot >= 0 && partySlot < 3) {
-            uint8_t* cs = (uint8_t*)COMP_STATS_BASE + partySlot * COMP_STATS_STRUCT_SIZE;
-            uint16_t csHP = *(uint16_t*)(cs + COMP_STATS_CURHP_OFFSET);
-            uint16_t csMax = *(uint16_t*)(cs + COMP_STATS_MAXHP_OFFSET);
-            if (csMax > 0 && csMax < 10000) {
-                // v0.18.2.9 (#10): take maxHP from computed stats (FF8 derives max HP
-                // at runtime; the savemap char struct doesn't store it — BAT showed
-                // savemap maxHP=0). But keep curHP from the SAVEMAP: it updates live on
-                // an in-menu item use, whereas computed curHP is stale until the Item
-                // screen is rebuilt (BAT: after a Potion, savemap=536, computed=336).
-                maxHP = csMax;
-                if (curHP == 0 && csHP > 0) curHP = csHP;  // safety if savemap unreadable
+        // Fallback: computed-stats array for the 3 battle slots (formation-indexed).
+        // Keep curHP from the SAVEMAP: it updates live on an in-menu item use, whereas
+        // computed curHP is stale until the Item screen is rebuilt (BAT #10: after a
+        // Potion, savemap=536, computed=336).
+        if (!gotMax) {
+            uint8_t* formation = (uint8_t*)SAVEMAP_BASE + 0xAF0;
+            int partySlot = -1;
+            for (int i = 0; i < 4; i++) {
+                if (formation[i] == charIdx) { partySlot = i; break; }
             }
-        } else if (maxHP == 0) {
-            // Not in party — try header for lead
-            if (formation[0] == charIdx) {
+            if (partySlot >= 0 && partySlot < 3) {
+                uint8_t* cs = (uint8_t*)COMP_STATS_BASE + partySlot * COMP_STATS_STRUCT_SIZE;
+                uint16_t csHP = *(uint16_t*)(cs + COMP_STATS_CURHP_OFFSET);
+                uint16_t csMax = *(uint16_t*)(cs + COMP_STATS_MAXHP_OFFSET);
+                if (csMax > 0 && csMax < 10000) {
+                    maxHP = csMax;
+                    if (curHP == 0 && csHP > 0) curHP = csHP;  // safety if savemap unreadable
+                }
+            } else if (maxHP == 0 && formation[0] == charIdx) {
                 maxHP = *(uint16_t*)((uint8_t*)SAVEMAP_BASE + HDR_CHAR1_MAX_HP);
             }
         }
