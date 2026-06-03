@@ -6,6 +6,185 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.2.23
+
+Shortened the party-group cue wording to "Active Party" / "Reserve Party" (dropped
+the trailing "Start"), which reads more naturally. No other change.
+
+
+## v0.18.2.22
+
+Active/reserve party grouping cue on the Junction, Magic, and Status character-
+select screens.
+
+Sighted players see the three active battle members' slots set apart from the
+reserve slots; that distinction was lost for screen-reader players. The character-
+select now announces a fieldset/legend-style cue — "Active Party Start" or
+"Reserve Party Start" — the first time the cursor lands in a group and whenever it
+crosses into the other group, prepended to the member readout in the same
+utterance (a separate announcement would be interrupted away). Start cues only,
+no end cues, to keep it terse. A character counts as active when it is in the
+battle formation (`savemap+0xAF0`); the roster lists the active members first,
+then reserves. Implemented in the shared `AnnounceJuncCharSelect` behind an opt-in
+flag, so all three character-select screens get it while the main-menu Rearrange
+panel (active members only) is unaffected; the group state resets on each
+(re)entry so every visit re-cues the starting group.
+
+
+## v0.18.2.21
+
+Magic and Status main-menu commands now read the party member during their
+character-select step.
+
+Magic and Status (like Junction) have an intermediate "select party member" step
+before their per-character screen; the other commands go straight in. That step
+was silent. The v0.18.2.20 probe confirmed both reuse Junction's character-select
+screen: Magic = subsystem `+0x1E8 == 3`, Status = `+0x1E8 == 5`, both with focus
+`+0x22E == 0` and the cursor at `+0x1E9` indexing the roster at `+0x1DB` (the
+cursor ranges over reserve members too, not just the three active leads). A small
+poller in `MenuTTS::Update()` now announces the member under the cursor via the
+shared `AnnounceJuncCharSelect` ("Name, Level N, HP X of Y", reserves and empty
+slots handled) whenever Magic or Status is in its character-select phase. The
+focus gate confines this to char-select; the per-character spell/status screen
+has a different focus and is unaffected. No overlap with the main-menu party
+panel (gated on `+0x1E8 == 0xFF`) or Junction (`+0x1E8 == 17`). The `[MagStatDiag]`
+diagnostic from v0.18.2.20 is removed.
+
+
+
+## v0.18.2.19
+
+Main-menu "Rearrange party order" — party panel now reachable from every command.
+
+The party-panel announce worked when approached from the Junction command but
+was silent from Item (and other commands): the block was gated by the
+per-submenu `!s_*Active` flags, and `s_itemSubmenuActive`/`s_gfActive` get set
+just by hovering the Item/GF command in the list, blocking the party panel
+from every command except Junction (whose `s_juncActive` is only set when the
+junction subsystem is genuinely open).
+
+The gate is now the bare-main-menu indicator `+0x1E8 == 0xFF` (any open submenu
+changes it — junction = 17, ability = 14, etc.), which is the correct semantic
+and independent of which command is highlighted. Panel detection still uses the
+region flag `+0x1B6` (`0x0F` source-select / `0x10` destination-select); the
+redundant `+0x1EC` check was dropped.
+
+
+## v0.18.2.18
+
+Main-menu "Rearrange party order" — command column re-announced on the way back.
+
+Moving from the command column onto the party panel announced the member fine
+(v0.18.2.16/.17), but moving back the other way — from the party panel to the
+command column — was silent until an up/down press, because the top cursor
+`+0x1E6` doesn't change while the cursor sits on the party panel, so
+`PollMenuCursor` saw nothing to announce when you landed back on the same
+command.
+
+`MenuTTS::Update()` now detects leaving the party panel (party sub-mode
+returning to 0) and resets `s_prevCursor` to `0xFF`, the same "announce on next
+poll" sentinel used on menu-open, so the next `PollMenuCursor` re-announces the
+command under the cursor.
+
+
+## v0.18.2.17
+
+Main-menu "Rearrange party order" — destination cursor now announced.
+
+Reordering uses two cursors: a source-select cursor picks a member, then a
+destination-select cursor picks the slot to swap it into. v0.18.2.16 announced
+the source cursor but the destination cursor was silent. BAT showed both
+sub-modes live on the party panel (`+0x1EC == 0x07`) and are told apart by
+`+0x1B6`: source-select is `0x0F` with cursor `+0x1D6`, destination-select is
+`0x10` with cursor `+0x1D7` (while `+0x1D6` stays locked on the source). Both
+cursors are 0/1/2 over `roster[0..2]`.
+
+`MenuTTS::Update()` now tracks the sub-mode and announces the member under
+whichever cursor is active (reusing `AnnounceJuncCharSelect`), with a one-time
+"Choose destination" spoken cue when entering destination-select so the mode
+switch — invisible without sight — is audible.
+
+
+## v0.18.2.16
+
+Main-menu "Rearrange party order" — party members now announced.
+
+From the bare main menu you can move the cursor onto the party panel (help bar
+"Rearrange party order") to reorder the three active members; previously nothing
+was announced as the cursor moved across them. The v0.18.2.15 `[PartyDiag]` BAT
+identified the state: the slot cursor is `+0x1D6` (0/1/2 over the three active
+members), and the cursor is on the party panel when `+0x1B6 == 0x0F` and
+`+0x1EC == 0x07` (the command column has `+0x1B6 == 3`). The roster is live at
+`+0x1DB` on this screen, so slot N is `roster[N]`.
+
+`MenuTTS::Update()` now, when no submenu is active and the party-panel flags are
+set, announces the member under the cursor on entry and on each slot change by
+reusing `AnnounceJuncCharSelect` (roster-indexed; "Name, Level N, HP X of Y",
+live HP since the three are battle members). The `[PartyDiag]` diagnostic has
+been removed.
+
+
+## v0.18.2.15
+
+Main-menu "Rearrange party order" — diagnostic for the party cursor on the bare main menu.
+
+From the main menu, before selecting any command (Junction/Item/etc.), the cursor
+can be moved onto the party panel — the help bar reads "Rearrange party order" —
+but nothing is announced as the cursor moves across the members. The v0.18.2.14 BAT
+log showed `+0x1D6` cycling 0/1/2 (the slot cursor) while the top-menu cursor
+`+0x1E6` stays put and `+0x1E8` is not 17, but `+0x1D6` is also 0 on the command
+column, so a separate mode flag is needed to know when the cursor is on the party.
+
+This adds an auto (no-key) `[PartyDiag]` log in `MenuTTS::Update()` (only when no
+submenu is active) that logs, on a change of `+0x1D6`/`+0x1E6`/`+0x1E8`/`+0x1F1`, a
+`+0x1D0..0x1FF` window plus reference bytes (`+0x01E`/`+0x020`/`+0x1B6`/`+0x1D3`) and
+the battle formation, so a BAT (open menu, move onto the party, across members, off
+again) reveals the party-slot cursor and the mode flag. Diagnostic only — removed
+once the fix lands.
+
+
+## v0.18.2.14
+
+Junction character-select — reserve (available, non-party) characters now announced (Task 4).
+
+The v0.18.2.13 `[JCharDiag]` BAT proved the char-select cursor (`+0x1E9`) indexes
+the roster array at `pMenuStateA+0x1DB` directly: cursor 0/1/2/3 -> roster
+`[1,0,5,3]` = Zell/Squall/Selphie/Quistis. Cursor 0-2 happen to equal
+`formation[0-2]`, but the reserve (Quistis) is only in the roster — the battle
+formation is `[1,0,5,FF]` — which is why the old code (formation-indexed, bailing
+past slot 2) left her silent.
+
+`AnnounceJuncCharSelect` and `GetJuncSelectedCharIdx` now source the character
+from the roster (`+0x1DB`) and accept cursor 0-7, so reserves are announced like
+the party. HP resolution: battle members still come from the computed-stats array
+(live), reserves from the menu's per-character HP display array at
+`pMenuStateA+0x71E` (the #47 benched-capable source), with the savemap struct as a
+final fallback. Empty roster slots (e.g. cursor past the last character) say
+"Empty". The `[JCharDiag]` diagnostic has been removed.
+
+
+## v0.18.2.13
+
+Junction character-select — diagnostic for reserve (available, non-party) character announcement (Task 4).
+
+Selecting "Junction" then choosing which character to junction shows the current
+party in three "STATUS" boxes (announced fine) and any reserve character (e.g.
+Quistis) in a larger box below (silent). `AnnounceJuncCharSelect` maps the cursor
+through the 3-slot battle formation (`savemap+0xAF0`) and bails past slot 2, and
+the reserve isn't in that array at all — it only appears in the full roster array
+at `pMenuStateA+0x1DB` (raw formation-then-reserve order, `[1,0,5,3]`).
+
+BAT v0.18.2.12 showed moving onto Quistis produced no char-select line and did not
+drive the party cursor `+0x1E9` to 3 — only render byte `+0x020` changed — so the
+reserve selection is encoded in an as-yet-unknown offset. This build adds an auto
+`[JCharDiag]` logger (no key) on the char-select that records, on any change, the
+candidate cursor offsets (`+0x1E9`, `+0x01E`, `+0x020`, `+0x022`, `+0x1D3`) plus
+the roster (`+0x1DB`) and formation (`+0xAF0`). BAT: enter Junction, move the
+cursor Zell -> Squall -> Selphie -> Quistis -> back. The log will reveal which
+offset tracks the reserve selection and how it maps to characters, feeding the
+fix in the next build.
+
+
 ## v0.18.2.12
 
 Item > Use target — benched-member max HP now announced (issue #47); diagnostic removed.

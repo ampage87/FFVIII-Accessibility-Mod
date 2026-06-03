@@ -54,6 +54,15 @@ static uint8_t  s_abilLastLeftCursor = 0;  // tracks which left slot was last ac
 static uint16_t s_juncCachedGfMasks[8] = {}; // v0.09.49: GF bitmasks for ALL chars, cached at Junction entry (game zeroes them during editing)
 static uint8_t  s_juncSelectedCharIdx = 0xFF;  // v0.09.49: cached charIdx from char select (formation array gets rewritten during editing)
 
+// v0.18.2.22: active/reserve party grouping legend for the Junction/Magic/Status
+// character-select screens. Sighted players see the 3 active battle members'
+// slots set apart from the reserve slots; we convey that with a fieldset/legend-
+// style cue ("Active Party Start" / "Reserve Party Start") announced when the
+// cursor first lands in a group or crosses into the other. Start cues only.
+// 0=none/reset, 1=active, 2=reserve; reset on each (re)entry so every visit re-cues.
+static int  s_charSelPrevGroup = 0;
+static void ResetCharSelGroup() { s_charSelPrevGroup = 0; }
+
 // v0.18.2.1: J-Auto submenu. From the action menu (Junction/Off/Auto) confirming
 // "Auto" opens a 3-option submenu that auto-junctions the character's magic to
 // optimize a stat. Confirmed by SUBMON (BAT 2026-06-02): focus (+0x22E) settles
@@ -225,7 +234,7 @@ static int ComputeCharLevel(uint32_t exp)
 //   3 members → formation=[charA, charB, charC, FF] (all three)
 // So formation[cursorPos] gives the character at the cursor's visual slot,
 // or 0xFF for an empty slot. No compaction or centering formula needed.
-static void AnnounceJuncCharSelect(uint8_t cursorPos)
+static void AnnounceJuncCharSelect(uint8_t cursorPos, bool announceGroup = false)
 {
     __try {
         uint8_t* sm = (uint8_t*)0x1CFDC5C;  // SAVEMAP_BASE
@@ -233,15 +242,16 @@ static void AnnounceJuncCharSelect(uint8_t cursorPos)
         // Cursor indexes directly into this array — engine handles centering.
         uint8_t* party = sm + 0xAF0;
         
-        if (cursorPos > 2) {
+        uint8_t* roster = (uint8_t*)pMenuStateA + 0x1DB;  // v0.18.2.14: char-select cursor indexes the roster (all available chars incl. reserves), NOT the 3-slot formation
+        if (cursorPos > 7) {
             Log::Menu("[JuncTTS] CharSelect cursor %u out of range", (unsigned)cursorPos);
             return;
         }
         
-        uint8_t charIdx = party[cursorPos];
+        uint8_t charIdx = roster[cursorPos];
         if (charIdx == 0xFF || charIdx > 10) {
             ScreenReader::Speak("Empty", true);
-            Log::Menu("[JuncTTS] CharSelect cursor %u -> empty (formation[%u]=0x%02X)",
+            Log::Menu("[JuncTTS] CharSelect cursor %u -> empty (roster[%u]=0x%02X)",
                        (unsigned)cursorPos, (unsigned)cursorPos, (unsigned)charIdx);
             return;
         }
@@ -277,11 +287,22 @@ static void AnnounceJuncCharSelect(uint8_t cursorPos)
                 break;
             }
         }
-        // Fallback: read from savemap character struct
-        if (maxHP == 0 && charIdx < 8) {
+        // v0.18.2.14: reserve (not in the battle formation) -> the menu's per-
+        // character HP display array at pMenuStateA+0x71E (stride 0x20, curHP +0,
+        // maxHP +2, indexed by character index; the #47 benched-capable source).
+        if (maxHP == 0) {
+            uint8_t* hp = (uint8_t*)pMenuStateA + 0x71E + (int)charIdx * 0x20;
+            uint16_t dCur = *(uint16_t*)(hp + 0x00);
+            uint16_t dMax = *(uint16_t*)(hp + 0x02);
+            Log::Menu("[JuncTTS] CharSelect reserve HP[+71E idx %u]: cur=%u max=%u",
+                       (unsigned)charIdx, (unsigned)dCur, (unsigned)dMax);
+            if (dMax > 0 && dMax < 10000) { curHP = dCur; maxHP = dMax; }
+        }
+        // Final fallback: savemap character struct (curHP live; savemap maxHP is 0)
+        if (charIdx < 8) {
             uint8_t* smChar = sm + 0x48C + charIdx * 0x98;
-            curHP = *(uint16_t*)(smChar + 0x00);
-            maxHP = *(uint16_t*)(smChar + 0x02);
+            if (curHP == 0) curHP = *(uint16_t*)(smChar + 0x00);
+            if (maxHP == 0) maxHP = *(uint16_t*)(smChar + 0x02);
         }
         
         // Get level from EXP (FF8: level = EXP/1000 + 1)
@@ -289,14 +310,30 @@ static void AnnounceJuncCharSelect(uint8_t cursorPos)
         uint32_t exp = *(uint32_t*)(charData + 0x04);
         int level = ComputeCharLevel(exp);
         
-        char buf[256];
+        char mbuf[256];
         if (maxHP > 0)
-            sprintf(buf, "%s, Level %d, HP %u of %u", name, level, (unsigned)curHP, (unsigned)maxHP);
+            sprintf(mbuf, "%s, Level %d, HP %u of %u", name, level, (unsigned)curHP, (unsigned)maxHP);
         else
-            sprintf(buf, "%s, Level %d, HP %u", name, level, (unsigned)curHP);
+            sprintf(mbuf, "%s, Level %d, HP %u", name, level, (unsigned)curHP);
+
+        // v0.18.2.22: prepend the active/reserve grouping legend (start cues only)
+        // in the SAME utterance — a separate Speak would interrupt it away. "Active"
+        // = the char is in the battle formation (savemap+0xAF0); else "Reserve".
+        const char* groupPrefix = "";
+        if (announceGroup) {
+            bool isActive = false;
+            for (int gs = 0; gs < 3; gs++) { if (party[gs] == charIdx) { isActive = true; break; } }
+            int group = isActive ? 1 : 2;
+            if (group != s_charSelPrevGroup) {
+                groupPrefix = isActive ? "Active Party. " : "Reserve Party. ";
+                s_charSelPrevGroup = group;
+            }
+        }
+        char buf[320];
+        sprintf(buf, "%s%s", groupPrefix, mbuf);
         
         ScreenReader::Speak(buf, true);
-        Log::Menu("[JuncTTS] CharSelect: %s (cursor=%u formation[%u]=%u modelId=%u)",
+        Log::Menu("[JuncTTS] CharSelect: %s (cursor=%u roster[%u]=%u modelId=%u)",
                    buf, (unsigned)cursorPos, (unsigned)cursorPos, (unsigned)charIdx, (unsigned)modelId);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         Log::Menu("[JuncTTS] Exception in AnnounceJuncCharSelect");
@@ -375,11 +412,11 @@ static uint8_t FindGfOwner(uint8_t gfIdx)
 static uint8_t GetJuncSelectedCharIdx()
 {
     __try {
-        uint8_t* sm = (uint8_t*)0x1CFDC5C;
-        uint8_t* party = sm + 0xAF0;
-        uint8_t cursor = *((uint8_t*)pMenuStateA + JUNC_CHARSEL_CURSOR_OFF);
-        if (cursor <= 2) {
-            uint8_t charIdx = party[cursor];
+        uint8_t* base = (uint8_t*)pMenuStateA;
+        uint8_t* roster = base + 0x1DB;  // v0.18.2.14: cursor indexes the roster (incl. reserves)
+        uint8_t cursor = base[JUNC_CHARSEL_CURSOR_OFF];
+        if (cursor <= 7) {
+            uint8_t charIdx = roster[cursor];
             if (charIdx != 0xFF && charIdx <= 10) return charIdx;
         }
         // v0.09.49: Engine rewrites formation during Junction editing.
@@ -495,6 +532,7 @@ static void PollJunctionSubmenu()
                            (unsigned)s_juncCachedGfMasks[6], (unsigned)s_juncCachedGfMasks[7]);
             }
             Log::Menu("[JuncTTS] Junction subsystem activated (+0x1E8=17)");
+            ResetCharSelGroup();  // v0.18.2.22: fresh active/reserve grouping for this visit
             JuncAutoBP_Arm();  // v0.18.2.6: arm the HW write BP that detects Auto-submenu confirms
         }
         
@@ -630,8 +668,8 @@ static void PollJunctionSubmenu()
                 // Auto submenu just closed; this char-select hop is transient and
                 // resolves at the action menu. Stay silent and keep prev in sync.
                 s_juncPrevCharCursor = charCursor;
-            } else if (charCursor <= 2 && charCursor != s_juncPrevCharCursor) {
-                AnnounceJuncCharSelect(charCursor);
+            } else if (charCursor <= 7 && charCursor != s_juncPrevCharCursor) {
+                AnnounceJuncCharSelect(charCursor, true);
                 // v0.09.49: Cache the resolved charIdx NOW, while formation is still intact.
                 // The engine rewrites the formation array once Junction editing starts.
                 {

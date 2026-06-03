@@ -761,6 +761,89 @@ void MenuTTS::Update()
             } else if (s_prevCursor != 5 && s_abilActive) {
                 ResetAbilitySubmenuState();
             }
+
+            // v0.18.2.16/.17/.18/.19: main-menu "Rearrange party order". From the
+            // bare main menu (+0x1E8==0xFF — any open submenu changes it: junction
+            // =17, ability=14, etc.) the cursor can move left onto the party panel to
+            // reorder the 3 active members. Region flag +0x1B6: command column =3,
+            // party source-select =0x0F (cursor +0x1D6), party dest-select =0x10
+            // (cursor +0x1D7). Slots 0/1/2 = roster[0..2]; announce the member at the
+            // active cursor (AnnounceJuncCharSelect), with a one-time "Choose
+            // destination" cue on entering dest-select.
+            // v0.18.2.19: gate on +0x1E8==0xFF, NOT the per-submenu !s_*Active flags —
+            // s_itemSubmenuActive/s_gfActive are set merely by hovering the Item/GF
+            // command, which blocked the party panel from every command but Junction.
+            {
+                uint8_t* pmd = (uint8_t*)pMenuStateA;
+                bool bareMenu = (pmd[0x1E8] == 0xFF);
+                uint8_t b1B6 = pmd[0x1B6];
+                int partyMode = 0;            // 0=off, 1=source-select, 2=dest-select
+                uint8_t partySlot = 0xFF;
+                if (bareMenu && b1B6 == 0x0F)      { partyMode = 1; partySlot = pmd[0x1D6]; }
+                else if (bareMenu && b1B6 == 0x10) { partyMode = 2; partySlot = pmd[0x1D7]; }
+                static int s_prevPartyMode = 0;
+                static uint8_t s_prevPartySlot = 0xFF;
+                if (partyMode != 0) {
+                    if (partyMode == 2 && s_prevPartyMode != 2) {
+                        // Entered destination-select: cue the phase; announce on moves.
+                        ScreenReader::Speak("Choose destination", true);
+                        s_prevPartySlot = partySlot;
+                    } else if (partyMode != s_prevPartyMode || partySlot != s_prevPartySlot) {
+                        AnnounceJuncCharSelect(partySlot);
+                        s_prevPartySlot = partySlot;
+                    }
+                    s_prevPartyMode = partyMode;
+                } else {
+                    if (s_prevPartyMode != 0) {
+                        // v0.18.2.18: left the party panel back to the command column.
+                        // The top cursor +0x1E6 didn't change while on the party, so
+                        // the next PollMenuCursor would stay silent; force it to
+                        // re-announce the command under the cursor (0xFF is the same
+                        // "announce on next poll" sentinel menu-open uses).
+                        s_prevCursor = 0xFF;
+                    }
+                    s_prevPartyMode = 0;
+                    s_prevPartySlot = 0xFF;
+                }
+            }
+
+            // v0.18.2.21: Magic (top cursor 2) and Status (top cursor 3) character-
+            // select. Both reuse Junction's char-select screen — confirmed by the
+            // v0.18.2.20 [MagStatDiag] probe: Magic subsystem +0x1E8==3, Status
+            // +0x1E8==5, both with focus +0x22E==0 and the char cursor at +0x1E9
+            // indexing the roster at +0x1DB (cursor reached 3 = roster[3] = the
+            // reserve member, so the range covers reserves too). Announce the member
+            // under the cursor via AnnounceJuncCharSelect, exactly like Junction.
+            // (The party block above is gated on +0x1E8==0xFF so it never overlaps;
+            // Junction's own +0x1E8==17 is excluded here too. Focus gate keeps this to
+            // the char-select phase — the per-character spell/status screen has a
+            // different focus, so we fall silent there rather than misread +0x1E9.)
+            {
+                uint8_t* pmd = (uint8_t*)pMenuStateA;
+                uint8_t sub = pmd[0x1E8];
+                uint8_t msFocus = pmd[0x22E];
+                bool magStatCharSel =
+                    ((s_prevCursor == 2 && sub == 3) || (s_prevCursor == 3 && sub == 5)) &&
+                    (msFocus == 0 || msFocus == 8);
+                static bool    s_magStatActive = false;
+                static uint8_t s_prevMagStatCursor = 0xFF;
+                if (magStatCharSel) {
+                    if (!s_magStatActive) {
+                        s_magStatActive = true;
+                        s_prevMagStatCursor = 0xFF;  // force announce on entry
+                        ResetCharSelGroup();         // v0.18.2.22: re-cue active/reserve on entry
+                    }
+                    uint8_t cur = pmd[0x1E9];
+                    if (cur <= 7 && cur != s_prevMagStatCursor) {
+                        AnnounceJuncCharSelect(cur, true);
+                        s_prevMagStatCursor = cur;
+                    }
+                } else if (s_magStatActive) {
+                    s_magStatActive = false;
+                    s_prevMagStatCursor = 0xFF;
+                    ResetCharSelGroup();
+                }
+            }
         }
         
         // v0.07.40: Poll save slot cursor in mode 6 using +0x276
