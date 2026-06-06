@@ -28,46 +28,73 @@ static bool IsPrintableASCII(const uint8_t* p, int len) {
 }
 
 // ============================================================================
-// FF8 text decoder (v0.10.08)
+// FF8 text decoder (v0.10.08 → v0.15.10.0 → v0.15.11.0)
 // ============================================================================
-// FF8 uses proprietary character encoding, NOT ASCII.
-// Confirmed mapping from diagnostic (v0.10.07):
-//   0x00 = null terminator
-//   0x02 = newline
-//   0x20 = space (same as ASCII)
-//   0x24-0x2D = '0'-'9' (digits: byte - 0x24 + '0') — estimated, not yet confirmed
-//   0x45-0x5E = 'A'-'Z' (byte - 4)
-//   0x5F-0x78 = 'a'-'z' (byte + 2)
+// v0.15.10.0: The v0.10.08 standalone decoder (DecodeFF8Char + DecodeFF8String)
+// was retired. Its character table was an "estimated, not yet confirmed"
+// approximation with three known errors that surfaced across BAT iterations:
+//   - Digit range 0x24-0x2D was off-by-0x03 (correct is 0x21-0x2A per the
+//     canonical Ifrit textformat.ifr table). Caused "X-ATM092" to be spoken
+//     as "X-ATM?6?" through every battle TTS path (NAME-CACHE, TARGET announce,
+//     BuildEnemyNameString, GF name lookup).
+//   - 0x06 was mapped to apostrophe; Ifrit says it's a color code that consumes
+//     the next byte.
+//   - 0x2F was mapped to '-'; Ifrit says it's '?'.
+//   - Zero coverage of the 0xE8-0xFF two-character compression sequences
+//     ("in", "to", "HP", "GF", "ar", etc.) that FF8 packs into kernel.bin to
+//     save space; any monster name using a compressed pair was silently
+//     mangled.
 //
-// Diagnostic proof:
-//   getMonsterName returned "Fgrc Fse" which decodes to "Bite Bug"
-//   getActorName returned "Usgqrgq" = "Quistis", "Wos_jj" = "Squall"
+// v0.15.11.0: The other two local decoders — DecodeFF8TextPreview and the
+// HookedBtCandidate8 inline ability-name decoder, both in
+// battle_tts_victory.inl — were also retired. Canonical decoder is now the
+// single source of truth across the entire mod. As part of the migration the
+// canonical was augmented with 0xFA "EC" and 0xFD "FE" compression sequences
+// (filling gaps relative to the preview's v0.13.46 table) and 0x0E (icon
+// code) was changed to consume the icon ID byte silently instead of leaking
+// it into the next decoded char.
+//
+// DecodeFF8String forwards to the canonical FF8TextDecode::Decode in
+// ff8_text_decode.cpp (Ifrit-based; battle-tested via scan_tts.cpp on the same
+// engine name accessor sub_495100 since v0.14.50). The signature is preserved
+// so all call sites (this file, hp.inl, menu.inl, victory.inl) keep working
+// unchanged; only the implementation moved.
+//
+// MSVC /EHsc forbids __try in a function holding non-trivial destructors
+// (C2712). std::string inside FF8TextDecode::Decode triggers that, so the
+// work is split across DecodeFF8StringInner (std::string, no SEH) and the
+// public DecodeFF8String (SEH wrapper). Pattern lifted from
+// scan_tts.cpp::DecodeNameSafe / DecodeNameToBuf.
 
-static char DecodeFF8Char(uint8_t b)
+static int DecodeFF8StringInner(const uint8_t* raw,
+                                 char* outBuf,
+                                 int outBufSize)
 {
-    if (b == 0x00) return '\0';
-    if (b == 0x20) return ' ';
-    if (b >= 0x45 && b <= 0x5E) return (char)(b - 4);        // A-Z
-    if (b >= 0x5F && b <= 0x78) return (char)(b + 2);        // a-z
-    if (b >= 0x24 && b <= 0x2D) return (char)(b - 0x24 + '0'); // 0-9 (estimated)
-    if (b == 0x2F) return '-';   // dash
-    if (b == 0x32) return '-';   // v0.13.34: hyphen (confirmed: M-Stone Piece)
-    if (b == 0x06) return '\'';  // apostrophe
-    // Unknown byte — return '?' rather than garbage
-    return '?';
+    if (!outBuf || outBufSize <= 0) return 0;
+    outBuf[0] = '\0';
+    if (!raw) return 0;
+    std::string decoded = FF8TextDecode::Decode(raw, 64);
+    if (decoded.empty()) return 0;
+    size_t n = decoded.size();
+    if ((int)n >= outBufSize) n = (size_t)(outBufSize - 1);
+    memcpy(outBuf, decoded.data(), n);
+    outBuf[n] = '\0';
+    return (int)n;
 }
 
-// Decode an FF8-encoded string into a regular C string.
+// Decode an FF8-encoded byte string into a regular C string.
 // Returns the number of characters decoded (not counting null terminator).
+// SEH-guarded so a faulting read on "raw" cannot crash the caller.
 static int DecodeFF8String(const uint8_t* src, char* dst, int maxLen)
 {
-    int i = 0;
-    for (; i < maxLen - 1; i++) {
-        if (src[i] == 0x00) break;
-        dst[i] = DecodeFF8Char(src[i]);
+    int n = 0;
+    __try {
+        n = DecodeFF8StringInner(src, dst, maxLen);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (dst && maxLen > 0) dst[0] = '\0';
+        n = 0;
     }
-    dst[i] = '\0';
-    return i;
+    return n;
 }
 
 // Get the decoded enemy name for a battle slot (3-6).

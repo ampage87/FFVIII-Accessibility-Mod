@@ -60,6 +60,14 @@ static bool AnnounceCurrentTarget()
         typeLabel = "Exit";
     else if (catEnt.type == ENT_NPC || catEnt.type == ENT_BG_NPC) typeLabel = "NPC";
     else if (catEnt.type == ENT_OBJECT || catEnt.type == ENT_BG_OBJECT) typeLabel = "Object";
+    // v0.17.8.15.1: ENT_INTERACTION needs its own typeLabel so JSM-injected
+    // raw-SYM relabels ("NPC N" / "Interaction N") flow through proper
+    // sameType matching for their typeNum/typeTotal counts. Without this
+    // branch the typeLabel defaulted to "Entity", no sameType branch matched,
+    // typeNum/typeTotal stayed 0, and the user heard "NPC 1 1 of 0" or
+    // "Interaction 3 1 of 0". See the matching ENT_INTERACTION clauses added
+    // below in the typeNum and typeTotal sameType cascades.
+    else if (catEnt.type == ENT_INTERACTION) typeLabel = "Interaction";
 
     // Count entities of same type up to this one to get type-specific number.
     // v05.72: Events and Exits are separate categories even though both can
@@ -86,9 +94,21 @@ static bool AnnounceCurrentTarget()
             sameType = true;
         else if (strcmp(typeLabel, "Card Game") == 0 && ce.type == ENT_CARD_GAME)
             sameType = true;
-        else if (strcmp(typeLabel, "NPC") == 0 && ce.entityIdx >= 0 && ce.entityIdx != s_playerEntityIdx)
+        // v0.17.8.15.1: NPC sameType now matches by TYPE (ENT_NPC/ENT_BG_NPC)
+        // OR legacy runtime-entity heuristic (entityIdx >= 0). The legacy
+        // path catches runtime entities not yet type-classified; the new
+        // type-based clause catches JSM-injected NPC relabels whose
+        // entityIdx is <= -300. Disjoint conditions, no double-counting.
+        else if (strcmp(typeLabel, "NPC") == 0 && ce.entityIdx != s_playerEntityIdx &&
+                 ((ce.entityIdx >= 0) ||
+                  (ce.type == ENT_NPC || ce.type == ENT_BG_NPC)))
             sameType = true;
         else if (strcmp(typeLabel, "Object") == 0 && (ce.type == ENT_OBJECT || ce.type == ENT_BG_OBJECT))
+            sameType = true;
+        // v0.17.8.15.1: Match JSM-injected ENT_INTERACTION entries so the
+        // generic "Interaction N" relabels self-count instead of falling
+        // through to typeTotal=0.
+        else if (strcmp(typeLabel, "Interaction") == 0 && ce.type == ENT_INTERACTION)
             sameType = true;
         if (sameType) typeNum++;
         if (c == s_selectedCatalogIdx) break;
@@ -115,9 +135,14 @@ static bool AnnounceCurrentTarget()
             sameType = true;
         else if (strcmp(typeLabel, "Card Game") == 0 && ce.type == ENT_CARD_GAME)
             sameType = true;
-        else if (strcmp(typeLabel, "NPC") == 0 && ce.entityIdx >= 0 && ce.entityIdx != s_playerEntityIdx)
+        // v0.17.8.15.1: see matching block in typeNum loop above.
+        else if (strcmp(typeLabel, "NPC") == 0 && ce.entityIdx != s_playerEntityIdx &&
+                 ((ce.entityIdx >= 0) ||
+                  (ce.type == ENT_NPC || ce.type == ENT_BG_NPC)))
             sameType = true;
         else if (strcmp(typeLabel, "Object") == 0 && (ce.type == ENT_OBJECT || ce.type == ENT_BG_OBJECT))
+            sameType = true;
+        else if (strcmp(typeLabel, "Interaction") == 0 && ce.type == ENT_INTERACTION)
             sameType = true;
         if (sameType) typeTotal++;
     }

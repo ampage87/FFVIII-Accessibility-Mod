@@ -19,10 +19,15 @@
 #include "ff8_accessibility.h"
 #include "fmv_audio_desc.h"
 #include "fmv_skip.h"
+#include "ff8_addresses.h"
 #include "resources.h"
 #include <vector>
 #include <string>
 #include <map>
+
+// Forward declarations for cross-module namespaces (restored in v0.14.29 build recovery).
+namespace Log { void Mod(const char* format, ...); }
+namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); }
 #include <sstream>
 #include <algorithm>
 #include <cctype>
@@ -78,6 +83,19 @@ namespace FmvAudioDesc
     static int g_nextCueIndex = 0;
     static LARGE_INTEGER g_startTime = {};
     static LARGE_INTEGER g_perfFreq = {};
+
+    // v0.17.8.16: Cue clock that only advances while the engine is actually
+    // playing the FMV. Wall-clock g_startTime is preserved for legacy logging
+    // (the "started playback" line at StartPlayback time), but cue firing now
+    // compares against g_engineActiveSeconds instead of wall-clock elapsed.
+    // This fixes the 22-second pre-roll on the Quistis infirmary FMV: the
+    // engine opens the AVI handle long before it actually begins playback,
+    // and any cues at startTime=0 (or near it) fired against wall-clock from
+    // handle-open, putting all AD cues 22s ahead of what the player heard.
+    // The same accumulator also handles mid-FMV pause/resume cleanly.
+    static double         g_engineActiveSeconds       = 0.0;
+    static LARGE_INTEGER  g_lastTickCounter           = {};   // QPC at previous OnFrame
+    static bool           g_engineWasPlayingLastTick  = false;
 
     // Track which AVI we last started playback for (to detect transitions)
     static std::string g_lastStartedAvi;
@@ -298,12 +316,13 @@ namespace FmvAudioDesc
 
     // ---- Playback control ----
 
+    // v0.17.8.16: returns the engine-active cue clock (advances only when the
+    // engine is actually playing the FMV). The wall-clock g_startTime is still
+    // recorded in StartPlayback for legacy code paths but no longer drives cue
+    // firing.
     static double GetElapsedSeconds()
     {
-        LARGE_INTEGER now;
-        QueryPerformanceCounter(&now);
-        return static_cast<double>(now.QuadPart - g_startTime.QuadPart)
-             / static_cast<double>(g_perfFreq.QuadPart);
+        return g_engineActiveSeconds;
     }
 
     static void StartPlayback(VttTrack* track, const std::string& aviName)
@@ -316,6 +335,13 @@ namespace FmvAudioDesc
         g_nextCueIndex = 0;
         g_lastStartedAvi = aviName;
         QueryPerformanceCounter(&g_startTime);
+        // v0.17.8.16: reset cue-clock accumulator and signal "first tick" so
+        // the OnFrame delta loop skips its initial delta computation.
+        // g_engineWasPlayingLastTick = true here because StartPlayback only
+        // runs once the engine has been observed to be playing.
+        g_engineActiveSeconds        = 0.0;
+        g_lastTickCounter.QuadPart   = 0;
+        g_engineWasPlayingLastTick   = true;
 
         Log::Mod("[FMV_AD] Started playback: %s (%zu cues, %.1f seconds)",
             track->name.c_str(), track->cues.size(),
@@ -436,6 +462,11 @@ namespace FmvAudioDesc
         g_playing = false;
         g_currentTrack = nullptr;
         g_nextCueIndex = 0;
+        // v0.17.8.16: reset cue-clock state alongside playback state so the
+        // next StartPlayback begins from a known-clean baseline.
+        g_engineActiveSeconds        = 0.0;
+        g_lastTickCounter.QuadPart   = 0;
+        g_engineWasPlayingLastTick   = false;
     }
 
     void OnFrame()
@@ -446,34 +477,59 @@ namespace FmvAudioDesc
         // ---- Detect new AVI playback via FmvSkip's handle tracking ----
         std::string currentAvi = FmvSkip::GetCurrentAviName();
 
+        // v0.17.8.16: source of truth for "is the engine ACTUALLY playing the
+        // FMV right now". FmvSkip tracks AVI file-handle state, which can
+        // lead engine playback by tens of seconds (Quistis infirmary: 22s).
+        // FF8Addresses::IsMoviePlaying reads the engine's movie_is_playing
+        // flag at movie_object + 0x4C4A8.
+        bool engineActuallyPlaying = FF8Addresses::IsMoviePlaying();
+
         if (!currentAvi.empty() && currentAvi != g_lastStartedAvi)
         {
-            Log::Mod("[FMV_AD] AVI detected via FmvSkip: %s", currentAvi.c_str());
-
-            if (g_playing)
-                StopPlayback();
-
-            auto it = g_aviToVtt.find(currentAvi);
-            if (it != g_aviToVtt.end())
+            if (!engineActuallyPlaying)
             {
-                auto trackIt = g_tracks.find(it->second);
-                if (trackIt != g_tracks.end())
+                // AVI file handle is open but the engine hasn't begun playback
+                // yet. Defer StartPlayback so the cue clock doesn't start
+                // running ahead. Log once per AVI so the BAT log shows the
+                // gap (helps confirm the gate is doing useful work).
+                static std::string s_lastDeferredAvi;
+                if (currentAvi != s_lastDeferredAvi)
                 {
-                    Log::Mod("[FMV_AD] Matched %s -> %s",
-                        currentAvi.c_str(), it->second.c_str());
-                    StartPlayback(&trackIt->second, currentAvi);
-                }
-                else
-                {
-                    Log::Mod("[FMV_AD] Mapping found but track not loaded: %s",
-                        it->second.c_str());
-                    g_lastStartedAvi = currentAvi;
+                    Log::Mod("[FMV_AD] AVI handle open: %s -- waiting for engine playback",
+                        currentAvi.c_str());
+                    s_lastDeferredAvi = currentAvi;
                 }
             }
             else
             {
-                Log::Mod("[FMV_AD] No mapping for: %s", currentAvi.c_str());
-                g_lastStartedAvi = currentAvi;
+                Log::Mod("[FMV_AD] AVI detected via FmvSkip: %s (engine confirmed playing)",
+                    currentAvi.c_str());
+
+                if (g_playing)
+                    StopPlayback();
+
+                auto it = g_aviToVtt.find(currentAvi);
+                if (it != g_aviToVtt.end())
+                {
+                    auto trackIt = g_tracks.find(it->second);
+                    if (trackIt != g_tracks.end())
+                    {
+                        Log::Mod("[FMV_AD] Matched %s -> %s",
+                            currentAvi.c_str(), it->second.c_str());
+                        StartPlayback(&trackIt->second, currentAvi);
+                    }
+                    else
+                    {
+                        Log::Mod("[FMV_AD] Mapping found but track not loaded: %s",
+                            it->second.c_str());
+                        g_lastStartedAvi = currentAvi;
+                    }
+                }
+                else
+                {
+                    Log::Mod("[FMV_AD] No mapping for: %s", currentAvi.c_str());
+                    g_lastStartedAvi = currentAvi;
+                }
             }
         }
 
@@ -487,7 +543,46 @@ namespace FmvAudioDesc
         if (!g_playing || !g_currentTrack)
             return;
 
-        double elapsed = GetElapsedSeconds();
+        // v0.17.8.16: Advance the cue clock only when the engine is actually
+        // playing. If the engine pauses mid-FMV (the original infirmary bug
+        // pattern), the accumulator freezes and resumes naturally -- cues
+        // stay aligned with what the player is hearing. Edge transitions are
+        // logged once each so the BAT trace shows when pauses happen.
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        if (g_lastTickCounter.QuadPart != 0)
+        {
+            if (engineActuallyPlaying)
+            {
+                double frameDelta = static_cast<double>(now.QuadPart - g_lastTickCounter.QuadPart)
+                                  / static_cast<double>(g_perfFreq.QuadPart);
+                g_engineActiveSeconds += frameDelta;
+
+                if (!g_engineWasPlayingLastTick)
+                {
+                    Log::Mod("[FMV_AD] Engine resumed at cue clock %.1f s -- AD timer running",
+                        g_engineActiveSeconds);
+                }
+            }
+            else
+            {
+                if (g_engineWasPlayingLastTick)
+                {
+                    Log::Mod("[FMV_AD] Engine stopped at cue clock %.1f s -- freezing AD timer",
+                        g_engineActiveSeconds);
+                }
+            }
+            g_engineWasPlayingLastTick = engineActuallyPlaying;
+        }
+        else
+        {
+            // First tick after StartPlayback: no delta to accumulate but
+            // record the engine state for the next-tick edge check.
+            g_engineWasPlayingLastTick = engineActuallyPlaying;
+        }
+        g_lastTickCounter = now;
+
+        double elapsed = g_engineActiveSeconds;
 
         if (g_nextCueIndex >= static_cast<int>(g_currentTrack->cues.size()))
         {

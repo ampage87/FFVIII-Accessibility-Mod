@@ -293,6 +293,17 @@ extern uint32_t opcode_set3;       // 0x01E — set entity position (X, Y, Z, tr
 // v0.08.07: PSHM_W opcode for shared memory read diagnostics
 extern uint32_t opcode_pshm_w;     // 0x00C — push shared memory word (unsigned)
 
+// v0.17.7.4: MAPJUMP variants for diagnostic destination capture.
+// Each is read from pExecuteOpcodeTable[N] at startup. Hooked via dispatch
+// table overwrite in field_nav_mapjump_diag.inl to log destination values
+// at the moment MAPJUMP fires, sidestepping the static-resolution dead end
+// found in v0.17.7.3 BAT.
+extern uint32_t opcode_mapjump;      // 0x029 — field transition (X, Y, tri)
+extern uint32_t opcode_mapjump3;     // 0x02A — field transition (X, Y, Z, tri)
+extern uint32_t opcode_discjump;     // 0x038 — disc change transition
+extern uint32_t opcode_mapjumpo;     // 0x05C — map jump (other variant)
+extern uint32_t opcode_worldmapjump; // 0x10D — world map transition
+
 // v04.28+: engine input button state variables.
 // Both are written by engine_eval_is_button_pressed each frame.
 // confirmed_buttons = buttons just pressed this frame (edge-triggered).
@@ -458,6 +469,21 @@ extern uint8_t** pFieldStateBackgrounds;
 // This is the game's set_midi_volume function, which FFNx replaces with
 // set_music_volume_for_channel. Resolved from main_loop -> sm_battle_sound.
 extern uint32_t pSetMidiVolume;  // game address of set_midi_volume
+
+// --- v0.14.45: SFX volume function addresses (for hooking) ---
+// FFNx replaces sfx_set_master_volume with a JMP to its own bridge that calls
+// nxAudioEngine.setSFXMasterVolume. Same pattern as the BGM hook.
+// Chain (mirrors FFNx ff8_data.cpp `// SFX` block):
+//   opcode_effectplay2          = pExecuteOpcodeTable[0x21]
+//   sfx_play_to_current_playing = get_relative_call(opcode_effectplay2, 0x5F)
+//   play_sfx_on_channel         = get_relative_call(sfx_play_to_current_playing, 0x35)
+//   sfx_set_volume              = get_relative_call(play_sfx_on_channel, 0xA1)
+//   sfx_get_master_volume       = sfx_set_volume - 0x10  (function entry)
+//   sfx_set_master_volume       = sfx_get_master_volume - 0xE0  (function entry)
+//   master_sfx_volume (uint32*) = get_absolute_value(sfx_get_master_volume, 0x1)
+extern uint32_t pSfxSetMasterVolume;   // game address of sfx_set_master_volume (FFNx replaces with JMP)
+extern uint32_t pSfxSetVolume;         // game address of per-channel sfx_set_volume
+extern uint32_t* pMasterSfxVolume;     // pointer to game-side master SFX volume DWORD
 
 // --- v0.07.25: Save file read function address (for hooking) ---
 // Signature: uint32_t sm_pc_read(char* filename, void* buffer)

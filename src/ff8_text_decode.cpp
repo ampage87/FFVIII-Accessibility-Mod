@@ -165,8 +165,15 @@ static int DecodeByte(const uint8_t* data, size_t pos, size_t maxBytes,
     // Spell name: 0x0C + spell_id
     if (b == 0x0C) return 1;
 
-    // 0x0E = special marker
-    if (b == 0x0E) return 0;
+    // 0x0E = icon code (next byte is icon ID).
+    // v0.15.11.0: was `return 0` (no consume); changed to consume the icon ID
+    // byte silently. Don't emit text for the icon — the now-retired preview's
+    // Fire/Magic table only covered 2 of many possible icons, so we accept
+    // losing icon names rather than risk leaking the icon ID into the next
+    // decoded char (which is what the previous `return 0` would have done if
+    // a 0x0E ever appeared in canonical's input — empirically rare for enemy
+    // names but possible for item descriptions).
+    if (b == 0x0E) return 1;
 
     // Other low control codes (0x0D-0x1F)
     if (b >= 0x0D && b <= 0x1F) return 0;
@@ -197,8 +204,10 @@ static int DecodeByte(const uint8_t* data, size_t pos, size_t maxBytes,
         case 0xF7: result += " r"; return 0;
         case 0xF8: result += "wi"; return 0;
         case 0xF9: result += "fi"; return 0;
+        case 0xFA: result += "EC"; return 0;  // v0.15.11.0: added from preview
         case 0xFB: result += "s "; return 0;
         case 0xFC: result += "ar"; return 0;
+        case 0xFD: result += "FE"; return 0;  // v0.15.11.0: added from preview
         case 0xFE: result += " S"; return 0;
         case 0xFF: result += "ag"; return 0;
         default: break;

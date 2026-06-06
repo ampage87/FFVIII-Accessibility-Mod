@@ -2,151 +2,13 @@
 // Included from field_navigation.cpp. Do not compile independently.
 // Part of the FieldNavigation namespace.
 //
-// v0.12.18: Extracted from field_navigation.cpp for readability.
-
-// ============================================================================
-// Auto-drive: inject arrow-key input to walk toward the selected entity
-// ============================================================================
-
-// Inject or release a direction key via SendInput using hardware scan codes.
-// DirectInput reads raw hardware scan codes, so we must use KEYEVENTF_SCANCODE
-// rather than KEYEVENTF_EXTENDEDKEY+VK.  Arrow keys have the E0 extended prefix,
-// indicated by KEYEVENTF_EXTENDEDKEY alongside KEYEVENTF_SCANCODE.
-static void InjectKey(WORD scanCode, bool down)
-{
-    INPUT inp      = {};
-    inp.type       = INPUT_KEYBOARD;
-    inp.ki.wVk     = 0;      // must be 0 when using KEYEVENTF_SCANCODE
-    inp.ki.wScan   = scanCode;
-    inp.ki.dwFlags = KEYEVENTF_SCANCODE | KEYEVENTF_EXTENDEDKEY
-                   | (down ? 0 : KEYEVENTF_KEYUP);
-    SendInput(1, &inp, sizeof(INPUT));
-}
-
-// Release all held direction keys and clear the held bitmask.
-static void ReleaseAllDirections()
-{
-    if (s_driveHeld & DIR_UP)    InjectKey(SC_UP,    false);
-    if (s_driveHeld & DIR_DOWN)  InjectKey(SC_DOWN,  false);
-    if (s_driveHeld & DIR_LEFT)  InjectKey(SC_LEFT,  false);
-    if (s_driveHeld & DIR_RIGHT) InjectKey(SC_RIGHT, false);
-    s_driveHeld = 0;
-}
-
-// Apply a new desired direction bitmask: release keys no longer needed,
-// press keys newly needed.
-// v05.85: Keyboard injection is REQUIRED to activate the game's movement code
-// path. Analog steering overrides the direction, but keyboard buttons are the
-// trigger that makes the game process movement at all.
-static void SetHeldDirections(uint8_t desired)
-{
-    uint8_t toRelease = s_driveHeld  & ~desired;
-    uint8_t toPress   = desired & ~s_driveHeld;
-    if (toRelease & DIR_UP)    InjectKey(SC_UP,    false);
-    if (toRelease & DIR_DOWN)  InjectKey(SC_DOWN,  false);
-    if (toRelease & DIR_LEFT)  InjectKey(SC_LEFT,  false);
-    if (toRelease & DIR_RIGHT) InjectKey(SC_RIGHT, false);
-    if (toPress   & DIR_UP)    InjectKey(SC_UP,    true);
-    if (toPress   & DIR_DOWN)  InjectKey(SC_DOWN,  true);
-    if (toPress   & DIR_LEFT)  InjectKey(SC_LEFT,  true);
-    if (toPress   & DIR_RIGHT) InjectKey(SC_RIGHT, true);
-    s_driveHeld = desired;
-}
-
-// v06.14: Per-field heading calibration.
-// The game interprets analog stick input relative to the camera orientation.
-// On each field, lX=+1000 moves the player along the camera's right vector
-// in entity/world space, and lY=+1000 moves along the camera's down vector.
-// We calibrate by injecting a known analog direction at drive start and
-// measuring the resulting world-space movement direction.
-//
-// Until calibrated, we use the .ca camera axes (loaded at field load) as
-// a best guess. The calibration refines this empirically.
-// NOTE: s_camRightX/Y, s_camDownX/Y, s_camCalibrated are declared earlier
-// (before FormatNavComponents) so compass directions can access them.
-
-// v06.14: Heading calibration state machine.
-// At drive start, we inject lX=+1000,lY=0 for a few ticks, measure the
-// resulting movement direction, and use that as the camera right axis.
-// Then inject lX=0,lY=+1000 for a few ticks to get the camera down axis.
-// After both are measured, s_camCalibrated=true and we use the measured axes.
-static int   s_calibPhase = 0;       // 0=not calibrating, 1=measuring right, 2=measuring down, 3=done
-static int   s_calibTicks = 0;       // ticks in current calibration phase
-static float s_calibStartX = 0;      // player position at calibration phase start
-static float s_calibStartY = 0;
-static const int CALIB_SETTLE_TICKS = 8;   // ticks to let the game start moving
-static const int CALIB_MEASURE_TICKS = 16; // ticks to measure movement direction
-static bool  s_calibPending = false;  // true if calibration should run at drive start
-
-// v05.84/v06.14: Set analog override from a world-space direction vector.
-// Converts (dx, dy) in entity/world space into DIJOYSTATE2 lX/lY values
-// using the per-field camera axes to produce correct screen-relative input.
-// DirectInput axis convention: lX +1000 = screen right, lY +1000 = screen down.
-static void SetAnalogFromVector(float dx, float dy)
-{
-    float len = sqrtf(dx*dx + dy*dy);
-    if (len < 1.0f) {
-        s_analogDesiredLX = 0;
-        s_analogDesiredLY = 0;
-        return;
-    }
-    float nx = dx / len;
-    float ny = dy / len;
-    // v06.14: Project world-space direction onto camera axes.
-    // lX = dot(worldDir, camRight) = how much of the desired direction
-    //   aligns with the camera's rightward axis.
-    // lY = dot(worldDir, camDown) = how much aligns with camera's downward axis.
-    float lxF = (nx * s_camRightX + ny * s_camRightY) * 1000.0f;
-    float lyF = (nx * s_camDownX  + ny * s_camDownY)  * 1000.0f;
-    int lx = (int)lxF;
-    int ly = (int)lyF;
-    if (lx < -1000) lx = -1000; if (lx > 1000) lx = 1000;
-    if (ly < -1000) ly = -1000; if (ly > 1000) ly = 1000;
-    s_analogDesiredLX = lx;
-    s_analogDesiredLY = ly;
-}
-
-// Stop auto-drive cleanly: release keys, clear state, optionally speak reason.
-static void StopAutoDrive(const char* reason)
-{
-    if (!s_driveActive) return;
-    // v05.85: Release any held keyboard direction keys.
-    ReleaseAllDirections();
-    // v05.84: Deactivate analog override and remove fake gamepad.
-    s_analogOverrideActive = false;
-    s_analogDesiredLX = 0;
-    s_analogDesiredLY = 0;
-    // Restore original dinput pointers.
-    if (s_fakeGamepadInstalled && FF8Addresses::HasDinputGamepadPtrs()) {
-        *FF8Addresses::pDinputGamepadDevicePtr = s_savedDevicePtr;
-        *FF8Addresses::pDinputGamepadStatePtr  = s_savedStatePtr;
-        s_fakeGamepadInstalled = false;
-        Log::Field("FieldNavigation: [drive] fake gamepad removed, original ptrs restored");
-    }
-    // v06.21: Do NOT restore talk radius here — the player needs the expanded
-    // radius to persist so they can press X to interact after "Arrived".
-    // The game's TALKRADIUS opcode resets it naturally on the next field load.
-    if (s_driveTalkRadExpanded) {
-        Log::Field("FieldNavigation: [drive] talkRadius stays expanded (%u -> %u) for ent%d — resets on field load",
-                   (unsigned)s_driveOrigTalkRadius,
-                   (unsigned)GetEntityTalkRadius(s_driveTargetEntityIdx),
-                   s_driveTargetEntityIdx);
-    }
-    s_driveTalkRadExpanded = false;
-    s_driveTargetEntityIdx = -1;
-    s_driveOrigTalkRadius = 0;
-
-    // v06.08: NavLog drive end
-    NavLog::DriveEnd(reason ? reason : "unknown", s_driveTotalTicks, 0.0f,
-                     s_driveWigglePhase, s_driveStartDist);
-
-    s_driveActive = false;
-    s_driveTrigTarget = false;
-    s_driveTrigCrossStart = 0.0f;
-    s_driveSkipTrigIdx = -1;
-    Log::Field("FieldNavigation: [drive] stopped: %s", reason);
-    if (reason) ScreenReader::Speak(reason);
-}
+// v0.17.8.20: Low-level helpers (InjectKey, ReleaseAllDirections,
+//   SetHeldDirections, SetAnalogFromVector, StopAutoDrive) moved to
+//   field_nav_autodrive_helpers.inl, and the CALIB phase 1/2 state machine
+//   moved to field_nav_autodrive_calib.inl::RunCalibration(), to drop this
+//   file below the 80 KB hard cap. This file now holds only UpdateAutoDrive.
+//   Both new files are included immediately before this one in
+//   field_navigation.cpp. ZERO behavior change.
 
 // Called from Update() every tick while auto-drive is active.
 // Computes direction to target, injects appropriate arrow keys.
@@ -159,99 +21,34 @@ static void UpdateAutoDrive()
 
     if (s_playerEntityIdx < 0) { StopAutoDrive("Player position lost."); return; }
 
-    // v06.14: Heading calibration — runs at the start of the first drive on each field.
-    // Injects known analog directions and measures the resulting world-space movement
-    // to determine the camera-to-world rotation for this field.
-    if (s_calibPhase > 0 && s_calibPhase < 3) {
-        float cpx = 0, cpy = 0;
-        GetEntityPos(s_playerEntityIdx, cpx, cpy);
-        s_calibTicks++;
+    // v0.17.8.20: CALIB phase 1/2 state machine extracted to
+    // field_nav_autodrive_calib.inl. RunCalibration() returns true while a
+    // calibration tick is consumed (phases 1-2) — caller returns immediately,
+    // exactly as the two inline `return;`s here used to; false once done
+    // (phase 3) or idle (phase 0), so we fall through to normal navigation.
+    if (RunCalibration()) return;
 
-        if (s_calibPhase == 1) {
-            // Phase 1: inject lX=+1000, lY=0 (screen-right) and measure movement.
-            s_analogOverrideActive = true;
-            s_analogDesiredLX = 1000;
-            s_analogDesiredLY = 0;
-            SetHeldDirections(DIR_RIGHT);  // keyboard trigger for movement
-
-            if (s_calibTicks == CALIB_SETTLE_TICKS) {
-                // Record position after settling.
-                s_calibStartX = cpx;
-                s_calibStartY = cpy;
-            } else if (s_calibTicks >= CALIB_SETTLE_TICKS + CALIB_MEASURE_TICKS) {
-                // Measure displacement.
-                float cdx = cpx - s_calibStartX;
-                float cdy = cpy - s_calibStartY;
-                float cdist = sqrtf(cdx*cdx + cdy*cdy);
-                if (cdist > 5.0f) {
-                    // Normalize: this is the world-space direction of lX=+1000.
-                    s_camRightX = cdx / cdist;
-                    s_camRightY = cdy / cdist;
-                    Log::Field("FieldNavigation: [CALIB] phase 1 done: lX=+1000 moved (%.1f,%.1f) dist=%.1f -> camRight=(%.3f,%.3f)",
-                               cdx, cdy, cdist, s_camRightX, s_camRightY);
-                } else {
-                    Log::Field("FieldNavigation: [CALIB] phase 1 FAILED: no movement (dist=%.1f), keeping default camRight", cdist);
-                }
-                // Transition to phase 2.
-                s_calibPhase = 2;
-                s_calibTicks = 0;
-            }
-            s_driveTotalTicks++;
-            return;  // don't run normal navigation during calibration
-        }
-
-        if (s_calibPhase == 2) {
-            // Phase 2: inject lX=0, lY=+1000 (screen-down) and measure movement.
-            s_analogOverrideActive = true;
-            s_analogDesiredLX = 0;
-            s_analogDesiredLY = 1000;
-            SetHeldDirections(DIR_DOWN);  // keyboard trigger for movement
-
-            if (s_calibTicks == CALIB_SETTLE_TICKS) {
-                s_calibStartX = cpx;
-                s_calibStartY = cpy;
-            } else if (s_calibTicks >= CALIB_SETTLE_TICKS + CALIB_MEASURE_TICKS) {
-                float cdx = cpx - s_calibStartX;
-                float cdy = cpy - s_calibStartY;
-                float cdist = sqrtf(cdx*cdx + cdy*cdy);
-                if (cdist > 5.0f) {
-                    s_camDownX = cdx / cdist;
-                    s_camDownY = cdy / cdist;
-                    Log::Field("FieldNavigation: [CALIB] phase 2 done: lY=+1000 moved (%.1f,%.1f) dist=%.1f -> camDown=(%.3f,%.3f)",
-                               cdx, cdy, cdist, s_camDownX, s_camDownY);
-                } else {
-                    // v06.17: Derive camDown from camRight by 90° clockwise rotation.
-                    // In screen space, rotating right vector 90° CW gives the down vector.
-                    // rotation: (x,y) -> (y, -x)
-                    s_camDownX = s_camRightY;
-                    s_camDownY = -s_camRightX;
-                    Log::Field("FieldNavigation: [CALIB] phase 2 FAILED: no movement (dist=%.1f), derived camDown=(%.3f,%.3f) from camRight perpendicular",
-                               cdist, s_camDownX, s_camDownY);
-                }
-                // Calibration complete.
-                s_calibPhase = 3;
-                s_camCalibrated = true;
-                s_calibPending = false;
-                // Log the final calibration result.
-                Log::Field("FieldNavigation: [CALIB] complete: camRight=(%.3f,%.3f) camDown=(%.3f,%.3f)",
-                           s_camRightX, s_camRightY, s_camDownX, s_camDownY);
-                // Reset stuck detection to account for calibration movement.
-                s_driveStuckTicks = 0;
-                GetEntityPos(s_playerEntityIdx, s_driveStuckPosX, s_driveStuckPosY);
-            }
-            s_driveTotalTicks++;
-            return;  // don't run normal navigation during calibration
-        }
-    }
-
+    // v0.15.9.2.1: Chase-drive bypasses the entity catalog. chase_auto_pilot
+    // doesn't have an entity to target -- it uses raw (X, Y) coords stored
+    // in s_chaseDriveTargetX/Y by StartChaseDrive. Setting ei=-1 here is a
+    // sentinel that skips entity-specific branches in the rest of this
+    // function. Without this gate, v0.15.9.2 BAT showed UpdateAutoDrive
+    // reading s_catalog[s_selectedCatalogIdx] after calibration, matching
+    // its stale entityIdx against the player, and firing the loud
+    // StopAutoDrive("No target.") SAPI announce.
     const EntityInfo& catTarget = (s_selectedCatalogIdx < s_catalogCount)
                                    ? s_catalog[s_selectedCatalogIdx]
                                    : s_catalog[0]; // safety fallback
-    int ei = catTarget.entityIdx;
-    if (ei == s_playerEntityIdx) { StopAutoDrive("No target."); return; }
-    // v0.07.94: Valid targets: >=0 (runtime entity), <=-200 (trigger line), <=-300 (JSM-injected), <=-400 (INF gateway).
-    if (ei < 0 && ei > -200) { StopAutoDrive("Target lost."); return; }
-    if (ei >= MAX_ENTITIES)                              { StopAutoDrive("Target lost."); return; }
+    int ei;
+    if (s_chaseDriveActive) {
+        ei = -1;  // sentinel: chase-drive has no entity target
+    } else {
+        ei = catTarget.entityIdx;
+        if (ei == s_playerEntityIdx) { StopAutoDrive("No target."); return; }
+        // v0.07.94: Valid targets: >=0 (runtime entity), <=-200 (trigger line), <=-300 (JSM-injected), <=-400 (INF gateway).
+        if (ei < 0 && ei > -200) { StopAutoDrive("Target lost."); return; }
+        if (ei >= MAX_ENTITIES)                              { StopAutoDrive("Target lost."); return; }
+    }
 
     // v05.37: Suspend key injection during dialog (scripted cutscenes lock movement).
     // Don't stop the drive — just pause until dialog clears.
@@ -271,8 +68,13 @@ static void UpdateAutoDrive()
     // v0.07.74: JSM-injected entities use SET3 extraction positions.
     // v0.07.83: Trigger line exits use SETLINE center positions.
     // v0.07.94: INF gateway exits use deduplicated gateway center positions.
+    // v0.15.9.2.1: Chase-drive uses raw target coords from s_chaseDriveTargetX/Y.
     bool gotTarget = false;
-    if (ei <= -400) {
+    if (s_chaseDriveActive) {
+        tx = (float)s_chaseDriveTargetX;
+        tz = (float)s_chaseDriveTargetY;
+        gotTarget = true;
+    } else if (ei <= -400) {
         int gwIdx = -(ei + 400);
         if (gwIdx >= 0 && gwIdx < s_dedupGatewayCount) {
             tx = s_dedupGateways[gwIdx].centerX;
@@ -304,33 +106,80 @@ static void UpdateAutoDrive()
     float dz   = tz - pz;
     float dist = sqrtf(dx*dx + dz*dz);
 
+    // v0.15.9.2.2: Save original target direction for keyboard heading bitmask.
+    // The corridor-level steering below overwrites dx/dz to point at nearby
+    // shared-edge midpoints. When that target is close (< 150 units in either
+    // axis), the heading-bitmask threshold check fails for ALL four bits, and
+    // the fallback fires DIR_UP. That presses the UP arrow while the analog
+    // says SW (toward the actual target) -- the engine sees fighting inputs
+    // and the party crawls instead of walking properly.
+    //
+    // Fix: heading bitmask uses the LONG-RANGE target direction (always passes
+    // the 150 threshold), while the analog continues to use the corridor-tuned
+    // dx/dz for fine steering. Keyboard "wake-up trigger" doesn't need to be
+    // pixel-precise; it just needs to push in the right broad direction.
+    float origDx = dx;
+    float origDz = dz;
+
     // v05.76: For trigger line targets, check if the player has crossed the line.
     // This is the primary arrival condition for screen transitions and events.
-    if (s_driveTrigTarget && ei <= -200) {
-        int trigIdx = -(ei + 200);
-        if (trigIdx >= 0 && trigIdx < s_capturedLineCount) {
-            float tlx1 = (float)s_capturedLines[trigIdx].x1;
-            float tly1 = (float)s_capturedLines[trigIdx].y1;
-            float tlx2 = (float)s_capturedLines[trigIdx].x2;
-            float tly2 = (float)s_capturedLines[trigIdx].y2;
-            float tdx = tlx2 - tlx1;
-            float tdy = tly2 - tly1;
-            float crossNow = tdx * (pz - tly1) - tdy * (px - tlx1);
-            // Player has crossed if the sign flipped from start.
-            if (s_driveTrigCrossStart != 0.0f && crossNow * s_driveTrigCrossStart < 0.0f) {
-                StopAutoDrive("Arrived.");
-                return;
+    //
+    // v0.15.9.2.14: Extended to chase-drive. Chase-drive's `ei` is the -1
+    // sentinel (no entity target), so the original `ei <= -200` gate excluded
+    // it. Now we read the trigger index from s_driveSkipTrigIdx (chase-drive
+    // sets it when StartChaseDrive is given a trigger line) and use the same
+    // cross-product sign-flip detection as F9.
+    //
+    // v0.15.9.2.15: Chase-drive now uses explicit endpoint state
+    // (s_driveCrossLine*) instead of indexing into s_capturedLines. This lets
+    // INF gateways drive the same crossing logic -- gateways aren't in
+    // s_capturedLines (which only holds SETLINE-defined trigger lines).
+    //
+    // v0.17.6.0: F9 auto-drive now ALSO populates s_driveCrossLine* when its
+    // target is an INF gateway exit (entityIdx <= -400). The first branch's
+    // condition was widened from `chase-drive + crossing-line-active` to just
+    // `crossing-line-active` so it covers both paths uniformly. F9 trigger
+    // lines (entityIdx <= -200) still take the second branch via the
+    // s_capturedLines lookup -- handlekeys doesn't seed s_driveCrossLine* for
+    // them (point-distance plus per-line geometry is the proven path).
+    bool gotCrossLine = false;
+    float tlx1 = 0, tly1 = 0, tlx2 = 0, tly2 = 0;
+    if (s_driveTrigTarget) {
+        if (s_driveCrossLineActive) {
+            tlx1 = (float)s_driveCrossLineX1;
+            tly1 = (float)s_driveCrossLineY1;
+            tlx2 = (float)s_driveCrossLineX2;
+            tly2 = (float)s_driveCrossLineY2;
+            gotCrossLine = true;
+        } else if (!s_chaseDriveActive && ei <= -200) {
+            int trigCrossIdx = -(ei + 200);
+            if (trigCrossIdx >= 0 && trigCrossIdx < s_capturedLineCount) {
+                tlx1 = (float)s_capturedLines[trigCrossIdx].x1;
+                tly1 = (float)s_capturedLines[trigCrossIdx].y1;
+                tlx2 = (float)s_capturedLines[trigCrossIdx].x2;
+                tly2 = (float)s_capturedLines[trigCrossIdx].y2;
+                gotCrossLine = true;
             }
-            // Also offset the target 300 units past the line center
-            // so the heading aims through the line, not just to its center.
-            float dirLen = sqrtf(dx*dx + dz*dz);
-            if (dirLen > 1.0f) {
-                tx += (dx / dirLen) * 300.0f;
-                tz += (dz / dirLen) * 300.0f;
-                dx = tx - px;
-                dz = tz - pz;
-                dist = sqrtf(dx*dx + dz*dz);
-            }
+        }
+    }
+    if (gotCrossLine) {
+        float tdx = tlx2 - tlx1;
+        float tdy = tly2 - tly1;
+        float crossNow = tdx * (pz - tly1) - tdy * (px - tlx1);
+        // Player has crossed if the sign flipped from start.
+        if (s_driveTrigCrossStart != 0.0f && crossNow * s_driveTrigCrossStart < 0.0f) {
+            StopAutoDrive("Arrived.");
+            return;
+        }
+        // Also offset the target 300 units past the line center
+        // so the heading aims through the line, not just to its center.
+        float dirLen = sqrtf(dx*dx + dz*dz);
+        if (dirLen > 1.0f) {
+            tx += (dx / dirLen) * 300.0f;
+            tz += (dz / dirLen) * 300.0f;
+            dx = tx - px;
+            dz = tz - pz;
+            dist = sqrtf(dx*dx + dz*dz);
         }
     }
     if (dist < s_driveArriveDist) {
@@ -343,6 +192,13 @@ static void UpdateAutoDrive()
     // Chain-advance is delayed until tick 30 (~0.5s) so we don't skip
     // nearby waypoints before the player has started moving.
     float steerX = tx, steerY = tz;  // default: straight to target
+    // v0.17.6.1: [drive-vec] pipeline tracking. Records what each steering
+    // stage produced so the per-tick diagnostic log can show WHICH stage
+    // changed the heading. Initialized to the default (straight to target)
+    // and updated as the waypoint, corridor, and trigger-line stages run.
+    float vecWpRawX = tx, vecWpRawY = tz;  // chosen waypoint (or final target if none)
+    bool  vecCorridorOverrode = false;     // true if corridor steering rewrote steerX/Y
+    bool  vecTrigRedirected   = false;     // true if trigger-line proximity check rewrote dx/dz
     if (s_waypointCount > 0 && s_waypointIdx < s_waypointCount) {
         // v05.66: Only chain-advance after the player has had time to move.
         // On the first few ticks, nearby waypoints shouldn't be skipped
@@ -399,6 +255,28 @@ static void UpdateAutoDrive()
         }
         steerX = s_waypoints[s_waypointIdx][0];
         steerY = s_waypoints[s_waypointIdx][1];
+        vecWpRawX = steerX;  // v0.17.6.1: capture pre-corridor waypoint for [drive-vec]
+        vecWpRawY = steerY;
+
+        // v0.17.8.19.4: Chase-drive gateway pass-through. Override final-wp
+        // steerX/Y to 300 units past the gateway so the party walks THROUGH
+        // instead of oscillating at it (chain-advance can't pass the last wp;
+        // v0.15.9.2.15 tx/tz offset gets overwritten here). See CHANGELOG.
+        if (s_chaseDriveActive && s_driveCrossLineActive &&
+            s_waypointIdx == s_waypointCount - 1) {
+            float toGwX = (float)s_chaseDriveTargetX - px;
+            float toGwY = (float)s_chaseDriveTargetY - pz;
+            float toGwLen = sqrtf(toGwX*toGwX + toGwY*toGwY);
+            if (toGwLen > 1.0f) {
+                steerX = (float)s_chaseDriveTargetX + (toGwX / toGwLen) * 300.0f;
+                steerY = (float)s_chaseDriveTargetY + (toGwY / toGwLen) * 300.0f;
+                Log::Field("FieldNavigation: [drive] chase-drive gateway pass-through: "
+                           "player=(%.0f,%.0f) gw=(%d,%d) toGwLen=%.0f -> steer=(%.0f,%.0f)",
+                           px, pz, (int)s_chaseDriveTargetX, (int)s_chaseDriveTargetY,
+                           toGwLen, steerX, steerY);
+                // vecWpRawX/Y left as raw funnel wp for [drive-vec] aim-vs-override.
+            }
+        }
     }
     // v06.17: Corridor-level steering — steer toward the shared-edge midpoint
     // of the next corridor triangle instead of distant funnel waypoints.
@@ -406,7 +284,50 @@ static void UpdateAutoDrive()
     // The corridor from A* tells us which triangle sequence leads to the goal.
     // Each tick, we find the player's current triangle in the corridor and target
     // the midpoint of the shared edge to the next corridor triangle.
-    if (s_walkmesh.valid && s_corridorCount >= 2 && s_driveTotalTicks >= 30) {
+    //
+    // v0.15.9.2.3: SKIPPED for chase-drive. v0.15.9.2.2 BAT (party frozen at
+    // (-989,3195) on domt5_1 for 60+ seconds) revealed that corridor steering
+    // depends on the engine's reported triangle ID (read from entity +0x1FA),
+    // which can be STALE -- particularly when the player has been frozen, the
+    // engine never reclassifies. Player was geometrically on tri 13 but engine
+    // kept reporting tri 51 (the previous triangle). Corridor steering found
+    // tri 51 at corridor[0], targeted the 51-13 portal midpoint at (-1135,3293)
+    // which is NORTHWEST of player. With v0.15.9.2.2 Fix A, keyboard reflects
+    // long-range target SE while analog reflects backward corridor NW --
+    // PERFECT 2D opposition, total freeze. For chase-drive, use the funnel
+    // waypoint instead (computed at A* time from portal positions, independent
+    // of per-tick tri ID reads). Waypoints can be slightly less precise at
+    // edge crossings but don't suffer from stale tri ID feedback loops.
+    //
+    // v0.17.6.2: DISABLED for F9 auto-drive as well (via `if (false && ...)`).
+    // The v0.17.6.1 BAT [drive-vec] log on bghall_1 Save Point exposed a hard
+    // failure mode: the handlekeys drive-start "pre-skip" block bumps
+    // s_waypointIdx past any wp closer than PRE_SKIP_DIST (120) so the drive
+    // targets the next meaningful waypoint instead of a trivial near-player
+    // one. Corridor steering then re-introduces the SAME point that pre-skip
+    // just discarded -- the corridor edge midpoint between the player's
+    // current triangle and the next is, by construction, the same location
+    // the funnel emitted as that near-player wp. The result is that the
+    // analog flips from "steer toward the real target wp 1" (lX=-332 lY=943,
+    // kb=DL, south-west toward Save Point) to "steer toward the corridor
+    // edge" (lX=-999 lY=-44, kb=L, pure west into a wall), the player
+    // wedges against geometry and moveDist=0 for hundreds of ticks. Manual
+    // nav uses the same funnel waypoints WITHOUT corridor steering and has
+    // been BAT-proven across bghall_1, bghall_4, bg2f_1, bg2f_2, bgroom_1
+    // since v0.17.5 -- FF8's built-in wall-sliding handles narrow corridor
+    // turns naturally when the analog points at a far-enough waypoint to
+    // produce a non-trivial diagonal heading. F9 inherits that correctness
+    // by removing the override and trusting the funnel output, matching the
+    // v0.17.6.x design theme (re-base F9 auto-drive on manual nav primitives).
+    //
+    // The block is preserved with the existing v06.17/v0.15.9.2.3 rationale
+    // because the geometry, shrink-by-agent-radius, and trigger-line edge-
+    // crossing avoidance might still be useful for elongated-corridor maze
+    // fields (Fire Cavern etc.) if v0.17.6.2 BAT regresses on those. To
+    // re-enable, flip `false &&` to `true &&` -- and consider gating on
+    // `currentWpDist > 200.0f` so the override only fires when the current
+    // waypoint is far enough that an intermediate edge midpoint adds value.
+    if (false && s_walkmesh.valid && s_corridorCount >= 2 && s_driveTotalTicks >= 30 && !s_chaseDriveActive) {
         uint16_t nowTri = 0xFFFF;
         {
             uint8_t* base2 = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
@@ -451,6 +372,7 @@ static void UpdateAutoDrive()
                         if (!edgeCrossesTrig) {
                             steerX = emx;
                             steerY = emy;
+                            vecCorridorOverrode = true;  // v0.17.6.1: flag for [drive-vec]
                         }
                         // else: keep the funnel waypoint as steer target
                     }
@@ -560,6 +482,7 @@ static void UpdateAutoDrive()
                         float dot = dx * trigNx + dz * trigNy;
                         dx = trigNx * dot;
                         dz = trigNy * dot;
+                        vecTrigRedirected = true;  // v0.17.6.1: flag for [drive-vec]
                     }
                     break;
                 }
@@ -568,8 +491,14 @@ static void UpdateAutoDrive()
     }
 
     // v05.62: Max drive time safety cutoff.
+    // v0.15.9.2.2: chase-drive uses an extended timeout because chase
+    // corridors are long (domt5_1 is ~3300 world units start-to-finish) and
+    // walking pace stays well below F9's run-to-NPC pace. 12000 ticks = 200 s
+    // gives enough slack to traverse multi-screen corridors without the
+    // outer chase auto-pilot loop having to disengage and re-engage.
     s_driveTotalTicks++;
-    if (s_driveTotalTicks >= DRIVE_MAX_TICKS) {
+    int driveMaxTicks = s_chaseDriveActive ? 12000 : DRIVE_MAX_TICKS;
+    if (s_driveTotalTicks >= driveMaxTicks) {
         char msg[128];
         snprintf(msg, sizeof(msg), "Gave up. Distance remaining: %.0f.", dist);
         StopAutoDrive(msg);
@@ -629,6 +558,34 @@ static void UpdateAutoDrive()
         if (stuckDist < DRIVE_STUCK_MIN_DIST) {
             // Player hasn't moved enough — trigger recovery.
             // (stuckTicks stays >= thresh so the recovery block below fires)
+            //
+            // v0.15.9.2.9: For chase-drive, the regular recovery branch is
+            // gated off (v0.15.9.2.2 Fix B), and v0.15.9.2.5's chase-drive
+            // advance-on-stuck only fires in the no-progress branch BELOW --
+            // which requires the player to actually be MOVING (stuckDist >=
+            // MIN). v0.15.9.2.8 BAT confirmed wp-13 on domt2_1 hangs in this
+            // gap: player at (683,8) with moveDist=0 for 27+ seconds, no
+            // logs, no advance, no recovery. Velocity-stuck on chase-drive
+            // was completely unhandled.
+            //
+            // Fix: when stuckDist < MIN AND chase-drive is active AND we have
+            // waypoints remaining, advance the funnel waypoint. Same logic as
+            // v0.15.9.2.5's no-progress advance, applied to the parallel
+            // velocity-stuck case (player completely stationary instead of
+            // oscillating). Reset stuckTicks so the next advance waits another
+            // full window (~1.3s at 60Hz), preventing chain-skip through all
+            // remaining waypoints in one tick.
+            if (s_chaseDriveActive && s_waypointIdx < s_waypointCount - 1) {
+                Log::Field("FieldNavigation: [drive] chase-drive: velocity-stuck "
+                           "(stuckDist=%.0f < %d), skipping wp %d/%d, "
+                           "advancing to wp %d/%d",
+                           stuckDist, (int)DRIVE_STUCK_MIN_DIST,
+                           s_waypointIdx, s_waypointCount,
+                           s_waypointIdx + 1, s_waypointCount);
+                s_waypointIdx++;
+                s_wpMinDist = 1e30f;
+                s_driveStuckTicks = 0;  // wait another full window before next advance
+            }
         } else {
             // v06.10: Player moved, but check if they're making progress
             // toward the target. Micro-oscillation (e.g. bggate_2 tri 126<->127)
@@ -649,6 +606,28 @@ static void UpdateAutoDrive()
                                    "noProgressCount=%d — forcing recovery",
                                    dist, s_driveProgressDist, closed,
                                    s_driveNoProgressCount);
+                        // v0.15.9.2.5: For chase-drive, the regular recovery branch
+                        // is gated off (v0.15.9.2.2 Fix B) because its perp-nudge
+                        // logic doesn't work on rotated cameras. But no-progress IS
+                        // a real signal that we're stuck on the current funnel
+                        // waypoint -- typically because the camera projection makes
+                        // it unreachable (e.g., on domt5_1 wp 7 sits east of the
+                        // player but camRight is mostly +Y world, so the analog
+                        // can barely move the player east; player oscillates around
+                        // the wp's Y-line at dist ~100 forever). Advance the funnel
+                        // waypoint instead: we've gotten as close as the camera will
+                        // allow, move on. The next waypoint may be camera-reachable.
+                        // If no more waypoints, fall through and let the main drive
+                        // timeout handle it.
+                        if (s_chaseDriveActive && s_waypointIdx < s_waypointCount - 1) {
+                            Log::Field("FieldNavigation: [drive] chase-drive: "
+                                       "skipping wp %d/%d (camera-unreachable?), "
+                                       "advancing to wp %d/%d",
+                                       s_waypointIdx, s_waypointCount,
+                                       s_waypointIdx + 1, s_waypointCount);
+                            s_waypointIdx++;
+                            s_wpMinDist = 1e30f;  // reset for new wp
+                        }
                         // Leave stuckTicks >= thresh so recovery block fires.
                         s_driveProgressDist = dist;
                         s_driveNoProgressCount = 0;
@@ -673,24 +652,114 @@ static void UpdateAutoDrive()
     }
     stuck_check_done:
 
+    // v05.83: Activate analog override and set direction from the computed vector.
+    // This gives us true 360-degree steering via the gamepad analog path.
+    // The keyboard injection (SetHeldDirections) is kept as a fallback
+    // in case the analog path isn't read by the game engine.
+    //
+    // v0.15.9.2.4: Moved BEFORE heading bitmask computation. The chase-drive
+    // heading is now derived from the analog values (set just below), not from
+    // the long-range target direction. See heading-bitmask comment.
+    s_analogOverrideActive = true;
+    SetAnalogFromVector(dx, dz);
+
     // v05.75: Heading computation. Map world-space delta to arrow keys.
     // Log analysis confirms: pressing UP moves player in +Y world direction.
     // For X axis: pressing RIGHT moves player in +X world direction (v05.74
     // confirmed back-to-front auto-drive worked with direct X mapping).
     // Y axis is inverted (UP=+Y but -Y=screen-up), X axis is NOT inverted.
+    //
+    // v0.15.9.2.2: Used origDx/origDz (long-range target direction) to fix
+    // the heading-fallback bug. F9 path-finding still uses this branch.
+    //
+    // v0.15.9.2.4: For chase-drive, DERIVE THE HEADING FROM THE ANALOG VALUES
+    // (s_analogDesiredLX/LY, set just above by SetAnalogFromVector). The
+    // keyboard's job is to wake up FF8's movement code; it doesn't direct
+    // movement, the analog does. When keyboard and analog conflict on ANY
+    // axis, FF8 reads inconsistent input and movement stalls or freezes.
+    // v0.15.9.2.3 BAT confirmed this: steer was correct (south-west toward
+    // funnel waypoint), analog correct (lX=-886 lY=852 = SW), but kb=DR
+    // (south-east per origDx/origDz from long-range SE target) conflicted on
+    // the X axis (E vs W) and the party stayed frozen for 60+ seconds. Y
+    // axis agreement wasn't enough; ANY axis-level conflict locks movement.
+    // Fix: in chase-drive, heading reflects the screen direction the analog
+    // is currently requesting (screen-relative, lX > thresh → RIGHT, etc.).
+    // F9 path-finding keeps the v0.15.9.2.2 origDx/origDz behavior unchanged.
+    //
+    // v0.17.6.0: F9 now uses the same analog-derived heading logic as chase-drive.
+    // Reason: F9's analog values now flow through the .ca-quantized camera
+    // projection (s_camRight/Down), so on rotated-camera fields the analog
+    // direction is screen-relative while origDx/origDz remained world-relative.
+    // On a 90-degree rotated field (camRight=(0,1), camDown=(-1,0)), a world
+    // +Y target produces lX=+positive (screen right) but origDz>0 triggers
+    // DIR_UP -- the same kb-vs-analog axis conflict the chase doc warned
+    // about. Sharing the analog-derived heading logic guarantees keyboard and
+    // analog agree on every field regardless of camera orientation. The
+    // chase doc Finding from v0.15.9.2.3 ("If F9 ever hits the same freeze
+    // pattern, replace this branch with the chase-drive logic above") was
+    // explicit foreshadowing; v0.17.6.0 acts on it.
     uint8_t heading = 0;
-    if (dz >  DRIVE_AXIS_THRESH) heading |= DIR_UP;    // +Y world = press UP
-    if (dz < -DRIVE_AXIS_THRESH) heading |= DIR_DOWN;  // -Y world = press DOWN
-    if (dx >  DRIVE_AXIS_THRESH) heading |= DIR_RIGHT; // +X world = press RIGHT
-    if (dx < -DRIVE_AXIS_THRESH) heading |= DIR_LEFT;  // -X world = press LEFT
-    if (heading == 0) heading = DIR_UP;  // fallback: shouldn't happen (dist > arrive)
+    {
+        // Derive heading from analog values (screen-relative).
+        // DirectInput convention: lX +1000 = screen right, lY +1000 = screen down.
+        // Arrow keys are screen-relative: DIR_RIGHT = screen right, DIR_DOWN = screen down.
+        const int kAnalogHeadingThresh = 100;
+        int lx = s_analogDesiredLX;
+        int ly = s_analogDesiredLY;
+        if (lx >  kAnalogHeadingThresh) heading |= DIR_RIGHT;
+        if (lx < -kAnalogHeadingThresh) heading |= DIR_LEFT;
+        if (ly >  kAnalogHeadingThresh) heading |= DIR_DOWN;
+        if (ly < -kAnalogHeadingThresh) heading |= DIR_UP;
+        if (heading == 0) {
+            // Analog is in deadzone. Pick the dominant axis so we still
+            // wake up FF8's movement code with something coherent.
+            int absLx = (lx < 0) ? -lx : lx;
+            int absLy = (ly < 0) ? -ly : ly;
+            if (absLx >= absLy && absLx > 0)      heading = (lx >= 0) ? DIR_RIGHT : DIR_LEFT;
+            else if (absLy > 0)                   heading = (ly >= 0) ? DIR_DOWN : DIR_UP;
+            else                                  heading = DIR_UP;  // pure deadzone
+        }
+    }
 
-    // v05.83: Activate analog override and set direction from the computed vector.
-    // This gives us true 360-degree steering via the gamepad analog path.
-    // The keyboard injection (SetHeldDirections) is kept as a fallback
-    // in case the analog path isn't read by the game engine.
-    s_analogOverrideActive = true;
-    SetAnalogFromVector(dx, dz);
+    // v0.17.6.1: [drive-vec] per-tick steering pipeline diagnostic.
+    // Logs the intermediate values at each stage of the steering pipeline so
+    // we can see WHICH STAGE produced the wrong direction when the drive gets
+    // stuck. Fires every DRIVE_VEC_LOG_INTERVAL ticks (~0.5 s at 60 Hz) -- the
+    // existing 120-tick [drive] tick log was too sparse to catch transient
+    // steering inversions (e.g. the v0.17.6.0 BAT showed lX=-840/lY=-542 for
+    // multiple consecutive log windows, but the per-tick values likely jumped
+    // around between recovery cycles). Format:
+    //   t  = total ticks since drive start
+    //   tri = engine-reported walkmesh triangle (read from entity +0x1FA)
+    //   pp = player world position
+    //   wpRaw = chosen funnel waypoint or final target (pre-corridor override)
+    //   corOverride/corSteer = corridor steering wrote new steer to this edge midpoint
+    //   trigRedir/finalDelta = trigger-line proximity rewrote dx/dz parallel
+    //   lX/lY = analog values written by SetAnalogFromVector (camera-projected)
+    //   kb = heading bitmask derived from analog (post v0.17.6.0 unified logic)
+    //   wig/phase = wiggle tick counter / recovery phase counter
+    // To disable, raise DRIVE_VEC_LOG_INTERVAL; the per-tick cost otherwise
+    // is one mod-by-constant and an int compare.
+    static const int DRIVE_VEC_LOG_INTERVAL = 30;
+    if ((s_driveTotalTicks % DRIVE_VEC_LOG_INTERVAL) == 0) {
+        uint16_t vecTri = 0xFFFF;
+        {
+            uint8_t* baseVec = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+            if (baseVec)
+                vecTri = *(uint16_t*)(baseVec + ENTITY_STRIDE * s_playerEntityIdx + 0x1FA);
+        }
+        Log::Field("FieldNavigation: [drive-vec] t=%d tri=%u pp=(%.0f,%.0f) "
+                   "wpRaw=(%.0f,%.0f) corOverride=%d corSteer=(%.0f,%.0f) "
+                   "trigRedir=%d finalDelta=(%.1f,%.1f) "
+                   "lX=%d lY=%d kb=%s%s%s%s wig=%d phase=%d",
+                   s_driveTotalTicks, (unsigned)vecTri, px, pz,
+                   vecWpRawX, vecWpRawY, (int)vecCorridorOverrode, steerX, steerY,
+                   (int)vecTrigRedirected, dx, dz,
+                   (int)s_analogDesiredLX, (int)s_analogDesiredLY,
+                   (heading & DIR_UP) ? "U" : "", (heading & DIR_DOWN) ? "D" : "",
+                   (heading & DIR_LEFT) ? "L" : "", (heading & DIR_RIGHT) ? "R" : "",
+                   s_driveWiggleTicks, s_driveWigglePhase);
+    }
 
     if (s_driveWiggleTicks > 0) {
         // v05.68/85: Wall recovery using analog steering.
@@ -725,9 +794,14 @@ static void UpdateAutoDrive()
             }
             if (nowTri != 0xFFFF && nowTri < (uint16_t)s_walkmesh.numTriangles) {
                 // Find goal triangle from target position
+                // v0.15.9.2.1: Chase-drive uses stored target coords.
                 float rpTx = 0, rpTz = 0;
                 bool rpGot = false;
-                if (ei <= -400) {
+                if (s_chaseDriveActive) {
+                    rpTx = (float)s_chaseDriveTargetX;
+                    rpTz = (float)s_chaseDriveTargetY;
+                    rpGot = true;
+                } else if (ei <= -400) {
                     int gwIdx = -(ei + 400);
                     if (gwIdx >= 0 && gwIdx < s_dedupGatewayCount) {
                         rpTx = s_dedupGateways[gwIdx].centerX;
@@ -759,9 +833,14 @@ static void UpdateAutoDrive()
                         // v06.02: Exempt target trigger line from A* avoidance during re-path.
                         // v06.04: Also exempt for event triggers (not just exits).
                         // v0.07.94: Only for trigger-line entities (-200 to -299).
+                        // v0.15.9.2.1: Use ei (matches catTarget.entityIdx in
+                        // the F9 path, -1 sentinel in chase-drive). Original
+                        // v06.02/v06.04 used catTarget.entityIdx; replaced for
+                        // chase-drive safety -- catTarget can be stale catalog
+                        // state when chase-drive owns the drive.
                         int rpSkipTrig = -1;
-                        if (catTarget.entityIdx <= -200 && catTarget.entityIdx > -300) {
-                            rpSkipTrig = -(catTarget.entityIdx + 200);
+                        if (ei <= -200 && ei > -300) {
+                            rpSkipTrig = -(ei + 200);
                         }
                         // v06.04: Save old waypoints before A* overwrites them.
                         // If re-path fails (player on disconnected island), we
@@ -790,13 +869,52 @@ static void UpdateAutoDrive()
                 }
             }
         }
-    } else if (s_driveStuckTicks >= DRIVE_STUCK_THRESH) {
+    } else if (s_driveStuckTicks >= DRIVE_STUCK_THRESH && !s_chaseDriveActive) {
         // v06.16: Simplified recovery system.
         // No more odd/even phase alternation. Simple cycle:
         //   Odd phases:  re-run A* from current position → funnel path
         //   Even phases: single perpendicular nudge to break wall contact
         // After nudge completes, the wiggle-completion code above re-paths via funnel.
+        //
+        // v0.15.9.2.2: Skipped for chase-drive. Recovery's perpendicular-nudge
+        // logic picks the perp direction whose dot-product with (next-tri-center
+        // − player) is larger. On elongated triangles, the centroid can be on
+        // the OPPOSITE side of the player from the shared edge, so the chosen
+        // perp pushes AWAY from the edge the corridor wants to cross. On rotated-
+        // camera fields like domt5_1 (camRight ≈ (0,1), camDown ≈ (0,-1)), the
+        // chosen perp also projects through the camera to nearly-zero analog,
+        // producing no useful movement. With the v0.15.9.2.2 heading-bitmask
+        // fix above, main steering can hold a coherent direction without
+        // recovery thrashing it. Chase corridors are hand-picked; if main
+        // steering can't progress, recovery's misdirected nudges won't help
+        // either, and the outer chase auto-pilot's per-tick IsChaseDriveActive
+        // check provides the only sensible cancel path.
         s_driveStuckTicks = 0;
+
+        // v0.17.6.1: Reset recovery counter when the player's walkmesh triangle
+        // has changed since the previous recovery cycle. Each new triangle
+        // along the corridor counts as genuine progress and earns a fresh
+        // MAX_RECOVERY_PHASES budget. Without this, narrow-corridor traversals
+        // burn the global counter across many triangles even when each
+        // individual triangle escape works -- the v0.17.6.0 Save Point BAT
+        // got 5 corridor advances (tri 367 -> 366 -> 363 -> 362 -> 359) and
+        // gave up at recovery 12 in tri 362 because the counter never reset.
+        {
+            uint16_t curRecoveryTri = 0xFFFF;
+            uint8_t* baseRT = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+            if (baseRT)
+                curRecoveryTri = *(uint16_t*)(baseRT + ENTITY_STRIDE * s_playerEntityIdx + 0x1FA);
+            if (curRecoveryTri != 0xFFFF && s_lastRecoveryTri != 0xFFFF &&
+                curRecoveryTri != s_lastRecoveryTri) {
+                Log::Field("FieldNavigation: [drive] recovery counter reset: tri %u -> %u "
+                           "(player advanced along corridor; phase was %d)",
+                           (unsigned)s_lastRecoveryTri, (unsigned)curRecoveryTri,
+                           s_driveWigglePhase);
+                s_driveWigglePhase = 0;
+            }
+            s_lastRecoveryTri = curRecoveryTri;
+        }
+
         s_driveWigglePhase++;
 
         // Auto-cancel after too many recovery phases without progress.

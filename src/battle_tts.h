@@ -25,6 +25,43 @@ uint8_t GetDrawExecutingSlot();
 // v0.12.52: Validate Draw character by diffing magic inventories.
 void ValidateDrawCharacter(uint8_t claimedSlot);
 
+// v0.14.51: Cancel any in-flight no-effect watchdog (and any already-queued
+// no-effect announcement) for the given slot. Called by modules that have
+// produced an authoritative TTS announcement which superseeds the watchdog's
+// fallback. Currently used by ScanTTS::OnScanCast — Scan goes through the
+// same sub_48E830 player-magic action-announce path that records the
+// watchdog snapshot, but Scan deals no HP / status / display change, so
+// without cancellation the watchdog would queue a spurious 'No effect on
+// <target>' ~6 s after the cast.
+void CancelNoEffectWatchdogForSlot(int slot);
+
+// v0.14.65: Non-blocking screenshot request. Sets the GL capture flag and
+// returns immediately; the next SwapBuffers call writes basePath.bmp +
+// basePath.png. Unlike the internal CaptureScreenshot() which blocks for up
+// to 160 ms waiting for the render thread, this variant is safe to call
+// from inside MinHook callbacks running on the game thread (e.g. the
+// sub_B687C0 hook in scan_tts.cpp) without freezing the game. Used by
+// ScanTTS to auto-capture the rendered Scan UI window for visual
+// validation against the in-memory entity stats.
+//
+// v0.14.65.3: optional frameDelay parameter defers the capture by N swap
+// frames so the caller can wait for FF8's typewriter text rendering to
+// finish drawing all values before the framebuffer is read. 0 (default)
+// preserves the v0.14.65 behavior — capture fires on the next swap.
+// Typical scan-UI value: 90 (≈1.5 s at 60 fps), enough to let the
+// description and stat-value typewriter complete.
+void RequestScreenshotAsync(const char* basePath, int frameDelay = 0);
+
+// v0.14.65.2: Return the absolute path to the diagnostic screenshots
+// directory. Lets other modules (currently ScanTTS) compose paths that
+// land alongside the existing kind4_*, poll_NEW_*, popup_time_* etc.
+// diagnostic captures rather than getting scattered across the FS based
+// on whatever the current working directory happens to be. The directory
+// itself is created on demand by the existing capture mechanisms (the
+// first SpriteScreenshot or KIND4 capture per battle calls
+// CreateDirectoryA on this path), so callers don't need to.
+const char* GetScreenshotDir();
+
 }  // namespace BattleTTS
 
 // ============================================================================
@@ -48,8 +85,21 @@ static const uint32_t BENT_MAX_ATB          = 0x08;  // uint16 (ally) / uint32 (
 static const uint32_t BENT_CUR_ATB          = 0x0C;  // uint16 (ally) / uint32 (enemy)
 static const uint32_t BENT_CUR_HP           = 0x10;  // uint16 (ally) / uint32 (enemy)
 static const uint32_t BENT_MAX_HP           = 0x14;  // uint16 (ally) / uint32 (enemy)
-static const uint32_t BENT_ELEM_RESIST_BASE = 0x3C;  // 8 x uint16 (Fire/Ice/Thunder/Earth/Poison/Wind/Water/Holy)
-static const uint32_t BENT_PERSIST_STATUS   = 0x78;  // bitfield: KO/Poison/Petrify/Blind/Silence/Berserk/Zombie
+static const uint32_t BENT_ELEM_RESIST_BASE   = 0x3C;  // 8 x uint16 (Fire/Ice/Thunder/Earth/Poison/Wind/Water/Holy)
+// v0.14.74: Status resistance block per `Plan & Research Documents/Scan spell deep research results.md`.
+// 20 contiguous unsigned bytes immediately after the 8 x u16 elemental block (which ends at 0x4B).
+// Order: Death, Poison, Petrify, Darkness, Silence, Berserk, Zombie, Sleep, Haste, Slow, Stop, Regen,
+//        Reflect, Doom, Slow Petrify, Float, Confuse, Drain, Expulsion, ???
+// Encoding: each byte adds to a 100 baseline to form StatusDefense in the inflict formula.
+//   byte == 0   -> baseline (most vulnerable; "Weak to" candidate per the Scan UI)
+//   byte >= 100 -> fully immune ("Strong vs" displayed by the Scan UI per the deep research's threshold)
+// v0.14.77 BAT-validation pivot: 0x4C is u16 UI scratch (write confirmed at 0x008XXXXX:
+//   `mov word ptr [edx + 0x4c], ax`). +0x80 confirmed by canon validation across two BAT
+//   samples (Grat Lv15 monsterId 0x1F, T-Rexaur Lv21 monsterId 0x43): every status
+//   matches FF Wiki / Quistis tutorial canon. Sleep=0x32 (50%) at idx 7 in BOTH monsters
+//   is the structural smoking gun. See DEVNOTES.md "v0.14.77 decision: ship with +0x80".
+static const uint32_t BENT_STATUS_RESIST_BASE = 0x80;  // 20 x uint8 status resistances (see comment above)
+static const uint32_t BENT_PERSIST_STATUS     = 0x78;  // bitfield: KO/Poison/Petrify/Blind/Silence/Berserk/Zombie
 static const uint32_t BENT_LEVEL            = 0xB4;  // uint8
 static const uint32_t BENT_STR              = 0xB5;  // uint8
 static const uint32_t BENT_VIT              = 0xB6;  // uint8

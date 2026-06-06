@@ -8,6 +8,8 @@
 //         memory sweep. No more keyboard tracking or guessing.
 
 #include "ff8_accessibility.h"
+#include "ff8_addresses.h"
+#include "mod_forward_decls.h"
 
 namespace TitleScreen {
 
@@ -86,13 +88,11 @@ void Update()
         s_lastCursor = cursor;
     }
 
-    // F5 = re-announce current position
-    if (GetAsyncKeyState(VK_F5) & 1) {
-        Log::Write("TitleScreen: F5 re-announce, cursor at %d", cursor);
-        wchar_t msg[64];
-        wsprintfW(msg, L"Cursor on: %s", MENU_ITEMS[cursor]);
-        ScreenReader::Output(msg, true);
-    }
+    // v0.14.45: Removed F5 = re-announce binding. F5 is now bound to
+    // GameAudio::SfxVolumeDown in dinput8.cpp. Re-announce is redundant
+    // because arrow-key cursor moves already trigger announces above, and
+    // the global ` key (FieldDialog::RepeatLastDialog) covers the
+    // "repeat last" use case.
 }
 
 void Shutdown()

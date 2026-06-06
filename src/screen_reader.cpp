@@ -22,6 +22,7 @@
 // The public API (Speak, Output, Silence, etc.) is unchanged.
 
 #include "ff8_accessibility.h"
+#include "mod_forward_decls.h"
 #include "resources.h"
 #include <objbase.h>
 #include <sapi.h>
@@ -291,23 +292,30 @@ static bool InitSAPI()
     Log::Mod("ScreenReader: SAPI voice 1 initialized (rate=%ld, volume=%u).",
                s_currentRate, (unsigned)s_currentVolume);
 
-    // v0.10.32: Create second SAPI voice for battle event channel
-    hr = CoCreateInstance(CLSID_SpVoice, NULL, CLSCTX_ALL,
-                          IID_ISpVoice, (void**)&s_pVoice2);
-    if (SUCCEEDED(hr) && s_pVoice2) {
-        s_pVoice2->SetRate(s_currentRate);
-        s_pVoice2->SetVolume(s_currentVolume);
-        Log::Mod("ScreenReader: SAPI voice 2 (event channel) initialized.");
-    } else {
-        Log::Mod("ScreenReader: WARNING - SAPI voice 2 creation failed, events will use voice 1.");
-        s_pVoice2 = nullptr;
-    }
+    // v0.14.61: Single-channel mode. v0.14.60 BAT exposed that having both
+    // voices initialized causes overlapping simultaneous speech for the same
+    // event when one path (e.g. ScanTTS) calls SpeakChannel2 and another path
+    // (still being identified via the SC1-PROBE in Speak() below) calls Speak
+    // with the same content. Aaron has been on Aaron-style single-channel
+    // expectation since the v0.14.45+ audio-mixing chapter, but the dual-
+    // channel architecture from v0.10.32 was never actually disabled —
+    // s_pVoice2 was being created unconditionally in InitSAPI. v0.14.61 leaves
+    // s_pVoice2 = nullptr; SpeakChannel2 then falls back to s_pVoice (voice 1)
+    // and SAPI's per-voice queue serializes everything — no simultaneous
+    // speech is possible. Trade-off: a SpeakChannel2 call with interrupt=true
+    // will now purge voice 1's queue (rather than only purging voice 2),
+    // potentially cutting off menu/command speech mid-utterance. The previous
+    // dual-channel benefit was that damage announces could overlap menu nav,
+    // which Aaron has confirmed he prefers to lose in exchange for clean,
+    // sequential, non-overlapping speech.
+    s_pVoice2 = nullptr;
+    Log::Mod("ScreenReader: SAPI voice 2 SKIPPED (v0.14.61 single-channel mode — SpeakChannel2 falls back to voice 1).");
 
-    // v0.10.43: Create separate SpMMAudioOut objects to bypass SAPI serialization.
-    // Without this, two ISpVoice instances sharing the default audio output are
-    // serialized by SAPI's ISpAudio queue — only one can play at a time.
-    // By giving each voice its own SpMMAudioOut (each opens a separate waveOut
-    // handle), Windows mixes them independently at the WASAPI layer.
+    // v0.10.43: Create a separate SpMMAudioOut object for voice 1. Without
+    // this, voices share the default audio output and SAPI's ISpAudio queue
+    // serializes them. With it, each voice gets its own waveOut handle. In
+    // v0.14.61 single-channel mode there's only one voice so this is largely
+    // moot, but we keep the call so voice 1 has a dedicated output device.
     hr = CoCreateInstance(CLSID_SpMMAudioOut, NULL, CLSCTX_ALL,
                           IID_ISpMMSysAudio, (void**)&s_pAudio1);
     if (SUCCEEDED(hr) && s_pAudio1) {
@@ -319,18 +327,8 @@ static bool InitSAPI()
         s_pAudio1 = nullptr;
     }
 
-    if (s_pVoice2) {
-        hr = CoCreateInstance(CLSID_SpMMAudioOut, NULL, CLSCTX_ALL,
-                              IID_ISpMMSysAudio, (void**)&s_pAudio2);
-        if (SUCCEEDED(hr) && s_pAudio2) {
-            s_pAudio2->SetDeviceId(WAVE_MAPPER);
-            hr = s_pVoice2->SetOutput(s_pAudio2, TRUE);
-            Log::Mod("ScreenReader: Voice 2 -> separate SpMMAudioOut (hr=0x%08X)", hr);
-        } else {
-            Log::Mod("ScreenReader: SpMMAudioOut 2 creation failed (hr=0x%08X), using default output.", hr);
-            s_pAudio2 = nullptr;
-        }
-    }
+    // v0.14.61: SpMMAudioOut for voice 2 also skipped (no voice 2 to attach it to).
+    s_pAudio2 = nullptr;
 
     return true;
 }
@@ -361,10 +359,16 @@ bool Initialize(HMODULE hModule)
     bool sapiOk = InitSAPI();
 
     // v0.13.51: After SAPI is up, apply saved voice ID (if any).
+    // v0.14.106: SAPI's documented behavior is that SetVoice() preserves rate
+    // and volume — v0.14.105's diagnostic harness empirically confirmed this
+    // (shadow rate==SAPI rate at every checkpoint), so no defensive re-apply
+    // is needed.
     if (sapiOk) {
         char savedVoiceId[512] = {};
         if (Config::GetString("speech_voice_id", savedVoiceId, sizeof(savedVoiceId), "")) {
             ApplySavedVoiceId(savedVoiceId);
+        } else {
+            Log::Mod("ScreenReader: No saved voice_id; using default voice.");
         }
     }
 
@@ -478,6 +482,22 @@ bool Speak(const wchar_t* text, bool interrupt)
     // v04.25: Track last spoken text for repeat feature
     if (wcslen(text) > 0) s_lastSpokenText = text;
 
+    // v0.17.5.3: Log every actually-spoken utterance so post-mortems can
+    // confirm what the player heard. Narrow ASCII transliteration is good
+    // enough for the log -- this is a diagnostic trail, not a transcript.
+    // Skip the empty-string "silence" Speak() calls that are used as queue
+    // purges (those produce no audio so a player would not hear them).
+    if (wcslen(text) > 0) {
+        char narrow[512];
+        int nb = WideCharToMultiByte(CP_UTF8, 0, text, -1, narrow,
+                                      sizeof(narrow) - 1, NULL, NULL);
+        if (nb > 0) {
+            narrow[nb] = '\0';
+            Log::Mod("ScreenReader: [TTS] \"%s\"%s", narrow,
+                       interrupt ? " (interrupt)" : "");
+        }
+    }
+
     switch (s_backend) {
     case Backend::NVDA_SAPI:
     {
@@ -490,19 +510,21 @@ bool Speak(const wchar_t* text, bool interrupt)
 
             // SAPI for audio
             bool sapiOk = false;
-            if (s_pVoice)
+            if (s_pVoice) {
                 sapiOk = SUCCEEDED(s_pVoice->Speak(text, SPF_ASYNC, NULL));
+            }
 
             // NVDA for speech + braille
-            if (fn_speakText) fn_speakText(text);
+            if (fn_speakText)      fn_speakText(text);
             if (fn_brailleMessage) fn_brailleMessage(text);
 
             return sapiOk;
         } else {
             // Queue mode: SAPI for audio (survives keypresses), NVDA braille only
             bool sapiOk = false;
-            if (s_pVoice)
+            if (s_pVoice) {
                 sapiOk = SUCCEEDED(s_pVoice->Speak(text, SPF_ASYNC, NULL));
+            }
 
             if (fn_brailleMessage) fn_brailleMessage(text);
 

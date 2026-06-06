@@ -46,10 +46,19 @@ Balamb Garden interior tour. Camera: corridor floor → elevated walkway → ope
 courtyard with trees and cadets → looking up at the ornate central hub against blue sky.
 NOT an exterior shot. This is the first thing Squall sees after leaving the infirmary.
 
-### disc00_01h (~13s) ✅ DONE
-Squall exits the infirmary. Sequence: angular corridor (Squall's POV leaving) →
-infirmary room with desk/monitor/eye chart → Dr. Kadowaki standing in uniform →
-close-up of Dr. Kadowaki (auburn hair, glasses).
+### disc00_01h (~13.5s) ✅ DONE (rewrite 2026-05-27, frame-verified)
+Quistis arrives at the Garden infirmary to collect Squall. Sequence: angular
+doorway close-up as she steps through → close-ups of her face (auburn hair in
+instructor's ponytail, wire-frame glasses, navy SeeD instructor's blazer with
+red trim and gold piping) → wide shot of the teal infirmary (angular desk
+with retro round monitor, lamp, eye chart on wall) with Quistis in the
+doorway → medium close-up of Quistis stepping in → SQUALL'S POV FROM THE BED:
+his boot/leg in foreground, Quistis stands across the room with arms loose
+at her sides, looking at him → close-up of Quistis: eyes lid lower → eyes
+close, mouth opens slightly for a soft sigh of patient exasperation → eyes
+open again, composed. NOT Dr. Kadowaki (original AD got this wrong); the
+instructor's uniform belongs to Quistis. Squall is in the bed throughout,
+not leaving.
 
 ### disc00_02h (~10s) ✅ DONE
 Zell Dincht's introduction in the Garden main lobby. Zell approaches and leaps into a

@@ -7,8 +7,22 @@ REM Lives in src\ — invoked by deploy.vbs in project root.
 REM ============================================================
 
 :: Extract version from ff8_accessibility.h
+:: v0.15.10.1 fix: add /B (begin-of-line anchor) so findstr matches only the
+:: actual #define line, not historical comment entries that mention the macro
+:: by name. v0.15.3 tightened the literal from "FF8OPC_VERSION " to
+:: "#define FF8OPC_VERSION " (with trailing space) but did not anchor to BOL.
+:: As version history accumulated in line 12's trailing comment, the v0.15.3
+:: entry's own commentary embedded the literal string "#define FF8OPC_VERSION"
+:: while describing what its fix matches -- ironically re-breaking the
+:: regex. findstr matched that comment line too, and for /f's
+:: last-iteration-wins behavior left VERSION set to token 3 of the comment
+:: line ("SINGLE-PRONGED" from "// v0.15.3: SINGLE-PRONGED CLEANUP..."),
+:: producing "Version: SINGLE-PRONGED" in deploy logs from v0.15.3 onward.
+:: Adding /B fixes it: the real #define starts at column 0; all historical
+:: mentions are indented "  // ..." so they no longer false-positive.
+:: The %%~V modifier strips surrounding quotes from "X.Y.Z".
 set "VERSION=unknown"
-for /f "tokens=3 delims= " %%V in ('findstr /C:"FF8OPC_VERSION " "%~dp0ff8_accessibility.h" ^| findstr /V "DATE"') do (
+for /f "tokens=3 delims= " %%V in ('findstr /B /C:"#define FF8OPC_VERSION " "%~dp0ff8_accessibility.h"') do (
     set "VERSION=%%~V"
 )
 
@@ -140,15 +154,29 @@ cl /nologo /W3 /EHsc /O2 /MD /LD ^
     "%SRC_DIR%\title_screen.cpp" ^
     "%SRC_DIR%\fmv_audio_desc.cpp" ^
     "%SRC_DIR%\fmv_skip.cpp" ^
+    "%SRC_DIR%\gf_audio_desc.cpp" ^
+    "%SRC_DIR%\scan_tts.cpp" ^
     "%SRC_DIR%\field_dialog.cpp" ^
     "%SRC_DIR%\field_archive.cpp" ^
     "%SRC_DIR%\field_navigation.cpp" ^
     "%SRC_DIR%\name_bypass.cpp" ^
     "%SRC_DIR%\nav_log.cpp" ^
     "%SRC_DIR%\game_audio.cpp" ^
+    "%SRC_DIR%\audio_ducker.cpp" ^
     "%SRC_DIR%\menu_tts.cpp" ^
     "%SRC_DIR%\battle_tts.cpp" ^
     "%SRC_DIR%\world_map.cpp" ^
+    "%SRC_DIR%\chase_diag.cpp" ^
+    "%SRC_DIR%\chase_detector.cpp" ^
+    "%SRC_DIR%\chase_ask_overlay.cpp" ^
+    "%SRC_DIR%\chase_auto_pilot.cpp" ^
+    "%SRC_DIR%\chase_keyboard.cpp" ^
+    "%SRC_DIR%\chase_wndproc.cpp" ^
+    "%SRC_DIR%\chase_kani_freeze.cpp" ^
+    "%SRC_DIR%\chase_battle_freeze.cpp" ^
+    "%SRC_DIR%\countdown_timer.cpp" ^
+    "%SRC_DIR%\dialog_inject.cpp" ^
+    "%SRC_DIR%\field_announce.cpp" ^
     "%SRC_DIR%\ff8_text_decode.cpp" ^
     "%MINHOOK_DIR%\src\buffer.c" ^
     "%MINHOOK_DIR%\src\hook.c" ^
@@ -163,6 +191,7 @@ cl /nologo /W3 /EHsc /O2 /MD /LD ^
     psapi.lib ^
     gdi32.lib ^
     gdiplus.lib ^
+    dxguid.lib ^
     opengl32.lib > "%PROJECT_DIR%\Logs\build_latest.log" 2>&1
 
 if errorlevel 1 (

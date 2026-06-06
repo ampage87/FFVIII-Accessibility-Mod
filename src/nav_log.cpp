@@ -98,7 +98,12 @@ void Close()
 
 void SessionStart()
 {
-    WriteBoth("SESSION\t" FF8OPC_VERSION "\t" FF8OPC_VERSION_DATE);
+    // v0.15.10.2: dropped FF8OPC_VERSION_DATE column from the SESSION row.
+    // The macro is gone; the [YYYY-MM-DD HH:MM:SS] prefix that WriteBoth
+    // prepends to every line already provides wall-clock context. If
+    // analysis tools were parsing this row expecting 2 tab-separated
+    // fields, they now see 1 (version string only).
+    WriteBoth("SESSION\t" FF8OPC_VERSION);
 }
 
 void FieldLoad(const char* fieldName, int fieldId, int numTris,
@@ -153,6 +158,27 @@ void CoordSample(const char* fieldName, int triIdx,
                  float posX, float posY,
                  float wx, float wy, float wz)
 {
+    // v0.15.9.11.3.7: debounce on (fieldName, triIdx) to skip duplicate
+    // consecutive samples. The party standing on a walkmesh triangle
+    // boundary causes the engine's triIdx reads to flicker between two
+    // neighbours every frame; v0.15.9.11.3.6 BAT on dotown_3 logged 19
+    // identical-coord lines in 1 second from this flicker. Caching the
+    // last (fieldName, triIdx) pair and skipping repeats preserves the
+    // triangle-sequence data (still logs every actual triangle change)
+    // while eliminating the noise. APPEND-mode file growth tames
+    // accordingly (~95% reduction expected based on observed flicker).
+    static char s_lastFieldName[64] = {0};
+    static int  s_lastTriIdx = -1;
+    if (fieldName != nullptr && triIdx == s_lastTriIdx &&
+        std::strcmp(fieldName, s_lastFieldName) == 0) {
+        return;
+    }
+    if (fieldName != nullptr) {
+        std::strncpy(s_lastFieldName, fieldName, sizeof(s_lastFieldName) - 1);
+        s_lastFieldName[sizeof(s_lastFieldName) - 1] = '\0';
+    }
+    s_lastTriIdx = triIdx;
+
     WriteF("COORD\t%s\t%d\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f",
            fieldName, triIdx, posX, posY, wx, wy, wz);
 }

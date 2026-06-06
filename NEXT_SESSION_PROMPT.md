@@ -1,135 +1,90 @@
-# NEXT SESSION PROMPT — FF8 Accessibility Mod (Session 77)
+# Next Session Prompt: Main-Menu Ability screen TTS (#42, v0.18.1.x)
 
-## Current Build: v0.13.61 (GitHub-synced, ready for session 77 item 2)
+## Greeting
 
-## Session 77 Goals (4 items)
+Start every response with `## Claude Says`. Read `DEVNOTES.md` and THIS file before any work, then `github:list_issues` for the live backlog.
 
-Aaron has picked four targets for this session. Work through them in order; GitHub sync should happen first so subsequent work commits cleanly on top of a synced tree.
+## Current session (0.18.2.x — menu polish + new submenus)
 
-### 1. Sync recent changes to GitHub
+Fresh chapter opened from HEAD v0.18.1.13. Five tasks (Aaron's order): **(1)** Junction > Character > **Auto** submenu (options Atk Mag, Def) — read options on move + announce when applied [NEW SCREEN — SUBMON discovery first; `menu_tts_junction.inl`]. **(2)** Refine **quantity** screen context [DONE in local v0.18.2.0, pending BAT — `PollRefineQuantity` orienting phrase]. **(3)** **Items** submenu glitches around the party-member list when using an item [overlaps #10; read `menu_tts_item.inl`, reproduce]. **(4)** Main-menu **party navigation** beyond the 3 lead members [SUBMON discovery]. **(5)** Verify junctioning **non-command abilities** (only command abilities tested so far) [read `menu_tts_junction.inl`, verify BAT].
 
-Sessions 75–76 produced v0.13.57 → v0.13.60 (cap→freeze ATB sandwich, dispatch hooks on `sub_483470`/`sub_482F80`, turn-counter diagnostic, format-string OOB fix). Everything is local — nothing pushed yet.
+Progress: **(2) refine quantity — DONE & BAT-confirmed** (v0.18.2.0). **(5) non-command ability junction — filed #45** (blocked: no GF teaches one yet). **(1) Junction>Auto submenu — readout + `/` help BAT-confirmed (v0.18.2.1); snapshot (.3) rejected, input-bit (.4) dead, routine located (.5); v0.18.2.6 wired the HW write-BP into the live confirm detector — DONE & BAT-confirmed (2026-06-02).** Auto submenu = junction focus `+0x22E==11`, option cursor `+0x26A` (0=Atk,1=Mag,2=Def); new `focus==11` branch in `PollJunctionSubmenu`. **Local build = v0.18.2.12, PUSHED — GitHub HEAD = v0.18.2.12** (v0.18.2.0–.12 pushed this session; Aaron runs `Utilities/push_to_github.ps1`; Claude never pushes). **(1) DONE & BAT-confirmed (v0.18.2.6, 2026-06-02): live "junctioned automatically" confirmation.** Confirm and cancel are byte-identical in the focus path (both 11->8->3). Snapshot (.3) was silent on no-op confirms; `pEngineInputConfirmedButtons` (.4) is never set by the menu. v0.18.2.5 located the game's auto-junction routine at 0x004BE790 via a 1-byte HW write-BP (DR3) on the junction working byte pMenuStateA+0x6C2, and a labelled BAT proved it runs on a confirm (incl a no-op confirm) and NOT on cancel. v0.18.2.6 promotes that BP to the live signal: the lean VEH sets s_juncAutoRoutineRan when it fires at focus==11 (armed on Junction activation, disarmed in ResetJunctionState, flag cleared on each Auto-submenu entry); the action-menu resolution announces "Junctioned automatically for <opt>" if set, silent if clear. No MinHook needed. BAT: Junction>char>action>Auto — confirm an option (expect the announce), re-confirm a no-op option (expect the announce again), cancel out (expect silence then the action item). Log: `[JuncTTS] AutoApplied: ... (confirm detected)` vs `AutoMenu cancelled (auto-junction routine did not run)`. (3) Items Use-target — IN PROGRESS (v0.18.2.8 DIAGNOSTIC). v0.18.2.7 HP-on-use fix FAILED BAT (read computed-stats 0x1CFF000, which doesn't update on in-menu item use); BAT also found a 2nd bug — 4-member Use list reads the 4th as Unknown because the list is built from the 3-member battle formation +0xAF0, not the full party roster. v0.18.2.8 diagnostic settled it: after a Potion, savemap curHP=536 (live) vs computed=336 (stale), savemap maxHP=0. v0.18.2.9 FIX (#10, pending BAT): `GetCharacterHP` takes curHP from savemap, maxHP from computed stats (also makes the v0.18.2.7 live re-announce fire). Roster (#46, open): GCW proves screen order = roster sorted by char index [0,1,3,5]; set {0,1,3,5} at pMenuStateA +0x1DB/+0x6FA (formation +0xAF0 only had the 3 battle members); v0.18.2.9 widened `[ItemDiag]` to dump those array windows. v0.18.2.10 FIX (#10 + #46, pending BAT): HP confirmed working (Squall/Zell); potion-error test confirmed screen order = sorted char-index [0,1,3,5]; roster array at pMenuStateA+0x1DB is 0xFF-terminated [1,0,5,3,FF...]. `GetPartyCharAtVisualPos` now reads the roster from +0x1DB (until 0xFF), sorts by index, maps cursor, falls back to formation if empty; all [ItemDiag] diagnostics removed. **BAT-CONFIRMED WORKING; #10 + #46 CLOSED** (local, pending push). Cosmetic follow-up filed as #47 (benched/available-but-not-in-battle members announce curHP but no maxHP — max HP is runtime-derived, only 3 battle members in 0x1CFF000). v0.18.2.11 `[ItemDiag2]` BAT found the benched max-HP source: a per-CHARACTER menu HP display array at pMenuStateA+0x71E, stride 0x20 (curHP +0, maxHP +2), covering all available chars incl. benched (Quistis3=861/861; 0x1CFF000 confirmed battle-only). v0.18.2.12 FIX: `GetCharacterHP` reads maxHP from +0x71E+charIdx*0x20+2, gated by its curHP==savemap curHP; computed-stats/header fallback kept; diagnostic removed — BAT-CONFIRMED (Quistis benched reads "861 of 861"); #47 CLOSED (pending push). Task 3 fully DONE. (4) main-menu party nav beyond 3 leads = Junction character-select reserve announce — IN PROGRESS (v0.18.2.13 DIAGNOSTIC, local). Screen: select Junction then pick which char to junction; party (Zell/Squall/Selphie) in 3 STATUS boxes announce fine, reserve (Quistis, larger box below) is SILENT. `AnnounceJuncCharSelect` maps cursor->battle formation (savemap+0xAF0), bails `>2`, and the reserve isn't in +0xAF0 ([1,0,5,FF]) — only in roster +0x1DB ([1,0,5,3], raw formation-then-reserve = the screen's visual order, NOT the Item screen's char-index-sorted order). BAT v0.18.2.13 PROVED the char-select cursor +0x1E9 indexes the roster directly: cursor 0/1/2/3 -> roster [1,0,5,3] = Zell/Squall/Selphie/Quistis (cursor 4 = roster[4]=FF = empty). v0.18.2.14 FIX (BAT-CONFIRMED 2026-06-02): `AnnounceJuncCharSelect` + `GetJuncSelectedCharIdx` source the char from roster (+0x1DB), accept cursor 0-7; reserve HP from +0x71E; empty slots say "Empty". Log PROVED it: cursor 3 -> `reserve HP[+71E idx 3]: cur=901 max=901` -> "Quistis, Level 18, HP 901 of 901"; cursor 4 -> "empty (roster[4]=0xFF)". +0x71E IS populated on the junction screen. **Task 4 DONE; chapter 0.18.2.x complete except #45 (blocked).** v0.18.2.16 FIX (BAT-CONFIRMED "That worked!"): main-menu "Rearrange party order" source cursor — moving onto the party panel from the bare main menu announced nothing; now announces the member at the source cursor (+0x1D6) on the party panel (+0x1EC==0x07 && +0x1B6==0x0F; command column +0x1B6==3). v0.18.2.17 FIX (BAT-CONFIRMED): the .16 BAT revealed rearrange uses TWO cursors — pick a member (source), then pick the slot to swap into (destination); .16 read the source fine, destination was silent. A Zell↔Selphie-swap log PROVED both sub-modes stay on the party panel and are told apart by +0x1B6: source-select = 0x0F (cursor +0x1D6), destination-select = 0x10 (cursor +0x1D7, while +0x1D6 stays locked on source). +0x1D7 went 2->1->0, then roster +0x1DB/+0x1DD swapped (01↔05). MenuTTS::Update now tracks partyMode 0/1/2 (off/source/dest), announces the member at whichever cursor is active via AnnounceJuncCharSelect, and speaks a one-time "Choose destination" cue on entering dest-select (the switch is otherwise sight-only). BAT = open menu, onto party, pick a member (confirm), expect "Choose destination" then members as the dest cursor moves, confirm to swap. v0.18.2.18 FIX (BAT-CONFIRMED): the reverse direction (party panel -> command column) was silent until an up/down press, because the top cursor +0x1E6 doesn't change while on the party panel so PollMenuCursor had nothing to announce; Update now resets s_prevCursor=0xFF on leaving the party panel (partyMode->0) so the next PollMenuCursor re-announces the command under the cursor. BAT = onto party, then back to the command column WITHOUT up/down; expect the command name to read. v0.18.2.19 FIX (BAT-CONFIRMED): the party panel announced from the Junction command but was SILENT from Item/other commands — the block was gated by the per-submenu !s_*Active flags, and s_itemSubmenuActive/s_gfActive get set just by HOVERING the Item/GF command, so it was skipped from every command but Junction. Re-gated on the bare-main-menu indicator +0x1E8==0xFF (any open submenu changes it: junction=17, ability=14) and detect the panel via +0x1B6 alone (0x0F source / 0x10 dest); redundant +0x1EC dropped. BAT = down to Item (or any command), left to the party; expect members to read. **Main-menu Rearrange (.15-.19) COMPLETE & BAT-CONFIRMED ("Fantastic!").** Magic/Status char-select: v0.18.2.20 diagnostic BAT PROVED both reuse Junction's char-select — Magic = subsystem +0x1E8==3, Status = +0x1E8==5, both focus +0x22E==0, cursor +0x1E9 -> roster +0x1DB (cursor reached 3 = roster[3] = reserve, so reserves are in range). **v0.18.2.21 FIX (pending BAT):** poller in MenuTTS::Update (replaced the diagnostic) announces the member at +0x1E9 via AnnounceJuncCharSelect when (top cursor 2 && +0x1E8==3) or (top cursor 3 && +0x1E8==5) and focus in {0,8}; force-announce on entry, reset when the gate drops. BAT = confirm into Magic, move across members incl. the reserve, back out; repeat for Status; expect each member's "Name, Level N, HP X of Y". **v0.18.2.22 (BAT-CONFIRMED, "Beautiful!"):** active/reserve grouping cue — announce "Active Party Start" / "Reserve Party Start" (start cues only) prepended to the member in the SAME utterance, when the cursor first lands in a group or crosses into the other; active = char in battle formation savemap+0xAF0; added to the shared AnnounceJuncCharSelect behind an opt-in `announceGroup` arg (Junction + Magic/Status pass true; Rearrange panel stays default false), `s_charSelPrevGroup` resets on each (re)entry. BAT (covers .21 + .22): confirm into Magic, move across active members then onto the reserve and back, back out; repeat for Status; re-check Junction. All CONFIRMED. **v0.18.2.23 (pending BAT):** dropped the trailing "Start" — cues are now "Active Party" / "Reserve Party". Session diagnostics were all removed in their own fix cycles (menu_tts.cpp + menu_tts_item.inl re-confirmed clean); standing reusable infra kept (F12 GCW-capture harness, GF exists-dump, save-subsystem offset logging, [TTS] audit, OpenGL screenshot capture). On confirm: file ONE GitHub issue (label menu-tts) for the session menu work — .14 Junction reserve-announce + .15-.19 main-menu party-nav + .20-.23 Magic/Status char-select & active/reserve grouping — closed against the shipping version, trim the SESSION IN PROGRESS block into DEVNOTES_HISTORY.md, then Aaron runs push_to_github.ps1. The rest of this file is the now-closed #42 plan, kept for reference.
 
-**Claude pushes directly via the GitHub MCP tools** — `github:push_files` for multi-file commits, `github:create_or_update_file` for single files. No local git required. Repo: `ampage87/FFVIII-Accessibility-Mod`, branch `main`.
+## Where we are at session open
 
-**Workflow at session start:**
+**GitHub HEAD = v0.18.1.13 (`9cba532`) — Ability screen (#42) refine flow COMPLETE, PUSHED & #42 CLOSED (2026-06-02).** The entire "Use GF ability" refine flow speaks end to end: ability list, Build 2 item list, 2b "Refinable / Cannot be refined" tag, Build 3 recipient picker with "has N <Magic>" stock on the 400 ms beat, Build 4 quantity + running total — plus the v0.18.1.10–.13 polish (entry-blip gate, memory-only sub-phase routing `+0x2E9`/`+0x2E7`, savemap magic-stock read). All BAT-confirmed, all diagnostics off. See DEVNOTES.md top block + `CHANGELOG.md` v0.18.1.4–.13. **NEXT SESSION: start fresh — `github:list_issues` for the live backlog and pick the next item.** Carried-forward minor follow-ups (in the #42 closing comment, none blocking): non-Water `MAGIC_NAMES` entries follow the documented order but only Water is in-game-verified (one-line fix if a wrong count surfaces); status-magic ids 41+ are name-only until confirmed; multi-input recipe (X→Y, X>1) totals unverified; renameable Squall/Rinoa use default names. The Ability screen's passive/shop abilities (Haggle, Call Shop, Junk Shop, …) are out of #42's scope and unhandled. The rest of this file is the original pre-discovery #42 plan, kept for reference.
 
-1. Call `github:list_commits` on `ampage87/FFVIII-Accessibility-Mod` main to find the last synced commit. Commit message + date tells us what's already up there.
-2. Identify files changed since last push. Sessions 75–76 almost certainly touched:
-   - `src/ff8_accessibility.h` (version bump — and confirm it matches v0.13.60)
-   - `src/battle_tts.cpp` and/or `battle_tts_*.inl` (ATB sandwich, dispatch hooks, turn counter)
-   - Possibly `DEVNOTES.md`, `DEVNOTES_HISTORY.md`, `NEXT_SESSION_PROMPT.md`
-   - Ask Aaron if anything else changed that isn't obvious (new files, build config, etc.)
-3. Read each file via `filesystem:read_text_file`, then batch them into one `github:push_files` call so they land as a single commit.
-4. Skip: log files (`Logs/*.log`), per-session F12 diagnostics if still lingering, any build artifacts.
+**THIS SESSION: the Ability screen (#42), top-level cursor index 5, under 0.18.1.x.** First bump this chapter: `FF8OPC_VERSION` -> `0.18.1.0` (+ matching new top `CHANGELOG.md` heading) when the first Ability build is ready. Versioning scheme (Aaron): 0.18.0.x = GF submenu (done), 0.18.1.x = Ability submenu, 0.18.3+ = other menus.
 
-**Before pushing:** bump `FF8OPC_VERSION` in `ff8_accessibility.h` from `0.13.59` → `0.13.61` and update `FF8OPC_VERSION_DATE` to session 77's date. Aaron's decision: skip 0.13.60 in the header so everything is consistent going forward (session 77 starts coding on top of the sync commit anyway). Include the header bump in the sync push as a single atomic commit.
+## #42 — Ability screen: the task (CORRECTED after BAT discovery)
 
-**Suggested commit message:**
+**The screen is NOT a GF-picker / category / AP-learn flow — that was a wrong pre-discovery guess (issue #42's body still has it; needs rewriting).** The main-menu Ability screen (top-level cursor 5, already announces via `MENU_ITEMS[5]`) is the **"Use GF ability"** action screen — using a GF's menu/command ability (the `*-RF` refine family, etc.) from the menu. Confirmed by BAT + 3 F11 shots (`f11_181850/181904/181915`). There is NO AP and nothing "learned/learning" here (that's the GF screen, #41, done). Two phases:
 
-```
-v0.13.57–0.13.61: resolve damage/command-menu overlap, add turn counter
+1. **Ability list** — the menu-usable abilities the party currently has (test save had two: **I Mag-RF**, **Tool-RF**). HELP bar shows that ability's description ("Refine Water/Ice Magic from an item" / "Refine Tools from an item"). Announce ability name + help on cursor move.
+2. **Selected-ability action UI** — for Refine (`*-RF`): an INFO bar with the ability name + a paginated source-item list ("ITEM P. 1": Potion 10, Phoenix Down 1 … Vampire Fang 3) with quantities; some items greyed (not refinable by that ability) — the #5 greyed-state tie-in. Some abilities also show a party HP panel on the right. Announce item name + quantity (+ eligible/greyed) on cursor move.
 
-- v0.13.57: switch ATB sandwich from cap-at-max-1 to true freeze
-  (eliminates converge-at-max-1 condition causing simultaneous dispatches)
-- v0.13.58: per-slot turn counter (initially coupled to EWM_UpdateBattle)
-- v0.13.59: split turn counter into lifecycle-hooked functions for
-  reliable per-battle reset/summary
-- v0.13.60: format-string OOB read fix (cosmetic, never shipped in header)
-- v0.13.61: version-string catch-up; baseline for session 77 work
+Names + help + item names/quantities all read straight from the GCW buffer (same as the GF learn list) — no new savemap structure needed. `GetAbilityName()` already covers these ids (I Mag-RF=98, Tool-RF=108). Never speak a number a blind player can't verify (the #44 rule).
 
-A/B tested across 10 G-Soldier battles: party:enemy turn ratio
-2.25:1 (EWM ON) vs 2.33:1 (EWM OFF) — within 3.5%. Confirms EWM
-has no measurable effect on turn economy.
-```
+## Confirmed offsets (BAT 2026-06-01 18:45, isolated SUBMON pass) — relative to `pMenuStateA`
 
-### 2. Battle status-ailment detection & announcement
+- **`+0x1E8 == 14`** — Ability screen active (gate); 255 when not. Dispatch on this, the analog of Junction `==17` / GF `==4`.
+- **`+0x22E`** — phase byte: **3** = on the ability list; **~19–21** = inside the selected ability's refine item-list. Use as the phase discriminator (treat `>=19` as the item-list phase; confirm exact value as built).
+- **`+0x258`** — **ability-list cursor** (0-based; 0=I Mag-RF, 1=Tool-RF). Confirmed: toggled 0↔1 in lockstep with the HELP-text/`+0x23E-F` pointer swap.
+- **`+0x2DF`** — **item-list cursor** inside a refine ability (0-based). Confirmed: clean 0→1→2→3→4→5 stepping down the source-item list.
+- Secondary confirmers: **`+0x230`** → 1 when a list is active; **`+0x5DF`** 3 (ability list) / 4 (item list) — same sub-phase bytes the Item handler uses. Item-list page/scroll offset still UNKNOWN (test list fit one page "ITEM P. 1"; find it when a list scrolls, cf. #18).
 
-**Two behaviors required:**
+## Suggested approach (mirror the GF chapter, which worked)
 
-- **(a) Transition announce** — when any party member or enemy gains a status, speak it on Channel 2 (e.g. "Squall poisoned", "Ifrit silenced"). Should also announce on *cure* ("Squall no longer poisoned") so the player knows when an Esuna/Remedy landed. Debounce so re-application of an already-active status doesn't re-announce.
-- **(b) Status-on-read** — extend the existing `1`/`2`/`3` HP-check handler and the enemy-targeting announcement so the active status list is appended. Example: "Squall, 1450 of 2100 HP, poisoned and silenced."
+1. **New file `menu_tts_ability.inl`** — textual `#include` from `menu_tts.cpp`, mirror `menu_tts_gf.inl` / `menu_tts_junction.inl` layout: statics-first `*_state` block included first, then poll/announce functions. No header guards, no namespace inside the `.inl`. Keep under the 60 KB soft cap (split if it grows).
+2. **Dispatch seam** — add `PollAbilitySubmenu()` in the `isMenuMode` block of `menu_tts.cpp`, gated on `s_prevCursor == 5`, mirroring the Junction/GF dispatch. Reset state on entry/exit; suppress while the item submenu is active.
+3. **Phase machine** — two phases (ability list -> selected-ability action UI), keyed off `+0x22E` (3 = ability list, ~19–21 = refine item list), like the Item submenu's phase/sub-phase tracking (`SUBMENU_PHASE_OFFSET`, `ITEM_SUBPHASE_OFFSET`, `ITEM_FOCUS_STATE_OFFSET`).
+4. **Discovery FIRST, fully solo-doable** — the per-phase cursor offsets, the phase indicator byte, and any scroll/page offset are unknown. Use the **SUBMON auto-monitor** harness (v0.08.28 in `menu_tts_diagnostics.inl`) — the same memory-diff path that found the Item (v0.08.29), Junction (v0.08.89), and GF (#41) offsets. It diffs memory automatically as the cursor moves, so there is **no "press a key when X appears on screen" step** — Aaron just navigates the Ability screens and the monitor logs which bytes near `pMenuStateA` toggle. Read the SUBMON output from the menu log, do not require a sighted observation.
+5. **Reuse, don't re-derive** — `GetAbilityName()` already names the abilities (I Mag-RF=98, Tool-RF=108). Read the ability list, help text, and item names/quantities from the GCW (the GF learn-list pattern), not new savemap structure. The AP tables from #41/#44 are NOT needed here (no AP on this screen).
 
-**Status list (FF8 has 22 battle statuses, roughly):** Death, Petrify, Darkness (Blind), Poison, Petrifying, Slow, Stop, Confusion, Drain, Berserk, Float, Zombie, Curse, Doom, Low HP, Regen, Protect, Shell, Reflect, Aura, Haste, Sleep, Silence + some field-only ones. Exact list + bit order comes from kernel.bin.
+Reminder — the main-menu Ability screen is distinct from the **battle** GF submenu (`battle_tts_menu_*.inl`) and GF summon audio (`gf_audio_desc.cpp`). Don't duplicate.
 
-**Research pointers (need to verify at session start):**
+## Reusable from the GF chapter (#41/#44) — DO NOT re-derive
 
-- Battle character struct: party actors live in the battle actor array. Status flags are typically a 32-bit or 64-bit field inside the actor struct. Look for FFNx references in `FFNx-Steam-v1.23.0.182/Source Code/FFNx-canary/src/ff8_data.cpp` — search for "status", "ailment", or hex constants around the known actor base.
-- Known battle addresses from `ff8_accessibility.h`/`ff8_addresses.h`: activeChar at `0x01D76844`, menuPhase at `0x01D768D0`. The actor array base should be findable via cross-references from these.
-- Disassembly lookups: grep `FF8_EN_callxrefs.txt` for sites that read/write suspected status-field offsets (often a `mov` to/from a word at `+0x...` inside a battle-tick function).
-- Kernel.bin has status-name strings; if they're not easily reached we can hard-code a 22-entry status-name table in C++.
+**CONFIRMED GF memory map (v0.18.0 BATs):**
+- **GF-list cursor**: `pMenuStateA + 0x253` = canonical GF index 0..15. Gate `pMenuStateA + 0x1E8 == 4` (GF screen). (Not used by the Ability screen — that's a separate flow with its own offsets, confirmed above.)
+- **GF savemap record** (base `SAVEMAP_BASE + 0x4C`, stride `0x44`, 16 records, canonical order): name `+0x00`, **Current EXP u32 `+0x0C`**, **obtained `+0x11`**, **current HP u16 `+0x12`**, complete_abilities[16] `+0x14`, **APs[24] `+0x24`**, kills `+0x3C`, **learning ability id `+0x40`**. Level NOT stored (computed).
+- **AP read pattern (#44):** current AP for an ability = `APs[slot-of-id]`, where slot comes from `gf_ability_slots[gf][...]` (the displayed list is id-sorted and is a SUBSET of the 22 slots; key every lookup off id, never off display order). Required AP = `ability_ap_cost[id]`. Helpers: `GFAbilityApCost(id)`, `GFReadAbilityAP(gf, id, &cur)`. Both tables + helpers live in `menu_tts_gf.inl`. Caveat: Auto-Haste (id 73, Cerberus-only) cost uncertain (Hyne 250 vs FFWiki 150) — verify when obtained.
+- **Compatibility** (GF detail only; may not be on the Ability screen): each CHARACTER's `gf_compat[16]` at char `+0x70` (u16, indexed by GF id), display = `(6000 - raw) / 5`.
+- **GF EXP / level**: flat per-level cost; level = exp/cost + 1, next = cost - (exp % cost). `GF_EXP_PER_LEVEL[16]` holds only CONFIRMED costs (Quez/Shiva/Ifrit/Diablos 500, Siren 400; rest 0 = announce EXP only, no guessed level). Calibrating the rest is tracked in **#43** (read each GF's level off a detail screenshot as obtained, set its entry).
+- Residual: "Siren" decodes as "Siren A" (name-table artifact in both the dump and the GCW) — trim later.
 
-**Implementation approach:**
+**Learn-list readout style locked in #41/#44 (reuse the wording):** rows = "&lt;name&gt;, Learned" or "&lt;name&gt;, C out of R AP" (one format, even at 0). Empty rows = "Empty Ability Slot". `/` key = help description only. Apply the same don't-over-talk discipline to the Ability ability-list.
 
-- Add `battle_status.inl` (new file) included from `battle_tts.cpp`.
-- Per-frame polling: read status bitfield for each of 3 party slots + up to 8 enemy slots; cache last-known in `s_statusPrev[11]`; on any bit flip, queue an announcement.
-- Gate announcements through Channel 2 (`SpeakChannel2`) with `interrupt=false` so they don't clobber active damage TTS.
-- Extend `battle_tts_screenshot.inl` or wherever the `1`/`2`/`3` HP-check lives to call a new `FormatStatusList(slot)` that returns a comma-joined string of active statuses.
-- Same `FormatStatusList` used for enemy-target announce (find the existing target-cursor hook in `battle_tts.cpp`).
+## Backlog (pick with Aaron after #42, or instead of it if he redirects)
 
-### 3. GF summon audio descriptions
+Live list is in **GitHub Issues** on `ampage87/FFVIII-Accessibility-Mod` — `github:list_issues`. Current open menu/this-chapter items:
+- **#42** Main-menu Ability screen TTS — THIS SESSION.
+- **#43** Calibrate remaining GF per-level EXP costs (#41 follow-up) — low-effort, do opportunistically as GFs are obtained.
+- **#5** announce disabled/greyed-out menu items — Ability is one of the conditionally-disabled items; handle "Ability, unavailable" rather than entering a dead screen.
+- **#18 / #19** battle Magic sub-menu scrolling + page/slot announcements (ability lists scroll too; share the offset once found).
 
-Mirror the existing FMV audio-description pipeline (shipped in v03.00) for GF summons. Each of FF8's 16 GFs has a distinctive animation — a blind player currently hears nothing meaningful during the entire summon sequence.
+Field / auto-drive + other open bugs (#21, #27–#39 etc.) are unchanged from the GF chapter — see DEVNOTES backlog and the tracker. For the field-exit verification items (#34/#35) flip `LINEDIAG_ENABLED` to 1 in `field_navigation.cpp`, rebuild locally, traverse the field. **File any new bug as a GitHub issue, not in these docs.**
 
-**Trigger detection:** `s_gfAnimFired` already latches when a GF summon starts. `s_gfHpTracking` already tracks which GF. Both are in `battle_tts.cpp`. The description should fire once per summon, at animation start.
+## Closed / verified — do NOT re-open
 
-**GF roster (16):** Quezacotl, Shiva, Ifrit, Siren, Brothers (Sacred + Minotaur), Diablos, Carbuncle, Leviathan, Pandemona, Cerberus, Alexander, Doomtrain, Bahamut, Cactuar, Tonberry, Eden.
+- **GF submenu chapter** — #41 (GF screen) + #44 (learning-ability AP) closed completed, shipped v0.18.0.15 (`9102689`), verified vs `f11_170221_023.png`. #40 closed as a duplicate of #41.
+- **Track A** F9 auto-drive (Steps 1+2+3) — closed + pushed v0.17.9.17 (`808d4802`), diagnostics gated off (`FEPIC1_GATE_DIAG`=0, `LINEDIAG_ENABLED`=0). Detail in CHANGELOG v0.17.9.14–.17 / DEVNOTES_HISTORY "Track A".
+- **Exit-destination interpreter** — `MapjumpResolver::InterpretExitMethod`, closed + pushed v0.17.9.6 (`502516c3`) and the JPF off-by-one generalization v0.17.9.11 (`3478683`); diagnostics behind `#define EXIT_TRACE_DIAG 0`.
+- **Chapter 5** SeeD rank R-key + salary — closed + pushed v0.17.9.1 (`5c3af6a5`). SeeD savemap reference below.
+- **deploy.bat "Version:" extraction** — verified correct (the `/B` anchor + v0.15.12.0 inline-changelog removal). No change wanted; editing risks regressing working build infra.
 
-**Approach decision to confirm with Aaron at session start:**
+## SeeD savemap reference (carry-forward — reuse for any future SeeD/savemap work)
 
-- **Option A (fast):** TTS descriptions — Aaron writes one paragraph per GF (e.g. Shiva: "A woman of ice materializes, raises her arms, and a cascade of icicles rains down on the target."), stored in a C++ `const` map, spoken via `SpeakChannel2`. Shippable in one session. Iteratable later.
-- **Option B (polished):** Pre-recorded audio files played via DirectSound or SAPI-to-WAV pipeline. More work; better production value.
-- Recommend starting with Option A, then upgrading individual GFs to recorded audio if/when Aaron wants.
+- `.ff8` files are FF7/FF8 LZSS-compressed (4-byte LE size header; N=4096 F=18 THRESHOLD=2, init-pos 0xFEE, zero-filled). **Live savemap offset X == decompressed-file offset 0x184 + X.**
+- **SeeD points: +0x0D6C (u16); rank = points / 100.** Salary-payment count: +0x0CDE (u16, LAGS the chime). Steps-since-pay: +0x0D64 (u16, the real-time salary trigger). Gameplay Gil: +0x0B08 (u32). Header Gil +0x08, saveCount +0x06, location +0x00.
+- **Savemap header = 76 bytes (0x4C), NOT 96.** Community/deep-research offsets run +0x14 too high — subtract 0x14. Always include this caveat in any savemap deep-research prompt.
 
-**Implementation scaffold:**
+## Session ritual & push-flow reminders
 
-- Add `gf_descriptions.inl` with a `GF_ID → description` map.
-- In the existing GF-summon detection path, after `s_gfAnimFired` latches, call `SpeakChannel2(GetGFDescription(gfId), /*interrupt=*/true)`.
-- Provide a user setting to toggle off (some players may not want it after the first view). Reuse the `Config::` API that handles the EWM toggle.
-
-### 4. Scan spell formatted output
-
-Scan currently spills the raw enemy-info text through the existing dialog hook. That text is a wall of fragments ("Weak: Fire,Ice Absorb: Lightning …") and not navigable or well-structured for a screen reader.
-
-**Target output format** (to confirm with Aaron):
-
-> "Scan: Ruby Dragon. Level 48. 20480 of 20480 HP. 1500 of 1500 MP. Weak to ice. Absorbs fire. Halves lightning. Immune to earth, water, poison. Status immunities: sleep, stop, silence, slow, berserk, confusion. Vulnerable to: blind, curse. Note: a dragon that lives in the Island Closest to Hell."
-
-**Research pointers:**
-
-- The Scan screen is a specific battle sub-menu. Find its opening function via the existing battle-menu dispatch (same area that handles Magic/GF/Item submenus — these live around `0x1D768D0` function-ptr territory).
-- Enemy struct has `u8 elem_weak`, `u8 elem_absorb`, `u8 elem_immune`, `u8 elem_halve` bitfields (8 elements: Fire, Ice, Thunder, Earth, Poison, Wind, Water, Holy). Status affinity similarly bitfielded.
-- Enemy Note text: sourced from kernel.bin or the battle scene file. May share a codepath with the existing dialog hook — worth checking whether the note text flows through `set_window_object` already.
-- FFNx `ff8_data.cpp` likely has the enemy-struct offsets documented near its scan-related hooks.
-
-**Implementation approach:**
-
-- Hook the Scan window open (not the existing generic dialog read — that fires too early and in wrong context).
-- Read the targeted enemy's struct directly; build the output string from raw affinity bitfields rather than parsing the rendered on-screen text.
-- Suppress or replace the raw-text read-out when formatted version fires, so the player doesn't hear both.
-
-**Nice-to-have:** a key to re-speak the last Scan result (mirroring the `` ` `` dialog-repeat key).
-
-## Active EWM Subsystem (do not break)
-
-- ATB freeze sandwich in `HookedATBUpdate` — POST-FREEZE restores to exact pre-sandwich value
-- Dispatch hooks on `sub_483470` and `sub_482F80` — block during damageOrActionActive or activeChar<3
-- Post-turn grace (1000 ms) + post-action cooldown (500 ms) — bridges game-thread/mod-thread race windows
-- Turn-count diagnostic — EWM-independent, logs per-battle summary
-- Damage-anim transition diagnostic — `[DMG-DIAG]`, `[FRZ-DIAG]`, `[POST-REL]` log tags
-
-All stable after v0.13.59. Changes to any of these need to preserve the invariants in `DEVNOTES.md`.
-
-## Session Ritual Reminder
-
-Read `DEVNOTES.md` and this file before any work. Consult `DEVNOTES_HISTORY.md` only when tracing past decisions. Keep `DEVNOTES.md` under 10 KB.
-
-**BAT protocol:** When Aaron says "BAT," immediately read `Logs/build_latest.log` tail for compiler errors, then the relevant domain log (`ff8_battle.log` for items 2/3/4) for runtime results.
-
-**File access:** ALWAYS use filesystem MCP tools for project files. Bash runs in a Linux container and cannot reach the Windows source tree.
-
-**F12 rule:** Reserved exclusively for per-session diagnostic builds. Before adding any new F12 diagnostic this session, search for existing `VK_F12` references and remove old diagnostic code first.
-
-**Version:** session 77 starts at `0.13.61` post-sync (see item 1). Bump the minor on the first real code change after sync (`0.13.62` for item 2 opener).
-
-**Copyright / IP note:** Any Scan "Note" text displayed in-game is Square Enix IP. Describe/paraphrase in tooling or TTS when possible; speaking the exact on-screen text verbatim to the player is fine (they'd see it otherwise) but the audio-description scripts Aaron writes for GFs should be original wording, not quoted from official materials.
+- **"BAT" mid-conversation** = read `Logs/build_latest.log` tail for version + success, then the relevant domain log — for this chapter that's `ff8_menu.log`. Read the FULL relevant log, not just the tail (the event may be earlier). Never assume a BAT result without reading the log.
+- **Aaron pushes via `Utilities/push_to_github.ps1`; Claude NEVER pushes.** The utility refuses unless `CHANGELOG.md`'s top `## vX.Y.Z` heading matches `FF8OPC_VERSION`. After a push, verify with `github:list_commits` and update DEVNOTES + this file to the new HEAD.
+- **Version bump = one place:** `FF8OPC_VERSION` in `src/ff8_accessibility.h`, paired with a new top `CHANGELOG.md` entry. Deploy = `deploy.vbs` -> `src/deploy.ps1` -> `src/deploy.bat`.
+- **Push-size guard:** local CI mirror enforces the 80 KB hard limit per `.inl`/`.cpp` at push (60–80 KB = non-blocking warning). Keep `menu_tts_ability.inl` lean from the start.
+- **`filesystem:edit_file` corrupts on a literal `$`** in the replacement (truncates + doubles the file) — use hex `0x24` in source, or rewrite the file with `write_file`. OneDrive may throw a transient EPERM on edit_file rename — retry once.
+- **F12 is the per-session diagnostic key only** — one at a time; remove any prior F12 diagnostic before adding a new one. Gate diagnostics `#define X 0` (don't delete) before a chapter is pushed.
+- Update `DEVNOTES.md` + this file at every version bump and after every BAT.

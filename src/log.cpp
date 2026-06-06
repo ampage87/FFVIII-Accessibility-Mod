@@ -17,6 +17,7 @@
 // during source file splits.
 
 #include "ff8_accessibility.h"
+#include "mod_forward_decls.h"
 #include <cstdio>
 #include <cstdarg>
 #include <ctime>

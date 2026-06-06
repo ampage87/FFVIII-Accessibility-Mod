@@ -126,6 +126,8 @@ static void ResetItemSubmenuState()
     s_pendingActionTime = 0;
     // v0.08.62: reset sub-flow state
     s_prevTargetCursor = 0xFF;
+    s_prevTargetCharIdx = 0xFF;   // v0.18.2.7 (#10)
+    s_prevTargetHP = 0xFFFF;      // v0.18.2.7 (#10)
     s_prevBattleItemCursor = 0xFF;
     s_inUseTargetMode = false;
     s_inRearrangeMode = false;
@@ -152,7 +154,8 @@ static const char* GetPartyMemberName(uint8_t cursorPos)
                (unsigned)cursorPos,
                (unsigned)party[0], (unsigned)party[1], (unsigned)party[2],
                (unsigned)charIdx);
-    return GetCharacterNameByPortrait(charIdx);
+    // v0.17.8.17.7: dream-aware name (charIdx is a formation index; stale in dreams)
+    return GetCharacterNameByPortrait(ResolveDreamAwareCharId(charIdx));
 }
 
 // ============================================================================
@@ -203,6 +206,17 @@ static const int COMP_STATS_CURHP_OFFSET = 0x172;
 static const int COMP_STATS_MAXHP_OFFSET = 0x174;
 static const int COMP_STATS_STRUCT_SIZE  = 0x1D0;  // 464 bytes per entry (3 entries for party)
 
+// v0.18.2.12 (#47): the menu also keeps a per-CHARACTER HP display array that
+// covers every AVAILABLE character — including benched ones the 3-slot
+// computed-stats array misses. pMenuStateA + 0x71E + charIdx*0x20: curHP at +0,
+// maxHP at +2. BAT v0.18.2.11: Squall(0)=336/916, Zell(1)=64/585,
+// Quistis(3,benched)=861/861, Selphie(5)=385/482 — all matching the battle
+// members' computed stats.
+static const int MENU_HP_ARRAY_OFFSET = 0x71E;  // pMenuStateA-relative
+static const int MENU_HP_ARRAY_STRIDE = 0x20;
+static const int MENU_HP_CUR_OFFSET   = 0x00;
+static const int MENU_HP_MAX_OFFSET   = 0x02;
+
 // v0.08.86: Get character HP + status.
 // Primary source: computed stats at 0x1CFF000 (live, updates on item use).
 // Fallback: savemap character section for curHP, header for lead maxHP.
@@ -215,26 +229,41 @@ static bool GetCharacterHP(uint8_t charIdx, uint16_t& curHP, uint16_t& maxHP)
         curHP = *(uint16_t*)(smChar + CHR_CURR_HP);
         maxHP = *(uint16_t*)(smChar + CHR_MAX_HP);
 
-        // v0.08.86: Try computed stats array for this party slot.
-        // Map charIdx to party slot (0-2) by checking formation.
-        uint8_t* formation = (uint8_t*)SAVEMAP_BASE + 0xAF0;
-        int partySlot = -1;
-        for (int i = 0; i < 4; i++) {
-            if (formation[i] == charIdx) { partySlot = i; break; }
+        // v0.18.2.12 (#47): prefer the menu's per-character HP display array, which
+        // covers ALL available characters — including benched ones. Confirm the entry
+        // belongs to this character by requiring its curHP field to match the savemap
+        // curHP, then take maxHP from it. (FF8 derives max HP at runtime; the savemap
+        // char struct doesn't store it — BAT showed savemap maxHP=0.)
+        bool gotMax = false;
+        if (pMenuStateA && charIdx <= 10) {
+            uint8_t* disp = (uint8_t*)pMenuStateA + MENU_HP_ARRAY_OFFSET + charIdx * MENU_HP_ARRAY_STRIDE;
+            uint16_t dispCur = *(uint16_t*)(disp + MENU_HP_CUR_OFFSET);
+            uint16_t dispMax = *(uint16_t*)(disp + MENU_HP_MAX_OFFSET);
+            if (dispMax > 0 && dispMax < 10000 && dispCur == curHP) {
+                maxHP = dispMax;
+                gotMax = true;
+            }
         }
 
-        // Use computed stats for HP if character is in active party
-        if (partySlot >= 0 && partySlot < 3) {
-            uint8_t* cs = (uint8_t*)COMP_STATS_BASE + partySlot * COMP_STATS_STRUCT_SIZE;
-            uint16_t csHP = *(uint16_t*)(cs + COMP_STATS_CURHP_OFFSET);
-            uint16_t csMax = *(uint16_t*)(cs + COMP_STATS_MAXHP_OFFSET);
-            if (csMax > 0 && csMax < 10000) {
-                curHP = csHP;
-                maxHP = csMax;
+        // Fallback: computed-stats array for the 3 battle slots (formation-indexed).
+        // Keep curHP from the SAVEMAP: it updates live on an in-menu item use, whereas
+        // computed curHP is stale until the Item screen is rebuilt (BAT #10: after a
+        // Potion, savemap=536, computed=336).
+        if (!gotMax) {
+            uint8_t* formation = (uint8_t*)SAVEMAP_BASE + 0xAF0;
+            int partySlot = -1;
+            for (int i = 0; i < 4; i++) {
+                if (formation[i] == charIdx) { partySlot = i; break; }
             }
-        } else if (maxHP == 0) {
-            // Not in party — try header for lead
-            if (formation[0] == charIdx) {
+            if (partySlot >= 0 && partySlot < 3) {
+                uint8_t* cs = (uint8_t*)COMP_STATS_BASE + partySlot * COMP_STATS_STRUCT_SIZE;
+                uint16_t csHP = *(uint16_t*)(cs + COMP_STATS_CURHP_OFFSET);
+                uint16_t csMax = *(uint16_t*)(cs + COMP_STATS_MAXHP_OFFSET);
+                if (csMax > 0 && csMax < 10000) {
+                    maxHP = csMax;
+                    if (curHP == 0 && csHP > 0) curHP = csHP;  // safety if savemap unreadable
+                }
+            } else if (maxHP == 0 && formation[0] == charIdx) {
                 maxHP = *(uint16_t*)((uint8_t*)SAVEMAP_BASE + HDR_CHAR1_MAX_HP);
             }
         }
@@ -295,45 +324,60 @@ static int FormatPartyMemberAnnouncement(uint8_t charIdx, const char* name,
     return pos;
 }
 
-// v0.08.67: Get party member character index by cursor position (0-based).
-// Reads party composition from savemap +0xAF0 (4 bytes: char indices, 0xFF=empty).
-// The menu's Use target screen shows party members sorted by character index
-// (Squall=0 always first), NOT in formation/battle order.
-// So we collect non-0xFF entries, sort by char index, and map cursor to sorted array.
+// v0.18.2.10 (#46): party member char index by cursor position (0-based).
+// The Use-target screen lists the FULL party roster, not just the 3 battle
+// members. The roster is an 0xFF-terminated array of char indices at pMenuStateA
+// +0x1DB (BAT: [1,0,5,3,FF...] = Zell,Squall,Selphie,Quistis), and the screen
+// renders it SORTED BY CHARACTER INDEX (BAT via potion errors: cursor 0/1/2/3 =
+// Squall/Zell/Quistis/Selphie = idx 0,1,3,5). Collect the roster, sort, map the
+// cursor. Fall back to the battle formation (+0xAF0) only if the roster array is
+// empty/unreadable (a degraded safety net). NB: the Use screen lists every
+// AVAILABLE (joined) character, not the battle party — benched members included,
+// and it grows as characters join (e.g. Rinoa/Irvine later).
 static uint8_t GetPartyCharAtVisualPos(uint8_t cursorPos)
 {
-    static const int PARTY_FORMATION_OFFSET = 0xAF0;  // 4 bytes: formation order char indices
-    uint8_t* formation = (uint8_t*)SAVEMAP_BASE + PARTY_FORMATION_OFFSET;
-    
-    // Collect non-empty party members
-    uint8_t members[4];
+    static const int ROSTER_OFFSET          = 0x1DB;  // pMenuStateA-relative, 0xFF-terminated
+    static const int PARTY_FORMATION_OFFSET = 0xAF0;  // savemap battle formation (fallback)
+
+    uint8_t members[12];
     int count = 0;
-    for (int i = 0; i < 4; i++) {
-        if (formation[i] != 0xFF && formation[i] <= 10) {
-            members[count++] = formation[i];
+
+    // Primary: the menu roster list (every available character)
+    if (pMenuStateA) {
+        uint8_t* roster = (uint8_t*)pMenuStateA + ROSTER_OFFSET;
+        for (int i = 0; i < 11; i++) {
+            uint8_t c = roster[i];
+            if (c == 0xFF) break;
+            if (c <= 10 && count < 11) members[count++] = c;
         }
     }
-    
-    // Sort by character index (simple insertion sort)
+    bool usedRoster = (count > 0);
+
+    // Fallback: battle formation, if the roster list was empty/unreadable
+    if (!usedRoster) {
+        uint8_t* formation = (uint8_t*)SAVEMAP_BASE + PARTY_FORMATION_OFFSET;
+        for (int i = 0; i < 4; i++)
+            if (formation[i] != 0xFF && formation[i] <= 10 && count < 11)
+                members[count++] = formation[i];
+    }
+
+    // Sort by character index (the screen's display order)
     for (int i = 1; i < count; i++) {
         uint8_t key = members[i];
         int j = i - 1;
-        while (j >= 0 && members[j] > key) {
-            members[j + 1] = members[j];
-            j--;
-        }
+        while (j >= 0 && members[j] > key) { members[j + 1] = members[j]; j--; }
         members[j + 1] = key;
     }
-    
-    Log::Menu("[MenuTTS] GetPartyCharAtVisualPos: pos=%u formation=[%u,%u,%u,%u] sorted=[%u,%u,%u] count=%d",
-               (unsigned)cursorPos,
-               (unsigned)formation[0], (unsigned)formation[1],
-               (unsigned)formation[2], (unsigned)formation[3],
+
+    Log::Menu("[MenuTTS] GetPartyCharAtVisualPos: pos=%u src=%s count=%d sorted=[%u %u %u %u %u %u]",
+               (unsigned)cursorPos, usedRoster ? "roster" : "formation", count,
                count > 0 ? (unsigned)members[0] : 255u,
                count > 1 ? (unsigned)members[1] : 255u,
                count > 2 ? (unsigned)members[2] : 255u,
-               count);
-    
+               count > 3 ? (unsigned)members[3] : 255u,
+               count > 4 ? (unsigned)members[4] : 255u,
+               count > 5 ? (unsigned)members[5] : 255u);
+
     if (cursorPos < count) return members[cursorPos];
     return 0xFF;
 }
@@ -437,6 +481,8 @@ static void PollItemSubmenu()
             s_pendingActionCursor = 0xFF;
             s_pendingActionTime = 0;
             s_prevTargetCursor = 0xFF;
+            s_prevTargetCharIdx = 0xFF;   // v0.18.2.7 (#10)
+            s_prevTargetHP = 0xFFFF;      // v0.18.2.7 (#10)
             s_prevBattleItemCursor = 0xFF;
             s_inUseTargetMode = false;
             s_inRearrangeMode = false;
@@ -505,7 +551,7 @@ static void PollItemSubmenu()
                 uint8_t targetCur = *(base + ITEM_TARGET_CURSOR_OFFSET);
                 s_prevTargetCursor = targetCur;
                 uint8_t charIdx = GetPartyCharAtVisualPos(targetCur);
-                const char* name = GetCharacterNameByPortrait(charIdx);
+                const char* name = GetCharacterNameByPortrait(ResolveDreamAwareCharId(charIdx));  // v0.17.8.17.7 dream-aware
                 char buf[256];
                 if (name) {
                     FormatPartyMemberAnnouncement(charIdx, name, true, buf, sizeof(buf));
@@ -515,6 +561,14 @@ static void PollItemSubmenu()
                 ScreenReader::Speak(buf, true);
                 Log::Menu("[MenuTTS] Use target entered: cursor %u charIdx=%u -> \"%s\"",
                            (unsigned)targetCur, (unsigned)charIdx, buf);
+                // v0.18.2.7 (#10): baseline the target HP so the live-HP poll below
+                // only re-announces on an actual change from using an item.
+                {
+                    uint16_t initCur = 0, initMax = 0;
+                    GetCharacterHP(charIdx, initCur, initMax);
+                    s_prevTargetCharIdx = charIdx;
+                    s_prevTargetHP = initCur;
+                }
             }
             // --- v0.08.64: Rearrange mode detection (focus stabilizes ~97) ---
             else if (focusState >= 94 && focusState <= 100 && !s_inRearrangeMode) {
@@ -616,11 +670,19 @@ static void PollItemSubmenu()
         }
 
         // === v0.08.86: USE TARGET CURSOR (+0x276 party member selection) ===
+        // v0.18.2.7 (#10): also re-announce when the selected target's HP changes
+        // from using an item. The cursor stays on the same character through a use,
+        // so the cursor-move check alone never re-reads the (now updated) HP.
         if (s_inUseTargetMode) {
             uint8_t targetCur = *(base + ITEM_TARGET_CURSOR_OFFSET);
-            if (targetCur != s_prevTargetCursor) {
-                uint8_t charIdx = GetPartyCharAtVisualPos(targetCur);
-                const char* name = GetCharacterNameByPortrait(charIdx);
+            uint8_t charIdx = GetPartyCharAtVisualPos(targetCur);
+            uint16_t curHP = 0, maxHP = 0;
+            GetCharacterHP(charIdx, curHP, maxHP);
+            bool cursorMoved = (targetCur != s_prevTargetCursor);
+            bool hpChanged   = (!cursorMoved && charIdx == s_prevTargetCharIdx &&
+                                s_prevTargetHP != 0xFFFF && curHP != s_prevTargetHP);
+            if (cursorMoved || hpChanged) {
+                const char* name = GetCharacterNameByPortrait(ResolveDreamAwareCharId(charIdx));  // v0.17.8.17.7 dream-aware
                 char buf[256];
                 if (name) {
                     FormatPartyMemberAnnouncement(charIdx, name, false, buf, sizeof(buf));
@@ -628,9 +690,13 @@ static void PollItemSubmenu()
                     sprintf(buf, "Party member %u", (unsigned)targetCur + 1);
                 }
                 ScreenReader::Speak(buf, true);
-                Log::Menu("[MenuTTS] Use target cursor %u: charIdx=%u -> \"%s\"",
-                           (unsigned)targetCur, (unsigned)charIdx, buf);
+                Log::Menu("[MenuTTS] Use target cursor %u: charIdx=%u hp=%u/%u -> \"%s\"%s",
+                           (unsigned)targetCur, (unsigned)charIdx,
+                           (unsigned)curHP, (unsigned)maxHP, buf,
+                           hpChanged ? " (HP changed)" : "");
                 s_prevTargetCursor = targetCur;
+                s_prevTargetCharIdx = charIdx;
+                s_prevTargetHP = curHP;
             }
         }
 

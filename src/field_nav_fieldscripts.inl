@@ -37,6 +37,11 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
     s_waypointCount      = 0;
     s_waypointIdx        = 0;
     s_usingFunnel        = false;  // v05.95
+    // v0.15.9.2.6: reset cluster state (will be repopulated by the dead-end scanner below)
+    s_deadClusterCount   = 0;
+#if FEPIC1_GATE_DIAG
+    s_gateDiagPending    = false;  // re-armed below only if this field is fepic1
+#endif
     // Free previous walkmesh before loading new one.
     FieldArchive::FreeWalkmesh(s_walkmesh);
     // Reset camera axes for new field.
@@ -57,10 +62,27 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
     s_entDiagDumped      = true;
     s_bgDiagDumped       = true;
     s_coordDiagDumped    = true;   // v0.12.11: DISABLED — coordinate diagnostic served its purpose
+    s_partyDiagDumped    = false;  // v0.14.107: re-arm the [party-state] dump for this field load
     s_coordPrevPlayerTri = 0;       // v06.13: reset for shared-edge CoordSample
     // v06.14: Reset heading calibration for new field.
+    //
+    // v0.17.2: Reset BOTH axis pairs (manual nav + auto-drive private) and the
+    // source tag. The CA-loaded block further down will overwrite both pairs
+    // and set s_camAxesSource = "ca-file" when a .ca file is parsed.
     s_camRightX = 1.0f; s_camRightY = 0.0f;
-    s_camDownX = 0.0f; s_camDownY = -1.0f;  // default: -Y world = screen-down (matches common calibration result)
+    s_camDownX  = 0.0f; s_camDownY  = -1.0f;
+    s_driveCamRightX = 1.0f; s_driveCamRightY = 0.0f;
+    s_driveCamDownX  = 0.0f; s_driveCamDownY  = -1.0f;
+    s_camAxesSource  = "identity";
+    // v0.17.7.6: Reset closed-loop empirical calibration accumulator.
+    // The buffer holds NAV-OBSERVE samples that drive the empirical
+    // camera-axes correction on degenerate-CA fields. Clearing on every
+    // field load means samples from one field never bleed into another's
+    // consensus check, and the one-shot lock re-arms so the new field's
+    // first valid sample run can apply a fresh correction if needed.
+    memset(s_navObsBuffer, 0, sizeof(s_navObsBuffer));
+    memset(s_navObsSampleCount, 0, sizeof(s_navObsSampleCount));
+    s_camAxesEmpiricalApplied = false;
     s_camCalibrated = false;
     s_calibPhase = 0;
     s_calibPending = true;  // calibrate on first drive
@@ -89,12 +111,7 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
     s_pshmCaptureStartTime = GetTickCount();
     s_pshmSummaryLogged = false;
 
-    // v0.12.22: Reset POPM varblock write capture.
-    s_varWriteCount = 0;
-    s_capturingVarWrites = true;
-    s_varWriteCaptureStart = GetTickCount();
-    s_varWriteSummaryLogged = false;
-    memset(s_varWrites, 0, sizeof(s_varWrites));
+    // v0.14.45: POPM varblock write capture reset block removed (F12 diagnostic retired).
 
     int ret = s_originalFieldScriptsInit(unk1, unk2, unk3, unk4);
 
@@ -129,7 +146,18 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                 uint8_t lim = (entCount < MAX_ENTITIES) ? entCount : (uint8_t)MAX_ENTITIES;
                 for (int i = 0; i < (int)lim; i++) {
                     uint8_t  setpc = *(base + ENTITY_STRIDE * i + 0x255);
-                    if (setpc == 0) {
+                    // v0.17.8.17.1: Accept any valid character ID (0..10), not
+                    // just `setpc == 0`. The old check matched only Squall (ID 0)
+                    // and so failed on Laguna dream fields like gwgrass1 where
+                    // the playable entity has setpc=8 (Laguna), 9 (Kiros), or
+                    // 10 (Ward). The first entity with a character ID is the
+                    // player; NPCs use the sentinel 254 (0xFE) and are excluded
+                    // by the < 11 bound. Confirmed by the v0.17.8.17 BAT
+                    // [LAGU-FLD] block on gwgrass1: ent0/1/2 had setpc=8/9/10
+                    // (Laguna/Kiros/Ward), ent3/4 had setpc=254 (NPCs), and the
+                    // old heuristic found nothing. Regular fields still work
+                    // because Squall's ID is 0, which satisfies `< 11`.
+                    if (setpc < 11) {
                         s_playerEntityIdx = i;
                         break;
                     }
@@ -172,6 +200,188 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
             // 3D walkmesh coordinates project to 2D entity/screen space.
             s_cameraAxes = {};
             FieldArchive::LoadCameraAxes(fieldName, s_cameraAxes);
+
+            // v0.17.0: Wire the .ca-derived camera axes into s_camRightX/Y/DownX/DownY
+            // so all manual-nav direction code paths (GPS guided navigation,
+            // FormatNavComponents-based Backspace announce, F9/F10 catalog cycling)
+            // get screen-relative directions on EVERY field, not just chase fields
+            // where the empirical chase-auto-pilot calibration happens to run.
+            //
+            // .ca format: 3 axis vectors stored as int16 fixed-point (/4096 to normalize).
+            //   axis0 = screen-right direction in world XY basis
+            //   axis1 = screen-down direction  in world XY basis
+            //   axis2 = screen-forward (depth) — unused for direction labels
+            // Confirmed by default-camera fields where axis0=(1.000,0.000,0.000) and
+            // axis1=(0.000,-1.000,0.000) — exactly the identity defaults reset above.
+            //
+            // Walkmesh deltas are 3D but we treat them as 2D (dx, dy, 0) because the
+            // floor is essentially flat for nav purposes. Projection becomes:
+            //   screenRight = dx*axis0[0] + dy*axis0[1]
+            //   screenDown  = dx*axis1[0] + dy*axis1[1]
+            // matching how FormatNavComponents already uses s_camRight/Down.
+            //
+            // The chase auto-pilot's empirical calibration will overwrite these values
+            // on chase fields when it runs (s_calibPending stays true). For non-chase
+            // fields, the CA-derived values remain in place — which is exactly the
+            // gap that caused 'left means right on some fields' for manual nav.
+            if (s_cameraAxes.valid) {
+                // v0.17.0.1: Normalize the 2D projection of axis0/axis1 to unit length.
+                // The .ca file stores axes as 3D unit vectors (int16 fixed-point /4096).
+                // For a tilted camera, axis1 has most of its magnitude in the Z
+                // (depth) component — the XY projection is short. Walkmesh deltas have
+                // Z=0, so dotting a short-XY-vector against (dx, dy) produces small
+                // results, asymmetric with the camRight projection. atan2(sD, sR) then
+                // biases toward east/west and the wrong cardinal comes out.
+                //
+                // The chase auto-pilot's empirical calibration produces NORMALIZED
+                // values (it divides the measured walkmesh delta by its magnitude),
+                // so the screen-projection is symmetric. We match that here by
+                // normalizing axis0/axis1's 2D projections to unit length too.
+                //
+                // Why this works geometrically: when the engine reads analog input
+                // (lX, lY) and converts to walkmesh movement, it follows the camera
+                // axes' 2D projection as a *direction* (the speed is normalized to
+                // the player's walking pace, not the axis magnitude). So the
+                // walkmesh direction of "press right arrow" is the unit-length 2D
+                // projection of axis0, not the raw 3D unit vector's XY components.
+                // BAT v0.17.0 confirmed this for bghall_1 where the raw projection
+                // produced `camDown=(0.044,-0.330)` (2D mag 0.333), breaking the
+                // cardinal computation; normalized projection gives `camDown=
+                // (0.132,-0.991)` (2D mag 1.0) and the cardinal binning works.
+                float r2x = (float)s_cameraAxes.axis0[0] / 4096.0f;
+                float r2y = (float)s_cameraAxes.axis0[1] / 4096.0f;
+                float r2len = sqrtf(r2x*r2x + r2y*r2y);
+                float d2x = (float)s_cameraAxes.axis1[0] / 4096.0f;
+                float d2y = (float)s_cameraAxes.axis1[1] / 4096.0f;
+                float d2len = sqrtf(d2x*d2x + d2y*d2y);
+                if (r2len > 0.001f && d2len > 0.001f) {
+                    s_camRightX = r2x / r2len;
+                    s_camRightY = r2y / r2len;
+                    s_camDownX  = d2x / d2len;
+                    s_camDownY  = d2y / d2len;
+                    // v0.17.4: Det convention check. The .ca format usually stores
+                    // axes with det(camRight, camDown) = -1 (screen convention:
+                    // camDown projects to world-down). Some fields (Aaron's BAT
+                    // surfaced bg2f_2 / Balamb Garden classroom) have det = +1
+                    // after 2D projection — axis1 ends up pointing world-UP after
+                    // normalization. The engine treats those as left-handed and
+                    // the predicted UP/DOWN cardinals come out exactly opposite
+                    // of the world direction Aaron actually moved ("had to go
+                    // opposite the instructions"). Negating camDown when det>0
+                    // forces standard right-handed convention; passive calibration
+                    // (v0.17.4 observer) then handles any residual rotation.
+                    float det2d = s_camRightX * s_camDownY - s_camRightY * s_camDownX;
+                    if (det2d > 0.0f) {
+                        s_camDownX = -s_camDownX;
+                        s_camDownY = -s_camDownY;
+                        Log::Field("FieldNavigation: [NAV-PROJ-INIT] field='%s' det-correction: raw det=%+.3f (left-handed); negated camDown to (%.3f,%.3f). Engine now treats axis1 as screen-up convention; manual nav uses negated value.",
+                                   fieldName, det2d, s_camDownX, s_camDownY);
+                    }
+                    // v0.17.5: Quantize camRight angle to its nearest 90-degree
+                    // world-cardinal snap, then derive camDown by rotating 90
+                    // degrees clockwise from camRight (which preserves the
+                    // det=-1 screen convention regardless of where camRight
+                    // happens to land).
+                    //
+                    // Rationale: v0.17.3 BAT data showed FF8's engine response
+                    // to a held single arrow is world-axis-aligned on every
+                    // tested field (bghall_1 measured exactly (1,0); bg2f_1
+                    // exactly (0,1); bgroom_1 exactly (0,-1); bghall_4 exactly
+                    // (0,1)). The CA-file values for those fields had axis
+                    // angles of 7.8, 65.4, -62.5 and 23.8 degrees respectively,
+                    // each rounding cleanly to a world cardinal. Only bg2f_2
+                    // (classroom) had measured directions 5-11 degrees off-
+                    // axis after the det fix; that residual is well within the
+                    // 22.5-degree cardinal-sector tolerance and Aaron confirmed
+                    // bg2f_2 navigates correctly with the det fix alone.
+                    //
+                    // The engine therefore appears to use a 90-deg-quantized
+                    // version of its camera matrix when mapping DIJOYSTATE2
+                    // lX/lY to walkmesh delta. Quantizing here makes the
+                    // mod's cardinal prediction match the engine exactly
+                    // (or within sector tolerance for bg2f_2), with zero
+                    // observation-based correction and zero per-field state.
+                    //
+                    // Quantize camRight independently. Derive camDown from
+                    // camRight via the rotation (x, y) -> (y, -x) which is
+                    // R(-90deg) and exactly the screen-down convention with
+                    // det = -1. (Quantizing camDown independently could break
+                    // orthogonality if camRight happened to be near a 45-deg
+                    // boundary, so we do not do that.)
+                    {
+                        float angleR = atan2f(s_camRightY, s_camRightX);
+                        float quantum = (float)NAV_PI / 2.0f;  // 90 degrees in radians
+                        float snappedR = roundf(angleR / quantum) * quantum;
+                        float qrx = cosf(snappedR);
+                        float qry = sinf(snappedR);
+                        // Clean up floating-point residuals so logs read
+                        // cleanly (cosf(pi/2) gives ~6e-8 instead of 0).
+                        if (fabsf(qrx) < 1e-6f) qrx = 0.0f;
+                        if (fabsf(qry) < 1e-6f) qry = 0.0f;
+                        float preRx = s_camRightX, preRy = s_camRightY;
+                        float preDx = s_camDownX,  preDy = s_camDownY;
+                        s_camRightX = qrx;
+                        s_camRightY = qry;
+                        // camDown = R(-90deg) * camRight = (y, -x)
+                        s_camDownX  = s_camRightY;
+                        s_camDownY  = -s_camRightX;
+                        float snappedDeg = snappedR * 180.0f / (float)NAV_PI;
+                        float origAngleDeg = angleR * 180.0f / (float)NAV_PI;
+                        Log::Field("FieldNavigation: [NAV-PROJ-INIT] field='%s' quantization: "
+                                   "camRight pre=(%.3f,%.3f) angle=%+.1fdeg -> snap=%+.0fdeg -> "
+                                   "camRight=(%.3f,%.3f) camDown=(%.3f,%.3f) (was camDown=(%.3f,%.3f))",
+                                   fieldName, preRx, preRy, origAngleDeg, snappedDeg,
+                                   s_camRightX, s_camRightY, s_camDownX, s_camDownY,
+                                   preDx, preDy);
+                    }
+                    // v0.17.2: Mirror to the auto-drive private pair so auto-drive
+                    // starts from CA-derived values on the first drive of this
+                    // field. Phase 1/2 of empirical calibration will overwrite
+                    // these as it runs.
+                    s_driveCamRightX = s_camRightX;
+                    s_driveCamRightY = s_camRightY;
+                    s_driveCamDownX  = s_camDownX;
+                    s_driveCamDownY  = s_camDownY;
+                    s_camAxesSource  = "ca-quantized";
+                } else {
+                    // Both 2D projections are essentially zero — the camera is
+                    // looking straight down a single world axis. Keep identity
+                    // defaults; the field will navigate with world-bearing
+                    // labels which on this geometry are effectively meaningless.
+                    Log::Field("FieldNavigation: [NAV-PROJ-INIT] WARNING field='%s' camera 2D projections degenerate (r2len=%.3f d2len=%.3f); keeping identity defaults.",
+                               fieldName, r2len, d2len);
+                    s_camAxesSource = "identity";
+                }
+                // Determinant of the 2D projection (camRight x camDown). For a normal
+                // camera this is ~1.0 (or -1.0 if axes are flipped). When near zero,
+                // both axes point in nearly the same world direction — pathological
+                // for the inverse problem (chase finding #4) but forward projection
+                // still works for nav labels. Log so we can spot odd cameras.
+                float det = s_camRightX * s_camDownY - s_camRightY * s_camDownX;
+                // v0.17.7.6.1: log the actual s_camAxesSource value
+                // instead of hardcoding "ca-quantized". On the degenerate-CA
+                // branch (else clause above) the code correctly sets
+                // s_camAxesSource to "identity" but the original log line
+                // here always wrote "source=ca-quantized" regardless,
+                // misleading anyone reading the BAT log. The code logic
+                // was always right; only the log message was wrong.
+                Log::Field("FieldNavigation: [NAV-PROJ-INIT] field='%s' camRight=(%.3f,%.3f) camDown=(%.3f,%.3f) det=%.3f source=%s",
+                           fieldName, s_camRightX, s_camRightY, s_camDownX, s_camDownY, det, s_camAxesSource);
+                // Pre-normalization 2D magnitudes are useful for diagnosing tilted vs
+                // rolled cameras.
+                Log::Field("FieldNavigation: [NAV-PROJ-INIT] field='%s' raw-2D r2len=%.3f d2len=%.3f (1.0 = flat camera; <1.0 = tilted)",
+                           fieldName, r2len, d2len);
+                if (fabsf(det) < 0.1f) {
+                    Log::Field("FieldNavigation: [NAV-PROJ-INIT] WARNING field='%s' degenerate camera (|det|<0.1); direction labels may be unreliable.",
+                               fieldName);
+                }
+            } else {
+                // No .ca file or parse failed — keep identity defaults. Manual nav
+                // will report world-bearing-as-screen-bearing, which is correct on
+                // default-camera fields and wrong on rotated ones. Same as pre-v0.17.0.
+                Log::Field("FieldNavigation: [NAV-PROJ-INIT] field='%s' camera axes unavailable; using identity defaults (world-bearing fallback).",
+                           fieldName);
+            }
 
             // v0.07.68: JSM script scan — classify all entities by opcode signatures.
             // Detects draw points, save points, shops, card games, ladders, and map exits.
@@ -441,6 +651,7 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                     s_capturedLines[t].lineType = FieldArchive::JSM_ENT_UNKNOWN;
                     s_capturedLines[t].destFieldId = -1;
                     s_capturedLines[t].hasExtDispatch = false;
+                    s_capturedLines[t].hasDialogReqTarget = false;  // v0.17.7.5.4
                     // Map captured line t to JSM Line entity at jsmDoors + t.
                     // Line entities in JSM: indices [jsmDoors .. jsmDoors+jsmLines-1].
                     int jsmIdx = s_jsmDoors + t;
@@ -448,9 +659,107 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                         s_jsmEntities[jsmIdx].jsmCategory == 1) {  // category 1 = Line
                         s_capturedLines[t].lineType = s_jsmEntities[jsmIdx].type;
                         s_capturedLines[t].hasExtDispatch = s_jsmEntities[jsmIdx].hasExtDispatch;
-                        // v0.07.83: Capture MAPJUMP destination for screen boundary lines.
+                        // v0.17.7.5.4: Copy the dialog-REQ-target signal too. This is
+                        // what the catalog now uses to decide if a SCREEN_BOUND line
+                        // is dual-purpose (exit-via-interaction) vs. a pure walk-across
+                        // exit. hasExtDispatch alone is too noisy (fires on any 0x1C use).
+                        s_capturedLines[t].hasDialogReqTarget = s_jsmEntities[jsmIdx].hasDialogReqTarget;
+                        // v0.07.83 / v0.17.7.1.2: Capture MAPJUMP destination for screen boundary lines.
+                        //
+                        // The JSM scanner sets info.param to either:
+                        //   * a literal field ID 0..981             (script pushed PSHN_L FieldID)
+                        //   * a PSHM_W marker 0x80000000 | addr     (script pushed PSHM_W field-var)
+                        //   * a negative literal e.g. -2 World Map  (PSHM_W passthrough, opcParam<0)
+                        //   * a small negative on resolution failure
+                        //
+                        // v0.17.7.1.2 adds PSHM marker resolution: when bit 31
+                        // is set, the low 16 bits encode the field-var address
+                        // in the varblock. By the time this block runs, the
+                        // engine has already executed s_originalFieldScriptsInit
+                        // (above) so the varblock at 0x1CFE9B8 is populated.
+                        // Read the 16-bit field ID from varblock[addr] and use
+                        // that as the resolved destination.
+                        //
+                        // Why this matters for B-Garden hall fields: their exits
+                        // (Cafeteria, Dormitories, Parking Lot) are emitted by
+                        // the engine as MAPJUMP <PSHM_W varAddr>, with the
+                        // varAddr indexing into a per-field destination table
+                        // populated by the engine during init. Static JSM scan
+                        // sees only the marker; INF gateways (v0.17.7.1.1's
+                        // first attempted fix) hold vestigial PS1 placeholder
+                        // destFieldIds for these fields; the runtime varblock
+                        // is the only authoritative source.
+                        //
+                        // PSHSM_W (special memory, opcode 0x0C) also produces
+                        // a marker via the same scanner branch but reads from
+                        // a different base. Handled together here -- if the
+                        // 0x1CFE9B8 read produces an out-of-range value, we
+                        // leave info.param as-is and the catalog falls back to
+                        // bare "Exit".
                         if (s_jsmEntities[jsmIdx].type == FieldArchive::JSM_ENT_LINE_SCREEN_BOUND) {
-                            s_capturedLines[t].destFieldId = s_jsmEntities[jsmIdx].param;
+                            int rawParam = s_jsmEntities[jsmIdx].param;
+                            if ((unsigned)rawParam & 0x80000000u) {
+                                uint16_t pshmAddr = (uint16_t)(rawParam & 0xFFFF);
+                                // v0.17.7.5.3: addr-as-literal. Empirically across
+                                // 8 BAT fires on B-Garden hall fields, SCREEN_BOUND
+                                // lines whose static resolver returns VARBLOCK <addr>
+                                // have engine destField == addr (in decimal):
+                                //   bghall_2 squallsd  0x00A5 -> 165 (Hall 1)
+                                //   bghall_2 zell      0x00B9 -> 185 (Quad 4)
+                                //   bghall_2 zells     0x00E3 -> 227 (Hallway 4)
+                                //   bghall_5 selphie   0x00E0 -> 224 (Hallway 1)
+                                //   bghall_5 irvine    0x00AA -> 170 (Hall 6)
+                                //   bghall_5 zell      0x00E4 -> 228 (Hallway 5)  [predicted]
+                                //   bghall_5 zells     0x00E1 -> 225 (Hallway 2)  [predicted]
+                                //   bgroad_1 squall    0x009A -> 154 (Cafeteria 1)
+                                //
+                                // Mechanism (best-current-understanding): the B-Garden
+                                // script authors chose pshmAddr = destField for ease
+                                // of reading; the varblock at byte-offset addr holds
+                                // value=addr at method-7 execution time (some setup
+                                // we haven't located populates it between field-load
+                                // and the line's MAPJUMP3 firing). We can't read it
+                                // at field-load time because at that lifecycle point
+                                // the varblock isn't yet populated -- prior v0.17.7.x
+                                // builds read varblock here and got either 0 (kept
+                                // marker, line stayed bare) or wrong values that
+                                // didn't match the engine's actual destField (e.g.
+                                // bghall_2 zell varblock[0xB9]=255 at field load but
+                                // engine destField=185, mismatching the v0.17.7.4 BAT).
+                                //
+                                // The addr-as-literal interpretation works whether the
+                                // pattern is intentional self-documenting bytecode
+                                // (most likely) or coincidental (engine populates
+                                // varblock[X] = X for some init range we haven't
+                                // identified). Either way the labeling comes out
+                                // correct on every BAT'd traversal.
+                                //
+                                // Caveats:
+                                //  * If a future field uses PSHM_W with addr that
+                                //    ISN'T the destField (a truly dynamic varblock-
+                                //    driven destination), this will mislabel it.
+                                //    No such case is known but it can't be ruled
+                                //    out for non-B-Garden fields.
+                                //  * bghall_1 has 3 SCREEN_BOUND lines all picking
+                                //    addr=0x00AF (=175=Hall 11). After this fix
+                                //    they all label as "Exit to Hall 11". If that's
+                                //    wrong, we'll catch it in catalog testing.
+                                if (pshmAddr > 0 && pshmAddr < FIELD_DISPLAY_NAMES_COUNT) {
+                                    Log::Field("FieldNavigation: [PSHM-DEST] line%d (jsm%d '%s') "
+                                               "marker=0x%08X addr=0x%04X -> field %d (%s) [addr-as-literal]",
+                                               t, jsmIdx, s_jsmEntities[jsmIdx].symName,
+                                               (unsigned)rawParam, pshmAddr,
+                                               (int)pshmAddr, FIELD_DISPLAY_NAMES[pshmAddr]);
+                                    rawParam = (int)pshmAddr;
+                                } else {
+                                    Log::Field("FieldNavigation: [PSHM-DEST] line%d (jsm%d '%s') "
+                                               "marker=0x%08X addr=0x%04X out of field-id range (0..%d), keeping marker",
+                                               t, jsmIdx, s_jsmEntities[jsmIdx].symName,
+                                               (unsigned)rawParam, pshmAddr,
+                                               FIELD_DISPLAY_NAMES_COUNT - 1);
+                                }
+                            }
+                            s_capturedLines[t].destFieldId = rawParam;
                         }
                         linesMapped++;
                     }
@@ -471,10 +780,148 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                            s_capturedLineCount, linesMapped,
                            cameraPans, screenBounds, lineEvents, lineInteractive, lineUnknown);
 
+                // v0.17.9.14.1 DIAG: per-captured-line dump. Greppable
+                // [LINEDIAG] anchor. Reports each SETLINE's assigned lineType +
+                // destFieldId + center + JSM name. v0.17.9.17: gated behind
+                // LINEDIAG_ENABLED (field_navigation.cpp); set 0 for push, flip
+                // to 1 to verify a field's trigger-line classification / exits
+                // (e.g. pending bgryo1_1 'squalls' / dotown_2 'Selphie' checks).
+#if LINEDIAG_ENABLED
+                for (int dt = 0; dt < s_capturedLineCount; dt++) {
+                    int dji = s_jsmDoors + dt;
+                    const char* dsym = (dji < s_jsmEntityCount) ? s_jsmEntities[dji].symName : "?";
+                    int dcat = (dji < s_jsmEntityCount) ? s_jsmEntities[dji].jsmCategory : -1;
+                    Log::Field("FieldNavigation: [LINEDIAG] field='%s' line%d order=%d center=(%d,%d) "
+                               "type=%s destFieldId=%d extDisp=%d (jsm%d '%s' cat=%d)",
+                               fieldName, dt, s_capturedLines[dt].lineOrder,
+                               (int)(s_capturedLines[dt].x1 + s_capturedLines[dt].x2) / 2,
+                               (int)(s_capturedLines[dt].y1 + s_capturedLines[dt].y2) / 2,
+                               FieldArchive::JSMEntityTypeName(s_capturedLines[dt].lineType),
+                               s_capturedLines[dt].destFieldId,
+                               (int)s_capturedLines[dt].hasExtDispatch,
+                               dji, dsym, dcat);
+                }
+#endif
+
+                // v0.17.7.2: MAPJUMP destination resolver DIAGNOSTIC (observation only).
+                //
+                // For each SCREEN_BOUND line whose param is an unresolved bit31
+                // PSHM marker (the runtime varblock read above failed because the
+                // varblock isn't populated at this lifecycle point), enumerate
+                // every init-method POPM_W write across all entities targeting
+                // the SAME varblock address. If exactly one entity writes a
+                // sensible field-ID value there, v0.17.7.3 will adopt it as the
+                // resolved destination.
+                //
+                // This block makes NO data changes -- it only logs. The goal is
+                // to confirm (or rule out) the hypothesis that field-exit
+                // destinations live in init-method literal-PUSH + POPM_W pairs
+                // captured by s_initVarMaps[]. If the BAT log shows writers
+                // matching the unresolved addresses, the resolver in v0.17.7.3
+                // is a 5-line cross-reference. If it shows zero writers, the
+                // destinations live in story-dispatch methods (m != 0) and the
+                // scanner needs to be widened first.
+                //
+                // The summary [INITVARS-SUMMARY] block at the end of this
+                // diagnostic shows the full landscape of init-var writes for
+                // this field so we can spot patterns even when the per-line
+                // lookup misses.
+                {
+                    int unresolvedLines = 0;
+                    int linesWithWriters = 0;
+                    for (int t = 0; t < s_capturedLineCount; t++) {
+                        if (s_capturedLines[t].lineType != FieldArchive::JSM_ENT_LINE_SCREEN_BOUND)
+                            continue;
+                        int dfi = s_capturedLines[t].destFieldId;
+                        // Filter to UNRESOLVED markers only (bit31 set, low 16 bits = varblock addr).
+                        if (((unsigned)dfi & 0x80000000u) == 0) continue;
+                        unresolvedLines++;
+                        uint16_t pshmAddr = (uint16_t)(dfi & 0xFFFF);
+                        int jsmIdx = s_jsmDoors + t;
+                        const char* sym = (jsmIdx < s_jsmEntityCount)
+                                            ? s_jsmEntities[jsmIdx].symName : "?";
+                        // Look up all init-method writers to this address.
+                        FieldArchive::InitVarWriter writers[16] = {};
+                        int totalWriters = FieldArchive::LookupInitVarWrites(
+                            (int16_t)pshmAddr, writers, 16);
+                        if (totalWriters == 0) {
+                            Log::Field("FieldNavigation: [MAPJUMP-RESOLVE] line%d (jsm%d '%s') "
+                                       "addr=0x%04X (%d): NO init writers found",
+                                       t, jsmIdx, sym, (unsigned)pshmAddr, (int)pshmAddr);
+                        } else {
+                            linesWithWriters++;
+                            int logged = totalWriters < 16 ? totalWriters : 16;
+                            Log::Field("FieldNavigation: [MAPJUMP-RESOLVE] line%d (jsm%d '%s') "
+                                       "addr=0x%04X (%d): %d init writers%s",
+                                       t, jsmIdx, sym, (unsigned)pshmAddr, (int)pshmAddr,
+                                       totalWriters, totalWriters > 16 ? " (capped to 16)" : "");
+                            for (int w = 0; w < logged; w++) {
+                                int wEnt = writers[w].entityIdx;
+                                int32_t wVal = writers[w].value;
+                                // Look up writer's sym name in the JSM table.
+                                const char* wSym = "?";
+                                for (int q = 0; q < s_jsmEntityCount; q++) {
+                                    if (s_jsmEntities[q].jsmIndex == wEnt) {
+                                        wSym = s_jsmEntities[q].symName;
+                                        break;
+                                    }
+                                }
+                                // If the value is a plausible field ID, also resolve its name.
+                                const char* destName = "";
+                                if (wVal > 0 && wVal < FIELD_DISPLAY_NAMES_COUNT)
+                                    destName = FIELD_DISPLAY_NAMES[wVal];
+                                Log::Field("FieldNavigation: [MAPJUMP-RESOLVE]   writer ent%d '%s' "
+                                           "value=%d %s%s",
+                                           wEnt, wSym, (int)wVal,
+                                           destName[0] ? "-> " : "", destName);
+                            }
+                        }
+                    }
+                    Log::Field("FieldNavigation: [MAPJUMP-RESOLVE] summary: %d unresolved SCREEN_BOUND lines, "
+                               "%d found writers, %d had no writers",
+                               unresolvedLines, linesWithWriters,
+                               unresolvedLines - linesWithWriters);
+
+                    // [INITVARS-SUMMARY]: full landscape of init writes for this field.
+                    // Useful for spotting the destination values when LookupInitVarWrites()
+                    // misses (e.g. if addresses are stored shifted, masked, or under a
+                    // different convention than the markers).
+                    FieldArchive::InitVarTuple allWrites[256] = {};
+                    int totalAllWrites = FieldArchive::EnumerateInitVars(allWrites, 256);
+                    int loggedAll = totalAllWrites < 256 ? totalAllWrites : 256;
+                    Log::Field("FieldNavigation: [INITVARS-SUMMARY] field has %d init-method POPM_W writes%s",
+                               totalAllWrites, totalAllWrites > 256 ? " (capped to 256)" : "");
+                    for (int w = 0; w < loggedAll; w++) {
+                        int wEnt = allWrites[w].entityIdx;
+                        int32_t wAddr = allWrites[w].addr;
+                        int32_t wVal = allWrites[w].value;
+                        const char* wSym = "?";
+                        for (int q = 0; q < s_jsmEntityCount; q++) {
+                            if (s_jsmEntities[q].jsmIndex == wEnt) {
+                                wSym = s_jsmEntities[q].symName;
+                                break;
+                            }
+                        }
+                        // Annotate if the value resembles a field ID.
+                        const char* destName = "";
+                        if (wVal > 0 && wVal < FIELD_DISPLAY_NAMES_COUNT)
+                            destName = FIELD_DISPLAY_NAMES[wVal];
+                        Log::Field("FieldNavigation: [INITVARS-SUMMARY]   ent%d '%s' addr=0x%04X (%d) "
+                                   "value=%d %s%s",
+                                   wEnt, wSym, (unsigned)(wAddr & 0xFFFF), (int)wAddr, (int)wVal,
+                                   destName[0] ? "-> " : "", destName);
+                    }
+                }
+
                 // v0.12.23: Dump scripts of Event Trigger and Unknown-type Line entities.
                 // These are interaction mediators on shared dormitory/classroom fields.
                 // Their scripts contain REQ opcodes targeting Others entities — revealing
                 // which interactive object (bed/desk/wardrobe) each SETLINE zone controls.
+                //
+                // v0.17.7.2: Gated behind FF8OPC_VERBOSE_JSM. The same per-Director
+                // log-explosion problem affected this loop on dormitory fields where
+                // Lines reference long Background scripts.
+#ifdef FF8OPC_VERBOSE_JSM
                 for (int ld = 0; ld < s_capturedLineCount; ld++) {
                     int ldJsmIdx = s_jsmDoors + ld;
                     if (ldJsmIdx >= s_jsmEntityCount) continue;
@@ -487,6 +934,7 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                         FieldArchive::DumpEntityScript(fieldName, ldJsmIdx);
                     }
                 }
+#endif
             }
 
             // v0.12.17: Override JSM entity positions with INF trigger zone data.
@@ -595,14 +1043,12 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                 static bool s_deadVisited[4096];
                 memset(s_deadVisited, 0, numTri * sizeof(bool));
 
-                struct DeadEndCluster {
-                    float centerX, centerY;
-                    int triCount;
-                    int seedTri;
-                };
-                static const int MAX_DEAD_CLUSTERS = 32;
-                DeadEndCluster deadClusters[MAX_DEAD_CLUSTERS];
-                int deadClusterCount = 0;
+                // v0.15.9.2.6: cluster array promoted to file-scope state
+                // (s_deadClusters / s_deadClusterCount in field_navigation.cpp)
+                // so chase_auto_pilot can read it via GetLargestClusterCenter().
+                // Reset before populating.
+                s_deadClusterCount = 0;
+                memset(s_deadClusters, 0, sizeof(s_deadClusters));
                 int totalDeadEnds = 0, totalNarrow = 0;
 
                 for (int t = 0; t < numTri; t++) {
@@ -610,7 +1056,7 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                     else if (s_neighborCount[t] == 2) totalNarrow++;
                 }
 
-                for (int t = 0; t < numTri && deadClusterCount < MAX_DEAD_CLUSTERS; t++) {
+                for (int t = 0; t < numTri && s_deadClusterCount < MAX_DEAD_CLUSTERS; t++) {
                     if (s_deadVisited[t] || s_neighborCount[t] != 1) continue;
                     // BFS from this dead-end through narrow (<=2 neighbor) triangles
                     float sumX = 0, sumY = 0;
@@ -634,25 +1080,25 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                             }
                         }
                     }
-                    deadClusters[deadClusterCount].centerX = sumX / (float)count;
-                    deadClusters[deadClusterCount].centerY = sumY / (float)count;
-                    deadClusters[deadClusterCount].triCount = count;
-                    deadClusters[deadClusterCount].seedTri = t;
-                    deadClusterCount++;
+                    s_deadClusters[s_deadClusterCount].centerX = sumX / (float)count;
+                    s_deadClusters[s_deadClusterCount].centerY = sumY / (float)count;
+                    s_deadClusters[s_deadClusterCount].triCount = count;
+                    s_deadClusters[s_deadClusterCount].seedTri = t;
+                    s_deadClusterCount++;
                 }
 
                 Log::Field("FieldNavigation: [DEADEND] %s: %d tris, %d dead-ends, %d narrow, %d clusters",
-                           fieldName, numTri, totalDeadEnds, totalNarrow, deadClusterCount);
+                           fieldName, numTri, totalDeadEnds, totalNarrow, s_deadClusterCount);
 
                 // Step 3: Log significant clusters and match to unpositioned interactive objects.
                 static const int MIN_CLUSTER_TRIS = 2;
                 int significantClusters = 0;
-                for (int c = 0; c < deadClusterCount; c++) {
-                    const char* tag = (deadClusters[c].triCount >= MIN_CLUSTER_TRIS) ? "*" : " ";
-                    if (deadClusters[c].triCount >= MIN_CLUSTER_TRIS) significantClusters++;
+                for (int c = 0; c < s_deadClusterCount; c++) {
+                    const char* tag = (s_deadClusters[c].triCount >= MIN_CLUSTER_TRIS) ? "*" : " ";
+                    if (s_deadClusters[c].triCount >= MIN_CLUSTER_TRIS) significantClusters++;
                     Log::Field("FieldNavigation: [DEADEND]  %s cluster[%d] center=(%.0f,%.0f) tris=%d seed=%d",
-                               tag, c, deadClusters[c].centerX, deadClusters[c].centerY,
-                               deadClusters[c].triCount, deadClusters[c].seedTri);
+                               tag, c, s_deadClusters[c].centerX, s_deadClusters[c].centerY,
+                               s_deadClusters[c].triCount, s_deadClusters[c].seedTri);
                 }
                 Log::Field("FieldNavigation: [DEADEND] %d significant clusters (>=%d tris)",
                            significantClusters, MIN_CLUSTER_TRIS);
@@ -677,6 +1123,25 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                        s_walkmesh.valid ? "OK" : "NONE");
             Log::Field("FieldNavigation: [fieldload] JSM: doors=%d lines=%d bg=%d others=%d",
                        s_jsmDoors, s_jsmLines, s_jsmBackgrounds, s_jsmOthers);
+
+#if FEPIC1_GATE_DIAG
+            // v0.17.9.12 / corrected v0.17.9.13: arm the one-shot push-through
+            // gate dump for the B-Garden front gate. The Track A notes called
+            // this field 'fepic1' but the live engine name is 'bggate_6'
+            // (fieldId 0x00A3, display 'B-Garden - Front Gate 5'); the v0.17.9.12
+            // build armed on the wrong name so the dump never fired. Key on the
+            // authoritative fieldId. Walkmesh, INF gateways/triggers, JSM scan
+            // and captured SETLINE trigger lines are all populated by this point;
+            // the dump itself fires from Update() after GATEDIAG_DELAY_MS so the
+            // player entity has settled at its spawn triangle.
+            if (fieldId == 0x00A3 || _stricmp(fieldName, "bggate_6") == 0) {
+                s_gateDiagPending = true;
+                s_gateDiagArmTime = GetTickCount();
+                Log::Field("FieldNavigation: [GATEDIAG] bggate_6 (front gate, id=0x%04X) detected "
+                           "— gate diagnostic armed (fires ~%ums after load).",
+                           (unsigned)fieldId, (unsigned)GATEDIAG_DELAY_MS);
+            }
+#endif
 
             // v06.08: NavLog field load
             NavLog::FieldLoad(fieldName, (int)fieldId,

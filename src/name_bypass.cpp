@@ -18,6 +18,14 @@
 #include "minhook/include/MinHook.h"
 #include <windows.h>
 
+// Forward declarations for cross-module namespaces (deleted from earlier and
+// restored in v0.14.27 build recovery).
+namespace Log {
+    void Mod(const char* format, ...);
+    void Write(const char* format, ...);
+}
+namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); }
+
 namespace NameBypass {
 
 // ============================================================================

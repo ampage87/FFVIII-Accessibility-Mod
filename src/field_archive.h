@@ -39,6 +39,15 @@ struct JSMCounts {
 struct GatewayInfo {
     float   centerX;          // midpoint X of the two vertices
     float   centerZ;          // midpoint Z of the two vertices
+    // v0.15.9.2.15: Exit line endpoints preserved for crossing detection.
+    // The INF gateway is a 2-vertex line segment that the player physically
+    // crosses to fire the screen transition. centerX/centerZ are the midpoint
+    // (useful for compass / navigation targeting), but to detect crossing we
+    // need the full line so we can do cross-product sign-flip detection.
+    // Chase auto-pilot reads these via GetGatewayNearestCluster() and passes
+    // them to StartChaseDrive.
+    int16_t lineX1, lineY1;   // first endpoint (screen X, Y)
+    int16_t lineX2, lineY2;   // second endpoint (screen X, Y)
     uint16_t destFieldId;     // destination field ID (0xFFFF = unused)
     char    destFieldName[64]; // looked up from field.fl if possible
 };
@@ -153,6 +162,18 @@ struct JSMEntityInfo {
     // v0.12.24: True if entity uses runtime 0x1C extended dispatch (PSHM_W-based).
     // Indicates potential runtime-dispatched dialog opcodes not detectable statically.
     bool           hasExtDispatch;
+    // v0.17.7.5.4: True if REQ-following found this Line entity REQs a target
+    // entity that has dialog opcodes (MES/ASK/AMES/AASK) or extended dispatch.
+    // Distinguishes the genuine "dual-purpose dialog-mediated exit" pattern
+    // (e.g. dormitory bed: bed Line REQs bed Background which shows "Sleep?")
+    // from the "line uses extended dispatch for non-dialog purposes" pattern
+    // (e.g. bgroad_5 squalls: uses 0x1C for sound/particle effects only).
+    // Before this flag existed, the catalog used hasExtDispatch for both cases
+    // and incorrectly suppressed pure-exit Lines from the catalog's Exit
+    // labeling -- BAT'd on bgroad_5 (Hallway 5) where the dormitory exit
+    // showed as "Interaction 1" instead of "Exit to Dormitory Double 1".
+    // Only set by the scanner's REQ-following post-pass (never by own 0x1C use).
+    bool           hasDialogReqTarget;
     // v0.12.16: SETLINE interaction zone from JSM script.
     // SETLINE defines the exact line segment where the player can interact.
     // The line center is the precise interaction position (better than SET3
@@ -160,6 +181,37 @@ struct JSMEntityInfo {
     bool           hasSetline;    // true if SETLINE opcode found with literal coords
     int16_t        setlineX1, setlineY1, setlineZ1;
     int16_t        setlineX2, setlineY2, setlineZ2;
+    // v0.17.7.1: True if entity's script uses TALKRADIUS or TALKON, meaning the
+    // player must press confirm to interact (vs. crossing a Line trigger to
+    // fire it). Used by catalog classification to distinguish Interactions
+    // from Events for Line entities, and as a keep-condition for the walkmesh
+    // exclusion filter (off-walkmesh entities with talk setup are kept because
+    // the player can interact from on-walkmesh).
+    bool           hasTalkSetup;
+    // v0.17.8.8: True if this is a Line entity that the script ties to a save
+    // point -- either its own script invokes the save menu (MENUSAVE/SAVEENABLE),
+    // or it REQs an entity that is a Save Point (type SAVE_POINT or a save*/svpt
+    // SYM name). The Line-classification block reclassifies all Line entities to
+    // LINE_* types, which loses the save-ness the type cascade detected; this
+    // flag preserves it so the catalog can label the surfaced Interaction as a
+    // "Save Point" instead of a generic "Interaction N". Fixes the bghall_1 save
+    // point, whose savePoint entity has PSHM-only X/Y and so never resolves a
+    // position to inject as a standalone Save Point -- it only surfaces via its
+    // co-located trigger line.
+    bool           isSaveLine;
+    // v0.17.8.15: True if this entity's init script (method 0) contains a
+    // SETMODEL opcode -- i.e. the entity loads a 3D model at field load and
+    // stands in the world (rather than being a script-only Background, an
+    // invisible Director, or a walk-across Line trigger). Combined with
+    // `jsmCategory == 3` (Other), this is the catalog's NPC discriminator:
+    // a positioned Other-entity with a model that the player walks up to
+    // and presses Confirm to interact with, vs. a Line walk-across trigger.
+    // Replaces v0.17.8.11's `int setmodelSlot` + chara.one cross-reference,
+    // which was reverted after the bghall_3 BAT screenshot showed the
+    // model-classification approach was the wrong signal entirely (kanban2
+    // IS Xu standing in the world; her chara.one slot p048 was misclassified
+    // as a prop but that doesn't matter -- the behavior signal is enough).
+    bool           hasSetmodelInit;
 };
 
 const char* JSMEntityTypeName(JSMEntityType t);
@@ -244,6 +296,27 @@ void FreeWalkmesh(WalkmeshData& mesh);
 // jsmEntityIndex is the flat JSM entity index (Door+Line+BG+Other ordering).
 // Logs all methods and decoded opcodes to the accessibility log.
 bool DumpEntityScript(const char* fieldName, int jsmEntityIndex);
+
+// v0.17.7.2: Look up init-method POPM_W writes to a specific varblock address.
+// After ScanJSMScripts() has run, this exposes the static init-script writes
+// captured per entity (the s_initVarMaps array). The diagnostic block in
+// HookedFieldScriptsInit calls this for each unresolved MAPJUMP PSHM address
+// to find out which entity writes the destination field ID at field load.
+//
+// addr: the PSHM varblock address (e.g. extracted from a 0x8000xxxx marker)
+// outEntries: caller-provided buffer of (entityIdx, value) pairs filled in
+// maxEntries: capacity of outEntries
+// Returns: number of writers found (may exceed maxEntries; only the first
+//          maxEntries are written to the buffer).
+struct InitVarWriter { int entityIdx; int32_t value; };
+int LookupInitVarWrites(int16_t addr, InitVarWriter* outEntries, int maxEntries);
+
+// v0.17.7.2: Iterate all init-method writes across the field for summary logging.
+// outEntries: caller buffer of (entityIdx, addr, value) tuples
+// maxEntries: capacity
+// Returns: number of writes found (may exceed maxEntries).
+struct InitVarTuple { int entityIdx; int32_t addr; int32_t value; };
+int EnumerateInitVars(InitVarTuple* outEntries, int maxEntries);
 
 // Shut down and release memory.
 void Shutdown();

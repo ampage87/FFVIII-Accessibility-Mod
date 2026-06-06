@@ -46,8 +46,62 @@
 #include "minhook/include/MinHook.h"
 #include "field_display_names.h"
 #include "entity_classifications.h"
+// v0.17.8.15: chara.one cross-reference removed; the catalog dedupe pass now
+// uses JSM behavior signals (jsmCategory + hasSetmodelInit) for the NPC vs
+// Interaction discriminator. See field_nav_catalog_dedupe.inl.
+
+// v0.15.9.11.3: chase_keyboard header included BEFORE the FieldNavigation
+// namespace opens so its global-scope namespace (::ChaseKeyboard) is
+// reachable from the .inl files included inside FieldNavigation below.
+// The chase keyboard buffer substitution is called from InjectKey in
+// field_nav_autodrive.inl during chase Auto, and only during chase Auto --
+// F9 path-finding and world-map AD are unaffected (ChaseKeyboard::IsActive()
+// returns false for them).
+#include "chase_keyboard.h"
+
+// Forward declarations for cross-module namespaces (restored in v0.14.28 build recovery).
+namespace Log { void Field(const char* format, ...); }
+namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); }
+namespace NavLog {
+    void SessionStart();
+    void FieldLoad(const char* fieldName, int fieldId, int numTris, int numEntities, int numExits, int numEvents);
+    void DriveStart(const char* fieldName, const char* targetName, const char* targetType,
+                    int startTri, float startX, float startY,
+                    int goalTri, float goalX, float goalY, float talkRadius,
+                    int astarTris, int waypointCount, bool usedFunnel);
+    void DriveWaypoint(int wpIndex, int wpTotal, float playerX, float playerY, float distToTarget, int tick);
+    void DriveSample(float playerX, float playerY, int playerTri, float distToTarget, int wpIndex, int wpTotal, int tick);
+    void DriveRecovery(int phase, int playerTri, float playerX, float playerY, float distToTarget);
+    void DriveEnd(const char* result, int totalTicks, float finalDist, int recoveryPhases, float startDist);
+    void CoordSample(const char* fieldName, int triIdx, float posX, float posY, float wx, float wy, float wz);
+}
 
 namespace FieldNavigation {
+
+// ============================================================================
+// v0.17.9.12: bggate_6 (front gate) push-through gate diagnostic (Track A).
+// LOCAL ONLY. When 1, a one-shot [GATEDIAG] walkmesh/reachability dump plus
+// the [TTRACE] turnstile path tracer fire on field bggate_6 (id 0x00A3).
+// Behaviour-neutral; only adds logging. See DumpGateDiagnostic() +
+// TurnstileTrace() in field_nav_diagnostics.inl and the arm site in
+// field_nav_fieldscripts.inl. v0.17.9.17: set to 0 for push -- Track A Step 3
+// (the turnstile) is BAT-passed, so GATEDIAG/TTRACE have served their purpose.
+// Flip back to 1 to re-probe the front gate.
+// ============================================================================
+#define FEPIC1_GATE_DIAG 0
+
+// ============================================================================
+// v0.17.9.17: per-field captured-trigger-line dump toggle. When 1, a
+// [LINEDIAG] line fires on EVERY field load for each captured SETLINE,
+// reporting its assigned lineType / destFieldId / center / JSM name (see the
+// arm site in field_nav_fieldscripts.inl). Behaviour-neutral; only adds
+// logging. Set to 0 for push. Flip to 1 when verifying a field's trigger-line
+// classification or exit destinations -- e.g. the pending bgryo1_1 'squalls'
+// and dotown_2 'Selphie' exit-label checks, or any future screen-bound / exit
+// bug. (Was an always-on raw loop through v0.17.9.16.2; gated here so it's a
+// one-line re-enable instead of a code edit.)
+// ============================================================================
+#define LINEDIAG_ENABLED 0
 
 // ============================================================================
 // Constants
@@ -211,10 +265,20 @@ static int      s_driveStuckTicks   = 0;
 static int      s_driveWiggleTicks  = 0;
 static uint8_t  s_driveWiggleDir    = 0;   // current wiggle direction
 static int      s_driveWigglePhase  = 0;   // v05.68: rotates through 8 recovery directions
+// v0.17.6.1: Player's walkmesh triangle at the most recent recovery cycle.
+// Set to 0xFFFF at drive start (no prior recovery). When the recovery block
+// fires and the player's current tri differs from s_lastRecoveryTri, that
+// signals genuine corridor progress (the player escaped the previous triangle
+// and entered the next one) and we reset s_driveWigglePhase = 0 to give the
+// new triangle a fresh recovery budget. Without this reset, the v0.17.6.0
+// BAT showed the recovery counter inflating across 5 corridor advances
+// (tri 367 -> 366 -> 363 -> 362 -> 359) and hitting MAX_RECOVERY_PHASES at
+// recovery 12 even though the player was making real progress.
+static uint16_t s_lastRecoveryTri    = 0xFFFF;
 static const int DRIVE_STUCK_THRESH  = 80;  // v06.14: ticks before wiggle (~1.3s, was 40). Analog steering needs more settling time.
 static const int DRIVE_WIGGLE_TICKS  = 18;  // v05.90: quick nudge (~0.3s, was 45)
 static const int NUDGE_TICKS         = 8;   // v06.07: micro-nudge duration (~0.13s)
-static const int MAX_RECOVERY_PHASES = 12;  // v06.08: auto-cancel after this many recovery phases without progress
+static const int MAX_RECOVERY_PHASES = 30;  // v0.17.6.1: bumped from 12. Narrow corridors (e.g. bghall_1 save-point alcove) need 2-3 recoveries per triangle to escape; 12 was too small for multi-triangle traversals. The new tri-advance reset (see s_lastRecoveryTri logic in UpdateAutoDrive) also resets the counter on genuine progress, so 30 only fires as a true "can't escape this triangle" cap.
 
 // v05.90: Velocity-based stuck detection — track position over a rolling window.
 // If the player moves less than DRIVE_STUCK_MIN_DIST world units over
@@ -274,17 +338,29 @@ static float       s_driveTrigCrossStart = 0.0f; // cross product at drive start
 static bool        s_driveTrigTarget     = false; // true if driving to a trigger line
 // v06.05: Trigger line index to skip during A* and recovery (target trigger line).
 static int         s_driveSkipTrigIdx    = -1;
+// v0.15.9.2.15: Explicit crossing-line endpoints for chase-drive. The crossing
+// detection in UpdateAutoDrive can fire for either a SETLINE-defined trigger
+// (chosen by trigger-line index, copied here) or an INF gateway (passed
+// directly by chase_auto_pilot). Unifying both into one pair of endpoint state
+// variables keeps the crossing-check block simple and lets us extend to other
+// crossing sources later without further plumbing changes.
+static int16_t     s_driveCrossLineX1    = 0;
+static int16_t     s_driveCrossLineY1    = 0;
+static int16_t     s_driveCrossLineX2    = 0;
+static int16_t     s_driveCrossLineY2    = 0;
+static bool        s_driveCrossLineActive = false;
 
 // --- Camera axes (loaded per field from .ca file for screen-space mapping) ---
 static FieldArchive::CameraAxes s_cameraAxes = {};
 
-// --- GPS Guidance state (v0.12.02) ---
+// --- GPS Guidance state (v0.12.02; projection rewritten v0.17.0) ---
 // Continuous directional guidance to selected entity.
-// Backspace toggles on/off. Provides periodic distance+direction announcements
-// using entity coordinate deltas, which are already in screen space.
-// Compass: +X = right on screen, +Y = up on screen.
-// (Corrected v0.12.03: +Y = UP confirmed by gateway data — bggate_4 forest
-// exit at Y=5353 is screen top, hallway at Y=534 is screen bottom.)
+// Backspace toggles on/off. Provides distance+direction announcements
+// where direction is a cardinal (north/northeast/east/...) derived by
+// projecting the walkmesh delta through the per-field camera axes
+// (s_camRightX/Y, s_camDownX/Y; populated from .ca file at field load).
+// Cardinals map to arrow keys: north=up, east=right, south=down, west=left.
+// See field_nav_gps.inl::ComputeScreenDirIndex for the projection + binning.
 static bool    s_gpsActive = false;        // guidance is currently on
 static int     s_gpsCatalogIdx = -1;       // which catalog entry we're guiding to
 static float   s_gpsLastDist = 1e30f;      // distance at last full announcement
@@ -303,11 +379,18 @@ static const float GPS_CLOSE_DIST  = 200.0f;           // switch to close interv
 static const float GPS_ARRIVE_DIST = 120.0f;           // "In range" threshold (default for non-entity targets)
 static const float GPS_ARRIVE_MARGIN = 0.9f;           // v0.12.07: safety margin — arrive at 90% of talk radius
 
-// Screen-relative direction names (8-way, indexed by compass octant).
-// Entity +X = right, +Y = up. atan2(dx, dy) gives angle from up (0°), CW.
+// v0.17.0: Cardinal direction names (8-way, indexed by ComputeScreenDirIndex result).
+// Cardinals are SCREEN-relative and map directly to arrow keys:
+//   north = up arrow, east = right, south = down, west = left.
+//   northeast = up+right, etc.
+// The mapping from walkmesh delta to cardinal goes through the per-field
+// camera projection (s_camRightX/Y, s_camDownX/Y populated from .ca file
+// at field load — see field_nav_fieldscripts.inl). On default-camera fields
+// the projection is identity; on rotated cameras the projection ensures
+// 'east' really does mean 'press the right arrow on the keyboard.'
 static const char* GPS_DIR_NAMES[] = {
-    "up", "up right", "right", "down right",
-    "down", "down left", "left", "up left"
+    "north",     "northeast", "east",      "southeast",
+    "south",     "southwest", "west",      "northwest"
 };
 
 // Step conversion: divide entity distance units by this to get "steps".
@@ -423,37 +506,15 @@ static DWORD s_pshmCaptureStartTime = 0;  // GetTickCount() when capture started
 static const DWORD PSHM_CAPTURE_DURATION_MS = 5000;  // capture window after field load
 static bool s_pshmSummaryLogged = false;  // true once end-of-window summary is logged
 
-// v0.12.22: POPM_W shared memory write capture hook.
-// Hooks the engine's POPM_W handler (writes uint16 to varblock at byte offset).
-// Captures all writes to the temp memory block during the first 10s after field
-// load. This reveals which varblock addresses hold interaction zone coordinates
-// — written by Director entities' per-frame scripts when they're active.
-// Varblock base confirmed at 0x01CFE9B8 by exe disassembly (session 42).
-// Handler signature: int __cdecl PopmWSharedMem(int entityPtr, int byteOffset)
-static const uint32_t POPM_W_SHARED_ADDR = 0x0051CCD0;  // vanilla handler VA
-static const uint32_t POPM_B_SHARED_ADDR = 0x0051CCA0;  // byte variant
-static const uint32_t POPM_L_SHARED_ADDR = 0x0051CD00;  // dword variant
-static const uint32_t VARBLOCK_BASE      = 0x01CFE9B8;  // field temp memory base
-
-typedef int (__cdecl *PopmSharedHandler_t)(int entityPtr, int byteOffset);
-static PopmSharedHandler_t s_originalPopmW = nullptr;  // trampoline
-static PopmSharedHandler_t s_originalPopmB = nullptr;
-static PopmSharedHandler_t s_originalPopmL = nullptr;
-
-struct CapturedVarWrite {
-    int32_t  byteOffset;    // varblock byte offset (POPM param)
-    int32_t  value;         // value written (from VM stack before write)
-    uint32_t entityAddr;    // entity struct address (for entity identification)
-    uint8_t  writeSize;     // 1=byte, 2=word, 4=dword
-    bool     logged;        // true once logged in summary
-};
-static const int MAX_VAR_WRITES = 512;
-static CapturedVarWrite s_varWrites[MAX_VAR_WRITES] = {};
-static int  s_varWriteCount = 0;
-static bool s_capturingVarWrites = false;
-static DWORD s_varWriteCaptureStart = 0;
-static const DWORD VAR_WRITE_CAPTURE_DURATION_MS = 10000;  // 10s window
-static bool s_varWriteSummaryLogged = false;
+// v0.14.45: POPM_W/B/L shared memory write capture (F12 diagnostic) removed.
+// Was used in v0.12.22 for Director varblock investigation (resolved session 43:
+// SETLINE triggers are definitive, Director entities are dead code). Removed:
+// - POPM_*_SHARED_ADDR constants, VARBLOCK_BASE, PopmSharedHandler_t typedef,
+//   s_originalPopm[WBL] trampolines
+// - CapturedVarWrite struct + s_varWrites[] + counters + capture window state
+// - HookedPopm[WBL]Shared handlers in field_nav_opcode_hooks.inl
+// - MH hook install/remove in Initialize()/Shutdown()
+// - F12 trigger in field_nav_handlekeys.inl + Update() summary block
 
 // v0.08.23: Descriptor table polling probe — check if PSHM_W entity-scope descriptors
 // populate after field load. Table at 0x01DCB340 holds one 4-byte pointer per flat
@@ -480,6 +541,16 @@ static bool  s_varblockPollActive = false;
 static DWORD s_varblockPollStart = 0;
 static int   s_varblockPollCount = 0;
 static DWORD s_varblockPollLastCheck = 0;
+
+#if FEPIC1_GATE_DIAG
+// v0.17.9.12: fepic1 gate diagnostic one-shot arming. Set in
+// HookedFieldScriptsInit when the loaded field is fepic1; the dump fires once
+// from Update() after GATEDIAG_DELAY_MS so the init scripts have populated the
+// captured trigger lines and the player entity has settled at its spawn.
+static bool  s_gateDiagPending = false;
+static DWORD s_gateDiagArmTime = 0;
+static const DWORD GATEDIAG_DELAY_MS = 1500;
+#endif
 
 // v0.08.24: One-shot hex dump of PSHM_W entity-scope functions.
 // Reads raw x86 instruction bytes from the two key subroutines so we can
@@ -533,6 +604,13 @@ static bool      s_bgDiagDumped    = true;   // true = skip old BGDIAG dump
 // v05.59: Coordinate diagnostic flag (fires once per field).
 static bool      s_coordDiagDumped = false;
 
+// v0.14.107: Party-state diagnostic flag. Set to false on field load by
+// HookedFieldScriptsInit so the [party-state] log fires once per field.
+// Initial value `true` here so we don't double-log on the very first load
+// (HookedFieldScriptsInit will reset to false right before the engine
+// populates the savemap for the new field).
+static bool      s_partyDiagDumped = true;
+
 // v06.13: CoordSample Approach B — track player's previous triangle for
 // shared-edge midpoint computation. Separate from s_hookPrevTri[] because
 // that array is updated inside the entity scan loop before we can read it.
@@ -549,8 +627,8 @@ static int32_t   s_projDiagPrevFpY = 0;
 static int       s_projDiagCount = 0;
 static const int PROJ_DIAG_MAX = 10;
 
-// v05.69: VISDIAG — dump entity visibility candidate bytes on F11.
-static bool s_f11WasDown = false;
+// v0.14.75: VISDIAG removed; F11 reassigned to global screenshot in
+// dinput8.cpp. s_f11WasDown declaration deleted along with the handler.
 
 // v05.39: Track which entities have logged the struct-position fallback.
 static uint16_t  s_structFallbackLogged = 0;
@@ -558,12 +636,117 @@ static uint16_t  s_structFallbackLogged = 0;
 // v06.14/v0.07.76: Per-field camera heading axes for analog steering + compass directions.
 // Calibrated empirically on first auto-drive; default = identity (world axes).
 // Declared here (before FormatNavComponents) so compass directions can use them.
-static float s_camRightX = 1.0f;   // camera right vector X component (normalized)
-static float s_camRightY = 0.0f;   // camera right vector Y component
-static float s_camDownX  = 0.0f;   // camera down vector X component
-static float s_camDownY  = -1.0f;  // camera down vector Y component (default: -Y world = screen-down, matches common calibration)
+//
+// v0.17.2: SPLIT INTO TWO PAIRS to stop auto-drive's empirical calibration
+// from corrupting manual-nav's screen-projection.
+//
+//   s_camRightX/Y, s_camDownX/Y  -- MANUAL NAV axes. Set at field load by
+//                                    HookedFieldScriptsInit:
+//                                      1. Parse .ca file -> 2D-normalize axis0/axis1
+//                                         (v0.17.0.1).
+//                                      2. Det convention check -- negate camDown if
+//                                         det(camRight, camDown) > 0 so left-handed
+//                                         .ca fields (e.g. bg2f_2 classroom) end up
+//                                         in standard screen-down convention
+//                                         (v0.17.4).
+//                                      3. Quantize camRight angle to nearest 90deg
+//                                         and derive camDown by rotating 90deg CW
+//                                         from camRight (v0.17.5). The engine
+//                                         appears to use per-axis world-cardinal
+//                                         input mapping; quantization makes
+//                                         predicted == engine actual on every
+//                                         clean field and ~5-11deg off on bg2f_2
+//                                         (well within the 22.5deg sector
+//                                         tolerance).
+//                                    Or identity defaults when .ca is absent /
+//                                    degenerate. NEVER written by anything after
+//                                    field load -- no observer cal, no auto-drive
+//                                    cal. Read by:
+//                                      - field_nav_gps.inl :: ComputeScreenDirIndex (GPS cardinals)
+//                                      - field_nav_gps.inl :: [NAV-PROJ] log lines
+//                                      - field_nav_helpers.inl :: FormatNavComponents (Backspace announce)
+//
+//   s_driveCamRightX/Y, s_driveCamDownX/Y -- AUTO-DRIVE PRIVATE axes. Mirrors
+//                                    the manual-nav pair at field load (so
+//                                    auto-drive starts from CA values), then
+//                                    overwritten by the empirical calibration
+//                                    in field_nav_autodrive.inl's phase 1/2.
+//                                    Read by:
+//                                      - field_nav_autodrive.inl :: SetAnalogFromVector
+//
+// Background: v0.17.1 BAT showed manual-nav cardinals reading wrong axes ~3
+// minutes into a session. The simplest explanation was that auto-drive's
+// calibration had overwritten s_camRight/Down at some intermediate field.
+// The chase doc "Auto-drive lessons" Finding #10 also notes that empirical
+// calibration and .ca-derived values aren't proven equivalent on every field
+// (the chase doc's verified-working axis source is empirical calibration; the
+// CA-derived values are still in evaluation for manual nav). Splitting the
+// state pairs lets each consumer use the source most appropriate for it
+// without cross-contamination, and the next BAT log will show definitively
+// whether the wrong-cardinal issue persists once calibration can no longer
+// touch the manual-nav pair.
+static float s_camRightX = 1.0f;   // camera right vector X component (normalized) -- MANUAL NAV
+static float s_camRightY = 0.0f;   // camera right vector Y component                -- MANUAL NAV
+static float s_camDownX  = 0.0f;   // camera down vector X component                 -- MANUAL NAV
+static float s_camDownY  = -1.0f;  // camera down vector Y component (default: -Y world = screen-down) -- MANUAL NAV
+static float s_driveCamRightX = 1.0f;   // AUTO-DRIVE private camera right X (calibration-mutable)
+static float s_driveCamRightY = 0.0f;   // AUTO-DRIVE private camera right Y
+static float s_driveCamDownX  = 0.0f;   // AUTO-DRIVE private camera down X
+static float s_driveCamDownY  = -1.0f;  // AUTO-DRIVE private camera down Y
+// v0.17.2: Source tag for the MANUAL-NAV camera axes pair. Logged in [NAV-PROJ]
+// lines so the BAT log makes obvious whether the axes came from the .ca file
+// (preferred) or fell back to identity defaults.
+//   "identity" = no .ca file or degenerate 2D projection; world-bearing fallback.
+//   "ca-file"  = parsed from the field's .ca and normalized to 2D unit length.
+static const char* s_camAxesSource = "identity";
 static bool  s_camCalibrated = false;
 
+// v0.17.7.6: Closed-loop empirical camera-axes calibration state.
+//
+// Active ONLY when s_camAxesSource == "identity" (CA file missing or its
+// 2D projection was degenerate). The observer in field_nav_observe.inl
+// pushes single-arrow measurements into s_navObsBuffer; when
+// OBS_EMPIRICAL_MIN_SAMPLES recent samples for the same arrow agree within
+// the threshold, the consensus direction is mapped to the camera axis
+// the arrow corresponds to, snapped to nearest 90-degree world cardinal,
+// and the orthogonal axis is derived via the standard det=-1 rotation.
+// Both s_cam*X/Y (manual nav) and s_driveCam*X/Y (auto-drive private)
+// are overwritten so all consumers pick up the corrected values.
+//
+// s_camAxesEmpiricalApplied locks the correction to one-shot per field
+// load. All three fields are reset in HookedFieldScriptsInit.
+//
+// REGRESSION SAFETY: on any field where the CA file's 2D projection
+// was non-degenerate, s_camAxesSource was set to "ca-quantized" by the
+// CA-load block; this state is never touched and the observer never
+// pushes a sample. Behavior on those fields is byte-for-byte identical
+// to v0.17.7.5.5.
+struct NavObsSample {
+    float wx;   // normalized world-X of measured movement direction
+    float wy;   // normalized world-Y of measured movement direction
+};
+static const int OBS_NUM_ARROWS  = 4;   // index 0=UP, 1=DOWN, 2=LEFT, 3=RIGHT
+static const int OBS_MAX_SAMPLES = 8;
+static NavObsSample s_navObsBuffer[OBS_NUM_ARROWS][OBS_MAX_SAMPLES] = {};
+static int          s_navObsSampleCount[OBS_NUM_ARROWS] = {};
+static bool         s_camAxesEmpiricalApplied = false;
+
+
+// --- v0.15.9.2.1 / moved earlier in v0.17.8.19.2: Chase-drive state
+// declared at file scope so all .inl files that need it can reference
+// s_chaseDriveActive / s_chaseDriveTargetX/Y. Originally declared just
+// before the autodrive.inl include, but v0.17.8.19.2 added a chase-drive
+// gate inside PruneCollinearWaypoints (field_nav_pathfinding.inl) which is
+// included earlier in this file, so the declarations had to move up.
+// The chase-drive IMPLEMENTATION (StartChaseDrive / StopChaseDrive /
+// IsChaseDriveActive) still lives in field_nav_directiondrive.inl which is
+// included later, after autodrive.inl, so it can use SetHeldDirections /
+// InjectKey from autodrive. File-scope statics in textual includes share one
+// translation unit, so these definitions are visible to every .inl below.
+static volatile bool s_chaseDriveActive = false;  // owned by directiondrive.inl, read by autodrive.inl + pathfinding.inl
+static bool          s_chaseDriveWalk   = false;  // owned by directiondrive.inl
+static int32_t       s_chaseDriveTargetX = 0;     // cached by StartChaseDrive, read by autodrive's UpdateAutoDrive
+static int32_t       s_chaseDriveTargetY = 0;
 
 // --- Engine input hooks (extracted v0.12.18) ---
 #include "field_nav_input_hooks.inl"
@@ -580,11 +763,51 @@ static bool  s_camCalibrated = false;
 // --- Opcode hooks: SETLINE, TALKRAD, PUSHRAD, SET3, PSHM_W (extracted v0.12.18) ---
 #include "field_nav_opcode_hooks.inl"
 
+// --- v0.17.7.4: MAPJUMP/MAPJUMP3/DISCJUMP/MAPJUMPO/WORLDMAPJUMP dispatch-table
+//   diagnostic hooks. Logs varblock state at field-transition fire time so we
+//   can identify the destination value for variable-dispatch MAPJUMPs that
+//   static analysis couldn't resolve. Diagnostic-only, no catalog changes.
+#include "field_nav_mapjump_diag.inl"
+
 // --- Catalog announce: AnnounceCurrentTarget, AnnounceDirections, CycleEntity (extracted v0.12.18) ---
 #include "field_nav_announce.inl"
 
 // --- Auto-drive state machine, steering, recovery (extracted v0.12.18) ---
+// v0.15.9.2.1 / v0.17.8.19.2: Chase-drive state (s_chaseDriveActive,
+// s_chaseDriveWalk, s_chaseDriveTargetX/Y) was declared here originally but
+// moved up above the field_nav_pathfinding.inl include in v0.17.8.19.2 so
+// the prune chase-drive gate could reference it. See the new declaration
+// block earlier in this file for the full rationale.
+
+// v0.15.9.2.6: File-scope dead-end cluster state populated by the walkmesh
+// dead-end scanner in HookedFieldScriptsInit (was a local variable before;
+// results were logged then discarded). Promoted to file scope so the public
+// API GetLargestClusterCenter() can read them, used by chase_auto_pilot to
+// pick a default MODE_TARGET destination on chase fields that aren't in its
+// explicit per-field config table.
+struct DeadEndCluster {
+    float centerX, centerY;
+    int   triCount;
+    int   seedTri;
+};
+static const int MAX_DEAD_CLUSTERS = 32;
+static DeadEndCluster s_deadClusters[MAX_DEAD_CLUSTERS] = {};
+static int            s_deadClusterCount = 0;
+
+// --- Auto-drive helpers + CALIB (extracted v0.17.8.20 from field_nav_autodrive.inl
+//     for size relief). helpers MUST precede calib (RunCalibration calls
+//     SetHeldDirections); both MUST precede autodrive (UpdateAutoDrive calls
+//     RunCalibration and the helpers). All three share the file-scope statics
+//     declared above. See those files' headers + DEVNOTES. ---
+#include "field_nav_autodrive_helpers.inl"
+#include "field_nav_autodrive_calib.inl"
 #include "field_nav_autodrive.inl"
+
+// --- Direction-based auto-drive for chase scenes (v0.15.9.1) ---
+// Included AFTER field_nav_autodrive.inl so SetHeldDirections / InjectKey /
+// ReleaseAllDirections are visible. Included BEFORE field_nav_handlekeys.inl
+// so the F9 drive handler can see s_directionDriveActive for mutex.
+#include "field_nav_directiondrive.inl"
 
 // --- GPS guided navigation (extracted v0.12.18) ---
 #include "field_nav_gps.inl"
@@ -726,39 +949,13 @@ void Initialize()
                    FF8Addresses::opcode_pshm_w);
     }
 
-    // v0.12.22: POPM_W/B/L shared memory write capture hooks.
-    // Hook the three varblock write handlers directly via MinHook.
-    // These are internal functions (not dispatch table entries) at fixed VAs.
-    {
-        MH_STATUS st = MH_CreateHook(
-            (LPVOID)POPM_W_SHARED_ADDR,
-            (LPVOID)HookedPopmWShared,
-            (LPVOID*)&s_originalPopmW);
-        if (st == MH_OK)
-            st = MH_EnableHook((LPVOID)POPM_W_SHARED_ADDR);
-        Log::Field("FieldNavigation: POPM_W shared mem hook @ 0x%08X — %s",
-                   POPM_W_SHARED_ADDR, MH_StatusToString(st));
-    }
-    {
-        MH_STATUS st = MH_CreateHook(
-            (LPVOID)POPM_B_SHARED_ADDR,
-            (LPVOID)HookedPopmBShared,
-            (LPVOID*)&s_originalPopmB);
-        if (st == MH_OK)
-            st = MH_EnableHook((LPVOID)POPM_B_SHARED_ADDR);
-        Log::Field("FieldNavigation: POPM_B shared mem hook @ 0x%08X — %s",
-                   POPM_B_SHARED_ADDR, MH_StatusToString(st));
-    }
-    {
-        MH_STATUS st = MH_CreateHook(
-            (LPVOID)POPM_L_SHARED_ADDR,
-            (LPVOID)HookedPopmLShared,
-            (LPVOID*)&s_originalPopmL);
-        if (st == MH_OK)
-            st = MH_EnableHook((LPVOID)POPM_L_SHARED_ADDR);
-        Log::Field("FieldNavigation: POPM_L shared mem hook @ 0x%08X — %s",
-                   POPM_L_SHARED_ADDR, MH_StatusToString(st));
-    }
+    // v0.17.7.4: Install MAPJUMP-family dispatch table hooks for destination
+    // diagnostics. See field_nav_mapjump_diag.inl for the full rationale.
+    // Runs after the existing SET3/PSHM_W setup block so we know the opcode
+    // table is resolved by the time we touch it.
+    MapjumpDiag::Install();
+
+    // v0.14.45: POPM_W/B/L shared memory write capture hooks removed (F12 diagnostic retired).
 
     // v05.84: Hook dinput_update_gamepad_status to intercept gamepad polling.
     if (FF8Addresses::dinput_update_gamepad_status_addr != 0) {
@@ -865,6 +1062,62 @@ static bool IsSeparatedByTriggerLine(float px, float py, float ex, float ey, int
     return false;  // same side of all trigger lines
 }
 
+// v0.17.8.10: Proper bounded segment-vs-segment intersection. Returns true only
+// when segment AB actually crosses segment CD (orientation test). Unlike the
+// infinite-line side test in IsSeparatedByTriggerLine, a short line that lies
+// off to one side does NOT count as a crossing. Used by the INF-gateway screen
+// filter so a far-edge screen-boundary doorway no longer falsely "separates" a
+// gateway on the opposite edge (the bug behind the missing bghall_5 -> Hall 4
+// exit). Collinear/endpoint-touch cases return false: a gateway grazing a
+// boundary endpoint is not "behind" it.
+static int Orient2D(float px, float py, float qx, float qy, float rx, float ry)
+{
+    float v = (qx - px) * (ry - py) - (qy - py) * (rx - px);
+    if (v >  1.0f) return  1;
+    if (v < -1.0f) return -1;
+    return 0;
+}
+static bool SegmentsCross(float ax, float ay, float bx, float by,
+                          float cx, float cy, float dx, float dy)
+{
+    int o1 = Orient2D(ax, ay, bx, by, cx, cy);
+    int o2 = Orient2D(ax, ay, bx, by, dx, dy);
+    int o3 = Orient2D(cx, cy, dx, dy, ax, ay);
+    int o4 = Orient2D(cx, cy, dx, dy, bx, by);
+    return (o1 != o2 && o3 != o4 && o1 != 0 && o2 != 0 && o3 != 0 && o4 != 0);
+}
+
+// v0.17.9.15: Local bounded screen-bound crossing test for A* avoidance.
+// Forward-declared in field_nav_pathfinding.inl. Unlike IsSeparatedByTriggerLine
+// (which side-splits an INFINITE line from the start centre, so a short
+// screen-bound segment near the spawn fences off the whole far side of the
+// field via its extension), this returns true only when the actual traversal
+// edge (ax,ay)->(bx,by) crosses a screen-bound line's FINITE segment, via the
+// bounded SegmentsCross. ComputeAStarPath calls it per current->neighbor
+// expansion so A* routes AROUND a boundary instead of being globally walled
+// off by the boundary's infinite extension. Same filter as
+// IsSeparatedByTriggerLine (only SCREEN_BOUND / UNKNOWN lines are barriers;
+// camera-pans and interactive lines are transparent) and the same
+// skipTriggerIdx exemption (used when driving TO a screen transition).
+// Validated on bcsaka_1 (Balamb Hotel): the global test gives No path
+// tri 13->196; this gives the 65-triangle route. nav-core shared with the
+// Dollet chase -> gated on a chase-first BAT. See DEVNOTES "Track A Step 2".
+static bool EdgeCrossesScreenBound(float ax, float ay, float bx, float by, int skipTriggerIdx)
+{
+    for (int t = 0; t < s_capturedLineCount; t++) {
+        if (!s_capturedLines[t].active) continue;
+        if (t == skipTriggerIdx) continue;
+        if (s_capturedLines[t].lineType != FieldArchive::JSM_ENT_LINE_SCREEN_BOUND &&
+            s_capturedLines[t].lineType != FieldArchive::JSM_ENT_UNKNOWN)
+            continue;
+        if (SegmentsCross(ax, ay, bx, by,
+                          (float)s_capturedLines[t].x1, (float)s_capturedLines[t].y1,
+                          (float)s_capturedLines[t].x2, (float)s_capturedLines[t].y2))
+            return true;
+    }
+    return false;
+}
+
 // v06.05: Check if moving from (px,py) in direction (dx,dy) by RECOVERY_CHECK_DIST
 // would cross any non-target active trigger line. Returns true if the projected
 // endpoint is on the opposite side of any trigger line from the start point.
@@ -888,11 +1141,19 @@ static bool WouldCrossTriggerLine(float px, float py, float dx, float dy, int sk
 // The selected catalog index is adjusted so the user stays on the same entity
 // (or the nearest valid one if theirs was removed).
 
+// --- Catalog diagnostic + late-resolve helpers (extracted v0.17.7.0) ---
+// MUST come before field_nav_catalog.inl so RefreshCatalog can call them.
+#include "field_nav_catalog_diag.inl"
+#include "field_nav_catalog_lateres.inl"
+
 // --- RefreshCatalog (extracted v0.12.18) ---
 #include "field_nav_catalog.inl"
 
 // --- Diagnostic functions (extracted v0.12.18) ---
 #include "field_nav_diagnostics.inl"
+
+// --- v0.17.3: Passive arrow-key response observer (diagnostic only) ---
+#include "field_nav_observe.inl"
 
 void Update()
 {
@@ -904,23 +1165,20 @@ void Update()
     HandleKeys();
     UpdateAutoDrive();
     UpdateGPS();  // v0.12.02: GPS guided navigation polling
+    ObserveArrowResponse();  // v0.17.3: log empirical arrow->world response vs CA prediction
 
-    // v0.12.22: POPM varblock write capture summary — log once after 10s window.
-    if (s_capturingVarWrites && !s_varWriteSummaryLogged) {
-        DWORD elapsed = GetTickCount() - s_varWriteCaptureStart;
-        if (elapsed > VAR_WRITE_CAPTURE_DURATION_MS) {
-            s_capturingVarWrites = false;
-            s_varWriteSummaryLogged = true;
-            Log::Field("FieldNavigation: [POPM-CAPTURE] Window closed: %d unique writes in %ums",
-                       s_varWriteCount, elapsed);
-            // Log all captured writes grouped by byte offset.
-            for (int w = 0; w < s_varWriteCount; w++) {
-                Log::Field("FieldNavigation: [POPM-CAPTURE]   offset=%d value=%d size=%d ent=0x%08X",
-                           s_varWrites[w].byteOffset, s_varWrites[w].value,
-                           (int)s_varWrites[w].writeSize, s_varWrites[w].entityAddr);
-            }
-        }
+#if FEPIC1_GATE_DIAG
+    // v0.17.9.12: fire the one-shot fepic1 push-through gate dump once the
+    // post-load settle delay elapses (armed in HookedFieldScriptsInit).
+    if (s_gateDiagPending && (GetTickCount() - s_gateDiagArmTime) >= GATEDIAG_DELAY_MS) {
+        s_gateDiagPending = false;
+        DumpGateDiagnostic();
     }
+    // v0.17.9.16.1: per-tick turnstile path tracer (bggate_6, auto-drive OFF).
+    TurnstileTrace();
+#endif
+
+    // v0.14.45: POPM varblock write capture summary block removed (F12 diagnostic retired).
 
     // v0.08.23: Descriptor table polling probe — DISABLED v0.12.05.
     // Served its purpose: confirmed descriptor table is party-slot-only,
@@ -1030,22 +1288,9 @@ void Shutdown()
         }
         s_originalPshmW = nullptr;
     }
-    // v0.12.22: Remove POPM shared memory hooks.
-    if (s_originalPopmW) {
-        MH_DisableHook((LPVOID)POPM_W_SHARED_ADDR);
-        MH_RemoveHook((LPVOID)POPM_W_SHARED_ADDR);
-        s_originalPopmW = nullptr;
-    }
-    if (s_originalPopmB) {
-        MH_DisableHook((LPVOID)POPM_B_SHARED_ADDR);
-        MH_RemoveHook((LPVOID)POPM_B_SHARED_ADDR);
-        s_originalPopmB = nullptr;
-    }
-    if (s_originalPopmL) {
-        MH_DisableHook((LPVOID)POPM_L_SHARED_ADDR);
-        MH_RemoveHook((LPVOID)POPM_L_SHARED_ADDR);
-        s_originalPopmL = nullptr;
-    }
+    // v0.17.7.4: Restore MAPJUMP-family dispatch table entries before unload.
+    MapjumpDiag::Restore();
+    // v0.14.45: POPM_W/B/L shared memory write hook removal block removed (F12 diagnostic retired).
     // Ensure fake gamepad is removed even if StopAutoDrive wasn't called.
     if (s_fakeGamepadInstalled && FF8Addresses::HasDinputGamepadPtrs()) {
         *FF8Addresses::pDinputGamepadDevicePtr = s_savedDevicePtr;
@@ -1061,5 +1306,129 @@ void Shutdown()
 }
 
 bool IsActive() { return s_initialized; }
+
+// v0.15.9.2.6: Walkmesh cluster query for chase auto-pilot fallback.
+// Returns the center of the cluster with the highest triCount across the
+// dead-end scanner's results. Ties broken by first found (lowest seedTri).
+// See header for full contract.
+bool GetLargestClusterCenter(int32_t* outX, int32_t* outY)
+{
+    if (!outX || !outY) return false;
+    if (s_deadClusterCount <= 0) return false;
+    int bestIdx = -1;
+    int bestCount = 0;
+    for (int i = 0; i < s_deadClusterCount; ++i) {
+        if (s_deadClusters[i].triCount > bestCount) {
+            bestCount = s_deadClusters[i].triCount;
+            bestIdx = i;
+        }
+    }
+    if (bestIdx < 0) return false;
+    *outX = (int32_t)s_deadClusters[bestIdx].centerX;
+    *outY = (int32_t)s_deadClusters[bestIdx].centerY;
+    return true;
+}
+
+// v0.15.9.2.14: Trigger-line lookup for chase auto-pilot fallback.
+// See header for full contract. Implementation: find largest cluster, then
+// pick the trigger line whose center is closest to that cluster.
+bool GetTriggerLineNearestCluster(int32_t* outX, int32_t* outY, int* outTrigIdx)
+{
+    if (!outX || !outY || !outTrigIdx) return false;
+
+    int32_t clusterX = 0, clusterY = 0;
+    if (!GetLargestClusterCenter(&clusterX, &clusterY)) return false;
+
+    int bestIdx = -1;
+    float bestDistSq = 1e30f;
+    for (int t = 0; t < s_capturedLineCount; ++t) {
+        if (!s_capturedLines[t].active) continue;
+        // Match the IsSeparatedByTriggerLine filter: SCREEN_BOUND for actual
+        // screen transitions, UNKNOWN for unclassified lines that haven't been
+        // labeled yet (common on early-game chase fields).
+        if (s_capturedLines[t].lineType != FieldArchive::JSM_ENT_LINE_SCREEN_BOUND &&
+            s_capturedLines[t].lineType != FieldArchive::JSM_ENT_UNKNOWN) continue;
+        float cx = ((float)s_capturedLines[t].x1 + (float)s_capturedLines[t].x2) * 0.5f;
+        float cy = ((float)s_capturedLines[t].y1 + (float)s_capturedLines[t].y2) * 0.5f;
+        float dx = cx - (float)clusterX;
+        float dy = cy - (float)clusterY;
+        float distSq = dx*dx + dy*dy;
+        if (distSq < bestDistSq) {
+            bestDistSq = distSq;
+            bestIdx = t;
+        }
+    }
+
+    if (bestIdx < 0) return false;
+
+    *outX = (int32_t)(((float)s_capturedLines[bestIdx].x1 +
+                       (float)s_capturedLines[bestIdx].x2) * 0.5f);
+    *outY = (int32_t)(((float)s_capturedLines[bestIdx].y1 +
+                       (float)s_capturedLines[bestIdx].y2) * 0.5f);
+    *outTrigIdx = bestIdx;
+    Log::Field("FieldNavigation: GetTriggerLineNearestCluster matched cluster(%d,%d) "
+               "-> trigger[%d] center=(%d,%d) distFromCluster=%.0f",
+               (int)clusterX, (int)clusterY, bestIdx, *outX, *outY, sqrtf(bestDistSq));
+    return true;
+}
+
+// v0.15.9.2.15: INF gateway lookup for chase auto-pilot fallback.
+// See header for full contract. Implementation: get largest cluster + player
+// position, then pick the gateway whose direction-from-player has the largest
+// positive dot product with the player->cluster vector. That selects forward-
+// progress gateways and rejects entry-back gateways even when the entry-back
+// gateway is geometrically closer to the cluster center.
+bool GetGatewayNearestCluster(int32_t* outX, int32_t* outY,
+                              int32_t* outLineX1, int32_t* outLineY1,
+                              int32_t* outLineX2, int32_t* outLineY2)
+{
+    if (!outX || !outY || !outLineX1 || !outLineY1 || !outLineX2 || !outLineY2)
+        return false;
+    if (s_gatewayCount <= 0) return false;
+
+    int32_t clusterX = 0, clusterY = 0;
+    if (!GetLargestClusterCenter(&clusterX, &clusterY)) return false;
+
+    float playerX = 0, playerY = 0;
+    if (s_playerEntityIdx < 0) return false;
+    if (!GetEntityPos(s_playerEntityIdx, playerX, playerY)) return false;
+
+    // Vector from player to cluster -- defines "forward" direction.
+    float clx = (float)clusterX - playerX;
+    float cly = (float)clusterY - playerY;
+
+    int bestIdx = -1;
+    float bestScore = -1e30f;
+    for (int g = 0; g < s_gatewayCount; ++g) {
+        // Skip degenerate gateways (zero-length line).
+        if (s_gateways[g].lineX1 == 0 && s_gateways[g].lineY1 == 0 &&
+            s_gateways[g].lineX2 == 0 && s_gateways[g].lineY2 == 0)
+            continue;
+        float gwDx = s_gateways[g].centerX - playerX;
+        float gwDy = s_gateways[g].centerZ - playerY;  // centerZ = Y in our coords
+        float dot = gwDx * clx + gwDy * cly;
+        if (dot > bestScore) {
+            bestScore = dot;
+            bestIdx = g;
+        }
+    }
+
+    if (bestIdx < 0) return false;
+
+    *outX = (int32_t)s_gateways[bestIdx].centerX;
+    *outY = (int32_t)s_gateways[bestIdx].centerZ;
+    *outLineX1 = (int32_t)s_gateways[bestIdx].lineX1;
+    *outLineY1 = (int32_t)s_gateways[bestIdx].lineY1;
+    *outLineX2 = (int32_t)s_gateways[bestIdx].lineX2;
+    *outLineY2 = (int32_t)s_gateways[bestIdx].lineY2;
+    Log::Field("FieldNavigation: GetGatewayNearestCluster matched cluster(%d,%d) "
+               "player=(%.0f,%.0f) -> gateway[%d] center=(%d,%d) "
+               "line=(%d,%d)->(%d,%d) destFieldId=%u score=%.0f",
+               (int)clusterX, (int)clusterY, playerX, playerY,
+               bestIdx, *outX, *outY,
+               *outLineX1, *outLineY1, *outLineX2, *outLineY2,
+               (unsigned)s_gateways[bestIdx].destFieldId, bestScore);
+    return true;
+}
 
 }  // namespace FieldNavigation

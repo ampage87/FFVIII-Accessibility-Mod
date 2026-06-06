@@ -1,80 +1,78 @@
-# DEVNOTES — FF8 Accessibility Mod
+**Purpose & context**
 
-## Current Build: v0.13.61 (GitHub catch-up baseline, session 77 starting point)
+Aaron is the sole developer of the FF8 Accessibility Mod — a `dinput8.dll` injection for Final Fantasy VIII Steam 2013 (App ID 39150, FF8_EN.exe + FFNx v1.23.x) that makes the game playable for blind players via Windows SAPI TTS, navigation assistance, and entity catalogs. Aaron is blind, uses NVDA, and is also the primary tester.
 
-### Status
+**Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
+**GitHub:** `ampage87/FFVIII-Accessibility-Mod`. Aaron pushes via `Utilities/push_to_github.ps1`; **Claude never pushes**; diagnostic builds stay LOCAL.
 
-**EWM damage/command-menu overlap bug: RESOLVED (v0.13.57).** Switching the ATB sandwich from "cap at max-1" to true freeze eliminated the converge-at-max-1 condition that was causing simultaneous dispatches at freeze release. Dispatch hooks on `sub_483470` and `sub_482F80` (v0.13.55/56) remain in place as defense-in-depth.
-
-**EWM principle empirically validated (v0.13.59).** 10-battle A/B test against G-Soldier encounters showed party:enemy turn ratios of 2.25:1 (EWM ON) vs 2.33:1 (EWM OFF) — within 3.5% of each other. 2v2 battles matched exactly at 2.25:1. Conclusion: freeze sequences actions without perturbing the natural race. No gameplay advantage, no gameplay disadvantage.
-
-**Turn-counter diagnostic is now reliable** and ships enabled. Each battle logs a clean bracket: `=== Battle START (EWM=ON/OFF) ===` at enter, per-turn detection lines during, `=== Battle END === / Party: ... / Enemies: ... / Ratio ...` at exit. Works whether EWM is on or off. Aaron plans to keep an eye on the ratios during ongoing play.
-
-### Active Systems
-
-| Subsystem | Status | Notes |
-|---|---|---|
-| ATB freeze sandwich (HookedATBUpdate) | ✅ | POST-FREEZE restores to exact pre-sandwich value |
-| Dispatch hook: `sub_483470` | ✅ | Blocks dispatch during damageOrActionActive or activeChar<3 |
-| Dispatch hook: `sub_482F80` | ✅ | Same block condition; execution-side pair |
-| Post-turn grace (1000 ms) | ✅ | Bridges player-action-end → next-turn race |
-| Post-action cooldown (500 ms) | ✅ | Bridges signal-clear → mod-thread-poll race |
-| Turn-count diagnostic | ✅ | EWM-independent; logs per-battle summary |
-| Damage-anim transition diagnostic | ✅ | `[DMG-DIAG]`, `[FRZ-DIAG]`, `[POST-REL]` log tags |
-
-### Next Session Priorities (Session 77)
-
-Aaron has picked four targets for session 77:
-
-1. **GitHub sync** — commit & push all v0.13.57–0.13.60 changes (sessions 75–76) to `ampage87/FFVIII-Accessibility-Mod` main via `github:push_files` (multi-file single-commit) and `filesystem:read_text_file` for each source.
-2. **Battle status-ailment detection & announcement** — (a) detect & announce when a status is applied to any party member or enemy; (b) append current statuses to the HP readout on `1`/`2`/`3` and when an enemy is targeted.
-3. **GF summon audio descriptions** — mirror the FMV audio-description pipeline (v03.00) for each GF summon animation. Use `s_gfAnimFired` as the trigger gate.
-4. **Scan spell formatted output** — intercept the Scan display, parse the enemy data (Level, HP, elemental affinities, status affinities, note), and speak a clean structured readout instead of the current raw text dump.
-
-Deferred from prior priority queue (pick up after session 77): persistent settings, GF naming bypass, party-member NPC filter, X-ATMO92 chase, per-character GF state, GF-acquired timing race, SFX volume split, greyed menu-item TTS, GitHub issues #6/#7.
-
-EWM subsystem is stable and not on the table unless a regression surfaces.
-
-### Critical Addresses (unchanged)
-
-| Address | Purpose |
-|---------|---------|
-| 0x00483470 | `sub_483470` — turn dispatch (hooked) |
-| 0x00482F80 | `sub_482F80` — action execute (hooked) |
-| 0x00483EB0 | `sub_483EB0` — entity-ATB-topped-out handler (not hooked) |
-| 0x004842B0 | ATB update function (hooked, freeze sandwich) |
-| 0x01D27B00 | engine "action in progress" flag |
-| 0x01D280C0 | BATTLE_DAMAGE_ANIM_FLAG (byte) |
-| 0x01D76844 | activeChar (0–2 = player slot, 0xFF = no one) |
-| 0x01D768D0 | menuPhase dword (dual-purpose: phase int OR function ptr) |
-
-### Key Invariants (do not break)
-
-1. **NEVER re-enable the SET3 opcode hook (opcode 0x1E)** — hangs infirmary scene. CI check in `.github/workflows/safety-checks.yml`.
-2. **Victory TTS must hook the text renderer, not read memory** — memory-scan dumps everything at once; blind player presses through unannounced screens.
-3. **Submenu detection on confirm, not highlight** — task pool scan and `s_pendingSubmenuEntry` fire on cursor highlight (rejected approaches).
-4. **Savemap header is 76 bytes (0x4C)**, not 96 — ChatGPT deep research assumes 96. Subtract 0x14 from any research offsets.
-5. **`EWM_TrackTurnCount` must stay EWM-independent** — detector watches ATB high→low transitions directly, works regardless of freeze state.
-
-### Previous Sessions
-
-<details>
-<summary>Sessions 75–76 (v0.13.57→v0.13.60) — Cap→Freeze + Turn-Counter Diagnostic</summary>
-
-Full details archived in DEVNOTES_HISTORY.md. Summary: switched ATB cap-at-max-1 sandwich to true freeze (v0.13.57) which eliminated the TTS-damage-overlap bug. Added per-slot turn counter (v0.13.58) initially coupled to EWM_UpdateBattle; split into lifecycle-hooked functions (v0.13.59) so reset/summary fire reliably on every battle. Fixed format string OOB read (v0.13.60). A/B test: EWM has no measurable effect on turn economy (2.25:1 vs 2.33:1 across 10 battles).
-</details>
-
-<details>
-<summary>Sessions 69–74 (v0.13.51→v0.13.56) — Damage/command-menu overlap investigation</summary>
-
-Full transcripts at `/mnt/transcripts/` (journal.txt for catalog). Progressive narrowing through 6 sessions ended with dual MinHook on `sub_483470` + `sub_482F80`. Session 75's cap→freeze change turned out to be what actually fixed the visible-overlap symptom; the dispatch hooks remain as defense-in-depth.
-</details>
-
-<details>
-<summary>Session 67 (v0.13.49→v0.13.50) — GF Submenu Fix + Code Cleanup + Draw Fix</summary>
-
-Fixed 100% of GF submenu detection misses by removing `wasCommandMenu` requirement (root cause: `0x1D768EB` is a party slot index, not a flag). Consolidated 4 detection paths into single `EnterSubmenu()` helper. Suppressed Draw-specific false submenu exits.
-</details>
-
+Per-chapter history lives in `CHANGELOG.md` (authoritative, one entry per version) and `DEVNOTES_HISTORY.md` (long-form narratives). This file is the live state + backlog + rules only; it stays under 10 KB.
 
 ---
+
+## Where we are at session open
+
+**v0.18.2.x menu chapter COMPLETE. Local build = v0.18.2.23, NOT yet pushed (GitHub HEAD = v0.18.2.12). Aaron runs `Utilities/push_to_github.ps1` to ship .13–.23.** All main-menu character-select TTS is done and BAT-confirmed: Junction reserve-member announce (v0.18.2.14), the main-menu "Rearrange party order" party-nav panel (.15–.19, "Fantastic!"), Magic/Status character-select (.20–.21), and the active/reserve "Active Party"/"Reserve Party" grouping cue (.22–.23, "Beautiful!" / "announcements sound good"). Tracked and closed as **#48** (menu-tts). Earlier in the chapter: refine-quantity context (.0), Junction>Auto applied-confirmation via a DR3 HW write-BP on the 0x004BE790 auto-junction routine (.1–.6), and the Items Use-target HP/roster fixes (.7–.12). Full per-version play-by-play + dead-ends are in **DEVNOTES_HISTORY.md** ("v0.18.2.x menu chapter"); per-version summaries in `CHANGELOG.md`.
+
+**Issues closed this chapter (effective once the push lands): #10, #42, #46, #47, #48. Still OPEN/blocked: #45** — junction non-command abilities; none of the current GFs teach a character/party ability, so it can't be tested yet.
+
+**Reusable offsets from the chapter** (vs `pMenuStateA` unless noted): `+0x1E8` subsystem code — `0xFF` bare main menu / `17` Junction / `14` Ability / `3` Magic / `5` Status; `+0x22E` focus (`0`/`8` = character-select phase); `+0x1E9` char-select cursor → roster `+0x1DB` (all available members incl. reserves, `0xFF`-terminated); `+0x71E` per-character menu HP array (stride 0x20, cur +0 / max +2, covers benched); Rearrange panel region `+0x1B6` (`0x0F` source cursor `+0x1D6` / `0x10` dest cursor `+0x1D7`); battle formation `savemap+0xAF0` = the active-party membership test.
+
+**Recent shipped chapters** (detail in CHANGELOG + closed issues + NEXT_SESSION_PROMPT.md, not here): v0.18.1.x Ability "Use GF ability" refine flow (#42, closed); v0.18.0.x GF submenus (#41/#44, closed; #43 open follow-up to calibrate remaining GF EXP costs); v0.17.9.x F9 auto-drive "Track A" edge-math + the SCREEN_BOUND exit-destination interpreter (pushed `808d4802`).
+
+**NEXT SESSION:** confirm the push landed via `github:list_commits`, then `github:list_issues` for the live backlog and pick the next item. Carry-forward: the Save screen still runs `LogSaveSubsystemChanges`/`LogSaveDiagState` offset-logging every 200/500 ms (pre-existing diagnostic, candidate for a future trim); #45 stays blocked until a GF teaches a character/party ability.
+
+---
+
+## Active backlog → GitHub Issues
+
+Tracked bugs/tasks now live as **GitHub issues** on `ampage87/FFVIII-Accessibility-Mod`, not in this file. Check the tracker for the live list. Migrated set (2026-06-01):
+
+- #30 menu_tts.cpp T-handler missing `!shift` gate (trivial)
+- #31 FieldAnnounce display-name audit (0x0134/0x0136; verify Fire Cavern A 0x0088 `bdview1`)
+- #32 Field-name populate race at Part-B arrival (diagnostic-log only; audio fine)
+- #33 Update Dollet timer countdown deep-research doc (doc)
+- #34 Verify bgryo1_1 'squalls' exit label (needs pre-SeeD save; flip `LINEDIAG_ENABLED`=1)
+- #35 Verify dotown_2 'Selphie' chase exit label (flip `LINEDIAG_ENABLED`=1)
+- #36 F9 auto-drive gateway target computes bogus driveSkipTrigIdx (~201) — range guard
+- #37 Source-file size refactor queue (60/80 KB guard)
+- #38 Parked diagnostics / contingency watch (re-enable only if symptom recurs)
+- #39 Deferred / someday backlog (umbrella)
+- #42 Main-menu Ability screen TTS (cursor idx 5) — CLOSED (v0.18.1 refine flow shipped)
+- #43 Calibrate remaining GF per-level EXP costs (#41 follow-up) — low-effort, do as GFs are obtained
+- (#40 closed as duplicate of #41; #41 + #44 closed completed — GF chapter done)
+
+**Closed since the migration:** #10, #41, #42, #44, #46, #47, #48. **Open / blocked:** #45 (junction non-command abilities — no GF teaches one yet).
+
+Pre-existing related: #28 Fire Cavern entry trigger; #21 dialog location-names-as-numbers; plus the open battle/menu-TTS set. **File new bugs on GitHub, not here.**
+
+**Known limitation (not a mod bug, no issue):** JAWS intercepts game keys (arrows, Backspace) until the user presses Insert+3 for passthrough. NVDA is unaffected.
+
+---
+
+## Reference: known fieldIds (geometric-trigger destinations)
+- **Fire Cavern A** (approach field, world-map terrain trigger): `0x0088`, engine `bdview1`, trigger ≈ (30260, -29221). Two-stage entry: the world-map trigger drops you into this approach field, not the interior.
+- **Balamb Town gate** (planner destination, not geometric): `0x006A`, `bcgate_1`, ≈ (12894, -26776).
+- **B-Garden Front Gate 5** (push-through gate, Track A): `0x00A3`, engine `bggate_6` (NOT `fepic1`).
+- **B-Garden Cafeteria 1** (raw SYM `Son` leaks): `0x009A`.
+
+---
+
+## Architecture, safety & workflow rules
+
+- Read **`DEVNOTES.md`** and **`NEXT_SESSION_PROMPT.md`** at session start; `DEVNOTES_HISTORY.md` only when tracing past decisions. Update DEVNOTES + NEXT_SESSION at every version bump AND after every BAT.
+- **Version bump = ONE place:** `FF8OPC_VERSION` in `src/ff8_accessibility.h`. Every bump pairs with a new top-of-file `CHANGELOG.md` entry; `push_to_github.ps1` refuses if the top `## vX.Y.Z` heading ≠ the macro.
+- **Filesystem MCP for all Windows project files** (`filesystem:read_text_file/edit_file/write_file/...`). Bash is a Linux container that can't reach OneDrive — use it only for processing in-context text. `filesystem:edit_file` CORRUPTS on a literal `$` in the replacement (truncates + doubles the file) — use hex `0x24` in source or rewrite with `write_file`. OneDrive sometimes throws a transient EPERM on edit_file rename — retry once.
+- **NEVER re-enable the SET3 hook (0x1E)** — any interception hangs the infirmary scene. CI guard in `.github/workflows/safety-checks.yml`.
+- **Victory/transition TTS hooks the text renderer, NOT memory** — memory dumps everything at once; the player presses blindly through unannounced screens.
+- **F-key handlers gated on `!(GetAsyncKeyState(VK_MENU) & 0x8000)`** (no Alt combos). **F12 is per-session diagnostic ONLY** — search all source for existing `VK_F12` and remove old code before hooking a new one.
+- **Source size (v0.16.0 CI guard):** 60 KB soft / 80 KB hard. Split via textual `#include` of `.inl` from the parent `.cpp` (no header guards, no namespaces inside `.inl`; `*_state.inl` statics included first). No `deploy.bat` change needed. Push-script mirrors the guard at Step 7c.
+- **Diagnostic gating pattern:** gate behind `#define X 0`, don't delete — keeps the tool available.
+- **GitHub commit history is authoritative** for "when did X change". Run `github:list_commits` before quoting push state.
+- **Entity-catalog identity (carry-forward):** SYM names are unreliable as identity hints (kanban2 was Xu) — never expose them; classify by JSM behavior signals (`jsmCategory`, `hasSetmodelInit`, `hasDialogReqTarget`, `foundExtDispatch`), not the model filename. NPC/interaction labels are generic ("NPC N" / "Interaction N") only. Announce-time counters need TYPE-based matching for JSM-injected entries (entityIdx ≤ −300), not the legacy `entityIdx ≥ 0` test.
+- **Navigation is screen-relative, not world-relative** (v0.17.0): cardinals map to arrow keys; project through `s_camRight/Down` before `atan2`. **F9 auto-drive uses `s_camRight/Down`** (quantized at load); **chase-drive uses `s_driveCam*`** (empirical CALIB) — don't cross the streams. **F9 corridor-level steering is OFF** (v0.17.6.2); funnel waypoints + FF8 wall-sliding are its only steering.
+- **EWM and battle-menu TTS are load-bearing.** EWM preserves "first-to-fill acts first, no skipped turns, natural ally/enemy ratio". Pure mechanical splits only unless Aaron explicitly approves a refactor.
+- **Arrival detection and empirical-coord capture need the underlying decision VERIFIED, not just signal-presence.** Mid-drive replan must honor the same planner-eligibility gate as the initial Start. When "fixing" a planner decline, don't substitute a different region (the v0.14.95 mistake).
+- **One change per BAT cycle.** If a fix doesn't engage, READ THE LOG before iterating; identical BAT outcomes across "fixes" mean the diagnosis is wrong; when stuck on a theory, ask Aaron for one specific observation and act on it (that unlocked the Chapter-4 chase fix). Aaron's domain knowledge is ground truth, but his recipes need empirical verification.
+- **Logs:** `ff8_field.log` is large — bash-grep it from stored tool results. `ff8_nav_data.log` logs every player triangle change (`[…] COORD field tri X Y`) regardless of auto-pilot state. F11 screenshots are gold for BAT context. `[MAPJUMP-HOOK]` is the live engine oracle for exit destinations.
+- **`deploy.bat` version-extract regex** needs the `/B` anchor (v0.15.10.1). Inline-changelog accretion is dead (retired v0.15.12.0) — `CHANGELOG.md` is canonical.
+- Every Claude response starts with `## Claude Says`.

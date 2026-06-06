@@ -1,5 +1,11 @@
 # Safety checks for known bugs.
 # Runs on every push and PR to catch accidental re-introduction of fixed issues.
+#
+# IMPORTANT: as of v0.16.5.2, the two checks below are ALSO mirrored locally
+# in Utilities/push_to_github.ps1 as Step 7c. The local mirror catches
+# violations BEFORE the push lands; this CI workflow remains the authoritative
+# server-side backstop. If you change any threshold, file pattern, or check
+# in this file, also update the corresponding block in push_to_github.ps1.
 
 name: Safety Checks
 
@@ -38,3 +44,131 @@ jobs:
             echo "The SET3 opcode hook must remain disabled. See DEVNOTES.md."
             exit 1
           fi
+
+  source-file-size-check:
+    name: Source file size guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enforce source-file size budget
+        run: |
+          echo "=== Source file size guard (v0.16.0+) ==="
+          echo ""
+          echo "Background: src/world_map.cpp grew to 222 KB / 4452 lines before the"
+          echo "v0.16.0 split. Beyond that scale, no editor (including Claude) can"
+          echo "safely round-trip the file in a single rewrite — partial-write bugs"
+          echo "become probable and the dependency graph becomes unreadable."
+          echo ""
+          echo "Policy:"
+          echo "  Soft warning: file > 60 KB. Plan to split into .inl chunks soon."
+          echo "  Hard fail:    file > 80 KB. Split MUST happen before this push."
+          echo ""
+          echo "Allowlist: files queued for an explicit v0.16.x split. The CI fail"
+          echo "becomes active for each once its scheduled split has shipped."
+          echo ""
+
+          # KB thresholds (1 KB = 1024 bytes)
+          WARN_BYTES=$((60 * 1024))
+          FAIL_BYTES=$((80 * 1024))
+
+          # Files that are already known-oversized and have a scheduled split.
+          # Remove a name here once the corresponding v0.16.x split has shipped.
+          #
+          # v0.16.5 (2026-05-17): allowlist emptied — every src/*.{cpp,inl} now
+          # passes the 80 KB hard-fail check. The closest watch-zone file is
+          # field_archive_jsm_scan.inl at 63 KB (accepted exception, will warn).
+          declare -A ALLOWLIST
+
+          fail_count=0
+          warn_count=0
+
+          # Scan every .cpp and .inl under src/. We deliberately don't scan
+          # .h files — header content is generally lean, and the few large
+          # headers (ff8_accessibility_history.h, field_display_names.h) are
+          # documented exceptions.
+          while IFS= read -r f; do
+            size=$(stat -c%s "$f")
+            kb=$(awk "BEGIN { printf \"%.1f\", $size / 1024 }")
+            if [ "$size" -gt "$FAIL_BYTES" ]; then
+              if [ -n "${ALLOWLIST[$f]:-}" ]; then
+                echo "ALLOWLISTED ($kb KB > 80 KB): $f — scheduled for v0.16.x split"
+              else
+                echo "FAIL ($kb KB > 80 KB): $f — must be split into .inl files before push"
+                fail_count=$((fail_count + 1))
+              fi
+            elif [ "$size" -gt "$WARN_BYTES" ]; then
+              echo "WARN  ($kb KB > 60 KB): $f — plan a split soon"
+              warn_count=$((warn_count + 1))
+            fi
+          done < <(find src -maxdepth 1 \( -name '*.cpp' -o -name '*.inl' \) | sort)
+
+          echo ""
+          echo "Summary: $fail_count failures, $warn_count warnings"
+
+          if [ "$fail_count" -gt 0 ]; then
+            echo ""
+            echo "Push refused. See world_map.cpp v0.16.0 split as the template:"
+            echo "  - state.inl first (types, structs, state arrays)"
+            echo "  - subsequent .inl files in dependency order"
+            echo "  - slim parent .cpp with namespace block + textual includes"
+            echo "  - history.h archive for changelog narrative pulled out of the build"
+            exit 1
+          fi
+
+  chase-pathfinding-guard:
+    name: Chase nav-core portal guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Run chase-protection nav-core guard
+        run: |
+          echo "=== Chase-protection nav-core guard (DEVNOTES Track A) ==="
+          echo ""
+          echo "Background: FindPortal in field_nav_pathfinding.inl read the wrong"
+          echo "vertex pair for a triangle neighbour ((e+1,e+2) instead of the (e,e+1)"
+          echo "pair the FF8 .id format stores), so it emitted WALL edges as funnel"
+          echo "portals and wedged auto-drive on narrow/rounded fields. The Dollet"
+          echo "chase path-finding fields ride the same code and their tuning was"
+          echo "calibrated on the buggy portals, so the fix carries regression risk."
+          echo ""
+          echo "This guard asserts the fixed (shared-vertex) edge selection returns"
+          echo "the true shared edge on every guarded chase/gate field, and that the"
+          echo "bggate_6 tri13->tri148 bug/fix witness holds. It blocks chase-route"
+          echo "regressions from landing on main. See tests/chase_pathfinding_guard.py."
+          echo ""
+          python tests/chase_pathfinding_guard.py
+
+  chase-harness:
+    name: Chase nav-core harness (real code on real walkmeshes)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Generate fixture, compile the real nav core, run the harness
+        run: |
+          echo "=== Chase-protection C++ harness (DEVNOTES Track A) ==="
+          echo ""
+          echo "Unlike the portal guard above (a Python MODEL of the edge math),"
+          echo "this compiles the ACTUAL src/field_nav_pathfinding.inl against real"
+          echo "Dollet walkmeshes sliced from the committed ff8_walkmeshes.json and"
+          echo "runs the real A*/funnel. The compile alone catches incompatible"
+          echo "nav-core refactors; the run hard-gates walkmesh mesh integrity"
+          echo "(every neighbour link must share exactly two vertices) and reports"
+          echo "route / out-of-mesh / robot-distance metrics. Exit non-zero on a"
+          echo "mesh-integrity violation blocks the push."
+          echo ""
+          python tests/gen_chase_fixture.py "Plan & Research Documents/ff8_walkmeshes.json" tests/chase_fixtures.h
+          g++ -std=c++17 -O2 -o tests/chase_harness tests/chase_harness.cpp
+          ./tests/chase_harness

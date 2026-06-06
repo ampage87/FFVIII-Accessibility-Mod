@@ -2,6 +2,75 @@
 // Included from battle_tts.cpp. Do not compile independently.
 // v0.12.18: Extracted for readability.
 
+// Forward declaration of CaptureScreenshot — defined later in
+// battle_tts_screenshot.inl. All .inl files share the same translation
+// unit so the forward decl resolves at link time. Used by v0.13.82's
+// FireAnimFlagScreenshot() helper (defined below, near FlushHPAnnouncements).
+static void CaptureScreenshot(const char* basePath);
+
+// v0.13.92: Forward declaration of TriggerImmediateHPFlush — defined later in
+// this file. Called from screenshot.inl when damage popups spawn.
+static void TriggerImmediateHPFlush(const char* trigger);
+
+// v0.13.92: Forward declaration of FlushHPAnnouncements — defined later in
+// this file. Called by TriggerImmediateHPFlush.
+static void FlushHPAnnouncements(const char* trigger);
+
+// v0.14.4: Tracks which sub_48EF80 popup tick we've already triggered for.
+// Set by PollHPChanges when it fires the popup-create early trigger.
+// Cleared on battle entry (DmgPopupHook_Reset) and via OnBattleExit. The
+// hook in battle_tts_dmg_popup_hook.inl publishes s_lastDmgPopupTick on
+// the game thread; we read it on the mod thread inside PollHPChanges and
+// compare against this seen-tick to detect new popups. Volatile DWORD
+// reads/writes are atomic on x86, so no lock is needed.
+static volatile DWORD s_lastSeenDmgPopupTick = 0;
+
+// v0.14.10: Same pattern for the sub_5068B0 render hook. The hook in
+// battle_tts_dmg_render_hook.inl publishes s_lastDmgRenderTick on the
+// game thread; we read it on the mod thread inside PollHPChanges and
+// compare against this seen-tick to detect new impact-time renders.
+// Cleared on battle entry via DmgRenderHook_Reset.
+static volatile DWORD s_lastSeenDmgRenderTick = 0;
+
+// v0.14.10: The two cross-file signals published by the sub_5068B0 hook.
+// Defined here (not in battle_tts_dmg_render_hook.inl) so PollHPChanges
+// below can read them without needing extern linkage. hp.inl is
+// #included BEFORE the render hook file, and all .inl files share the
+// same translation unit, so the render hook can reference these as
+// already-declared file-scope statics.
+static volatile DWORD s_lastDmgRenderTick  = 0;
+static volatile DWORD s_lastDmgRenderValue = 0;
+
+// v0.14.4: The two cross-file signals published by the sub_48EF80 hook.
+// Defined here (not in battle_tts_dmg_popup_hook.inl) because hp.inl is
+// included BEFORE the hook file, and PollHPChanges below needs to read
+// these values. The hook file (included after hp.inl) writes them on the
+// game thread; we read them here on the mod thread. volatile DWORD reads
+// are atomic on x86, so no lock is needed.
+static volatile DWORD s_lastDmgPopupTick  = 0;  // GetTickCount() of last damage popup (dmg > 0)
+static volatile DWORD s_lastDmgPopupValue = 0;  // damage value of that popup (low 16 bits)
+
+// v0.14.36: Freshness gate for popup-create and dmg-render triggers.
+//
+// The publishers (sub_48EF80 hook for popup-create, sub_5068B0 hook for
+// dmg-render) write their tick + value on the game thread for EVERY damage
+// popup they observe — including events where no actual HP change occurs
+// (status spell on immune target, absorb, etc.). These events leave their
+// tick value sitting in the publisher state, so the NEXT damaging event's
+// first poll sees the stale tick (newer than s_lastSeen...Tick) and would
+// fire the trigger using the previous event's value.
+//
+// v0.14.35's consume-on-read fix only zeroed the publisher state when the
+// trigger actually fired, which doesn't help when no fire ever happened
+// for the no-effect event. v0.14.36 adds a freshness check: ignore any
+// tick older than TRIGGER_FRESHNESS_MS. Combined with consume-on-read,
+// this means stale signals from no-fire events automatically expire.
+//
+// 500 ms is generous: poll runs at ~30 Hz so detection latency is ~33 ms
+// in the typical case, and even an Update() stall from a long TTS Speak
+// call is unlikely to exceed a few hundred ms.
+static const DWORD TRIGGER_FRESHNESS_MS = 500;
+
 // v0.12.48: Per-slot GF animation fired tracking.
 // Set by HookedBattleEffect when a GF animation dispatches for a slot.
 // Cleared by PollGFSummonState when entity+0x7C transitions 0->non-zero (new summon).
@@ -46,6 +115,23 @@ static const uint32_t BATTLE_DAMAGE_DISPLAY_ADDR = 0x01D2834A; // uint16: last d
 // animation completes (~1.4 seconds after HP change). This is our trigger.
 static const uint32_t BATTLE_DAMAGE_ANIM_FLAG = 0x01D280C0; // BYTE: 01=animating, 00=done
 
+// v0.13.86: Pre-action displayValue baseline for the no-effect watchdog.
+// Updated at the end of every PollHPChanges call (mod thread). The game
+// thread's NoEffect_RecordSnapshot reads this when sub_48E830 fires to
+// capture the displayValue from BEFORE the engine's same-frame pre-write
+// of the new heal/damage value. Distinguishes 'engine wrote a new heal
+// value during this action' from 'displayValue is stale from a previous
+// action'. Single uint16 read — atomic on x86, no lock needed.
+static uint16_t s_displayValuePrevFrame = 0;
+
+// v0.13.86: Per-slot tick of last FlushHPAnnouncements speech for that slot.
+// The no-effect watchdog reads this to detect heals/damage it would
+// otherwise miss — the engine pre-applies HP before sub_48E830 fires, so
+// the watchdog's own HP snapshot captures POST-action HP and its expiry
+// comparison sees no change. If the flush spoke for the watchdog target
+// during the watchdog window, the action clearly had an effect.
+static DWORD s_lastFlushAnnounceTick[BATTLE_TOTAL_SLOTS] = {};
+
 static uint32_t s_hpPrev[BATTLE_TOTAL_SLOTS] = {};      // previous HP per slot
 static uint32_t s_hpMaxPrev[BATTLE_TOTAL_SLOTS] = {};   // previous maxHP (detect population)
 static bool s_hpTrackingReady = false;                   // true after first frame of valid HP
@@ -55,12 +141,23 @@ static DWORD s_hpFirstPendingTime = 0;                   // GetTickCount when fi
 static bool s_anyHpPending = false;                      // any slot has pending HP changes
 static const DWORD HP_HEAL_TIMEOUT_MS = 1500;            // v0.10.51: shorter heal timeout (no anim flag available)
 
+// v0.13.92: Popup-spawn immediate trigger coordination
+// When damage popups spawn, we trigger immediate announcements.
+// Set this flag to prevent the anim-flag system from re-announcing the same changes.
+static bool s_popupSpawnTriggered = false;               // true when popup spawn already triggered this cycle
+static DWORD s_popupSpawnTriggerTime = 0;                // GetTickCount when popup spawn triggered
+
 // v0.10.47: Animation flag trigger — replaces display-to-zero approach.
 // We watch BATTLE_DAMAGE_ANIM_FLAG: when it transitions from non-zero to zero,
 // the damage number has finished displaying on screen. Flush announcements.
+// v0.13.90: Removed HP_ANIM_TIMEOUT_MS safety-net constant. The anim flag's
+// natural 1->0 transition is the trustworthy signal for any animation
+// length — confirmed in v0.13.89 BAT (Fire = 6s, physical = 1.2s, both
+// transitioned cleanly). The earlier 4s timeout was a defensive guess that
+// truncated long spell animations. s_damageAnimStartTime is retained for
+// the diagnostic log line "Anim flag cleared after Nms".
 static bool s_damageAnimWasActive = false;               // true while anim flag is non-zero
-static DWORD s_damageAnimStartTime = 0;                  // GetTickCount when anim flag first went non-zero
-static const DWORD HP_ANIM_TIMEOUT_MS = 4000;            // safety net: max wait for anim flag to clear
+static DWORD s_damageAnimStartTime = 0;                  // GetTickCount when anim flag first went non-zero (kept for diagnostic log)
 
 // v0.10.42: New-turn flush — when active_char_id changes, the previous action's
 // animation is guaranteed complete (engine wouldn't advance otherwise).
@@ -145,11 +242,20 @@ static const char* GetSlotName(int slot, char* nameBuf, int bufSize)
 
 // ============================================================================
 // v0.10.35: Party HP & Status check keys (1/2/3 = individual, H = full party)
+// v0.14.59: Number keys 1..0 now route to ScanTTS::SpeakField when a Scan
+//           window is open on screen. See PollHPCheckKeys below.
 // ============================================================================
 
 static bool s_hpKey1WasDown = false;
 static bool s_hpKey2WasDown = false;
 static bool s_hpKey3WasDown = false;
+static bool s_hpKey4WasDown = false;
+static bool s_hpKey5WasDown = false;
+static bool s_hpKey6WasDown = false;
+static bool s_hpKey7WasDown = false;
+static bool s_hpKey8WasDown = false;
+static bool s_hpKey9WasDown = false;
+static bool s_hpKey0WasDown = false;
 static bool s_hpKeyHWasDown = false;
 
 // Build a status effect string from the entity's persistent + timed status bytes.
@@ -424,16 +530,56 @@ static void PollHPCheckKeys()
     bool key1 = (GetAsyncKeyState('1') & 0x8000) != 0;
     bool key2 = (GetAsyncKeyState('2') & 0x8000) != 0;
     bool key3 = (GetAsyncKeyState('3') & 0x8000) != 0;
+    bool key4 = (GetAsyncKeyState('4') & 0x8000) != 0;
+    bool key5 = (GetAsyncKeyState('5') & 0x8000) != 0;
+    bool key6 = (GetAsyncKeyState('6') & 0x8000) != 0;
+    bool key7 = (GetAsyncKeyState('7') & 0x8000) != 0;
+    bool key8 = (GetAsyncKeyState('8') & 0x8000) != 0;
+    bool key9 = (GetAsyncKeyState('9') & 0x8000) != 0;
+    bool key0 = (GetAsyncKeyState('0') & 0x8000) != 0;
     bool keyH = (GetAsyncKeyState('H') & 0x8000) != 0;
-    
-    if (key1 && !s_hpKey1WasDown) AnnouncePartyMemberHP(0);
-    if (key2 && !s_hpKey2WasDown) AnnouncePartyMemberHP(1);
-    if (key3 && !s_hpKey3WasDown) AnnouncePartyMemberHP(2);
+
+    // v0.14.59: When a Scan window is open on screen, number keys 1..0
+    // query that target's cached snapshot via ScanTTS::SpeakField. The
+    // bindings (per NEXT_SESSION_PROMPT.md):
+    //   1=Name 2=Description 3=Level 4=HP 5=Stats 6=Weak 7=Absorb
+    //   8=Nullify 9=StatusRes 0=ActiveStatus.
+    // Outside the Scan window (the common case), 1/2/3 retain their
+    // historical ally-HP behavior; 4..0 do nothing.
+    // ScanTTS::IsScreenActive() reads s_scanScreenActiveSlot via an
+    // atomic compare-exchange so it's safe to call here on every poll.
+    if (::ScanTTS::IsScreenActive()) {
+        if (key1 && !s_hpKey1WasDown) ::ScanTTS::SpeakField(1);
+        if (key2 && !s_hpKey2WasDown) ::ScanTTS::SpeakField(2);
+        if (key3 && !s_hpKey3WasDown) ::ScanTTS::SpeakField(3);
+        if (key4 && !s_hpKey4WasDown) ::ScanTTS::SpeakField(4);
+        if (key5 && !s_hpKey5WasDown) ::ScanTTS::SpeakField(5);
+        if (key6 && !s_hpKey6WasDown) ::ScanTTS::SpeakField(6);
+        if (key7 && !s_hpKey7WasDown) ::ScanTTS::SpeakField(7);
+        if (key8 && !s_hpKey8WasDown) ::ScanTTS::SpeakField(8);
+        if (key9 && !s_hpKey9WasDown) ::ScanTTS::SpeakField(9);
+        if (key0 && !s_hpKey0WasDown) ::ScanTTS::SpeakField(0);
+    } else {
+        if (key1 && !s_hpKey1WasDown) AnnouncePartyMemberHP(0);
+        if (key2 && !s_hpKey2WasDown) AnnouncePartyMemberHP(1);
+        if (key3 && !s_hpKey3WasDown) AnnouncePartyMemberHP(2);
+        // 4..0 unbound outside the Scan window (the v0.14.x chapter
+        // plan reserves them for the full Scan UX). Pressing them
+        // outside a Scan window is a silent no-op.
+    }
+
     if (keyH && !s_hpKeyHWasDown) AnnounceFullPartyHP();
-    
+
     s_hpKey1WasDown = key1;
     s_hpKey2WasDown = key2;
     s_hpKey3WasDown = key3;
+    s_hpKey4WasDown = key4;
+    s_hpKey5WasDown = key5;
+    s_hpKey6WasDown = key6;
+    s_hpKey7WasDown = key7;
+    s_hpKey8WasDown = key8;
+    s_hpKey9WasDown = key9;
+    s_hpKey0WasDown = key0;
     s_hpKeyHWasDown = keyH;
 }
 
@@ -540,6 +686,84 @@ static void PollTargetSelection()
     }
 }
 
+// v0.13.82: anim-flag-triggered screenshot helper.
+//
+// Fires a screenshot with a filename that encodes the pending HP deltas
+// and the trigger name. Called from the three FlushHPAnnouncements branches
+// in PollHPChanges (anim-done at 1→0 edge, anim-timeout, heal-timeout).
+//
+// v0.13.81 originally fired at the 0→1 edge but BAT6 proved that was too
+// early — the engine sets the anim flag when it begins damage computation,
+// before the damage-number sprite is composited into the back buffer.
+// v0.13.82 moves capture to the 1→0 edge, which BAT4 (v0.13.79) already
+// proved catches the sprite at peak visibility (damage=112 clearly visible).
+//
+// Pre-conditions: s_hpAccumPending/s_hpAccumDelta must still hold the
+// pending deltas. Must be called BEFORE FlushHPAnnouncements clears them.
+// Defined here (not at top of file) so the s_hpAccum* state declared
+// further up is in scope.
+static void FireAnimFlagScreenshot(const char* trigger)
+{
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char deltaStr[256] = {};
+    int dp = 0;
+    for (int slot = 0; slot < BATTLE_TOTAL_SLOTS; slot++) {
+        if (!s_hpAccumPending[slot]) continue;
+        if (dp > 0 && dp < (int)sizeof(deltaStr) - 2) {
+            deltaStr[dp++] = '_';
+        }
+        dp += snprintf(deltaStr + dp, sizeof(deltaStr) - dp,
+                       "s%d=%+d", slot, s_hpAccumDelta[slot]);
+    }
+    if (dp == 0) {
+        // No pending deltas (unusual — possible for anim-timeout after
+        // the flush already ran, or for non-HP animations we hook
+        // incidentally). Still capture so we can see what was on screen.
+        strncpy(deltaStr, "nopending", sizeof(deltaStr) - 1);
+    }
+    char basePath[512];
+    snprintf(basePath, sizeof(basePath),
+             "C:\\Users\\ampag\\OneDrive\\Documents\\FFVIII-Accessibility-Mod"
+             "\\FF8_OriginalPC_mod\\Logs\\screenshots\\sprite_animflag_"
+             "%02d%02d%02d_%03d_%s_%s",
+             st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+             trigger ? trigger : "unknown",
+             deltaStr);
+    CaptureScreenshot(basePath);
+    Log::Battle("BattleTTS: [HP-TRACK] anim-flag screenshot (%s): %s",
+                trigger ? trigger : "unknown", basePath);
+}
+
+// v0.13.92: Immediate HP flush triggered by popup spawn detection.
+// Called from popup polling when damage popups (kinds 0x01, 0x02, 0x08) spawn.
+// This provides immediate announcement synced with damage sprite visibility,
+// rather than waiting for animation end. Coordinates with anim-flag system
+// to prevent duplicate announcements.
+static void TriggerImmediateHPFlush(const char* trigger)
+{
+    if (!s_anyHpPending) {
+        // No pending HP changes to announce - popup might be for a different event type
+        Log::Battle("BattleTTS: [POPUP-SPAWN] Trigger ignored - no pending HP changes");
+        return;
+    }
+    
+    // Fire audit screenshot before flushing (same pattern as anim-flag path)
+    FireAnimFlagScreenshot(trigger);
+    
+    // Flush announcements immediately
+    FlushHPAnnouncements(trigger);
+    
+    // Mark that popup spawn triggered this cycle - prevents anim-flag from re-triggering
+    s_popupSpawnTriggered = true;
+    s_popupSpawnTriggerTime = GetTickCount();
+    
+    // Reset animation tracking since we've already announced
+    s_damageAnimWasActive = false;
+    
+    Log::Battle("BattleTTS: [POPUP-SPAWN] Immediate HP flush completed - anim-flag bypass active");
+}
+
 // Flush all pending HP change announcements (damage and healing).
 // v0.10.40: Back to Channel 2 (independent SAPI voice for damage/events).
 // Each slot with accumulated HP changes gets its own individual announcement.
@@ -556,6 +780,12 @@ static void FlushHPAnnouncements(const char* trigger)
     // v0.13.51: Track whether any damage (not healing) was announced in this
     // flush, so we can raise the EWM hold after the loop.
     bool anyDamageAnnounced = false;
+
+    // v0.13.86: Tick stamped onto s_lastFlushAnnounceTick for any slot we
+    // speak for. The no-effect watchdog reads this to detect heals/damage
+    // it would miss via direct HP polling (engine pre-applies HP before
+    // sub_48E830 fires).
+    DWORD flushNow = GetTickCount();
 
     for (int slot = 0; slot < BATTLE_TOTAL_SLOTS; slot++) {
         if (!s_hpAccumPending[slot]) continue;
@@ -585,8 +815,11 @@ static void FlushHPAnnouncements(const char* trigger)
             } else {
                 snprintf(buf, sizeof(buf), "%s takes %u damage.", name, dmg);
             }
+            // v0.13.79: Validate BEFORE speaking. Structured log + screenshot.
+            Validate_AnnounceEvent(ko ? "kill" : "damage", slot, (int)dmg, buf, trigger);
             BattleSpeakEvent(buf);
             anyDamageAnnounced = true;  // v0.13.51
+            s_lastFlushAnnounceTick[slot] = flushNow;  // v0.13.86
             Log::Battle("BattleTTS: [HP-TRACK] %s (slot%d, hpDelta=%d, display=%u, used=%u, hp=%u/%u, trigger=%s)",
                        buf, slot, accum, (unsigned)displayVal, dmg,
                        GetEntityHP(slot), GetEntityMaxHP(slot), trigger);
@@ -597,7 +830,10 @@ static void FlushHPAnnouncements(const char* trigger)
                 healAmt = (uint32_t)displayVal;
             }
             snprintf(buf, sizeof(buf), "%s recovers %u HP.", name, healAmt);
+            // v0.13.79: Validate BEFORE speaking. Structured log + screenshot.
+            Validate_AnnounceEvent("heal", slot, (int)healAmt, buf, trigger);
             BattleSpeakEvent(buf);
+            s_lastFlushAnnounceTick[slot] = flushNow;  // v0.13.86
             Log::Battle("BattleTTS: [HP-TRACK] %s (slot%d, delta=+%d, display=%u, used=%u, hp=%u/%u, trigger=%s)",
                        buf, slot, accum, (unsigned)displayVal, healAmt,
                        GetEntityHP(slot), GetEntityMaxHP(slot), trigger);
@@ -615,7 +851,7 @@ static void FlushHPAnnouncements(const char* trigger)
 static void PollHPChanges()
 {
     if (!s_initAnnounceDone || !s_enemyAnnounceDone) return;
-    
+
     // First call: populate baseline HP values, don't announce
     if (!s_hpTrackingReady) {
         bool anyValid = false;
@@ -706,37 +942,159 @@ static void PollHPChanges()
     // displayed on screen, and clears it to 00 when the animation completes.
     // When it transitions from non-zero to zero, flush pending announcements.
     // This replaces the broken display-to-zero approach (0x01D2834A never clears).
+    // v0.13.92: Coordinate with popup-spawn immediate triggering - if popup spawn
+    // already triggered announcements, skip anim-flag triggering to prevent duplicates.
     if (s_anyHpPending) {
         uint8_t animFlag = 0;
         __try { animFlag = *(uint8_t*)BATTLE_DAMAGE_ANIM_FLAG; } __except(EXCEPTION_EXECUTE_HANDLER) {}
         bool healTimeout = (now - s_hpFirstPendingTime >= HP_HEAL_TIMEOUT_MS);
         
+        // v0.13.92: Reset popup spawn trigger flag on new HP cycles
+        // If we have new HP changes after the popup spawn trigger, allow anim-flag to work
+        if (s_popupSpawnTriggered && (now - s_popupSpawnTriggerTime > 5000)) {
+            // Reset after 5 seconds - allows for new damage events in same battle
+            s_popupSpawnTriggered = false;
+            Log::Battle("BattleTTS: [HP-TRACK] Popup spawn trigger flag reset after timeout");
+        }
+        
         if (animFlag != 0 && !s_damageAnimWasActive) {
-            // Flag just went active — damage number appearing on screen
+            // Flag just went active — damage number will appear on screen
+            // in the following frames. v0.13.82: screenshot was moved out
+            // of this block because 0→1 fires BEFORE the sprite composits
+            // into the back buffer (BAT6 proved this). Capture now happens
+            // at the 1→0 edge below, which BAT4 proved catches peak visibility.
             s_damageAnimWasActive = true;
             s_damageAnimStartTime = now;
             Log::Battle("BattleTTS: [HP-TRACK] Anim flag active (0x%08X=%u)",
                        BATTLE_DAMAGE_ANIM_FLAG, (unsigned)animFlag);
         }
-        
+
+        // v0.14.38: sub_5068B0 render hook — PRODUCTION TRIGGER (impact-time).
+        //
+        // This hook fires when the damage popup is rendered to the framebuffer
+        // — the moment the visible damage sprite appears over the target. v0.14.32
+        // BAT recorded yellowLeadVsAnimFlag=-109ms with this hook as primary; v0.14.37
+        // BAT confirmed it fires ~266ms before yellow peak (the visible damage number).
+        // That's the synchronization Aaron asked for.
+        //
+        // The popup-create publisher (sub_48EF80) is intentionally NOT used as a
+        // trigger here — v0.14.37 BAT proved it fires 1–5 SECONDS before the visible
+        // damage sprite, at the engine's ANIM-UP / popup-data-struct creation phase.
+        // That's the action-launch popup (e.g. "Cast Fire" text), NOT the damage
+        // sprite. Triggering on it makes Aaron hear announces well before the
+        // damage is visible. Both v0.14.4 and v0.14.36 promoted popup-create and
+        // both regressed; v0.14.38 leaves it as publisher-only for diagnostics.
+        //
+        // The anim-flag-fall block at the bottom of this function remains as the
+        // catch-all fallback if render-hook completely misses an event. That has
+        // never been needed in practice but is kept defensively.
+        //
+        // Defenses retained on render-hook trigger:
+        //   - s_anyHpPending: don't fire before the engine has applied HP damage
+        //   - TRIGGER_FRESHNESS_MS=500: reject stale ticks from no-fire events
+        //   - consume-on-read: clear publisher state after firing
+        DWORD renderTickSnap = (DWORD)s_lastDmgRenderTick;
+        DWORD renderAge = (renderTickSnap != 0) ? (now - renderTickSnap) : 0xFFFFFFFFu;
+        if (s_anyHpPending && !s_popupSpawnTriggered
+            && renderTickSnap != 0
+            && renderAge < TRIGGER_FRESHNESS_MS
+            && renderTickSnap != s_lastSeenDmgRenderTick) {
+            s_lastSeenDmgRenderTick = renderTickSnap;
+            DWORD renderVal = (DWORD)s_lastDmgRenderValue;
+            Log::Battle("BattleTTS: [HP-TRACK] Damage popup rendered via sub_5068B0 "
+                        "— impact-time trigger dmg=%u (age=%u ms)",
+                        (unsigned)renderVal, (unsigned)renderAge);
+            FireAnimFlagScreenshot("dmg-render");
+            TriggerImmediateHPFlush("dmg-render");
+            // v0.14.35 + v0.14.36: zero the publisher state on consume.
+            InterlockedExchange((LONG*)&s_lastDmgRenderTick, 0);
+            InterlockedExchange((LONG*)&s_lastDmgRenderValue, 0);
+            s_lastSeenDmgRenderTick = 0;
+        }
+
+        // v0.14.38: popup-create trigger block REMOVED.
+        //
+        // sub_48EF80 fires at ANIM-UP / popup-data-struct creation — that's the
+        // "Cast Fire" / action-launch popup, NOT the visible damage sprite.
+        // v0.14.37 BAT log proved this conclusively: across 4 damage events,
+        // popup-create publisher fired 1–5 SECONDS before the corresponding
+        // dmg-render publisher (and before the YELLOW ROI peak). Using it as
+        // any kind of trigger — primary or fallback — makes announces fire well
+        // before Aaron sees the damage.
+        //
+        // The publisher hook itself (in battle_tts_dmg_popup_hook.inl) is still
+        // installed and still publishes s_lastDmgPopupTick / s_lastDmgPopupValue
+        // for the [DMG-POPUP-CREATE] diagnostic log. We just don't consume those
+        // values to fire announcements anymore.
+        //
+        // Three flag history (codified in v0.14.38):
+        //   Flag #1 = sub_48EF80 / popup-create / ANIM-UP / action-launch popup
+        //             → NOT a trigger. Diagnostic publisher only.
+        //   Flag #2 = sub_5068B0 / dmg-render / impact-time / damage sprite
+        //             → PRIMARY trigger. The flag we want to sync to.
+        //   Flag #3 = BATTLE_DAMAGE_ANIM_FLAG 1→0 / animation-complete
+        //             → FALLBACK trigger. Never needed in practice but kept.
+        //
+        // Both v0.14.4 and v0.14.36 tried to promote Flag #1 to a trigger and
+        // both regressed. Do not re-add a popup-create trigger block here
+        // without first confirming via BAT that sub_48EF80 fires AT the visible
+        // damage sprite — which previous BATs have shown it does not.
+
         if (animFlag == 0 && s_damageAnimWasActive) {
-            // Flag cleared — damage number animation finished, announce now!
-            s_damageAnimWasActive = false;
-            Log::Battle("BattleTTS: [HP-TRACK] Anim flag cleared after %ums",
-                       (unsigned)(now - s_damageAnimStartTime));
-            FlushHPAnnouncements("anim-done");
-        } else if (s_damageAnimWasActive && (now - s_damageAnimStartTime >= HP_ANIM_TIMEOUT_MS)) {
-            // Safety net: flag stuck non-zero too long
-            s_damageAnimWasActive = false;
-            FlushHPAnnouncements("anim-timeout");
+            // Flag cleared — damage number animation finished
+            // v0.13.92: Check if popup spawn already triggered announcements
+            if (s_popupSpawnTriggered) {
+                Log::Battle("BattleTTS: [HP-TRACK] Anim flag cleared, but popup-spawn already triggered - skipping");
+                s_damageAnimWasActive = false;
+            } else {
+                // Normal anim-flag triggering path (fallback when popup spawn not detected)
+                Log::Battle("BattleTTS: [HP-TRACK] Anim flag cleared after %ums - fallback trigger",
+                           (unsigned)(now - s_damageAnimStartTime));
+                FireAnimFlagScreenshot("anim-done");
+                FlushHPAnnouncements("anim-done");
+                s_damageAnimWasActive = false;
+            }
         } else if (!s_damageAnimWasActive && healTimeout) {
-            // Fallback for healing (no damage display) or if flag never activated
-            FlushHPAnnouncements("heal-timeout");
+            // v0.13.92: Heal timeout fallback - only fire if popup spawn didn't already trigger
+            if (s_popupSpawnTriggered) {
+                Log::Battle("BattleTTS: [HP-TRACK] Heal timeout reached, but popup-spawn already triggered - skipping");
+            } else {
+                // v0.13.90: Removed the s_damageAnimWasActive timeout branch.
+                // The natural 1->0 transition of the anim flag is the
+                // trustworthy signal for ANY animation length — short physical
+                // (~1.2s), magic (~6s), or longer spells like Meteor / Ultima.
+                // The earlier 4-second "safety net" was firing prematurely on
+                // any animation longer than 4 seconds, which is exactly the
+                // case Aaron reported with Fire (6s anim, fired at 4s).
+                //
+                // This branch is the heal-timeout fallback for HP changes
+                // that occur with NO anim flag activity (poison ticks, regen,
+                // passive HP drain). 1500ms is plenty for those.
+                FireAnimFlagScreenshot("heal-timeout");
+                FlushHPAnnouncements("heal-timeout");
+            }
         }
     } else {
         // No pending HP changes — reset tracking
         s_damageAnimWasActive = false;
+        // v0.13.92: Also reset popup spawn trigger when no HP changes pending
+        if (s_popupSpawnTriggered) {
+            s_popupSpawnTriggered = false;
+            Log::Battle("BattleTTS: [HP-TRACK] Popup spawn trigger flag reset - no pending changes");
+        }
     }
+
+    // v0.13.86: Snapshot displayValue for next-frame baseline. Read at the
+    // END of the function so the value reflects any engine writes that
+    // happened during this poll cycle. The game thread reads this in
+    // NoEffect_RecordSnapshot when sub_48E830 fires — since hooks fire
+    // BETWEEN mod thread polls (game thread runs the engine, mod thread
+    // runs us), the value seen by the hook is from the LAST mod poll,
+    // which precedes the engine's same-frame pre-write of the new heal
+    // value. uint16 read is atomic on x86; no lock needed.
+    __try {
+        s_displayValuePrevFrame = *(uint16_t*)BATTLE_DAMAGE_DISPLAY_ADDR;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
 // ============================================================================
@@ -753,16 +1111,39 @@ static void PollGFSummonState()
 {
     for (int gs = 0; gs < BATTLE_ALLY_SLOTS; gs++) {
         bool nowSummoning = IsSlotSummoningGF(gs);
-        
+
         // Bug 1: Detect new summon starting — clear animation-fired flag
         if (nowSummoning && !s_prevSlotSummoning[gs]) {
             s_gfAnimFired[gs] = false;
             s_gfHpTracking[gs] = false;  // reset HP baseline for new summon
             Log::Battle("BattleTTS: [GF-SUMMON] New summon detected for slot %d (entity+0x7C 0->non-zero)", gs);
         }
-        
+
+        // v0.17.8.0: HP-tracking predicate now OR'd with s_gfHpSubstitutionActive.
+        //
+        // Pre-v0.17.8.0 this only checked IsSlotSummoningGF (entity+0x7C). That
+        // engine flag is unreliable during the HP-SUB window: it can read 0 in
+        // intervals where the GF is acting as HP substitute but the engine
+        // hasn't yet flipped the per-character flag, and stays 0xFFFF after the
+        // animation fires (the "stays stale forever" pattern noted on the
+        // s_gfHpSubstitutionActive declaration above). v0.16.5.2 BAT logged
+        // Shiva taking damage with no announcement on a field where the engine
+        // flag was 0 throughout the damage event.
+        //
+        // AnnouncePartyMemberHP (the manual HP-check-key path, 1/2/3) already
+        // uses this same OR pattern — it correctly shows GF HP across the
+        // entire HP-SUB window. The auto damage-announce path now matches.
+        //
+        // s_gfHpSubstitutionActive is set definitively at GF command confirm
+        // in battle_tts_menu_poll.inl (when the turn ends and submenuCommandId
+        // is 0x15 = GF), and cleared when that character gets its next turn or
+        // on battle exit. Once set, it covers the entire interval from command
+        // confirm through animation fire, regardless of the per-character
+        // engine flag's state.
+        bool hpSubActive = nowSummoning || s_gfHpSubstitutionActive[gs];
+
         // Bug 2: Track GF HP for damage announcements during summon
-        if (nowSummoning && !s_gfAnimFired[gs]) {
+        if (hpSubActive && !s_gfAnimFired[gs]) {
             char gfName[64];
             uint16_t gfHP = 0;
             if (GetActiveGFInfo(gs, gfName, sizeof(gfName), &gfHP)) {
@@ -774,16 +1155,26 @@ static void PollGFSummonState()
                 } else if (gfHP != s_gfHpPrev[gs]) {
                     int32_t delta = (int32_t)gfHP - (int32_t)s_gfHpPrev[gs];
                     char buf[256];
+                    const char* gfValKind = nullptr;  // v0.13.79
+                    int gfValAmount = 0;
                     if (delta < 0) {
                         uint32_t dmg = (uint32_t)(-delta);
+                        gfValAmount = (int)dmg;
                         if (gfHP == 0) {
                             snprintf(buf, sizeof(buf), "%s takes %u damage. Defeated.", gfName, dmg);
+                            gfValKind = "gf-kill";
                         } else {
                             snprintf(buf, sizeof(buf), "%s takes %u damage.", gfName, dmg);
+                            gfValKind = "gf-damage";
                         }
                     } else {
                         snprintf(buf, sizeof(buf), "%s recovers %u HP.", gfName, (uint32_t)delta);
+                        gfValKind = "gf-heal";
+                        gfValAmount = (int)delta;
                     }
+                    // v0.13.79: Validate BEFORE speaking. GF events use slot=gs
+                    // (the party slot that's summoning), same as the HP path.
+                    Validate_AnnounceEvent(gfValKind, gs, gfValAmount, buf, "gf-poll");
                     BattleSpeakEvent(buf);
                     Log::Battle("BattleTTS: [GF-SUMMON] %s (slot %d, %u->%u)", buf, gs, (unsigned)s_gfHpPrev[gs], (unsigned)gfHP);
                     s_gfHpPrev[gs] = gfHP;

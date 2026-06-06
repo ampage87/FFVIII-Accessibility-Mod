@@ -54,9 +54,146 @@ static uint8_t  s_abilLastLeftCursor = 0;  // tracks which left slot was last ac
 static uint16_t s_juncCachedGfMasks[8] = {}; // v0.09.49: GF bitmasks for ALL chars, cached at Junction entry (game zeroes them during editing)
 static uint8_t  s_juncSelectedCharIdx = 0xFF;  // v0.09.49: cached charIdx from char select (formation array gets rewritten during editing)
 
+// v0.18.2.22: active/reserve party grouping legend for the Junction/Magic/Status
+// character-select screens. Sighted players see the 3 active battle members'
+// slots set apart from the reserve slots; we convey that with a fieldset/legend-
+// style cue ("Active Party Start" / "Reserve Party Start") announced when the
+// cursor first lands in a group or crosses into the other. Start cues only.
+// 0=none/reset, 1=active, 2=reserve; reset on each (re)entry so every visit re-cues.
+static int  s_charSelPrevGroup = 0;
+static void ResetCharSelGroup() { s_charSelPrevGroup = 0; }
+
+// v0.18.2.1: J-Auto submenu. From the action menu (Junction/Off/Auto) confirming
+// "Auto" opens a 3-option submenu that auto-junctions the character's magic to
+// optimize a stat. Confirmed by SUBMON (BAT 2026-06-02): focus (+0x22E) settles
+// at 11 and stays there while navigating; the option cursor is +0x26A (0/1/2) and
+// the GCW help line tracked it exactly ("Junction magic to up Str/Mag/HP").
+static const int JUNC_AUTO_FOCUS      = 11;     // +0x22E value on the Auto submenu
+static const int JUNC_AUTO_CURSOR_OFF = 0x26A;  // option cursor (0=Atk,1=Mag,2=Def)
+static const int JUNC_AUTO_OPT_COUNT  = 3;
+static const char* const JUNC_AUTO_OPT_NAMES[] = { "Attack", "Magic", "Defense" };
+// Help (read on "/", like the GF/Ability menus): the game's help-bar text per option.
+static const char* const JUNC_AUTO_OPT_HELP[] = {
+    "Junctions magic to raise Strength.",
+    "Junctions magic to raise Magic.",
+    "Junctions magic to raise HP."
+};
+static uint8_t s_juncPrevAutoCursor = 0xFF;     // previous Auto submenu cursor
+static bool    s_juncAutoConfirmPending = false; // Auto option confirmed; speak confirmation when the action menu settles
+static uint8_t s_juncAutoConfirmOpt     = 0xFF;  // which Auto option (0/1/2) was confirmed
+// v0.18.2.6: apply-detection via the auto-junction routine itself. Confirm and
+// cancel of the Auto submenu are byte-identical in the focus path (11 -> 8 -> 3),
+// so apply/cancel can't be read from menu state. BAT (2026-06-02) proved the game
+// routine at 0x004BE790 that rewrites the working junction array runs on a CONFIRM
+// (even a no-op confirm that changes nothing) and does NOT run on a CANCEL. The HW
+// write-BP below sets this flag from inside that routine while the Auto submenu is
+// focused (+0x22E==11); the action-menu resolution reads it: set => confirm
+// (announce), clear => cancel (silent). Replaces the v0.18.2.3 magic-changed
+// snapshot, which was silent on no-op confirms (Aaron: "reads as broken").
+static volatile bool s_juncAutoRoutineRan = false;
+
+
+// ============================================================================
+// v0.18.2.6 — auto-junction CONFIRM detector (HW write BP on the working byte)
+// ============================================================================
+// v0.18.2.4 BAT proved the menu module does NOT update pEngineInputConfirmedButtons
+// (zero [JuncBtnDiag] lines across a full Auto session), so the engine button
+// bitmask can't tell us a confirm happened. Instead we find the routine that
+// rearranges the magic: on a confirm it writes the menu's working junction array
+// at pMenuStateA+0x6C2 (BAT log: 0x6C2 0->18, 0x6C4 32->0). A 1-byte hardware
+// WRITE breakpoint on that fixed address fires INSIDE the auto-junction routine.
+// We log EIP + registers + FF8-.text stack return addresses; the return addresses
+// sets s_juncAutoRoutineRan when it fires while the Auto submenu is focused. DR3
+// is used (DR0/1/2 are the battle BPs); each VEH checks its own DR6 bit so they
+// coexist. Armed on Junction-menu activation, dropped on Junction reset. This is
+// now load-bearing (the apply/cancel signal), not a throwaway diagnostic.
+static const int      JUNC_AUTO_WORK_OFF = 0x6C2;   // working junction byte the routine writes
+static volatile bool  s_juncAutoBPArmed  = false;
+static PVOID          s_juncAutoBPVEH    = nullptr;
+static uint32_t       s_juncAutoBPTarget = 0;       // resolved pMenuStateA + 0x6C2
+
+static LONG CALLBACK JuncAutoBP_VEH(PEXCEPTION_POINTERS pEx)
+{
+    if (pEx->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP)
+        return EXCEPTION_CONTINUE_SEARCH;
+    if (!((DWORD)pEx->ContextRecord->Dr6 & 0x08))  // DR3 condition bit — not our hit
+        return EXCEPTION_CONTINUE_SEARCH;
+    pEx->ContextRecord->Dr6 &= ~0x0F;  // acknowledge
+
+    // The write fires from inside the game's auto-junction routine (0x004BE790),
+    // which runs on a CONFIRM of the Auto submenu (including a no-op confirm) and
+    // NOT on a cancel. Gate on the Auto submenu being focused (+0x22E==11) so the
+    // same byte's menu-load / manual-junction writes don't trip the flag.
+    __try {
+        if (pMenuStateA && ((uint8_t*)pMenuStateA)[0x22E] == 11)
+            s_juncAutoRoutineRan = true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static void JuncAutoBP_SetAllThreads(bool arm)
+{
+    DWORD pid = GetCurrentProcessId();
+    DWORD myTid = GetCurrentThreadId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 te; te.dwSize = sizeof(te);
+    int done = 0;
+    if (Thread32First(snap, &te)) {
+        do {
+            if (te.th32OwnerProcessID != pid) continue;
+            HANDLE h = OpenThread(
+                THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT,
+                FALSE, te.th32ThreadID);
+            if (!h) continue;
+            bool isSelf = (te.th32ThreadID == myTid);
+            if (!isSelf) SuspendThread(h);
+            CONTEXT ctx; ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+            if (GetThreadContext(h, &ctx)) {
+                if (arm) {
+                    ctx.Dr3 = s_juncAutoBPTarget;
+                    ctx.Dr7 &= ~((DWORD)0x40 | ((DWORD)0x0F << 28)); // clear L3 + RW3 + LEN3
+                    ctx.Dr7 |= (DWORD)0x40;                          // L3 local enable (bit 6)
+                    ctx.Dr7 |= ((DWORD)0x01 << 28);                  // RW3 = 01 (write-only)
+                    // LEN3 = 00 (1 byte)
+                } else {
+                    ctx.Dr3 = 0;
+                    ctx.Dr7 &= ~((DWORD)0x40 | ((DWORD)0x0F << 28));
+                }
+                if (SetThreadContext(h, &ctx)) done++;
+            }
+            if (!isSelf) ResumeThread(h);
+            CloseHandle(h);
+        } while (Thread32Next(snap, &te));
+    }
+    CloseHandle(snap);
+    Log::Menu("[JuncAutoBP] %s DR3 on 0x%08X (1-byte write) — threads=%d",
+               arm ? "armed" : "disarmed", s_juncAutoBPTarget, done);
+}
+
+static void JuncAutoBP_Arm()
+{
+    if (s_juncAutoBPArmed) return;
+    if (!pMenuStateA) return;
+    if (!s_juncAutoBPVEH) {
+        s_juncAutoBPVEH = AddVectoredExceptionHandler(1, JuncAutoBP_VEH);
+        Log::Menu("[JuncAutoBP] VEH registered: 0x%08X", (uint32_t)(uintptr_t)s_juncAutoBPVEH);
+    }
+    s_juncAutoBPTarget = (uint32_t)(uintptr_t)((uint8_t*)pMenuStateA + JUNC_AUTO_WORK_OFF);
+    JuncAutoBP_SetAllThreads(true);
+    s_juncAutoBPArmed = true;
+}
+
+static void JuncAutoBP_Disarm()
+{
+    if (!s_juncAutoBPArmed) return;
+    JuncAutoBP_SetAllThreads(false);
+    s_juncAutoBPArmed = false;
+}
 
 static void ResetJunctionState()
 {
+    JuncAutoBP_Disarm();  // v0.18.2.6: drop the HW write BP when the Junction state resets
     s_juncActive = false;
     s_juncPrevCharCursor = 0xFF;
     s_juncPrevFocus = 0xFF;
@@ -72,6 +209,10 @@ static void ResetJunctionState()
     s_abilLastLeftCursor = 0;
     memset(s_juncCachedGfMasks, 0, sizeof(s_juncCachedGfMasks));
     s_juncSelectedCharIdx = 0xFF;
+    s_juncPrevAutoCursor = 0xFF;
+    s_juncAutoConfirmPending = false;
+    s_juncAutoConfirmOpt     = 0xFF;
+    s_juncAutoRoutineRan     = false;
 }
 
 // Compute character level from EXP. FF8: each level needs 1000 EXP flat.
@@ -93,7 +234,7 @@ static int ComputeCharLevel(uint32_t exp)
 //   3 members → formation=[charA, charB, charC, FF] (all three)
 // So formation[cursorPos] gives the character at the cursor's visual slot,
 // or 0xFF for an empty slot. No compaction or centering formula needed.
-static void AnnounceJuncCharSelect(uint8_t cursorPos)
+static void AnnounceJuncCharSelect(uint8_t cursorPos, bool announceGroup = false)
 {
     __try {
         uint8_t* sm = (uint8_t*)0x1CFDC5C;  // SAVEMAP_BASE
@@ -101,15 +242,16 @@ static void AnnounceJuncCharSelect(uint8_t cursorPos)
         // Cursor indexes directly into this array — engine handles centering.
         uint8_t* party = sm + 0xAF0;
         
-        if (cursorPos > 2) {
+        uint8_t* roster = (uint8_t*)pMenuStateA + 0x1DB;  // v0.18.2.14: char-select cursor indexes the roster (all available chars incl. reserves), NOT the 3-slot formation
+        if (cursorPos > 7) {
             Log::Menu("[JuncTTS] CharSelect cursor %u out of range", (unsigned)cursorPos);
             return;
         }
         
-        uint8_t charIdx = party[cursorPos];
+        uint8_t charIdx = roster[cursorPos];
         if (charIdx == 0xFF || charIdx > 10) {
             ScreenReader::Speak("Empty", true);
-            Log::Menu("[JuncTTS] CharSelect cursor %u -> empty (formation[%u]=0x%02X)",
+            Log::Menu("[JuncTTS] CharSelect cursor %u -> empty (roster[%u]=0x%02X)",
                        (unsigned)cursorPos, (unsigned)cursorPos, (unsigned)charIdx);
             return;
         }
@@ -118,7 +260,18 @@ static void AnnounceJuncCharSelect(uint8_t cursorPos)
             "Squall", "Zell", "Irvine", "Quistis", "Rinoa", "Selphie", "Seifer", "Edea",
             "Laguna", "Kiros", "Ward"
         };
-        const char* name = (charIdx < 11) ? JUNC_CHAR_NAMES[charIdx] : "Unknown";
+        // v0.17.8.17.7: Dream-party name fix (same model as victory screen). The
+        // formation index (charIdx, e.g. [5,0,1] = Selphie/Squall/Zell) is the
+        // STALE regular party during a Laguna dream; the dream character's data
+        // is loaded into char-data[charIdx], whose model_id (+0x08) reads 8/9/10
+        // for Laguna/Kiros/Ward. Prefer model_id when it names a dream member,
+        // else fall back to the formation index (unchanged for normal play, where
+        // model_id == charIdx for the 8 mains). The modelId is added to the log
+        // line below so a dream BAT confirms the value without a separate diag.
+        uint8_t modelId = *(sm + 0x48C + charIdx * 0x98 + 0x08);
+        const char* name;
+        if (modelId >= 8 && modelId <= 10) name = JUNC_CHAR_NAMES[modelId];
+        else                               name = (charIdx < 11) ? JUNC_CHAR_NAMES[charIdx] : "Unknown";
         
         // Get HP from computed stats (0x1CFF000, stride 0x1D0, curHP +0x172, maxHP +0x174)
         // Map charIdx to party slot via party array
@@ -134,11 +287,22 @@ static void AnnounceJuncCharSelect(uint8_t cursorPos)
                 break;
             }
         }
-        // Fallback: read from savemap character struct
-        if (maxHP == 0 && charIdx < 8) {
+        // v0.18.2.14: reserve (not in the battle formation) -> the menu's per-
+        // character HP display array at pMenuStateA+0x71E (stride 0x20, curHP +0,
+        // maxHP +2, indexed by character index; the #47 benched-capable source).
+        if (maxHP == 0) {
+            uint8_t* hp = (uint8_t*)pMenuStateA + 0x71E + (int)charIdx * 0x20;
+            uint16_t dCur = *(uint16_t*)(hp + 0x00);
+            uint16_t dMax = *(uint16_t*)(hp + 0x02);
+            Log::Menu("[JuncTTS] CharSelect reserve HP[+71E idx %u]: cur=%u max=%u",
+                       (unsigned)charIdx, (unsigned)dCur, (unsigned)dMax);
+            if (dMax > 0 && dMax < 10000) { curHP = dCur; maxHP = dMax; }
+        }
+        // Final fallback: savemap character struct (curHP live; savemap maxHP is 0)
+        if (charIdx < 8) {
             uint8_t* smChar = sm + 0x48C + charIdx * 0x98;
-            curHP = *(uint16_t*)(smChar + 0x00);
-            maxHP = *(uint16_t*)(smChar + 0x02);
+            if (curHP == 0) curHP = *(uint16_t*)(smChar + 0x00);
+            if (maxHP == 0) maxHP = *(uint16_t*)(smChar + 0x02);
         }
         
         // Get level from EXP (FF8: level = EXP/1000 + 1)
@@ -146,15 +310,31 @@ static void AnnounceJuncCharSelect(uint8_t cursorPos)
         uint32_t exp = *(uint32_t*)(charData + 0x04);
         int level = ComputeCharLevel(exp);
         
-        char buf[256];
+        char mbuf[256];
         if (maxHP > 0)
-            sprintf(buf, "%s, Level %d, HP %u of %u", name, level, (unsigned)curHP, (unsigned)maxHP);
+            sprintf(mbuf, "%s, Level %d, HP %u of %u", name, level, (unsigned)curHP, (unsigned)maxHP);
         else
-            sprintf(buf, "%s, Level %d, HP %u", name, level, (unsigned)curHP);
+            sprintf(mbuf, "%s, Level %d, HP %u", name, level, (unsigned)curHP);
+
+        // v0.18.2.22: prepend the active/reserve grouping legend (start cues only)
+        // in the SAME utterance — a separate Speak would interrupt it away. "Active"
+        // = the char is in the battle formation (savemap+0xAF0); else "Reserve".
+        const char* groupPrefix = "";
+        if (announceGroup) {
+            bool isActive = false;
+            for (int gs = 0; gs < 3; gs++) { if (party[gs] == charIdx) { isActive = true; break; } }
+            int group = isActive ? 1 : 2;
+            if (group != s_charSelPrevGroup) {
+                groupPrefix = isActive ? "Active Party. " : "Reserve Party. ";
+                s_charSelPrevGroup = group;
+            }
+        }
+        char buf[320];
+        sprintf(buf, "%s%s", groupPrefix, mbuf);
         
         ScreenReader::Speak(buf, true);
-        Log::Menu("[JuncTTS] CharSelect: %s (cursor=%u formation[%u]=%u)",
-                   buf, (unsigned)cursorPos, (unsigned)cursorPos, (unsigned)charIdx);
+        Log::Menu("[JuncTTS] CharSelect: %s (cursor=%u roster[%u]=%u modelId=%u)",
+                   buf, (unsigned)cursorPos, (unsigned)cursorPos, (unsigned)charIdx, (unsigned)modelId);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         Log::Menu("[JuncTTS] Exception in AnnounceJuncCharSelect");
     }
@@ -232,11 +412,11 @@ static uint8_t FindGfOwner(uint8_t gfIdx)
 static uint8_t GetJuncSelectedCharIdx()
 {
     __try {
-        uint8_t* sm = (uint8_t*)0x1CFDC5C;
-        uint8_t* party = sm + 0xAF0;
-        uint8_t cursor = *((uint8_t*)pMenuStateA + JUNC_CHARSEL_CURSOR_OFF);
-        if (cursor <= 2) {
-            uint8_t charIdx = party[cursor];
+        uint8_t* base = (uint8_t*)pMenuStateA;
+        uint8_t* roster = base + 0x1DB;  // v0.18.2.14: cursor indexes the roster (incl. reserves)
+        uint8_t cursor = base[JUNC_CHARSEL_CURSOR_OFF];
+        if (cursor <= 7) {
+            uint8_t charIdx = roster[cursor];
             if (charIdx != 0xFF && charIdx <= 10) return charIdx;
         }
         // v0.09.49: Engine rewrites formation during Junction editing.
@@ -352,6 +532,8 @@ static void PollJunctionSubmenu()
                            (unsigned)s_juncCachedGfMasks[6], (unsigned)s_juncCachedGfMasks[7]);
             }
             Log::Menu("[JuncTTS] Junction subsystem activated (+0x1E8=17)");
+            ResetCharSelGroup();  // v0.18.2.22: fresh active/reserve grouping for this visit
+            JuncAutoBP_Arm();  // v0.18.2.6: arm the HW write BP that detects Auto-submenu confirms
         }
         
         // Detect Junction subsystem deactivation
@@ -367,7 +549,7 @@ static void PollJunctionSubmenu()
         if (!s_juncActive) return;
         
         // DEBUG: Log unhandled focus states
-        if (focus != 0 && focus != 3 && focus != 8 && focus != 37 && focus != 38 && focus != 41 &&
+        if (focus != 0 && focus != 3 && focus != 8 && focus != 11 && focus != 37 && focus != 38 && focus != 41 &&
             !(focus >= 20 && focus <= 28)) {
             static uint8_t s_lastLoggedFocus = 0xFF;
             if (focus != s_lastLoggedFocus) {
@@ -377,6 +559,21 @@ static void PollJunctionSubmenu()
             }
         }
         
+        // ---- Auto submenu CLOSED — resolve apply vs cancel at the action menu ----
+        // Confirm and cancel both leave the Auto submenu (focus 11) via the same
+        // path (11 -> char-select 8 -> action menu 3), so the focus path can't tell
+        // them apart. Mark "pending" on the way out and decide at the action menu
+        // (focus==3 block) from whether the auto-junction routine ran (the HW
+        // write-BP flag). While pending, the
+        // char-select re-announce is muted so it can't precede the confirmation.
+        if (s_juncPrevFocus == JUNC_AUTO_FOCUS && (focus == 0 || focus == 8) &&
+            s_juncPrevAutoCursor < JUNC_AUTO_OPT_COUNT) {
+            s_juncAutoConfirmPending = true;
+            s_juncAutoConfirmOpt     = s_juncPrevAutoCursor;
+            Log::Menu("[JuncTTS] AutoMenu closed: opt=%u (focus %u->%u), awaiting apply check",
+                       (unsigned)s_juncAutoConfirmOpt, (unsigned)s_juncPrevFocus, (unsigned)focus);
+        }
+
         // ---- Ability Screen (focus 20-28 range) ----
         // v0.09.45: Confirmed via v0.09.44 diagnostic:
         //   LEFT panel:  focus=28, cursor at +0x271 (equipped command/ability slots)
@@ -467,8 +664,12 @@ static void PollJunctionSubmenu()
         // focus=0 is the normal char select on first entry.
         if (focus == 0 || focus == 8) {
             uint8_t charCursor = base[JUNC_CHARSEL_CURSOR_OFF];
-            if (charCursor <= 2 && charCursor != s_juncPrevCharCursor) {
-                AnnounceJuncCharSelect(charCursor);
+            if (s_juncAutoConfirmPending) {
+                // Auto submenu just closed; this char-select hop is transient and
+                // resolves at the action menu. Stay silent and keep prev in sync.
+                s_juncPrevCharCursor = charCursor;
+            } else if (charCursor <= 7 && charCursor != s_juncPrevCharCursor) {
+                AnnounceJuncCharSelect(charCursor, true);
                 // v0.09.49: Cache the resolved charIdx NOW, while formation is still intact.
                 // The engine rewrites the formation array once Junction editing starts.
                 {
@@ -485,9 +686,37 @@ static void PollJunctionSubmenu()
         // ---- Action Menu (focus == 3) ----
         if (focus == 3) {
             uint8_t actionCursor = base[JUNC_ACTION_CURSOR_OFF];
-            
+            bool spokeConfirm = false;
+
+            // Resolve a just-closed Auto submenu. The HW write-BP set
+            // s_juncAutoRoutineRan iff the game's auto-junction routine ran while
+            // the submenu was focused, which happens on a CONFIRM (even a no-op
+            // confirm) and never on a cancel. Set => speak the confirmation (and
+            // suppress the action re-announce). Clear => it was a cancel; say
+            // nothing here and let the normal action announce run below.
+            if (s_juncAutoConfirmPending) {
+                bool applied = s_juncAutoRoutineRan;
+                if (applied) {
+                    const char* opt = (s_juncAutoConfirmOpt < JUNC_AUTO_OPT_COUNT)
+                                      ? JUNC_AUTO_OPT_NAMES[s_juncAutoConfirmOpt] : "";
+                    char abuf[64];
+                    sprintf(abuf, "Junctioned automatically for %s", opt);
+                    ScreenReader::Speak(abuf, true);
+                    Log::Menu("[JuncTTS] AutoApplied: %s (confirm detected)", opt);
+                    s_juncPrevActionCursor = actionCursor;  // suppress the action re-announce
+                    spokeConfirm = true;
+                } else {
+                    Log::Menu("[JuncTTS] AutoMenu cancelled (auto-junction routine "
+                              "did not run) opt=%u",
+                              (unsigned)s_juncAutoConfirmOpt);
+                }
+                s_juncAutoConfirmPending = false;
+                s_juncAutoConfirmOpt     = 0xFF;
+                s_juncAutoRoutineRan     = false;
+            }
+
             // Announce on entry to action menu OR cursor change
-            if (actionCursor < JUNC_ACTION_COUNT) {
+            if (!spokeConfirm && actionCursor < JUNC_ACTION_COUNT) {
                 if (s_juncPrevFocus != 3 || actionCursor != s_juncPrevActionCursor) {
                     const char* actionName = JUNC_ACTION_NAMES[actionCursor];
                     ScreenReader::Speak(actionName, true);
@@ -505,6 +734,26 @@ static void PollJunctionSubmenu()
             s_juncPrevAbilRightCursor = 0xFF;
             s_juncPrevAbilFocus = 0xFF;
             s_abilRightListCount = 0;
+        }
+
+        // ---- Auto-junction submenu (focus == 11) ----
+        // Confirming "Auto" from the action menu opens a 3-option submenu
+        // (Atk/Mag/Def) selected by +0x26A; focus stays 11 throughout. Announce
+        // the option + what it optimizes on entry and on cursor change.
+        if (focus == JUNC_AUTO_FOCUS) {
+            // On entry, clear the apply flag so the action-menu resolution can
+            // tell this Auto session's confirm (write-BP sets it) from a cancel.
+            if (s_juncPrevFocus != JUNC_AUTO_FOCUS) {
+                s_juncAutoRoutineRan = false;  // fresh apply-window; the write-BP sets it on a confirm
+            }
+            uint8_t autoCursor = base[JUNC_AUTO_CURSOR_OFF];
+            if (autoCursor < JUNC_AUTO_OPT_COUNT &&
+                (s_juncPrevFocus != JUNC_AUTO_FOCUS || autoCursor != s_juncPrevAutoCursor)) {
+                ScreenReader::Speak(JUNC_AUTO_OPT_NAMES[autoCursor], true);
+                Log::Menu("[JuncTTS] AutoMenu: %s (cursor=%u)",
+                           JUNC_AUTO_OPT_NAMES[autoCursor], (unsigned)autoCursor);
+                s_juncPrevAutoCursor = autoCursor;
+            }
         }
         
         // ---- Junction Sub-option (focus == 37 or 38) ----
@@ -570,12 +819,25 @@ static void PollJunctionSubmenu()
                 };
                 uint8_t owner = FindGfOwner(realGfIdx);
                 uint8_t selChar = GetJuncSelectedCharIdx();
+                // v0.17.8.17.7: dream-aware owner name. owner is a regular char
+                // index (0-7) from FindGfOwner; during a dream the dream member's
+                // struct is loaded into char-data[owner] and its model_id (+0x08)
+                // reads 8/9/10. Map through that so "on <name>" says Laguna/Kiros/
+                // Ward, not the stale regular name. (Literal savemap addr used
+                // because the shared resolver is defined in a later include.)
+                uint8_t ownerName = owner;
+                if (owner < 11) {
+                    __try {
+                        uint8_t m = *((uint8_t*)0x1CFDC5C + 0x48C + owner * 0x98 + 0x08);
+                        if (m >= 8 && m <= 10) ownerName = m;
+                    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                }
                 
                 char buf[128];
                 if (owner != 0xFF && owner == selChar) {
                     sprintf(buf, "%s, junctioned", gfName);
                 } else if (owner != 0xFF && owner < 11) {
-                    sprintf(buf, "%s, on %s", gfName, JUNC_CHAR_NAMES2[owner]);
+                    sprintf(buf, "%s, on %s", gfName, JUNC_CHAR_NAMES2[ownerName]);
                 } else {
                     sprintf(buf, "%s", gfName);
                 }
@@ -604,7 +866,7 @@ static void PollJunctionSubmenu()
         // When returning to char select (focus==0 or 8) after being deeper,
         // force re-announce the current character
         if ((focus == 0 || focus == 8) && s_juncPrevFocus != 0 && s_juncPrevFocus != 8 && s_juncPrevFocus != 0xFF) {
-            s_juncPrevCharCursor = 0xFF;
+            if (!s_juncAutoConfirmPending) s_juncPrevCharCursor = 0xFF;
         }
         
         // Reset sub-phase cursors when leaving those phases
@@ -615,6 +877,9 @@ static void PollJunctionSubmenu()
             s_juncPrevGfListCursor = 0xFF;
             s_juncPrevGfToggle = 0xFF;
         }
+        if (focus != JUNC_AUTO_FOCUS && s_juncPrevFocus == JUNC_AUTO_FOCUS) {
+            s_juncPrevAutoCursor = 0xFF;
+        }
         
         // Track focus changes for transition detection
         s_juncPrevFocus = focus;
@@ -622,6 +887,27 @@ static void PollJunctionSubmenu()
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         Log::Menu("[JuncTTS] Exception in PollJunctionSubmenu");
     }
+}
+
+// (/) On-demand help for the Junction Auto submenu option under the cursor.
+// Returns true (and speaks the help) ONLY while the Auto submenu is up, so the
+// "/" dispatch chain in MenuTTS::Update() falls through to the normal help bar
+// everywhere else. Mirrors GFSpeakSelectedAbilityHelp()/AbilitySpeakSelectedHelp().
+// Reads focus/cursor live (the / hotkey fires earlier in the frame than
+// PollJunctionSubmenu, so the stashed prev-cursor could lag). SEH-safe.
+static bool JunctionAutoSpeakHelp()
+{
+    if (!s_juncActive || !pMenuStateA) return false;
+    __try {
+        uint8_t* base = (uint8_t*)pMenuStateA;
+        if (base[JUNC_ACTIVE_OFFSET] != 17) return false;
+        if (base[JUNC_FOCUS_OFFSET] != JUNC_AUTO_FOCUS) return false;
+        uint8_t cur = base[JUNC_AUTO_CURSOR_OFF];
+        if (cur >= JUNC_AUTO_OPT_COUNT) return false;
+        ScreenReader::Speak(JUNC_AUTO_OPT_HELP[cur], true);
+        Log::Menu("[JuncTTS] AutoHelp (/): cursor=%u \"%s\"", (unsigned)cur, JUNC_AUTO_OPT_HELP[cur]);
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
 // F12 diagnostic: track menu_draw_text / get_character_width call counts

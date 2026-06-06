@@ -1,8 +1,45 @@
-// field_nav_catalog.inl — Entity catalog building (RefreshCatalog)
-// Included from field_navigation.cpp. Do not compile independently.
-// Part of the FieldNavigation namespace.
+// field_nav_catalog.inl — Entity catalog building (RefreshCatalog).
+// Included from field_navigation.cpp inside the FieldNavigation namespace.
+// Do not compile independently.
 //
 // v0.12.18: Extracted from field_navigation.cpp for readability.
+// v0.17.7.0: Two large blocks moved to dedicated helper files for size
+//            compliance (catalog.inl was 75.77 KB, 4 KB under the 80 KB
+//            hard fail). Helpers live in:
+//              field_nav_catalog_diag.inl
+//                — DumpEntityDiagOnce, DumpBgDiagOnce,
+//                  DumpPartyStateOnce, DumpCoordDiagOnce
+//              field_nav_catalog_lateres.inl
+//                — ResolveLatePositions, MatchSet3LateCaptures,
+//                  ResolveStructPositions
+//            Both included BEFORE this file in field_navigation.cpp so
+//            their static functions are visible to RefreshCatalog.
+//            Behavior byte-for-byte identical to v0.17.6.2 source except
+//            the v0.12.17 VARBLOCK-POS unreachable `if (false)` block is
+//            dropped. Git history at v0.17.6.2 preserves it.
+
+// v0.17.8.3: Known FF8 field SYM names for playable / party-swap characters.
+// Field scripts name the party entities after the character (with optional
+// shadow/duplicate suffixes like 'squalls', 'squallsd', 'zells'), so a prefix
+// match against these bases identifies a party member regardless of which
+// field-local model slot the engine assigned. Draw points ('drpoint'), save
+// points ('savePoint'/'saveline'), and generic NPCs never match, so this is a
+// safe discriminator for the party filter (see RefreshCatalog). Includes the
+// Laguna dream party (laguna/kiros/ward) and the intro/tutorial playables
+// (seifer/edea).
+static bool IsPartyCharacterSym(const char* sym)
+{
+    if (!sym || sym[0] == '\0') return false;
+    static const char* const kBases[] = {
+        "squall", "zell", "selphie", "quistis", "rinoa", "irvine",
+        "laguna", "kiros", "ward", "seifer", "edea"
+    };
+    for (int b = 0; b < (int)(sizeof(kBases) / sizeof(kBases[0])); b++) {
+        size_t n = strlen(kBases[b]);
+        if (_strnicmp(sym, kBases[b], n) == 0) return true;
+    }
+    return false;
+}
 
 static void RefreshCatalog()
 {
@@ -20,139 +57,12 @@ static void RefreshCatalog()
             if (setpc == 0) { s_playerEntityIdx = i; break; }
         }
 
-        // v05.48: Diagnostic dump of ALL entities at scan time.
-        // This reveals which entities exist and why some might be filtered.
-        // v05.49: Also try multiple SYM offsets to find correct mapping.
-        if (!s_entDiagDumped) {
-            Log::Field("FieldNavigation: [ENTDIAG] === Entity dump: %d entities, symCount=%d, curOffset=%d ===",
-                       (int)lim, s_symNameCount, s_symOthersOffset);
-            // Log ALL SYM names for cross-reference.
-            for (int s = 0; s < s_symNameCount; s++) {
-                Log::Field("FieldNavigation: [ENTDIAG] SYM[%d]='%s'", s, s_symNames[s]);
-            }
-            for (int i = 0; i < (int)lim; i++) {
-                uint8_t* block = base + ENTITY_STRIDE * i;
-                int16_t  modelId      = *(int16_t*)(block + 0x218);
-                uint16_t triId        = *(uint16_t*)(block + 0x1FA);
-                uint8_t  setpc        = *(block + 0x255);
-                uint8_t  talkonoff    = *(block + 0x24B);
-                uint8_t  pushonoff    = *(block + 0x249);
-                uint8_t  throughonoff = *(block + 0x24C);
-                uint32_t execFlags    = *(uint32_t*)(block + 0x160);
-                int32_t  fpX          = *(int32_t*)(block + 0x190);
-                int32_t  fpZ          = *(int32_t*)(block + 0x198);
-                int16_t  simX         = *(int16_t*)(block + 0x20);
-                int16_t  simZ         = *(int16_t*)(block + 0x28);
-                // Try offset 0, lines+bg, and current offset to compare.
-                const char* sym0 = (i < s_symNameCount) ? s_symNames[i] : "(none)";
-                int symLB = s_symOthersOffset + i;
-                const char* symLBName = (symLB >= 0 && symLB < s_symNameCount) ? s_symNames[symLB] : "(none)";
-                Log::Field("FieldNavigation: [ENTDIAG] ent%d model=%d tri=0x%04X setpc=%d "
-                           "talk=%d push=%d thru=%d exec=0x%X fp=(%d,%d) sim=(%d,%d) "
-                           "@0='%s' @%d='%s'",
-                           i, (int)modelId, (unsigned)triId, (int)setpc,
-                           (int)talkonoff, (int)pushonoff, (int)throughonoff,
-                           execFlags, fpX, fpZ, (int)simX, (int)simZ,
-                           sym0, s_symOthersOffset, symLBName);
-            }
-            s_entDiagDumped = true;
-        }
-
-        // v05.50: Background entity diagnostic dump.
-        // Logs the entire backgrounds array with execution_flags, bgstate,
-        // and candidate SYM indices to determine the correct mapping.
-        if (!s_bgDiagDumped && FF8Addresses::HasFieldStateBackgrounds()) {
-            __try {
-                uint8_t bgCount = *FF8Addresses::pFieldStateBackgroundCount;
-                uint8_t* bgBase = reinterpret_cast<uint8_t*>(
-                    *reinterpret_cast<uint32_t*>(FF8Addresses::pFieldStateBackgrounds));
-                Log::Field("FieldNavigation: [BGDIAG] === Background entity dump: %d bg entities ===",
-                           (int)bgCount);
-                Log::Field("FieldNavigation: [BGDIAG] bgBase=0x%08X  otherCount=%d  symCount=%d  JSM(D=%d L=%d B=%d O=%d)",
-                           (uint32_t)(uintptr_t)bgBase, (int)lim, s_symNameCount,
-                           s_jsmDoors, s_jsmLines, s_jsmBackgrounds, s_jsmOthers);
-                if (bgBase && bgCount > 0) {
-                    int bgLim = (bgCount < MAX_BG_ENTITIES) ? bgCount : MAX_BG_ENTITIES;
-                    for (int b = 0; b < bgLim; b++) {
-                        uint8_t* block = bgBase + BG_STRIDE * b;
-                        // ff8_field_state_common fields:
-                        uint32_t execFlags = *(uint32_t*)(block + 0x160);
-                        uint16_t instrPos  = *(uint16_t*)(block + 0x176);
-                        // ff8_field_state_background fields (after common at 0x188):
-                        uint16_t bgstate   = *(uint16_t*)(block + 0x188);
-                        // SYM mapping hypothesis: backgrounds are at SYM[L .. L+B-1]
-                        // where L = number of line entities from JSM header.
-                        // But we also try offset=0 mapping to see if it makes sense.
-                        // For now, log the raw index and let the human figure it out.
-                        const char* symDirect = (b < s_symNameCount) ? s_symNames[b] : "(none)";
-                        // Hypothesis A: offset = otherCount (bg entities AFTER others in SYM).
-                        int symAfterOthers = (int)lim + b;
-                        const char* symAfterO = (symAfterOthers < s_symNameCount)
-                                                ? s_symNames[symAfterOthers] : "(none)";
-                        // Hypothesis B: offset = lines (SYM order = lines, bg, others).
-                        int symAfterLines = s_jsmLines + b;
-                        const char* symAfterL = (symAfterLines >= 0 && symAfterLines < s_symNameCount)
-                                                ? s_symNames[symAfterLines] : "(none)";
-                        Log::Field("FieldNavigation: [BGDIAG] bg%d exec=0x%X bgstate=0x%04X ipos=%u "
-                                   "@0='%s' @oth%d='%s' @lin%d='%s'",
-                                   b, execFlags, (unsigned)bgstate, (unsigned)instrPos,
-                                   symDirect, symAfterOthers, symAfterO,
-                                   symAfterLines, symAfterL);
-                    }
-                } else {
-                    Log::Field("FieldNavigation: [BGDIAG] bgBase is NULL or bgCount==0");
-                }
-                Log::Field("FieldNavigation: [BGDIAG] === End background dump ===");
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER) {
-                Log::Field("FieldNavigation: [BGDIAG] Exception reading backgrounds array");
-            }
-            s_bgDiagDumped = true;
-        }
-
-        // v05.59: Coordinate diagnostic dump — log ALL coord sources once per field.
-        // This helps identify coordinate space mismatches between entities,
-        // triggers, and gateways.
-        if (!s_coordDiagDumped) {
-            s_coordDiagDumped = true;  // only dump once per field
-            Log::Field("FieldNavigation: [COORDDIAG] === Coordinate space diagnostic ===");
-            Log::Field("FieldNavigation: [COORDDIAG] Field: %s  player=ent%d",
-                       FF8Addresses::pCurrentFieldName ? FF8Addresses::pCurrentFieldName : "?",
-                       s_playerEntityIdx);
-            // Entity positions (all strategies)
-            for (int i = 0; i < (int)lim; i++) {
-                uint8_t* block = base + ENTITY_STRIDE * i;
-                int16_t  modelId = *(int16_t*)(block + 0x218);
-                uint16_t triId   = *(uint16_t*)(block + 0x1FA);
-                int32_t  fpX     = *(int32_t*)(block + 0x190);
-                int32_t  fpY     = *(int32_t*)(block + 0x194);
-                int32_t  fpZ     = *(int32_t*)(block + 0x198);
-                int16_t  simX    = *(int16_t*)(block + 0x20);
-                int16_t  simY    = *(int16_t*)(block + 0x24);
-                int16_t  simZ    = *(int16_t*)(block + 0x28);
-                Log::Field("FieldNavigation: [COORDDIAG] ent%d model=%d tri=0x%04X "
-                           "fp=(%d,%d,%d)/4096=(%d,%d,%d) sim=(%d,%d,%d)%s",
-                           i, (int)modelId, (unsigned)triId,
-                           fpX, fpY, fpZ, fpX/4096, fpY/4096, fpZ/4096,
-                           (int)simX, (int)simY, (int)simZ,
-                           (i == s_playerEntityIdx) ? " [PLAYER]" : "");
-            }
-            // SETLINE trigger positions — show all 3 raw axes
-            for (int t = 0; t < s_capturedLineCount; t++) {
-                Log::Field("FieldNavigation: [COORDDIAG] trigger%d ent=0x%08X "
-                           "raw=(%d,%d,%d)->(%d,%d,%d) "
-                           "centerX=%.0f centerY=%.0f centerZ=%.0f active=%d",
-                           t, s_capturedLines[t].entityAddr,
-                           (int)s_capturedLines[t].x1, (int)s_capturedLines[t].y1, (int)s_capturedLines[t].z1,
-                           (int)s_capturedLines[t].x2, (int)s_capturedLines[t].y2, (int)s_capturedLines[t].z2,
-                           (float)(s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2.0f,
-                           (float)(s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2.0f,
-                           (float)(s_capturedLines[t].z1 + s_capturedLines[t].z2) / 2.0f,
-                           (int)s_capturedLines[t].active);
-            }
-            // v0.07.83: INF gateway logging removed (gateways replaced by JSM exits).
-            Log::Field("FieldNavigation: [COORDDIAG] === End diagnostic ===");
-        }
+        // One-shot diagnostic dumps (extracted v0.17.7.0).
+        // See field_nav_catalog_diag.inl. Each helper no-ops on subsequent calls.
+        DumpEntityDiagOnce(base, lim);
+        DumpBgDiagOnce(lim);
+        DumpPartyStateOnce();
+        DumpCoordDiagOnce(base, lim);
 
         // Build set of currently-qualifying entity indices.
         bool qualifies[MAX_ENTITIES] = {};
@@ -168,6 +78,103 @@ static void RefreshCatalog()
             // v0.12.08 Fix D: Read position for placement validation.
             int32_t  fpX          = *(int32_t*)(block + 0x190);
             int32_t  fpY          = *(int32_t*)(block + 0x194);
+
+            // v0.17.8.3: Resolve this entity's SYM name now (needed by the
+            // party filter below). Same offset mapping used elsewhere in this
+            // function for JSM lookups.
+            const char* symName = "";
+            {
+                int symIdxFilt = s_symOthersOffset + i;
+                if (symIdxFilt >= 0 && symIdxFilt < s_symNameCount)
+                    symName = s_symNames[symIdxFilt];
+            }
+
+            // v0.14.108 / v0.17.8.3: Party-member / non-interactive-character filter.
+            // A FOLLOWING party member is identified by behavioral fingerprint:
+            // a visible character (model 0-9) the player walks through
+            // (throughonoff>0) with no talk/push -- model slots are field-local
+            // so canonical-ID matching (the failed v0.14.107 approach) doesn't
+            // work. v0.17.8.3 adds STANDING / high-model scene actors (dorm,
+            // Laguna dream): party members placed static or walk-through with no
+            // talk/push, sometimes on full NPC models (model>=10), caught by the
+            // SYM NAME. The name is also the safe discriminator that protects
+            // draw points reusing a party model (Fire Cavern 'drpoint' = model 9,
+            // flags 0): 'drpoint'/'savePoint'/'l1' don't match IsPartyCharacterSym
+            // so they're KEPT for downstream reclassification. Rules:
+            //   - model 0-9 + no talk/push + thru>0       -> following member
+            //   - character SYM + no talk/push (any model) -> scene-placed member
+            //   - non-character SYM                        -> KEEP
+            // Talkable characters (talk>0) are never filtered. Real exits come
+            // from the trigger-line/gateway path, not runtime entities, so this
+            // never drops an exit. Race: TALKRADIUS setting talkonoff after this
+            // scan could transiently filter an NPC; mitigated by per-F9 refresh.
+            {
+                bool isVisibleChar = (modelId >= 0 && modelId < 10);
+                bool noInteract    = (talkonoff == 0 && pushonoff == 0);
+                // Model-based: an unnamed visible character the player walks
+                // through is a following party member.
+                bool isFollower    = isVisibleChar && noInteract && throughonoff > 0;
+                // Name-based: a party-character SYM with no talk/push, regardless
+                // of model or walk-through. Covers standing members (model 0-9,
+                // thru=0) and high-model scene actors (model >= 10, thru>0).
+                bool isNamedParty  = noInteract && IsPartyCharacterSym(symName);
+                if (i != s_playerEntityIdx && (isFollower || isNamedParty)) {
+                    Log::Field("FieldNavigation: [party-filter] ent%d model=%d sym='%s' "
+                               "filtered (%s; thru=%d)",
+                               i, (int)modelId, symName,
+                               isFollower ? "following party member"
+                                          : "named party member",
+                               (int)throughonoff);
+                    continue;
+                }
+            }
+
+            // v0.17.8.3: the v0.17.8.2 [party-filter-miss] diagnostic was
+            // removed here once the fix was BAT-confirmed on bgryo2_1 (all six
+            // party entities -- squalls/squallsd/zell/zells/selphie/selphies,
+            // including the model-11 selphie -- filtered as named party members,
+            // zero misses, navigation intact). Draw-point safety holds by
+            // construction: 'drpoint' is not a character name and has thru=0, so
+            // neither the follower nor the named-party branch touches it.
+
+            // v0.17.7.1: Walkmesh exclusion rule.
+            //
+            // Drop entities that are BOTH non-talkable AND non-pushable AND
+            // positioned off the walkmesh. These are typically light sources,
+            // particle emitters, decorative props, and other scenery the
+            // player cannot reach or interact with. The OR-with-talkonoff /
+            // pushonoff condition preserves entities like over-railing guards
+            // (off-mesh but talkable) and walking NPCs whose model puts them
+            // briefly off-mesh between steps (talk radius keeps them).
+            //
+            // Light sources entering via JSM_ENT_INTERACTIVE_OBJECT promotion
+            // (bypassing the existing ENTITY_SKIP_NAMES BG filter) drop here
+            // because lights have no talkradius. fepic1's three exit Lines
+            // pass through unaffected because they're injected from the
+            // SETLINE/JSM-MAP_EXIT block, not the runtime loop -- their
+            // walkmesh check lives in those blocks (added separately).
+            //
+            // The v0.12.08 reachability filter (REMOVED in v0.12.09 because
+            // bggate_6 has a guard on tri=87 while the player stands on
+            // tri=22, disconnected islands within one screen) does not
+            // recur here: the guard has talkonoff>0 so the OR keeps it.
+            //
+            // Skip player and entities without a readable position (fpX=fpY=0
+            // covers the placeholder case where the engine hasn't placed the
+            // entity yet -- treat that as on-mesh provisionally rather than
+            // dropping prematurely).
+            if (i != s_playerEntityIdx &&
+                talkonoff == 0 && pushonoff == 0 &&
+                (fpX != 0 || fpY != 0)) {
+                float wmX = (float)(fpX / 4096);
+                float wmY = (float)(fpY / 4096);
+                if (!IsInsideWalkmesh(wmX, wmY)) {
+                    Log::Field("FieldNavigation: [walkmesh-excl] ent%d model=%d "
+                               "pos=(%.0f,%.0f) off-mesh + no-talk/push -- excluded",
+                               i, (int)modelId, wmX, wmY);
+                    continue;
+                }
+            }
 
             // v05.52: Classify entity type by interaction flags.
             // setpc==0 means this IS the player; setpc!=0 means it isn't.
@@ -378,27 +385,85 @@ static void RefreshCatalog()
         // Each JSM_ENT_LINE_SCREEN_BOUND captured line becomes an ENT_EXIT entry
         // with the destination resolved from the MAPJUMP destination field ID.
         // Replaces INF gateway exits entirely (INF data is vestigial PS1 data).
+        //
+        // v0.17.7.1: Removed the v0.12.24 field-wide demote that converted
+        // SCREEN_BOUND lines into Interactions whenever ANY entity on the
+        // field was an Interactive Object. That rule fired on fepic1 (Front
+        // Gate 5) and turned the three legitimate exit Lines into
+        // 'Interaction 1/2/3'. Per-line discrimination now happens in the
+        // JSM scanner via TALKRADIUS/TALKON detection -- if a Line really IS
+        // dual-purpose (dormitory bed: MAPJUMP + dialog + TALK setup) the
+        // scanner classifies it as JSM_ENT_LINE_INTERACTIVE and this exit
+        // loop skips it on lineType alone (no field-wide lookup needed).
         if (s_capturedLineCount > 0 && s_playerEntityIdx >= 0) {
             float scrPlayerX = 0, scrPlayerY = 0;
             if (GetEntityPos(s_playerEntityIdx, scrPlayerX, scrPlayerY)) {
                 for (int t = 0; t < s_capturedLineCount && newCount < MAX_CATALOG; t++) {
                     if (!s_capturedLines[t].active) continue;
-                    // v0.12.24: Check if this field has Interactive Objects.
-                    // On such fields (dormitories), SETLINE screen boundaries serve
-                    // dual purposes (exit + interaction) and their CENTER position is
-                    // the interaction zone, not the exit. INF gateways handle exits.
-                    // Convert these SETLINEs to Interactions instead of Exits.
-                    bool fieldHasInteractiveObjects = false;
-                    for (int ji = 0; ji < s_jsmEntityCount; ji++) {
-                        if (s_jsmEntities[ji].type == FieldArchive::JSM_ENT_INTERACTIVE_OBJECT) {
-                            fieldHasInteractiveObjects = true; break;
-                        }
-                    }
-                    if (s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_SCREEN_BOUND &&
-                        fieldHasInteractiveObjects) {
-                        continue;  // skip — will be added as Interaction below
-                    }
                     if (s_capturedLines[t].lineType != FieldArchive::JSM_ENT_LINE_SCREEN_BOUND) continue;
+                    // v0.17.7.1.2 / v0.17.7.5.4: SCREEN_BOUND lines that
+                    // genuinely REQ a dialog-bearing entity are dual-purpose
+                    // (exit-via-interaction). The Line REQs a background
+                    // entity that fires dialog (dorm bed: bed Line REQs the
+                    // bed Background, which shows "Sleep?"; the MAPJUMP fires
+                    // as a consequence of the player choosing yes, not as a
+                    // walk-across event). These show only as Interactions
+                    // below, not as Exits here -- showing both would be
+                    // confusing and the Exit name (next-day field) is
+                    // uninformative anyway.
+                    //
+                    // fepic1's three exit Lines, bgroad_5 squalls (Hallway 5
+                    // -> Dormitory), and similar pure-exit Lines do NOT
+                    // REQ dialog entities (they may still use 0x1C extended
+                    // dispatch for sound/particle effects, but that's not
+                    // a dual-purpose signal), so they pass through here as
+                    // Exits.
+                    //
+                    // The check used to be `hasExtDispatch` which incorrectly
+                    // suppressed bgroad_5 squalls because squalls' own script
+                    // uses 0x1C for non-dialog purposes. v0.17.7.5.4 split
+                    // hasExtDispatch into two signals: hasExtDispatch (own
+                    // 0x1C usage, very common, not a dual-purpose indicator)
+                    // and hasDialogReqTarget (REQ to dialog/ext-dispatch
+                    // entity, only set by REQ-following post-pass). The
+                    // catalog now uses hasDialogReqTarget, which only fires
+                    // for genuine dual-purpose Lines.
+                    if (s_capturedLines[t].hasDialogReqTarget) continue;
+
+                    // v0.17.7.5.5: Self-loop detection. SCREEN_BOUND lines whose
+                    // resolved destField equals the CURRENT field id are in-place
+                    // state transitions, not navigational exits. The canonical
+                    // case is a dormitory bed: walking onto it does a MAPJUMP to
+                    // the same field id (which the engine treats as "reload this
+                    // field, advancing some state like day/night"). The player
+                    // doesn't move to a different room -- they wake up where
+                    // they slept.
+                    //
+                    // BAT'd on bgryo1_4 (Dormitory Double 4, field 240): ent0
+                    // 'squall' SCREEN_BOUND with destField=240 was labeled
+                    // "Exit to B-Garden - Dormitory Double 4" -- nonsense
+                    // because that IS the field the player is on. Aaron
+                    // correctly identified the bed should be an Interaction.
+                    //
+                    // Block 2 below picks up self-loop SCREEN_BOUND lines as
+                    // Interactions (same condition mirrored there). This is
+                    // the same pattern as the hasDialogReqTarget split for
+                    // genuinely dual-purpose Lines: Block 1 suppresses, Block 2
+                    // emits the appropriate Interaction label.
+                    //
+                    // Safety: an in-place state-change Line that ISN'T a sleep
+                    // transition (e.g. a script-driven looping animation Line)
+                    // would also be treated as an Interaction here. That's
+                    // mostly fine -- such a Line is still something the player
+                    // CAN interact with, even if the meaning differs from
+                    // "sleep here". A bare "Exit" label to the current field
+                    // is unambiguously wrong; Interaction is at worst slightly
+                    // imprecise.
+                    {
+                        uint16_t curFid = FF8Addresses::pCurrentFieldId
+                                          ? *FF8Addresses::pCurrentFieldId : 0xFFFF;
+                        if (s_capturedLines[t].destFieldId == (int)curFid) continue;
+                    }
                     float tcx = (float)(s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2.0f;
                     float tcy = (float)(s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2.0f;
 
@@ -407,9 +472,61 @@ static void RefreshCatalog()
                     if (IsSeparatedByTriggerLine(scrPlayerX, scrPlayerY, tcx, tcy))
                         continue;
 
+                    // v0.17.7.1.1: Robust destination recovery for PSHM_W-sourced
+                    // MAPJUMPs. When the JSM static scan couldn't extract a usable
+                    // destFieldId (the script pushed a memory-variable marker like
+                    // 0x8000xxxx at MAPJUMP time, which the scanner treats as a
+                    // marker and the marker survives into this code path as a
+                    // negative int32 or an out-of-range positive), match the
+                    // SETLINE center to the nearest INF gateway. INF gateway
+                    // destFieldIds are static binary data in the .inf file and
+                    // reliable when present. Threshold: 1000 world units --
+                    // SETLINE trigger lines and INF gateway lines for the same
+                    // physical exit are typically co-located (both at the screen
+                    // boundary), often within ~200 units; 1000 gives generous
+                    // margin without risking cross-matching to a different exit.
+                    //
+                    // World-map dest (-2) is preserved -- those resolve correctly
+                    // through the WorldMapJump branch below.
+                    //
+                    // The dedup-against-existing-exit check in the v0.07.94 INF
+                    // gateway block runs after this and catches the duplicate via
+                    // displayName strcmp (same FIELD_DISPLAY_NAMES table on both
+                    // paths), so the INF gateway won't be added as a separate
+                    // entry once we've recovered its destId here.
+                    int destId = s_capturedLines[t].destFieldId;
+                    if ((destId < 0 || destId >= FIELD_DISPLAY_NAMES_COUNT) &&
+                        destId != -2 && s_gatewayCount > 0) {
+                        float bestDistSq = 1000.0f * 1000.0f;
+                        int bestGw = -1;
+                        for (int gi = 0; gi < s_gatewayCount; gi++) {
+                            float gdx = s_gateways[gi].centerX - tcx;
+                            float gdy = s_gateways[gi].centerZ - tcy;
+                            float dsq = gdx*gdx + gdy*gdy;
+                            if (dsq < bestDistSq) {
+                                bestDistSq = dsq;
+                                bestGw = gi;
+                            }
+                        }
+                        if (bestGw >= 0) {
+                            int recoveredId = (int)s_gateways[bestGw].destFieldId;
+                            Log::Field("FieldNavigation: [refresh] SETLINE line%d "
+                                       "center=(%.0f,%.0f) destId=%d unresolvable -> "
+                                       "matched INF gateway %d destId=%d (dist=%.0f) "
+                                       "-- recovering",
+                                       t, tcx, tcy, destId, bestGw, recoveredId,
+                                       sqrtf(bestDistSq));
+                            destId = recoveredId;
+                        } else {
+                            Log::Field("FieldNavigation: [refresh] SETLINE line%d "
+                                       "center=(%.0f,%.0f) destId=%d unresolvable, "
+                                       "no INF gateway within 1000 units -- staying generic",
+                                       t, tcx, tcy, destId);
+                        }
+                    }
+
                     // Resolve destination name from MAPJUMP field ID.
                     char exitName[48];
-                    int destId = s_capturedLines[t].destFieldId;
                     if (destId >= 0 && destId < FIELD_DISPLAY_NAMES_COUNT) {
                         snprintf(exitName, sizeof(exitName), "Exit to %s", FIELD_DISPLAY_NAMES[destId]);
                     } else if (destId == -2) {
@@ -452,9 +569,22 @@ static void RefreshCatalog()
                     // v0.12.12: Also skip UNKNOWN lines — these are unclassified trigger lines
                     // that don't fire any player-visible event. Showing them as "Event"
                     // is confusing (player arrives and nothing happens).
+                    // v0.17.8.7: ALSO skip LINE_INTERACTIVE. With campan/event/screenbound/
+                    // unknown all skipped, LINE_INTERACTIVE was the ONLY type this block still
+                    // emitted -- and the Interaction block below ALSO emits it (same -200-t
+                    // sentinel), so every interactive line was injected TWICE: once as "Event"
+                    // (type ENT_OBJECT) and once as "Interaction N" (type ENT_INTERACTION). On
+                    // bghall_1 line5 (a pathway sign) showed as both, and the F9 cursor appeared
+                    // to "flicker" between Event and Interaction. Worse, the bogus ENT_OBJECT
+                    // "Event" entry tripped the JSM-injection block's `alreadyInCatalog`
+                    // (type==ENT_OBJECT) test, suppressing the real Directory (igyous1, also
+                    // ENT_OBJECT). Skipping LINE_INTERACTIVE here makes this block emit nothing
+                    // (its original UNKNOWN-only purpose was already removed in v0.12.12); genuine
+                    // interactions still surface once, via the Interaction block.
                     if (s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_CAMERA_PAN ||
                         s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_EVENT ||
                         s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_SCREEN_BOUND ||
+                        s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_INTERACTIVE ||
                         s_capturedLines[t].lineType == FieldArchive::JSM_ENT_UNKNOWN)
                         continue;
                     // Reachability check (same as screen transitions).
@@ -519,47 +649,98 @@ static void RefreshCatalog()
             }
         }
 
-        // v0.12.24: Add SETLINE-triggered interactive objects as "Interaction N".
-        // Line entities classified as JSM_ENT_LINE_INTERACTIVE have dialog opcodes
-        // (MES/ASK/AMES/AASK) or runtime ext dispatch — genuine player-facing
-        // interactions (dormitory bed/desk/wardrobe, classroom desk/sign, etc.).
-        // These use SETLINE center as navigation position.
+        // v0.12.24 / v0.17.7.1: Add SETLINE-triggered interactive objects as
+        // "Interaction N". Line entities classified as JSM_ENT_LINE_INTERACTIVE
+        // by the JSM scanner have dialog opcodes (MES/ASK/AMES/AASK) AND a
+        // TALKRADIUS/TALKON setup -- genuine player-facing interactions
+        // (dormitory bed/desk/wardrobe, classroom desk/sign, etc.).
+        //
+        // v0.17.7.1: dropped the dual-purpose SCREEN_BOUND-promote-to-Interactive
+        // path. JSM scanner now classifies dual-purpose lines (MAPJUMP + dialog
+        // + talk setup, like dormitory beds) directly as LINE_INTERACTIVE
+        // because TALKRADIUS/TALKON wins over MAPJUMP in the new priority
+        // ordering. fepic1's three exit Lines (MAPJUMP only, no dialog, no
+        // talk setup) stay LINE_SCREEN_BOUND and are added as Exits above
+        // rather than mislabeled here.
         if (s_capturedLineCount > 0 && s_playerEntityIdx >= 0) {
             float intPlayerX = 0, intPlayerY = 0;
             if (GetEntityPos(s_playerEntityIdx, intPlayerX, intPlayerY)) {
                 int interactionNum = 0;
                 for (int t = 0; t < s_capturedLineCount && newCount < MAX_CATALOG; t++) {
                     if (!s_capturedLines[t].active) continue;
-                    bool isInteractive = (s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_INTERACTIVE);
+                    // v0.17.7.1.2 / v0.17.7.5.4 / v0.17.7.5.5: Accept
+                    // SCREEN_BOUND lines as Interactions in two cases:
+                    //   1. hasDialogReqTarget=true (genuine dual-purpose,
+                    //      e.g. dorm bed Line REQs dialog-bearing Background)
+                    //   2. destFieldId == currentFieldId (self-loop sleep
+                    //      transition, e.g. bgryo1_4 bed MAPJUMPs to field 240
+                    //      which IS bgryo1_4) -- introduced v0.17.7.5.5 after
+                    //      Aaron BAT'd the bed-as-exit mislabel.
+                    //
+                    // The SETLINE-Exit block above skips those same lines so
+                    // they only appear here.
+                    //
+                    // Pure-exit SCREEN_BOUND lines (fepic1, bgroad_5 squalls)
+                    // have hasDialogReqTarget=false AND destFieldId pointing
+                    // to a different field -- they fall through this whole
+                    // block and remain as Exits emitted by Block 1.
+                    bool isInteractive =
+                        (s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_INTERACTIVE);
                     if (!isInteractive &&
                         s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_SCREEN_BOUND) {
-                        // v0.12.24: On fields with Interactive Objects, SETLINE screen
-                        // boundaries are dual-purpose (exit + interaction). Their center
-                        // position is the interaction zone. Add as Interaction.
-                        bool fhio = false;
-                        for (int ji = 0; ji < s_jsmEntityCount; ji++) {
-                            if (s_jsmEntities[ji].type == FieldArchive::JSM_ENT_INTERACTIVE_OBJECT) {
-                                fhio = true; break;
+                        if (s_capturedLines[t].hasDialogReqTarget) {
+                            isInteractive = true;
+                        } else {
+                            // v0.17.7.5.5: self-loop check.
+                            uint16_t curFid = FF8Addresses::pCurrentFieldId
+                                              ? *FF8Addresses::pCurrentFieldId : 0xFFFF;
+                            if (s_capturedLines[t].destFieldId == (int)curFid) {
+                                isInteractive = true;
                             }
                         }
-                        if (fhio) isInteractive = true;
                     }
                     if (!isInteractive) continue;
-                    // Don't check alreadyAdded — Interactions use sentinel -600-t,
+                    // Don't check alreadyAdded -- Interactions use sentinel -600-t,
                     // distinct from exit sentinel -200-t, so both can coexist.
                     // Reachability: must be on same side of screen-boundary trigger lines.
                     float tcx = (float)(s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2.0f;
                     float tcy = (float)(s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2.0f;
                     if (IsSeparatedByTriggerLine(intPlayerX, intPlayerY, tcx, tcy))
                         continue;
-                    interactionNum++;
+                    // v0.17.8.8: If the scanner flagged this line's owning
+                    // entity as a save line (own MENUSAVE, or REQ to a save
+                    // point), surface it as "Save Point" not "Interaction N".
+                    // This restores the bghall_1 Hall 1 save-point label: its
+                    // 'savePoint' has PSHM-only X/Y, never injects standalone,
+                    // and reaches the catalog only via this trigger line.
+                    // Map: captured line t -> JSM line entity jsmIndex (doors+t).
+                    bool lineIsSave = false;
+                    {
+                        int wantIdx = s_jsmDoors + t;
+                        for (int j = 0; j < s_jsmEntityCount; j++) {
+                            if (s_jsmEntities[j].jsmCategory == 1 &&
+                                s_jsmEntities[j].jsmIndex == wantIdx &&
+                                s_jsmEntities[j].isSaveLine) {
+                                lineIsSave = true; break;
+                            }
+                        }
+                    }
                     EntityInfo intEntry = {};
-                    intEntry.entityIdx  = -200 - t;  // same sentinel as exits — position lookup works identically
+                    intEntry.entityIdx  = -200 - t;  // same sentinel as exits -- position lookup works identically
                     intEntry.modelId    = -1;
                     intEntry.triangleId = 0;
-                    intEntry.type       = ENT_INTERACTION;
                     intEntry.gatewayIdx = -1;
-                    snprintf(intEntry.name, sizeof(intEntry.name), "Interaction %d", interactionNum);
+                    if (lineIsSave) {
+                        intEntry.type = ENT_SAVE_POINT;
+                        strncpy(intEntry.name, "Save Point", sizeof(intEntry.name) - 1);
+                        intEntry.name[sizeof(intEntry.name) - 1] = '\0';
+                        Log::Field("FieldNavigation: [refresh] line%d surfaced as "
+                                   "Save Point (isSaveLine) [v0.17.8.8]", t);
+                    } else {
+                        interactionNum++;
+                        intEntry.type = ENT_INTERACTION;
+                        snprintf(intEntry.name, sizeof(intEntry.name), "Interaction %d", interactionNum);
+                    }
                     newCatalog[newCount++] = intEntry;
                 }
             }
@@ -572,254 +753,13 @@ static void RefreshCatalog()
         // by walk-on zones — the player discovers them by exploring, not by
         // navigating to an entity position.
 
-        // v0.08.05: Late PSHM resolution — retry direct struct reads for entities
-        // whose positions weren't available at field init time. By RefreshCatalog time,
-        // the field has been running and non-init scripts may have executed SET3.
-        if (FF8Addresses::pFieldStateOthers) {
-            __try {
-                uint8_t* othBase = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
-                if (othBase) {
-                    int othStart = s_jsmDoors + s_jsmLines + s_jsmBackgrounds;
-                    for (int jr = 0; jr < s_jsmEntityCount; jr++) {
-                        FieldArchive::JSMEntityInfo& jer = s_jsmEntities[jr];
-                        if (!jer.hasPshmCoords || jer.hasPosition) continue;
-                        // v0.08.15: Handle both Others (cat 3) and Background (cat 2) entities.
-                        uint8_t* blk4 = nullptr;
-                        int oir = 0;
-                        if (jer.jsmCategory == 3) {
-                            oir = jer.jsmIndex - othStart;
-                            if (oir < 0) continue;
-                            blk4 = othBase + ENTITY_STRIDE * oir;
-                        } else if (jer.jsmCategory == 2) {
-                            uint8_t* bgBase4 = nullptr;
-                            if (FF8Addresses::HasFieldStateBackgrounds()) {
-                                bgBase4 = reinterpret_cast<uint8_t*>(
-                                    *reinterpret_cast<uint32_t*>(FF8Addresses::pFieldStateBackgrounds));
-                            }
-                            if (!bgBase4) continue;
-                            int bgStart4 = s_jsmDoors + s_jsmLines;
-                            oir = jer.jsmIndex - bgStart4;
-                            if (oir < 0) continue;
-                            blk4 = bgBase4 + BG_STRIDE * oir;
-                        } else {
-                            continue;
-                        }
-                        int32_t fX = *(int32_t*)(blk4 + 0x190);
-                        int32_t fY = *(int32_t*)(blk4 + 0x194);
-                        uint16_t tr = 0;
-                        if (jer.jsmCategory == 3) {
-                            tr = *(uint16_t*)(blk4 + 0x1FA);
-                        }
-                        if (fX != 0 || fY != 0) {
-                            jer.posX = (int16_t)(fX / 4096);
-                            jer.posY = (int16_t)(fY / 4096);
-                            jer.posTriangle = tr;
-                            jer.hasPosition = true;
-                            Log::Field("FieldNavigation: [LATE-RESOLVE] ent%d '%s' type=%s "
-                                       "cat=%d idx=%d pos=(%d,%d) tri=%u fp=(%d,%d)",
-                                       jer.jsmIndex, jer.symName,
-                                       FieldArchive::JSMEntityTypeName(jer.type),
-                                       jer.jsmCategory, oir,
-                                       (int)jer.posX, (int)jer.posY,
-                                       (unsigned)tr, fX, fY);
-                        }
-                    }
-                }
-            } __except(EXCEPTION_EXECUTE_HANDLER) {}
-        }
-
-        // v0.08.16: SET3-LATE-MATCH — re-check accumulated SET3 captures against PSHM entities.
-        // The extended capture window (3s) catches per-frame SET3 calls from entities like
-        // dic (bghall_1 Directory) whose SET3 fires in method 1+, not during init.
-        // This overwrites shift-pattern approximations with engine-resolved positions.
-        if (s_set3CaptureCount > 0 && FF8Addresses::pFieldStateOthers) {
-            __try {
-                uint8_t* set3OthBase = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
-                uint8_t* set3BgBase = nullptr;
-                if (FF8Addresses::HasFieldStateBackgrounds()) {
-                    set3BgBase = reinterpret_cast<uint8_t*>(
-                        *reinterpret_cast<uint32_t*>(FF8Addresses::pFieldStateBackgrounds));
-                }
-                if (set3OthBase) {
-                    int set3OthStart = s_jsmDoors + s_jsmLines + s_jsmBackgrounds;
-                    int set3BgStart = s_jsmDoors + s_jsmLines;
-                    int lateMatched = 0;
-                    for (int jl = 0; jl < s_jsmEntityCount; jl++) {
-                        FieldArchive::JSMEntityInfo& jel = s_jsmEntities[jl];
-                        if (!jel.hasPshmCoords) continue;
-                        // Compute expected entity address.
-                        uint32_t lateAddr = 0;
-                        if (jel.jsmCategory == 3) {
-                            int oi = jel.jsmIndex - set3OthStart;
-                            if (oi < 0) continue;
-                            lateAddr = (uint32_t)(uintptr_t)(set3OthBase + ENTITY_STRIDE * oi);
-                        } else if (jel.jsmCategory == 2 && set3BgBase) {
-                            int bi = jel.jsmIndex - set3BgStart;
-                            if (bi < 0) continue;
-                            lateAddr = (uint32_t)(uintptr_t)(set3BgBase + BG_STRIDE * bi);
-                        } else {
-                            continue;
-                        }
-                        // Search SET3 captures for this entity address.
-                        for (int c = 0; c < s_set3CaptureCount; c++) {
-                            if (s_set3Captures[c].entityAddr == lateAddr) {
-                                int16_t newX = s_set3Captures[c].posX;
-                                int16_t newY = s_set3Captures[c].posY;
-                                if (newX == 0 && newY == 0) break;  // no useful position
-                                // Only log + update if position actually changed.
-                                if (!jel.hasPosition || jel.posX != newX || jel.posY != newY) {
-                                    Log::Field("FieldNavigation: [SET3-LATE-MATCH] ent%d '%s' type=%s "
-                                               "cat=%d old=(%d,%d) new=(%d,%d) tri=%u addr=0x%08X",
-                                               jel.jsmIndex, jel.symName,
-                                               FieldArchive::JSMEntityTypeName(jel.type),
-                                               jel.jsmCategory,
-                                               jel.hasPosition ? (int)jel.posX : 0,
-                                               jel.hasPosition ? (int)jel.posY : 0,
-                                               (int)newX, (int)newY,
-                                               (unsigned)s_set3Captures[c].triId, lateAddr);
-                                    jel.posX = newX;
-                                    jel.posY = newY;
-                                    jel.posTriangle = s_set3Captures[c].triId;
-                                    jel.hasPosition = true;
-                                    lateMatched++;
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    if (lateMatched > 0) {
-                        Log::Field("FieldNavigation: [SET3-LATE-MATCH] %d entities updated from %d captures",
-                                   lateMatched, s_set3CaptureCount);
-                    }
-                }
-            } __except(EXCEPTION_EXECUTE_HANDLER) {}
-        }
-
-        // v0.12.17: Varblock PSHM position resolution — DISABLED.
-        // Varblock[addr] returns 0 for entities beyond the active window
-        // (their scripts never run to populate the PSHM variables).
-        // This CORRUPTED positions by replacing shift-pattern approximations
-        // with zeros. The STRUCT-POS block below handles the cases where
-        // runtime struct data is available. Keep shift-pattern for the rest.
-        if (false)
-        {
-            static const uint32_t VARBLOCK_BASE = 0x1CFE9B8;
-            int vbResolved = 0;
-            for (int jv = 0; jv < s_jsmEntityCount; jv++) {
-                FieldArchive::JSMEntityInfo& jev = s_jsmEntities[jv];
-                if (!jev.hasPshmCoords) continue;
-                // Read varblock at each PSHM address.
-                int16_t vbX = 0, vbY = 0, vbZ = 0;
-                bool vbOk = true;
-                __try {
-                    // PSHM addresses are byte offsets into the varblock.
-                    // addr=0 means "literal" (not a PSHM ref) — the JSM scanner
-                    // stores the literal value in posX/posY/posZ already.
-                    if (jev.pshmAddrX != 0)
-                        vbX = *(int16_t*)(VARBLOCK_BASE + (uint16_t)jev.pshmAddrX);
-                    else
-                        vbX = jev.posX;  // literal value from shift-pattern
-                    if (jev.pshmAddrY != 0)
-                        vbY = *(int16_t*)(VARBLOCK_BASE + (uint16_t)jev.pshmAddrY);
-                    else
-                        vbY = jev.posY;
-                    if (jev.pshmAddrZ != 0)
-                        vbZ = *(int16_t*)(VARBLOCK_BASE + (uint16_t)jev.pshmAddrZ);
-                    else
-                        vbZ = jev.posZ;
-                } __except(EXCEPTION_EXECUTE_HANDLER) {
-                    vbOk = false;
-                }
-                if (vbOk && (vbX != 0 || vbY != 0)) {
-                    // SET3 params map to: entity.X = param_X, entity.Y = param_Y.
-                    // For 2D navigation: posX = SET3.X, posY = SET3.Y.
-                    int16_t oldX = jev.posX;
-                    int16_t oldY = jev.posY;
-                    jev.posX = vbX;
-                    jev.posY = vbY;
-                    jev.posZ = vbZ;
-                    jev.hasPosition = true;
-                    vbResolved++;
-                    Log::Field("FieldNavigation: [VARBLOCK-POS] ent%d '%s' type=%s "
-                               "pshmAddr=(%d,%d,%d) varblock=(%d,%d,%d) "
-                               "old=(%d,%d) new=(%d,%d)",
-                               jev.jsmIndex, jev.symName,
-                               FieldArchive::JSMEntityTypeName(jev.type),
-                               (int)jev.pshmAddrX, (int)jev.pshmAddrY, (int)jev.pshmAddrZ,
-                               (int)vbX, (int)vbY, (int)vbZ,
-                               (int)oldX, (int)oldY,
-                               (int)jev.posX, (int)jev.posY);
-                }
-            }
-            if (vbResolved > 0)
-                Log::Field("FieldNavigation: [VARBLOCK-POS] %d PSHM entity positions resolved from varblock",
-                           vbResolved);
-        }
-
-        // v0.12.17: Direct entity struct position read for PSHM entities.
-        // The shift-pattern approximation discards the PSHM X value, giving
-        // ~200-unit error. But the engine allocates structs for ALL Others
-        // entities (not just the active window). If the entity's init script
-        // ran SET3 during field_scripts_init, the struct has the resolved
-        // position even though the entity isn't in the active window.
-        // LATE-RESOLVE skips entities with hasPosition=true (from shift-pattern),
-        // so we check here specifically for hasPshmCoords entities.
-        if (FF8Addresses::pFieldStateOthers) {
-            __try {
-                uint8_t* othBase2 = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
-                uint8_t* bgBase3 = nullptr;
-                if (FF8Addresses::HasFieldStateBackgrounds()) {
-                    bgBase3 = reinterpret_cast<uint8_t*>(
-                        *reinterpret_cast<uint32_t*>(FF8Addresses::pFieldStateBackgrounds));
-                }
-                if (othBase2) {
-                    int structOthStart = s_jsmDoors + s_jsmLines + s_jsmBackgrounds;
-                    int structBgStart = s_jsmDoors + s_jsmLines;
-                    int structFixed = 0;
-                    for (int js = 0; js < s_jsmEntityCount; js++) {
-                        FieldArchive::JSMEntityInfo& jes = s_jsmEntities[js];
-                        if (!jes.hasPshmCoords) continue;
-                        // Try reading the entity struct position directly.
-                        uint8_t* blk5 = nullptr;
-                        int sIdx = 0;
-                        if (jes.jsmCategory == 3) {
-                            sIdx = jes.jsmIndex - structOthStart;
-                            if (sIdx < 0 || sIdx >= 31) continue;  // safety: max 31 Others
-                            blk5 = othBase2 + ENTITY_STRIDE * sIdx;
-                        } else if (jes.jsmCategory == 2 && bgBase3) {
-                            sIdx = jes.jsmIndex - structBgStart;
-                            if (sIdx < 0 || sIdx >= MAX_BG_ENTITIES) continue;
-                            blk5 = bgBase3 + BG_STRIDE * sIdx;
-                        } else {
-                            continue;
-                        }
-                        int32_t fX5 = *(int32_t*)(blk5 + 0x190);
-                        int32_t fY5 = *(int32_t*)(blk5 + 0x194);
-                        if (fX5 == 0 && fY5 == 0) continue;  // no position set
-                        int16_t sX = (int16_t)(fX5 / 4096);
-                        int16_t sY = (int16_t)(fY5 / 4096);
-                        // Only update if the struct position differs from current.
-                        if (sX != jes.posX || sY != jes.posY) {
-                            Log::Field("FieldNavigation: [STRUCT-POS] ent%d '%s' type=%s "
-                                       "cat=%d idx=%d struct=(%d,%d) old=(%d,%d) fp=(%d,%d)",
-                                       jes.jsmIndex, jes.symName,
-                                       FieldArchive::JSMEntityTypeName(jes.type),
-                                       jes.jsmCategory, sIdx,
-                                       (int)sX, (int)sY,
-                                       (int)jes.posX, (int)jes.posY,
-                                       fX5, fY5);
-                            jes.posX = sX;
-                            jes.posY = sY;
-                            jes.hasPosition = true;
-                            structFixed++;
-                        }
-                    }
-                    if (structFixed > 0)
-                        Log::Field("FieldNavigation: [STRUCT-POS] %d PSHM positions updated from entity structs",
-                                   structFixed);
-                }
-            } __except(EXCEPTION_EXECUTE_HANDLER) {}
-        }
+        // Late position resolution (extracted v0.17.7.0).
+        // See field_nav_catalog_lateres.inl. Must run in this order — STRUCT-POS
+        // depends on LATE-RESOLVE having populated hasPosition for entities that
+        // had only hasPshmCoords on entry.
+        ResolveLatePositions();
+        MatchSet3LateCaptures();
+        ResolveStructPositions();
 
         // v0.07.74: Inject JSM-classified special entities not already in the catalog.
         // These are entities beyond the runtime state array (SYM index >= entCount)
@@ -955,6 +895,29 @@ static void RefreshCatalog()
             if (!je.hasPosition) continue;
             // Validate position is in plausible range.
             if (je.posX == 0 && je.posY == 0 && je.posZ == 0) continue;
+
+            // v0.17.7.1: Walkmesh exclusion for off-mesh Interactive Objects
+            // without TALKRADIUS/TALKON. Lights and decorative props get
+            // incorrectly promoted to JSM_ENT_INTERACTIVE_OBJECT during the
+            // JSM scan (foundDialogOp/foundExtDispatch + SET3 position make
+            // them look like real interactive objects). Almost all of them
+            // sit off-walkmesh, so excluding off-mesh + no-talk-setup catches
+            // the bug without dropping real signs/desks (those land on the
+            // walkmesh because the player has to stand on top of them or
+            // adjacent to them to read).
+            //
+            // Save/Draw/Shop/Card points are NOT filtered here: they may
+            // use proximity (PARTICLEON + MENUSAVE etc.) rather than
+            // TALKRADIUS, and they're always valuable navigation targets.
+            // MAP_EXIT injection runs in a separate block below; it's also
+            // not subject to this filter -- exits are always valuable.
+            if (jt == ENT_OBJECT && !je.hasTalkSetup &&
+                !IsInsideWalkmesh((float)je.posX, (float)je.posY)) {
+                Log::Field("FieldNavigation: [walkmesh-excl] JSM ent%d '%s' "
+                           "INTERACTIVE_OBJECT pos=(%d,%d) off-mesh + no-talk-setup -- excluded",
+                           je.jsmIndex, je.symName, (int)je.posX, (int)je.posY);
+                continue;
+            }
             EntityInfo jsmEntry = {};
             jsmEntry.entityIdx  = -300 - j;  // unique sentinel for JSM-injected entities
             jsmEntry.modelId    = -1;
@@ -1061,6 +1024,23 @@ static void RefreshCatalog()
                         continue;
                 }
             }
+            // v0.17.8.6: Suppress dead positionless exits with unresolved
+            // destinations. bgryo2_1 ent15 'l1' is a JSM_ENT_MAP_EXIT with no
+            // SET3/SETLINE position and param=INT_MIN (0x80000000 -- a runtime-var
+            // destination the static scan could not resolve). On a field with no
+            // INF gateways the gateway-suppression check below never fires, so
+            // without this the entity injects a bare second "Exit" with no
+            // position -- the duplicate, useless exit Aaron reported. An exit that
+            // has neither a navigable position nor a resolvable/world-map
+            // destination cannot be driven to or named; drop it. (param==-2 is the
+            // world-map sentinel and is kept.)
+            if (!hasPos && je.param != -2 &&
+                (je.param < 0 || je.param >= FIELD_DISPLAY_NAMES_COUNT)) {
+                Log::Field("FieldNavigation: [refresh] MAP_EXIT '%s' dropped: "
+                           "no position, unresolved dest (param=%d)",
+                           je.symName, je.param);
+                continue;
+            }
             EntityInfo mapExit = {};
             // v0.07.95: Suppress JSM exits with runtime-resolved destinations
             // when INF gateways exist on this field. The INF gateway system
@@ -1154,12 +1134,36 @@ static void RefreshCatalog()
             float gwPlayerX = 0, gwPlayerY = 0;
             bool gotPlayer = GetEntityPos(s_playerEntityIdx, gwPlayerX, gwPlayerY);
             for (int d = 0; d < s_dedupGatewayCount && newCount < MAX_CATALOG; d++) {
-                // Screen filter: skip if center is separated from player by trigger lines.
+                // Screen filter: skip the gateway only if the player->gateway
+                // SEGMENT actually crosses a screen-boundary line SEGMENT.
+                // v0.17.8.10: replaced IsSeparatedByTriggerLine() here -- that
+                // does an INFINITE-line side test, so a short SCREEN_BOUND line
+                // on a far edge (bghall_5's Hall 6 doorway, x in [4206,5042])
+                // wrongly "separated" the Hall 4 INF gateway on the opposite
+                // (west) edge because the gateway's Y lay almost on that line's
+                // infinite extension. A gateway is a real exit you walk to; it
+                // is on another screen only if the path to it actually crosses a
+                // boundary segment. Entity screen-filtering still uses the
+                // infinite-line helper; only the gateway test changed.
                 if (gotPlayer && s_capturedLineCount > 0) {
-                    if (IsSeparatedByTriggerLine(gwPlayerX, gwPlayerY,
-                                                 s_dedupGateways[d].centerX,
-                                                 s_dedupGateways[d].centerY))
-                        continue;
+                    bool crossed = false;
+                    for (int dt = 0; dt < s_capturedLineCount && !crossed; dt++) {
+                        if (!s_capturedLines[dt].active) continue;
+                        if (s_capturedLines[dt].lineType != FieldArchive::JSM_ENT_LINE_SCREEN_BOUND &&
+                            s_capturedLines[dt].lineType != FieldArchive::JSM_ENT_UNKNOWN)
+                            continue;
+                        if (SegmentsCross(gwPlayerX, gwPlayerY,
+                                          s_dedupGateways[d].centerX, s_dedupGateways[d].centerY,
+                                          (float)s_capturedLines[dt].x1, (float)s_capturedLines[dt].y1,
+                                          (float)s_capturedLines[dt].x2, (float)s_capturedLines[dt].y2)) {
+                            crossed = true;
+                            Log::Field("FieldNavigation: [refresh] INF-GW group %d '%s' "
+                                       "center=(%.0f,%.0f) filtered: path crosses screen-bound line%d",
+                                       d, s_dedupGateways[d].displayName,
+                                       s_dedupGateways[d].centerX, s_dedupGateways[d].centerY, dt);
+                        }
+                    }
+                    if (crossed) continue;
                 }
                 // Dedup against JSM exits already in catalog with same destination.
                 bool dupExit = false;
@@ -1187,6 +1191,12 @@ static void RefreshCatalog()
                            s_dedupGateways[d].count);
             }
         }
+
+        // v0.17.8.8 object/line dedupe + raw-SYM relabel. Extracted to
+        // field_nav_catalog_dedupe.inl (v0.17.8.9) to keep this file under the
+        // size ceiling; the fragment runs inline here (own braces) and operates
+        // on the local newCatalog[]/newCount. See that file for the full logic.
+        #include "field_nav_catalog_dedupe.inl"
 
         // Detect changes and log.
         bool changed = (newCount != s_catalogCount || added > 0);
@@ -1260,4 +1270,3 @@ static void RefreshCatalog()
 // Target addresses (Steam 2013 en-US, no ASLR):
 //   0x00532890 — entity-scope parametric curve subroutine (~300 insns)
 //   0x0051C9C0 — type-clamping dispatch (caller of 0x00532890)
-

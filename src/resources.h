@@ -13,6 +13,10 @@
 #define IDR_VTT_DISC03_BASE 4000   // disc03_00h .. disc03_04h, disc03_06h (no 05h)
 #define IDR_VTT_DISC04_BASE 5000   // disc04_00h
 
+// GF summon audio description VTT files (v0.14.44)
+// Resource ID = base + per-GF index (mapped in gf_audio_desc.cpp::g_gfTable)
+#define IDR_VTT_GF_BASE     6000   // gf_quezacotl..gf_eden..gf_phoenix..gf_odin
+
 // AVI-to-VTT mapping file (embedded as RCDATA) — kept for special-case overrides
 #define IDR_AD_MAPPING          201
 

@@ -33,6 +33,53 @@ static int FindNearestTriangle(float x, float y)
     return best;
 }
 
+// v0.17.7.1: Point-in-triangle test for the walkmesh exclusion filter in
+// RefreshCatalog. Returns true if (x, y) lies inside any walkmesh triangle
+// using the standard sign-of-cross-product 2D test.
+//
+// Rationale: light sources, scenery and other non-interactive props on FF8
+// fields are commonly placed off the walkmesh (above an alcove ceiling, on
+// a far wall, etc.). The walkmesh is the navigable surface, so an entity
+// off-mesh is one the player can't reach. Combined with the
+// no-TALKRADIUS/TALKON check at the catalog call site, this excludes them
+// from the entity catalog while preserving talkable off-mesh entities like
+// guards over a railing (player interacts from on-mesh).
+//
+// Returns false if the walkmesh isn't loaded -- conservative default that
+// keeps every entity rather than dropping them all when data is unavailable.
+//
+// The walkmesh is already in memory for A* path-finding, so this is cheap
+// (one cross-product triple per triangle, at most a few hundred per field,
+// run at most ~16 times per RefreshCatalog).
+static bool IsInsideWalkmesh(float x, float y)
+{
+    if (!s_walkmesh.valid || s_walkmesh.numTriangles == 0) return false;
+    for (int t = 0; t < s_walkmesh.numTriangles; t++) {
+        int vi0 = s_walkmesh.triangles[t].vertexIdx[0];
+        int vi1 = s_walkmesh.triangles[t].vertexIdx[1];
+        int vi2 = s_walkmesh.triangles[t].vertexIdx[2];
+        if (vi0 < 0 || vi0 >= s_walkmesh.numVertices) continue;
+        if (vi1 < 0 || vi1 >= s_walkmesh.numVertices) continue;
+        if (vi2 < 0 || vi2 >= s_walkmesh.numVertices) continue;
+        float ax = (float)s_walkmesh.vertices[vi0].x;
+        float ay = (float)s_walkmesh.vertices[vi0].y;
+        float bx = (float)s_walkmesh.vertices[vi1].x;
+        float by = (float)s_walkmesh.vertices[vi1].y;
+        float cx = (float)s_walkmesh.vertices[vi2].x;
+        float cy = (float)s_walkmesh.vertices[vi2].y;
+        // Sign-of-cross-product test. If all three signs match, the point is
+        // inside; if mixed, it's outside. Points exactly on an edge get
+        // counted as inside (zero is permissive in both directions here).
+        float d1 = (x - bx) * (ay - by) - (ax - bx) * (y - by);
+        float d2 = (x - cx) * (by - cy) - (bx - cx) * (y - cy);
+        float d3 = (x - ax) * (cy - ay) - (cx - ax) * (y - ay);
+        bool hasNeg = (d1 < 0.0f) || (d2 < 0.0f) || (d3 < 0.0f);
+        bool hasPos = (d1 > 0.0f) || (d2 > 0.0f) || (d3 > 0.0f);
+        if (!(hasNeg && hasPos)) return true;
+    }
+    return false;
+}
+
 // A* open set node.
 struct AStarNode {
     uint16_t triIdx;
@@ -42,14 +89,16 @@ struct AStarNode {
 };
 
 // v05.81: Compute the length of the shared edge between triangle triIdx and
-// its neighbor on edge edgeIdx (0-2). The shared edge connects the two
-// vertices that are NOT vertexIdx[edgeIdx]. Returns 0 if data is invalid.
+// its neighbor on edge edgeIdx (0-2). v0.17.9.14: the shared edge for
+// neighbor[edge] connects vertexIdx[edge] and vertexIdx[(edge+1)%3] (the FF8
+// .id walkmesh convention) -- NOT the (edge+1,edge+2) pair this comment used
+// to claim. Returns 0 if data is invalid.
 static float GetSharedEdgeLength(int triIdx, int edgeIdx)
 {
     if (!s_walkmesh.valid || triIdx < 0 || triIdx >= s_walkmesh.numTriangles) return 0;
-    // Shared edge connects vertex[(edge+1)%3] and vertex[(edge+2)%3]
-    int vi1 = s_walkmesh.triangles[triIdx].vertexIdx[(edgeIdx + 1) % 3];
-    int vi2 = s_walkmesh.triangles[triIdx].vertexIdx[(edgeIdx + 2) % 3];
+    // v0.17.9.14: neighbor[edge] is across edge (vertex[edge], vertex[(edge+1)%3]).
+    int vi1 = s_walkmesh.triangles[triIdx].vertexIdx[edgeIdx];
+    int vi2 = s_walkmesh.triangles[triIdx].vertexIdx[(edgeIdx + 1) % 3];
     if (vi1 >= s_walkmesh.numVertices || vi2 >= s_walkmesh.numVertices) return 0;
     float dx = (float)(s_walkmesh.vertices[vi1].x - s_walkmesh.vertices[vi2].x);
     float dy = (float)(s_walkmesh.vertices[vi1].y - s_walkmesh.vertices[vi2].y);
@@ -87,6 +136,13 @@ static const float NARROW_EDGE_PENALTY = 3.0f;
 // v06.02: skipTriggerIdx allows exempting one trigger line (used when
 // driving TO a screen transition — we need to cross that specific line).
 static bool IsSeparatedByTriggerLine(float px, float py, float ex, float ey, int skipTriggerIdx = -1);
+// v0.17.9.15: LOCAL bounded screen-bound crossing test (the actual cur->nb
+// traversal edge vs a screen-bound line's FINITE segment). Replaces the global
+// IsSeparatedByTriggerLine in the A* avoidance so a screen-bound line near the
+// spawn no longer fences off the far side of the field via its infinite
+// extension (Balamb Hotel bcsaka_1: "No path tri 13->196"). Defined in
+// field_navigation.cpp next to SegmentsCross. See DEVNOTES "Track A Step 2".
+static bool EdgeCrossesScreenBound(float ax, float ay, float bx, float by, int skipTriggerIdx = -1);
 // v06.05: Check if moving from (px,py) in direction (dx,dy) by RECOVERY_CHECK_DIST
 // would cross any non-target active trigger line. Used to prevent recovery
 // wiggle from accidentally pushing the player through screen transitions.
@@ -111,6 +167,11 @@ struct CapturedTriggerLine {
     // v0.12.24: True if the JSM entity also has foundExtDispatch (runtime 0x1C dispatch).
     // Used to identify dual-purpose Lines (exit + interaction via PSHM_W-dispatched dialog).
     bool hasExtDispatch;
+    // v0.17.7.5.4: True if REQ-following found this Line REQs a target with
+    // dialog opcodes or extended dispatch. The genuine dual-purpose signal
+    // (distinct from hasExtDispatch which also fires on non-dialog 0x1C usage).
+    // See JSMEntityInfo::hasDialogReqTarget for full rationale.
+    bool hasDialogReqTarget;
 };
 static const int MAX_CAPTURED_LINES = 32;
 static CapturedTriggerLine s_capturedLines[MAX_CAPTURED_LINES] = {};
@@ -315,15 +376,38 @@ static bool ComputeAStarPath(int startTri, int goalTri, int targetEntityIdx = -1
                 if (IsTriangleBlockedByNPC(nbX, nbY, targetEntityIdx)) continue;
             }
 
-            // v05.91: Skip triangles on the other side of active trigger lines.
-            // This prevents the A* path from routing through screen transition
-            // zones, which would cause the player to accidentally leave the field.
-            // We check if the neighbor triangle's center is separated from the
-            // start triangle's center by any active trigger line.
+            // v05.91 / v0.17.9.15 / v0.17.9.16: Skip a neighbor that the
+            // traversal would put on the far side of a screen-bound trigger
+            // line. TWO tests, split by drive type:
+            //
+            //  - Chase-drive (s_chaseDriveActive): the ORIGINAL global
+            //    start->neighbor infinite-line side test. The X-ATM092 Dollet
+            //    chase is tuned around this exact behavior (v0.17.9.14 = 0
+            //    catches). v0.17.9.15 made the test local for everyone and
+            //    regressed the chase -- doopen2a has 2 SCREEN_BOUND lines, so
+            //    the more-permissive local test opened a different route and
+            //    the robot caught the party. Keep the chase byte-identical to
+            //    the 0-catch build.
+            //
+            //  - F9 path-finding auto-drive (else): the LOCAL bounded cur->nb
+            //    test (the Step-2 Balamb Hotel fix). The global test fenced the
+            //    spawn off from the far side of bcsaka_1 via the harbor-exit
+            //    line's infinite extension ("No path tri 13->196"); the local
+            //    test only blocks edges that physically cross a screen-bound
+            //    segment, so A* routes around it. F9 is player-initiated, not a
+            //    timed chase, so the more permissive route is safe there.
+            //
+            // Both honor the same SCREEN_BOUND/UNKNOWN filter + skipTriggerIdx.
             if (s_capturedLineCount > 0 && nb != (uint16_t)goalTri) {
-                float startCX = s_walkmesh.triangles[startTri].centerX;
-                float startCY = s_walkmesh.triangles[startTri].centerY;
-                if (IsSeparatedByTriggerLine(startCX, startCY, nbX, nbY, skipTriggerIdx)) continue;
+                bool blocked;
+                if (s_chaseDriveActive) {
+                    float startCX = s_walkmesh.triangles[startTri].centerX;
+                    float startCY = s_walkmesh.triangles[startTri].centerY;
+                    blocked = IsSeparatedByTriggerLine(startCX, startCY, nbX, nbY, skipTriggerIdx);
+                } else {
+                    blocked = EdgeCrossesScreenBound(curX, curY, nbX, nbY, skipTriggerIdx);
+                }
+                if (blocked) continue;
             }
 
             // v05.81: Check shared edge width. Block edges too narrow to navigate.
@@ -398,6 +482,65 @@ static bool ComputeAStarPath(int startTri, int goalTri, int targetEntityIdx = -1
     return (s_waypointCount > 0);
 }
 
+// v0.17.9.16.2: Two-segment A* through a forced "via" triangle.
+//
+// Runs A* start->via, then via->goal, and stitches the two triangle corridors
+// into s_corridor[] (dropping the duplicate via at the seam) so FunnelPath
+// threads the via triangle. Built for the bggate_6 front-gate TURNSTILE: that
+// field is a closed walkmesh loop with two offset one-way lanes (west lane =
+// IN/up to the Hall, east lane = OUT/down to the gate path), and the turnstile
+// collision that separates them is NOT in the walkmesh. Plain A* therefore
+// freely picks the geometrically shorter lane -- which is the wrong/blocked
+// one-way lane -- and the party wedges. Forcing a via triangle in the correct
+// lane's mid-band pins A* to that lane. Returns true only if BOTH segments
+// path; the caller falls back to a plain ComputeAStarPath on false.
+//
+// Shares ComputeAStarPath's avoidance (chase vs F9 split, skipTriggerIdx,
+// NPC push-radius). Only ever called for F9 drives on bggate_6, so
+// s_chaseDriveActive is false here and the chase path is untouched.
+static bool ComputeAStarPathVia(int startTri, int viaTri, int goalTri,
+                                int targetEntityIdx, int skipTriggerIdx)
+{
+    if (!s_walkmesh.valid) return false;
+    if (startTri < 0 || viaTri < 0 || goalTri < 0) return false;
+
+    // Segment 1: start -> via. Capture its corridor before the second call
+    // overwrites s_corridor[].
+    if (!ComputeAStarPath(startTri, viaTri, targetEntityIdx, skipTriggerIdx))
+        return false;
+    static uint16_t corridorA[MAX_CORRIDOR];
+    int countA = s_corridorCount;
+    if (countA <= 0 || countA > MAX_CORRIDOR) return false;
+    for (int i = 0; i < countA; i++) corridorA[i] = s_corridor[i];
+
+    // Segment 2: via -> goal.
+    if (!ComputeAStarPath(viaTri, goalTri, targetEntityIdx, skipTriggerIdx))
+        return false;
+    int countB = s_corridorCount;
+    if (countB <= 0) return false;
+
+    // Stitch: corridorA (start..via) + segment-2 minus its leading via.
+    static uint16_t stitched[MAX_CORRIDOR];
+    int n = 0;
+    for (int i = 0; i < countA && n < MAX_CORRIDOR; i++) stitched[n++] = corridorA[i];
+    for (int i = 1; i < countB && n < MAX_CORRIDOR; i++) stitched[n++] = s_corridor[i];
+    s_corridorCount = n;
+    for (int i = 0; i < n; i++) s_corridor[i] = stitched[i];
+
+    // Rebuild center waypoints from the stitched corridor (FunnelPath will
+    // overwrite these; kept consistent as the non-funnel fallback path).
+    s_waypointCount = 0;
+    for (int i = 0; i < s_corridorCount && s_waypointCount < MAX_WAYPOINTS; i++) {
+        s_waypoints[s_waypointCount][0] = s_walkmesh.triangles[s_corridor[i]].centerX;
+        s_waypoints[s_waypointCount][1] = s_walkmesh.triangles[s_corridor[i]].centerY;
+        s_waypointCount++;
+    }
+    s_usingFunnel = false;
+    Log::Field("FieldNavigation: [A*-via] stitched start->via (%d tris) + via->goal (%d tris) "
+               "= %d corridor tris (via=%d)", countA, countB, s_corridorCount, viaTri);
+    return (s_waypointCount > 0);
+}
+
 // v05.90: Simple Stupid Funnel Algorithm (SSFA) for path smoothing.
 // Takes the triangle corridor from A* and produces the shortest path through
 // it by "string-pulling" — finding the tightest rope through the portal edges.
@@ -435,9 +578,12 @@ static bool FindPortal(uint16_t triA, uint16_t triB,
         if (tA.neighbor[e] == triB) { edgeIdx = e; break; }
     }
     if (edgeIdx < 0) return false;
-    // Shared edge connects vertex[(edge+1)%3] and vertex[(edge+2)%3].
-    int vi1 = tA.vertexIdx[(edgeIdx + 1) % 3];
-    int vi2 = tA.vertexIdx[(edgeIdx + 2) % 3];
+    // v0.17.9.14: neighbor[edge] is across edge (vertex[edge], vertex[(edge+1)%3]).
+    // The old (edge+1,edge+2) pair named the wrong edge -- off by one vertex --
+    // which emitted WALL edges as funnel portals and wedged auto-drive on
+    // narrow/rounded fields. See DEVNOTES_HISTORY "Track A".
+    int vi1 = tA.vertexIdx[edgeIdx];
+    int vi2 = tA.vertexIdx[(edgeIdx + 1) % 3];
     if (vi1 >= s_walkmesh.numVertices || vi2 >= s_walkmesh.numVertices) return false;
     float x1 = (float)s_walkmesh.vertices[vi1].x;
     float y1 = (float)s_walkmesh.vertices[vi1].y;
@@ -479,8 +625,134 @@ static bool FindPortal(uint16_t triA, uint16_t triB,
     return true;
 }
 
+// v0.17.5.2: Iterative collinear waypoint pruning.
+//
+// The SSFA funnel can emit many micro-corner waypoints when the walkmesh
+// corridor has multiple small triangle turns. v0.17.5.1 BAT on bg2f_2
+// (classroom hallway) showed a 1600-unit path produce 13 waypoints; checking
+// each one's perpendicular distance from the line through its neighbors:
+//
+//   wp 1 = 220 units off line wp 0->wp 4   <- real corner (keep)
+//   wp 2 =   6 units off line wp 1->wp 4   <- nearly collinear (remove)
+//   wp 3 =  24 units off line wp 1->wp 4   <- nearly collinear (remove)
+//   wp 4 =  30 units off line wp 1->wp 5   <- nearly collinear (remove)
+//   ...
+//
+// Aaron's perception: TTS rattling through micro-cardinal changes as each
+// waypoint advances. Each micro-correction is a real walkmesh triangle
+// portal corner, but doesn't represent a turn the player needs to make.
+//
+// This pass repeatedly scans the waypoint list and removes any waypoint B
+// whose perpendicular distance from the segment connecting its neighbors A
+// and C is below PRUNE_PERP_EPSILON. It's a simplified Ramer-Douglas-
+// Peucker (no recursion; just sweep-until-stable).
+//
+// PRUNE_PERP_EPSILON is set conservatively below typical FF8 wall thickness
+// (~100+ units) so post-prune paths cannot route through walls. Combined
+// with the existing AGENT_RADIUS=30 portal shrinking that pre-pulls
+// waypoints inward from walls, worst-case wall clearance after pruning is
+// ~80 units -- still well within walkable space.
+//
+// First and last waypoints are preserved (loop runs i = 1 to count-2).
+static const float PRUNE_PERP_EPSILON = 50.0f;
+
+// v0.17.8.19.1: Protected waypoint positions populated by FunnelPath's
+// wall-parallel-portal COLLAPSE branch. Those waypoints are constraint-
+// forced -- the path MUST aim at them so the player threads a narrow
+// doorway rather than sliding along its parallel wall. Without protection
+// they are geometrically near-collinear with their neighbors (the whole
+// point of a doorway through a wall is that it sits ON the corridor line)
+// and would be deleted by PruneCollinearWaypoints. Removing them regresses
+// v0.16.1.2's COLLAPSE fix and reproduces the v0.16.1.1 stuck-at-wall
+// behavior on domt2_1 (chase catch by battleyarou at the south exit) and
+// any other field with a wall-parallel exit portal.
+//
+// Cleared at the top of every FunnelPath call so the protection list is
+// fresh per re-path; populated in the COLLAPSE branch with the post-
+// AGENT_RADIUS-shift midpoint that the funnel emits as a forced waypoint;
+// consulted in PruneCollinearWaypoints which skips any candidate-for-prune
+// whose position lies within PROTECTED_WP_EPSILON of a recorded entry.
+//
+// Sized to MAX_CORRIDOR because that's the upper bound on portals per
+// path; in practice <=5 protected waypoints per field is typical, well
+// under the threshold where preserving them would resurrect the TTS
+// micro-corner spam that motivated PruneCollinearWaypoints' original
+// design (hundreds of waypoints on bg2f_2's classroom hallway).
+static float s_protectedWaypointPos[MAX_CORRIDOR][2];
+static int   s_protectedWaypointCount = 0;
+static const float PROTECTED_WP_EPSILON = 1.0f;
+
+static int PruneCollinearWaypoints(float wp[][2], int count)
+{
+    if (count < 3) return count;
+    bool changed = true;
+    int iterations = 0;
+    int totalRemoved = 0;
+    int totalSkipped = 0;
+    while (changed && iterations < 100) {  // safety bound
+        changed = false;
+        iterations++;
+        for (int i = 1; i + 1 < count; i++) {
+            float ax = wp[i-1][0], ay = wp[i-1][1];
+            float bx = wp[i][0],   by = wp[i][1];
+            float cx = wp[i+1][0], cy = wp[i+1][1];
+            float abx = bx - ax, aby = by - ay;
+            float acx = cx - ax, acy = cy - ay;
+            float aclen = sqrtf(acx * acx + acy * acy);
+            float perpDist;
+            if (aclen < 0.001f) {
+                // A and C are essentially the same point; B is redundant.
+                perpDist = 0.0f;
+            } else {
+                float cross = abx * acy - aby * acx;
+                perpDist = fabsf(cross) / aclen;
+            }
+            if (perpDist < PRUNE_PERP_EPSILON) {
+                // v0.17.8.19.1: Skip if this waypoint is a protected
+                // wall-parallel-portal COLLAPSE midpoint. See the
+                // s_protectedWaypointPos declaration above for the full
+                // rationale.
+                bool isProtected = false;
+                for (int p = 0; p < s_protectedWaypointCount; p++) {
+                    float pdx = bx - s_protectedWaypointPos[p][0];
+                    float pdy = by - s_protectedWaypointPos[p][1];
+                    if (pdx*pdx + pdy*pdy < PROTECTED_WP_EPSILON*PROTECTED_WP_EPSILON) {
+                        isProtected = true;
+                        break;
+                    }
+                }
+                if (isProtected) {
+                    totalSkipped++;
+                    continue;  // leave protected waypoint in place
+                }
+                // Remove B by shifting subsequent waypoints left.
+                for (int k = i; k + 1 < count; k++) {
+                    wp[k][0] = wp[k+1][0];
+                    wp[k][1] = wp[k+1][1];
+                }
+                count--;
+                totalRemoved++;
+                changed = true;
+                break;  // restart scan with the smaller list
+            }
+        }
+    }
+    if (totalRemoved > 0 || totalSkipped > 0) {
+        Log::Field("FieldNavigation: [funnel-prune] removed %d collinear waypoints "
+                   "(eps=%.0f units, %d sweeps, %d protected wall-parallel midpoints preserved)",
+                   totalRemoved, PRUNE_PERP_EPSILON, iterations, totalSkipped);
+    }
+    return count;
+}
+
 static void FunnelPath(float startX, float startY, float goalX, float goalY)
 {
+    // v0.17.8.19.1: Fresh protected-waypoint list per call. The COLLAPSE
+    // branch below populates it with wall-parallel doorway midpoints so
+    // PruneCollinearWaypoints (called at the bottom of this function)
+    // won't delete them.
+    s_protectedWaypointCount = 0;
+
     // Build portal list from corridor.
     // Each portal is the shared edge between corridor[i] and corridor[i+1].
     struct Portal { float lx, ly, rx, ry; };
@@ -518,10 +790,79 @@ static void FunnelPath(float startX, float startY, float goalX, float goalY)
             // false positives on bg2f_1 (dX=209 dY=0 portal at Y=-2342).
             bool wallParallel = (absDX < WALL_PARALLEL_EPSILON && absDY > WALL_PARALLEL_EPSILON * 10.0f);
             if (wallParallel) {
-                degenerateSkipped++;
-                Log::Field("FieldNavigation: [funnel] SKIP wall-parallel portal %d "
-                           "dX=%.1f dY=%.1f L=(%.0f,%.0f) R=(%.0f,%.0f) tri %d->%d",
-                           i, absDX, absDY, lx, ly, rx, ry,
+                // v0.16.1.2 Fix B: COLLAPSE wall-parallel portals to a single
+                // waypoint instead of SKIPPING them. The v0.16.1.1 diagnostic
+                // BAT on the X-ATM092 chase identified the SKIP behavior as
+                // the root cause of the deterministic doopen2a catch: on
+                // domt2_1, the wall-parallel portal between tri 26 and tri 27
+                // at x=-42 (L=(-42,-1638), R=(-42,-1360)) is the ONLY exit
+                // from tri 26 going south. Skipping it left the player with
+                // no aim point inside the doorway, so they slid along the
+                // x=-42 wall accumulating moveDist=160 over 2s with zero net
+                // displacement, then froze entirely (moveDist=0) for another
+                // 2s before velocity-stuck recovery advanced wp 23 -> 24 ->
+                // 25 -> 26 over 5 seconds total. Without that 5s, the chase
+                // session timer (~51s total budget) has enough headroom for
+                // the party to reach doopen2a's south trigger before BATTLE.
+                //
+                // The new behavior emits a single "forced waypoint" at the
+                // portal midpoint, offset toward triB's center by
+                // AGENT_RADIUS. The funnel algorithm treats L == R as a
+                // pass-through constraint, which forces the player to aim
+                // into the doorway and cross the wall.
+                //
+                // SKIP_WALL_PARALLEL_LEGACY toggle (Fix A fallback): if Fix B
+                // regresses on bg2f_1 or other fields where the wall-parallel
+                // skip was the right call (e.g. long open corridors with
+                // inner-wall edges that the v0.15-era SKIP heuristic was
+                // tuned against), flip this constant to true to restore the
+                // v0.16.1.1 "continue" behavior globally. The toggle is
+                // intentionally static const so a one-line flip + rebuild
+                // is the quickest mitigation; if a per-field toggle becomes
+                // necessary we can lift it to a route-config field later.
+                static const bool SKIP_WALL_PARALLEL_LEGACY = false;
+                if (SKIP_WALL_PARALLEL_LEGACY) {
+                    degenerateSkipped++;
+                    Log::Field("FieldNavigation: [funnel] SKIP wall-parallel portal %d (LEGACY) "
+                               "dX=%.1f dY=%.1f L=(%.0f,%.0f) R=(%.0f,%.0f) tri %d->%d",
+                               i, absDX, absDY, lx, ly, rx, ry,
+                               (int)s_corridor[i], (int)s_corridor[i+1]);
+                    continue;
+                }
+                // Fix B: collapse to a single waypoint offset toward triB.
+                float mx = (lx + rx) / 2.0f;
+                float my = (ly + ry) / 2.0f;
+                uint16_t triB = s_corridor[i+1];
+                if (triB < (uint16_t)s_walkmesh.numTriangles) {
+                    float toBx = s_walkmesh.triangles[triB].centerX - mx;
+                    float toBy = s_walkmesh.triangles[triB].centerY - my;
+                    float toBlen = sqrtf(toBx*toBx + toBy*toBy);
+                    if (toBlen > 0.001f) {
+                        mx += (toBx / toBlen) * AGENT_RADIUS;
+                        my += (toBy / toBlen) * AGENT_RADIUS;
+                    }
+                }
+                portals[numPortals].lx = mx;
+                portals[numPortals].ly = my;
+                portals[numPortals].rx = mx;
+                portals[numPortals].ry = my;
+                // v0.17.8.19.1: Record this midpoint as a protected
+                // waypoint position so PruneCollinearWaypoints doesn't
+                // delete it later. Without this, the funnel emits the
+                // collapsed point correctly but the prune pass (added in
+                // v0.17.5.2) removes it because it's near-collinear with
+                // its neighbors in the path -- which is the entire reason
+                // it's a useful constraint, but defeats v0.16.1.2's fix.
+                if (s_protectedWaypointCount < MAX_CORRIDOR) {
+                    s_protectedWaypointPos[s_protectedWaypointCount][0] = mx;
+                    s_protectedWaypointPos[s_protectedWaypointCount][1] = my;
+                    s_protectedWaypointCount++;
+                }
+                numPortals++;
+                degenerateSkipped++;  // reused as "encountered" counter for the summary log
+                Log::Field("FieldNavigation: [funnel] COLLAPSE wall-parallel portal %d "
+                           "dX=%.1f dY=%.1f L=(%.0f,%.0f) R=(%.0f,%.0f) -> wp=(%.0f,%.0f) tri %d->%d",
+                           i, absDX, absDY, lx, ly, rx, ry, mx, my,
                            (int)s_corridor[i], (int)s_corridor[i+1]);
                 continue;
             }
@@ -548,7 +889,8 @@ static void FunnelPath(float startX, float startY, float goalX, float goalY)
         }
     }
     if (degenerateSkipped > 0) {
-        Log::Field("FieldNavigation: [funnel] Skipped %d wall-parallel portals",
+        Log::Field("FieldNavigation: [funnel] %d wall-parallel portals processed "
+                   "(SKIP if SKIP_WALL_PARALLEL_LEGACY else COLLAPSE; v0.16.1.2 default = COLLAPSE)",
                    degenerateSkipped);
     }
     // Add a degenerate portal at the goal (both sides = goal point).
@@ -650,11 +992,37 @@ static void FunnelPath(float startX, float startY, float goalX, float goalY)
     int oldCount = s_waypointCount;
     memcpy(s_waypoints, result, sizeof(float) * 2 * resultCount);
     s_waypointCount = resultCount;
+    // v0.17.8.19.2: Skip the prune for chase-drive. v0.17.5.2's prune
+    // motivation (TTS micro-corner spam on bg2f_2 classroom) doesn't apply
+    // to chase auto-pilot, which runs silent. Chase needs the dense funnel
+    // output to navigate long Dollet corridors like domt2_1 -- v0.17.8.19.1
+    // protected the COLLAPSE'd doorway midpoint but the prune still deleted
+    // 24 of 32 OTHER intermediate waypoints, leaving the path so sparse
+    // that the party wedged on tri 25 geometry between the doorway exit
+    // (-13,-1508) and the next surviving waypoint (-306,-1919). v0.16.1.4
+    // had 0 chase catches without any prune; restore that by gating the
+    // call on !s_chaseDriveActive.
+    //
+    // Manual nav (F9 path-finding to NPCs) still runs the prune and keeps
+    // the v0.17.5.2 TTS fix. The s_protectedWaypointPos mechanism added in
+    // v0.17.8.19.1 stays in place for F9 path-finding that happens to cross
+    // a wall-parallel-portal field (same scenario applies there if a player
+    // F9s to an NPC behind a doorway).
+    int prePruneCount = s_waypointCount;
+    if (!s_chaseDriveActive) {
+        s_waypointCount = PruneCollinearWaypoints(s_waypoints, s_waypointCount);
+    } else {
+        Log::Field("FieldNavigation: [funnel-prune] skipped for chase-drive "
+                   "(%d waypoints kept; PRUNE_PERP_EPSILON=%.0f only applies "
+                   "to F9 nav to avoid TTS micro-corner spam)",
+                   s_waypointCount, PRUNE_PERP_EPSILON);
+    }
     s_waypointIdx = 0;
     s_usingFunnel = true;  // v05.95: use tighter arrive distance for funnel waypoints
 
-    Log::Field("FieldNavigation: [funnel] %d triangles -> %d waypoints (was %d centers)",
-               s_corridorCount, resultCount, oldCount);
+    Log::Field("FieldNavigation: [funnel] %d triangles -> %d waypoints "
+               "(post-prune; pre-prune=%d, was %d centers)",
+               s_corridorCount, s_waypointCount, prePruneCount, oldCount);
 }
 
 // v06.06: Edge-midpoint path generation — the reliable fallback for when funnel
@@ -694,9 +1062,9 @@ static void EdgeMidpointPath(float startX, float startY, float goalX, float goal
         }
         if (edgeIdx < 0) continue;
 
-        // Shared edge connects vertex[(edge+1)%3] and vertex[(edge+2)%3].
-        int vi1 = tA.vertexIdx[(edgeIdx + 1) % 3];
-        int vi2 = tA.vertexIdx[(edgeIdx + 2) % 3];
+        // v0.17.9.14: neighbor[edge] is across edge (vertex[edge], vertex[(edge+1)%3]).
+        int vi1 = tA.vertexIdx[edgeIdx];
+        int vi2 = tA.vertexIdx[(edgeIdx + 1) % 3];
         if (vi1 >= s_walkmesh.numVertices || vi2 >= s_walkmesh.numVertices) continue;
 
         float x1 = (float)s_walkmesh.vertices[vi1].x;

@@ -25,6 +25,7 @@
 //   to check broader memory for cursor candidates.
 
 #include "ff8_accessibility.h"
+#include "ff8_addresses.h"
 #include "menu_tts.h"
 #include "field_dialog.h"
 #include "ff8_text_decode.h"
@@ -32,6 +33,12 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <tlhelp32.h>   // v0.18.2.5 diag: thread enumeration for the HW write BP
+
+// Forward declarations for namespaces used in .inl files
+namespace Log { void Menu(const char* format, ...); }
+namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); bool IsSpeaking(); }
+namespace Config { void Load(); int GetInt(const char* key, int defaultValue); void SetInt(const char* key, int value); const char* GetPath(); }
 
 using namespace FF8Addresses;
 
@@ -324,6 +331,8 @@ static DWORD    s_pendingActionTime = 0;            // GetTickCount when pending
 // v0.08.62: Item sub-flow state tracking
 // Use target: focus==14, +0x276 party cursor. Rearrange: focus~97, +0x272. Sort: focus flash 79. Battle: focus~30, +0x285.
 static uint8_t  s_prevTargetCursor = 0xFF;          // tracks +0x276 during Use target selection
+static uint8_t  s_prevTargetCharIdx = 0xFF;         // v0.18.2.7 (#10): char whose HP the Use-target poll is tracking
+static uint16_t s_prevTargetHP = 0xFFFF;            // v0.18.2.7 (#10): last announced Use-target curHP (re-announce on change)
 static uint8_t  s_prevBattleItemCursor = 0xFF;      // tracks +0x285 during Battle items
 static bool     s_inUseTargetMode = false;           // true when focus==14 (Use target selection)
 static bool     s_inRearrangeMode = false;           // true when focus stabilized ~97
@@ -529,6 +538,12 @@ void MenuTTS::Initialize()
 // --- Help bar + hotkeys (extracted v0.12.18) ---
 #include "menu_tts_hotkeys.inl"
 
+// --- Main-menu GF screen TTS / discovery (#41, v0.18.0) ---
+#include "menu_tts_gf.inl"
+
+// --- Main-menu Ability screen TTS (#42, v0.18.1) ---
+#include "menu_tts_ability.inl"
+
 void MenuTTS::Update()
 {
     if (!s_initialized) return;
@@ -554,22 +569,23 @@ void MenuTTS::Update()
 
     // v0.08.21: Menu mode hotkeys
     if (isMenuMode) {
-        // F11 = full menu summary
-        // Shift+F11 = start memory monitor (15s, tracks left-panel cursor)
-        // Ctrl+F11 = diagnostic dump
-        if (GetAsyncKeyState(VK_F11) & 1) {
-            if (GetAsyncKeyState(VK_SHIFT) & 0x8000) {
-                StartMemoryMonitor();
-            } else if (GetAsyncKeyState(VK_CONTROL) & 0x8000) {
-                ScreenReader::Speak("Menu data scan", true);
-                DumpMenuScreenData();
-                ScreenReader::Speak("Done, check log", true);
-            } else {
-                AnnounceMenuSummary();
-            }
+        // v0.14.75: M = full menu summary (party / Gil / play time / location).
+        // Moved from F11 to free F11 for the global on-demand screenshot trigger
+        // in dinput8.cpp. The Shift+F11 (StartMemoryMonitor) and Ctrl+F11
+        // (DumpMenuScreenData) bindings were research diagnostics for cursor /
+        // savemap-offset discovery; both investigations are closed and the
+        // diagnostics are dormant. Removed in v0.14.75 along with the F11
+        // reassignment. The PollMemoryMonitor() call that paired with
+        // StartMemoryMonitor was also removed here — with no caller of
+        // StartMemoryMonitor left, the monitor can never activate, so polling
+        // it every frame was just a no-op. The Start/Poll/StartMemoryMonitor
+        // function definitions in menu_tts_diagnostics.inl remain in place
+        // (harmless dead code) in case a future investigation needs them.
+        // M was confirmed free across all source files via dryRun probes
+        // before binding here.
+        if (GetAsyncKeyState('M') & 1) {
+            AnnounceMenuSummary();
         }
-        // Poll memory monitor if active
-        PollMemoryMonitor();
         // G = Gil
         if (GetAsyncKeyState('G') & 1) {
             AnnounceGil();
@@ -586,9 +602,12 @@ void MenuTTS::Update()
         if (GetAsyncKeyState('R') & 1) {
             AnnounceSeedRank();
         }
-        // / = Read help bar text (v0.09.41)
+        // / = Read help bar text (v0.09.41). On the GF ability-to-learn list,
+        // re-read the help of the ability under the cursor instead (#3); the
+        // helper returns false off that list so the normal help bar still works.
         if (GetAsyncKeyState(VK_OEM_2) & 1) {
-            AnnounceHelpText();
+            if (!GFSpeakSelectedAbilityHelp() && !AbilitySpeakSelectedHelp() && !JunctionAutoSpeakHelp())
+                AnnounceHelpText();
         }
     }
     
@@ -653,6 +672,8 @@ void MenuTTS::Update()
         s_submonStableSince = 0;  // v0.08.28: reset submenu monitor
         s_submonActive = false;
         ResetItemSubmenuState();  // v0.08.29
+        ResetGFSubmenuState();    // v0.18.0 (#41)
+        ResetAbilitySubmenuState(); // v0.18.1 (#42)
         Log::Menu("[MenuTTS] Menu opened (mode 6)");
         
 
@@ -725,6 +746,103 @@ void MenuTTS::Update()
                 PollJunctionSubmenu();
             } else if (s_prevCursor != 0) {
                 if (s_juncActive) ResetJunctionState();
+            }
+
+            // v0.18.0 (#41): GF screen TTS / discovery (top-level cursor == 4)
+            if (s_prevCursor == 4 && !s_itemSubmenuActive) {
+                PollGFSubmenu();
+            } else if (s_prevCursor != 4 && s_gfActive) {
+                ResetGFSubmenuState();
+            }
+
+            // v0.18.1 (#42): Ability screen TTS (top-level cursor == 5)
+            if (s_prevCursor == 5 && !s_itemSubmenuActive) {
+                PollAbilitySubmenu();
+            } else if (s_prevCursor != 5 && s_abilActive) {
+                ResetAbilitySubmenuState();
+            }
+
+            // v0.18.2.16/.17/.18/.19: main-menu "Rearrange party order". From the
+            // bare main menu (+0x1E8==0xFF — any open submenu changes it: junction
+            // =17, ability=14, etc.) the cursor can move left onto the party panel to
+            // reorder the 3 active members. Region flag +0x1B6: command column =3,
+            // party source-select =0x0F (cursor +0x1D6), party dest-select =0x10
+            // (cursor +0x1D7). Slots 0/1/2 = roster[0..2]; announce the member at the
+            // active cursor (AnnounceJuncCharSelect), with a one-time "Choose
+            // destination" cue on entering dest-select.
+            // v0.18.2.19: gate on +0x1E8==0xFF, NOT the per-submenu !s_*Active flags —
+            // s_itemSubmenuActive/s_gfActive are set merely by hovering the Item/GF
+            // command, which blocked the party panel from every command but Junction.
+            {
+                uint8_t* pmd = (uint8_t*)pMenuStateA;
+                bool bareMenu = (pmd[0x1E8] == 0xFF);
+                uint8_t b1B6 = pmd[0x1B6];
+                int partyMode = 0;            // 0=off, 1=source-select, 2=dest-select
+                uint8_t partySlot = 0xFF;
+                if (bareMenu && b1B6 == 0x0F)      { partyMode = 1; partySlot = pmd[0x1D6]; }
+                else if (bareMenu && b1B6 == 0x10) { partyMode = 2; partySlot = pmd[0x1D7]; }
+                static int s_prevPartyMode = 0;
+                static uint8_t s_prevPartySlot = 0xFF;
+                if (partyMode != 0) {
+                    if (partyMode == 2 && s_prevPartyMode != 2) {
+                        // Entered destination-select: cue the phase; announce on moves.
+                        ScreenReader::Speak("Choose destination", true);
+                        s_prevPartySlot = partySlot;
+                    } else if (partyMode != s_prevPartyMode || partySlot != s_prevPartySlot) {
+                        AnnounceJuncCharSelect(partySlot);
+                        s_prevPartySlot = partySlot;
+                    }
+                    s_prevPartyMode = partyMode;
+                } else {
+                    if (s_prevPartyMode != 0) {
+                        // v0.18.2.18: left the party panel back to the command column.
+                        // The top cursor +0x1E6 didn't change while on the party, so
+                        // the next PollMenuCursor would stay silent; force it to
+                        // re-announce the command under the cursor (0xFF is the same
+                        // "announce on next poll" sentinel menu-open uses).
+                        s_prevCursor = 0xFF;
+                    }
+                    s_prevPartyMode = 0;
+                    s_prevPartySlot = 0xFF;
+                }
+            }
+
+            // v0.18.2.21: Magic (top cursor 2) and Status (top cursor 3) character-
+            // select. Both reuse Junction's char-select screen — confirmed by the
+            // v0.18.2.20 [MagStatDiag] probe: Magic subsystem +0x1E8==3, Status
+            // +0x1E8==5, both with focus +0x22E==0 and the char cursor at +0x1E9
+            // indexing the roster at +0x1DB (cursor reached 3 = roster[3] = the
+            // reserve member, so the range covers reserves too). Announce the member
+            // under the cursor via AnnounceJuncCharSelect, exactly like Junction.
+            // (The party block above is gated on +0x1E8==0xFF so it never overlaps;
+            // Junction's own +0x1E8==17 is excluded here too. Focus gate keeps this to
+            // the char-select phase — the per-character spell/status screen has a
+            // different focus, so we fall silent there rather than misread +0x1E9.)
+            {
+                uint8_t* pmd = (uint8_t*)pMenuStateA;
+                uint8_t sub = pmd[0x1E8];
+                uint8_t msFocus = pmd[0x22E];
+                bool magStatCharSel =
+                    ((s_prevCursor == 2 && sub == 3) || (s_prevCursor == 3 && sub == 5)) &&
+                    (msFocus == 0 || msFocus == 8);
+                static bool    s_magStatActive = false;
+                static uint8_t s_prevMagStatCursor = 0xFF;
+                if (magStatCharSel) {
+                    if (!s_magStatActive) {
+                        s_magStatActive = true;
+                        s_prevMagStatCursor = 0xFF;  // force announce on entry
+                        ResetCharSelGroup();         // v0.18.2.22: re-cue active/reserve on entry
+                    }
+                    uint8_t cur = pmd[0x1E9];
+                    if (cur <= 7 && cur != s_prevMagStatCursor) {
+                        AnnounceJuncCharSelect(cur, true);
+                        s_prevMagStatCursor = cur;
+                    }
+                } else if (s_magStatActive) {
+                    s_magStatActive = false;
+                    s_prevMagStatCursor = 0xFF;
+                    ResetCharSelGroup();
+                }
             }
         }
         

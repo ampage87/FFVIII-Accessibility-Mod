@@ -5,6 +5,7 @@
 
 #include "ff8_addresses.h"
 #include "ff8_accessibility.h"
+#include "mod_forward_decls.h"
 #include <cstdio>
 
 namespace FF8Addresses {
@@ -79,6 +80,13 @@ uint32_t  opcode_set3 = 0;
 // v0.08.07: PSHM_W opcode for shared memory read diagnostics
 uint32_t  opcode_pshm_w = 0;
 
+// v0.17.7.4: MAPJUMP variants for diagnostic destination capture
+uint32_t  opcode_mapjump      = 0;
+uint32_t  opcode_mapjump3     = 0;
+uint32_t  opcode_discjump     = 0;
+uint32_t  opcode_mapjumpo     = 0;
+uint32_t  opcode_worldmapjump = 0;
+
 // v04.28+: engine input button state variables
 uint32_t* pEngineInputConfirmedButtons = nullptr;
 uint32_t* pEngineInputValidButtons     = nullptr;
@@ -127,6 +135,11 @@ uint32_t  set_current_triangle_addr = 0;
 
 // v0.07.24: Music volume function (set_midi_volume / set_music_volume_for_channel)
 uint32_t  pSetMidiVolume = 0;
+
+// v0.14.45: SFX volume function addresses (for hooking)
+uint32_t  pSfxSetMasterVolume = 0;
+uint32_t  pSfxSetVolume       = 0;
+uint32_t* pMasterSfxVolume    = nullptr;
 
 // v0.07.25: Save file read function
 uint32_t  sm_pc_read_addr = 0;
@@ -693,6 +706,18 @@ bool Resolve()
             opcode_pshm_w = pExecuteOpcodeTable[0x06];
             Log::Mod("FF8Addresses:   opcode_pshm_w     [0x006] = 0x%08X", opcode_pshm_w);
 
+            // v0.17.7.4: MAPJUMP variants for diagnostic hook in field_nav_mapjump_diag.inl
+            opcode_mapjump      = pExecuteOpcodeTable[0x29];
+            opcode_mapjump3     = pExecuteOpcodeTable[0x2A];
+            opcode_discjump     = pExecuteOpcodeTable[0x38];
+            opcode_mapjumpo     = pExecuteOpcodeTable[0x5C];
+            opcode_worldmapjump = pExecuteOpcodeTable[0x10D];
+            Log::Mod("FF8Addresses:   opcode_mapjump      [0x029] = 0x%08X", opcode_mapjump);
+            Log::Mod("FF8Addresses:   opcode_mapjump3     [0x02A] = 0x%08X", opcode_mapjump3);
+            Log::Mod("FF8Addresses:   opcode_discjump     [0x038] = 0x%08X", opcode_discjump);
+            Log::Mod("FF8Addresses:   opcode_mapjumpo     [0x05C] = 0x%08X", opcode_mapjumpo);
+            Log::Mod("FF8Addresses:   opcode_worldmapjump [0x10D] = 0x%08X", opcode_worldmapjump);
+
             // v0.08.06: PSHM_W handler diagnostic — dump machine code to find
             // the shared memory base address for direct variable reads.
             // PSHM_W = opcode 0x06, POPM_W = opcode 0x0A.
@@ -1117,6 +1142,45 @@ bool Resolve()
                        sm_battle_sound, sm_battle_sound_offset);
             Log::Mod("FF8Addresses:   set_midi_volume = 0x%08X (from sm_battle_sound+0x173)",
                        pSetMidiVolume);
+        }
+
+        // ---- v0.14.45: Resolve sfx_set_master_volume (SFX volume function for hooking) ----
+        // Chain: opcode_effectplay2 -> +0x5F sfx_play_to_current_playing_channel
+        //        -> +0x35 play_sfx_on_channel -> +0xA1 sfx_set_volume
+        //        sfx_get_master_volume = sfx_set_volume - 0x10
+        //        sfx_set_master_volume = sfx_get_master_volume - 0xE0
+        //        master_sfx_volume     = absolute @ sfx_get_master_volume + 0x1
+        // Mirrors the FFNx ff8_data.cpp "// SFX" block. FFNx replaces
+        // sfx_set_master_volume with a JMP to its own bridge that calls
+        // nxAudioEngine.setSFXMasterVolume.
+        Log::Mod("FF8Addresses: --- Resolving sfx_set_master_volume (v0.14.45) ---");
+        if (pExecuteOpcodeTable != nullptr) {
+            __try {
+                uint32_t opcode_effectplay2          = pExecuteOpcodeTable[0x21];
+                uint32_t sfx_play_to_current_playing = get_relative_call(opcode_effectplay2, 0x5F);
+                uint32_t play_sfx_on_channel         = get_relative_call(sfx_play_to_current_playing, 0x35);
+                pSfxSetVolume                        = get_relative_call(play_sfx_on_channel, 0xA1);
+                uint32_t sfx_get_master_volume       = pSfxSetVolume - 0x10;
+                pSfxSetMasterVolume                  = sfx_get_master_volume - 0xE0;
+                pMasterSfxVolume = (uint32_t*)get_absolute_value(sfx_get_master_volume, 0x1);
+                Log::Mod("FF8Addresses:   opcode_effectplay2          = 0x%08X", opcode_effectplay2);
+                Log::Mod("FF8Addresses:   sfx_play_to_current_playing = 0x%08X", sfx_play_to_current_playing);
+                Log::Mod("FF8Addresses:   play_sfx_on_channel         = 0x%08X", play_sfx_on_channel);
+                Log::Mod("FF8Addresses:   sfx_set_volume              = 0x%08X", pSfxSetVolume);
+                Log::Mod("FF8Addresses:   sfx_get_master_volume       = 0x%08X", sfx_get_master_volume);
+                Log::Mod("FF8Addresses:   sfx_set_master_volume       = 0x%08X", pSfxSetMasterVolume);
+                Log::Mod("FF8Addresses:   pMasterSfxVolume            = 0x%08X (val=0x%08X)",
+                           (uint32_t)(uintptr_t)pMasterSfxVolume,
+                           pMasterSfxVolume ? *pMasterSfxVolume : 0);
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                Log::Mod("FF8Addresses:   EXCEPTION resolving SFX volume chain. Code=0x%08X",
+                           GetExceptionCode());
+                pSfxSetMasterVolume = 0;
+                pSfxSetVolume = 0;
+                pMasterSfxVolume = nullptr;
+            }
+        } else {
+            Log::Mod("FF8Addresses:   SKIP - pExecuteOpcodeTable not yet resolved.");
         }
 
         // ---- v0.07.25: Resolve sm_pc_read (save file read function for hooking) ----

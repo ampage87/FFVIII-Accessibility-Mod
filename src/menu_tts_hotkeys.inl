@@ -151,28 +151,52 @@ static void AnnounceLocation()
 
 static void AnnounceSeedRank()
 {
-    // SeeD rank is stored in field_h section of savemap.
-    // field_h starts after: header(0x4C) + GFs(0x440) + chars(8*0x98=0x4C0)
-    //   + shops(16*20=0x140) + limit_breaks(0x14) + items(0x198)
-    // = 0x4C + 0x440 + 0x4C0 + 0x140 + 0x14 + 0x198 = 0xF94
-    // field_h.seedExp is at field_h + 0x08 (uint16)
-    // SeeD level = seedExp / 100 (approximate, game uses a lookup table)
-    // For now, just report the raw seedExp value and compute approximate level.
-    static const int FIELD_H_OFFSET = 0xF94;  // from savemap base
-    static const int SEED_EXP_IN_FIELD_H = 0x08;  // uint16 within field_h
-    uint16_t seedExp = *(uint16_t*)((uint8_t*)SAVEMAP_BASE + FIELD_H_OFFSET + SEED_EXP_IN_FIELD_H);
-    if (seedExp == 0) {
+    // SeeD rank is derived from SeeD points (a.k.a. SeeD experience) stored at
+    // live savemap +0x0D6C (uint16). Each rank is 100 points, so rank =
+    // points / 100. Ranks run 1..30 then "A" (the 31st). A non-SeeD / fresh game
+    // reads below 100 (no rank).
+    //
+    // Offset confirmed empirically (Chapter 5, v0.17.9.0) by diffing three
+    // decompressed .ff8 saves, anchored to the live savemap via Squall HP/EXP +
+    // Gil + location (live offset == decompressed-file offset - 0x184):
+    //   - pre-SeeD save:                  points = 500  (the documented base of
+    //       the initial-rank formula, present before the Dollet exam grades it)
+    //   - SeeD Rank 3 save, pre-salary:   points = 392  (392 / 100 = 3)
+    //   - same save right after a salary: points = 383  (-9 = lose 10 per payment
+    //       + 1 from a kill; matches the documented -10 SeeD-points-per-pay decay)
+    // 392/100 = 3 matched the observed 7400->8900 Gil (= 1500 = Rank 3) salary.
+    //
+    // The previous read (+0xF94 + 0x08 = +0xF9C) was derived by summing section
+    // sizes in a comment and never measured. That offset lands in the field-
+    // variable block and reads dead zeros in every save examined, which is why
+    // this hotkey always reported "No SeeD rank yet" regardless of actual rank.
+    static const int SEED_POINTS_OFFSET    = 0x0D6C;  // uint16, live savemap-relative
+    static const int SEED_SALARY_COUNT_OFF = 0x0CDE;  // uint16: salary payments received (0 until first pay)
+    uint16_t seedPoints  = *(uint16_t*)((uint8_t*)SAVEMAP_BASE + SEED_POINTS_OFFSET);
+    uint16_t salaryCount = *(uint16_t*)((uint8_t*)SAVEMAP_BASE + SEED_SALARY_COUNT_OFF);
+    int rank = seedPoints / 100;  // each rank = 100 points
+    // Pre-SeeD gate: before the Dollet field exam grades the player, the points
+    // pool sits at exactly the formula base (500) and no salary has ever been
+    // paid. Pre-promotion rank modifiers (e.g. showing the gunblade) are
+    // DEFERRED -- applied at graduation, not to the live value -- so points
+    // stays exactly 500 until promotion. Confirmed: the pre-SeeD save reads
+    // points=500, salaryCount=0; both SeeD saves read salaryCount>0. So treat
+    // (points == 500 && salaryCount == 0) as "not a SeeD yet" and avoid
+    // announcing a false "Rank 5". A paid SeeD that happens to sit at exactly
+    // 500 points still announces Rank 5 correctly (salaryCount > 0).
+    if ((seedPoints == 500 && salaryCount == 0) || rank < 1) {
         ScreenReader::Speak("No SeeD rank yet", true);
-        Log::Menu("[MenuTTS] SeeD: no rank (seedExp=0)");
+        Log::Menu("[MenuTTS] SeeD: no rank (points=%u salaryCount=%u)",
+                  (unsigned)seedPoints, (unsigned)salaryCount);
+    } else if (rank >= 31) {
+        // Rank 30 is the highest numbered rank; 3100+ points is Rank A.
+        ScreenReader::Speak("SeeD Rank A", true);
+        Log::Menu("[MenuTTS] SeeD: Rank A (points=%u)", (unsigned)seedPoints);
     } else {
-        // SeeD level is roughly seedExp / 100, clamped 1-31
-        int seedLvl = seedExp / 100;
-        if (seedLvl < 1) seedLvl = 1;
-        if (seedLvl > 31) seedLvl = 31;
         char buf[64];
-        sprintf(buf, "SeeD Level %d", seedLvl);
+        sprintf(buf, "SeeD Rank %d", rank);
         ScreenReader::Speak(buf, true);
-        Log::Menu("[MenuTTS] SeeD: level %d (seedExp=%u)", seedLvl, (unsigned)seedExp);
+        Log::Menu("[MenuTTS] SeeD: Rank %d (points=%u)", rank, (unsigned)seedPoints);
     }
 }
 

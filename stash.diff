@@ -1,0 +1,982 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 18636d3..6c7e095 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -4,6 +4,161 @@ Newest on top. Each entry begins with a `## vMAJOR.MINOR.BUILD` heading followed
+ 
+ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_accessibility.h`. The push utility refuses to push if they don't.
+ 
++## v0.15.9.11.1
++
++Windows low-level keyboard hook (`WH_KEYBOARD_LL`) for chase Auto key suppression. v0.15.9.11 BAT revealed that the engine-keyboard-buffer (kbBuf) zeroing layer in `HookedGetKeyState` was silently broken: Aaron pressed arrow keys during chase Auto, the arrows reached the engine, interrupted the auto-pilot, and a chase battle fired just 2 seconds after engagement.
++
++### Why kbBuf zeroing didn't work
++
++The v0.15.9.11 BAT mod log showed:
++
++```
++[13:14:15][MOD] FF8Addresses:   pKeyboardState (byte**) = 0x01CD02D8 (val=0x00000000)
++```
++
++The pointer resolved successfully, but its dereferenced value stayed `0x00000000` at all times. **FFNx replaces FF8's DirectInput keyboard path with its own implementation**, so the original engine keyboard buffer at `*0x01CD02D8` is never populated. The `if (kbBuf)` guard inside `HookedGetKeyState` always fell through and the zeroing block never ran -- neither the pre-existing v05.89 arrow-zeroing nor the v0.15.9.11 W/A/D/X extension. That's why neither activation log line ever appeared in the BAT log despite `s_analogOverrideActive=1` being confirmed at engagement.
++
++The v0.15.9.11 HandleKeys gate (Layer 2, for the mod's nav hotkeys -, =, Backspace, \) DID work -- those keys are read via `GetAsyncKeyState` from mod-owned code and don't depend on FFNx's keyboard path. So only Layer 1 (kbBuf) was affected.
++
++### Fix: Windows low-level keyboard hook
++
++A `WH_KEYBOARD_LL` hook sits ABOVE FFNx in the input chain. Physical key events come from the OS, hit our hook FIRST, and never reach FFNx or the engine if we swallow them. The hook is installed in `DllMain DLL_PROCESS_ATTACH` (on the game's main thread, which has the message pump LL hooks require) and uninstalled in `DLL_PROCESS_DETACH`.
++
++Key design points:
++
++- **Auto-pilot's SendInput-injected arrows pass through.** They're flagged `LLKHF_INJECTED` in `KBDLLHOOKSTRUCT.flags`; the hook only acts on physical events.
++- **Tight gate.** The hook only swallows when `ChaseAutoPilot::IsEngaged() && ChaseDetector::GetChaseMode() == MODE_AUTO`. Outside the chase it's a pure pass-through.
++- **O(1) hook proc.** Read flags, compare vkCode to ~8 constants, query two inline accessors. Well within the Windows LL hook timeout budget.
++- **Cross-thread safety without locks.** The hook fires on the game main thread; chase state is set on the accessibility worker thread. Both accessor returns (`bool` and `Mode` enum) are atomically readable on x86 -- no locks required.
++- **Scope matches Aaron's 2026-05-12 design clarification.** Swallow arrows + W/A/D/X. Preserve S (pause). F-keys (audio/TTS), V (version), G/T/L/R (stat lookups), mod nav hotkeys (-, =, Backspace, \), and all other keys flow through normally.
++
++### What's preserved
++
++The v0.15.9.11 dispatch-level gate in `field_nav_handlekeys.inl::HandleKeys` (which BAT confirmed working) is left in place. It handles the mod's GetAsyncKeyState-read nav hotkeys (-, =, Backspace, \) during chase Auto -- those don't go through the kbBuf or FFNx, so the LL hook doesn't reach them either; the HandleKeys early-return remains the right tool for that path.
++
++The v0.15.9.11 kbBuf zeroing block in `field_nav_input_hooks.inl::HookedGetKeyState` is left in place as no-cost belt-and-suspenders (it can't fire because `*pKeyboardState` is always null; harmless dead code). A future cleanup can remove it once we've collected enough chase BATs to be confident the LL hook fully covers the case.
++
++### Compatibility
++
++- **NVDA users:** NVDA doesn't intercept arrow keys for FF8 (per Aaron's project memory). Our LL hook fires on Aaron's physical arrow presses and swallows them during chase Auto. ✅
++- **JAWS users:** JAWS intercepts arrow keys until Insert+3 passthrough is engaged. That's a pre-existing JAWS behavior, not a regression introduced by this hook. ✅
++- **Mod F-keys and info hotkeys:** Reach the OS normally, `GetAsyncKeyState` sees them as pressed, mod handlers fire as before. ✅
++- **S key for pause:** Not in the suppressed set, FF8 sees it normally. ✅
++
++### Expected v0.15.9.11.1 BAT
++
++Aaron picks **Auto** at the chase ASK. Auto-pilot engages as in v0.15.9.10 Auto. During the chase, Aaron presses arrow keys -- nothing happens, party continues running per the auto-pilot's intended direction. F-keys still adjust audio/TTS rate/volume. S still pauses. No `[CBF] PASS` lines on chase fields. Chase completes through to the Lapin Beach FMV.
++
++Verification markers in logs:
++
++- `Logs/ff8_mod.log`: `WH_KEYBOARD_LL hook installed (handle=0x...)` near session start.
++- `Logs/ff8_field.log`: `[v0.15.9.11.1] LL keyboard hook first suppressed key vk=0x...` on Aaron's first physical arrow press during chase Auto.
++- v0.15.9.11's `HandleKeys suppressor active` line also fires as before (Layer 2 unchanged).
++- v0.15.9.10's `chase ACTIVATED ... mode=auto`, `ChaseAutoPilot: ENGAGED`, no `[CBF]` lines, `chase DEACTIVATED ... battles_fired=0` markers all apply.
++
++### Risk
++
++Low. The hook is fully optional -- if `SetWindowsHookExW` fails, we log a warning and continue with the v0.15.9.11 layers (which still cover Layer 2). The swallow branch is tightly gated on chase Auto being engaged, so outside the chase it's a pure pass-through. Worst case (an unexpected key Aaron wants is in the suppressed set): remove it from `LowLevelKeyboardProc`'s `isArrow || isGameKey` check and re-BAT.
++
++### Files
++
++- `src/dinput8.cpp` -- `LowLevelKeyboardProc` + `InstallLowLevelKeyboardHook` + `UninstallLowLevelKeyboardHook` + DllMain wiring.
++- `src/ff8_accessibility.h` -- version bump.
++- `CHANGELOG.md` -- this entry.
++- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md` -- current state + BAT plan.
++
++## v0.15.9.11
++
++Keyboard suppressor during engaged Auto chase (Aaron's chase-scene item #3 -- the last chase-scene work item). Closes out the four-item chase scene cleanup that started 2026-05-12.
++
++### Aaron's design clarification
++
++FF8's default keyboard control set is arrows + W/A/D/X/S. v0.15.9.11 suppresses all of these except S (pause) during engaged Auto chase. Plus the mod's navigation hotkeys -, =, Backspace, \ are suppressed at the dispatch level since they bypass the engine keyboard buffer. Everything else (F-keys for audio/TTS control, mod info hotkeys like V/G/T/L/R/`/M/O) remains functional.
++
++### Two-pronged implementation
++
++**1. Engine keyboard buffer (kbBuf) zeroing -- `src/field_nav_input_hooks.inl::HookedGetKeyState`:**
++
++The pre-existing outer block (unchanged) zeros arrow scancodes (Up=0x48, Down=0x50, Left=0x4B, Right=0x4D) whenever `s_analogOverrideActive` is true. A new nested block gated on `::ChaseAutoPilot::IsEngaged() && ::ChaseDetector::GetChaseMode() == ::ChaseDetector::MODE_AUTO` additionally zeros:
++
++```cpp
++kbBuf[0x11] = 0;  // W (default walk modifier)
++kbBuf[0x1E] = 0;  // A (default rotate/move-left)
++kbBuf[0x20] = 0;  // D (default rotate/move-right)
++kbBuf[0x2D] = 0;  // X (default confirm)
++// 0x1F = S NOT zeroed (pause preserved)
++```
++
++The narrower predicate ensures F9 path-finding and world-map AD (which also use `s_analogOverrideActive` but on non-chase fields) aren't affected.
++
++**2. Mod hotkey dispatch gating -- `src/field_nav_handlekeys.inl::HandleKeys`:**
++
++The four mod navigation hotkeys (-, =, Backspace, \) read via `GetAsyncKeyState`, which **bypasses the engine keyboard buffer entirely**. The kbBuf zeroing doesn't reach them. So a chase-Auto early-return was added at the top of `HandleKeys` after the four key states are read:
++
++```cpp
++bool chaseAutoEngaged = ::ChaseAutoPilot::IsEngaged()
++                     && ::ChaseDetector::GetChaseMode() == ::ChaseDetector::MODE_AUTO;
++if (chaseAutoEngaged) {
++    // Preserve edge-detect state so post-chase presses fire cleanly.
++    s_minusWasDown  = minus;
++    s_plusWasDown   = plus;
++    s_bkspWasDown   = bksp;
++    s_driveWasDown  = drive;
++    return;
++}
++```
++
++The `s_*WasDown` statics are updated before the early-return so post-chase edge detection works correctly (no spurious edge if the user releases mid-chase; clean edge for a fresh press after chase ends).
++
++### What stays accessible
++
++- **F-keys (F1-F12)** for audio/TTS control: dispatched in `dinput8.cpp` and other modules, not affected by either suppression layer.
++- **S (pause)**: not in the kbBuf zero list.
++- **Mod info hotkeys** (V version, G/T/L/R for stat lookups, ` repeat, / help, M menu summary, O EWM, etc.): dispatched outside `HandleKeys` in dinput8.cpp, so the `HandleKeys` early-return doesn't reach them. They remain functional because they're informational and don't disrupt the chase route.
++- **Chase ASK navigation**: `IsEngaged()` requires `s_askAnswered`, so during ASK navigation the predicate is false and X confirm + arrow cursors work normally.
++
++### Predicate consistency
++
++Both layers (kbBuf zeroing in `field_nav_input_hooks.inl` and dispatch gating in `field_nav_handlekeys.inl`) use the same predicate: `::ChaseAutoPilot::IsEngaged() && ::ChaseDetector::GetChaseMode() == ::ChaseDetector::MODE_AUTO`. They activate and deactivate in lockstep with chase auto-pilot's engagement state.
++
++### Implementation
++
++Two-file touch plus header includes:
++
++- **`src/field_navigation.cpp`**: added `#include "chase_auto_pilot.h"` and `#include "chase_detector.h"` BEFORE the `namespace FieldNavigation { ... }` block so the chase namespaces reach the global scope (the `.inl` files are included INSIDE the namespace and reference chase via `::ChaseAutoPilot::` with the global scope operator).
++- **`src/field_nav_input_hooks.inl::HookedGetKeyState`**: nested predicate-gated block zeroing W/A/D/X (S preserved) plus one-time activation log line.
++- **`src/field_nav_handlekeys.inl::HandleKeys`**: chase-Auto early-return after key-state reads, with edge-detect static updates and one-time activation log line.
++
++### Expected v0.15.9.11 BAT
++
++Aaron triggers the chase, picks **Auto**. Chase plays out hands-off as in v0.15.9.10 Auto. During the chase, any of these presses are silently ignored:
++- W (walk modifier) - won't override auto-pilot's walk decision
++- A or D (rotate keys) - won't fight the analog override
++- X (confirm) - won't trigger entity interactions
++- - or = (entity catalog cycle) - won't disrupt the selected navigation target
++- Backspace (GPS toggle) - won't activate guided navigation
++- \ (auto-drive toggle) - already refused with a screen-reader message, now skipped silently
++
++S still pauses. F-keys still adjust audio/TTS. The chase completes through to the Lapin Beach FMV.
++
++For verification in `Logs/ff8_field.log`:
++- `FieldNavigation: [v0.15.9.11] chase Auto kb suppressor active: zeroing W A D X (W=%02X A=%02X D=%02X X=%02X) -- S preserved for pause ...` (one-time, kbBuf side)
++- `FieldNavigation: [v0.15.9.11] chase Auto HandleKeys suppressor active: -, =, Backspace, \ disabled until chase ends` (one-time, dispatch side)
++- All v0.15.9.10 Auto BAT markers still apply: no `[CBF]` lines on chase fields, chase completes.
++
++### Risk
++
++Low. Existing arrow-zeroing block untouched; new nested kbBuf block is additive and predicate-gated. `HandleKeys` early-return preserves edge-detect statics for clean post-chase behavior. If a specific suppressed key turns out to be needed during chase, remove it from the relevant list and re-BAT.
++
++### Files
++
++- `src/field_navigation.cpp` -- chase header includes before the namespace block.
++- `src/field_nav_input_hooks.inl` -- extended `HookedGetKeyState` with W/A/D/X zeroing (S preserved) + one-time activation log.
++- `src/field_nav_handlekeys.inl` -- chase-Auto early-return at top of `HandleKeys` + one-time activation log.
++- `src/ff8_accessibility.h` -- version bump.
++- `CHANGELOG.md` -- this entry.
++- `DEVNOTES.md`, `NEXT_SESSION_PROMPT.md` -- current state + BAT plan.
++
+ ## v0.15.9.10
+ 
+ MODE_ORIGINAL implementation (Aaron's chase-scene item #2). The third ASK option is now a real third mode that bypasses all mod chase machinery, letting the vanilla FF8 chase play out unmodified.
+diff --git a/DEVNOTES.md b/DEVNOTES.md
+index d21cdac..b02d7e5 100644
+--- a/DEVNOTES.md
++++ b/DEVNOTES.md
+@@ -4,24 +4,207 @@ Aaron is the sole developer of the FF8 Accessibility Mod -- a `dinput8.dll` inje
+ 
+ **Project root:** `C:/Users/ampag/OneDrive/Documents/FFVIII-Accessibility-Mod/FF8_OriginalPC_mod/`
+ 
+-GitHub: `ampage87/FFVIII-Accessibility-Mod`. **HEAD = v0.15.9.9.1** (pushed 2026-05-12). Local tree matches HEAD. v0.15.9.9.1 push squashed v0.15.9.9 / .9.1 into a single commit using the top CHANGELOG section as commit message.
++GitHub: `ampage87/FFVIII-Accessibility-Mod`. **HEAD = v0.15.9.10** (pushed 2026-05-12). Local tree matches HEAD.
+ 
+ ---
+ 
+-## Current state: v0.15.9.10 BAT SUCCESS -- MODE_ORIGINAL working as vanilla ✨
++## Current state: v0.15.9.11.1 BAT analysis -- TWO PROBLEMS confirmed, neither yet fixed
++
++v0.15.9.11.1 BAT ran twice. Aaron's empirical results forced a re-frame of what's actually broken.
++
++### Problem A: doopen2a auto-pilot regression (not keyboard, not scripted)
++
++**Aaron's confirmed facts (2026-05-12):**
++
++- v0.15.9.9 BAT had `cap=INT_MAX` in AUTO (battle suppression effectively disabled) AND 0 chase battles fired anywhere, including doopen2a. The auto-pilot was avoiding every robot trigger on its own.
++- **There is NO scripted always-fires encounter in doopen2a.** The party previously ran through the town square successfully (v0.15.9.8.1 BAT, v0.15.9.9 BAT). What we're seeing now is a real regression in the auto-pilot's path or behavior on doopen2a.
++- v0.15.9.11.1 hands-off BAT (no key presses): chase ran cleanly through domt4_1, domt3_2, domt5_1, etc. but failed on doopen2a at waypoint 6/26 -- chase-progress director (entityPtr=0x0188CA04) fired BATTLE.
++
++The `cap=INT_MAX` verification gate is **doing exactly what it was designed to do** -- surfacing a real auto-pilot regression as a `[CBF] PASS` line instead of silently NO-OP'ing it. **Do NOT revert `cap=INT_MAX` to `cap=0`.** Doing that would hide the regression behind a NO-OP and the chase would stall stuck on the field (auto-pilot disengaged on battle entry, no battle to return from).
++
++**Comment in `chase_battle_freeze.cpp` updated 2026-05-12** to lock this in: "v0.15.9.9 BAT result: 0 [CBF] PASS lines on any chase field including doopen2a. Auto-pilot proven self-sufficient with the suppression scaffold disabled -- there is NO scripted chase battle on doopen2a... KEEP cap=INT_MAX as a permanent verification gate -- any future [CBF] PASS line in AUTO mode is an immediate, visible auto-pilot regression we need to investigate, not silently NO-OP and hide."
++
++**What we need to investigate:** what changed between v0.15.9.9 (clean doopen2a transit) and v0.15.9.11.1 (caught at wp 6/26 with same target -952,-3800)? Candidate causes:
++
++- v0.15.9.10 `chase_kani_freeze.cpp` Update short-circuit -- short-circuits in MODE_ORIGINAL only, but verify no MODE_AUTO side effect.
++- v0.15.9.10 `chase_kani_freeze.cpp` RegisterChaseAgent short-circuit -- same MODE_ORIGINAL gate, verify.
++- v0.15.9.10 `chase_battle_freeze.cpp` MODE_ORIGINAL top-of-branch short-circuit -- runs before counter increment but after `inChase` gate; verify no MODE_AUTO side effect.
++- v0.15.9.11 `field_navigation.cpp` -- added `chase_auto_pilot.h` and `chase_detector.h` includes BEFORE the namespace block. Could a header include reorder change `s_kFieldConfigs` or other static initialization? Unlikely but worth checking.
++- v0.15.9.11 `field_nav_input_hooks.inl` HookedGetKeyState -- dead-code kbBuf zeroing; should have no runtime effect since `pKeyboardState` dereferences to 0.
++- v0.15.9.11 `field_nav_handlekeys.inl` HandleKeys early-return for -, =, Backspace, \ -- only fires for those four keys, can't affect doopen2a path.
++- v0.15.9.11.1 `dinput8.cpp` WH_KEYBOARD_LL hook -- O(1) per keystroke. Could it add per-frame latency that affects the path-finding tick rate?
++- Save state preserved between BATs (chase script global counters? field-state vars?) -- could affect chase-progress director's BATTLE trigger condition.
++- FFNx auto-update -- did FFNx change between Aaron's v0.15.9.9 BAT date and now?
++- Aaron's BAT entry route -- is he starting the chase from the same savefile point as v0.15.9.9 BAT?
++
++### Problem B: WH_KEYBOARD_LL hook is NOT suppressing arrow keys
++
++**Aaron's confirmed facts (2026-05-12):**
++
++- v0.15.9.11.1 first BAT (with arrow presses): caught on first chase field (domt4_1).
++- v0.15.9.11.1 second BAT (no key presses): made it past domt4_1 fine.
++- **Conclusion: arrow keys are still reaching FFNx/engine despite the WH_KEYBOARD_LL hook.** The hook DID suppress an X keyup at chase engagement (logs prove it fired), but Aaron's physical arrow presses during chase Auto are still affecting the auto-pilot.
++
++**Hypothesis:** FFNx replaces FF8's DirectInput keyboard path. If FFNx polls DirectInput in `DISCL_EXCLUSIVE | DISCL_FOREGROUND` mode, it reads the keyboard device buffer directly at a lower level than `WH_KEYBOARD_LL` can intercept. The X keyup we suppressed went through the standard Windows message queue path; arrow events might go through DirectInput exclusively, bypassing the LL hook entirely.
++
++Needs a diagnostic to confirm: log every key event the LL hook sees during chase Auto (with rate limiting per vk), so we can verify whether arrow keys reach our hook at all.
++
++### What I do NOT have evidence for (and should stop assuming)
++
++- That doopen2a has a scripted always-fires BATTLE on the chase-progress director. The v0.15.2.15 comment block describes the v0.15.2.14 BAT (the chase-progress director's BATTLE fired ONCE in that BAT) -- it doesn't claim that BATTLE fires every chase. The v0.15.9.9 BAT empirically proved it does not.
++- That reverting `cap=INT_MAX` to `cap=0` would fix anything. It would HIDE the doopen2a regression behind a NO-OP, then break the chase a different way (auto-pilot stays disengaged, party stuck on field).
++- That my next step should be more code. Both problems need investigation FIRST.
++
++### Next steps (no code shipped this session)
++
++1. **Wait for direction from Aaron** on which problem to tackle first (A or B).
++2. For Problem A: read `chase_kani_freeze.cpp` to verify the v0.15.9.10 short-circuits really are MODE_ORIGINAL-only. Read `field_navigation.cpp` to verify the v0.15.9.11 header-include reorder has no static-init side effect. Possibly ask Aaron whether his save-file entry point matches the v0.15.9.9 BAT entry point, and whether FFNx might have updated.
++3. For Problem B: design a diagnostic v0.15.9.11.2 that logs every key event the LL hook sees during chase Auto (vk, flags, isInjected, swallow decision), rate-limited per vk. One BAT cycle would confirm whether arrows bypass our hook or are reaching it but not being swallowed correctly.
++
++### Current build state
++
++- `chase_battle_freeze.cpp`: `cap = INT_MAX` in AUTO branch (RESTORED to v0.15.9.10 state with updated comment block explaining the v0.15.9.9 BAT result). Initialize log message restored to v0.15.9.10 wording.
++- `ff8_accessibility.h`: `FF8OPC_VERSION "0.15.9.11.1"` (no version bump yet).
++- `CHANGELOG.md`: no v0.15.9.11.2 entry.
++- `NEXT_SESSION_PROMPT.md`: still references v0.15.9.11.1 work.
++
++---
++
++## v0.15.9.11.1 READY-TO-BAT -- WH_KEYBOARD_LL hook fixes the Layer 1 kbBuf failure from v0.15.9.11 BAT
++
++**v0.15.9.11.1 implemented 2026-05-12.** Fixes Aaron's v0.15.9.11 BAT failure where arrow presses interrupted chase Auto.
++
++### v0.15.9.11 BAT root cause
++
++The mod log smoking gun:
++
++```
++[13:14:15][MOD] FF8Addresses:   pKeyboardState (byte**) = 0x01CD02D8 (val=0x00000000)
++```
++
++The pointer resolved, but `*pKeyboardState` was always nullptr -- FFNx replaces FF8's DirectInput keyboard path with its own implementation, so the engine's keyboard buffer is never populated. The `if (kbBuf)` guard in `HookedGetKeyState` always fell through, both the v05.89 arrow-zeroing block and the v0.15.9.11 W/A/D/X extension never ran. Neither activation log line ever fired in the BAT log.
++
++Layer 2 (HandleKeys gate for -, =, Backspace, \) worked correctly -- those go through `GetAsyncKeyState`, not the kbBuf or FFNx. Only Layer 1 (kbBuf) was broken.
++
++Aaron pressed arrow keys; they reached the engine via FFNx; the auto-pilot was interrupted; `[CBF] PASS` fired at 13:17:23 just 2 seconds after engagement.
++
++### v0.15.9.11.1 fix: WH_KEYBOARD_LL hook
++
++Install a Windows low-level keyboard hook in `dinput8.cpp::DllMain DLL_PROCESS_ATTACH`. The hook sits ABOVE FFNx in the input chain -- physical key events come from the OS, hit our hook first, and never reach FFNx or the engine if we swallow them.
++
++- **Swallow during chase Auto:** arrows + W/A/D/X.
++- **Preserve always:** S (pause), F-keys (audio/TTS), V/G/T/L/R/`/etc. info hotkeys, and all other keys.
++- **Auto-pilot's own SendInput-injected arrows pass through:** detected via `KBDLLHOOKSTRUCT.flags & LLKHF_INJECTED`.
++- **Mod GetAsyncKeyState hotkeys still work:** the hook doesn't touch F-keys, V, G/T/L/R, etc. -- they reach the OS normally.
++- **Tight gate:** swallow branch only fires when `ChaseAutoPilot::IsEngaged() && ChaseDetector::GetChaseMode() == MODE_AUTO`. Outside chase Auto it's a pure pass-through.
++- **O(1) hook proc:** read flags, compare vkCode, check chase state -- well within the Windows LL hook timeout.
++- **Cross-thread safe:** hook fires on game main thread; chase state set on accessibility thread; x86 atomic bool/enum reads -- no locks needed.
++
++### What's preserved from v0.15.9.11
++
++- The HandleKeys early-return for -, =, Backspace, \ -- those keys never go through the kbBuf or FFNx, so the LL hook doesn't reach them; HandleKeys remains the right gate.
++- The v0.15.9.11 kbBuf zeroing block in `HookedGetKeyState` is left in place as no-cost belt-and-suspenders (always dead code because `*pKeyboardState` is always null). A future cleanup can remove it.
++
++### Implementation
++
++- `src/dinput8.cpp`:
++  - `LowLevelKeyboardProc` -- hook proc with `LLKHF_INJECTED` check and chase-Auto gate.
++  - `InstallLowLevelKeyboardHook` -- called from DllMain DLL_PROCESS_ATTACH.
++  - `UninstallLowLevelKeyboardHook` -- called from DllMain DLL_PROCESS_DETACH before signaling the worker thread to stop.
++  - One-time activation log on first suppressed key during chase Auto.
++
++### BAT plan
++
++Aaron triggers the chase, picks **Auto**. Expects hands-off completion as in v0.15.9.10. **Key test: Aaron presses arrow keys during the chase.** Expected: nothing happens, party continues per auto-pilot's direction.
++
++Verification in `Logs/ff8_mod.log`:
++
++```
++[v0.15.9.11.1] WH_KEYBOARD_LL hook installed (handle=0x...)
++```
++
++Verification in `Logs/ff8_field.log`:
++
++```
++[v0.15.9.11.1] LL keyboard hook first suppressed key vk=0x... (flags=0x...) during chase Auto
++```
++
++No `[CBF] PASS` lines on chase fields. Chase completes through to Lapin Beach FMV.
++
++### Risk
++
++Low. The hook is fully optional -- failure logs a warning, mod continues with v0.15.9.11 layers. Worst case (a key Aaron wants is unexpectedly swallowed): remove it from `LowLevelKeyboardProc`'s candidate set.
++
++---
++
++## Pre-v0.15.9.11.1 history (kept for context)
++
++## v0.15.9.11 BAT FAILURE (kbBuf layer silent, arrows reached engine via FFNx)
++
++Layer 2 (HandleKeys gate) worked. Layer 1 (kbBuf zeroing) never fired. Diagnosed by reading `Logs/ff8_mod.log` for the `pKeyboardState (byte**) = ... val=0x00000000` line. v0.15.9.11.1 ships a WH_KEYBOARD_LL hook to bypass the FFNx keyboard path entirely.
++
++**v0.15.9.11 READY-TO-BAT 2026-05-12.** Aaron's chase-scene item #3 implemented, awaiting BAT. This is the **last item** in the four-item chase scene cleanup that started 2026-05-12.
++
++### Design (revised per Aaron's 2026-05-12 clarification)
++
++FF8's default keyboard control set is arrows + W/A/D/X/S. Suppress all of these EXCEPT S (pause) during engaged Auto chase. Also disable the mod's four navigation hotkeys -, =, Backspace, \. Everything else (F-keys for audio/TTS, mod info hotkeys like V/G/T/L/R/`/M/O) stays functional.
++
++Two layers needed because the keys are read through different paths:
++
++**Layer 1 -- engine kbBuf zeroing** in `field_nav_input_hooks.inl::HookedGetKeyState`:
++- Arrow scancodes (existing v05.89 outer block, unchanged): Up=0x48, Down=0x50, Left=0x4B, Right=0x4D
++- New chase-Auto-gated inner block adds: W=0x11, A=0x1E, D=0x20, X=0x2D
++- S=0x1F deliberately NOT zeroed (pause preserved)
++
++**Layer 2 -- mod dispatch gating** in `field_nav_handlekeys.inl::HandleKeys`:
++- The four mod hotkeys -, =, Backspace, \ read via `GetAsyncKeyState` which bypasses kbBuf entirely. So a chase-Auto early-return at the top of `HandleKeys` (after key reads, before any handler fires) suppresses them. Edge-detect statics (`s_minusWasDown` etc.) are updated before the return so post-chase presses fire cleanly.
++
++Both layers use the same predicate: `::ChaseAutoPilot::IsEngaged() && ::ChaseDetector::GetChaseMode() == ::ChaseDetector::MODE_AUTO`. They activate and deactivate in lockstep.
++
++### What stays accessible
++
++- F-keys for audio/TTS (dispatched in dinput8.cpp, untouched)
++- S key for pause (excluded from kbBuf zero list)
++- Mod info hotkeys V, G/T/L/R, `, /, M, O, etc. (dispatched outside HandleKeys)
++- Chase ASK navigation (predicate is false during ASK because `IsEngaged()` requires `s_askAnswered`)
++
++### Implementation
++
++- `src/field_navigation.cpp`: `#include "chase_auto_pilot.h"` + `#include "chase_detector.h"` BEFORE the namespace block.
++- `src/field_nav_input_hooks.inl::HookedGetKeyState`: nested predicate-gated W/A/D/X zeroing block (S preserved) + one-time activation log.
++- `src/field_nav_handlekeys.inl::HandleKeys`: chase-Auto early-return after key-state reads + edge-detect static updates + one-time activation log.
++
++### BAT plan
++
++Aaron triggers the chase, picks **Auto**. Expects hands-off chase as in v0.15.9.10 Auto BAT (no battles, full completion). Any accidental presses of W/A/D/X/-/=/Backspace/\ are silently ignored. S still pauses. F-keys still adjust audio/TTS.
++
++Verification in `Logs/ff8_field.log`:
++- One-time kbBuf-side activation: `FieldNavigation: [v0.15.9.11] chase Auto kb suppressor active: zeroing W A D X ...`
++- One-time dispatch-side activation: `FieldNavigation: [v0.15.9.11] chase Auto HandleKeys suppressor active: -, =, Backspace, \ disabled until chase ends`
++- No `[CBF]` lines on chase fields; chase completes through to Lapin Beach FMV.
++
++### Risk
++
++Low. Existing arrow-zeroing untouched. New blocks are additive and predicate-gated. If a specific suppressed key turns out to be needed during chase, remove it from the relevant list.
++
++---
++
++## Pre-v0.15.9.11 history (kept for context)
++
++## v0.15.9.10 BAT SUCCESS -- MODE_ORIGINAL working as vanilla ✨
+ 
+ **v0.15.9.10 BAT SUCCESS 2026-05-12.** Aaron: "I believe that worked. The robot got up shortly after battles as expected in vanilla ff8." The short-circuits in chase_battle_freeze, chase_kani_freeze, and the auto-pilot's natural MODE_AUTO-only engagement gate all cooperated: no mod chase machinery activated, chase battles fired as Square shipped them, and the X-ATM092 wakeup-after-battle behavior (which v0.15.2.x worked hard to suppress in MANUAL/AUTO) is back exactly as the vanilla engine implements it. Aaron's chase-scene item #2 complete.
+ 
+-### Chase scene status -- ALL ITEMS DONE
++### Chase scene status -- ALL ITEMS DONE except this last BAT
+ 
+-Aaron's four chase-scene items (2026-05-12 list) are now complete:
++Aaron's four chase-scene items (2026-05-12 list):
+ - [x] **#4** (ASK dialog text revisions): shipped in v0.15.9.9, BAT-confirmed, pushed.
+ - [x] **#1** (verify auto-pilot self-sufficient): v0.15.9.9 BAT proved auto-pilot does all the work; pushed.
+ - [x] **(post-BAT cleanup)** duplicate "Let's go!" line: fixed in v0.15.9.9.1, pushed.
+-- [x] **#2** (MODE_ORIGINAL): shipped in v0.15.9.10, BAT-confirmed, awaiting push.
+-- [ ] **#3** (keyboard suppressor during Auto chase): scheduled for v0.15.9.11.
++- [x] **#2** (MODE_ORIGINAL): shipped in v0.15.9.10, BAT-confirmed, pushed.
++- [x] **#3** (keyboard suppressor during Auto chase): shipped in v0.15.9.11, awaiting BAT.
+ 
+-After #3 ships and BATs, the chase scene work is fully closed.
++After v0.15.9.11 BATs and pushes, the four-item chase scene cleanup is fully closed.
+ 
+ ### Push state
+ 
+@@ -894,7 +1077,8 @@ The INF gateway insight from v0.15.9.2.14's failure: SETLINE Line entities can b
+ 
+ ## Recent history
+ 
+-- **v0.15.9.10** -- **BAT SUCCESS 2026-05-12.** MODE_ORIGINAL working as vanilla; robot wakeup behavior intact. Awaiting push.
++- **v0.15.9.11** -- READY-TO-BAT 2026-05-12. Keyboard suppressor during engaged Auto chase. Aaron's chase-scene item #3 -- the last chase-scene work item.
++- **v0.15.9.10** -- **BAT SUCCESS 2026-05-12. Pushed.** MODE_ORIGINAL working as vanilla; robot wakeup behavior intact.
+ - **v0.15.9.9.1** -- **BAT SUCCESS 2026-05-12. Pushed.** Duplicate Squall "Let's go!" line at chase ASK open eliminated.
+ - **v0.15.9.9** -- BAT SUCCESS 2026-05-12 (auto-pilot proven self-sufficient). Cap=INT_MAX verification + ASK text revisions. Squashed into v0.15.9.9.1 push.
+ - **v0.15.9.8.3** -- **BAT SUCCESS 2026-05-12.** Pushed. 0 catches across the entire chase route. Bridge dance + kani-slot override worked exactly as designed. The asymmetric EAST/WEST state machine tricked X-ATM092 into a wasted westward leap during which the party slipped past to the east-edge SETLINE.
+@@ -938,8 +1122,13 @@ The INF gateway insight from v0.15.9.2.14's failure: SETLINE Line entities can b
+ 
+ Chase auto-pilot catch elimination is COMPLETE (v0.15.9.8.3 pushed). Remaining chase scene work focuses on verification, the third ASK option, input safety, and ASK dialog polish.
+ 
+-1. **Push v0.15.9.10 to GitHub.** Aaron runs `Utilities/push_to_github.vbs`. Will land as its own commit (no squash, since one version ahead of HEAD).
+-2. **v0.15.9.11 -- Keyboard suppressor during Auto chase** (Aaron's item #3, the last chase-scene item). Extend `HookedGetKeyState` in `field_nav_input_hooks.inl` to zero W (0x11), ESC (0x01), and FF8 confirm/cancel/menu scancodes when `ChaseAutoPilot::IsEngaged() && ChaseDetector::GetChaseMode() == MODE_AUTO`. Accessibility hotkeys (read via `GetAsyncKeyState` in mod-owned code) bypass the keyboard buffer entirely so they're unaffected.
++1. **BAT v0.15.9.11**: keyboard suppressor during Auto chase. READY-TO-BAT. Aaron picks Auto at the chase ASK, then verifies the chase plays out hands-off as in v0.15.9.10 Auto (no battles, full completion). Optionally tests the suppression by pressing W mid-chase to confirm the walk state doesn't flip. After BAT, push v0.15.9.11 -- closes out the chase scene cleanup.
++2. **Chase scene work is COMPLETE** after the v0.15.9.11 push. Next focus areas (from project memory):
++   - Walk-and-talk dialog gap (hardcoded engine path, no easy hook)
++   - SeeD rank bug #27 (FIELD_H_OFFSET = 0xF94 hypothesis)
++   - Refined-coord narrow-gate steering (#29)
++   - Fire Cavern entry (#28) + planner-fallback (#29)
++   - Remove party members from field entity catalog
+ 
+ 5. **Push v0.15.9.9+ to GitHub** after each verification cycle. Aaron runs `Utilities/push_to_github.vbs`. Claude does NOT push.
+ 6. **Cleanup of BridgeDiag verbosity** (low priority, can fold into v0.15.10). With the dance proven, the 10Hz per-sample BridgeDance log + the 10Hz BridgeDiag all-slots dump is noise on every BAT. Trim to transition-only events.
+diff --git a/NEXT_SESSION_PROMPT.md b/NEXT_SESSION_PROMPT.md
+index 655a250..5d51ce9 100644
+--- a/NEXT_SESSION_PROMPT.md
++++ b/NEXT_SESSION_PROMPT.md
+@@ -1,101 +1,143 @@
+-# Next Session Prompt -- v0.15.9.10 READY-TO-BAT (MODE_ORIGINAL)
++# Next Session Prompt -- v0.15.9.11 READY-TO-BAT (keyboard suppressor, revised)
+ 
+-**Build state:** v0.15.9.10 implemented 2026-05-12, awaiting build. Aaron's chase-scene item #2 complete: the third ASK option ("Original") is now a real third chase mode that bypasses all mod chase machinery and lets the vanilla FF8 chase play out unmodified.
++**Build state:** v0.15.9.11 implemented 2026-05-12, awaiting build. Aaron's chase-scene item #3 -- **the last item in the four-item chase scene cleanup**. After this BATs and pushes, the chase scene work is fully closed.
+ 
+-**HEAD on GitHub:** v0.15.9.9.1 (pushed 2026-05-12). Local tree is one version ahead at v0.15.9.10 awaiting BAT.
++**HEAD on GitHub:** v0.15.9.10 (pushed 2026-05-12). Local tree is one version ahead at v0.15.9.11 awaiting BAT.
+ 
+ ## Read first
+ 
+-1. `DEVNOTES.md` -- current state (v0.15.9.10 READY-TO-BAT section at top, plus v0.15.9.9.1 BAT success preserved for context).
++1. `DEVNOTES.md` -- current state (v0.15.9.11 READY-TO-BAT section at top, revised per Aaron's 2026-05-12 clarification).
+ 2. This file -- BAT plan and verification markers.
+ 
+-## What just landed (v0.15.9.10)
++## Aaron's 2026-05-12 clarification
+ 
+-Five-file touch implementing MODE_ORIGINAL as a real third chase mode:
++> "the game's default controls are the arrow keys as well as W, A, D, X, and S keys. We should make sure we suppress all of these keys except for S, which is just the game's pause function. We should also disable the mod's entity catalog - and = keys, as well as the backspace and \\ shortcuts for setting navigation targets. Essentially, we're disabling everything except the F# keys for audio/TTS control and S to pause."
+ 
+-### 1. `src/chase_detector.h`
++The implementation revised to match: W/A/D/X suppressed (S preserved), plus mod hotkeys -, =, Backspace, \\ suppressed at the dispatch level.
+ 
+-Added `MODE_ORIGINAL = 2` to the `Mode` enum with rationale comments. Backward-compatible (MODE_MANUAL=0 and MODE_AUTO=1 unchanged).
++## What landed in v0.15.9.11
+ 
+-### 2. `src/chase_detector.cpp`
++### Two-pronged suppression
+ 
+-- `LoadChaseModeFromIni`: accepts `"original"` string -> `MODE_ORIGINAL`.
+-- `ChaseModeName`: switch statement returns `"original"` for `MODE_ORIGINAL` (previously a ternary; rewritten for three cases).
++The keys are read through two different paths, so the suppression takes two layers.
+ 
+-### 3. `src/chase_battle_freeze.cpp::Hook_opcode_battle`
++**Layer 1 -- engine kbBuf zeroing** in `src/field_nav_input_hooks.inl::HookedGetKeyState`:
+ 
+-Short-circuit at top of the `if (inChase)` branch. When `mode == MODE_ORIGINAL`, returns `s_origBattle(entityPtr)` immediately with no chase-counter increment, no `[CBF] PASS`/`NO-OP` log, no `RegisterChaseAgent` call. Vanilla FF8 chase battles fire as Square shipped them. Reordered so `mode` is read before `s_chaseCallCount` is incremented (the short-circuit needs to happen before any chase counter touches). Initialize log message updated.
++Pre-existing outer block (unchanged) zeros arrow scancodes (Up=0x48, Down=0x50, Left=0x4B, Right=0x4D) whenever `s_analogOverrideActive` is true.
+ 
+-### 4. `src/chase_kani_freeze.cpp`
++New inner block gated on `::ChaseAutoPilot::IsEngaged() && ::ChaseDetector::GetChaseMode() == ::ChaseDetector::MODE_AUTO` adds:
+ 
+-- `Update`: short-circuit before reading `pGameMode`. If `s_freezeActive` is true from a previous mode (e.g. user changed mode mid-chase via INI), `DeactivateFreeze` runs cleanly so no stale pin keeps writing.
+-- `RegisterChaseAgent`: short-circuit immediately after the `!entityPtr` early return -- belt-and-suspenders in case any future code path calls it bypassing chase_battle_freeze.
++```cpp
++kbBuf[0x11] = 0;  // W (default walk modifier)
++kbBuf[0x1E] = 0;  // A (default rotate/move-left)
++kbBuf[0x20] = 0;  // D (default rotate/move-right)
++kbBuf[0x2D] = 0;  // X (default confirm)
++// 0x1F = S NOT zeroed (pause preserved)
++```
++
++One-time activation log fires the first time the inner block runs per session.
++
++**Layer 2 -- mod dispatch gating** in `src/field_nav_handlekeys.inl::HandleKeys`:
++
++The four mod navigation hotkeys (-, =, Backspace, \\) read via `GetAsyncKeyState`, which bypasses the engine keyboard buffer. The kbBuf zeroing doesn't reach them. Chase-Auto early-return added at the top of `HandleKeys` after key-state reads:
+ 
+-### 5. `src/chase_ask_overlay.cpp::CommitChoice`
++```cpp
++bool chaseAutoEngaged = ::ChaseAutoPilot::IsEngaged()
++                     && ::ChaseDetector::GetChaseMode() == ::ChaseDetector::MODE_AUTO;
++if (chaseAutoEngaged) {
++    // Preserve edge-detect state so post-chase presses fire cleanly.
++    s_minusWasDown  = minus;
++    s_plusWasDown   = plus;
++    s_bkspWasDown   = bksp;
++    s_driveWasDown  = drive;
++    return;
++}
++```
++
++One-time activation log fires the first time this gate fires per session.
+ 
+-`ANSWER_ORIGINAL` branch now sets `ChaseDetector::MODE_ORIGINAL` instead of `MODE_MANUAL`. Comment updated to describe the new behavior.
++### `src/field_navigation.cpp`
+ 
+-### Not changed
++Two `#include` lines added BEFORE the `namespace FieldNavigation { ... }` block opens:
++
++```cpp
++#include "chase_auto_pilot.h"
++#include "chase_detector.h"
++```
+ 
+-`chase_auto_pilot` -- its engagement gate already requires `mode == MODE_AUTO`, so MODE_ORIGINAL naturally fails the gate and the auto-pilot stays disengaged. Verified via inspection: line 1933, `bool autoMode = (ChaseDetector::GetChaseMode() == ChaseDetector::MODE_AUTO);`.
++This makes the chase namespaces reachable from inside FieldNavigation via the `::Name::` global-scope-operator references used in the `.inl` files.
+ 
+-## BAT plan for v0.15.9.10
++## What stays accessible
+ 
+-Aaron's BAT cycle:
++- **F-keys (F1-F12)** for audio/TTS control: dispatched in `dinput8.cpp` and other modules outside HandleKeys, untouched by both layers.
++- **S key**: not in the kbBuf zero list, so pause still works mid-chase.
++- **Mod info hotkeys** (V version, G/T/L/R for stat lookups, ` repeat, / help, M menu summary, O EWM, 1/2/3/H battle HP): dispatched outside `HandleKeys` in dinput8.cpp; the HandleKeys early-return doesn't reach them.
++- **Chase ASK navigation**: `IsEngaged()` requires `s_askAnswered` (the v0.15.9.2.10 gate), so the predicate is false during the chase ASK itself. The player can use arrow keys to navigate the three options and X to confirm normally.
++
++## BAT plan
+ 
+ 1. `deploy.vbs` -> `src/deploy.ps1` -> `src/deploy.bat`.
+-2. Launch FF8. Listen for the startup log via mod loader; if Aaron previously committed Auto from v0.15.9.9.1's BAT, the INI will say `chase_mode=auto` and a fresh chase would default to Auto. That's fine -- the ASK will fire again and Aaron picks Original this time.
++2. Launch FF8. The INI may still say `chase_mode=original` from v0.15.9.10's BAT -- doesn't matter, the ASK fires again and Aaron picks Auto.
+ 3. Load the save near chase start.
+-4. Trigger the chase. Listen for:
+-   - Squall's "Forget it! Let's go!" line ONCE via AMESW.
++4. Trigger the chase. Listen for the standard sequence:
++   - Squall's "Forget it! Let's go!" line once.
+    - 3 seconds elapse.
+-   - New ASK prompt: "X-ATM092 is heading right for you. How do you want to run?"
+-   - Three option labels read out as cursor navigates.
+-5. **Choose Original.** Listen for: "Original selected".
+-6. Experience the vanilla chase: walk west on the trail, get caught by chase battles, robot pursues, ground shakes, etc.
+-7. Optional persistence check: after the chase, exit FF8 and inspect `ff8_accessibility.ini` -- should show `chase_mode=original` under `[Chase]` section.
++   - ASK prompt + three option labels.
++5. **Pick Auto.** Confirm "Automatic selected" announcement.
++6. Experience the chase hands-off -- same behavior as v0.15.9.10 Auto BAT.
++7. **Optional suppression spot-checks during the chase:**
++   - Press W. Walk state should NOT flip (auto-pilot's run-east decision on domt4_1 stays authoritative).
++   - Press - or =. No "entity catalog cycle" speech.
++   - Press Backspace. No "Navigation off" / "Guiding..." speech.
++   - Press \\. No "Auto-drive unavailable" speech (the existing refusal is replaced by silent skip).
++   - Press S. Chase should pause normally.
++8. After the chase, exit FF8 and check `Logs/ff8_field.log` for the two activation log lines.
+ 
+ ### Verification markers in Logs/ff8_field.log
+ 
+-**At mod load (startup):**
++**kbBuf layer activation (first time the inner block runs):**
+ 
+ ```
+-ChaseBattleFreeze: Initialized v0.15.9.10 (... MODE_ORIGINAL short-circuits before any chase logic so vanilla chase plays out unmodified ...)
+-ChaseDetector: loaded chase_mode='<previous>' from INI
++FieldNavigation: [v0.15.9.11] chase Auto kb suppressor active: zeroing W A D X (W=00 A=00 D=00 X=00) -- S preserved for pause, F-keys + mod GetAsyncKeyState hotkeys untouched (mod hotkeys gated separately in HandleKeys)
+ ```
+ 
+-**After ASK commits Original:**
++**HandleKeys layer activation (first time the gate fires):**
+ 
+ ```
+-ChaseAskOverlay: committed choice = 3 (Original: vanilla chase, no mod help)
+-ChaseDetector: chase_mode set to 'original' (persisted)
++FieldNavigation: [v0.15.9.11] chase Auto HandleKeys suppressor active: -, =, Backspace, \ disabled until chase ends
+ ```
+ 
+-**On chase ACTIVATED:**
+-
+-```
+-ChaseDetector: chase ACTIVATED on entry to 'domt4_1' (mode=original, baseline calls=N freezes=0)
+-```
++**Otherwise, same markers as v0.15.9.10 Auto BAT:**
+ 
+-**Throughout the chase fields:**
+-
+-- **No `[CBF]` lines** (PASS or NO-OP). The short-circuit returns `s_origBattle` before any logging.
+-- **No `KaniFreeze:` lines** (no FREEZE ACTIVATED, no CAPTURE STARTED, no CHASE-AGENT). The Update short-circuit bails before any of that work runs.
+-- **No `ChaseAutoPilot: ENGAGED` lines.** Auto-pilot's engagement gate naturally skips MODE_ORIGINAL.
+-
+-**Battles WILL fire** and appear in `Logs/ff8_battle.log` as normal battle activity (BTL_START, battle TTS, battle command menus, etc.). The party WILL get caught by X-ATM092 -- that's the vanilla behavior, which is what Original mode delivers.
++- `ChaseDetector: chase ACTIVATED on entry to 'domt4_1' (mode=auto, baseline calls=N freezes=0)`
++- `ChaseAutoPilot: ENGAGED ...` lines for each chase field
++- No `[CBF]` lines (auto-pilot proven self-sufficient from v0.15.9.9)
++- Chase completes through to the Lapin Beach FMV
++- `ChaseDetector: chase DEACTIVATED ... CHASE-END SUMMARY mode=auto battles_fired=0 battles_suppressed=0`
+ 
+ ### Outcomes
+ 
+-- **Best (mode works cleanly):** Aaron experiences the vanilla chase end-to-end. No mod chase machinery activates. Log markers as above. Push v0.15.9.10 and move to item #3.
+-- **Acceptable (chase works but some log noise):** A path was missed. Aaron sees the vanilla behavior, but the log has stray `[CBF]` or `KaniFreeze:` lines. Diagnose which path, add a short-circuit in v0.15.9.10.1.
+-- **Worst (mode doesn't behave as vanilla):** Something unexpected. E.g. battles get suppressed despite the short-circuit, or auto-pilot engages. Revert the ASK routing to MODE_MANUAL in v0.15.9.10.1 to restore working behavior, then diagnose.
++- **Best (both layers work):** Auto chase plays identically to v0.15.9.10 Auto, but suppression spot-checks confirm W/A/D/X/-/=/Backspace/\\ are silently ignored. S still pauses. F-keys still work. Both activation log lines fired. Push v0.15.9.11 -- chase scene work is COMPLETE.
++- **Acceptable (one layer works, other has issue):** Logs show which side activated. Diagnose the broken side and ship a fix in v0.15.9.11.1.
++- **Worst (Aaron's intended Auto behavior breaks):** Some legitimate engine path needed one of the suppressed keys. Remove the offending scancode from the relevant list and re-BAT.
++
++## After v0.15.9.11 BAT
+ 
+-## After v0.15.9.10 BAT
++1. **Push v0.15.9.11 to GitHub.** Aaron runs `Utilities/push_to_github.vbs`. Will land as its own commit on top of v0.15.9.10.
++2. **Chase scene cleanup is COMPLETE.** All four items from Aaron's 2026-05-12 list are done. Update DEVNOTES to mark the chase scene work fully closed.
++3. **Next focus areas** (from project memory's "On the horizon"):
++   - Walk-and-talk dialog gap (hardcoded engine path, no easy hook)
++   - SeeD rank bug #27 (FIELD_H_OFFSET = 0xF94 hypothesis)
++   - Refined-coord narrow-gate steering (#29)
++   - Fire Cavern entry (#28) + planner-fallback (#29)
++   - Remove party members from field entity catalog
+ 
+-1. **Push v0.15.9.10 to GitHub.** Aaron runs `Utilities/push_to_github.vbs`.
+-2. **v0.15.9.11 -- Keyboard suppressor during Auto chase** (Aaron's item #3). Last item in the chase scene work. Extend `HookedGetKeyState` in `field_nav_input_hooks.inl` to zero W (0x11), ESC (0x01), and FF8 confirm/cancel/menu scancodes when `ChaseAutoPilot::IsEngaged() && ChaseDetector::GetChaseMode() == MODE_AUTO`. Accessibility hotkeys bypass the keyboard buffer (read via `GetAsyncKeyState` in mod-owned code) so they're unaffected. Predicate is narrowly scoped: only fires during engaged Auto chase; Manual/Original chases are untouched; F9 path-finding and world-map AD are untouched.
++## Low-priority cleanup that's accumulated
+ 
+-## Mid-chase mode swap edge case (already handled)
++After the chase scene closes, there's some cleanup that's been accumulating across the chase work:
+ 
+-If Aaron edits `ff8_accessibility.ini` mid-chase to flip mode (which is admittedly unusual), `chase_kani_freeze::Update`'s MODE_ORIGINAL short-circuit calls `DeactivateFreeze("chase mode switched to MODE_ORIGINAL")` to release any active freeze cleanly. Documented in the implementation comments. Not part of the BAT plan but worth knowing.
++- **BridgeDiag verbosity cleanup**: 10Hz per-sample BridgeDance log + 10Hz BridgeDiag all-slots dump is noise on every BAT now that the dance is proven. Trim to transition-only events.
++- **deploy.bat "Version: SINGLE-PRONGED" regex regression** from v0.15.3 -- still in the backlog.
++- **WALK_REPRESS_PERIOD constant** + s_walkRepressCounter/Logged statics in field_nav_directiondrive.inl -- vestigial from v0.15.9.7.1, safe to delete.
++- **Finding #35 lesson doc entry**: SYM-name-resolution-fallback insight from v0.15.9.8.3 (the `ApplyPerFieldKaniOverride` pattern).
++- **CHASE-AGENT FINAL SUMMARY log regression** from v0.15.3 (log inside DeactivateFreeze before clearing agent state) -- v0.15.3.1 candidate.
+diff --git a/src/chase_battle_freeze.cpp b/src/chase_battle_freeze.cpp
+index 6f10b6e..4bdf4ad 100644
+--- a/src/chase_battle_freeze.cpp
++++ b/src/chase_battle_freeze.cpp
+@@ -123,6 +123,16 @@ static int __cdecl Hook_opcode_battle(int entityPtr)
+         // regression is addressed. MANUAL cap stays at 1 (the scripted
+         // first-battle-per-field pass-through preserves vanilla MANUAL
+         // behavior).
++        //
++        // v0.15.9.9 BAT result (Aaron, 2026-05-12): 0 [CBF] PASS lines
++        // on any chase field including doopen2a. Auto-pilot proven
++        // self-sufficient with the suppression scaffold disabled --
++        // there is NO scripted chase battle on doopen2a; the auto-pilot's
++        // A*+funnel path through the town square avoids whatever trigger
++        // condition caused the v0.15.2.14 BATTLE. KEEP cap=INT_MAX as a
++        // permanent verification gate -- any future [CBF] PASS line in
++        // AUTO mode is an immediate, visible auto-pilot regression we
++        // need to investigate, not silently NO-OP and hide.
+         int  cap    = (mode == ChaseDetector::MODE_AUTO) ? INT_MAX : 1;
+         bool freeze = (battleCount >= cap);
+ 
+diff --git a/src/dinput8.cpp b/src/dinput8.cpp
+index d471b7e..e95a159 100644
+--- a/src/dinput8.cpp
++++ b/src/dinput8.cpp
+@@ -55,6 +55,134 @@ static DirectInput8Create_t pDirectInput8Create = nullptr;
+ static HMODULE hOriginalDll = nullptr;
+ static HMODULE hOurModule = nullptr;  // Our DLL's HMODULE, for locating Audio Descriptions folder
+ 
++// ============================================================================
++// v0.15.9.11.1: Low-level keyboard hook for chase Auto key suppression
++// ============================================================================
++//
++// Background. v0.15.9.11 tried to suppress arrows + W/A/D/X via two layers:
++// (1) zeroing the engine keyboard buffer in HookedGetKeyState
++// (field_nav_input_hooks.inl), and (2) early-returning from HandleKeys for
++// the mod's GetAsyncKeyState hotkeys (field_nav_handlekeys.inl). Layer 2
++// worked. Layer 1 did NOT -- the v0.15.9.11 BAT log shows pKeyboardState
++// resolved successfully (0x01CD02D8) but its DEREFERENCED value stayed
++// 0x00000000 at all times. FFNx replaces FF8's DirectInput keyboard path
++// with its own implementation, so the original engine kbBuf is never
++// populated. Our zeroing block falls through the `if (kbBuf)` guard and
++// silently does nothing.
++//
++// Aaron's v0.15.9.11 BAT: pressed arrow keys during chase Auto, the arrows
++// reached the engine through FFNx (bypassing kbBuf), interrupted the auto-
++// pilot, and a chase battle fired.
++//
++// Fix. Install a Windows low-level keyboard hook (WH_KEYBOARD_LL). This
++// sits ABOVE FFNx in the input chain -- physical key events come from the
++// OS, hit our hook first, and never reach FFNx or the engine if we swallow
++// them. Auto-pilot's SendInput-injected arrows are flagged LLKHF_INJECTED
++// in KBDLLHOOKSTRUCT.flags and pass through cleanly. Aaron's physical
++// presses do not.
++//
++// Scope (matching Aaron's 2026-05-12 design clarification):
++//   Swallow during chase Auto: arrows + W/A/D/X.
++//   Preserve: S (pause), F-keys (audio/TTS control), and all other keys.
++//
++// The hook ONLY swallows when chase auto-pilot is engaged in MODE_AUTO.
++// Outside the chase, it returns CallNextHookEx unchanged so all input
++// flows normally.
++//
++// Hook proc constraints. Windows enforces a timeout on LL hooks; if the
++// proc takes too long, Windows unhooks us. Our check is O(1): read flags,
++// compare vkCode to ~8 constants, query two inline accessors. Both
++// `ChaseAutoPilot::IsEngaged()` and `ChaseDetector::GetChaseMode()` return
++// single bool/enum values that are atomically readable on x86, so cross-
++// thread access (hook on game main thread, state set on accessibility
++// thread) is safe without locks.
++//
++// Interaction with mod hotkeys. The mod's F-keys (audio/TTS), V, G/T/L/R,
++// etc. are read via GetAsyncKeyState from the accessibility thread. The LL
++// hook does NOT swallow any of them, so they reach the OS normally and
++// GetAsyncKeyState sees them as pressed. The mod's nav hotkeys (-, =,
++// Backspace, \) are ALSO read via GetAsyncKeyState but are gated separately
++// in field_nav_handlekeys.inl's HandleKeys early-return; the LL hook does
++// NOT touch them either, leaving HandleKeys as the sole gate for those.
++//
++// Compatibility. WH_KEYBOARD_LL is a global hook. Multiple LL hooks form a
++// chain. NVDA doesn't intercept arrow keys for FF8, so our hook fires and
++// can swallow as needed. JAWS intercepts arrows until Insert+3 passthrough
++// is engaged -- that's a pre-existing JAWS behavior, not a regression from
++// this hook.
++
++static HHOOK s_llKeyboardHook = nullptr;
++
++static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
++{
++    if (nCode == HC_ACTION && lParam != 0) {
++        KBDLLHOOKSTRUCT* k = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
++        const bool isInjected = (k->flags & LLKHF_INJECTED) != 0;
++        if (!isInjected) {
++            // Only check chase state if the key is a candidate for suppression.
++            // Avoids ChaseAutoPilot::IsEngaged() / ChaseDetector::GetChaseMode()
++            // calls on every non-game keystroke (typing in a text editor, etc.).
++            const DWORD vk = k->vkCode;
++            const bool isArrow =
++                vk == VK_UP || vk == VK_DOWN || vk == VK_LEFT || vk == VK_RIGHT;
++            const bool isGameKey =
++                vk == 'W' || vk == 'A' || vk == 'D' || vk == 'X';
++            // 'S' (VK 0x53) is NOT in the suppressed set: it's FF8's pause
++            // key and Aaron retains pause access mid-chase.
++            if (isArrow || isGameKey) {
++                const bool chaseAutoEngaged =
++                    ChaseAutoPilot::IsEngaged() &&
++                    ChaseDetector::GetChaseMode() == ChaseDetector::MODE_AUTO;
++                if (chaseAutoEngaged) {
++                    static bool s_llSuppressLogged = false;
++                    if (!s_llSuppressLogged) {
++                        s_llSuppressLogged = true;
++                        Log::Field("FieldNavigation: [v0.15.9.11.1] LL keyboard hook "
++                                   "first suppressed key vk=0x%02X (flags=0x%X) "
++                                   "during chase Auto -- physical arrows + W/A/D/X "
++                                   "will no longer reach FFNx or the engine; "
++                                   "S/F-keys/mod hotkeys remain functional",
++                                   vk, (unsigned)k->flags);
++                    }
++                    return 1;  // swallow: do NOT call CallNextHookEx
++                }
++            }
++        }
++    }
++    return CallNextHookEx(nullptr, nCode, wParam, lParam);
++}
++
++static void InstallLowLevelKeyboardHook(HMODULE hModule)
++{
++    if (s_llKeyboardHook != nullptr) return;  // already installed
++    s_llKeyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL,
++                                         LowLevelKeyboardProc,
++                                         hModule,
++                                         0);
++    if (s_llKeyboardHook) {
++        Log::Mod("AccessibilityThread: [v0.15.9.11.1] WH_KEYBOARD_LL hook installed "
++                   "(handle=0x%p) for chase Auto arrow + W/A/D/X suppression. "
++                   "S (pause), F-keys, and mod hotkeys remain functional.",
++                   s_llKeyboardHook);
++    } else {
++        DWORD err = GetLastError();
++        Log::Mod("AccessibilityThread: [v0.15.9.11.1] WARNING - "
++                   "SetWindowsHookExW(WH_KEYBOARD_LL) FAILED with error 0x%lX. "
++                   "Chase Auto arrow suppression is DISABLED for this session; "
++                   "Aaron's arrow presses will still interrupt chase auto-pilot "
++                   "as in v0.15.9.11.", err);
++    }
++}
++
++static void UninstallLowLevelKeyboardHook()
++{
++    if (s_llKeyboardHook) {
++        UnhookWindowsHookEx(s_llKeyboardHook);
++        Log::Mod("AccessibilityThread: [v0.15.9.11.1] WH_KEYBOARD_LL hook uninstalled");
++        s_llKeyboardHook = nullptr;
++    }
++}
++
+ extern "C" __declspec(dllexport) HRESULT WINAPI DirectInput8Create(
+     HINSTANCE hinst,
+     DWORD dwVersion,
+@@ -463,13 +591,29 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
+         } else {
+             Log::Write("DllMain: Accessibility thread started.");
+         }
++
++        // v0.15.9.11.1: Install the low-level keyboard hook from DllMain so
++        // the calling thread (the game's main thread, which has a message
++        // pump) owns the hook. LL hooks fire on the installing thread's
++        // message pump; the accessibility worker thread doesn't have one,
++        // so installing from there would silently no-op. The hook is
++        // global; it intercepts physical key events for every window in
++        // every process, but its swallow branch is gated tightly on chase
++        // Auto being engaged so it's a pure pass-through outside chase.
++        InstallLowLevelKeyboardHook(hModule);
+         
+         break;
+     }
+     case DLL_PROCESS_DETACH:
+     {
+         Log::Write("DllMain: DLL_PROCESS_DETACH");
+-        
++
++        // v0.15.9.11.1: Uninstall the low-level keyboard hook BEFORE
++        // signaling the accessibility thread to stop. Removing the hook
++        // first ensures no further chase-Auto suppression decisions are
++        // made during shutdown when ChaseAutoPilot state is being torn down.
++        UninstallLowLevelKeyboardHook();
++
+         // Signal thread to stop
+         s_running = false;
+         if (s_thread != nullptr) {
+diff --git a/src/ff8_accessibility.h b/src/ff8_accessibility.h
+index 99422f5..ef1d5ef 100644
+--- a/src/ff8_accessibility.h
++++ b/src/ff8_accessibility.h
+@@ -9,7 +9,7 @@
+ // FF8 Original PC Accessibility Mod version
+ // Increment on every build change
+ // ================================================================
+-#define FF8OPC_VERSION "0.15.9.10"  // v0.15.9.10: MODE_ORIGINAL implementation (Aaron's chase-scene item #2). Adds a real third chase mode that bypasses all mod chase machinery, letting the vanilla FF8 chase play out unmodified. Five-file touch: (1) chase_detector.h: MODE_ORIGINAL=2 added to the Mode enum with rationale comments. (2) chase_detector.cpp: LoadChaseModeFromIni accepts "original" string -> MODE_ORIGINAL; ChaseModeName returns "original" for MODE_ORIGINAL via switch. (3) chase_battle_freeze.cpp Hook_opcode_battle: short-circuits at top of the chase branch -- when mode == MODE_ORIGINAL, return s_origBattle(entityPtr) immediately with no chase-counter increment, no PASS/NO-OP log, no RegisterChaseAgent call. (4) chase_kani_freeze.cpp Update: short-circuits before reading pGameMode; if a freeze was active from a previous mode (mid-chase mode swap via INI), DeactivateFreeze cleanly. RegisterChaseAgent also short-circuits as belt-and-suspenders. (5) chase_ask_overlay.cpp CommitChoice: ANSWER_ORIGINAL routes to SetChaseMode(MODE_ORIGINAL) instead of MODE_MANUAL. chase_auto_pilot needs no change -- its engagement gate already requires mode == MODE_AUTO, so MODE_ORIGINAL naturally skips engagement. Expected v0.15.9.10 BAT: Aaron triggers the chase, ASK reads out the three options, Aaron picks Original. The party experiences the vanilla unmodified chase scene -- chase battles fire as Square shipped them, robot pursues, ground shakes on the west trail, no auto-pilot intervention. Mod's screen-reader assistance (field TTS, etc.) is unaffected. Logs show ChaseBattleFreeze Initialize message includes "MODE_ORIGINAL short-circuits before any chase logic" at startup, and no [CBF] PASS/NO-OP lines on chase fields in MODE_ORIGINAL. Risk: low-medium. Five-file integration but each individual change is small and the short-circuits are at well-defined top-of-hook points. Worst case (a chase machinery path was missed and still activates in MODE_ORIGINAL): the user reports unexpected mod behavior; we add another short-circuit. The mode itself is opt-in via the ASK so default users (MODE_MANUAL / MODE_AUTO) are completely unaffected. Files: src/chase_detector.h (Mode enum + comments), src/chase_detector.cpp (LoadChaseModeFromIni + ChaseModeName switch), src/chase_battle_freeze.cpp (top-of-chase-branch short-circuit + Initialize log update), src/chase_kani_freeze.cpp (Update + RegisterChaseAgent short-circuits), src/chase_ask_overlay.cpp (ANSWER_ORIGINAL routes to MODE_ORIGINAL), src/ff8_accessibility.h (this version), CHANGELOG.md, DEVNOTES.md, NEXT_SESSION_PROMPT.md.  // v0.15.9.9.1: Fix duplicate Squall "Let's go!" line at chase ASK open. v0.15.9.9 BAT confirmed the auto-pilot is fully self-sufficient (0 chase battles fired with cap=INT_MAX) AND the new ASK option labels read out correctly, but Aaron still heard the chase-trigger MES "Forget it! Let's go!" announced twice when the ASK opened. Tracing the dialog log identified the source: field_dialog.cpp's ScanAndSpeakChoiceWindows hook (which runs for every opcode_ask) iterates over ALL 8 dialog window slots looking for ASK choice fields. When the chase ASK opens in slot 2, the hook also visits slot 0 (which still holds Squall's chase-trigger MES from 3 seconds earlier). Slot 0's firstQ=0xFF and lastQ=0xFF -- FF8's "no ASK fields set" sentinel -- but the existing skip predicates (firstQ==0 && lastQ==0; lastQ < firstQ) didn't catch the (0xFF, 0xFF) case. The slot got decoded as a 0-choice dialog with a non-empty prompt, then the prompt was spoken as if it were the ASK. Result: "Let's go!" gets announced once by AMESW when the MES fires, then again by the [ASK] hook when the chase ASK opens. v0.15.9.9.1 adds `if (firstQ == 0xFF || lastQ == 0xFF) continue;` to ScanAndSpeakChoiceWindows so windows with the FF8 unset sentinel are correctly skipped. 0xFF is unambiguously a sentinel (FF8 dialogs cap at ~16 choices, so neither firstQ nor lastQ can be 0xFF in a real ASK). Risk: very low. One-line additive predicate. Worst case (we missed a legitimate ASK with one of the fields set to 0xFF): the slot's text won't be read out, which is a quieter regression than the duplicate. Files: src/field_dialog.cpp (sentinel check in ScanAndSpeakChoiceWindows around line 681), src/ff8_accessibility.h (this version), CHANGELOG.md, DEVNOTES.md, NEXT_SESSION_PROMPT.md.  // v0.15.9.9: VERIFICATION BUILD -- combines ASK text polish (item #4) and battle-suppressor disable in Auto mode (item #1). Two coordinated changes: (1) chase_battle_freeze.cpp: AUTO-mode cap raised from 0 to INT_MAX so any chase battle the auto-pilot fails to avoid will PASS through to a real battle screen instead of being silently NO-OP'd. The v0.15.9.8.3 BAT recorded 0 [CBF] NO-OP lines on the whole chase, but that didn't prove whether the underlying chase battle calls were 0 (auto-pilot doing the work) or N>0 (suppressor band-aid doing the work). v0.15.9.9 BAT answers the question: if 0 [CBF] PASS lines appear, the auto-pilot is fully sufficient and the suppressor can be removed in v0.15.10; if any PASS fires, it's a real regression to investigate. (2) chase_ask_overlay.cpp: prompt changed from "Mode?" to "X-ATM092 is heading right for you. How do you want to run?" (replaces the redundant Squall "Let's go!" line at ASK open with situational context). Option labels updated to describe what each does now that Auto is fully implemented: Manual="drive yourself, one battle per field", Auto="mod drives, no battles or shake", Original="vanilla chase, no mod help" (Original still falls back to Manual until v0.15.9.10 implements MODE_ORIGINAL; label change is deferred to that version so we don't promise what the build doesn't deliver). Predicted v0.15.9.9 BAT: ChaseBattleFreeze Initialize log shows "cap=INT_MAX in AUTO (VERIFICATION BUILD)", ASK announces new explainer + new option labels on cursor change, full chase completes with 0 [CBF] PASS and 0 [CBF] NO-OP lines on any chase field. Risk: low. Single-constant change in chase_battle_freeze + 4 string changes in chase_ask_overlay. Worst case (a real chase battle fires): revert cap=INT_MAX -> 0 in v0.15.9.9.1 to restore the band-aid while we diagnose. Files: src/chase_battle_freeze.cpp (cap constant, log message, <climits> include), src/chase_ask_overlay.cpp (prompt string, kChaseChoices labels), src/ff8_accessibility.h (this version), CHANGELOG.md, DEVNOTES.md, NEXT_SESSION_PROMPT.md.  // v0.15.9.8.3: Bridge dance + kani-slot override (domt1_1). Ships TWO coordinated changes targeting the bridge's remaining 1 catch in v0.15.9.8.2 BAT. (1) chase_detector.cpp ApplyPerFieldKaniOverride() runs after the default SYM-name-based kani slot resolution and, on field == 'domt1_1', overrides s_kaniLoc to Others slot 3 (SYM 'laguna'). v0.15.9.8.2 BAT BridgeDiag (416 samples over 6.7 seconds) empirically proved the actually-pursuing entity is at this slot -- ChaseDetector's default 'kani' SYM resolves to Others slot 6 which reads (0,0) the entire transit. The bridge field reuses a generic NPC SYM template for X-ATM092. With the override in place, ReadKaniPosition() and the per-second tick log both read the correct entity for the first time on this field. (2) chase_auto_pilot.cpp adds MODE_BRIDGE_DANCE, a new drive mode for domt1_1 only. Per-tick (10Hz) state machine samples kani.X and classifies motion: LEAPING (deltaX > 200/tick), LANDED (deltaX < 50/tick), CHASING (everything between). Two states: EAST_LEG (initial, drive east) -> turn west when kani lands IN FRONT of party with the wasLeaping latch true; WEST_LEG (drive west) -> turn east the instant a new leap STARTS (mid-air), so party slips past while robot can't course-correct. Aaron's mechanic, verbatim: "Robot jumps east, lands in front of party. Wait for robot to LAND before turning west. ... After turning west, robot eventually jumps again. As soon as the robot jumps (mid-air), turn east immediately -- no wait for landing." Detection signals from v0.15.9.8.2 BAT: kani Y is constant at -446 throughout (jumps are X-axis only in walkmesh coords; visual jump is 3D Z), normal pursuit ~106 units/100ms tick, leap speed ~372 units/100ms tick (3.5x), landed 0-1 units/tick. Thresholds: kBridgeLeapThreshold=200, kBridgeLandThreshold=50, kBridgeLandConsec=2 (samples), kBridgeMinDwellTicks=60 (1s), kBridgeWestTimeoutTicks=300 (5s). The west-leg timeout is the safety net: empirically we don't have data on what the robot does AFTER the party turns west (the v0.15.9.8.2 catch fired before any turn), so we hedge with a 5s bail-back-to-east if no leap fires. Worst-case behavior with timeout firing: identical to v0.15.9.8.2 (1 catch at X~2053 then post-catch teleport advances party). BridgeDiag from v0.15.9.8.2 remains active for one more BAT cycle so we can confirm the slot-3 kani is consistent and capture the previously-missing west-leg robot trajectory. Predicted v0.15.9.8.3 BAT outcome: ENGAGED mode=BRIDGE_DANCE log line on domt1_1, ChaseDetector OVERRIDE log line on field-debounce settle, BridgeDance per-sample logs at 10Hz throughout transit, EAST->WEST transition log after ~6 seconds when laguna lands, then either (best case) WEST->EAST transition on second leap with 0 catches; or (acceptable) WEST->EAST TIMEOUT after 5s and 0-1 catches; or (worst) some unforeseen interaction. Risk: medium. The west-leg detection is inferred from Aaron's verbal description and has no empirical backing yet -- the BAT will give us that data. The east-leg detection is fully calibrated from v0.15.9.8.2 BAT signals. Kani-slot override is surgically scoped to domt1_1; other chase fields keep default ChaseDetector resolution. Files: src/chase_detector.cpp (ApplyPerFieldKaniOverride + call site), src/chase_auto_pilot.cpp (MODE_BRIDGE_DANCE enum value, kBridgeXxx constants, BridgeDanceState type, s_bridgeXxx state vars, UpdateBridgeDance helper, Engage/Disengage/Initialize handling, explicit domt1_1 kFieldConfigs entry, ENGAGED log case, IsDirectionLikeMode update, Initialize log message), src/ff8_accessibility.h (this version), CHANGELOG.md, DEVNOTES.md, NEXT_SESSION_PROMPT.md.
++#define FF8OPC_VERSION "0.15.9.11.1"  // v0.15.9.11.1: Windows low-level keyboard hook (WH_KEYBOARD_LL) for chase Auto key suppression. v0.15.9.11 BAT revealed the kbBuf zeroing layer (HookedGetKeyState in field_nav_input_hooks.inl) was silently broken: pKeyboardState resolved to 0x01CD02D8 but its dereferenced value stayed 0x00000000 at all times, because FFNx replaces FF8's DirectInput keyboard path with its own implementation. The original engine keyboard buffer is never populated, so the `if (kbBuf)` guard in HookedGetKeyState always falls through and the zeroing never runs. Aaron's v0.15.9.11 BAT: pressed arrow keys during chase Auto, the arrows reached the engine via FFNx (bypassing kbBuf), interrupted the auto-pilot, and a chase battle fired at 13:17:23 just 2 seconds after engagement. Fix: install a WH_KEYBOARD_LL hook in DllMain DLL_PROCESS_ATTACH. This sits ABOVE FFNx in the input chain -- physical key events come from the OS, hit our hook first, and never reach FFNx or the engine if we swallow them. Auto-pilot's SendInput-injected arrows are flagged LLKHF_INJECTED in KBDLLHOOKSTRUCT.flags and pass through cleanly; Aaron's physical presses do not. Scope: swallow arrows + W/A/D/X during chase Auto only; preserve S (pause), F-keys (audio/TTS), and all other keys. The hook's swallow branch is tightly gated on ChaseAutoPilot::IsEngaged() && ChaseDetector::GetChaseMode() == MODE_AUTO, so outside the chase it's a pure pass-through. Hook proc is O(1): read flags, compare vkCode to ~8 constants, check chase state. Cross-thread access (hook fires on game main thread, chase state set on accessibility thread) is safe via x86 atomic bool/enum reads -- no locks needed. Mod hotkeys (F-keys, V, G/T/L/R, etc.) via GetAsyncKeyState are NOT touched by the hook; they reach the OS normally and GetAsyncKeyState sees them as pressed. Mod nav hotkeys (-, =, Backspace, \) remain gated separately in field_nav_handlekeys.inl's HandleKeys early-return (the v0.15.9.11 dispatch-level layer which BAT confirmed working). Compatibility: WH_KEYBOARD_LL is global; NVDA users get the suppression (NVDA doesn't intercept arrows). JAWS users need Insert+3 passthrough as a pre-existing requirement; no new regression. The dead v05.89/v0.15.9.11 kbBuf zeroing block is left in field_nav_input_hooks.inl as no-cost belt-and-suspenders pending a future cleanup. Install/uninstall: InstallLowLevelKeyboardHook is called from DllMain DLL_PROCESS_ATTACH (the game's main thread, which has a message pump that LL hooks require); UninstallLowLevelKeyboardHook is called from DllMain DLL_PROCESS_DETACH before signaling the accessibility thread to stop. Expected v0.15.9.11.1 BAT: Aaron picks Auto at ASK, the auto-pilot engages, Aaron presses arrow keys (and W/A/D/X) -- nothing happens, party continues running per the auto-pilot's intended direction. S still pauses. F-keys still adjust audio/TTS. Log shows 'WH_KEYBOARD_LL hook installed' at startup and 'LL keyboard hook first suppressed key' on the first physical arrow press during chase Auto. All v0.15.9.10 Auto BAT markers still apply: chase completes through to Lapin Beach FMV with no [CBF] PASS lines on chase fields. Risk: low. The hook is fully optional (failure to install is logged as a warning, mod continues with existing v0.15.9.11 layers). Tightly scoped: swallow branch only fires during chase Auto. Worst case (Aaron's F-key or other accessibility hotkey is unexpectedly swallowed): widen the chase Auto gate or remove the offending key from the suppressed set in LowLevelKeyboardProc. Files: src/dinput8.cpp (LowLevelKeyboardProc + Install/Uninstall + DllMain wiring), src/ff8_accessibility.h (this version), CHANGELOG.md, DEVNOTES.md, NEXT_SESSION_PROMPT.md.  // v0.15.9.11: Keyboard suppressor during engaged Auto chase (Aaron's chase-scene item #3, the last chase-scene work item). Per Aaron's 2026-05-12 design clarification: FF8's default keyboard control set is arrows + W/A/D/X/S. v0.15.9.11 suppresses all of these except S (pause) during engaged Auto chase, plus disables the mod's four navigation hotkeys -, =, Backspace, \. Everything else (F-keys for audio/TTS control, mod info hotkeys like V/G/T/L/R/`/M/O) stays functional. Two-layer implementation because the keys are read via two different paths: (1) Engine keyboard buffer in field_nav_input_hooks.inl::HookedGetKeyState -- the pre-existing v05.89 outer block zeros arrows (Up/Down/Left/Right) when s_analogOverrideActive is true. v0.15.9.11 adds a nested block gated on ChaseAutoPilot::IsEngaged() && ChaseDetector::GetChaseMode() == MODE_AUTO that zeros W (0x11), A (0x1E), D (0x20), X (0x2D). S (0x1F) is deliberately preserved. (2) Mod dispatch gating in field_nav_handlekeys.inl::HandleKeys -- the four mod hotkeys -, =, Backspace, \ read via GetAsyncKeyState which bypasses the engine keyboard buffer entirely, so kbBuf zeroing doesn't reach them. Added a chase-Auto early-return at the top of HandleKeys after the four key states are read; the s_*WasDown statics are updated before the return so edge-detect stays consistent (no spurious post-chase edges, clean fresh-press edges). Both layers use the same predicate so they activate/deactivate in lockstep. Includes: chase_auto_pilot.h and chase_detector.h added to field_navigation.cpp BEFORE the FieldNavigation namespace opens, so the chase namespaces reach the global scope and the .inl files reference them via ::ChaseAutoPilot::IsEngaged() / ::ChaseDetector::GetChaseMode() with the global scope operator. What stays accessible: F-keys (F1-F12 for audio/TTS, dispatched in dinput8.cpp); S key for pause (excluded from kbBuf zero list); mod info hotkeys V, G/T/L/R, `, /, M, O, 1/2/3/H (dispatched outside HandleKeys so the early-return doesn't reach them); chase ASK navigation (IsEngaged() requires s_askAnswered so predicate is false during ASK, X confirm + arrow cursors flow through normally). Expected v0.15.9.11 BAT: Aaron picks Auto at ASK, experiences hands-off chase as in v0.15.9.10 Auto. Accidental presses of W/A/D/X/-/=/Backspace/\ are silently ignored. S still pauses, F-keys still work. Log shows two one-time activation messages: 'chase Auto kb suppressor active: zeroing W A D X' (kbBuf layer) and 'chase Auto HandleKeys suppressor active: -, =, Backspace, \ disabled' (dispatch layer). All v0.15.9.10 Auto BAT markers still apply (no [CBF] lines, chase completes through to Lapin Beach FMV). Risk: low. Existing arrow-zeroing block untouched; new blocks are additive and predicate-gated. Worst case (a suppressed key turns out to be needed during chase): remove it from the relevant list and re-BAT. Files: src/field_navigation.cpp (chase header includes before namespace block), src/field_nav_input_hooks.inl (extended HookedGetKeyState with W/A/D/X zeroing, S preserved, + one-time activation log), src/field_nav_handlekeys.inl (chase-Auto early-return at top of HandleKeys + edge-detect static updates + one-time activation log), src/ff8_accessibility.h (this version), CHANGELOG.md, DEVNOTES.md, NEXT_SESSION_PROMPT.md.  // v0.15.9.10: MODE_ORIGINAL implementation (Aaron's chase-scene item #2). Adds a real third chase mode that bypasses all mod chase machinery, letting the vanilla FF8 chase play out unmodified. Five-file touch: (1) chase_detector.h: MODE_ORIGINAL=2 added to the Mode enum with rationale comments. (2) chase_detector.cpp: LoadChaseModeFromIni accepts "original" string -> MODE_ORIGINAL; ChaseModeName returns "original" for MODE_ORIGINAL via switch. (3) chase_battle_freeze.cpp Hook_opcode_battle: short-circuits at top of the chase branch -- when mode == MODE_ORIGINAL, return s_origBattle(entityPtr) immediately with no chase-counter increment, no PASS/NO-OP log, no RegisterChaseAgent call. (4) chase_kani_freeze.cpp Update: short-circuits before reading pGameMode; if a freeze was active from a previous mode (mid-chase mode swap via INI), DeactivateFreeze cleanly. RegisterChaseAgent also short-circuits as belt-and-suspenders. (5) chase_ask_overlay.cpp CommitChoice: ANSWER_ORIGINAL routes to SetChaseMode(MODE_ORIGINAL) instead of MODE_MANUAL. chase_auto_pilot needs no change -- its engagement gate already requires mode == MODE_AUTO, so MODE_ORIGINAL naturally skips engagement. Expected v0.15.9.10 BAT: Aaron triggers the chase, ASK reads out the three options, Aaron picks Original. The party experiences the vanilla unmodified chase scene -- chase battles fire as Square shipped them, robot pursues, ground shakes on the west trail, no auto-pilot intervention. Mod's screen-reader assistance (field TTS, etc.) is unaffected. Logs show ChaseBattleFreeze Initialize message includes "MODE_ORIGINAL short-circuits before any chase logic" at startup, and no [CBF] PASS/NO-OP lines on chase fields in MODE_ORIGINAL. Risk: low-medium. Five-file integration but each individual change is small and the short-circuits are at well-defined top-of-hook points. Worst case (a chase machinery path was missed and still activates in MODE_ORIGINAL): the user reports unexpected mod behavior; we add another short-circuit. The mode itself is opt-in via the ASK so default users (MODE_MANUAL / MODE_AUTO) are completely unaffected. Files: src/chase_detector.h (Mode enum + comments), src/chase_detector.cpp (LoadChaseModeFromIni + ChaseModeName switch), src/chase_battle_freeze.cpp (top-of-chase-branch short-circuit + Initialize log update), src/chase_kani_freeze.cpp (Update + RegisterChaseAgent short-circuits), src/chase_ask_overlay.cpp (ANSWER_ORIGINAL routes to MODE_ORIGINAL), src/ff8_accessibility.h (this version), CHANGELOG.md, DEVNOTES.md, NEXT_SESSION_PROMPT.md.  // v0.15.9.9.1: Fix duplicate Squall "Let's go!" line at chase ASK open. v0.15.9.9 BAT confirmed the auto-pilot is fully self-sufficient (0 chase battles fired with cap=INT_MAX) AND the new ASK option labels read out correctly, but Aaron still heard the chase-trigger MES "Forget it! Let's go!" announced twice when the ASK opened. Tracing the dialog log identified the source: field_dialog.cpp's ScanAndSpeakChoiceWindows hook (which runs for every opcode_ask) iterates over ALL 8 dialog window slots looking for ASK choice fields. When the chase ASK opens in slot 2, the hook also visits slot 0 (which still holds Squall's chase-trigger MES from 3 seconds earlier). Slot 0's firstQ=0xFF and lastQ=0xFF -- FF8's "no ASK fields set" sentinel -- but the existing skip predicates (firstQ==0 && lastQ==0; lastQ < firstQ) didn't catch the (0xFF, 0xFF) case. The slot got decoded as a 0-choice dialog with a non-empty prompt, then the prompt was spoken as if it were the ASK. Result: "Let's go!" gets announced once by AMESW when the MES fires, then again by the [ASK] hook when the chase ASK opens. v0.15.9.9.1 adds `if (firstQ == 0xFF || lastQ == 0xFF) continue;` to ScanAndSpeakChoiceWindows so windows with the FF8 unset sentinel are correctly skipped. 0xFF is unambiguously a sentinel (FF8 dialogs cap at ~16 choices, so neither firstQ nor lastQ can be 0xFF in a real ASK). Risk: very low. One-line additive predicate. Worst case (we missed a legitimate ASK with one of the fields set to 0xFF): the slot's text won't be read out, which is a quieter regression than the duplicate. Files: src/field_dialog.cpp (sentinel check in ScanAndSpeakChoiceWindows around line 681), src/ff8_accessibility.h (this version), CHANGELOG.md, DEVNOTES.md, NEXT_SESSION_PROMPT.md.  // v0.15.9.9: VERIFICATION BUILD -- combines ASK text polish (item #4) and battle-suppressor disable in Auto mode (item #1). Two coordinated changes: (1) chase_battle_freeze.cpp: AUTO-mode cap raised from 0 to INT_MAX so any chase battle the auto-pilot fails to avoid will PASS through to a real battle screen instead of being silently NO-OP'd. The v0.15.9.8.3 BAT recorded 0 [CBF] NO-OP lines on the whole chase, but that didn't prove whether the underlying chase battle calls were 0 (auto-pilot doing the work) or N>0 (suppressor band-aid doing the work). v0.15.9.9 BAT answers the question: if 0 [CBF] PASS lines appear, the auto-pilot is fully sufficient and the suppressor can be removed in v0.15.10; if any PASS fires, it's a real regression to investigate. (2) chase_ask_overlay.cpp: prompt changed from "Mode?" to "X-ATM092 is heading right for you. How do you want to run?" (replaces the redundant Squall "Let's go!" line at ASK open with situational context). Option labels updated to describe what each does now that Auto is fully implemented: Manual="drive yourself, one battle per field", Auto="mod drives, no battles or shake", Original="vanilla chase, no mod help" (Original still falls back to Manual until v0.15.9.10 implements MODE_ORIGINAL; label change is deferred to that version so we don't promise what the build doesn't deliver). Predicted v0.15.9.9 BAT: ChaseBattleFreeze Initialize log shows "cap=INT_MAX in AUTO (VERIFICATION BUILD)", ASK announces new explainer + new option labels on cursor change, full chase completes with 0 [CBF] PASS and 0 [CBF] NO-OP lines on any chase field. Risk: low. Single-constant change in chase_battle_freeze + 4 string changes in chase_ask_overlay. Worst case (a real chase battle fires): revert cap=INT_MAX -> 0 in v0.15.9.9.1 to restore the band-aid while we diagnose. Files: src/chase_battle_freeze.cpp (cap constant, log message, <climits> include), src/chase_ask_overlay.cpp (prompt string, kChaseChoices labels), src/ff8_accessibility.h (this version), CHANGELOG.md, DEVNOTES.md, NEXT_SESSION_PROMPT.md.  // v0.15.9.8.3: Bridge dance + kani-slot override (domt1_1). Ships TWO coordinated changes targeting the bridge's remaining 1 catch in v0.15.9.8.2 BAT. (1) chase_detector.cpp ApplyPerFieldKaniOverride() runs after the default SYM-name-based kani slot resolution and, on field == 'domt1_1', overrides s_kaniLoc to Others slot 3 (SYM 'laguna'). v0.15.9.8.2 BAT BridgeDiag (416 samples over 6.7 seconds) empirically proved the actually-pursuing entity is at this slot -- ChaseDetector's default 'kani' SYM resolves to Others slot 6 which reads (0,0) the entire transit. The bridge field reuses a generic NPC SYM template for X-ATM092. With the override in place, ReadKaniPosition() and the per-second tick log both read the correct entity for the first time on this field. (2) chase_auto_pilot.cpp adds MODE_BRIDGE_DANCE, a new drive mode for domt1_1 only. Per-tick (10Hz) state machine samples kani.X and classifies motion: LEAPING (deltaX > 200/tick), LANDED (deltaX < 50/tick), CHASING (everything between). Two states: EAST_LEG (initial, drive east) -> turn west when kani lands IN FRONT of party with the wasLeaping latch true; WEST_LEG (drive west) -> turn east the instant a new leap STARTS (mid-air), so party slips past while robot can't course-correct. Aaron's mechanic, verbatim: "Robot jumps east, lands in front of party. Wait for robot to LAND before turning west. ... After turning west, robot eventually jumps again. As soon as the robot jumps (mid-air), turn east immediately -- no wait for landing." Detection signals from v0.15.9.8.2 BAT: kani Y is constant at -446 throughout (jumps are X-axis only in walkmesh coords; visual jump is 3D Z), normal pursuit ~106 units/100ms tick, leap speed ~372 units/100ms tick (3.5x), landed 0-1 units/tick. Thresholds: kBridgeLeapThreshold=200, kBridgeLandThreshold=50, kBridgeLandConsec=2 (samples), kBridgeMinDwellTicks=60 (1s), kBridgeWestTimeoutTicks=300 (5s). The west-leg timeout is the safety net: empirically we don't have data on what the robot does AFTER the party turns west (the v0.15.9.8.2 catch fired before any turn), so we hedge with a 5s bail-back-to-east if no leap fires. Worst-case behavior with timeout firing: identical to v0.15.9.8.2 (1 catch at X~2053 then post-catch teleport advances party). BridgeDiag from v0.15.9.8.2 remains active for one more BAT cycle so we can confirm the slot-3 kani is consistent and capture the previously-missing west-leg robot trajectory. Predicted v0.15.9.8.3 BAT outcome: ENGAGED mode=BRIDGE_DANCE log line on domt1_1, ChaseDetector OVERRIDE log line on field-debounce settle, BridgeDance per-sample logs at 10Hz throughout transit, EAST->WEST transition log after ~6 seconds when laguna lands, then either (best case) WEST->EAST transition on second leap with 0 catches; or (acceptable) WEST->EAST TIMEOUT after 5s and 0-1 catches; or (worst) some unforeseen interaction. Risk: medium. The west-leg detection is inferred from Aaron's verbal description and has no empirical backing yet -- the BAT will give us that data. The east-leg detection is fully calibrated from v0.15.9.8.2 BAT signals. Kani-slot override is surgically scoped to domt1_1; other chase fields keep default ChaseDetector resolution. Files: src/chase_detector.cpp (ApplyPerFieldKaniOverride + call site), src/chase_auto_pilot.cpp (MODE_BRIDGE_DANCE enum value, kBridgeXxx constants, BridgeDanceState type, s_bridgeXxx state vars, UpdateBridgeDance helper, Engage/Disengage/Initialize handling, explicit domt1_1 kFieldConfigs entry, ENGAGED log case, IsDirectionLikeMode update, Initialize log message), src/ff8_accessibility.h (this version), CHANGELOG.md, DEVNOTES.md, NEXT_SESSION_PROMPT.md.
+   // v0.15.9.8.2: DIAGNOSTIC-ONLY build for the bridge (domt1_1). v0.15.9.8.1 BAT brought total chase catches from 11 (baseline) to 1, with only the mid-east-traversal catch on domt1_1 remaining. Aaron described the bridge mechanic (2026-05-12): the robot jumps east in front of the party, party must wait for it to LAND then turn west, robot eventually jumps again in front (or back over), party must IMMEDIATELY turn east when the jump starts (without waiting for landing); turning prematurely during the east leg causes the robot to run the party down and trigger battle. The asymmetric rule maps to a single Y-axis signal: bridge is a horizontal corridor at Y ~= -607 (confirmed from v0.15.9.8.1 BAT party trajectory), so `abs(kani.Y - party.Y) < tolerance` means "landed on corridor" (east-leg turn condition) and `abs(kani.Y - party.Y) > tolerance` means "airborne / off corridor" (west-leg turn condition). Problem: ChaseDetector currently resolves kani symIdx=12 to Others slot 6 on domt1_1, but that slot reads pos=(0,0) on every per-tick log throughout the v0.15.9.8.1 BAT bridge traversal. Either (a) the bridge uses a different entity for the actively-jumping kani than ChaseDetector's symbol resolution finds, or (b) the resolution is correct but the entity's position is stored at a different offset on this field. v0.15.9.8.2 adds a per-tick (10Hz) diagnostic on domt1_1 that enumerates every non-zero slot of both pFieldStateOthers and pFieldStateBackgrounds, dumping slot index + SYM name + world pos + Y-delta-vs-party for each. BAT analysis identifies the real moving entity; v0.15.9.8.3 then routes ChaseDetector to it and implements the asymmetric dance. **Y-AXIS THEORY REFUTED 2026-05-12**: v0.15.9.8.2 BAT BridgeDiag empirically proved Y is constant on the bridge -- the moving kani at Others slot 3 (SYM 'laguna') has Y=-446 throughout, party has Y=-607 throughout, so ydelta is a useless constant of 161. The jump signal is X-velocity (3.5x normal speed during leap, 0 during landing). v0.15.9.8.3 thresholds were derived from this. No behavior change to the bridge in this build -- chase still runs as in v0.15.9.8.1 with 1 catch. Risk: very low. Pure additive logging, hard-gated to fieldName == "domt1_1". Files: src/chase_auto_pilot.cpp (LogBridgeDiagnostic helper + per-tick call + counter), src/ff8_accessibility.h (this version), CHANGELOG.md, DEVNOTES.md.
+   // v0.15.9.8.1 [BAT SUCCESS 2026-05-12]: Bump doopen2a targetY from -3703 to -3800 (97 units past the south trigger line at y ~= -3700). v0.15.9.8 BAT showed the south-target fix worked structurally on doopen2a (party ran 3300+ units south in 6s with no NW detour) but A* stopped 159 units short of the trigger line at pos=(-958,-3541) -- likely the last reachable walkmesh waypoint from the requested target (-952,-3703). Party sat there for 8 seconds with chase-drive still active, the chase script's catch evaluator fired once at 23:04:28 forcing 1 [CBF] catch on this field, and the field eventually transitioned at 23:04:34 via the chase script's natural progression after the catch. v0.15.9.8 result: town square went 2 -> 1 catch (-1), bridge unchanged at 1, total chase 3 -> 2 catches. v0.15.9.8.1 hypothesis: by targeting -3800 instead of -3703, A*'s last reachable waypoint should fall closer to or past the trigger line itself, letting the party actually cross the line and fire the script-side field transition before the catch evaluator window expires. If walkmesh extends past the trigger, A* will find a path further south. If walkmesh literally ends at -3541, A* will clip to that same point as v0.15.9.8 and we'll see no improvement -- in which case v0.15.9.8.2 switches to MODE_DIRECTION south (skipping path-finding entirely, like dotown_2 and dotown_1). Single-coordinate edit; risk negligible. Predicted v0.15.9.8.1 BAT outcome (SUCCESS): doopen2a 0 catches, transit 6-8s, clean transition to dotown_3 via south trigger crossing. Files: src/chase_auto_pilot.cpp (targetY -3703 -> -3800 + rationale comment), src/ff8_accessibility.h (this version), CHANGELOG.md.
+   // v0.15.9.8: Explicit MODE_TARGET config for doopen2a (Dollet Town Square). v0.15.9.7.8 BAT [CBF] count by field showed 2 catches on doopen2a, root-caused via the field log: doopen2a has ZERO INF gateways, so the BuildFallbackConfig fallback chain dropped to tier 2 (TRIGGER-LINE). The field has two SETLINE trigger lines: idx=1 center (-1390,854) NW and idx=257 center (-952,-3703) SOUTH. GetTriggerLineNearestCluster picked the NW one because the walkmesh's largest dead-end cluster lands at (-1315,503) -- an interior corner. So the auto-pilot targeted NW while the field actually needs the party to run south. v0.15.9.8 added an explicit MODE_TARGET entry for doopen2a targeting the south trigger line center (-952,-3703), bypassing the cluster heuristic entirely. v0.15.9.8 BAT result: 2 -> 1 catches on doopen2a (50% reduction). Remaining issue diagnosed in v0.15.9.8.1.
+diff --git a/src/field_nav_handlekeys.inl b/src/field_nav_handlekeys.inl
+index 39dd033..e92e887 100644
+--- a/src/field_nav_handlekeys.inl
++++ b/src/field_nav_handlekeys.inl
+@@ -15,6 +15,54 @@ static void HandleKeys()
+     // \ (backslash) toggles auto-drive to selected entity.
+     bool drive = (GetAsyncKeyState(VK_OEM_5) & 0x8000) != 0;
+ 
++    // v0.15.9.11: Chase-scene item #3 -- mod hotkey suppression during engaged
++    // Auto chase. Aaron's instruction (2026-05-12): "disable the mod's entity
++    // catalog - and = keys, as well as the backspace and \ shortcuts for
++    // setting navigation targets. Essentially, we're disabling everything
++    // except the F# keys for audio/TTS control and S to pause."
++    //
++    // These four hotkeys (-, =, Backspace, \) are read above via
++    // GetAsyncKeyState, which BYPASSES the engine keyboard buffer entirely.
++    // That means the kbBuf zeroing in field_nav_input_hooks.inl::HookedGetKeyState
++    // (which suppresses FF8's W/A/D/X engine keys) does NOT reach these.
++    // We have to gate them at the dispatch level.
++    //
++    // Predicate matches the kbBuf zeroing's chase-Auto predicate exactly:
++    // ChaseAutoPilot::IsEngaged() requires s_askAnswered, so during the chase
++    // ASK navigation itself the gate is open (player can use - / = to navigate
++    // the entity catalog normally before committing the chase mode). Only
++    // after the user picks Auto and the auto-pilot engages does suppression
++    // kick in.
++    //
++    // We still update the s_*WasDown statics inside the gate before returning
++    // so the edge-detect is consistent: if the user holds - during chase and
++    // releases after chase ends, no spurious edge fires; if the user starts
++    // a fresh press after chase ends, the edge fires normally.
++    //
++    // Other mod hotkeys NOT in this gate (F-keys for audio/TTS, V for version,
++    // G/T/L/R for game stat lookups, ` for repeat, / for help, etc.) are
++    // dispatched in dinput8.cpp and other modules. They remain functional
++    // during the chase because they're informational and don't disrupt the
++    // route. If a specific non-listed hotkey needs gating too, add it to the
++    // appropriate handler in a follow-up version.
++    bool chaseAutoEngaged = ::ChaseAutoPilot::IsEngaged()
++                         && ::ChaseDetector::GetChaseMode() == ::ChaseDetector::MODE_AUTO;
++    if (chaseAutoEngaged) {
++        static bool s_chaseHandleKeysSuppressLogged = false;
++        if (!s_chaseHandleKeysSuppressLogged) {
++            s_chaseHandleKeysSuppressLogged = true;
++            Log::Field("FieldNavigation: [v0.15.9.11] chase Auto HandleKeys "
++                       "suppressor active: -, =, Backspace, \\ disabled until "
++                       "chase ends");
++        }
++        // Preserve edge-detect state so post-chase presses fire cleanly.
++        s_minusWasDown  = minus;
++        s_plusWasDown   = plus;
++        s_bkspWasDown   = bksp;
++        s_driveWasDown  = drive;
++        return;
++    }
++
+     // v0.14.75: F11 VISDIAG dump removed. Was a v05.69 research diagnostic
+     // for finding the entity SHOW/HIDE visibility-flag offset by dumping
+     // candidate byte ranges (0x188, 0x1A0, 0x21A, 0x240) for every
+diff --git a/src/field_nav_input_hooks.inl b/src/field_nav_input_hooks.inl
+index cbbdc5e..5f9803e 100644
+--- a/src/field_nav_input_hooks.inl
++++ b/src/field_nav_input_hooks.inl
+@@ -25,6 +25,32 @@ static DinputUpdateGamepad_t s_originalDinputUpdateGamepad = nullptr;
+ // The arrow keys were injected via SendInput to trigger "player wants to move"
+ // abstract buttons, but we don't want them to determine the movement DIRECTION.
+ // The gamepad analog path (via FFNx's ff8_get_analog_value) provides the direction.
++//
++// v0.15.9.11: Extended for chase-scene item #3 (keyboard suppressor during
++// Auto chase). The base arrow-zeroing block is preserved unchanged: it fires
++// whenever s_analogOverrideActive is true, which covers F9 path-finding,
++// world-map auto-drive, and chase auto-pilot uniformly. A second tighter
++// suppression block was added underneath: when the player is in an actively
++// engaged Auto chase, additionally zero W, A, D, X scancodes -- FF8's default
++// keyboard controls beyond the arrow keys. S (0x1F, pause) is deliberately
++// preserved so the player can still pause mid-chase. ESC/Space/Return are
++// NOT in FF8's default control set so they're not suppressed at the buffer
++// level (any user with custom bindings that map ESC/Space/Return to chase-
++// relevant actions can flag this for v0.15.9.11.1). The narrower predicate
++// ensures that F9 path-finding (which uses the same analog override but on
++// non-chase fields) and world-map AD (different code path entirely) are NOT
++// affected by the extended suppression.
++//
++// Mod hotkey suppression (the -, =, Backspace, \ keys that affect navigation
++// targets) is handled separately at the HandleKeys dispatch in
++// field_nav_handlekeys.inl, since those keys are read via GetAsyncKeyState
++// (which bypasses the engine keyboard buffer entirely).
++//
++// IMPORTANT: this hook zeros the keyboard *buffer*. Mod accessibility hotkeys
++// (F-keys, V, G/T/L/R, slash, backslash, tilde, etc.) are read via
++// GetAsyncKeyState in mod-owned code paths, which bypasses the keyboard
++// buffer entirely. So zeroing W/A/D/X in the buffer does NOT affect any mod
++// hotkey -- only the engine's own reads of those keys.
+ static int __cdecl HookedGetKeyState()
+ {
+     // Call the original (or FFNx's replacement) to fill the keyboard buffer.
+@@ -50,6 +76,45 @@ static int __cdecl HookedGetKeyState()
+                 kbBuf[0x50] = 0;  // Down
+                 kbBuf[0x4B] = 0;  // Left
+                 kbBuf[0x4D] = 0;  // Right
++
++                // v0.15.9.11: Chase-scene item #3 -- extended keyboard suppression
++                // during engaged Auto chase. Predicate is narrower than the arrow-
++                // zeroing above because the additional keys aren't always safe to
++                // zero -- F9 path-finding and world-map AD let the player use
++                // W/A/D normally (and W is the car's reverse, A is the car's gas).
++                // Only chase auto-pilot in MODE_AUTO with the chase ASK already
++                // answered (IsEngaged() requires s_askAnswered) gets the extra
++                // suppression. This means during the chase ASK navigation itself
++                // (cursor and confirm presses on the three options), the predicate
++                // is false and the player's X confirm flows through normally.
++                //
++                // Per Aaron's v0.15.9.11 design clarification (2026-05-12): the FF8
++                // default control set is arrows + W/A/D/X/S; we suppress everything
++                // except S so the player can still pause mid-chase. Listening for
++                // the audio cue from a successful S press is the player's confirmation
++                // that pause works.
++                if (::ChaseAutoPilot::IsEngaged()
++                    && ::ChaseDetector::GetChaseMode() == ::ChaseDetector::MODE_AUTO) {
++                    static bool s_chaseKbSuppressLogged = false;
++                    if (!s_chaseKbSuppressLogged) {
++                        s_chaseKbSuppressLogged = true;
++                        Log::Field("FieldNavigation: [v0.15.9.11] chase Auto kb "
++                                   "suppressor active: zeroing W A D X "
++                                   "(W=%02X A=%02X D=%02X X=%02X) -- S preserved "
++                                   "for pause, F-keys + mod GetAsyncKeyState hotkeys "
++                                   "untouched (mod hotkeys gated separately in "
++                                   "HandleKeys)",
++                                   kbBuf[0x11], kbBuf[0x1E], kbBuf[0x20], kbBuf[0x2D]);
++                    }
++                    kbBuf[0x11] = 0;  // W (default walk modifier; chase_auto_pilot owns
++                                      // walk state via StartDirectionDrive(walk=...))
++                    kbBuf[0x1E] = 0;  // A (default rotate/move-left; would fight analog)
++                    kbBuf[0x20] = 0;  // D (default rotate/move-right; would fight analog)
++                    kbBuf[0x2D] = 0;  // X (default confirm; could trigger entity interact)
++                    // NOTE: 0x1F = S is deliberately NOT zeroed. S is FF8's pause
++                    // function; preserving it lets the player pause the chase if
++                    // needed without breaking the suppression invariant.
++                }
+             }
+         } __except(EXCEPTION_EXECUTE_HANDLER) {}
+     }
+diff --git a/src/field_navigation.cpp b/src/field_navigation.cpp
+index ea84c28..c5ca513 100644
+--- a/src/field_navigation.cpp
++++ b/src/field_navigation.cpp
+@@ -47,6 +47,16 @@
+ #include "field_display_names.h"
+ #include "entity_classifications.h"
+ 
++// v0.15.9.11: chase headers included for the keyboard suppressor in
++// field_nav_input_hooks.inl. Aaron's chase-scene item #3: extended
++// scancode zeroing is gated on ChaseAutoPilot::IsEngaged() &&
++// ChaseDetector::GetChaseMode() == MODE_AUTO. Including the actual
++// headers (not forward declarations) keeps the Mode enum in sync with
++// chase_detector.h automatically -- when a new mode is added there,
++// nothing else has to track it.
++#include "chase_auto_pilot.h"
++#include "chase_detector.h"
++
+ // Forward declarations for cross-module namespaces (restored in v0.14.28 build recovery).
+ namespace Log { void Field(const char* format, ...); }
+ namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); }
