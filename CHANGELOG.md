@@ -6,6 +6,39 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.2.24
+
+FMV audio descriptions — incorporate the community review/edit pass (PR #26,
+thanks to @djoleninja) for the disc 0 FMVs.
+
+PR #26 rewrote and corrected the AI-generated descriptions for disc00_00h through
+disc00_20h (21 clips): fixing mis-identified scenes (01h is the Quistis infirmary
+intro, not Dr. Kadowaki; 06h is the X-ATM092 crushing a car, not a car driving)
+and adding beat-by-beat detail to the longer sequences (the Dollet launch 03h, the
+comm-tower activation 05h, the X-ATM092 chase 07h, the Timber train mission
+10h/11h, and the Edea parade 17h).
+
+The GitHub merge collided with this repo's own later AD revision of the same files
+and committed Git conflict markers into five of them (01h, 03h, 07h, 10h, 14h)
+while silently reverting the other 16 to the repo-side text. This commit resolves
+that by taking the PR author's descriptions wholesale, per maintainer decision,
+for all 21 files, with the conflict markers removed.
+
+Small cleanups applied on top of the PR text:
+- 07h: "Quill" -> "Quistis"; tidied "one of the extraction ship ," to "extraction
+  ships,".
+- 03h: a duplicate cue start (two cues at 00:48.000) would have made the second
+  interrupt the first and drop a line; the second cue now starts at 00:51.000.
+- 05h / 14h / 17h: repaired malformed timestamps (a stray space inside a
+  timestamp, a double space before the arrow) that the lenient parser tolerated
+  but were still wrong.
+- 09h / 14h: removed the contributor's notes-to-maintainer left inside the NOTE
+  header blocks (the parser skips NOTE blocks, so they never reached players).
+
+Content-only change: the VTTs are embedded as RCDATA at build time, so this needs
+a rebuild for the new descriptions to ship. No code changed.
+
+
 ## v0.18.2.23
 
 Shortened the party-group cue wording to "Active Party" / "Reserve Party" (dropped
