@@ -6,6 +6,210 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.2.34
+
+Status Limit Break page TTS (#49) confirmed complete on Squall, Zell, Quistis,
+Rinoa, Selphie.
+
+- Restored the `[STBAND]` and `[STLIMIT]` diagnostics behind a new
+  `ST_LIMIT_DIAG` compile-time flag (off by default), generalized to log the
+  active character. Flip it to true to map a new character's limit page (e.g.
+  Irvine's Shot limit).
+
+## v0.18.2.33
+
+Status Limit Break page TTS (#49) — BAT #6, Squall silent slot fixed.
+
+- Fixed the silent slot on Squall's page (down from Rough Divide / the cell next
+  to it announced nothing). The `[STBAND]` dump confirmed only +0x25F moves, and
+  it advances by 1 across the finishers (cur 4-7 = Rough Divide / Fated Circle /
+  Blasting Zone / Lion Heart) while the two toggles occupy cur 0-3. The config
+  had step=2, which mapped cur=4 and cur=5 to the same row index, so cur=5 was
+  silently deduped against Rough Divide. Changed Squall to step=1,
+  leadingToggles=4 (moveIdx = cursor - 4); cur=5 now reads as an empty Fated
+  Circle slot.
+- Removed the temporary `[STBAND]` and `[STLIMIT]` diagnostics now that the
+  chapter is complete.
+
+## v0.18.2.32
+
+Status Limit Break page TTS (#49) — BAT #5.
+
+- Fixed the first ability after a toggle being swallowed (Zell: moving from
+  Duel-Auto down to Punch Rush announced nothing until you moved again). The
+  toggle path returns early, so the cursor-band snapshot wasn't maintained while
+  on a toggle; the move onto the adjacent list row then registered no change. We
+  now remember that we just left a toggle and force the arriving row to announce.
+- Added a temporary `[STBAND]` diagnostic on Squall (full cursor-band dump on any
+  change) to identify which byte the silent slot between the Renzokuken Indicator
+  and Rough Divide uses — that test wasn't captured in the previous run's log.
+  Removed once #49 closes.
+
+## v0.18.2.31
+
+Status Limit Break page TTS (#49) — BAT #4 fixes.
+
+- Zell move descriptions now correct. The baked-description lookup was indexed by
+  the displayed row number, but with only some Duel moves learned the displayed
+  list is compressed (Burning Rave is the 5th learned row but the 7th move in the
+  full table), so it returned the wrong move's description. Each displayed row is
+  now mapped back to its full-list index, so Burning Rave correctly reads "Damage
+  all enemies."
+- Renzokuken Indicator now announces "disabled" when focused while Gunblade Auto
+  is on. The F11 screenshot confirmed the row is greyed out but still carries its
+  "Set Renzokuken Indicator" help, so it was being read as a normal on/off toggle
+  (or going silent when the help buffer lagged) — the "unannounced slot next to
+  Rough Divide" Aaron heard. The toggle path now special-cases it, and the
+  per-character cursor byte below makes the lagged-buffer path catch it too.
+- Cursor detection is now pinned to each character's known band byte (Squall
+  +0x25F, Zell +0x260, Rinoa +0x263; Quistis still auto-detects) instead of
+  "whichever byte moved," which was grabbing a flickering highlight byte on
+  Squall's page and mis-resolving the focused row.
+
+## v0.18.2.30
+
+Status Limit Break page TTS (#49) — BAT #3 fixes for all three flagged items.
+
+- Move descriptions read on "/" (and on arrow) are now correct on Squall and
+  Zell. Root cause: on the two toggle-bearing pages the GCW help text lags the
+  cursor by one row and never refreshes while the cursor is still — confirmed in
+  the log, where Burning Rave read "Damage one enemy" the whole time it was
+  focused and only flipped to "Damage all enemies" after moving off it. Those two
+  pages now announce a baked target description (Burning Rave and Fated Circle =
+  all enemies, every other shown move = one enemy). Rinoa and Quistis have no
+  toggle and read the live GCW help correctly, so they're left on the live text.
+- Renzokuken Indicator "disabled" is now announced at the moment Gunblade Auto is
+  turned on ("Gunblade Auto, on. Renzokuken Indicator disabled"), since the
+  disabled row itself can't be focused so it never announced on its own.
+
+Still open: Rinoa's currently-learning ability, per-ability learn %, and the
+"Won't learn anything. OK? Yes/No" confirmation dialog (its GCW string is now
+confirmed) — all tracked under #50.
+
+## v0.18.2.29
+
+Status Limit Break page TTS (#49) — BAT #2 follow-ups.
+
+- Selphie's Slot limit page now announces "Slot limit. No options to adjust."
+  once on entry (confirmed from the GCW: her limit page renders only the stat
+  panel — nothing selectable between "Save" and the header), instead of silence.
+- Fixed the temporary GCW log flooding the menu log: the previous
+  ST_LIMIT_GCW_LOG dumped on every poll because the GCW buffer rotates each
+  frame so its dedup never matched, which buried the per-character pages under
+  thousands of lines. Removed it; replaced with a single clean [STLIMIT] line
+  per cursor move that logs the focused row's cursor value and help-region text.
+
+Still open from BAT #2, to finalize from the clean [STLIMIT] log on the next
+pass: the move descriptions read on "/" (Zell reported "Damage 1" and Squall's
+Rough Divide read nothing — need to see the exact GCW help bytes per row to fix
+the extraction), and the Renzokuken Indicator "disabled" announce (need the
+actual Squall cursor value when Gunblade Auto is on — the current branch keys on
+cursor +0x25F==2). Quistis and the Rinoa/Zell/Squall move-name readouts are
+good. Rinoa's currently-learning ability, per-ability learn %, and the "Won't
+learn anything" confirmation dialog are tracked under #50.
+
+## v0.18.2.28
+
+Status Limit Break page TTS (#49) — BAT #1 follow-ups from the first feature
+build. The toggles and the Squall/Zell/Quistis move-name readouts worked; this
+round addresses four observations:
+
+- Renzokuken Indicator disabled state: when Gunblade Auto is on the game stops
+  drawing that row's help text, so the help-keyed path went silent on it.
+  Detect the row by cursor instead (Squall row +0x25F==2) and announce
+  "Renzokuken Indicator, disabled" while Gunblade Auto is on.
+- Empty slots: unlearned move/finisher rows past the learned ones now announce
+  "Empty slot" (cursor row index >= the learned count, within the move table).
+- Description on "/": each focused move now stores its GCW help text, and the
+  "/" key reads it back via StatusLimitSpeakSelectedHelp(), wired into the same
+  on-demand help chain as the GF Learn list / Ability / Junction.
+- Rinoa read nothing: her Angelo list is preceded by a bare "Angelo" command
+  label that stopped the forward-parse before the ability names. Added "Angelo"
+  to the skip tokens so the parse continues into Angelo Rush / Angelo Cannon /
+  etc.
+
+Selphie's Slot limit has no learnable list, so she stays silent by design (not
+in the per-character table). A temporary [STLIMIT-GCW] log (ST_LIMIT_GCW_LOG,
+remove next) dumps the decoded GCW on the limit page so this BAT confirms Rinoa
+parses and shows whether Selphie's page has anything worth reading. Rinoa's
+Angelo learn-% gauges remain tracked as #50.
+
+## v0.18.2.27
+
+Status screen Limit Break page TTS (#49) — first feature build of the limit-break
+chapter, replacing the local STATDIAG diagnostic with production announcements on
+the per-character Status detail view's limit page (Status subsystem +0x1E8==5,
+detail focus +0x22E==3, page index +0x257==3).
+
+Toggles — the headline accessibility win, since these auto-mode / indicator
+options are what let a blind player land Squall's Renzokuken and Zell's Duel
+(which otherwise need unseeable visual timing). Detected from the GCW help text
+(so no dependence on the per-character row cursor), with on/off read from the
+savemap and re-announced whenever the bit flips:
+- Gunblade Auto: savemap+0x0D1C & 0x01 (1 = on)
+- Zell Duel-Auto: savemap+0x0D1C & 0x02 (set = on)
+- Renzokuken Indicator: savemap+0x0D1D & 0x80 (0 = on, inverted)
+
+Read-only limit-move names — the Renzokuken finishers / Duel moves / Blue Magic /
+Angelo abilities are parsed out of the rendered GCW by longest-match against the
+per-character name table (the GF Learn-list technique) and indexed by the row
+cursor (band +0x25F..+0x264, using whichever byte moved; Squall steps by 2 with
+two leading toggle rows, the others step by 1). New file menu_tts_status.inl,
+textually included after menu_tts_ability.inl; the local [STATDIAG] savemap
+watcher and its call site are removed.
+
+To confirm on this BAT: toggle polarity (one-line flip if any reads backwards),
+the exact on-screen move spellings (longest-match needs them byte-for-byte), and
+the per-character cursor step / leading-toggle counts. Selphie's Slot page has no
+readable content; Rinoa's Angelo learn-% gauges are tracked separately as #50.
+
+## v0.18.2.26
+
+LOCAL DIAGNOSTIC BUILD (issue #49, not for push) — widen the Status-screen
+savemap watcher to the full savemap.
+
+The v0.18.2.25 BAT confirmed the watcher fires correctly (init line logged on
+Status entry), but toggling Gunblade Auto / Renzokuken Indicator on Squall's
+limit page produced no [STATDIAG] change lines — even though the switch was
+audibly applied. The state byte is therefore outside the 512-byte window
+[+0x0A80..+0x0C80) that build watched (and outside SUBMON's 4 KB at pMenuStateA),
+so the config-block guess was wrong; the byte may live lower, e.g. in Squall's
+character record.
+
+This build widens `PollStatusSavemapDiag` to diff the entire documented savemap
+(+0x0000..+0x1400, 5120 bytes) while the Status subsystem is active, skipping
+only the live play-time counter (+0xCCC, 4 bytes) so it doesn't spam. Same BAT:
+open Squall's Status, page to the limit screen, flip Gunblade Auto and Renzokuken
+Indicator back and forth a few times each; the byte that flips in lockstep is the
+state field. If the full-savemap diff still catches nothing, the setting is a
+runtime global outside the per-save savemap and we'll switch tactics (disassembly
+or a wider RAM scan).
+
+## v0.18.2.25
+
+LOCAL DIAGNOSTIC BUILD (issue #49, not for push) — Status-screen savemap window
+watcher to locate the persistent state byte for Squall's limit-page toggles.
+
+The 12:25 BAT mapped Squall's Status page 4: two ON/OFF options (Gunblade Auto,
+Renzokuken Indicator) plus the learned finisher rows (Rough Divide), with page
+index at pMenuStateA+0x257 (limit page = 3) and the limit-page row cursor at
++0x25F (0 = Gunblade Auto, 2 = Renzokuken Indicator, 4 = Rough Divide). What's
+still unknown is where the ON/OFF state is stored — GCW can't tell ON from OFF
+(it emits both strings), and SUBMON only diffs 4 KB at pMenuStateA, never the
+savemap, where a persistent setting must live.
+
+This build adds `PollStatusSavemapDiag` in `menu_tts_diagnostics.inl`, called from
+the menu poll whenever the Status subsystem is active (+0x1E8 == 5). It diffs a
+512-byte savemap window [+0x0A80 .. +0x0C80) — config block, active party,
+Griever, Gil, limit-break region, item battle-order, start of item inventory —
+and logs every byte that changes as `[STATDIAG] savemap+0xNNN: x -> y`. The
+window stops short of the play-time counter (+0xCCC) to avoid per-frame tick
+noise. No F12, no key; resets its snapshot on leaving Status.
+
+BAT: open Squall's Status, page to the limit screen, then toggle Gunblade Auto
+OFF->ON->OFF and Renzokuken Indicator ON->OFF->ON; the byte that flips in lockstep
+is the state field. Remove this watcher once the offset is pinned (#49).
+
 ## v0.18.2.24
 
 FMV audio descriptions — incorporate the community review/edit pass (PR #26,

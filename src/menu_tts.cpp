@@ -544,6 +544,9 @@ void MenuTTS::Initialize()
 // --- Main-menu Ability screen TTS (#42, v0.18.1) ---
 #include "menu_tts_ability.inl"
 
+// --- Status screen limit-break page TTS (#49, v0.18.2.27) ---
+#include "menu_tts_status.inl"
+
 void MenuTTS::Update()
 {
     if (!s_initialized) return;
@@ -606,7 +609,7 @@ void MenuTTS::Update()
         // re-read the help of the ability under the cursor instead (#3); the
         // helper returns false off that list so the normal help bar still works.
         if (GetAsyncKeyState(VK_OEM_2) & 1) {
-            if (!GFSpeakSelectedAbilityHelp() && !AbilitySpeakSelectedHelp() && !JunctionAutoSpeakHelp())
+            if (!GFSpeakSelectedAbilityHelp() && !AbilitySpeakSelectedHelp() && !JunctionAutoSpeakHelp() && !StatusLimitSpeakSelectedHelp())
                 AnnounceHelpText();
         }
     }
@@ -822,6 +825,11 @@ void MenuTTS::Update()
                 uint8_t* pmd = (uint8_t*)pMenuStateA;
                 uint8_t sub = pmd[0x1E8];
                 uint8_t msFocus = pmd[0x22E];
+                // v0.18.2.27 (#49): Status limit-break page TTS — toggles
+                // (Gunblade Auto / Duel-Auto / Renzokuken Indicator) + read-only
+                // limit-move list names. Runs whenever the Status subsystem is
+                // active; PollStatusLimit internally gates to the limit page.
+                if (sub == 5) PollStatusLimit(); else ResetStatusLimit();
                 bool magStatCharSel =
                     ((s_prevCursor == 2 && sub == 3) || (s_prevCursor == 3 && sub == 5)) &&
                     (msFocus == 0 || msFocus == 8);
