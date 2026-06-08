@@ -829,7 +829,7 @@ void MenuTTS::Update()
                 // (Gunblade Auto / Duel-Auto / Renzokuken Indicator) + read-only
                 // limit-move list names. Runs whenever the Status subsystem is
                 // active; PollStatusLimit internally gates to the limit page.
-                if (sub == 5) PollStatusLimit(); else ResetStatusLimit();
+                if (sub == 5) { PollStatusLimit(); PollStatusDetailPages(); StatusDetailHotkeys(); PollStatusDetailDiag(); PollStatusCalcDiag(); PollStatusPage2Diag(); PollStatusMagScan(); } else { ResetStatusLimit(); ResetStatusDetailPages(); }
                 bool magStatCharSel =
                     ((s_prevCursor == 2 && sub == 3) || (s_prevCursor == 3 && sub == 5)) &&
                     (msFocus == 0 || msFocus == 8);

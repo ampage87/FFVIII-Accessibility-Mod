@@ -6,6 +6,327 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.2.50
+
+Status Page 2 key 3 (Status Attack) — implemented with name + percent (#54).
+Completes the status detail submenu; ready to ship Pages 1/2/3 together.
+
+The percent turned out to be readable after all. ST-Atk-J inflicts status at 1%
+per spell stocked (max 100), so the displayed percent is simply the stock count
+of the junctioned spell (confirmed via Final Fantasy Wiki, Neoseeker, GameFAQs).
+The "66" found earlier in the magic-inventory list wasn't a coincidence — Squall
+had 66 Berserk stocked, and 66 stock = 66%. (The three kernel-scanner attempts
+were the wrong tool: this value was never in a kernel table we needed to find.)
+
+Key 3 now reads the junctioned ST-Atk magic id (savemap char+0x66 = FFNx
+j_atk_mtl), names the spell from a magic-id table validated against our own data
+(id 7 = Thunder, id 46 = Berserk both match), and reads the percent as that
+spell's stock count from the per-character magic inventory (FFNx
+savemap_ff8_character.magics[32] at char+0x10; each u16 = id in the low byte,
+quantity in the high byte). Speaks e.g. "Status attack, Berserk, 66 percent";
+logs magicId + stock for verification. It names the junctioned spell (not the
+inflicted status) to stay exact and self-verifiable rather than ship an
+unsourced spell->status mapping. ST_PAGE2_DIAG flipped off (discovery done);
+ST_MAGSCAN stays shelved.
+
+## v0.18.2.49
+
+Status Page 2 key 3 — shelved the kernel Magic-table scanner, pivoted back to the
+computed-slot diff method (#54, LOCAL/diagnostic only).
+
+Three scanner variants (v1–v3, .46–.48) each false-matched or found nothing: v1
+hit a UI vertex buffer, v2 a curve/lookup table, and v3's strict 48-entry
+u16-id==index run found no match anywhere, with the fallback only turning up
+.text code bytes. Conclusion: the in-memory magic data isn't a flat, id-indexed
+0x3C array we can fingerprint by scanning. The anchor itself was also suspect —
+the "66" came from the status-DEFENSE reading, not status-attack.
+
+Set ST_MAGSCAN=false (scanner code kept, gated off) and re-enabled ST_PAGE2_DIAG
+to dump the computed-stats slot on Page 2. The status-attack data is almost
+certainly cached in that slot (the battle engine needs it to inflict status),
+as a status bitmask + percent near the already-solved elem-attack fields
+(+0x1C4/+0x1C5). The plan: capture the slot with Berserk on ST-Atk-J, locate the
+Byte(s) holding the Berserk status bit + its percent, and confirm by diffing
+against a different status spell — the same empirical method that solved
+elem-attack (Thunder/Water/Ice) and the resistances. No shipping changes.
+
+## v0.18.2.48
+
+Status Page 2 key 3 — kernel Magic-table scanner v3 (#54, LOCAL/diagnostic only).
+
+The v0.18.2.47 scanner hit a second false positive (base 0x00D497D4, a curve /
+lookup table of smooth ramp bytes): its two-entry id check accepted a u8-at-+0x04
+match, and a single coincidental byte plus stray anchor bytes were enough.
+Replaced with a full 48-entry run requiring the u16 id field at +0x04 to equal
+the entry index (0-based, with a 1-based fallback) — a coincidence across 48
+consecutive u16==index values at 0x3C stride is unique to the real Magic table,
+and both prior false positives are rejected on entry 0. The value-byte anchors
+(Thunder 0x2B, Berserk 0x42) are now informational (logged, not required) so a
+surprise in the stored values can't reject the real table. Fallback unchanged.
+Still one-shot, SEH-guarded, log-only, gated to Page 2; no shipping changes.
+
+## v0.18.2.47
+
+Status Page 2 key 3 — kernel Magic-table scanner v2 (#54, LOCAL/diagnostic only).
+
+The v0.18.2.46 scanner returned a false positive (base 0x00CDB728, a UI vertex
+buffer in the exe data section: 20-byte records of rising screen coords ending
+in an `80 80 80 24` color, which tripped the loose name-offset-monotone
+heuristic and happened to contain a stray 0x42). Because the scan stops at the
+first hit, that junk match blocked the real table. Replaced the heuristic with a
+strict, self-verifying match: at a candidate base the per-entry magic-id field
+(tried at +0x04/+0x00/+0x02 u16 and +0x04 u8) must equal the entry index at BOTH
+anchor entries (7 = Thunder, 46 = Berserk) AND those entries must carry their
+known value bytes (0x2B and 0x42). If the strict pass finds nothing, a fallback
+lists up to six bases that merely carry both anchor bytes (with their +0x04 id
+reads and e7/e46 dumps) for manual identification. Read window widened to cover
+entry 46 fully (NEED = 47 entries). Still one-shot, SEH-guarded, log-only, gated
+to Page 2; no shipping behavior changes.
+
+## v0.18.2.46
+
+Status Page 2 key 3 (Status Attack) groundwork — kernel Magic-data discovery
+diagnostic (#54, LOCAL/diagnostic only).
+
+Key 3's status name + percent come from the kernel.bin Magic table, which isn't
+cached in the computed-stats buffer and isn't exposed as a base pointer by FFNx
+(its named magic loaders are the battle effect/animation data, not the stat
+table). Added `PollStatusMagScan` (behind `ST_MAGSCAN`, gated to Page 2): a
+one-shot scan that walks committed/readable memory via VirtualQuery for a
+0x3C-stride array whose per-entry magic-id field counts up, confirmed by the
+content anchor that entry 46 contains 0x42 (Berserk's status-attack value 66
+from the prior BAT). On a hit it logs the base and dumps entries 0/1/7/27/46 in
+full so the real field offsets (status-attack byte, status bitmask) can be read
+rather than assumed. SEH-guarded, log-only, no speech/writes; no change to any
+shipping behavior. Once the base + offsets are confirmed, key 3 will read the
+kernel entry directly (status from the bitmask, percent from the status-attack
+byte) and `ST_MAGSCAN` flips off.
+
+## v0.18.2.45
+
+Status Page 2 Elemental Resistance (key 2) — resist / immune / absorb wording (#54).
+
+The elemental-defense reading now interprets the FF8 elem-def value (word - 800)
+as three cases instead of a flat "resist N percent":
+
+- value below 100  -> "<Element> resists N percent" (N = value)
+- value exactly 100 -> "<Element> immune"
+- value above 100   -> "<Element> absorbs M percent" where M = value - 100
+
+So Squall's Blizzaga-on-Elem-Def-J (Ice word 920 = value 120) now speaks
+"Ice absorbs 20 percent" instead of the misleading "Ice resist 120 percent".
+Verified against the v0.18.2.44 BAT log ([STPAGE2] key=2 read 120). Negative
+values still read "<Element> weak N percent". Status Resistance (key 4) is
+unchanged — status effects can be resisted or made immune but never absorbed.
+
+## v0.18.2.44
+
+Status Page 2 (Elemental & Status) TTS — implemented (#54). Completes the status
+detail submenu (Pages 1/2/3). Discovery diagnostic flipped off.
+
+Five `[ST2DIAG]` BATs located every Page-2 array inside the computed-stats slot
+(0x1CFF000 + slot*0x1D0) and confirmed each scale against on-screen values:
+
+- Key 1 Elemental Attack: element bitmask +0x1C4 (Fire 0x01 / Ice 0x02 / Thunder
+  0x04 / Earth 0x08 / Poison 0x10 / Wind 0x20 / Water 0x40 / Holy 0x80) + percent
+  +0x1C5. Verified Thunder 43%, Water 100%, Ice 80%.
+- Key 2 Elemental Resistance: 8 little-endian words +0x194, percent = word - 800
+  (neutral 800). Verified Blizzara->Elem-Def gives Ice word 824 = 24% on screen.
+  Spoken as resist / weak. Element order Fire/Ice/Thunder/Earth/Poison/Wind/Water/Holy.
+- Key 4 Status Resistance: 13 bytes +0x1A4, percent = byte - 100 (neutral 100).
+  Verified across 0% / 4% / 66% data points. Status order Death/Poison/Petrify/
+  Darkness/Silence/Berserk/Zombie/Sleep/Slow/Stop/Curse/Confuse/Drain.
+- Key 3 Status Attack: reads the junctioned ST-Atk magic id (savemap char+0x66).
+  Its status name + percent are NOT cached in the computed buffer, so v1 reports
+  presence only and logs the magic id; a magic->status table is the pending
+  refinement (does not block Pages 1/2/3 shipping together).
+
+Entering Page 2 announces "Elemental and Status" + the four key hints; each key
+speaks labeled values (rule #44). `ST_PAGE2_DIAG` set false; the `[ST2DIAG]`
+diagnostic is retained behind the flag for the later Status-Attack table work.
+No new source files (all in `menu_tts_status.inl`; the dispatch in `menu_tts.cpp`
+already calls `PollStatusDetailPages` / `StatusDetailHotkeys`).
+
+## v0.18.2.43
+
+Status Page 2 (Elemental & Status) discovery diagnostic (#54) — LOCAL build, not
+for release (diagnostic flag is on).
+
+- Added `[ST2DIAG]`, gated to Page 2 (focus +0x22E==3, page +0x257==1). For the
+  viewed character it logs the savemap junction inputs (char+0x65..0x6E: Elem-Atk,
+  ST-Atk, 4x Elem-Def, 4x ST-Def magic IDs) and a hex dump of the computed-stats
+  slot at 0x1CFF000 (non-zero 16-byte rows across the full 0x1D0 struct).
+- Purpose: the displayed Page-2 percentages bypass the GCW buffer and FFNx leaves
+  the elem/status arrays unnamed inside `ff8_char_computed_stats.unk1[370]`. Pairing
+  the dump with a Page-2 F11 screenshot lets the per-element / per-status arrays and
+  their scale be located by correlation (the same method that resolved Page 1).
+- Log-only, SEH-isolated, no speech/writes, no GCW snapshot. `ST_PAGE2_DIAG` flips
+  off before the Page-2 implementation ships.
+
+## v0.18.2.42
+
+Hardened the Page-1 weapon parser's command skip-list (#54).
+
+- The weapon is read from the GCW panel by skipping the command box that
+  precedes it. The skip-list is now the complete, verified set of FF8 command
+  abilities (18 total + innate Attack): Absorb, Card, Darkside, Defend, Devour,
+  Doom, Draw, GF, Item, Kamikaze, LV Down, LV Up, Mad Rush, Magic, MiniMog,
+  Recover, Revive, Treatment.
+- Removed three entries that are not command abilities: Mug (not in FF8) and
+  Med Data / Junk Shop (those are Menu abilities, never in the battle command
+  box).
+- Added both spacing/hyphen variants for the multi-word names whose exact
+  in-game rendering is uncertain (Mad Rush / Mad-Rush, LV Up / LV-Up, etc.), so
+  an unusual command sitting before the weapon can't leak into the readout.
+
+## v0.18.2.41
+
+Status Page 1 key 9 — equipped weapon (#54).
+
+- Page-1 key 9 now announces the equipped weapon, e.g. "Weapon, Revolver" /
+  "Weapon, Metal Knuckle". FF8 has no armor or accessories, so the weapon is the
+  whole of equipment.
+- The name is read from the game's own rendered text in the page-1 GCW panel
+  (so it always matches the screen), not a hand-rolled weapon-ID table. The
+  command box between the labels and the weapon is junction-dependent, so the
+  parser isolates one panel between two menu-bar repeats and skips the command
+  tokens after the innate "Attack", taking the trailing run as the weapon.
+- Page-1 entry hint updated to include "9 weapon".
+
+## v0.18.2.40
+
+Status Page 1 experience now matches the screen (#54).
+
+- Key 1 (experience) previously spoke only the running total. The status
+  screen also shows "Next LEVEL" — the EXP remaining to the next level — which
+  the F11 screenshot of Squall's page confirmed (Current EXP 19690, Next LEVEL
+  310). Key 1 now speaks both, e.g. "Experience 19690. 310 to next level."
+- FF8 characters take a flat 1000 EXP per level, so to-next = level×1000 − EXP
+  (20×1000 − 19690 = 310, an exact match to the screen). At level 100 it says
+  "maximum level" instead of a remaining figure.
+
+## v0.18.2.39
+
+F11 screenshot index — makes manual captures discoverable from the logs.
+
+- Each F11 press now writes an inline `[F11-SHOT]` marker into the log channel
+  matching the current game mode (menu shot → `ff8_menu.log`, battle → battle,
+  field → field, world → world, else mod), so the screenshot record sits next
+  to the on-screen context it captured. Grep `[F11-SHOT]` to jump straight to a
+  capture point.
+- After each press it re-appends a cumulative `[F11-INDEX]` block (sequence #,
+  filename, timestamp, channel) to that same log, so a tail read taken right
+  after a screenshot burst surfaces the full list and the filenames — the latest
+  block is always the complete one.
+- A final consolidated `[F11-INDEX]` is written to `ff8_mod.log` at shutdown for
+  whole-log reads.
+- Filenames recorded as `.png` basenames under `Logs\screenshots` (the capture
+  writes both `.bmp` and `.png`). The previous single mod-log line is kept as a
+  `[F11-SCREENSHOT]` trail with the sequence number and active channel.
+
+## v0.18.2.38
+
+Status detail pages 1 & 3 (#54) confirmed; discovery diagnostics off.
+
+- BAT (Squall + Zell) confirmed Page 1 (Character Statistics) and Page 3 (GF
+  Compatibility) read the correct character on both. The viewed-character
+  resolution is verified: the roster index and the independent HP cross-check
+  agree (Zell = index 1), and the computed buffer puts the viewed character in
+  slot 0 regardless of party position (viewing Zell: comp[0] = Zell's HP 866,
+  with Squall in comp[1]). The HP-match slot picker handles it either way.
+- Turned `ST_DETAIL_DIAG` off now that the slot/character question is settled
+  — the `[STDETAIL]`/`[STCALC]` discovery dumps no longer spam the menu log.
+  The production `[STPAGE]`/`[STPAGE1]`/`[STPAGE3]` lines remain for ongoing
+  verification.
+- Known cosmetic: Siren's GF name decodes with a stray trailing glyph
+  ("SirenA"); affects `DecodeGFName` (so the GF grid too). Noted for cleanup.
+- Compatibility values confirmed on a 0–1000 display scale; Zell's Shiva 0 /
+  Ifrit 1000 is genuine per-character affinity data, not a misread.
+
+## v0.18.2.37
+
+Status detail pages 1 & 3 (#54) — Character Statistics + GF Compatibility TTS.
+
+- Page 1 (Character Statistics): number-key hotkeys read each labeled field from
+  the computed-stats buffer `ff8_char_computed_stats` (0x1CFF000, stride 0x1D0).
+  Key 0 overview (name, level, HP current of max), 1 experience, 2-7
+  Strength/Vitality/Magic/Spirit/Speed/Luck, 8 Evade and Hit. Stat-field offsets
+  were resolved by disassembling `compute_char_stats_sub_495960` (curHP +0x172,
+  maxHP +0x174, level +0x1B8, STR +0x1BB, VIT +0x1BC, MAG +0x1BD, SPR +0x1BE,
+  SPD +0x1BF, LUCK +0x1C0, EVA +0x1C1, HIT +0x1C2) and cross-corroborated by the
+  junction-bonus factor array order. Equipment (key 9) deferred.
+- Page 3 (GF Compatibility): key 0 enumerates obtained GFs with this character's
+  compatibility value and a "junctioned" marker, reading the savemap directly
+  (reusing the GF module's verified model: obtained = GF rec[+0x11]; name via
+  DecodeGFName; compatibility = (6000 - char[+0x70 + gf*2]) / 5; junctioned-to-
+  this-char = char[+0x58] bit gf). No GCW glyph needed for the marker.
+- On entering either page the mod announces the page name, the viewed character,
+  and the available number keys. Pages are static (no in-game cursor), so reads
+  are mod-side number-key hotkeys gated to the page (cursor==3, focus==3,
+  +0x257 == 0 or 2). Per rule #44 every value is spoken with its label.
+- Viewed character resolved from the char-select roster (+0x1DB indexed by
+  +0x1E9); the computed slot is matched by the character's current HP and falls
+  back to slot 0 (the confirmed viewed-char slot). A `[STPAGE]` log records the
+  roster index, an HP-match cross-check, and the resolved slot so a benched /
+  non-leader character (e.g. Zell) confirms the slot mapping next test.
+- `ST_DETAIL_DIAG` discovery diagnostics (`[STDETAIL]`/`[STCALC]`) left enabled
+  this build for that confirmation; they flip off once #54 fully ships.
+
+## v0.18.2.36
+
+Status detail pages 1-3 (#54) — computed-stats buffer hunt (LOCAL, not for release).
+
+- Added `[STCALC]`, a second log-only discovery diagnostic in
+  `menu_tts_status.inl` (under the same `ST_DETAIL_DIAG` flag). On any Status
+  detail page it dumps, once per page/character change: the 8 savemap base
+  character records (stored HP/maxHP + pre-junction base stats, as ground
+  truth) and the three slots of the computed-stats buffer
+  `char_comp_stats_1CFF000` (`ff8_char_computed_stats[3]`, stride 0x1D0;
+  curr_hp +0x172, max_hp +0x174, stat_multiplier +0x1B8), plus the char-select
+  cursor hint. All reads SEH-isolated; speaks/writes nothing; makes no GCW
+  snapshot, so it cannot interfere with `PollStatusLimit`.
+- Purpose (existing-knowledge-first, confirmed against FFNx `ff8_data.cpp` /
+  `ff8.h`): the v0.18.2.35 BAT proved the page numbers bypass the GCW text
+  pipeline, and FFNx identifies `0x1CFF000` as the battle/active computed-stats
+  buffer (not `character_data_1CFE74C`, which is the base/working records). This
+  build answers the go/no-go: does a `0x1CFF000` slot hold the viewed
+  character's computed HP while a Status page is open, and which slot maps to
+  the viewed character? If yes, page-1 stats for active members read straight
+  from this buffer; a follow-up maps the stat-field offsets via a junction-diff.
+- No behavior change for players; diagnostic only. `ST_DETAIL_DIAG` flips to
+  false when #54 ships.
+
+## v0.18.2.35
+
+Status detail pages 1-3 (#54) — discovery diagnostic build (LOCAL, not for release).
+
+- Added `[STDETAIL]`, a log-only discovery diagnostic in `menu_tts_status.inl`
+  behind a new `ST_DETAIL_DIAG` compile-time flag (on for this build). It fires
+  on the Status detail view for the three non-limit pages (detail focus
+  +0x22E==3, page +0x257 != 3), logging the page byte, the cursor band
+  (+0x25F..+0x264), and the decoded GCW text on any page/band/text change. All
+  reads are SEH-isolated; it speaks nothing and writes nothing.
+- Purpose: map which +0x257 value is which page (P1 stats / P2 resistances /
+  P3 GF compatibility) and determine whether the font-rendered stat numbers and
+  percentages reach the GCW (get_character_width) buffer at all — or whether a
+  separate number-draw routine bypasses it, in which case the next step is to
+  locate the computed-stats render buffer (the base-stat struct at
+  character_data 0x1CFE74C is NOT it: page 1 shows junction-inclusive computed
+  values, not the struct's base stats).
+- Wired `PollStatusDetailDiag()` into the existing `sub==5` Status dispatch in
+  menu_tts.cpp, after `PollStatusLimit()`. On the limit page the diag early-
+  returns so only `PollStatusLimit` drains the GCW buffer (no double drain); on
+  pages 1-3 `PollStatusLimit` early-returns before touching the buffer, so the
+  diag is the only consumer.
+- No production behavior change: with `ST_DETAIL_DIAG` off this is inert.
+
+BAT: menu > Status > pick a character > on the detail view, cycle pages with
+L1/R1, pausing a moment on each (pages 1-3 are static info displays — no cursor,
+so there is nothing to arrow through). Then read `ff8_menu.log` and grep
+`[STDETAIL]` — report the page byte per page and whether the `text=` field
+contains the stat numbers / percentages or only the labels. The band is expected
+to stay constant (confirming there is no per-page cursor).
+
 ## v0.18.2.34
 
 Status Limit Break page TTS (#49) confirmed complete on Squall, Zell, Quistis,

@@ -449,6 +449,67 @@ static void PollSeedSalary()
     s_prevSteps  = steps;
 }
 
+// ============================================================================
+// v0.18.2.39 — F11 on-demand screenshot index
+// ============================================================================
+// Each F11 press writes an inline [F11-SHOT] marker into the log channel that
+// matches the current game mode (menu shot -> ff8_menu.log, battle -> battle,
+// field -> field, world -> world, else mod), so the screenshot record sits
+// next to the on-screen context that was captured. It then re-appends a
+// cumulative [F11-INDEX] summary to that same channel, so a tail read taken
+// right after a screenshot burst surfaces what was captured and the filenames.
+// A final consolidated index is also written to the mod log at shutdown for
+// whole-log reads. Names are basenames under BattleTTS::GetScreenshotDir()
+// (Logs\screenshots); DoGLCapture writes both .bmp and .png, index records .png.
+struct F11ShotRec {
+    int  seq;
+    char name[64];    // "f11_HHMMSS_mmm.png"
+    char stamp[16];   // "HH:MM:SS"
+    const char* chan; // channel label
+};
+static F11ShotRec s_f11Shots[64];
+static int        s_f11ShotCount = 0;
+
+enum F11Chan { F11_MOD = 0, F11_BATTLE, F11_FIELD, F11_WORLD, F11_MENU };
+static const char* const F11_CHAN_LABEL[] = { "mod", "battle", "field", "world", "menu" };
+
+static F11Chan F11ActiveChannel()
+{
+    switch (FF8Addresses::GetCurrentMode()) {
+        case FF8Addresses::MODE_MENU:     return F11_MENU;
+        case FF8Addresses::MODE_FIELD:    return F11_FIELD;
+        case FF8Addresses::MODE_WORLDMAP: return F11_WORLD;
+        case 3:                           return F11_BATTLE;  // raw battle mode (cf. PollPopupRecords)
+        default:                          return F11_MOD;
+    }
+}
+
+static void F11LogTo(F11Chan ch, const char* line)
+{
+    switch (ch) {
+        case F11_BATTLE: Log::Battle("%s", line); break;
+        case F11_FIELD:  Log::Field("%s", line);  break;
+        case F11_WORLD:  Log::World("%s", line);  break;
+        case F11_MENU:   Log::Menu("%s", line);   break;
+        default:         Log::Mod("%s", line);    break;
+    }
+}
+
+// Written to the mod log at shutdown so a whole-log read of ff8_mod.log ends
+// with the full session screenshot list.
+static void F11WriteFinalIndex()
+{
+    if (s_f11ShotCount <= 0) return;
+    Log::Mod("[F11-INDEX] === F11 screenshots this session (final, %d total) ===",
+             s_f11ShotCount);
+    for (int i = 0; i < s_f11ShotCount; i++) {
+        Log::Mod("[F11-INDEX]   #%d  %s  @%s  (%s log)",
+                 s_f11Shots[i].seq, s_f11Shots[i].name,
+                 s_f11Shots[i].stamp, s_f11Shots[i].chan);
+    }
+    Log::Mod("[F11-INDEX] === end ===");
+}
+
 DWORD WINAPI AccessibilityThread(LPVOID lpParam)
 {
     // Give the game a moment to initialize its memory structures.
@@ -613,13 +674,55 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
             if (f11 && !s_f11was && !alt) {
                 SYSTEMTIME wt;
                 GetLocalTime(&wt);
-                char path[512];
-                snprintf(path, sizeof(path),
+                char base[512];
+                snprintf(base, sizeof(base),
                          "%s\\f11_%02d%02d%02d_%03d",
                          BattleTTS::GetScreenshotDir(),
                          wt.wHour, wt.wMinute, wt.wSecond, wt.wMilliseconds);
-                BattleTTS::RequestScreenshotAsync(path);
-                Log::Mod("[F11-SCREENSHOT] Capture requested: '%s.png'", path);
+                BattleTTS::RequestScreenshotAsync(base);
+
+                char shotName[64];
+                snprintf(shotName, sizeof(shotName),
+                         "f11_%02d%02d%02d_%03d.png",
+                         wt.wHour, wt.wMinute, wt.wSecond, wt.wMilliseconds);
+                char stamp[16];
+                snprintf(stamp, sizeof(stamp), "%02d:%02d:%02d",
+                         wt.wHour, wt.wMinute, wt.wSecond);
+
+                F11Chan ch  = F11ActiveChannel();
+                int     seq = s_f11ShotCount + 1;
+                if (s_f11ShotCount < (int)(sizeof(s_f11Shots) / sizeof(s_f11Shots[0]))) {
+                    F11ShotRec& r = s_f11Shots[s_f11ShotCount++];
+                    r.seq  = seq;
+                    strncpy_s(r.name,  shotName, _TRUNCATE);
+                    strncpy_s(r.stamp, stamp,    _TRUNCATE);
+                    r.chan = F11_CHAN_LABEL[ch];
+                }
+
+                // Inline marker, co-located with the on-screen context. Grep
+                // [F11-SHOT] in the active domain log to jump straight here.
+                char marker[192];
+                snprintf(marker, sizeof(marker),
+                         "[F11-SHOT] #%d %s  <- screenshot captured at this point",
+                         seq, shotName);
+                F11LogTo(ch, marker);
+
+                // Cumulative index re-appended each press so a tail read after
+                // a burst surfaces the full list (the last block is complete).
+                F11LogTo(ch, "[F11-INDEX] === F11 screenshots this session ===");
+                for (int i = 0; i < s_f11ShotCount; i++) {
+                    char il[192];
+                    snprintf(il, sizeof(il),
+                             "[F11-INDEX]   #%d  %s  @%s  (%s log)",
+                             s_f11Shots[i].seq, s_f11Shots[i].name,
+                             s_f11Shots[i].stamp, s_f11Shots[i].chan);
+                    F11LogTo(ch, il);
+                }
+                F11LogTo(ch, "[F11-INDEX] === end (latest block is complete) ===");
+
+                // Mod-log trail (kept for whole-log / mod-log reads).
+                Log::Mod("[F11-SCREENSHOT] #%d '%s' captured (active log: %s)",
+                         seq, shotName, F11_CHAN_LABEL[ch]);
                 ScreenReader::Speak(L"Screenshot captured.", true);
             }
             if (vkey && !s_vWas) {
@@ -747,6 +850,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             FreeLibrary(hOriginalDll);
         }
         
+        F11WriteFinalIndex();   // v0.18.2.39: consolidated F11 index for whole-log reads
         NavLog::Close();
         Log::Close();
         break;
