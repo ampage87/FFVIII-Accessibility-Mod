@@ -331,6 +331,83 @@ static void ObsLogSample(uint8_t arrow, float dx, float dy, int heldTicks) {
     }
 }
 
+// ============================================================================
+// v0.18.3.7: Guard-patrol recon for the Timber train (#58). LOG-ONLY.
+//
+// On the real coupling field tilink1 (where GalHei1/GalHei2 patrol), log each
+// VISIBLE, MOVING entity's live world position, distance to the player, and
+// talk/push radius -- throttled to ~400ms. An entity is flagged a "mover" once
+// it drifts >20 units from where it was first seen; thereafter it's logged
+// every tick so the full back-and-forth patrol (including turn points and any
+// approach toward the player) is captured. Static scenery and invisible
+// controllers (modelId < 0) never log. Party followers will also show, but
+// they track the player (small, shrinking dist) and are easy to tell apart
+// from the independently-patrolling guards in analysis.
+//
+// Purpose: characterize the guards' patrol range, speed, and radii for the
+// #58 awareness/suppression design. Reads only; the sole side effect is the
+// [GUARDPOS] log line. No std::string here, so the __try blocks are C2712-safe.
+// ============================================================================
+#define GUARD_RECON_DIAG 0   // off v0.18.3.8: first-pass patrol mapped (ents 5/6, X~-1315, Y~[-505,1640], ~150u/s); flip to 1 to resume #58 guard work
+
+static void GuardReconLog() {
+#if GUARD_RECON_DIAG
+    const char* fn = FF8Addresses::pCurrentFieldName;
+    if (!fn || _strnicmp(fn, "tilink", 6) != 0) return;   // real coupling field only
+    if (!FF8Addresses::pFieldStateOthers) return;
+
+    static DWORD s_lastLog = 0;
+    DWORD now = GetTickCount();
+    if (now - s_lastLog < 400) return;   // ~2.5 bursts/sec max
+    s_lastLog = now;
+
+    float px = 0.0f, py = 0.0f;
+    bool havePlayer = (s_playerEntityIdx >= 0) && GetEntityPos(s_playerEntityIdx, px, py);
+
+    static float s_firstX[MAX_ENTITIES] = {};
+    static float s_firstY[MAX_ENTITIES] = {};
+    static bool  s_seen[MAX_ENTITIES]   = {};
+    static bool  s_mover[MAX_ENTITIES]  = {};
+
+    int entCount = MAX_ENTITIES;
+    if (FF8Addresses::pFieldStateOtherCount) {
+        __try {
+            int c = *FF8Addresses::pFieldStateOtherCount;
+            if (c >= 0 && c < MAX_ENTITIES) entCount = c;
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
+
+    for (int i = 0; i < entCount; i++) {
+        if (i == s_playerEntityIdx) continue;
+        float ex = 0.0f, ey = 0.0f;
+        if (!GetEntityPos(i, ex, ey)) continue;   // not placed / not active
+
+        int16_t modelId = -1;
+        __try {
+            uint8_t* base = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+            if (base) modelId = *(int16_t*)(base + ENTITY_STRIDE * i + 0x218);
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        if (modelId < 0) continue;   // invisible controller -- not a patroller
+
+        if (!s_seen[i]) { s_seen[i] = true; s_firstX[i] = ex; s_firstY[i] = ey; }
+        float ddx = ex - s_firstX[i], ddy = ey - s_firstY[i];
+        if ((ddx * ddx + ddy * ddy) > 400.0f) s_mover[i] = true;  // >20 units from spawn
+        if (!s_mover[i]) continue;   // log movers (guards / followers) only
+
+        uint16_t talk = GetEntityTalkRadius(i);
+        uint16_t push = GetEntityPushRadius(i);
+        float dist = -1.0f;
+        if (havePlayer) {
+            float dxp = ex - px, dyp = ey - py;
+            dist = sqrtf(dxp * dxp + dyp * dyp);
+        }
+        Log::Field("FieldNavigation: [GUARDPOS] ent%d model=%d pos=(%.0f,%.0f) "
+                   "distToPlayer=%.0f talk=%u push=%u",
+                   i, (int)modelId, ex, ey, dist, talk, push);
+    }
+#endif
+}
+
 // Per-tick observer. Called from Update() each frame.
 //
 // v0.17.5 (post quantization architecture): Pure diagnostic again. The cal
@@ -347,6 +424,11 @@ static void ObsLogSample(uint8_t arrow, float dx, float dy, int heldTicks) {
 // effect; if it logs, the only side-effect is the log line and an update to
 // the observer's own private statics.
 static void ObserveArrowResponse() {
+    // v0.18.3.7: guard-patrol recon (#58) -- runs every tick BEFORE the
+    // observer's own auto-drive/dialog gates so the guards are captured
+    // regardless of player input or game state. Self-gates to tilink1.
+    GuardReconLog();
+
     // v0.17.7.6.1: Two-tier gating for auto-drive activity.
     //
     // CHASE drive always suppresses observer sampling. The chase auto-pilot

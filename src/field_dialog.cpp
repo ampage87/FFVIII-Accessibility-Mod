@@ -130,6 +130,7 @@
 #include "ff8_addresses.h"
 #include "ff8_text_decode.h"
 #include "battle_tts.h"       // v0.10.112: GetLastDrawerName() for draw result announcements
+#include "field_archive.h"    // v0.18.3.2: DumpTrainCodeScripts() for the #56 JSM dump diagnostic
 #include "minhook/include/MinHook.h"
 #include <vector>
 
@@ -137,6 +138,7 @@
 namespace Log {
     void Dialog(const char* format, ...);
     void Write(const char* format, ...);
+    void Field(const char* format, ...);   // v0.18.3.2: ff8_field.log sink, for TrainCodeJsmDump (#56)
 }
 namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); }
 // v0.14.63: ScanTTS::IsScreenActive() lets us know when the Scan UI window

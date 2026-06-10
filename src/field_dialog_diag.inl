@@ -359,3 +359,290 @@ static void DiagRawWindowDump()
 
     Log::Write("%s", buf);
 }
+
+// ============================================================================
+// v0.18.3.0: Train minigame code-channel probe ([TRAINPROBE]) -- log-only.
+//
+// Goal (issue #56): find which render channel carries Rinoa's uncoupling
+// code numbers. The mod already catches every text channel it knows about
+// (opcode_mes, field_get_dialog_string, show_dialog, and the
+// get_character_width glyph accumulator), yet the codes are never spoken --
+// so they are almost certainly drawn by the fixed-width numeric-sprite
+// routine (the HP/gil/timer font), bypassing all of them. This probe RULES
+// OUT the text channels first: while on a field it dumps, UNFILTERED,
+//   (1) the current field name + id on change (also seeds the train_detector
+//       field set), and
+//   (2) every window slot's decoded text (no min-length / garbled filter), and
+//   (3) the raw + decoded get_character_width glyph buffer.
+// If the code shows up in none of them, v0.18.3.1 hooks the numeric-sprite
+// routine. If it shows up but is being filtered/deduped, the fix lives in
+// code we already own.
+//
+// Discovery is done on the briefing-room PRACTICE code panel: no timer, no
+// guards, repeatable. Auto-fires on field (no F12, no key, no SET3, no new
+// engine hook). Pure logging -- no speech, no memory writes.
+// ============================================================================
+
+#define TRAIN_PROBE_DIAG 0   // set 0 to compile the probe out -- DONE: code is sprite-drawn, not in windows
+
+static void TrainProbeDump()
+{
+#if TRAIN_PROBE_DIAG
+    if (!FF8Addresses::IsOnField()) return;
+
+    // Field name/id on change -- captures the briefing/train field names.
+    static std::string s_lastProbeField;
+    char fbuf[24];
+    int fi = 0;
+    const char* fn = FF8Addresses::pCurrentFieldName;
+    if (fn) { for (; fi < 16 && fn[fi]; ++fi) fbuf[fi] = fn[fi]; }
+    fbuf[fi] = 0;
+    std::string curField(fbuf);
+    if (curField != s_lastProbeField) {
+        s_lastProbeField = curField;
+        uint16_t fid = FF8Addresses::pCurrentFieldId ? *FF8Addresses::pCurrentFieldId : 0xFFFF;
+        Log::Write("[TRAINCODE] field=\"%s\" id=0x%04X", curField.c_str(), fid);
+    }
+
+    if (!FF8Addresses::pWindowsArray) return;
+
+    // Per-window RAW HEX + decoded, logged ONLY when a slot's bytes change.
+    // Change-triggered (not time-throttled) so every ~5s code refresh in win[4]
+    // is captured exactly once with its raw bytes, the stable legend window is
+    // captured once, and idle frames produce no spam. The raw bytes are what we
+    // need to map the code's button-icon glyphs to digits (#56/#57).
+    static uint32_t s_slotHash[MAX_WINDOWS] = {0};
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        uint8_t* winObj = GetWindowObj(i);
+        char* text1 = GetWinText1(winObj);
+        if (!text1 || !IsValidTextPointer(text1) || !ProbePointer(text1)) {
+            s_slotHash[i] = 0;
+            continue;
+        }
+        // Copy up to 48 bytes (text1 already validated; FF8 text buffers are
+        // large, so this stays in-bounds just like the 512-byte decode path).
+        uint8_t raw[48];
+        int n = 0;
+        for (; n < 48; n++) {
+            uint8_t b = ((const uint8_t*)text1)[n];
+            raw[n] = b;
+            if (b == 0x00) { n++; break; }   // include terminator, then stop
+        }
+        if (n == 0) { s_slotHash[i] = 0; continue; }
+        uint32_t h = 2166136261u;            // FNV-1a for change detection
+        for (int k = 0; k < n; k++) { h ^= raw[k]; h *= 16777619u; }
+        if (h == s_slotHash[i]) continue;    // unchanged since last log -> skip
+        s_slotHash[i] = h;
+
+        char hexBuf[120];
+        int hp = 0;
+        int hexN = (n < 40) ? n : 40;
+        for (int k = 0; k < hexN && hp < (int)sizeof(hexBuf) - 3; k++)
+            hp += snprintf(hexBuf + hp, sizeof(hexBuf) - hp, "%02X", raw[k]);
+        std::string decoded = FF8TextDecode::Decode(raw, n);
+        uint32_t state = *(uint32_t*)(winObj + WIN_OBJ_STATE_OFFSET);
+        Log::Write("[TRAINCODE] win[%d] st=%u raw=%s dec=\"%s\"",
+                   i, state, hexBuf, decoded.c_str());
+    }
+#endif
+}
+
+// ============================================================================
+// v0.18.3.2: Train code-apparatus JSM dump ([SCRIPT-DUMP]) -- static analysis
+// aid for #56. On entering a Timber-train field (tiagit*), dump the code
+// entities' decoded opcode streams so the 4 uncoupling-code digits' storage
+// can be found statically: where they're generated (random 1-4), the POPM_W
+// varblock addresses they're written to, and the draw-number opcode that
+// renders them. The digits are sprite-drawn (NOT in any window text buffer --
+// confirmed by exe disassembly of the field text engine), so the announcement
+// must read them from the varblock; this dump finds the addresses.
+// Fires once per field entry. Output -> ff8_field.log. Log-only.
+// ============================================================================
+#define TRAIN_JSM_DUMP_DIAG 0   // off again v0.18.3.7: apparatus entities have no POPM writes on tilink1; code located via [TRAINWIN] instead (#56)
+
+static void TrainCodeJsmDump()
+{
+#if TRAIN_JSM_DUMP_DIAG
+    if (!FF8Addresses::IsOnField()) return;
+    const char* fn = FF8Addresses::pCurrentFieldName;
+    if (!fn) return;
+    bool isCodeField = (_strnicmp(fn, "tiagit", 6) == 0 ||
+                        _strnicmp(fn, "titrain", 7) == 0 ||
+                        _strnicmp(fn, "tilink", 6) == 0);
+    if (!isCodeField) return;   // Timber-train code fields only
+
+    static std::string s_lastJsmDumpField;
+    std::string cur(fn);
+    if (cur == s_lastJsmDumpField) return;          // once per field entry
+    s_lastJsmDumpField = cur;
+
+    Log::Field("FieldDialog: [SCRIPT-DUMP] TrainCodeJsmDump firing for field '%s' (#56)", cur.c_str());
+    FieldArchive::DumpTrainCodeScripts(cur.c_str());
+#endif
+}
+
+// ============================================================================
+// v0.18.3.3: Train code-var runtime probe ([CODEVAR]) -- #56. The v0.18.3.2
+// JSM dump located the 4 code digits in field-varblock vars 1026-1029 (Keykantoku
+// writes each 1-4). They are written with the LONG memory op at consecutive
+// indices, so the long bank's exact byte addressing is unconfirmed (raw
+// byte-offset longs would overlap). This probe reads vars 1026-1029 under five
+// candidate addressings from the varblock base (0x1CFE9B8 -- the same base the
+// mapjump resolver uses for word vars) and logs the quad change-triggered (plus a
+// ~2s heartbeat) so the right interpretation can be pinned against the known
+// on-screen codes (1232 / 4331). Poll thread, tiagit* only. Log-only -> ff8_field.log.
+// ============================================================================
+#define TRAIN_CODEVAR_DIAG 0   // set 0 to compile the probe out -- DONE: confirmed byte@idx (v0.18.3.3 BAT)
+
+static void TrainCodeVarProbe()
+{
+#if TRAIN_CODEVAR_DIAG
+    if (!FF8Addresses::IsOnField()) return;
+    const char* fn = FF8Addresses::pCurrentFieldName;
+    if (!fn) return;
+    if (_strnicmp(fn, "tiagit", 6) != 0) return;   // Timber train fields only
+
+    const uint32_t base = 0x1CFE9B8;               // FFNx field_vars_stack (Steam 2013 en-US)
+    static const int idx[4] = { 1026, 1027, 1028, 1029 };
+
+    int b[4]  = {}, w[4]  = {}, l[4]  = {};        // byte / word / long @ base+idx
+    int w2[4] = {}, l4[4] = {};                    // word @ base+idx*2, long @ base+idx*4
+    bool okRead = true;
+    __try {
+        for (int i = 0; i < 4; i++) {
+            b[i]  = *(uint8_t*)(base + idx[i]);
+            w[i]  = *(int16_t*)(base + idx[i]);
+            l[i]  = *(int32_t*)(base + idx[i]);
+            w2[i] = *(int16_t*)(base + idx[i] * 2);
+            l4[i] = *(int32_t*)(base + idx[i] * 4);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        okRead = false;
+    }
+    if (!okRead) {
+        static bool s_faultLogged = false;
+        if (!s_faultLogged) {
+            Log::Field("FieldDialog: [CODEVAR] read fault at base=0x%08X (varblock not mapped?)", base);
+            s_faultLogged = true;
+        }
+        return;
+    }
+
+    // Change-trigger over all candidates, with a ~2s heartbeat so a screenshot
+    // always lines up with a recent line even if the values are momentarily static.
+    uint32_t h = 2166136261u;
+    int vals[20]; int n = 0;
+    for (int i = 0; i < 4; i++) { vals[n++]=b[i]; vals[n++]=w[i]; vals[n++]=l[i]; vals[n++]=w2[i]; vals[n++]=l4[i]; }
+    for (int i = 0; i < n; i++) { h ^= (uint32_t)vals[i]; h *= 16777619u; }
+
+    static uint32_t s_lastHash = 0;
+    static DWORD    s_lastLog  = 0;
+    DWORD now = GetTickCount();
+    if (h == s_lastHash && (now - s_lastLog) < 2000) return;
+    s_lastHash = h;
+    s_lastLog  = now;
+
+    Log::Field("FieldDialog: [CODEVAR] %s base=0x%08X idx=1026-1029  "
+               "byte@idx=[%d %d %d %d]  word@idx=[%d %d %d %d]  long@idx=[%d %d %d %d]  "
+               "word@idx*2=[%d %d %d %d]  long@idx*4=[%d %d %d %d]",
+               fn, base,
+               b[0],b[1],b[2],b[3],
+               w[0],w[1],w[2],w[3],
+               l[0],l[1],l[2],l[3],
+               w2[0],w2[1],w2[2],w2[3],
+               l4[0],l4[1],l4[2],l4[3]);
+#endif
+}
+
+// ============================================================================
+// v0.18.3.5: Real-train code-field discovery ([TRAINFIELD]/[TRAINSCAN]) -- #56.
+//
+// The v0.18.3.4 announcement works on the briefing-room practice panel
+// (tiagit5) but NOT on the actual moving-train code-entry, because
+// TrainCodeAnnounce() is gated to `tiagit*` and the real train uses a
+// different field name. This pass finds (a) that field name and (b) whether
+// the code is stored at the SAME varblock spot (0x1CFE9B8 + 1026..1029) there.
+//
+// On EVERY field it logs the field name+id on change ([TRAINFIELD]); and, when
+// bytes 1026..1029 all read 1-4, logs that quad on change ([TRAINSCAN]). On
+// the real train code-entry field we expect to see [TRAINFIELD] give its name
+// and [TRAINSCAN] cycle a 1-4 code (~5s) just like the practice panel -- in
+// which case the fix is simply widening the announce gate to that field. If
+// [TRAINSCAN] does NOT cycle there, the train field stores the code elsewhere
+// and needs its own JSM dump (re-enable TRAIN_JSM_DUMP_DIAG + widen its gate).
+// Log-only -> ff8_field.log. No speech, no writes.
+// ============================================================================
+#define TRAIN_FIELD_SCAN_DIAG 0   // off v0.18.3.8: real-train code located at tilink1 1029-1032 + announce BAT-confirmed working; [TRAINWIN]/[TRAINSCAN] served their purpose (#56)
+
+#if TRAIN_FIELD_SCAN_DIAG
+// Destructor-free SEH wrapper for raw varblock byte reads. __try cannot share a
+// function with C++ objects that require unwinding (std::string) -- MSVC C2712 --
+// so the guarded reads live here. Returns true and fills out[0..count-1].
+static bool TrainScan_ReadBytes(unsigned firstIdx, int count, int* out)
+{
+    __try {
+        for (int i = 0; i < count; i++) out[i] = *(uint8_t*)(0x1CFE9B8 + firstIdx + i);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+#endif
+
+static void TrainFieldScan()
+{
+#if TRAIN_FIELD_SCAN_DIAG
+    if (!FF8Addresses::IsOnField()) return;
+    const char* fn = FF8Addresses::pCurrentFieldName;
+    if (!fn) return;
+    std::string cur(fn);
+
+    // (1) Field name + id on change -- captures the train code-entry field name.
+    static std::string s_lastField;
+    if (cur != s_lastField) {
+        s_lastField = cur;
+        uint16_t fid = FF8Addresses::pCurrentFieldId ? *FF8Addresses::pCurrentFieldId : 0xFFFF;
+        Log::Field("FieldDialog: [TRAINFIELD] field=\"%s\" id=0x%04X", cur.c_str(), (unsigned)fid);
+    }
+
+    // (2) v0.18.3.6: on the real train code fields (tilink*/titrain*), the
+    // practice's 1026-1029 read [1 1 1 x] -- NOT a live code (the practice never
+    // produced three identical leading digits) -- so the digits live at different
+    // indices here. Dump a 64-var window (1008..1071) as a 1-4-else-dot map,
+    // logged only when the 1-4 pattern changes, so the four bytes that cycle
+    // together can be located by column. Tag [TRAINWIN]; column i = var 1008+i.
+    if (_strnicmp(fn, "tilink", 6) == 0 || _strnicmp(fn, "titrain", 7) == 0) {
+        int win[64] = {};
+        if (TrainScan_ReadBytes(1008, 64, win)) {
+            char map[72];
+            uint32_t h = 2166136261u;
+            for (int i = 0; i < 64; i++) {
+                char c = (win[i] >= 1 && win[i] <= 4) ? (char)('0' + win[i]) : '.';
+                map[i] = c;
+                h ^= (uint32_t)c; h *= 16777619u;
+            }
+            map[64] = 0;
+            static uint32_t s_winHash = 0;
+            static std::string s_winField;
+            if (h != s_winHash || cur != s_winField) {
+                s_winHash = h; s_winField = cur;
+                Log::Field("FieldDialog: [TRAINWIN] field=\"%s\" vars 1008..1071 (1-4 else .): %s",
+                           cur.c_str(), map);
+            }
+        }
+    }
+
+    // (3) Reference read of the practice code vars 1026-1029 (confirmed on tiagit5).
+    int d[4] = {};
+    if (!TrainScan_ReadBytes(1026, 4, d)) return;
+    for (int i = 0; i < 4; i++) if (d[i] < 1 || d[i] > 4) return;   // not a code here
+
+    int code = d[0] * 1000 + d[1] * 100 + d[2] * 10 + d[3];
+    static int         s_lastCode = -1;
+    static std::string s_lastCodeField;
+    if (code == s_lastCode && cur == s_lastCodeField) return;       // change-triggered
+    s_lastCode = code; s_lastCodeField = cur;
+    Log::Field("FieldDialog: [TRAINSCAN] field=\"%s\" code@1026=[%d %d %d %d]",
+               cur.c_str(), d[0], d[1], d[2], d[3]);
+#endif
+}

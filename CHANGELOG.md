@@ -6,6 +6,227 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.8
+
+#56 DONE -- cleanup after the real-train code announce was BAT-confirmed.
+
+v0.18.3.7 BAT (2026-06-09) confirmed the announce reads the real-train code
+correctly: `[TRAINCODE-SAY] (2221)` matched `[TRAINWIN]` 1029-1032 = 2,2,2,1 and
+`(4334)` matched 4,3,3,4, and Aaron entered the spoken codes and uncoupled the
+car. The code-announce feature (1026-1029 on `tiagit*`, 1029-1032 on `tilink*`)
+is complete. This version just turns the discovery diagnostics off:
+`TRAIN_FIELD_SCAN_DIAG` (`[TRAINWIN]`/`[TRAINSCAN]`/`[TRAINFIELD]`) and
+`GUARD_RECON_DIAG` (`[GUARDPOS]`) both -> 0. All diag code is retained behind
+its `#define` for one-line re-enable. No behavior change to the shipping
+features.
+
+Guard recon first pass (seeds #58): the two patrollers on `tilink1` are ent5
+(GalHei1) and ent6 (GalHei2), sweeping a single corridor at X ~= -1315, Y from
+~ -505 to ~ +1640, ~150 units/sec, in opposite phase. talk=128/push=48 (same as
+all entities, so detection is script logic, not radius). A guard passed within
+71 units of the stationary player at the device with no catch -- the catch is
+during the crossing, not at the panel. Recon posted to #58.
+
+## v0.18.3.7
+
+Announce the real-train uncoupling code (#56). LOCAL, awaiting functional BAT.
+
+The v0.18.3.6 `[TRAINWIN]` map located the real-train code on `tilink1`: vars
+**1029-1032** held a stable 4-digit 1-4 code for ~5s then cycled cleanly
+(`2421` -> `2433` -> `4122`), while 1026-1029 (the practice location) read
+`[1 1 1 x]`. The 1029-1032 window was the most stable of the candidates
+(1030-1033 wobbled within a hold; 1028 was empty), so the real train uses the
+practice apparatus's varblock shifted +3. The apparatus entities themselves
+(`Angoyarukun`/`Keykantoku`/`Keyjokantoku`) have no `POPM` writes on `tilink1`
+(only reads + dispatch), so the JSM dump couldn't pin it -- the runtime map did.
+
+`TrainCodeAnnounce` now selects the code location per field: 1026-1029 on
+`tiagit*` (practice, confirmed), 1029-1032 on `tilink*` (real train). Gate
+re-widened to `tiagit*`/`tilink*`. `SETTLE_POLLS` 3 -> 5 (~500ms) to skip the
+real train's noisier mid-rewrite transients. JSM dump turned back off;
+`[TRAINWIN]`/`[TRAINSCAN]` field scan kept on as a safety net. Functional BAT:
+at the `tilink1` panel, the spoken code should uncouple a car when entered.
+
+Also bundles **guard-patrol recon** for #58 (`[GUARDPOS]`, `GUARD_RECON_DIAG`
+in `field_nav_observe.inl`, called from `ObserveArrowResponse`): on `tilink1`,
+logs each visible moving entity's live world position, distance to the player,
+and talk/push radius (~400ms throttle, movers only). Lets the one functional
+BAT verify the code AND map the guards' (GalHei1/GalHei2) patrol range, speed,
+and radii in a single run.
+
+## v0.18.3.6
+
+Locate the real-train code vars (#56). LOCAL diagnostic, not for push.
+
+v0.18.3.5 BAT confirmed the real code-entry field is **`tilink1`** (id 902;
+field-load trail tiyane1/2/3 -> titrain1 -> tilink1), whose SYM carries the
+same apparatus as the practice panel (`Angoyarukun`/`Keykantoku`/`Keyjokantoku`).
+The widened gate fired and announced there -- BUT the 1026-1029 reads were
+`[1 1 1 3]` / `[1 1 1 4]`: three pinned 1s with only the last digit moving. The
+practice panel never produced three identical leading digits, so 1026-1029 is
+NOT the live code on `tilink1`; the digits sit at different var indices.
+
+This build finds them: `TrainFieldScan` now dumps a 64-var window (1008..1071)
+on `tilink*`/`titrain*` as a "digit if 1-4, else dot" map, logged only when the
+1-4 pattern changes (`[TRAINWIN]`, column i = var 1008+i) so the four bytes that
+cycle together show up by column. The JSM dump (`TRAIN_JSM_DUMP_DIAG`) is
+re-enabled and its gate widened to `tilink*`/`titrain*` as a cross-check
+(the same tool that pinned 1026-1029 on the practice field). `TrainCodeAnnounce`
+is reverted to `tiagit*` only so it won't speak an unverified code under the
+train timer; it will be re-widened with the correct indices once located.
+
+## v0.18.3.5
+
+Real-train code-field discovery (#56). LOCAL diagnostic, not for push.
+
+The v0.18.3.4 announcement works on the briefing-room practice panel (tiagit5)
+but not on the actual moving-train code-entry: `TrainCodeAnnounce()` is gated
+to `tiagit*`, and the real train uses a different field name, so it bailed out
+before reading anything (field navigation isn't name-gated, which is why nav
+worked there). This build adds `TrainFieldScan()` in field_dialog_diag.inl
+(gated `TRAIN_FIELD_SCAN_DIAG`), called from PollWindows on every field: it
+logs the field name+id on change (`[TRAINFIELD]`) and, whenever bytes
+0x1CFE9B8 + 1026..1029 all read 1-4, logs that quad on change (`[TRAINSCAN]`).
+
+Goal: learn the real train code-entry field name and confirm whether the code
+lives at the same varblock spot there. If `[TRAINSCAN]` cycles a 1-4 code on
+the train field, the code is at 1026-1029 there too; if not, the train field
+stores the code elsewhere and gets its own JSM dump.
+
+This build also **widens `TrainCodeAnnounce`'s field gate** from `tiagit*` to
+also cover `titrain*` / `tilink*` -- the real train code-entry fields
+identified from the v0.18.3.4 field-load trail (tiyane1/2/3 -> titrain1 ->
+tilink1; "link" = the car coupling). Since the train uncoupling is the same
+minigame as the practice, it very likely reuses the same apparatus/vars, so
+the code should now announce on the train this build; `[TRAINSCAN]` confirms
+which field carries it and that it reads at 1026-1029.
+
+## v0.18.3.4
+
+Timber-train uncoupling-code announcement (#56) -- first working accessibility feature for the train minigame.
+
+The v0.18.3.3 `[CODEVAR]` probe confirmed the four code digits are stored as
+bytes at field-varblock `0x1CFE9B8 + 1026..1029` (values 1-4), read left to
+right. This build adds `TrainCodeAnnounce()` in field_dialog_lifecycle.inl,
+called from PollWindows: on a `tiagit*` field it reads those four bytes each
+poll and, when a new code settles (the same quad held for a few consecutive
+polls -- enough to skip the sub-second mixed states while the script rewrites
+the four bytes one at a time), speaks it as four words via ScreenReader::Speak in
+assertive/interrupt mode (aria-live "assertive" -- it purges queued/in-progress
+field TTS so a fresh, time-sensitive code never waits), e.g. "Code. four, three, three, one." It announces once per settled code, so as
+the practice panel cycles (~5s) the current code is read out each time it
+changes. SEH-guarded; logs `[TRAINCODE-SAY]` to ff8_field.log.
+
+The three discovery diagnostics from the prior builds are now gated off
+(retained): `TRAIN_PROBE_DIAG` (window-text rule-out), `TRAIN_JSM_DUMP_DIAG`
+(code-apparatus JSM dump), and `TRAIN_CODEVAR_DIAG` (varblock-addressing
+probe). Still local; not pushed (the wider Timber chapter -- #57 key layout,
+#58 guards, #59 timer -- is ongoing).
+
+## v0.18.3.3
+
+Runtime varblock probe for the Timber-train code digits (#56). LOCAL diagnostic, not for push.
+
+The v0.18.3.2 `[SCRIPT-DUMP]` JSM dump located the four code digits in field-
+varblock vars 1026-1029: on field `tiagit5`, Keykantoku (ent13) `method[4]`
+buckets the raw randomized code and writes the human digit 1-4 into each via
+`POPM_L`; Angoyarukun (ent12) copies each into scratch var 1030 and `REQEW`s
+Keykantoku to draw it; Keyjokantoku (ent14) draws the sprites and runs the
+randomizer (opcode 0x21) + validation. Because the digits are written with the
+LONG memory op at consecutive indices (raw byte-offset longs would overlap),
+the long bank's exact byte addressing isn't certain from the static dump.
+
+This build adds `TrainCodeVarProbe()` in field_dialog_diag.inl (gated `#define
+TRAIN_CODEVAR_DIAG 1`), called from PollWindows after the JSM dump. On any
+`tiagit*` field it reads vars 1026-1029 under five candidate addressings from
+the varblock base 0x1CFE9B8 (the same base the mapjump resolver uses for word
+vars): byte / word / long at base+idx, word at base+idx*2, and long at
+base+idx*4. Output is tagged `[CODEVAR]` in ff8_field.log, logged whenever the
+combined value set changes plus a ~2s heartbeat so a screenshot always lines up
+with a recent line. SEH-guarded; log-only, no speech or writes. BAT on the
+practice panel + one F11 to match the quad against the known codes (1232 /
+4331) and pin the correct interpretation, then implement the #56 announcement.
+
+## v0.18.3.2
+
+Timber-train code-apparatus JSM dump (#56). LOCAL diagnostic build, not for push.
+
+Static disassembly of FF8_EN.exe established the code-display mechanism
+conclusively: the field/dialog text engine (measure pass 0x4a0d10, draw pass
+0x4a1200) has NO inline "insert number from a variable" control code -- FF8
+pre-flattens dynamic numbers into literal glyph bytes before drawing. Since
+win[4]'s buffer is byte-frozen while the on-screen code changes, the yellow
+code digits are NOT in any window text buffer; they are drawn by a separate
+number-sprite routine reading the 4 values from the field varblock. The exe
+holds the engine, not the per-field code identity (that lives in the tiagit5
+field script), so the exact varblock addresses are found by reading the JSM.
+
+This build adds `FieldArchive::DumpTrainCodeScripts()` (in
+field_archive_jsm_dump.inl), which dumps the decoded opcode stream of the
+code-apparatus entities (SYM names ango*/key* -- Angoyarukun + Key*
+supervisors, falling back to all 'Other' entities if no name match) via the
+existing DumpEntityScript decoder. It is triggered once per field entry by
+`TrainCodeJsmDump()` in field_dialog_diag.inl (gated `#define
+TRAIN_JSM_DUMP_DIAG 1`), called from PollWindows when the current field name
+starts with "tiagit". Output is tagged `[SCRIPT-DUMP]` in ff8_field.log. From
+the dump we read, statically: the random-code generation (random 1-4 x4), the
+POPM_W varblock addresses the 4 digits are stored at, and the draw-number
+opcode -- which yields the exact addresses the announcement (#56) will read.
+Log-only; no speech, no memory writes, no new engine hook.
+
+## v0.18.3.1
+
+Timber train code-channel probe refined to capture live code bytes (#56).
+LOCAL diagnostic build, not for push.
+
+The v0.18.3.0 BAT settled the key question: Rinoa's uncoupling code rides the
+normal AMES/window text channel, not a hidden numeric-sprite channel. During
+the briefing-room practice (field `tiagit5`) the code apparatus occupies window
+slots: win[4] = the code ("The code is..." followed by four button-icon glyphs
+that decode to punctuation `. + - =` and the whole line is rejected by
+IsGarbledText), win[5] = status ("Enter the code" / "Code input error", speaks
+fine), win[3] = "Press [icon] to quit", win[2] = a stable "4 3 1   2" (likely
+the keypad legend). So #56 needs no new engine hook -- the fix is ours: detect
+the code context, bypass the garble filter, and translate the four icon bytes
+to a spoken digit/button sequence.
+
+The one missing piece is the raw bytes of a LIVE code (v0.18.3.0 logged decoded
+text per window plus the glyph buffer, and its 2s raw dump never coincided with
+a live code, so the icon-byte -> digit mapping isn't yet derivable). This build
+reworks `TrainProbeDump` to log per-window RAW HEX + decoded, change-triggered
+(FNV-1a per slot) so each ~5s code refresh in win[4] is captured exactly once
+with its bytes and idle frames produce no spam. Tagged `[TRAINCODE]`, written
+via Log::Write to `ff8_mod.log`. Still pure logging -- no speech, no writes, no
+new hook, no F11/F12 (auto-fires on field).
+
+## v0.18.3.0
+
+Timber train hijack minigame — accessibility chapter begins (#60). Code-entry
+code-channel rule-out probe (#56). LOCAL diagnostic build, not for push.
+
+The Timber train uncoupling minigame is being made playable for blind players
+as three assistance modes (Auto / Manual / Original), mirroring the X-ATM092
+chase. Filed the chapter as #60 (umbrella) with #56 (announce Rinoa's code
+numbers), #57 (code-entry key layout), #58 (guard awareness), #59 (timer).
+
+First target is the code-entry mechanic (#56), mappable on the briefing-room
+PRACTICE code panel — no timer, no guards, repeatable. The mod already catches
+every text channel it knows about (opcode_mes, field_get_dialog_string,
+show_dialog, and the get_character_width glyph accumulator), yet Rinoa's code
+numbers are never spoken, which points to the code being drawn by the
+fixed-width numeric-sprite routine (HP/gil/timer font) that bypasses all of
+them.
+
+This build adds `TrainProbeDump()` in `field_dialog_diag.inl` (gated behind
+`#define TRAIN_PROBE_DIAG 1`), called from `PollWindows`. While on a field it
+logs, unfiltered: (1) the current field name + id on change (also seeds the
+train_detector field set), (2) every window slot's decoded text with no
+min-length/garbled filter, and (3) the raw + decoded get_character_width glyph
+buffer. Pure logging — no speech, no memory writes, no new engine hook, no F12
+(auto-fires on field). If the practice code appears in none of these channels,
+v0.18.3.1 hooks the numeric-sprite routine; if it appears but is being
+filtered/deduped, the fix lives in code we already own.
+
 ## v0.18.2.50
 
 Status Page 2 key 3 (Status Attack) — implemented with name + percent (#54).

@@ -297,6 +297,12 @@ void FreeWalkmesh(WalkmeshData& mesh);
 // Logs all methods and decoded opcodes to the accessibility log.
 bool DumpEntityScript(const char* fieldName, int jsmEntityIndex);
 
+// v0.18.3.2: Dump the Timber-train code-apparatus entities' JSM scripts (#56).
+// Dumps entities named ango*/key* (Angoyarukun code apparatus, Key* key
+// supervisors), falling back to all 'Other' entities if no name match. Reuses
+// DumpEntityScript; log-only -> ff8_field.log [SCRIPT-DUMP].
+bool DumpTrainCodeScripts(const char* fieldName);
+
 // v0.17.7.2: Look up init-method POPM_W writes to a specific varblock address.
 // After ScanJSMScripts() has run, this exposes the static init-script writes
 // captured per entity (the s_initVarMaps array). The diagnostic block in

@@ -25,4 +25,4 @@
 // heading in CHANGELOG.md or `Utilities/push_to_github.ps1` will
 // refuse to push.
 // ================================================================
-#define FF8OPC_VERSION "0.18.2.50"
+#define FF8OPC_VERSION "0.18.3.8"  // v0.18.3.8: #56 DONE -- real-train code announce BAT-confirmed; turned off the [TRAINWIN]/[TRAINSCAN] + [GUARDPOS] diagnostics (cleanup) (#56/#58)

@@ -167,6 +167,80 @@ bool Initialize()
 }
 
 // ============================================================================
+// v0.18.3.4: Timber-train uncoupling-code announcement (#56).
+//
+// The v0.18.3.3 [CODEVAR] probe confirmed the four code digits are bytes at
+// field-varblock 0x1CFE9B8 + 1026..1029 (values 1-4) -- the only addressing
+// that read four 1-4 values cycling on the code's ~5s refresh. Keykantoku
+// writes them; Angoyarukun displays them left-to-right (1026 = leftmost).
+//
+// Read the four bytes each poll on a `tiagit*` field. When a NEW code settles
+// (the same quad held for a few consecutive polls -- enough to skip the
+// sub-second mixed states while the script rewrites the four bytes one at a
+// time), speak it as four words ("Code. four, three, three, one."). Speaks
+// once per settled code. SEH-guarded; reuses ScreenReader::Speak. Logs
+// [TRAINCODE-SAY] to ff8_field.log.
+// ============================================================================
+static void TrainCodeAnnounce()
+{
+    static int s_lastSeen  = -1;   // last quad read, for the settle debounce
+    static int s_settle    = 0;    // consecutive polls the current quad has held
+    static int s_announced = -1;   // last quad actually spoken
+    static const int SETTLE_POLLS = 5;  // ~500ms; skips the real train's noisier mid-rewrite transients
+
+    if (!FF8Addresses::IsOnField()) { s_lastSeen = -1; s_settle = 0; s_announced = -1; return; }
+    const char* fn = FF8Addresses::pCurrentFieldName;
+    if (!fn) { s_lastSeen = -1; s_settle = 0; s_announced = -1; return; }
+    // Code-apparatus fields, each with its own varblock location for the four
+    // 1-4 digits (FFNx field_vars_stack base 0x1CFE9B8, read left-to-right):
+    //   tiagit* (briefing-room practice model) -> bytes 1026..1029 (v0.18.3.3,
+    //     entry-confirmed working on the practice panel).
+    //   tilink1 (the real moving-train code panel) -> bytes 1029..1032
+    //     (v0.18.3.6 [TRAINWIN]: 1029-1032 held a stable 1-4 code ~5s then
+    //      cycled -- "2421"/"2433"/"4122" -- while 1026-1029 read [1 1 1 x];
+    //      same apparatus, varblock shifted +3 on this field).
+    unsigned codeBase;
+    if      (_strnicmp(fn, "tiagit", 6) == 0) codeBase = 1026;
+    else if (_strnicmp(fn, "tilink", 6) == 0) codeBase = 1029;
+    else { s_lastSeen = -1; s_settle = 0; s_announced = -1; return; }
+
+    int d[4] = {};
+    bool okRead = true;
+    __try {
+        for (int i = 0; i < 4; i++) d[i] = *(uint8_t*)(0x1CFE9B8 + codeBase + i);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { okRead = false; }
+    if (!okRead) return;
+
+    // Valid displayed code = all four digits in 1..4. Anything else means the
+    // code panel isn't currently presenting a code; reset the settle counter.
+    for (int i = 0; i < 4; i++) {
+        if (d[i] < 1 || d[i] > 4) { s_lastSeen = -1; s_settle = 0; return; }
+    }
+
+    int code = d[0] * 1000 + d[1] * 100 + d[2] * 10 + d[3];
+    if (code == s_lastSeen) {
+        if (s_settle < 1000) s_settle++;
+    } else {
+        s_lastSeen = code;
+        s_settle   = 1;
+    }
+    // Fire exactly once, the poll the quad first becomes stable.
+    if (s_settle != SETTLE_POLLS) return;
+    if (code == s_announced) return;   // unchanged since the last announcement
+    s_announced = code;
+
+    static const char* kWord[5] = { "", "one", "two", "three", "four" };
+    char msg[64];
+    sprintf_s(msg, sizeof(msg), "Code. %s, %s, %s, %s.",
+              kWord[d[0]], kWord[d[1]], kWord[d[2]], kWord[d[3]]);
+    // Assertive (aria-live): interrupt=true so the code jumps the queue ahead of
+    // any in-progress field TTS. The displayed code is time-sensitive (it cycles
+    // ~every 5s and must be entered before it changes), so it must not wait.
+    ScreenReader::Speak(msg, true);
+    Log::Field("FieldDialog: [TRAINCODE-SAY] %s (%04d)", msg, code);
+}
+
+// ============================================================================
 // Polling fallback: called from accessibility thread every ~100ms
 //
 // Catches dialogs that bypass our hooked opcodes (e.g. Squall's internal
@@ -254,6 +328,11 @@ void PollWindows()
     }
 
     DiagRawWindowDump();
+    TrainProbeDump();  // v0.18.3.0: train code-channel rule-out probe (#56)
+    TrainCodeJsmDump();  // v0.18.3.2: dump code-apparatus JSM once on tiagit* entry (#56)
+    TrainCodeVarProbe();  // v0.18.3.3: read code-digit varblock candidates on tiagit* (#56)
+    TrainCodeAnnounce();  // v0.18.3.4: speak the 4 code digits on tiagit* when a new code settles (#56)
+    TrainFieldScan();     // v0.18.3.5: discover the real-train code field name + var location (#56)
 
     EnterCriticalSection(&s_cs);
     ScanAndSpeakAllWindows("POLL");

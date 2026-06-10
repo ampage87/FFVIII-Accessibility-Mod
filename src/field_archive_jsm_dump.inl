@@ -157,3 +157,71 @@ bool DumpEntityScript(const char* fieldName, int jsmEntityIndex)
     Log::Field("FieldArchive: [SCRIPT-DUMP] === End entity %d '%s' ===", jsmEntityIndex, entName);
     return true;
 }
+
+// v0.18.3.2: Train code-apparatus script dump (#56). Dumps the JSM opcode
+// stream of the Timber-train code entities so the uncoupling code's storage
+// can be found statically: the random-code generation, the POPM_W stores
+// (the varblock addresses the 4 code digits live at), and the draw-number
+// opcode. The digits are sprite-drawn (NOT in any window text buffer --
+// confirmed by exe disassembly of the field text engine, which has no
+// inline number-from-variable control code), so the announcement must read
+// the values from the varblock; this dump locates the addresses.
+//
+// Strategy: dump every entity whose SYM name starts with "ango" (Angoyarukun,
+// the code apparatus / "code guy") or "key" (Keykantoku / Keyjokantoku key
+// supervisors). If none match, fall back to dumping every "Other" entity so
+// the apparatus is captured regardless of naming. Reuses DumpEntityScript.
+// Log-only; fires once per field entry (caller-gated). -> ff8_field.log.
+bool DumpTrainCodeScripts(const char* fieldName)
+{
+    if (!s_initialized) return false;
+
+    std::vector<uint8_t> jsmData;
+    if (!ExtractInnerFile(fieldName, ".jsm", jsmData)) {
+        Log::Field("FieldArchive: [SCRIPT-DUMP] Train: failed to extract JSM for '%s'", fieldName);
+        return false;
+    }
+    if (jsmData.size() < 8) return false;
+
+    int countDoors = jsmData[0];
+    int countLines = jsmData[1];
+    int countBg    = jsmData[2];
+    uint16_t posFirst = *(const uint16_t*)(jsmData.data() + 4);
+    int totalEntities = ((int)posFirst - 8) / 2;
+    int firstOther = countDoors + countLines + countBg;
+
+    char symNames[128][32] = {};
+    int symCount = 0;
+    LoadSYMNames(fieldName, symNames, 128, symCount);
+
+    Log::Field("FieldArchive: [SCRIPT-DUMP] === Train code dump '%s': %d entities "
+               "(D=%d L=%d B=%d firstOther=%d) %d SYM names ===",
+               fieldName, totalEntities, countDoors, countLines, countBg, firstOther, symCount);
+
+    int matched = 0;
+    for (int symIdx = 0; symIdx < symCount; symIdx++) {
+        const char* nm = symNames[symIdx];
+        if (_strnicmp(nm, "ango", 4) == 0 || _strnicmp(nm, "key", 3) == 0) {
+            int jsmEntityIndex = symIdx + countDoors;
+            if (jsmEntityIndex >= 0 && jsmEntityIndex < totalEntities) {
+                Log::Field("FieldArchive: [SCRIPT-DUMP] Train: name match '%s' -> jsmIndex %d",
+                           nm, jsmEntityIndex);
+                DumpEntityScript(fieldName, jsmEntityIndex);
+                matched++;
+            }
+        }
+    }
+
+    if (matched == 0) {
+        Log::Field("FieldArchive: [SCRIPT-DUMP] Train: no ango/key name match; "
+                   "dumping all %d 'Other' entities", totalEntities - firstOther);
+        for (int e = firstOther; e < totalEntities; e++) {
+            DumpEntityScript(fieldName, e);
+            matched++;
+        }
+    }
+
+    Log::Field("FieldArchive: [SCRIPT-DUMP] === Train code dump '%s' complete: %d dumped ===",
+               fieldName, matched);
+    return matched > 0;
+}
