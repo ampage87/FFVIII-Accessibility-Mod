@@ -348,7 +348,7 @@ static void ObsLogSample(uint8_t arrow, float dx, float dy, int heldTicks) {
 // #58 awareness/suppression design. Reads only; the sole side effect is the
 // [GUARDPOS] log line. No std::string here, so the __try blocks are C2712-safe.
 // ============================================================================
-#define GUARD_RECON_DIAG 0   // off v0.18.3.8: first-pass patrol mapped (ents 5/6, X~-1315, Y~[-505,1640], ~150u/s); flip to 1 to resume #58 guard work
+#define GUARD_RECON_DIAG 0   // OFF v0.18.3.20: #58 guard mechanic fully mapped + Original/Manual BAT-confirmed, so the [GUARDPOS] recon flood is no longer needed. Set to 1 to re-enable for any future guard-position investigation.
 
 static void GuardReconLog() {
 #if GUARD_RECON_DIAG
@@ -408,6 +408,203 @@ static void GuardReconLog() {
 #endif
 }
 
+// ============================================================================
+// v0.18.3.15: Timber train ORIGINAL mode -- per-guard audio proximity cue (#58).
+//
+// When train_guard_mode == Original (FieldDialog::GetTrainGuardMode()), the
+// guards patrol as in vanilla and this gives the blind player the spatial
+// information a sighted player reads off-screen: how near each sweeping guard
+// is. EACH real guard is tracked and announced SEPARATELY with a stable label
+// -- "Guard 1 approaching", "Guard 2 close", "Guard 1 clear" -- so two guards
+// converging are never conflated into one ambiguous cue.
+//
+// GUARD vs. FOLLOWER (v0.18.3.20): the deciding signal is the Y AXIS, confirmed
+// against the F11 screenshots. The train runs left-right; when Squall drops to
+// the code panel he is at the BOTTOM of the screen while the party stay on the
+// ROOF up top, so a party member can stand horizontally right above Squall yet
+// be far from him on the Y (depth) axis -- which a Euclidean distance check
+// (v0.18.3.17-.19) would wrongly flag. The guards patrol the interior corridor,
+// so their Y sweeps straight through Squall's. Proximity is therefore judged on
+// |entity.Y - player.Y| ALONE: the roof party sit at |dY| >= ~1360 and are
+// ignored; a guard is announced as its |dY| shrinks toward 0. (The field's axes
+// are rotated -- this Y axis reads as horizontal on screen.) The motion gate is
+// kept as a secondary guard against any static same-lane prop.
+//
+// Per guard, three levels as its Y-offset to the player crosses:
+//   <= 480   -> "Guard N close"        (interrupts; a catch at |dY| ~90 is near)
+//   <= 960   -> "Guard N approaching"  (a few seconds' lead at the observed sweep)
+//   >= 1152  -> "Guard N clear"        (hysteresis band 960..1152 holds level)
+// Announced on the way IN and once a guard has fully receded; a close->
+// approaching step while a guard is LEAVING is silent (calling it "approaching"
+// then would mislead).
+//
+// Guard labels are the lowest free slot, assigned when an entity's Y first
+// nears the player's (lvl != 0) and released when it recedes, so the two real
+// patrollers come out Guard 1 / Guard 2; the set resets per field. [GUARDCUE]
+// logs dY, dist and pos.
+//
+// FEATURE, not a diagnostic: gated by the mode (inert unless Original; default
+// Manual), NOT behind a #define. Reads only; side effects are ScreenReader::
+// Speak on a per-guard level change and a [GUARDCUE] log line. No std::string,
+// so the __try blocks are C2712-safe. Thresholds remain easy to tune.
+// ============================================================================
+static void GuardOriginalCue()
+{
+    static char  s_cueField[32]             = {0};   // field the cue state belongs to
+    static float s_prevX[MAX_ENTITIES]      = {};    // position at the previous evaluation
+    static float s_prevY[MAX_ENTITIES]      = {};
+    static bool  s_seen[MAX_ENTITIES]       = {};
+    static DWORD s_lastMoveMs[MAX_ENTITIES] = {};    // tick of last significant move (0 = never moved)
+    static int   s_guardNum[MAX_ENTITIES]   = {};    // 0 = unassigned; else 1-based guard label
+    static int   s_level[MAX_ENTITIES]      = {};    // per-guard cue level: 0 clear, 1 approaching, 2 close
+    static DWORD s_last                     = 0;
+
+    // A real guard PATROLS continuously; the party take their spot on top of
+    // the train and hold still, and the dial NPC is static. So the test is
+    // "moving right now", not "ever moved"/"ever far" (both latch and got fooled
+    // by the roof-sitting followers). An entity earns a cue only while it has
+    // moved within ACTIVE_WINDOW.
+    const float MOVE_EPS      = 8.0f;     // per-eval displacement that counts as moving
+    const DWORD ACTIVE_WINDOW = 1200;     // ms since last move to still count as an active patroller
+    // Cue thresholds on the Y-AXIS offset |entity.Y - player.Y| (NOT Euclidean
+    // distance). Per Aaron + the F11 screenshots: the train runs left-right and
+    // the party ride ON TOP while Squall drops DOWN to the panel, so the party
+    // sit far from him on the Y axis (|dY| >= ~1360) even when horizontally near
+    // him; the guards patrol the interior corridor and their Y sweeps through
+    // his. CLEAR_DY below 1360 excludes the roof party outright; the guard
+    // catches at |dY| ~90, so 480/960 give a few seconds' lead at the sweep.
+    const float CLOSE_DY      = 480.0f;
+    const float APPROACH_DY   = 960.0f;
+    const float CLEAR_DY      = 1152.0f;  // hysteresis band 960..1152; party (>=1360) is past it
+
+    const char* fn = FF8Addresses::pCurrentFieldName;
+    bool onTilink = (fn && _strnicmp(fn, "tilink", 6) == 0);
+
+    // Left the train (or never on it): drop all cue state so a later re-entry
+    // starts fresh.
+    if (!onTilink) {
+        if (s_cueField[0]) {
+            s_cueField[0] = 0;
+            for (int i = 0; i < MAX_ENTITIES; i++) { s_seen[i]=false; s_lastMoveMs[i]=0; s_guardNum[i]=0; s_level[i]=0; }
+        }
+        return;
+    }
+    if (FieldDialog::GetTrainGuardMode() != FieldDialog::TGM_ORIGINAL) return;
+
+    // Field changed (incl. tilink1 <-> tilink2 between the two code cars):
+    // reset per-entity tracking and restart guard numbering for the new car.
+    if (_strnicmp(fn, s_cueField, sizeof(s_cueField) - 1) != 0) {
+        sprintf_s(s_cueField, sizeof(s_cueField), "%.31s", fn);
+        for (int i = 0; i < MAX_ENTITIES; i++) { s_seen[i]=false; s_lastMoveMs[i]=0; s_guardNum[i]=0; s_level[i]=0; }
+    }
+    if (!FF8Addresses::pFieldStateOthers || s_playerEntityIdx < 0) return;
+
+    DWORD now = GetTickCount();
+    if (now - s_last < 200) return;   // ~5 evaluations/sec
+    s_last = now;
+
+    float px = 0.0f, py = 0.0f;
+    if (!GetEntityPos(s_playerEntityIdx, px, py)) return;   // player unresolved (cutscene)
+
+    int entCount = MAX_ENTITIES;
+    if (FF8Addresses::pFieldStateOtherCount) {
+        __try {
+            int c = *FF8Addresses::pFieldStateOtherCount;
+            if (c >= 0 && c < MAX_ENTITIES) entCount = c;
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
+
+    // Per guard: each ACTIVELY PATROLLING guard tracks its own proximity level
+    // and is announced separately ("Guard 1 approaching", "Guard 2 close", ...).
+    for (int i = 0; i < entCount; i++) {
+        if (i == s_playerEntityIdx) continue;
+        float ex = 0.0f, ey = 0.0f;
+        if (!GetEntityPos(i, ex, ey)) continue;
+
+        int16_t modelId = -1;
+        __try {
+            uint8_t* base = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+            if (base) modelId = *(int16_t*)(base + ENTITY_STRIDE * i + 0x218);
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        if (modelId < 0) continue;                        // invisible controller
+        if (GetEntityTalkRadius(i) < 64) continue;        // skip talk=1 panel; guards=128
+
+        // Track per-eval motion. A patrolling guard moves every tick; a settled
+        // follower or a static NPC does not.
+        if (!s_seen[i]) { s_seen[i] = true; s_prevX[i] = ex; s_prevY[i] = ey; }
+        float mdx = ex - s_prevX[i], mdy = ey - s_prevY[i];
+        s_prevX[i] = ex; s_prevY[i] = ey;
+        if (sqrtf(mdx * mdx + mdy * mdy) > MOVE_EPS) s_lastMoveMs[i] = now;
+
+        bool active = (s_lastMoveMs[i] != 0) && (now - s_lastMoveMs[i] < ACTIVE_WINDOW);
+        if (!active) {
+            // Settled on the roof / static: not a live threat. If it had been
+            // announced, retire it with a clear, and RELEASE its guard number
+            // so a party member that merely walked into position at scene start
+            // doesn't permanently consume "Guard 1"/"Guard 2".
+            if (s_guardNum[i] != 0 && s_level[i] != 0) {
+                char msg[48];
+                sprintf_s(msg, sizeof(msg), "Guard %d clear", s_guardNum[i]);
+                ScreenReader::Speak(msg, false);
+                Log::Field("FieldNavigation: [GUARDCUE] guard%d ent%d level=0 dist=- pos=(%.0f,%.0f) settled field=%s",
+                           s_guardNum[i], i, ex, ey, fn);
+            }
+            s_level[i] = 0;
+            s_guardNum[i] = 0;
+            continue;
+        }
+
+        float dxp = ex - px, dyp = ey - py;
+        float d = sqrtf(dxp * dxp + dyp * dyp);
+
+        // Y-AXIS proximity: judge the guard's nearness on the Y axis ALONE
+        // (|entity.Y - player.Y|), not Euclidean distance -- a roof party member
+        // standing horizontally above Squall is Euclidean-near but Y-far, and
+        // must not count. The guards' Y sweeps through Squall's, so |dY| -> 0.
+        float ady = fabsf(ey - py);
+        (void)d;   // dxp/d retained for the log line below
+
+        int lvl;
+        if      (ady <= CLOSE_DY)    lvl = 2;
+        else if (ady <= APPROACH_DY) lvl = 1;
+        else if (ady >= CLEAR_DY)    lvl = 0;
+        else                         lvl = s_level[i];   // hysteresis band APPROACH..CLEAR
+
+        // The roof party sit at |dY| >= ~1360 -> lvl stays 0 -> never labelled
+        // and ignored. A guard earns the lowest free label as its Y nears the
+        // player's; the two real patrollers come out Guard 1 / Guard 2.
+        if (s_guardNum[i] == 0 && lvl == 0) continue;
+        if (s_guardNum[i] == 0) {
+            int newNum = 1;
+            for (bool taken = true; taken; ) {
+                taken = false;
+                for (int j = 0; j < entCount; j++)
+                    if (j != i && s_guardNum[j] == newNum) { taken = true; newNum++; break; }
+            }
+            s_guardNum[i] = newNum;
+        }
+
+        if (lvl != s_level[i]) {
+            // Announce on the way IN (approaching, close) and once a guard has
+            // fully receded (clear). A close->approaching step while a guard is
+            // LEAVING is silent -- calling it "approaching" then would mislead.
+            const char* word = nullptr;
+            if      (lvl > s_level[i]) word = (lvl == 2) ? "close" : "approaching";
+            else if (lvl == 0)        word = "clear";
+
+            if (word) {
+                char msg[48];
+                sprintf_s(msg, sizeof(msg), "Guard %d %s", s_guardNum[i], word);
+                ScreenReader::Speak(msg, lvl == 2);   // interrupt only for the urgent "close"
+                Log::Field("FieldNavigation: [GUARDCUE] guard%d ent%d level=%d dY=%.0f dist=%.0f pos=(%.0f,%.0f) field=%s",
+                           s_guardNum[i], i, lvl, ady, d, ex, ey, fn);
+            }
+            s_level[i] = lvl;
+        }
+        if (lvl == 0) s_guardNum[i] = 0;   // receded out of the lane -> free the label
+    }
+}
+
 // Per-tick observer. Called from Update() each frame.
 //
 // v0.17.5 (post quantization architecture): Pure diagnostic again. The cal
@@ -428,6 +625,11 @@ static void ObserveArrowResponse() {
     // observer's own auto-drive/dialog gates so the guards are captured
     // regardless of player input or game state. Self-gates to tilink1.
     GuardReconLog();
+
+    // v0.18.3.15: Original-mode guard-proximity audio cue (#58). Also runs
+    // before the gates (the cue must fire while the player stands at the code
+    // panel); self-gates to tilink* AND to train_guard_mode == Original.
+    GuardOriginalCue();
 
     // v0.17.7.6.1: Two-tier gating for auto-drive activity.
     //

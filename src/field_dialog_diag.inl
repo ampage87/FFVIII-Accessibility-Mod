@@ -646,3 +646,34 @@ static void TrainFieldScan()
                cur.c_str(), d[0], d[1], d[2], d[3]);
 #endif
 }
+
+// ============================================================================
+// v0.18.3.9/.10: Timber-train guard JSM dump ([SCRIPT-DUMP]) -- #58. Dumps
+// tilink1's GalHei1/GalHei2 (ents 5/6) + the controller candidates
+// (TrainSindou, point) via FieldArchive::DumpGuardScripts, so the patrol MOVE
+// loop + the line-of-sight/proximity check + the "spotted -> restart" trigger
+// (MAPJUMP/fail-flag) can be read statically.
+//   v0.18.3.10: reads tilink1's archive BY NAME, so it fires from ANY field
+//   (e.g. the briefing-room save) -- no need to traverse to the live coupling
+//   field -- once per game session on the first valid field. Lands near the
+//   TOP of the session log (read with `head`), not buried under runtime spam.
+// Poll thread. Log-only -> ff8_field.log.
+// ============================================================================
+#define GUARD_JSM_DUMP_DIAG 0   // #58: entities 0-27 fully mapped (v0.18.3.13); dump retained behind this gate for one-line re-enable
+
+static void GuardJsmDump()
+{
+#if GUARD_JSM_DUMP_DIAG
+    if (!FF8Addresses::IsOnField()) return;
+    const char* fn = FF8Addresses::pCurrentFieldName;
+    if (!fn || !fn[0]) return;
+
+    static bool s_guardDumpDone = false;
+    if (s_guardDumpDone) return;                     // once per game session
+    // Dump tilink1's guard scripts from the field ARCHIVE (by name); works from
+    // any field. Only mark done on success so it retries until the archive is
+    // ready (DumpGuardScripts logs its own success/fail lines).
+    if (FieldArchive::DumpGuardScripts("tilink1"))
+        s_guardDumpDone = true;
+#endif
+}

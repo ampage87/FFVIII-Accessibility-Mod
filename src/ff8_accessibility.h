@@ -25,4 +25,4 @@
 // heading in CHANGELOG.md or `Utilities/push_to_github.ps1` will
 // refuse to push.
 // ================================================================
-#define FF8OPC_VERSION "0.18.3.8"  // v0.18.3.8: #56 DONE -- real-train code announce BAT-confirmed; turned off the [TRAINWIN]/[TRAINSCAN] + [GUARDPOS] diagnostics (cleanup) (#56/#58)
+#define FF8OPC_VERSION "0.18.3.21"  // v0.18.3.21: #58 cleanup -- turned OFF the guard discovery diagnostics now that Manual (v0.18.3.14) and Original (v0.18.3.20) are both BAT-confirmed. GUARD_RECON_DIAG=0 ([GUARDPOS], field_nav_observe.inl) and GUARD_VAR_DIAG=0 ([GUARDVAR] + the [GUARDFREEZE] confirmation, field_dialog_lifecycle.inl); both retained behind their flags for one-line re-enable. The Manual var-pin and the [GUARDCUE] feature cue are unchanged. No behavior change -- shippable build for Manual+Original

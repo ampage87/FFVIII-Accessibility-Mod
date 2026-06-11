@@ -225,3 +225,64 @@ bool DumpTrainCodeScripts(const char* fieldName)
                fieldName, matched);
     return matched > 0;
 }
+
+// v0.18.3.9: Guard + controller script dump for the Timber train (#58).
+// On tilink1 the patrolling guards are GalHei1/GalHei2 (ents 5/6); the
+// "spotted -> restart" logic is either in their (light, 3-method) scripts or
+// in a controller. Dump galhei* + the prime controller candidates
+// (TrainSindou, point) so the patrol MOVE loop, the line-of-sight/proximity
+// check, and the catch trigger (MAPJUMP to a caught field / a fail-flag POPM)
+// can be read statically. Reuses DumpEntityScript. Log-only -> ff8_field.log.
+bool DumpGuardScripts(const char* fieldName)
+{
+    if (!s_initialized) return false;
+
+    std::vector<uint8_t> jsmData;
+    if (!ExtractInnerFile(fieldName, ".jsm", jsmData)) {
+        Log::Field("FieldArchive: [SCRIPT-DUMP] Guard: failed to extract JSM for '%s'", fieldName);
+        return false;
+    }
+    if (jsmData.size() < 8) return false;
+
+    int countDoors = jsmData[0];
+    uint16_t posFirst = *(const uint16_t*)(jsmData.data() + 4);
+    int totalEntities = ((int)posFirst - 8) / 2;
+
+    char symNames[128][32] = {};
+    int symCount = 0;
+    LoadSYMNames(fieldName, symNames, 128, symCount);
+
+    Log::Field("FieldArchive: [SCRIPT-DUMP] === Guard dump '%s': %d entities, %d SYM names ===",
+               fieldName, totalEntities, symCount);
+
+    // v0.18.3.11: dump ALL entities. v0.18.3.10 proved the catch logic is NOT
+    // in galhei/trainsindou/point (decorative sprites + the shake controller +
+    // a scenery orchestrator). The guard-vs-Squall detection lives elsewhere --
+    // most likely a blind* invisible trigger or the train-movement entities --
+    // so dump everything and hunt for the proximity/distance check + the catch
+    // trigger (MAPJUMP / REQEW-to-caught / fail-flag POPM).
+    // v0.18.3.12 (#58): entities 0-17 already analyzed clean -- party/NPC
+    // sprites, the train-shake (TrainSindou) + hatch/view/camera controllers,
+    // and the Noriuturiline1 code-entry line. None hold a guard-proximity
+    // check or the fail-ASK. Dump ONLY 18-30 (blind1..blind10, hatch, point,
+    // v0.18.3.13 (#58): entities 18-25 now also mapped (blind1-blind8 = the
+    // guards blind2/3 + master blind4 + validators/display). Advance the start
+    // to 26 so the LAST unread suspects (blind9, blind10, hatch, point, light)
+    // land alone at the TOP of the log -- hunting the fail-ASK (opcode 0x4A,
+    // "Rinoa: What happened!?") + any player-distance check not yet found.
+    const int kFirstDumpSym = 26;
+    int matched = 0;
+    for (int symIdx = kFirstDumpSym; symIdx < symCount; symIdx++) {
+        const char* nm = symNames[symIdx];
+        int jsmEntityIndex = symIdx + countDoors;
+        if (jsmEntityIndex >= 0 && jsmEntityIndex < totalEntities) {
+            Log::Field("FieldArchive: [SCRIPT-DUMP] entity '%s' -> jsmIndex %d", nm, jsmEntityIndex);
+            DumpEntityScript(fieldName, jsmEntityIndex);
+            matched++;
+        }
+    }
+
+    Log::Field("FieldArchive: [SCRIPT-DUMP] === Guard dump '%s' complete: %d dumped ===",
+               fieldName, matched);
+    return matched > 0;
+}

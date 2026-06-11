@@ -303,6 +303,14 @@ bool DumpEntityScript(const char* fieldName, int jsmEntityIndex);
 // DumpEntityScript; log-only -> ff8_field.log [SCRIPT-DUMP].
 bool DumpTrainCodeScripts(const char* fieldName);
 
+// v0.18.3.9: Dump the Timber-train guard + controller JSM scripts (#58).
+// On tilink1, dumps entities named galhei* (GalHei1/GalHei2 patrolling
+// Galbadian soldiers) plus the likely catch-logic controllers (TrainSindou,
+// point) via DumpEntityScript, so the patrol MOVE loop + the line-of-sight/
+// proximity check + the "spotted" trigger (MAPJUMP/fail-flag) can be read
+// statically. Log-only -> ff8_field.log [SCRIPT-DUMP].
+bool DumpGuardScripts(const char* fieldName);
+
 // v0.17.7.2: Look up init-method POPM_W writes to a specific varblock address.
 // After ScanJSMScripts() has run, this exposes the static init-script writes
 // captured per entity (the s_initVarMaps array). The diagnostic block in

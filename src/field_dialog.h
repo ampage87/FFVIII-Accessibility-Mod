@@ -35,6 +35,14 @@ void RepeatLastDialog();
 // Used by FieldNavigation to suspend auto-drive key injection during cutscenes.
 bool IsDialogOpen();
 
+// v0.18.3.15: Timber train-hijack guard mode (#58). Selectable via INI key
+// `train_guard_mode` [Accessibility] and (later) an in-engine ASK. Exposed so
+// FieldNavigation's Original-mode proximity cue can read the active mode and
+// the ASK can set it.
+enum TrainGuardModeVal { TGM_ORIGINAL = 0, TGM_MANUAL = 1, TGM_SKIP = 2 };
+int  GetTrainGuardMode();          // cached; reads the INI on first call
+void SetTrainGuardMode(int mode);  // updates the cache + persists to INI
+
 // v07.09: Expose text rendering call counters for save screen diagnostic.
 LONG GetMenuDrawTextCallCount();
 LONG GetGetCharWidthCallCount();

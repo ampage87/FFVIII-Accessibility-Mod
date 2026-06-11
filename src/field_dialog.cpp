@@ -127,8 +127,10 @@
 //   Total size: 0x3C bytes per window (NOT 0x38!)
 
 #include "ff8_accessibility.h"
+#include "field_dialog.h"    // v0.18.3.15: own header -- TrainGuardModeVal enum + Get/SetTrainGuardMode shared with FieldNavigation (#58)
 #include "ff8_addresses.h"
 #include "ff8_text_decode.h"
+#include "config.h"          // v0.18.3.14: train_guard_mode (Manual freeze) read from INI (#58)
 #include "battle_tts.h"       // v0.10.112: GetLastDrawerName() for draw result announcements
 #include "field_archive.h"    // v0.18.3.2: DumpTrainCodeScripts() for the #56 JSM dump diagnostic
 #include "minhook/include/MinHook.h"

@@ -6,6 +6,375 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.21
+
+Timber guard chapter -- diagnostics-off cleanup (#58). LOCAL build, no behavior change.
+
+With both assisted guard modes confirmed -- Manual at v0.18.3.14 and Original at
+v0.18.3.20 -- the discovery diagnostics that were flooding the field log are no
+longer needed. Turned off `GUARD_RECON_DIAG` (the `[GUARDPOS]` per-guard
+position stream) and `GUARD_VAR_DIAG` (the `[GUARDVAR]` round/var stream, and
+with it the `[GUARDFREEZE]` once-a-second Manual confirmation). Both stay behind
+their flags for a one-line re-enable if a future guard investigation needs them.
+
+Nothing about the features changed: Manual still pins the patrol switch to keep
+the guards frozen, and the Original-mode `[GUARDCUE]` line -- which only emits on
+a per-guard level change, not a flood -- is left on as the feature's own trace.
+Not yet pushed.
+
+## v0.18.3.20
+
+Timber guard **Original mode** -- identify guards by the Y axis, not distance (#58). LOCAL build.
+
+The F11 screenshots settled the question. When Squall drops to the code panel he
+is at the bottom of the screen, on the lower coupling, while the party stay up
+on the roof. So a party member can be standing horizontally right above Squall
+-- near in a straight line -- yet far from him on the depth axis. Every previous
+attempt judged proximity by Euclidean distance, which can't tell those apart;
+that's why the party kept leaking through.
+
+This build judges proximity on the Y axis alone: |entity.Y - player.Y|. The
+guards patrol the interior corridor, so their Y sweeps straight through Squall's
+(down to about 90, the width of the corridor) -- while the party sit on the roof
+at a Y offset of roughly 1360 or more and stay there. A guard is announced as
+its Y closes on Squall's (approaching at 960, close at 480, clear past 1152);
+anything beyond 1152 on the Y axis, including the entire roof party, is ignored
+and never gets a label. The field's axes are rotated, so this Y axis is what
+reads as horizontal on screen -- which is why earlier notes called the guard
+motion "vertical."
+
+The motion gate stays on as a secondary guard against a static prop sharing the
+lane, the per-guard labels and silent-recede behavior are unchanged, and
+`[GUARDCUE]` now logs the Y offset alongside distance and position. Not yet pushed.
+
+## v0.18.3.19
+
+Timber guard **Original mode** -- fix the "four guards" on the first car (#58). LOCAL build.
+
+The live-motion gate from v0.18.3.18 worked during code entry -- the party,
+parked motionless on top of the car, were correctly silent -- yet the BAT still
+announced four guards. The position log made it plain: the two real guards
+patrol the rail at X about -1315, sweeping continuously, while two party members
+sit dead still at X -1221 (the same rail the player stands on), distance 1364
+and 1924, never moving and never coming near. The catch was at scene start: the
+party walk *into* those positions, so for a second or two they are moving, and
+the label was handed out to any mover on its first active tick -- so the party
+took "Guard 1" and "Guard 2," then settled, leaving the two real guards as
+"Guard 3" and "Guard 4."
+
+Two fixes. A guard label is now assigned only once an entity actually approaches
+within the warning distance, not merely moves -- the party walk to a far spot
+and stay 1300-plus units away the whole time, so they never earn a label. And
+the label is released the moment an entity settles, then re-taken as the lowest
+free slot, so the two real patrollers reliably come out as Guard 1 and Guard 2
+even if a straggler briefly held a number. The motion gate, distances
+(480/960/1152), per-guard cues, and pos logging are unchanged. Not yet pushed.
+
+## v0.18.3.18
+
+Timber guard **Original mode** -- tell guards from party by live motion (#58). LOCAL build.
+
+The third BAT was much closer: timing felt about right, but two issues remained.
+First, the first car still announced more than two guards. The v0.18.3.17
+"ever far" gate assumed followers stay near the player -- but they don't: the
+party (Zell, Selphie, Rinoa) ride on top of the train, far from Squall down at
+the panel, so they sailed past the distance gate. The win-cutscene log showed
+the same failure mode from the static dial NPC, which became a phantom "Guard 3"
+the moment it slid across the screen and then closed on the walking player.
+
+The fix drops distance-based discrimination entirely in favor of **live motion**.
+A real guard patrols the corridor without stopping, so it will have moved within
+the last 1.2 seconds; a party member who has taken position on the roof, or a
+static NPC, has not. Only an entity moving *right now* earns a guard label and a
+cue, and a guard that stops is retired with a "clear". This is field-independent
+-- no hard-coded coordinates -- and matches the layout: guards inside and moving,
+party up top and still.
+
+Second, the gap between "approaching" and "close" was too short. Approaching
+widens from 832 to 960 units (close stays 480), giving roughly a second more
+between the first warning and the urgent one at the observed sweep speed.
+
+The per-guard labels, silent close->approaching recede, and close-only interrupt
+are unchanged. `[GUARDCUE]` now also logs each entity's position, so any future
+tuning against the on-screen layout has the coordinates on hand. Not yet pushed.
+
+## v0.18.3.17
+
+Timber guard **Original mode** -- fix false guards and widen the lead (#58). LOCAL build.
+
+The second BAT surfaced two linked problems. On the first code car the cue
+announced more than two guards: the party followers (Zell, Selphie, Rinoa)
+shuffle to keep up with you, which tripped the "is it moving?" test, and the
+static dial NPC jostles once in the cutscene and did the same -- all of them
+then sat right next to you and read as "close". That false chatter also buried
+the real guard's earlier warning, which is why the advance notice still felt
+short even after v0.18.3.16 widened the distances.
+
+**Guard-vs-follower discriminator.** A real guard sweeps the corridor and is
+seen far from the player at least once; followers and static NPCs never are
+(they stay close). `GuardOriginalCue()` now requires one sighting beyond
+`GUARD_FAR` (900 units) before an entity earns a guard label and a cue. In the
+BAT the real guards swept out past 1500-2000 units, while the followers and the
+dial NPC never left the player's side -- so only the two real guards qualify,
+and they renumber correctly as Guard 1 and Guard 2.
+
+**More lead time.** Cue distances widened again: close 480, approaching 832,
+clear 1024 (hysteresis band 832..1024). At the observed ~125 unit/sec sweep the
+first "approaching" now lands roughly 7 seconds before a catch. Removing the
+false-guard chatter should make that warning actually audible in time.
+
+Per-guard labels, the silent close->approaching recede, and the close-only
+interrupt are unchanged. `GUARD_FAR` and the three cue distances are named
+constants at the top of `GuardOriginalCue()`. Not yet pushed.
+
+## v0.18.3.16
+
+Timber guard **Original mode** tuning from the first live BAT (#58). LOCAL build.
+
+The v0.18.3.15 cue worked, but the `tilink2` run exposed two problems: the
+warning came too late (only ~2 seconds between "Guard close" and the catch --
+not enough to finish entering the code and step away), and with two guards
+sweeping, a single "Guard close" didn't say *which* one. Both are addressed.
+
+**Per-guard announcements.** Each moving guard now carries its own proximity
+level and a stable numeric label, so cues are specific: "Guard 1 approaching",
+"Guard 2 close", "Guard 1 clear". Labels are assigned 1, 2, ... the first time
+each entity is seen moving and reset per field, so each code car numbers its
+guards from 1. The static dist-206 entity from the BAT (talk radius 128 but
+never moving) is still correctly ignored -- only entities that actually patrol
+get a label and a cue.
+
+**Wider, later-tunable thresholds.** Measured sweep speed was ~125 units/sec,
+so the old 192/320 thresholds gave almost no lead. New distances:
+
+- <= 384 -> "Guard N close" (interrupts; catch at the ~128 talk radius is near)
+- <= 704 -> "Guard N approaching" (~6 seconds of lead at the observed speed)
+- >= 832 -> "Guard N clear" (hysteresis band 704..832 prevents boundary chatter)
+
+A guard stepping back from "close" to the "approaching" band is now silent --
+announcing "approaching" while a guard is leaving would be misleading -- and
+only the urgent "close" interrupts speech; "approaching" and "clear" queue.
+
+Manual mode and every non-`tilink` field are unaffected. Thresholds are plain
+named constants at the top of `GuardOriginalCue()`, easy to tune further. Not
+yet pushed.
+
+## v0.18.3.15
+
+Timber guard **Original mode** -- audio guard-proximity cue for the train
+hijack (#58). LOCAL build.
+
+Manual mode (v0.18.3.14) freezes the guards entirely. Original mode is the
+opposite end: the guards patrol exactly as in vanilla, and the mod gives the
+blind player the spatial information a sighted player reads off the screen --
+how near the nearest sweeping guard is -- so they can play the real minigame,
+stepping away from the code panel when a guard closes in and returning when it
+is clear.
+
+When `train_guard_mode` is Original, `GuardOriginalCue()`
+(`field_nav_observe.inl`, called each tick from the field observer) finds the
+nearest *moving*, visible guard (talk radius 128; the static code panel is
+talk 1 and is ignored) and announces three escalating levels as its distance
+to the player crosses fixed thresholds, with a hysteresis band so it does not
+chatter at a boundary:
+
+- distance >= 480 -> "Guard clear"
+- distance <= 320 -> "Guard approaching"
+- distance <= 192 -> "Guard close" (interrupts speech; a catch at the ~128
+  talk radius is imminent)
+
+Mover detection mirrors the recon: an entity counts as a guard once it drifts
+more than 20 units from where it was first seen on the field, which keeps the
+static scenery -- and, while the player holds still at the panel, the party
+followers -- from tripping the cue. The cue is gated by the mode, not a
+diagnostic flag, so it is completely inert unless Original is selected (the
+default remains Manual). It reads only; its sole effects are the spoken cue
+and a `[GUARDCUE]` log line on each level change.
+
+The 192/320/480 thresholds are a first cut tied to the 128 talk radius
+(1.5x / 2.5x / 3.75x) and are expected to be tuned after testing against how
+close the guards actually sweep in un-frozen play.
+
+The guard mode was promoted from a private cache in `field_dialog` to a shared
+accessor so the cue (which lives in `field_navigation`) can read it and the
+upcoming in-engine mode ASK can set it:
+
+- `field_dialog.h` now declares `enum TrainGuardModeVal { TGM_ORIGINAL,
+  TGM_MANUAL, TGM_SKIP }` plus `GetTrainGuardMode()` / `SetTrainGuardMode(int)`.
+- The cache moved from a function-local static to a file-scope static so
+  `SetTrainGuardMode()` can update the live mode (and persist it to the INI)
+  without an INI round-trip -- ready for the ASK to call when the player picks
+  a mode in-game.
+- `TrainGuardMode()` now writes the resolved value back to the INI on first
+  read, so the `train_guard_mode` key always exists as an editable line
+  (previously the default was applied but never materialized in the file, so
+  there was nothing to edit when selecting a mode by hand).
+
+No behavior change for Manual or for any non-`tilink` field. Not yet pushed.
+
+## v0.18.3.14
+
+Timber guard **Manual mode** -- first real accessibility mode for the train
+hijack (#58). LOCAL build.
+
+The v0.18.3.13 `[GUARDVAR]` run proved the guard-patrol switch: field var 1040
+holds 1 while the guards patrol and drops to 0 when they idle, and the catch
+fires as a moving guard enters its talk radius (~128) of the player. The code
+validators gate on a different var (1042 = round active), not 1040.
+
+Manual mode pins var 1040 to 0 on `tilink*` every poll, so the guards stay
+frozen and can never reach the player, while code entry and the win proceed
+normally. A blind player can now work the uncoupling code at their own pace
+without a guard sweep they can't see ending the round.
+
+- New `GuardManualFreeze()` (`field_dialog_lifecycle.inl`, from `PollWindows`):
+  on `tilink*`, writes 0 to the single byte at varblock 0x1CFE9B8 + 1040 each
+  poll. SEH-guarded; logs a throttled `[GUARDFREEZE]` confirmation once per
+  second. The varblock is byte-indexed, so only the one byte is written --
+  never a wider store that would clobber the adjacent round/entry vars.
+- New `train_guard_mode` setting in `ff8_accessibility.ini` `[Accessibility]`:
+  0 = Original (vanilla; audio cue to come), 1 = Manual (freeze), 2 = Skip
+  (not yet implemented). Default = Manual. Read once and cached. Eventually an
+  in-game mode prompt (#60) will set this; for now it's INI-selectable.
+- Turned off the guard JSM dump diagnostic (`GUARD_JSM_DUMP_DIAG` 1 -> 0) now
+  that entities 0-27 are fully mapped; retained behind the `#define`. The
+  `[GUARDVAR]` and `[GUARDPOS]` runtime logs stay on to confirm the freeze
+  holds and to watch the round still reach a win.
+
+No opcode 0x4A (ASK) exists in any `tilink1` entity (0-27 dumped), confirming
+the fail dialog is not a field script there -- it lives on the post-catch
+destination. Skip mode still needs the success/win flag pattern and will be
+built next.
+
+## v0.18.3.13
+
+Guard machine mapped + runtime state logger (#58). LOCAL diagnostic build.
+
+The v0.18.3.12 narrowed dump (entities 18-30) was read for 18-25 and cracked
+the Timber train-hijack minigame's structure:
+
+- The patrol guards are `blind2` (entity 19, SETMODEL 5) and `blind3` (entity
+  20, SETMODEL 6) -- invisible `Other` entities that walk the corridor (spawn
+  near (-1315,-505) and (-1312,93)). These are the recon's moving "model-5/6"
+  guards, NOT the GalHei sprites (which are static `Background` scenery). Their
+  walk loop is gated on field var 1040 and never reads the player's position.
+- `blind4` (entity 21) is the minigame master: its init zeroes the entered-code
+  slots 1024-1027, the code-entry var 1043, and the patrol var 1040, then wakes
+  the helpers; one method is the fail/restart path (MAPJUMP3 back into field 902
+  = tilink1 itself, spawn picked by savemap 724); another is the success path
+  (MAPJUMP3 out to field 925).
+- `blind5`/`blind6`/`blind7` (22/23/24) are per-digit validators (gated var
+  1042, reading 1024-1026); `blind8` (25) is the code display (reads the live
+  code digits 1029-1032 and draws them).
+- Key switches: var 1040 = guard patrol on/off; var 1042 = round active.
+
+No opcode 0x4A (ASK) appears in entities 0-25, so the fail dialog ("Rinoa:
+What happened!?") lives in the still-unread `blind9`/`blind10` (26/27) or is
+requested during the method-4 reload.
+
+This build:
+- Re-narrows `DumpGuardScripts` to entities 26-30 (`blind9`, `blind10`,
+  `hatch`, `point`, `light`) so the last unread suspects land alone at the top
+  of the log, to find the fail-ASK and any player-distance check.
+- Adds `GuardVarLog()` (`GUARD_VAR_DIAG`, called from `PollWindows`): on
+  `tilink*`, once per ~500 ms, logs the live byte values of vars 1040, 1042,
+  1028, 1038, 1039, 1043, 1044, plus the entered-code slots 1024-1027 and the
+  target code 1029-1032, as `[GUARDVAR]` in `ff8_field.log`. Paired with the
+  still-on `[GUARDPOS]` recon, a real run (enter code, then get caught, then
+  succeed) reveals which value of var 1040 freezes the guards (Manual mode) and
+  the success/fail flag pattern (Auto/Skip mode). SEH-guarded, log-only.
+
+Three accessibility modes (refined with Aaron): Auto/Skip = bypass the
+minigame via the success path; Manual = player enters the code with guards
+frozen; Original = player enters the code with an audio cue for guards
+approaching/receding.
+
+## v0.18.3.12
+
+Guard catch hunt (#58). LOCAL diagnostic build.
+
+Static analysis of the v0.18.3.11 all-entity `tilink1` dump cleared entities
+0-17 -- the party/NPC sprites, the train-shake (`TrainSindou`) and
+`hatchcont`/`view` camera controllers (var 1044 = down/up state), and the
+`Noriuturiline1` code-entry line (var 1043, savemap var 724). None of them
+holds a guard-vs-Squall proximity check or the fail-ASK ("Rinoa: What
+happened!? Squall!!!"). The remaining suspects are entities 18-30: the ten
+`blind*` invisible entities plus `hatch`, `point`, and `light`.
+
+`DumpGuardScripts()` now starts its dump loop at entity 18 instead of 0, so
+those 13 entities land at the TOP of `ff8_field.log` for a single cheap read
+(the earlier 0-17 dumps pushed them into an unreadable mid-log zone).
+
+Diagnostic-only; no gameplay/TTS behaviour change. The dump fires once on the
+first field load of the session, so any field reached after launch triggers
+it -- no need to navigate to the train.
+
+## v0.18.3.11
+
+Guard catch hunt (#58). LOCAL diagnostic build.
+
+v0.18.3.10's dump proved the catch logic is NOT in GalHei1/GalHei2 (decorative
+background sprites), TrainSindou (train-rumble controller), or point (scenery
+orchestrator). But the guards DO catch Squall if they get too close during
+code entry -- the detection just lives in another entity (or an engine-level
+proximity check). Two changes to find it:
+
+1. `DumpGuardScripts()` now dumps ALL 31 `tilink1` entities, not just the four
+   name-matched ones, so the proximity/distance check + catch trigger (MAPJUMP
+   to a caught field / REQEW-to-caught / fail-flag POPM) can be located. Prime
+   suspects: the `blind1`-`blind10` invisible entities and the train-movement
+   entities (Downyarukun/Upyarukun). Still fires once per session from any
+   field, landing at the top of the log.
+2. `GUARD_RECON_DIAG` re-enabled so a deliberate get-caught run logs each
+   guard's position and distance-to-player every ~400 ms -- this captures the
+   catch threshold (distance at which detection fires) and any position reset.
+   The existing MAPJUMP / field-load / dialog hooks capture what the catch
+   does. The static dump is at the top of the log and the catch is at the tail,
+   so neither buries the other.
+
+Log-only; no behavior change.
+
+## v0.18.3.10
+
+Guard-awareness discovery, retrieval fix (#58). LOCAL diagnostic build.
+
+v0.18.3.9 dumped the guard scripts correctly, but the build also re-enabled the
+`[GUARDPOS]` recon flood, and the `tilink1` visit was followed by a return to
+the briefing area with F9-navigation logging -- so the one-shot dump ended up
+buried in the middle of a 572 KB log, unreachable without grep.
+
+Fix: `GuardJsmDump()` now reads `tilink1`'s script archive **by name**, so it
+fires from ANY field (including the briefing-room save) -- no traversal to the
+live coupling field needed -- once per game session on the first valid field.
+The `[SCRIPT-DUMP]` block lands near the TOP of the session log, readable with
+`head`. `GUARD_RECON_DIAG` turned back off (the v0.18.3.7 first-pass patrol map
+is enough; the flood was what buried the dump). DumpGuardScripts retries until
+the field archive is ready, then dumps GalHei1/GalHei2 + TrainSindou + point.
+Log-only; no behavior change.
+
+## v0.18.3.9
+
+Guard-awareness discovery (#58). LOCAL diagnostic build, not for push.
+
+First discovery build for the train guards, following the v0.18.3.7 `[GUARDPOS]`
+recon (ents 5/6 = GalHei1/GalHei2 patrol X~-1315, Y~[-505,1640], ~150 u/s; a
+guard passed within 71 units of the stationary player at the device with no
+catch, so the catch fires during the crossing, not at the panel). To find the
+catch mechanic this build adds a static JSM dump of the guard + controller
+scripts on `tilink1`:
+
+- `FieldArchive::DumpGuardScripts()` (field_archive_jsm_dump.inl) dumps the SYM
+  entities named `galhei*` (GalHei1/GalHei2) plus the prime controller
+  candidates `TrainSindou` and `point`, via the existing `DumpEntityScript`.
+- `GuardJsmDump()` (gated `GUARD_JSM_DUMP_DIAG 1`, field_dialog_diag.inl) fires
+  once on `tilink1` entry from `PollWindows` -> `[SCRIPT-DUMP]` in ff8_field.log.
+- `GUARD_RECON_DIAG` re-enabled so the same run refreshes the `[GUARDPOS]`
+  patrol data.
+
+Reading targets in the dump: the patrol MOVE loop, the line-of-sight/proximity
+check against the player, and what a "spotted" event triggers (likely a MAPJUMP
+to a caught field or a fail-flag `POPM`). Log-only; no behavior change.
+
 ## v0.18.3.8
 
 #56 DONE -- cleanup after the real-train code announce was BAT-confirmed.
