@@ -150,6 +150,9 @@ static char __cdecl Hook_show_dialog(int32_t window_id, uint32_t state, int16_t 
     // context this is a near-no-op (single string compare + early return).
     if (currentMode == 1 /* MODE_FIELD */) {
         ::ChaseAskOverlay::OnDialogText(decoded.c_str());
+        // v0.18.3.23: same forward for the Timber train guard-mode ASK (#60).
+        // Cheap field-gate + strstr inside; near-no-op outside tiyane1.
+        ::TrainModeAskOverlay::OnDialogText(decoded.c_str());
     }
 
     // Check if opcode hooks already spoke this

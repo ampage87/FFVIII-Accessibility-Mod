@@ -409,10 +409,11 @@ static void GuardReconLog() {
 }
 
 // ============================================================================
-// v0.18.3.15: Timber train ORIGINAL mode -- per-guard audio proximity cue (#58).
+// v0.18.3.15: Timber train MANUAL mode -- per-guard audio proximity cue (#58).
+// (Mode formerly called "Original"; relabeled "Manual" -- now the default -- in v0.18.3.22.)
 //
-// When train_guard_mode == Original (FieldDialog::GetTrainGuardMode()), the
-// guards patrol as in vanilla and this gives the blind player the spatial
+// When train_guard_mode == Manual (FieldDialog::GetTrainGuardMode() == TGM_MANUAL),
+// the guards patrol as in vanilla and this gives the blind player the spatial
 // information a sighted player reads off-screen: how near each sweeping guard
 // is. EACH real guard is tracked and announced SEPARATELY with a stable label
 // -- "Guard 1 approaching", "Guard 2 close", "Guard 1 clear" -- so two guards
@@ -443,12 +444,12 @@ static void GuardReconLog() {
 // patrollers come out Guard 1 / Guard 2; the set resets per field. [GUARDCUE]
 // logs dY, dist and pos.
 //
-// FEATURE, not a diagnostic: gated by the mode (inert unless Original; default
-// Manual), NOT behind a #define. Reads only; side effects are ScreenReader::
+// FEATURE, not a diagnostic: gated by the mode (inert unless Manual, which is
+// the default), NOT behind a #define. Reads only; side effects are ScreenReader::
 // Speak on a per-guard level change and a [GUARDCUE] log line. No std::string,
 // so the __try blocks are C2712-safe. Thresholds remain easy to tune.
 // ============================================================================
-static void GuardOriginalCue()
+static void GuardManualCue()
 {
     static char  s_cueField[32]             = {0};   // field the cue state belongs to
     static float s_prevX[MAX_ENTITIES]      = {};    // position at the previous evaluation
@@ -489,7 +490,7 @@ static void GuardOriginalCue()
         }
         return;
     }
-    if (FieldDialog::GetTrainGuardMode() != FieldDialog::TGM_ORIGINAL) return;
+    if (FieldDialog::GetTrainGuardMode() != FieldDialog::TGM_MANUAL) return;
 
     // Field changed (incl. tilink1 <-> tilink2 between the two code cars):
     // reset per-entity tracking and restart guard numbering for the new car.
@@ -626,10 +627,10 @@ static void ObserveArrowResponse() {
     // regardless of player input or game state. Self-gates to tilink1.
     GuardReconLog();
 
-    // v0.18.3.15: Original-mode guard-proximity audio cue (#58). Also runs
+    // v0.18.3.15: Manual-mode guard-proximity audio cue (#58). Also runs
     // before the gates (the cue must fire while the player stands at the code
-    // panel); self-gates to tilink* AND to train_guard_mode == Original.
-    GuardOriginalCue();
+    // panel); self-gates to tilink* AND to train_guard_mode == Manual.
+    GuardManualCue();
 
     // v0.17.7.6.1: Two-tier gating for auto-drive activity.
     //

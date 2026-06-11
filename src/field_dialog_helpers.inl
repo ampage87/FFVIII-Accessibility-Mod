@@ -136,6 +136,37 @@ static std::string TrimDecoded(const std::string& text)
 }
 
 // ============================================================================
+// v0.18.3.28: Timber code-entry instruction key-name fix (#60 / #57).
+//
+// Rinoa's uncoupling-code briefing contains a line that, in the original,
+// shows four directional BUTTON SPRITES for the example code 3124:
+//   "...if I relay the code 3124, you'll push [btn][btn][btn][btn], in that
+//    order."
+// On the PC release those four key sprites decode to the literal "L L L L"
+// (the text decoder has no glyph for them, the same fallback it uses for the
+// page-break code), so a blind player hears "L L L L" with no idea which keys
+// are meant. We rewrite the spoken line to name the real keys: for the example
+// 3124 the keys are 3=A, 1=D, 2=X, 4=W (per the #57 map and the on-screen
+// W/A/D/X diagram), so "L L L L" becomes "A, D, X, W". A "/" reminder is
+// appended so the player knows they can re-hear the layout.
+//
+// Matching is on the literal "L L L L" run, which is unique to this line: the
+// page-break fallback elsewhere only ever produces a SINGLE 'L' between words
+// (e.g. "onboard.L  I'll"), never four space-separated L's. Mutates `text` in
+// place and returns true if a substitution was made.
+// ============================================================================
+static bool ApplyTrainCodeKeyFix(std::string& text)
+{
+    static const std::string marker = "L L L L";
+    size_t pos = text.find(marker);
+    if (pos == std::string::npos) return false;
+    // Example code 3124 -> keys 3=A, 1=D, 2=X, 4=W.
+    text.replace(pos, marker.length(), "A, D, X, W");
+    text += "  You can press the slash key anytime to hear the key layout.";
+    return true;
+}
+
+// ============================================================================
 // v04.23: FNV-1a hash for detecting in-place content changes
 // ============================================================================
 

@@ -162,6 +162,11 @@ namespace ScanTTS { bool IsScreenActive(); }
 namespace ChaseAskOverlay { void OnDialogText(const char* text); }
 namespace ChaseDiag       { void OnAskOpcodeFired(const char* opcodeLabel); }
 
+// v0.18.3.23: Timber train guard-mode ASK (#60). Same pattern as the chase
+// overlay above -- fed every decoded field text from Hook_show_dialog; opens
+// the Manual/Freeze/Skip picker when it sees the tiyane1 trigger line.
+namespace TrainModeAskOverlay { void OnDialogText(const char* text); }
+
 // v0.15.6.1 Phase 2b: dialog_inject.cpp's text override coordination.
 // When IsOverrideActive() returns true, our Hook_opcode_ask patches
 // slot[GetOverrideSlot()]+0x08 (text_data1) with GetOverrideText() AFTER

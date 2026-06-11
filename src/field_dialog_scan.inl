@@ -237,7 +237,9 @@ static void ScanAndSpeakAllWindows(const char* opcodeLabel)
             continue;
         }
 
-        // New text for this window -- speak it
+        // New text for this window -- speak it. Dedup keys stay the ORIGINAL
+        // decoded text so the next poll's raw window text still matches them
+        // and we don't re-speak; only the spoken/repeat copy is rewritten.
         ws.lastSpokenText = decoded;
         ws.lastRawText = decoded;
         ws.skipLogged = false;
@@ -245,10 +247,16 @@ static void ScanAndSpeakAllWindows(const char* opcodeLabel)
         // v04.16: Mark this text as spoken in pending queue
         MarkPendingAsSpoken(decoded);
 
+        // v0.18.3.28 (#60/#57): rewrite the Timber code-entry instruction so the
+        // four "L L L L" button sprites become real key names (A, D, X, W for
+        // the example code 3124) plus a "/" reminder. No-op on every other line.
+        std::string toSpeak = decoded;
+        ApplyTrainCodeKeyFix(toSpeak);
+
         Log::Dialog("FieldDialog: [%s] win[%d] Speaking: \"%s\"",
-                   opcodeLabel, i, decoded.c_str());
-        s_lastDialogSpoken = decoded;  // v04.25: track for F5 repeat
-        ScreenReader::Speak(decoded.c_str(), false);  // Queue mode
+                   opcodeLabel, i, toSpeak.c_str());
+        s_lastDialogSpoken = toSpeak;  // v04.25: track for F5 repeat
+        ScreenReader::Speak(toSpeak.c_str(), false);  // Queue mode
     }
 }
 

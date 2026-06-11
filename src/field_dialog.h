@@ -36,10 +36,20 @@ void RepeatLastDialog();
 bool IsDialogOpen();
 
 // v0.18.3.15: Timber train-hijack guard mode (#58). Selectable via INI key
-// `train_guard_mode` [Accessibility] and (later) an in-engine ASK. Exposed so
-// FieldNavigation's Original-mode proximity cue can read the active mode and
+// `train_guard_mode` [Accessibility] and an in-engine ASK. Exposed so
+// FieldNavigation's Manual-mode proximity cue can read the active mode and
 // the ASK can set it.
-enum TrainGuardModeVal { TGM_ORIGINAL = 0, TGM_MANUAL = 1, TGM_SKIP = 2 };
+//
+// v0.18.3.22: relabeled to the user-facing scheme. NUMERIC VALUES UNCHANGED
+// from the old 0=Original / 1=Manual / 2=Skip mapping -- only the names and
+// the default changed (default is now Manual=0, was the frozen mode=1). A
+// fully-vanilla option was dropped: without the code announce it strands a
+// blind player.
+//   TGM_MANUAL (0) = guards move; code announce + per-guard proximity cues
+//                    (was "Original"). The DEFAULT.
+//   TGM_FREEZE (1) = guards held; player just enters codes (was "Manual").
+//   TGM_SKIP   (2) = bypass the train scene (not yet built).
+enum TrainGuardModeVal { TGM_MANUAL = 0, TGM_FREEZE = 1, TGM_SKIP = 2 };
 int  GetTrainGuardMode();          // cached; reads the INI on first call
 void SetTrainGuardMode(int mode);  // updates the cache + persists to INI
 

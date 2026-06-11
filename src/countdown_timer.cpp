@@ -108,10 +108,31 @@ static uint32_t s_announcedMask = 0;
 // Edge-detection state for T and Shift+T hotkeys.
 static bool s_tWas = false;
 
+// v0.18.3.29 (#59): decrement-gated activation. While INACTIVE we watch the
+// timer global and only ENTER ACTIVE once we've seen it cleanly step DOWN a
+// couple of times -- the signature of a live 1/sec countdown. A static
+// leftover value (e.g. the 79 the Timber timer holds after the mission
+// completes) never decrements, so it no longer false-triggers an announcement
+// and no longer floods the log (the old code called EnterActive every tick on
+// any nonzero value). s_actPrevRaw is -1 when unseeded.
+static int s_actPrevRaw    = -1;
+static int s_actDecrements = 0;
+static const int ACT_DECREMENTS_NEEDED = 2;  // ~2 seconds of confirmed countdown
+
 // Diagnostic counters and timestamps.
 static DWORD s_sessionStartTickMs = 0;
 static DWORD s_lastLogTickMs      = 0;
 static int   s_lastLoggedRaw      = -1;  // -1 = no log yet; suppresses repeat logs
+
+// v0.18.3.30 (#59): stall-based deactivation. A running countdown changes
+// ~1/sec; if the ACTIVE value stops changing for STALL_TIMEOUT_MS, the timed
+// sequence has ended (mission complete) WITHOUT the global reaching 0 -- it
+// just freezes at whatever was left (the Timber train leaves ~79). We then
+// deactivate so the mod stops reporting a phantom running timer. This fixes
+// the long-standing "timer still counting after the sequence ended" glitch
+// across all timers. FROZEN is unaffected (the user holds that on purpose).
+static DWORD s_lastDecrementTickMs = 0;
+static const int STALL_TIMEOUT_MS = 8000;  // ~8s with no change => sequence ended
 
 // Scheduled-announcement boundaries, descending, in SECONDS remaining.
 static const int BOUNDARY_SEC[] = {
@@ -169,19 +190,26 @@ static void WriteLiveTimerRaw(uint16_t value)
 
 static Units ClassifyUnits(uint16_t raw)
 {
-    // Frames @ 30Hz: 30-min Dollet = 54000; range 15000-60000.
-    if (raw >= 15000 && raw <= 60000) {
-        return Units::FRAMES_30HZ;
-    }
-    // Seconds: 30-min Dollet = 1800; range 500-3000.
-    // Aaron's v0.15.13.1 BAT confirmed live timer reads 1711 = 28:31,
-    // squarely in this range.
-    if (raw >= 500 && raw <= 3000) {
+    // This global holds SECONDS for every timed sequence that uses it
+    // (Dollet confirmed 1711 = 28:31; Fire Cavern and the Timber train
+    // share the same on-screen MM:SS timer and the same global), so we
+    // treat essentially the whole low range as seconds. This is what lets
+    // the Timber 5-minute (300s) timer and its final 0:30 / 0:79 values
+    // classify -- the old 500-3000 floor (sized for Dollet) left the train
+    // timer below the floor, so it never activated (#59).
+    //
+    // The old MINUTES 5-60 branch was removed: a raw of, say, 30 at this
+    // address is 30 SECONDS (a final countdown), never 30 minutes -- that
+    // branch would have mis-scaled the train's last minute by 60x had it
+    // ever activated. Units are latched once at EnterActive anyway, so an
+    // already-active SECONDS timer stays SECONDS all the way down to 0.
+    if (raw >= 1 && raw <= 14999) {
         return Units::SECONDS;
     }
-    // Minutes: 5-60.
-    if (raw >= 5 && raw <= 60) {
-        return Units::MINUTES;
+    // Frames @ 30Hz kept as a conservative fallback for any sequence that
+    // might store a frame count (30-min @ 30Hz = 54000; range 15000-60000).
+    if (raw >= 15000 && raw <= 60000) {
+        return Units::FRAMES_30HZ;
     }
     return Units::UNKNOWN;
 }
@@ -261,10 +289,8 @@ static void EnterActive(uint16_t firstRaw)
 {
     Units units = ClassifyUnits(firstRaw);
     if (units == Units::UNKNOWN) {
-        Log::Mod("[CountdownTimer] Observed nonzero value %u but units "
-                 "UNKNOWN (no classification matched: not minutes 5-60, "
-                 "not seconds 500-3000, not frames 15000-60000). Staying "
-                 "INACTIVE.", (unsigned)firstRaw);
+        Log::Mod("[CountdownTimer] value %u unclassifiable; staying INACTIVE.",
+                 (unsigned)firstRaw);
         return;
     }
 
@@ -274,6 +300,7 @@ static void EnterActive(uint16_t firstRaw)
     s_lastRawValue = firstRaw;
     s_announcedMask = 0;
     s_sessionStartTickMs = GetTickCount();
+    s_lastDecrementTickMs = GetTickCount();
     s_state = State::ACTIVE;
 
     // Pre-flag boundaries already past the session start.
@@ -367,10 +394,13 @@ void Initialize()
     s_frozenRawValue = 0;
     s_announcedMask = 0;
     s_tWas = false;
+    s_actPrevRaw = -1;
+    s_actDecrements = 0;
+    s_lastDecrementTickMs = 0;
     s_sessionStartTickMs = 0;
     s_lastLogTickMs = 0;
     s_lastLoggedRaw = -1;
-    Log::Mod("[CountdownTimer] Initialize v0.15.13.2: reading live engine "
+    Log::Mod("[CountdownTimer] Initialize v0.18.3.30: reading live engine "
              "timer at 0x%08X (uint16, scanner-discovered v0.15.13.1). "
              "T=announce, Shift+T=freeze (rewrite each frame). Boundaries: "
              "25/20/15/10/5:00, 1:00, 0:30. Script-side snapshot at "
@@ -409,11 +439,45 @@ void Update()
         }
 
         switch (s_state) {
-            case State::INACTIVE:
-                if (raw > 0) {
-                    EnterActive(raw);
+            case State::INACTIVE: {
+                // Decrement-gated activation (#59). Only a value that is
+                // actively counting down should start the timer; a static
+                // leftover must be ignored.
+                if (raw == 0) {
+                    s_actPrevRaw = -1;
+                    s_actDecrements = 0;
+                    break;
                 }
+                if (s_actPrevRaw < 0) {
+                    // First sighting -- seed, don't trust it yet.
+                    s_actPrevRaw = (int)raw;
+                    s_actDecrements = 0;
+                    break;
+                }
+                int delta = s_actPrevRaw - (int)raw;
+                if (delta == 0) {
+                    // Unchanged this tick. A real countdown only steps once
+                    // per second, so the vast majority of ticks land here.
+                    break;
+                }
+                if (delta > 0 && delta <= 3) {
+                    // Clean small step-down: the live-countdown signature.
+                    s_actPrevRaw = (int)raw;
+                    s_actDecrements++;
+                    if (s_actDecrements >= ACT_DECREMENTS_NEEDED) {
+                        EnterActive(raw);
+                        s_actPrevRaw = -1;
+                        s_actDecrements = 0;
+                    }
+                    break;
+                }
+                // Jumped up, or a large discontinuity (timer reset, a
+                // different sequence, or a stale write). Resync and require
+                // fresh decrements before trusting it.
+                s_actPrevRaw = (int)raw;
+                s_actDecrements = 0;
                 break;
+            }
 
             case State::ACTIVE: {
                 if (raw == 0) {
@@ -424,7 +488,17 @@ void Update()
                 if (newRemaining != s_remainingSec) {
                     s_remainingSec = newRemaining;
                     s_lastRawValue = raw;
+                    s_lastDecrementTickMs = now;   // activity -- reset stall watch
                     CheckScheduledAnnouncements();
+                } else if ((now - s_lastDecrementTickMs) >= (DWORD)STALL_TIMEOUT_MS) {
+                    // Value unchanged for STALL_TIMEOUT_MS. A live countdown
+                    // steps ~1/sec, so a stall this long means the timed
+                    // sequence ended without the global hitting 0 (it froze
+                    // at the leftover value). Stop reporting a phantom timer.
+                    // (If a sequence legitimately pauses the global for this
+                    // long, e.g. a long battle, it simply re-detects when the
+                    // countdown resumes.)
+                    EnterInactive("timer stalled -- sequence ended");
                 }
                 break;
             }

@@ -14,6 +14,7 @@
 #include "chase_diag.h"
 #include "chase_detector.h"
 #include "chase_ask_overlay.h"
+#include "train_mode_ask_overlay.h"
 #include "chase_auto_pilot.h"
 #include "chase_battle_freeze.h"
 #include "chase_keyboard.h"
@@ -557,6 +558,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     ChaseDetector::Initialize();
     ChaseDiag::Initialize();
     ChaseAskOverlay::Initialize();
+    TrainModeAskOverlay::Initialize();   // v0.18.3.23: Timber train guard-mode ASK (#60)
     ChaseAutoPilot::Initialize();
     ChaseKaniFreeze::Initialize();
     ChaseBattleFreeze::Initialize();
@@ -608,6 +610,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
 
         ChaseDetector::Update();
         ChaseAskOverlay::Update();
+        TrainModeAskOverlay::Update();   // v0.18.3.23: Timber train guard-mode ASK (#60)
         ChaseAutoPilot::Update();
         ChaseKaniFreeze::Update();
         ChaseDiag::Update();
@@ -754,6 +757,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     ChaseKeyboard::Shutdown();
     ChaseKaniFreeze::Shutdown();
     ChaseAskOverlay::Shutdown();
+    TrainModeAskOverlay::Shutdown();   // v0.18.3.23: Timber train guard-mode ASK (#60)
     ChaseDiag::Shutdown();
     ChaseDetector::Shutdown();
     GameAudio::Shutdown();

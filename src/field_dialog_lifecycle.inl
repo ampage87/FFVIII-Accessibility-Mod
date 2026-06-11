@@ -241,6 +241,42 @@ static void TrainCodeAnnounce()
 }
 
 // ============================================================================
+// v0.18.3.27: Timber code-entry key-layout announce (#60 / #57).
+//
+// During train code entry the four digits are spoken as NUMBERS (1-4), but a
+// blind player has no way to discover which keys those numbers map to. "/"
+// (VK_OEM_2) announces the layout whenever the player is on a code-apparatus
+// field -- tiagit* (briefing-room practice) or tilink* (the live moving train).
+// No conflict with the menu help bar that also uses "/": that handler in
+// menu_tts.cpp is gated to menu mode (game mode 6) and never fires on the
+// field, where code entry happens.
+//
+// Number-first framing ("1 is D, 2 is X...") matches the order the code is read
+// aloud, so the player hears "two" and looks up 2 -> X directly. Spoken once
+// per "/" press (edge-detected on the 0x8000 down bit). No memory reads, so no
+// SEH needed; reuses ScreenReader::Speak. Logs [TRAINCODE-KEYS].
+//
+// #57 key map: 1 = Right / D, 2 = Down / X, 3 = Left / A, 4 = Up / W, Q = quit.
+// We surface the D/X/A/W letters (Aaron's chosen framing); the arrow-key
+// equivalents and Q-to-quit are omitted to keep the announce short.
+// ============================================================================
+static void TrainCodeKeyHelp()
+{
+    if (!FF8Addresses::IsOnField()) return;
+    const char* fn = FF8Addresses::pCurrentFieldName;
+    if (!fn) return;
+    if (_strnicmp(fn, "tiagit", 6) != 0 && _strnicmp(fn, "tilink", 6) != 0) return;
+
+    static bool s_slashWasDown = false;
+    bool slash = (GetAsyncKeyState(VK_OEM_2) & 0x8000) != 0;
+    if (slash && !s_slashWasDown) {
+        ScreenReader::Speak("Code entry keys. 1 is D, 2 is X, 3 is A, 4 is W.", true);
+        Log::Field("FieldDialog: [TRAINCODE-KEYS] announced D/X/A/W = 1/2/3/4 on %s", fn);
+    }
+    s_slashWasDown = slash;
+}
+
+// ============================================================================
 // v0.18.3.13: Timber guard/round state runtime logger (#58).
 //
 // The v0.18.3.12 static dump mapped the minigame state machine: the patrol
@@ -300,15 +336,17 @@ static void GuardVarLog()
 // ============================================================================
 // v0.18.3.14: Timber train-hijack guard MODE -- first real accessibility mode
 // (#58). Three modes persist in ff8_accessibility.ini [Accessibility] under
-// key `train_guard_mode`:
-//   0 = Original : vanilla guards (later: + audio proximity cue)
-//   1 = Manual   : guards FROZEN -- player enters the code at their own pace
-//   2 = Skip     : bypass the minigame (not yet implemented)
-// Default = Manual (the accessible default; a blind player can't react to a
-// visual guard sweep). Mode is cached on first read so we don't touch the INI
+// key `train_guard_mode`. v0.18.3.22 relabeled them to the user-facing scheme
+// (NUMERIC VALUES UNCHANGED; default flipped to 0):
+//   0 = Manual : guards move; code announce + per-guard proximity cues (the
+//                accessible default -- a fully-vanilla mode strands a blind
+//                player). Cue lives in field_nav_observe.inl (GuardManualCue).
+//   1 = Freeze : guards FROZEN -- player enters the code at their own pace.
+//   2 = Skip   : bypass the minigame (not yet implemented).
+// Default = Manual (0). Mode is cached on first read so we don't touch the INI
 // every poll.
 //
-// MANUAL implementation: pin the guard-patrol switch (field var 1040) to 0 on
+// FREEZE implementation: pin the guard-patrol switch (field var 1040) to 0 on
 // `tilink*` every poll. v0.18.3.13 [GUARDVAR] proved var 1040 = 1 while the
 // guards patrol and 0 when idle; the patrol entities (blind2/blind3) read it
 // and stop when it's 0. The code validators gate on var 1042 (round), NOT
@@ -318,8 +356,8 @@ static void GuardVarLog()
 // +1040 -- never a wider store that would clobber 1041/1042/1043.
 // SEH-guarded; throttled [GUARDFREEZE] confirmation once per second.
 // ============================================================================
-// TGM_ORIGINAL/MANUAL/SKIP now live in field_dialog.h (enum TrainGuardModeVal)
-// so FieldNavigation's Original-mode cue can share them. The cache is a
+// TGM_MANUAL/FREEZE/SKIP now live in field_dialog.h (enum TrainGuardModeVal)
+// so FieldNavigation's Manual-mode cue can share them. The cache is a
 // file-scope static (not a function-local) so SetTrainGuardMode() -- called by
 // the in-engine mode ASK -- can update the live value without an INI round-trip.
 static int s_trainGuardMode = -1;   // -1 = not yet loaded from INI
@@ -328,14 +366,14 @@ static int TrainGuardMode()
 {
     if (s_trainGuardMode < 0) {
         Config::Load();
-        s_trainGuardMode = Config::GetInt("train_guard_mode", TGM_MANUAL);
-        if (s_trainGuardMode < TGM_ORIGINAL || s_trainGuardMode > TGM_SKIP) s_trainGuardMode = TGM_MANUAL;
+        s_trainGuardMode = Config::GetInt("train_guard_mode", TGM_MANUAL);  // TGM_MANUAL is now 0 = the default
+        if (s_trainGuardMode < TGM_MANUAL || s_trainGuardMode > TGM_SKIP) s_trainGuardMode = TGM_MANUAL;
         // Write the resolved value straight back so the key always EXISTS in the
         // INI after first load -- otherwise GetInt's default is invisible and a
         // user (or the mode ASK, pre-launch) has no line to edit. Idempotent:
         // re-reading the same value and writing it back is a no-op on disk.
         Config::SetInt("train_guard_mode", s_trainGuardMode);
-        Log::Field("FieldDialog: [TRAINMODE] train_guard_mode = %d (0=Original,1=Manual,2=Skip)", s_trainGuardMode);
+        Log::Field("FieldDialog: [TRAINMODE] train_guard_mode = %d (0=Manual,1=Freeze,2=Skip)", s_trainGuardMode);
     }
     return s_trainGuardMode;
 }
@@ -347,15 +385,15 @@ int GetTrainGuardMode() { return TrainGuardMode(); }
 
 void SetTrainGuardMode(int mode)
 {
-    if (mode < TGM_ORIGINAL || mode > TGM_SKIP) return;
+    if (mode < TGM_MANUAL || mode > TGM_SKIP) return;
     s_trainGuardMode = mode;
     Config::SetInt("train_guard_mode", mode);
-    Log::Field("FieldDialog: [TRAINMODE] train_guard_mode set to %d (0=Original,1=Manual,2=Skip)", mode);
+    Log::Field("FieldDialog: [TRAINMODE] train_guard_mode set to %d (0=Manual,1=Freeze,2=Skip)", mode);
 }
 
-static void GuardManualFreeze()
+static void GuardFreezePin()
 {
-    if (TrainGuardMode() != TGM_MANUAL) return;
+    if (TrainGuardMode() != TGM_FREEZE) return;   // formerly GuardManualFreeze; Freeze mode = old numeric 1
     if (!FF8Addresses::IsOnField()) return;
     const char* fn = FF8Addresses::pCurrentFieldName;
     if (!fn || _strnicmp(fn, "tilink", 6) != 0) return;
@@ -466,10 +504,11 @@ void PollWindows()
     TrainCodeJsmDump();  // v0.18.3.2: dump code-apparatus JSM once on tiagit* entry (#56)
     TrainCodeVarProbe();  // v0.18.3.3: read code-digit varblock candidates on tiagit* (#56)
     TrainCodeAnnounce();  // v0.18.3.4: speak the 4 code digits on tiagit* when a new code settles (#56)
+    TrainCodeKeyHelp();   // v0.18.3.27: "/" announces the D/X/A/W = 1/2/3/4 code-entry key layout (#60/#57)
     TrainFieldScan();     // v0.18.3.5: discover the real-train code field name + var location (#56)
     GuardJsmDump();       // v0.18.3.9: dump tilink1 guard + controller scripts once on entry (#58)
     GuardVarLog();        // v0.18.3.13: log tilink1 guard/round vars at runtime (#58)
-    GuardManualFreeze();  // v0.18.3.14: Manual mode -- pin guard var 1040=0 to freeze guards (#58)
+    GuardFreezePin();     // v0.18.3.14: Freeze mode -- pin guard var 1040=0 to freeze guards (#58)
 
     EnterCriticalSection(&s_cs);
     ScanAndSpeakAllWindows("POLL");

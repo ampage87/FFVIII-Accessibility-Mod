@@ -6,6 +6,215 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.30
+
+Timer: stop reporting a phantom timer after a timed sequence ends (#59). LOCAL build.
+
+After the train mission finished, the mod still acted as if the timer were
+running. The engine doesn't reset its timer to zero when a mission completes --
+it just freezes it at whatever was left (the train leaves about 79 seconds), and
+the module only deactivated when the value reached zero. So it sat there
+"active" indefinitely. This was the same root cause behind the equivalent
+glitch on the Dollet and Fire Cavern timers.
+
+The module now also deactivates when the timer stops changing. A live countdown
+ticks about once a second, so if the value holds steady for several seconds the
+sequence has clearly ended, and the timer switches off on its own. A frozen
+timer (Shift+T) is left alone -- that's held on purpose. If some sequence ever
+legitimately pauses its timer for a long stretch, the timer simply re-detects
+when the countdown resumes.
+
+Not pushed.
+
+## v0.18.3.29
+
+Timber train: countdown timer now announces (#59). LOCAL build.
+
+The train hijack gives you 5 minutes to finish the seven procedures, but that
+timer never spoke. The countdown module (from the Dollet / Fire Cavern work)
+reads the live engine timer, but its "is this seconds?" check was sized for
+Dollet's half-hour clock -- it only accepted 500-3000. The train's 300 seconds
+fell below that, so the timer was classified as unknown and never started.
+
+Two changes fix it. First, the seconds range is widened: that engine global
+holds seconds for every timed sequence that uses it, so anything from 1 up to
+14999 is now read as seconds (the train's 5:00, and its final 0:30, included).
+Second, the timer now only starts once it has actually been seen counting
+down a couple of times. Previously any leftover value sitting at that address
+(the train leaves a 79 there after the mission ends) was treated as a live
+timer every single frame -- which both risked a bogus announcement and was the
+source of the multi-megabyte log spam. A static value never decrements, so it
+is now correctly ignored.
+
+Behavior once active is unchanged from Dollet: you hear "Timer detected, about
+5 minutes remaining" when it starts, automatic cues at 1 minute and 30 seconds,
+T announces the time remaining on demand, and Shift+T freezes it.
+
+Note: the train timer living at this address is a strong inference (it is the
+shared timer global, and the leftover 79 = 1:19 is a believable "time left at
+mission completion"), but it is confirmed by this BAT, not yet hard-proven. If
+it does not announce on the live train, the fallback is to re-enable the
+address scanner (as was done originally for Dollet) to locate the train's
+timer. A quick Dollet regression check is also worthwhile since the activation
+logic changed.
+
+Not pushed.
+
+## v0.18.3.28
+
+Timber code entry: fix Rinoa's "L L L L" instruction (#60 / #57). LOCAL build.
+
+During the uncoupling briefing, Rinoa explains the keypad with a line like
+"...if I relay the code 3124, you'll push [four buttons], in that order." In
+the original those four buttons are directional sprites; on PC they decode to
+a meaningless "L L L L", so the spoken version gave you no idea which keys she
+meant.
+
+That line is now rewritten on the fly. For the example code 3124 it reads
+"...you'll push A, D, X, W, in that order" (3 is A, 1 is D, 2 is X, 4 is W),
+and a short reminder is tacked on: you can press the slash key anytime to hear
+the key layout. Only that one line is touched -- the match is on the unique
+four-L run, and the single "L" that shows up as a line break in other dialogue
+is left alone.
+
+Not pushed.
+
+## v0.18.3.27
+
+Timber code entry: announce the key layout (#60 / #57). LOCAL build.
+
+The uncoupling codes are read aloud as numbers ("Code. two, two, three,
+two"), but until now there was no spoken way to learn which keys those
+numbers map to. Pressing "/" while at a code panel -- either the briefing-
+room practice model or the live moving train -- now says:
+
+"Code entry keys. 1 is D, 2 is X, 3 is A, 4 is W."
+
+The order is number-first on purpose: it matches the order the code itself is
+read out, so when you hear "two" you can look up "2 is X" directly.
+
+This reuses the same "/" key that reads the help bar inside menus; there's no
+clash because the menu handler only runs in menu mode, and code entry happens
+on the field. Press once per reminder. Not pushed.
+
+## v0.18.3.26
+
+Timber Skip: confirmed working + label note (#60). LOCAL build.
+
+Skip is confirmed end to end: choosing it drops you into the Forest Owls' base
+with the post-mission story intact -- the dummy-President conversation starts
+exactly as it would after a real run.
+
+One nice side effect: because the captured state came from a run that included
+a few failed attempts, replaying it lowers your SeeD rank by one. Rather than
+scrub that out, we're keeping it as an intentional, predictable cost of
+skipping the challenge. The Skip option's description now says so, so you know
+the trade-off before you pick it.
+
+Label text only -- no behavior change from v0.18.3.25. Not pushed.
+
+## v0.18.3.25
+
+Timber Skip: real bypass built (#60). LOCAL build.
+
+The Skip option now actually skips. Picking it at the start of the train mission
+reproduces the persistent state a successful uncouple leaves behind, then warps
+you to the room the win returns you to (the Forest Owls' base), so the story
+picks up exactly where it would after a clean run -- no roof traversal, no code
+entry, no guards.
+
+How it works (`ExecuteSkipBypass` in `train_mode_ask_overlay.cpp`): it writes the
+23-byte persistent savemap delta captured from a real winning run (the step and
+clock counters from that capture are left out, since you didn't take those
+steps), then fills the engine's own field-transition request block with the
+exact values the winning map-jump produced and arms it. The engine's field loop
+picks up the request and performs the load -- the same path a real win takes, so
+no engine function is called directly. The warp is deferred about 400 ms after
+you confirm the choice so it doesn't collide with the dialog closing.
+
+The before/after capture diagnostic from v0.18.3.24 is switched off now that we
+have the data (the code stays behind its flag for future reuse).
+
+Testing note: this writes story state and moves you between fields, so test it
+with a backup save handy. If the post-mission scene doesn't play correctly, the
+captured delta needs refining -- reload and report what happened. Not pushed.
+
+## v0.18.3.24
+
+Timber Skip: discovery capture (#60). LOCAL build, logging-only.
+
+Groundwork for the real Skip (bypass the train). Before we can warp the player
+to the end safely, we need to know exactly what persistent state a *successful*
+run leaves behind, so we don't skip past a story flag and break later events.
+
+This adds a diagnostic (behind `TRAIN_SKIP_CAPTURE_DIAG`, on) inside the train
+overlay. On a normal run it snapshots the savemap (base `0x1CFDC5C`, 4 KB) at
+mission start (`tiyane1`) and again at the field a successful uncouple returns
+the player to, then logs the byte-level diff to `ff8_field.log` under
+`[SKIP-CAP]`. It reuses the overlay's existing field-change detection and the
+guarded snapshot reads nothing it writes -- no engine state is touched.
+
+Next: read the `[SKIP-CAP]` delta from one clean winning run, identify the
+story/progression flag(s) among the gametime/step churn, then implement Skip
+(set those flags + MAPJUMP to the captured return field) and switch the Skip
+choice off its interim Freeze fallback. Not pushed.
+
+## v0.18.3.23
+
+Timber train: in-engine guard-mode picker (#60). LOCAL build.
+
+The player now chooses how the mod handles the train guards through a real
+in-game dialog, right as the mission begins, instead of editing the INI. New
+module `train_mode_ask_overlay`, built on the same proven pipeline as the
+Dollet chase ASK: DialogInject renders the prompt and detects the answer; the
+overlay owns the trigger and the dispatch.
+
+The three options, default on the first:
+
+- **Manual** -- guards patrol; the uncoupling codes and per-guard proximity
+  cues are announced.
+- **Freeze** -- guards are held in place; the player just enters the codes.
+- **Skip** -- bypass the train scene. The bypass itself isn't built yet, so
+  for now Skip falls back to Freeze (announced clearly on selection) rather
+  than leaving the guards live with no help.
+
+Trigger, pinned from a capture run: Watts' "Are you ready, sir!?" prompt fires
+in the Forest Owls' base room (tiagit1); answering "Yeah" jumps straight to the
+first train-roof field (tiyane1, "Timber - Train 3"), where Rinoa says "Squall,
+over here!". The overlay matches that line, gated to tiyane1 and fired once per
+mission, then opens the ASK. It re-arms whenever the player returns to the
+briefing room, so a reload or replay prompts again.
+
+Wiring: forwarded the decoded dialog text from the show_dialog hook (beside the
+chase forward, field mode only); added Initialize/Update/Shutdown to the mod
+lifecycle in dinput8.cpp; added the new source file to the build list. The
+choice persists via `FieldDialog::SetTrainGuardMode()`. Not yet pushed.
+
+## v0.18.3.22
+
+Timber guard modes -- relabel to the player-facing scheme (#60 prep). LOCAL build, behavior-preserving per INI value.
+
+The in-engine mode picker we're about to build needs the three options named
+the way a player will read them, so the guard-mode enum is relabeled:
+
+- **Manual** (0) -- guards move; the code announce and per-guard proximity
+  cues are on. This is the old "Original" path, and it's now the **default**.
+- **Freeze** (1) -- guards held in place; the player only enters codes. This is
+  the old "Manual" path.
+- **Skip** (2) -- bypass the train scene (not yet built).
+
+The fully-vanilla option is gone on purpose: with no code announce it leaves a
+blind player stuck, so it has no place in this mod.
+
+The numeric INI values did not change -- 0 has always meant guards-plus-cue, 1
+frozen, 2 skip -- so any existing `train_guard_mode` line keeps its exact
+behavior. Only the names and the default moved (default flipped from 1 to 0).
+Under the hood: the `TGM_*` enum members were renamed in `field_dialog.h`;
+`GuardOriginalCue` -> `GuardManualCue` (gates `TGM_MANUAL`); `GuardManualFreeze`
+-> `GuardFreezePin` (gates `TGM_FREEZE`); and the default, bounds checks, and
+`[TRAINMODE]` log strings were updated to match. No new runtime behavior; this
+is the groundwork for the ASK picker. Not yet pushed.
+
 ## v0.18.3.21
 
 Timber guard chapter -- diagnostics-off cleanup (#58). LOCAL build, no behavior change.
