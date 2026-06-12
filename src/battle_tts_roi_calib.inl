@@ -35,8 +35,14 @@
 // ============================================================================
 // Build-time toggle
 // ============================================================================
+// Issue #62: defaults to the battle diagnostic-screenshot master switch
+// (BATTLE_DIAG_SCREENSHOTS, declared in battle_tts.h, included by
+// battle_tts.cpp before this file). With that flag off (the shipping
+// default) RoiCalib_OnSwapBuffers compiles to the no-op stub below, so no
+// roi_calib_* folders are written and the per-frame glReadPixels/downsample
+// work is skipped entirely. Set BATTLE_DIAG_SCREENSHOTS to 1 to re-enable.
 #ifndef ROI_CALIBRATION_CAPTURE
-#define ROI_CALIBRATION_CAPTURE 1
+#define ROI_CALIBRATION_CAPTURE BATTLE_DIAG_SCREENSHOTS
 #endif
 
 #if ROI_CALIBRATION_CAPTURE

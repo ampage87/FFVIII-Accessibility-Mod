@@ -696,6 +696,13 @@ static bool s_kind4CaptureDirEnsured = false;
 
 static void SchedulePendingKind4Capture(uint32_t slot, uint32_t a3, bool isAnnounceBranch)
 {
+#if !BATTLE_DIAG_SCREENSHOTS
+    // Issue #62: diagnostic capture disabled. Nothing scheduled, so
+    // PollKind4Capture() early-returns and no kind4_* file is written.
+    // The no-effect/miss announcements run on separate paths and are unaffected.
+    (void)slot; (void)a3; (void)isAnnounceBranch;
+    return;
+#else
     if (s_kind4CaptureCount >= KIND4_CAPTURE_LIMIT_PER_BATTLE) return;
     // Don't overwrite a pending capture that hasn't fired yet.
     if (s_kind4CapturePending) return;
@@ -718,6 +725,7 @@ static void SchedulePendingKind4Capture(uint32_t slot, uint32_t a3, bool isAnnou
 
     Log::Battle("BattleTTS: [KIND4-CAP] Scheduled %s capture (+%ums) for slot=%u a3=0x%X",
                 label, KIND4_CAPTURE_DELAY_MS, slot, a3);
+#endif
 }
 
 // Called from the main Update() loop once per frame.

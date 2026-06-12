@@ -139,6 +139,11 @@ static int LifetimeBand(uint8_t lifetime)
 static void PollSpriteScreenshot(const char* tag, uint8_t slot, uint8_t text_id,
                                   uint16_t value)
 {
+#if !BATTLE_DIAG_SCREENSHOTS
+    // Issue #62: diagnostic capture disabled.
+    (void)tag; (void)slot; (void)text_id; (void)value;
+    return;
+#else
     // Ensure screenshot directory exists on first fire. Idempotent.
     if (!s_pollScreenshotDirEnsured) {
         BOOL ok = CreateDirectoryA(KIND4_SCREENSHOT_DIR, NULL);
@@ -165,6 +170,7 @@ static void PollSpriteScreenshot(const char* tag, uint8_t slot, uint8_t text_id,
 
     Log::Battle("BattleTTS: [SPRITE-POLL] Screenshot %s: %s",
                 tag, s_captureBasePath);
+#endif
 }
 
 // ============================================================================
@@ -441,6 +447,11 @@ static int LogPerByteDeltas(const uint8_t* prev, const uint8_t* cur, int size,
 static void FirePopupChangeCapture(int trackIdx, const char* reason,
                                      uint32_t curFrame, const SpriteRec& cur)
 {
+#if !BATTLE_DIAG_SCREENSHOTS
+    // Issue #62: diagnostic capture disabled.
+    (void)trackIdx; (void)reason; (void)curFrame; (void)cur;
+    return;
+#else
     PopupLifeDiagState& st = s_popupLifeDiag[trackIdx];
     if (st.changeScreenshotsFired >= POPUP_CHANGE_SCREENSHOTS_PER_POPUP) return;
     if (s_popupLifeDiagScreenshotCount >= POPUP_LIFE_DIAG_SCREENSHOT_MAX) return;
@@ -465,11 +476,17 @@ static void FirePopupChangeCapture(int trackIdx, const char* reason,
                 trackIdx, reason, framesSinceSpawn, (unsigned)elapsedMs,
                 st.changeScreenshotsFired, POPUP_CHANGE_SCREENSHOTS_PER_POPUP,
                 st.spawnedKind, (unsigned)st.spawnedDmg);
+#endif
 }
 
 static void FirePopupTimeDiagCapture(int trackIdx, uint32_t gateMs,
                                        uint32_t curFrame, const SpriteRec& cur)
 {
+#if !BATTLE_DIAG_SCREENSHOTS
+    // Issue #62: diagnostic capture disabled.
+    (void)trackIdx; (void)gateMs; (void)curFrame; (void)cur;
+    return;
+#else
     if (s_popupLifeDiagScreenshotCount >= POPUP_LIFE_DIAG_SCREENSHOT_MAX) return;
     s_popupLifeDiagScreenshotCount++;
 
@@ -513,6 +530,7 @@ static void FirePopupTimeDiagCapture(int trackIdx, uint32_t gateMs,
     FormatHexBytes(dispBytes, DAMAGE_DISPLAY_REGION_SIZE, dispOk, dispHex, sizeof(dispHex));
     Log::Battle("BattleTTS: [POPUP-TIME-DIAG] CAPTURE-DISP trackIdx=%d gate=%ums region=[%s]",
                 trackIdx, (unsigned)gateMs, dispHex);
+#endif
 }
 
 static void PopupLifeDiag_OnNew(int trackIdx, const SpriteRec& cur,

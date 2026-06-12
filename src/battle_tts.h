@@ -9,6 +9,33 @@
 #include <windows.h>
 #include <cstdint>
 
+// ============================================================================
+// Battle diagnostic-screenshot master switch (v0.18.3.31, issue #62)
+// ============================================================================
+// The v0.13.x-v0.14.x damage-number reading investigation left several
+// auto-capture diagnostics wired into the live battle render path. Each
+// fires up to its per-battle cap EVERY battle (caps reset on OnBattleEnter),
+// flooding Logs/screenshots/ with poll_*, popup_time_*, popup_change_*,
+// kind4_*, sprite_animflag_*, and roi_calib_* output. The investigation is
+// long concluded (damage announce ships via the sub_5068B0 render hook) and
+// these are pure audit captures with no gameplay/accessibility function.
+//
+// This single flag governs all five capture paths:
+//   FireAnimFlagScreenshot   (battle_tts_hp.inl)        -> sprite_animflag_*
+//   PollSpriteScreenshot     (battle_tts_screenshot.inl) -> poll_NEW_* / poll_KIND_*
+//   FirePopupTimeDiagCapture (battle_tts_screenshot.inl) -> popup_time_*
+//   FirePopupChangeCapture   (battle_tts_screenshot.inl) -> popup_change_*
+//   SchedulePendingKind4Capture (battle_tts_sprite.inl)  -> kind4_*
+//   RoiCalib_OnSwapBuffers   (battle_tts_roi_calib.inl, via ROI_CALIBRATION_CAPTURE) -> roi_calib_*/
+//
+// Set to 1 to re-enable that diagnostic capture for a future damage-render
+// investigation. The code stays in place behind the flag per the project's
+// "gate, don't delete" convention. The F11 manual screenshot and the victory
+// screenshot do NOT route through any gated function, so they are unaffected.
+#ifndef BATTLE_DIAG_SCREENSHOTS
+#define BATTLE_DIAG_SCREENSHOTS 0
+#endif
+
 namespace BattleTTS {
 
 void Initialize();

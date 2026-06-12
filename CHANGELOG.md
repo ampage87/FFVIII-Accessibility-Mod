@@ -6,6 +6,38 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.31
+
+Battle: stop flooding Logs/screenshots with diagnostic captures every battle (#62). LOCAL build.
+
+Apart from the F11 screenshots you take on purpose, every battle was dumping
+hundreds of extra captures into Logs/screenshots, plus large per-event
+subfolders that each held up to ~270 images. A play session with random
+encounters bloated the folder fast.
+
+These were all left over from the old battle damage-number reading work. That
+investigation finished long ago (the damage announce ships through the
+impact-time render hook), but the auto-capture diagnostics that supported it
+were never switched off. They sit on the live battle render path and fire up to
+their per-battle limits on every encounter, with the limits resetting each
+battle, so the growth never stopped. Five separate capture paths were involved:
+the sprite poll (poll_NEW_*/poll_KIND_*), the damage-popup lifetime captures
+(popup_time_*/popup_change_*), the spell-result kind=4 captures (kind4_*), the
+per-HP-flush audit capture (sprite_animflag_*), and the ROI calibration folders
+(roi_calib_*, the biggest contributor).
+
+All five are now governed by a single master switch, BATTLE_DIAG_SCREENSHOTS in
+battle_tts.h, which defaults to off. The capture code stays in place behind the
+flag so a future damage-render investigation can turn it back on with a one-line
+change. Every capture was pure diagnostic audit; the live accessibility
+features (HP/damage announce, scan-window detection, no-effect/miss announce)
+run on separate paths and are unchanged. The F11 manual screenshot and the
+victory screenshot do not route through any of the gated functions, so they
+still work exactly as before.
+
+Note: the same old investigation also leaves heavy per-frame diagnostic logging
+in the battle log; that is a separate, lower-priority cleanup, out of scope here.
+
 ## v0.18.3.30
 
 Timer: stop reporting a phantom timer after a timed sequence ends (#59). LOCAL build.

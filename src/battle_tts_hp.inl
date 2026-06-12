@@ -704,6 +704,12 @@ static void PollTargetSelection()
 // further up is in scope.
 static void FireAnimFlagScreenshot(const char* trigger)
 {
+#if !BATTLE_DIAG_SCREENSHOTS
+    // Issue #62: diagnostic audit capture disabled. The HP announce itself
+    // (FlushHPAnnouncements) runs on a separate path and is unaffected.
+    (void)trigger;
+    return;
+#else
     SYSTEMTIME st;
     GetLocalTime(&st);
     char deltaStr[256] = {};
@@ -733,6 +739,7 @@ static void FireAnimFlagScreenshot(const char* trigger)
     CaptureScreenshot(basePath);
     Log::Battle("BattleTTS: [HP-TRACK] anim-flag screenshot (%s): %s",
                 trigger ? trigger : "unknown", basePath);
+#endif
 }
 
 // v0.13.92: Immediate HP flush triggered by popup spawn detection.
