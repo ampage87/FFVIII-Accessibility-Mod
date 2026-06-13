@@ -89,7 +89,7 @@ static int __cdecl Hooked_RenderPopupSlot(void* slotPtr)
         DWORD nowTick = GetTickCount();
         InterlockedExchange((LONG*)&s_lastDmgRenderTick, (LONG)nowTick);
         InterlockedExchange((LONG*)&s_lastDmgRenderValue, (LONG)slot_dmg);
-        Log::Battle("BattleTTS: [DMG-RENDER] slot=0x%p dmg=%u active=0x%02X tick=%u",
+        DiagLogBattle("BattleTTS: [DMG-RENDER] slot=0x%p dmg=%u active=0x%02X tick=%u",
                     slotPtr, (unsigned)slot_dmg, (unsigned)slot_active,
                     (unsigned)nowTick);
     } else if ((slot_active & 0x01) != 0) {
@@ -154,7 +154,7 @@ static void DmgRenderHook_PeriodicStats()
     LONG i = InterlockedCompareExchange(&s_dmgRenderHitsInactive, 0, 0);
     if (a + z + i == 0) return;  // Quiet period \u2014 nothing to report.
 
-    Log::Battle("BattleTTS: [DMG-RENDER-HOOK] STATS active+dmg=%ld active+zero=%ld inactive=%ld "
+    DiagLogBattle("BattleTTS: [DMG-RENDER-HOOK] STATS active+dmg=%ld active+zero=%ld inactive=%ld "
                 "lastTick=%u lastVal=%u",
                 a, z, i,
                 (unsigned)InterlockedCompareExchange((LONG*)&s_lastDmgRenderTick,  0, 0),

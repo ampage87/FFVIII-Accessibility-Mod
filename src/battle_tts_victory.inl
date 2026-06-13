@@ -1100,6 +1100,14 @@ static void ResetVictoryTTS()
 
 static void VictoryAutoCapture(const char* label)
 {
+#if !BATTLE_DIAG_SCREENSHOTS
+    // v0.18.3.32 (#62): victory-screen diagnostic capture gated off alongside the
+    // other battle diagnostic screenshots. When enabled it wrote
+    // Logs/victory_auto_<N>_<label>.bmp/.png on every victory (self-overwriting,
+    // ~900KB the pair). Re-enable via BATTLE_DIAG_SCREENSHOTS in battle_tts.h.
+    (void)label;
+    return;
+#else
     s_victoryAutoCapture++;
     char path[512];
     snprintf(path, sizeof(path),
@@ -1108,6 +1116,7 @@ static void VictoryAutoCapture(const char* label)
              s_victoryAutoCapture, label);
     CaptureScreenshot(path);
     Log::Battle("BattleTTS: [VICTORY-TTS] Auto-capture %d: %s", s_victoryAutoCapture, label);
+#endif
 }
 
 // ============================================================================

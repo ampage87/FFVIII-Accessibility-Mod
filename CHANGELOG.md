@@ -6,6 +6,46 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.32
+
+Battle: silence the rest of the leftover damage-number diagnostics -- the victory screenshot (#62) and the per-frame battle-log flood (#63). LOCAL build.
+
+Two loose ends from the same concluded damage-number investigation, both pure
+diagnostic with no effect on gameplay or the spoken accessibility output.
+
+#62 (victory screenshot): on every victory the mod still wrote a
+Logs/victory_auto_1_pose.bmp/.png pair (~900 KB). It doesn't route through any
+of the five capture paths v0.18.3.31 gated, so it survived. It overwrites
+itself each battle rather than piling up, but by the "only the F11 screenshots
+you take on purpose are wanted" rule it should be off too. VictoryAutoCapture is
+now gated behind the same BATTLE_DIAG_SCREENSHOTS switch.
+
+#63 (battle-log flood): the same investigation left heavy diagnostic logging on
+the live battle path. Any battle with damage or healing filled the battle log
+with per-frame hex dumps -- the worst being [POPUP-TIME-DIAG] (a full record /
+display-region / entity-region dump every frame for the life of every damage
+popup) and [SPRITE-POOL-DIAG] (a per-frame sprite-pool diff), plus per-event
+lines from [SPRITE-POLL], [SPRITE-ALLOC-V99], [DMG-RENDER], [DMG-POPUP-CREATE]
+and their periodic STATS summaries.
+
+A new master switch, BATTLE_DIAG_LOGGING in battle_tts.h (default off), now
+governs all of it, alongside a DiagLogBattle helper that compiles to the real
+logger when the flag is on and to nothing when it's off. The two per-frame
+offenders have their whole diagnostic bodies gated (so the wasted per-frame work
+is skipped, not just the log line); the per-event lines route through
+DiagLogBattle. The popup-lifetime body is gated on either flag, so turning the
+screenshots back on for a future investigation still gives you its time-gate
+captures.
+
+Nothing load-bearing was touched. The hooks and publishers that drive the live
+features keep running: the sub_5068B0 impact-time render-tick publish (the
+damage-announce trigger), the immediate HP-flush trigger and scan-window-close
+detector inside the popup poll, and the damage-popup InterlockedExchange
+publishes. As always, the code stays in place behind the flags -- gate, don't
+delete -- so a one-line change re-enables the full diagnostic stream.
+
+Not yet pushed.
+
 ## v0.18.3.31
 
 Battle: stop flooding Logs/screenshots with diagnostic captures every battle (#62). LOCAL build.

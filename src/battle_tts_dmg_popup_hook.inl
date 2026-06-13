@@ -93,7 +93,7 @@ static void __cdecl HookedSub48EF80(int arg0)
                             (LONG)GetTickCount());
         InterlockedExchange((volatile LONG*)&s_lastDmgPopupValue,
                             (LONG)stagingDmg);
-        Log::Battle("BattleTTS: [DMG-POPUP-CREATE] #%ld dmg=%u arg0=0x%02X "
+        DiagLogBattle("BattleTTS: [DMG-POPUP-CREATE] #%ld dmg=%u arg0=0x%02X "
                     "slotCntPre=%u staging[0..2]=%02X %02X %02X tick=%u",
                     s_dmgPopupHookDmgCount,
                     (unsigned)stagingDmg,
@@ -158,7 +158,7 @@ static void DmgPopupHook_LogStats()
     LONG dmg   = s_dmgPopupHookDmgCount;
     LONG zero  = s_dmgPopupHookZeroCount;
     if (total == 0) return;  // hook never fired this window — skip log
-    Log::Battle("BattleTTS: [DMG-POPUP-HOOK] STATS total=%ld dmgPopups=%ld "
+    DiagLogBattle("BattleTTS: [DMG-POPUP-HOOK] STATS total=%ld dmgPopups=%ld "
                 "zeroPopups=%ld lastDmgTick=%u lastDmgVal=%u",
                 total, dmg, zero,
                 (unsigned)s_lastDmgPopupTick,

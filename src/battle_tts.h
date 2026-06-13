@@ -36,6 +36,41 @@
 #define BATTLE_DIAG_SCREENSHOTS 0
 #endif
 
+// ============================================================================
+// Battle diagnostic-LOGGING master switch (v0.18.3.32, issue #63)
+// ============================================================================
+// The same v0.13.x-v0.14.x damage-number investigation that left the capture
+// diagnostics (gated above) also left heavy per-frame / per-event diagnostic
+// LOGGING on the live battle path. Every battle with damage or healing floods
+// ff8_battle.log with, among others:
+//   [POPUP-TIME-DIAG]   PopupLifeDiag_OnNew/OnTick/OnDespawn (battle_tts_screenshot.inl) - per-frame, worst
+//   [SPRITE-POOL-DIAG]  PollSpritePool                       (battle_tts_screenshot.inl) - per-frame
+//   [SPRITE-POLL]       PollPopupRecords                     (battle_tts_screenshot.inl) - per transition
+//   [SPRITE-ALLOC-V99]  HookedSub482C90                      (battle_tts_sprite_spawn.inl) - uncapped per alloc
+//   [DMG-RENDER]        render-slot hook                     (battle_tts_dmg_render_hook.inl) - per damage event
+//   [DMG-POPUP-CREATE]  popup-create hook                    (battle_tts_dmg_popup_hook.inl) - per damage event
+//
+// This flag gates ONLY the verbose diagnostic log output. The hooks and their
+// publishers that drive shipping accessibility features stay live regardless:
+// the sub_5068B0 render-tick publish (damage-announce trigger), the
+// TriggerImmediateHPFlush / ScanTTS::OnScanPopupDespawn calls in
+// PollPopupRecords, and the InterlockedExchange publishes in the DMG hooks are
+// NOT gated. Set to 1 to restore the full diagnostic stream for a future
+// damage-render investigation; code is retained behind the flag per the
+// project's "gate, don't delete" convention.
+#ifndef BATTLE_DIAG_LOGGING
+#define BATTLE_DIAG_LOGGING 0
+#endif
+
+// Diagnostic battle-log helper. Expands to Log::Battle when diagnostic logging
+// is enabled, and to a no-op otherwise. Use ONLY for pure-diagnostic log calls
+// whose arguments have no side effects (the args are not evaluated when off).
+#if BATTLE_DIAG_LOGGING
+#define DiagLogBattle(...) Log::Battle(__VA_ARGS__)
+#else
+#define DiagLogBattle(...) ((void)0)
+#endif
+
 namespace BattleTTS {
 
 void Initialize();

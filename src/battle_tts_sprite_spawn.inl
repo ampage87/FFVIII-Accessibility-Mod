@@ -153,7 +153,7 @@ static uint32_t __cdecl HookedSub482C90(uint32_t arg0, uint32_t arg1,
         // Cross-correlation with [ROI-LIVE-SHADOW] yellow-spike timestamps
         // happens in post-hoc analysis of the battle log. Tag suffix CUC =
         // "COMPLEX_UPDATE candidate" so it's grep-friendly.
-        Log::Battle("BattleTTS: [SPRITE-ALLOC-V99] #%d tick=%u retaddr=0x%08X "
+        DiagLogBattle("BattleTTS: [SPRITE-ALLOC-V99] #%d tick=%u retaddr=0x%08X "
                     "args=[0x%X,0x%X,0x%X,0x%X] result=0x%X "
                     "slot=%d cb=0x%08X(%s) data=[0x%08X,0x%08X,0x%08X] activeChar=%u%s",
                     s_spriteAllocCallCountThisBattle,
@@ -164,7 +164,7 @@ static uint32_t __cdecl HookedSub482C90(uint32_t arg0, uint32_t arg1,
                     (unsigned)activeChar,
                     isDamageCandidate ? " CUC" : "");
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        Log::Battle("BattleTTS: [SPRITE-ALLOC-V99] EXCEPTION in hook");
+        DiagLogBattle("BattleTTS: [SPRITE-ALLOC-V99] EXCEPTION in hook");
     }
 
     return result;

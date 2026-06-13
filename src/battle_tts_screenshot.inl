@@ -536,6 +536,13 @@ static void FirePopupTimeDiagCapture(int trackIdx, uint32_t gateMs,
 static void PopupLifeDiag_OnNew(int trackIdx, const SpriteRec& cur,
                                   uint16_t damageDisplay, uint32_t curFrame)
 {
+#if !BATTLE_DIAG_LOGGING && !BATTLE_DIAG_SCREENSHOTS
+    // Issue #63 (the [POPUP-TIME-DIAG] log stream) / #62 (the time-gate
+    // screenshot captures fired from here): whole-body diagnostic, compiled
+    // out unless either flag is enabled.
+    (void)trackIdx; (void)cur; (void)damageDisplay; (void)curFrame;
+    return;
+#else
     if (!IsDamagePopupKind(cur.text_id)) return;
     PopupLifeDiagState& st = s_popupLifeDiag[trackIdx];
     st.tracking         = true;
@@ -613,11 +620,16 @@ static void PopupLifeDiag_OnNew(int trackIdx, const SpriteRec& cur,
                                   curFrame, cur);
         st.nextGateIdx++;
     }
+#endif
 }
 
 static void PopupLifeDiag_OnTick(int trackIdx, const SpriteRec& cur,
                                    uint32_t curFrame)
 {
+#if !BATTLE_DIAG_LOGGING && !BATTLE_DIAG_SCREENSHOTS
+    (void)trackIdx; (void)cur; (void)curFrame;
+    return;
+#else
     PopupLifeDiagState& st = s_popupLifeDiag[trackIdx];
     if (!st.tracking) return;
 
@@ -771,11 +783,16 @@ static void PopupLifeDiag_OnTick(int trackIdx, const SpriteRec& cur,
                                   curFrame, cur);
         st.nextGateIdx++;
     }
+#endif
 }
 
 static void PopupLifeDiag_OnDespawn(int trackIdx, const SpriteRec& prev,
                                       uint32_t curFrame)
 {
+#if !BATTLE_DIAG_LOGGING && !BATTLE_DIAG_SCREENSHOTS
+    (void)trackIdx; (void)prev; (void)curFrame;
+    return;
+#else
     PopupLifeDiagState& st = s_popupLifeDiag[trackIdx];
     if (!st.tracking) return;
     DWORD elapsedMs = GetTickCount() - st.spawnTick;
@@ -790,6 +807,7 @@ static void PopupLifeDiag_OnDespawn(int trackIdx, const SpriteRec& prev,
                 st.changeScreenshotsFired, POPUP_CHANGE_SCREENSHOTS_PER_POPUP,
                 st.entityPtr);
     st.tracking = false;
+#endif
 }
 
 static void ResetPopupLifeDiagState()
@@ -858,7 +876,7 @@ static void PollPopupRecords()
             uint16_t damageDisplay = 0;
             __try { damageDisplay = *(uint16_t*)BATTLE_DAMAGE_DISPLAY_ADDR; }
             __except(EXCEPTION_EXECUTE_HANDLER) {}
-            Log::Battle("BattleTTS: [SPRITE-POLL] NEW i=%d slot=%u kind=0x%02X val=%u "
+            DiagLogBattle("BattleTTS: [SPRITE-POLL] NEW i=%d slot=%u kind=0x%02X val=%u "
                         "life=0x%02X style=0x%02X sec=%u ent=0x%08X dmg=%u (f=%u)",
                         i, cur.slot, cur.text_id, cur.value,
                         cur.lifetime, cur.style, cur.secondary, cur.entity_ptr,
@@ -900,7 +918,7 @@ static void PollPopupRecords()
                 expectedDamage = 0;
             }
             if (IsDamagePopupKind(cur.text_id) && cur.value > 0 && cur.value == expectedDamage) {
-                Log::Battle("BattleTTS: [SPRITE-POLL] TRUE DAMAGE SPRITE detected "
+                DiagLogBattle("BattleTTS: [SPRITE-POLL] TRUE DAMAGE SPRITE detected "
                             "(kind=0x%02X, slot=%u, val=%u=dmg) - attempting immediate HP flush",
                             cur.text_id, cur.slot, cur.value);
                 TriggerImmediateHPFlush("true-damage-sprite");
@@ -911,7 +929,7 @@ static void PollPopupRecords()
             // tracking so OnTick can fire screenshots at each elapsed-ms gate.
             PopupLifeDiag_OnNew(i, cur, damageDisplay, s_pollFrameCounter);
         } else if (prev.valid && !cur.valid) {
-            Log::Battle("BattleTTS: [SPRITE-POLL] DESPAWN i=%d slot=%u kind=0x%02X val=%u (f=%u)",
+            DiagLogBattle("BattleTTS: [SPRITE-POLL] DESPAWN i=%d slot=%u kind=0x%02X val=%u (f=%u)",
                         i, prev.slot, prev.text_id, prev.value,
                         s_pollFrameCounter);
 
@@ -948,7 +966,7 @@ static void PollPopupRecords()
         } else {
             if (prev.text_id != cur.text_id) {
                 // text_id overwrite mid-animation — the Miss-detection signal.
-                Log::Battle("BattleTTS: [SPRITE-POLL] KIND i=%d slot=%u 0x%02X->0x%02X "
+                DiagLogBattle("BattleTTS: [SPRITE-POLL] KIND i=%d slot=%u 0x%02X->0x%02X "
                             "val=%u life=0x%02X (f=%u)",
                             i, cur.slot, prev.text_id, cur.text_id,
                             cur.value, cur.lifetime, s_pollFrameCounter);
@@ -960,7 +978,7 @@ static void PollPopupRecords()
             }
 
             if (prev.value != cur.value) {
-                Log::Battle("BattleTTS: [SPRITE-POLL] VALUE i=%d slot=%u kind=0x%02X "
+                DiagLogBattle("BattleTTS: [SPRITE-POLL] VALUE i=%d slot=%u kind=0x%02X "
                             "%u->%u life=0x%02X (f=%u)",
                             i, cur.slot, cur.text_id,
                             prev.value, cur.value, cur.lifetime,
@@ -970,7 +988,7 @@ static void PollPopupRecords()
             int prevBand = LifetimeBand(prev.lifetime);
             int curBand  = LifetimeBand(cur.lifetime);
             if (prevBand != curBand) {
-                Log::Battle("BattleTTS: [SPRITE-POLL] LIFE i=%d slot=%u kind=0x%02X "
+                DiagLogBattle("BattleTTS: [SPRITE-POLL] LIFE i=%d slot=%u kind=0x%02X "
                             "val=%u 0x%02X->0x%02X band=%d->%d (f=%u)",
                             i, cur.slot, cur.text_id, cur.value,
                             prev.lifetime, cur.lifetime, prevBand, curBand,
@@ -1067,6 +1085,13 @@ static void FormatSpriteSlotHex(const uint8_t* slot, char* buf, size_t bufSize)
 
 static void PollSpritePool()
 {
+#if !BATTLE_DIAG_LOGGING
+    // Issue #63: [SPRITE-POOL-DIAG] is pure per-frame diagnostic logging left
+    // from the concluded damage-number investigation. No feature depends on it
+    // (the production damage announce ships via the sub_5068B0 render hook).
+    // Re-enable via BATTLE_DIAG_LOGGING in battle_tts.h.
+    return;
+#else
     s_spritePoolFrameCounter++;
 
     // Read current snapshot with SEH guard. Battle memory may not be
@@ -1204,6 +1229,7 @@ static void PollSpritePool()
     // Always update prev snapshot for next frame so transitions are
     // detected accurately even if logging is gated off.
     memcpy(s_spritePoolPrev, cur, SPRITE_POOL_TOTAL_SIZE);
+#endif
 }
 
 static BOOL WINAPI HookedSwapBuffers(HDC hdc)
