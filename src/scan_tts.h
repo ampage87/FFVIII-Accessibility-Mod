@@ -92,6 +92,29 @@
 
 #pragma once
 
+// ============================================================================
+// Scan-UI diagnostic-screenshot master switch (#64)
+// ============================================================================
+// HookedScanGetText (the sub_B687C0 "Scan window opened" hook in
+// scan_tts.cpp) requests a screenshot of the rendered Scan UI on the
+// first fire of every Scan event (via BattleTTS::RequestScreenshotAsync),
+// landing a timestamped scan_*.bmp/.png pair in Logs/screenshots/. This
+// was a v0.14.65.1 developer aid: Aaron is blind and can't eyeball the
+// rendered UI, so the capture let the stat / element / status reads be
+// validated offline against the on-screen values. That investigation is
+// concluded and the reads ship; the capture has NO runtime accessibility
+// function (every spoken Scan field reads from the in-memory s_scanCache
+// snapshot, never from the screenshot), and unlike the victory capture
+// these are timestamped so they ACCUMULATE per Scan cast.
+//
+// Default off. Set to 1 to re-enable the Scan-UI capture for a future
+// render investigation. Kept separate from BATTLE_DIAG_SCREENSHOTS so the
+// two capture families toggle independently. Code retained behind the
+// flag per the project's "gate, don't delete" convention.
+#ifndef SCAN_DIAG_SCREENSHOTS
+#define SCAN_DIAG_SCREENSHOTS 0
+#endif
+
 namespace ScanTTS {
 
 // One-shot init. Installs the sub_B687C0 hook (the announce trigger

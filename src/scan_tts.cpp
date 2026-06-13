@@ -1382,6 +1382,7 @@ static const char* __cdecl HookedScanGetText(int slotIndex)
         // One capture per scan event. Path is relative to the FF8 working
         // directory; the file lands as
         // Screenshots\\scan_<HHMMSS>_<MS>_slot<N>_<safeName>.{bmp,png}.
+#if SCAN_DIAG_SCREENSHOTS
         if (slot >= 0 && slot < BATTLE_TOTAL_SLOTS && s_scanCache[slot].valid) {
             // Sanitize name for filename: ASCII alnum + underscore only.
             // FF8 names are usually clean but defensive against rare cases
@@ -1424,6 +1425,7 @@ static const char* __cdecl HookedScanGetText(int slotIndex)
             Log::Battle("BattleTTS: [SCAN-CAPTURE] Skipping fire #1 capture: slot=%d invalid or snapshot not valid",
                         slot);
         }
+#endif
     } else if ((count % 60) == 0) {
         // Subsequent fires are silent no-ops (engine re-reads text per
         // frame while the window is open IF it does that at all — v0.14.65

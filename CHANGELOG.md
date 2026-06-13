@@ -6,7 +6,32 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
-## v0.18.3.32
+## v0.18.3.33
+
+Battle: stop the Scan UI from leaving a screenshot in Logs/screenshots every time you scan (#64). LOCAL build.
+
+The third and last of the leftover battle diagnostic captures, after the
+damage-number ones gated in #62/#63. Every time you cast Scan, the mod wrote a
+timestamped scan_*.bmp/.png pair (the rendered Scan window) into
+Logs/screenshots. Unlike the victory capture, these are timestamped, so they
+pile up rather than overwriting -- a run that scans a lot grows the folder.
+
+It was added as a developer aid: since I can't see the rendered Scan UI, the
+screenshot let the in-memory stat / element / status reads be checked offline
+against what the game actually drew on screen. That validation is long done and
+the reads ship, so the capture has no purpose now -- and importantly no
+accessibility purpose, since every spoken Scan field reads from the in-memory
+snapshot, never from the screenshot.
+
+A new master switch, SCAN_DIAG_SCREENSHOTS in scan_tts.h (default off), now gates
+the capture block in the Scan-window hook. The spoken announce and all the
+snapshot reads sit outside the gate and are untouched. It's a separate flag from
+the battle damage-number one (BATTLE_DIAG_SCREENSHOTS) so the two can be toggled
+independently -- turning damage-render captures back on for an investigation
+won't drag scan captures along. Code stays in place behind the flag per the
+usual gate-don't-delete convention.
+
+Not yet pushed.
 
 Battle: silence the rest of the leftover damage-number diagnostics -- the victory screenshot (#62) and the per-frame battle-log flood (#63). LOCAL build.
 
