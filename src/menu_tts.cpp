@@ -547,6 +547,9 @@ void MenuTTS::Initialize()
 // --- Status screen limit-break page TTS (#49, v0.18.2.27) ---
 #include "menu_tts_status.inl"
 
+// --- Switch submenu TTS (#65, v0.18.3.35) ---
+#include "menu_tts_switch.inl"
+
 void MenuTTS::Update()
 {
     if (!s_initialized) return;
@@ -852,6 +855,24 @@ void MenuTTS::Update()
                     ResetCharSelGroup();
                 }
             }
+
+#if SWITCH_DISCOVERY_DIAG
+            // v0.18.3.35 (#65): Switch submenu TTS (subsystem +0x1E8==10), plus the
+            // discovery diagnostic kept on as a safety net (now gated to sub==10).
+            {
+                uint8_t* pmdSw = (uint8_t*)pMenuStateA;
+                bool switchActive = (s_prevCursor == 6 && pmdSw[0x1E8] == 10);
+                if (switchActive) { PollSwitchSubmenu(); PollSwitchDiscoveryDiag(); }
+                else              { ResetSwitchSubmenu(); ResetSwitchDiscoveryDiag(); }
+            }
+#else
+            // v0.18.3.35 (#65): Switch submenu TTS (subsystem +0x1E8==10).
+            {
+                uint8_t* pmdSw = (uint8_t*)pMenuStateA;
+                if (s_prevCursor == 6 && pmdSw[0x1E8] == 10) PollSwitchSubmenu();
+                else                                         ResetSwitchSubmenu();
+            }
+#endif
         }
         
         // v0.07.40: Poll save slot cursor in mode 6 using +0x276

@@ -6,6 +6,129 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.37
+
+Menu: Switch submenu announcements now include level and HP (#65). LOCAL build.
+
+The Switch screen shows each member's level and HP (the left column for the three
+active members, and the bottom-right detail box for the highlighted character),
+but those numbers bypass the menu-text pipeline, so they needed a memory read.
+The member-list announcements are now "Name, active/reserve, Level N, HP X of Y."
+— both on entry and as the cursor moves — with a graceful "Name, active/reserve."
+fallback if the read ever fails.
+
+It reads by character id (which comes free from the name scan, since the name
+table is indexed by character id), reusing the same proven path as the other
+character-select screens: level from EXP (the flat 1000-per-level formula), and
+HP from the computed-stats slot when the character is in the live battle
+formation, otherwise from the menu HP array that also covers benched members.
+
+BAT-confirmed working. (It was tested under the 0.18.3.36 version string because
+the code landed just before this version bump; the source is unchanged here.)
+
+The main-menu Switch submenu is now feature-complete: the two options, the active
+trio on entry, each candidate with active/reserve plus level and HP, the new party
+after a swap, and both the Switch Member and Junction Exchange lists. Next: close
+#65, then the forced party/junction-switch screens that appear at story beats.
+
+Not yet pushed.
+
+## v0.18.3.36
+
+Menu: Switch submenu TTS polish (#65). LOCAL build.
+
+v0.18.3.35 was BAT-confirmed working. This fixes the one bug found: after a swap,
+the "Party is now A, B, C" announce was immediately cut off by the candidate name
+(e.g. it started "Party is…" then just said "Rinoa"). Cause: the swap path cleared
+the remembered candidate, so on the next poll the unchanged candidate looked new
+and re-announced over the party line. It now pins the remembered candidate to the
+current slot instead, so the new-party line plays uninterrupted and the candidate
+re-announces only when the cursor actually moves.
+
+Also: the two option announcements now match the exact on-screen labels, "Switch
+Member" and "Junction Exchange" (confirmed from the F11 screenshots), and the
+SWITCH_DISCOVERY_DIAG diagnostic is turned off (gate, don't delete) now that the
+screen structure is confirmed.
+
+Still to come: level and HP in the announcements (the screen shows them for the
+active members and the highlighted character; they bypass the menu-text pipeline,
+so this needs the same memory read the other character-select screens use), and
+the forced party/junction-switch screens that appear at story beats.
+
+Not yet pushed.
+
+## v0.18.3.35
+
+Menu: Switch submenu now talks (#65) — first cut. LOCAL build.
+
+The Switch command (the last unhandled main-menu submenu) is the screen that
+moves characters between the active party and the reserve bench. The v0.18.3.34
+discovery diagnostic pinned the layout, and this build turns it into speech.
+
+Findings from the [SwitchDiag] capture: the screen is identified by subsystem
+byte +0x1E8 == 10. The focus byte +0x22E is 12 on the two-option action bar and
+2 in the member-select list. On the action bar, +0x25E selects the option: 0 is
+Switch Member (help "Please make a party of 3") and 1 is Junction Exchange (help
+"Exchanges all that is junctioned") — so the screen really does have both options.
+The member list draws the three active members plus the highlighted candidate as
+<Name>LVHP tokens, and the fourth token is whoever the cursor is on.
+
+New file menu_tts_switch.inl (PollSwitchSubmenu, textually included from
+menu_tts.cpp) speaks all of that, gated on +0x1E8 == 10:
+- Action bar: announces "Switch members" or "Junction exchange" with its help line
+  when the selection changes.
+- Member list: announces the active trio on entry, the candidate (name plus
+  whether it is currently active or reserve) as the cursor moves, and the new
+  party after a swap (detected by the active trio changing).
+
+It reads the names straight from the rendered menu text by scanning for the known
+character names, so it does not depend on the source/destination cursor bytes,
+which are still tangled in the busy first capture (the +0x24C/+0x24E/+0x262
+working-buffer cluster). The savemap active-party commit timing is also still
+open — the on-screen trio and the roster at +0x1DB reorder, but the diagnostic
+un-gates as the screen tears down, so the exact write wasn't captured; the
+feature reads display state and doesn't need it.
+
+The SWITCH_DISCOVERY_DIAG diagnostic is kept on as a safety net for this build
+(now gated to sub == 10 to cut noise) so the BAT log still shows ground truth if
+the focus/option model is off anywhere. It will be turned off once the speech is
+confirmed. Next: map the cursor bytes and add level/HP to the announcements
+(reusing the #48 char-select infrastructure), exercise the Junction Exchange list,
+and then the forced party/junction-switch story screens.
+
+Not yet pushed.
+
+## v0.18.3.34
+
+Menu: begin the Switch submenu accessibility chapter (#65) with a discovery diagnostic build. LOCAL build, log-only, no behavior change.
+
+Switch is the last unhandled main-menu command -- the screen that lets you move
+characters between the active party and the reserve bench (and, at story beats,
+the forced party/junction-switch screens). A blind player currently can't read
+the reserve roster or tell who a swap moved. This chapter makes it speak.
+
+This build adds no spoken output yet. It adds PollSwitchDiscoveryDiag in
+menu_tts_diagnostics.inl, gated behind the new SWITCH_DISCOVERY_DIAG flag and
+called from MenuTTS::Update only while the Switch command is active (top cursor
++0x1E6 == 6). It delta-monitors two contiguous bands of the pMenuStateA menu-
+state region (0x1D0..0x1FF and 0x228..0x28F -- which together contain every
+known menu cursor: the roster at +0x1DB, the char cursor +0x1E9, subsystem
++0x1E8, focus +0x22E, the Rearrange slot cursors, and the Item/Junction/Status
+sub-list cursors) plus both candidate savemap party arrays (the mod's 3-byte
++0xAF1 and the research 4-byte +0x0B04). On entering Switch it logs a baseline
+(subsystem, focus, char cursor, decoded roster, party); thereafter every byte
+or party-array change is logged to ff8_menu.log under [SwitchDiag].
+
+The point is to pin -- with no sighted step -- Switch's subsystem value, its
+focus/phase byte, the two-phase source/destination cursor offset, the
+active/reserve grouping, and exactly what a completed swap writes to the party
+arrays. The player just navigates Switch by the game's own cursor-move sounds;
+the delta-monitor captures everything that moves. Reusing the already-confirmed
+#48 char-select infrastructure (roster +0x1DB, per-character HP +0x71E,
+AnnounceJuncCharSelect) once the offsets land.
+
+The diagnostic is off for ship (gate, don't delete). Not yet pushed.
+
 ## v0.18.3.33
 
 Battle: stop the Scan UI from leaving a screenshot in Logs/screenshots every time you scan (#64). LOCAL build.
@@ -32,6 +155,8 @@ won't drag scan captures along. Code stays in place behind the flag per the
 usual gate-don't-delete convention.
 
 Not yet pushed.
+
+## v0.18.3.32
 
 Battle: silence the rest of the leftover damage-number diagnostics -- the victory screenshot (#62) and the per-frame battle-log flood (#63). LOCAL build.
 

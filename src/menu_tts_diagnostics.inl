@@ -187,6 +187,94 @@ static uint8_t ResolveDreamAwareCharId(uint8_t charIdx)
 }
 
 // ============================================================================
+// v0.18.3.34 (#65): Switch submenu discovery diagnostic. LOG-ONLY, no speech.
+// ----------------------------------------------------------------------------
+// Goal: find Switch's subsystem value (+0x1E8), its focus/phase byte, the
+// two-phase source/destination cursor offset(s), the active/reserve grouping,
+// and what a completed swap writes to the party arrays. We don't yet know the
+// Switch cursor offset, so instead of watching a hand-picked set we delta-
+// monitor two contiguous bands of the pMenuStateA menu-state region that
+// contain every known menu cursor (roster +0x1DB, char cursor +0x1E9, top
+// cursor +0x1E6, subsystem +0x1E8, focus +0x22E, the Rearrange slot cursors
+// +0x1D6/+0x1D7, and the sub-list cursors used by Item/Junction/Status), plus
+// both candidate savemap party arrays (mod's 3-byte +0xAF1 and the research
+// 4-byte +0x0B04). Gated to the Switch command (top cursor == 6) by the caller,
+// so other submenus never trigger it. No sighted step: Aaron just navigates
+// Switch by the game's cursor-move sounds; every byte that moves is logged.
+// Off for ship; gate, don't delete.
+// ============================================================================
+#define SWITCH_DISCOVERY_DIAG 0
+
+#if SWITCH_DISCOVERY_DIAG
+static const int  SWDIAG_A0 = 0x1D0; static const int SWDIAG_AN = 0x58;  // band A: 0x1D0..0x227
+static const int  SWDIAG_B0 = 0x228; static const int SWDIAG_BN = 0x68;  // band B: 0x228..0x28F (contiguous with A)
+static bool       s_swDiagArmed = false;
+static uint8_t    s_swBandA[SWDIAG_AN];
+static uint8_t    s_swBandB[SWDIAG_BN];
+static uint8_t    s_swParty[7];
+static DWORD      s_swLastDiag = 0;
+
+static void ResetSwitchDiscoveryDiag() { s_swDiagArmed = false; }
+
+static void PollSwitchDiscoveryDiag()
+{
+    DWORD now = GetTickCount();
+    if (now - s_swLastDiag < 100) return;   // 10 Hz is plenty for cursor moves
+    s_swLastDiag = now;
+    __try {
+        uint8_t* pmd = (uint8_t*)pMenuStateA;
+        uint8_t* sm  = (uint8_t*)SAVEMAP_BASE;
+        uint8_t party[7] = { sm[0xAF1], sm[0xAF2], sm[0xAF3],
+                             sm[0xB04], sm[0xB05], sm[0xB06], sm[0xB07] };
+
+        if (!s_swDiagArmed) {
+            s_swDiagArmed = true;
+            for (int i = 0; i < SWDIAG_AN; i++) s_swBandA[i] = pmd[SWDIAG_A0 + i];
+            for (int i = 0; i < SWDIAG_BN; i++) s_swBandB[i] = pmd[SWDIAG_B0 + i];
+            memcpy(s_swParty, party, 7);
+            Log::Menu("[SwitchDiag] === ENTER Switch (baseline) ===");
+            Log::Menu("[SwitchDiag] 1E6=%u 1E8=%u 1E9=%u 22E=%u 1B6=%u 1D6=%u 1D7=%u 1EC=%u",
+                       pmd[0x1E6], pmd[0x1E8], pmd[0x1E9], pmd[0x22E],
+                       pmd[0x1B6], pmd[0x1D6], pmd[0x1D7], pmd[0x1EC]);
+            // Roster at +0x1DB (all members incl. reserves, 0xFF-terminated)
+            char rb[200]; int p = 0;
+            for (int i = 0; i < 12; i++) {
+                uint8_t v = pmd[0x1DB + i];
+                const char* nm = (v < 8) ? CHAR_NAMES[v] : ((v == 0xFF) ? "END" : "?");
+                if (p < 180) p += sprintf(rb + p, "%u(%s) ", (unsigned)v, nm);
+                if (v == 0xFF) break;
+            }
+            Log::Menu("[SwitchDiag] roster +0x1DB: %s", rb);
+            Log::Menu("[SwitchDiag] party +0xAF1=(%u,%u,%u) +0x0B04=(%u,%u,%u,%u)",
+                       party[0], party[1], party[2],
+                       party[3], party[4], party[5], party[6]);
+            return;
+        }
+
+        for (int i = 0; i < SWDIAG_AN; i++)
+            if (pmd[SWDIAG_A0 + i] != s_swBandA[i]) {
+                Log::Menu("[SwitchDiag] +0x%03X: %u -> %u",
+                           SWDIAG_A0 + i, (unsigned)s_swBandA[i], (unsigned)pmd[SWDIAG_A0 + i]);
+                s_swBandA[i] = pmd[SWDIAG_A0 + i];
+            }
+        for (int i = 0; i < SWDIAG_BN; i++)
+            if (pmd[SWDIAG_B0 + i] != s_swBandB[i]) {
+                Log::Menu("[SwitchDiag] +0x%03X: %u -> %u",
+                           SWDIAG_B0 + i, (unsigned)s_swBandB[i], (unsigned)pmd[SWDIAG_B0 + i]);
+                s_swBandB[i] = pmd[SWDIAG_B0 + i];
+            }
+        static const char* PN[7] = { "AF1","AF2","AF3","B04","B05","B06","B07" };
+        for (int i = 0; i < 7; i++)
+            if (party[i] != s_swParty[i]) {
+                Log::Menu("[SwitchDiag] party[+0x%s]: %u -> %u",
+                           PN[i], (unsigned)s_swParty[i], (unsigned)party[i]);
+                s_swParty[i] = party[i];
+            }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+#endif // SWITCH_DISCOVERY_DIAG
+
+// ============================================================================
 // v0.08.27: Savemap offset verification — compare current offsets vs deep research
 // ============================================================================
 static void VerifySavemapOffsets()
