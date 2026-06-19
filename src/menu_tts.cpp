@@ -554,6 +554,13 @@ void MenuTTS::Update()
 {
     if (!s_initialized) return;
     if (pGameMode == nullptr || pMenuStateA == nullptr) return;
+
+    // #66: forced party-select (game mode 10 — Rinoa join, etc.). Self-gates on mode; runs before the menu-mode gate.
+    PollForcedPartySelect();
+
+#if FORCED_PSEL_DIAG
+    PollForcedPselDiag();   // forced party-select discovery probe (now off; gate, don't delete)
+#endif
     
     uint16_t mode = *pGameMode;
     bool isMenuMode = (mode == 6);

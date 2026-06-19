@@ -6,6 +6,246 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.48
+
+Menu: forced party-select — announce the action-bar option when you move up onto the bar (#66). LOCAL build.
+
+The v0.18.3.47 character-on-landing announce is confirmed working. This adds the
+mirror image: when you move focus up from a character onto the action bar, the
+mod now announces the option you're on ("Switch Member" or "Junction Exchange"),
+so arriving on the bar is no longer silent until you flip between the two. It
+uses the same focus signal as the landing announce.
+
+## v0.18.3.47
+
+Menu: forced party-select — announce the character when you drop from the action bar onto it (#66). LOCAL build.
+
+The v0.18.3.46 build's diagnostic capture (a clean up/down motion between the
+action bar and a character) located the byte that tracks which area has focus.
+When you pick an option on the action bar and the cursor lands back on a
+character, the on-screen cursor reappears on that character — the mod now
+announces that character and its level and HP at that moment, even if it's the
+same slot you started from. So choosing Switch Member or Junction Exchange and
+dropping onto a character reads who you're on, as you'd expect.
+
+The action-bar toggle still reads only the option name, and the empty-slot and
+reserve announcements are unchanged. Moving up onto the action bar is, for now,
+silent until you flip an option (which reads the option name); an arrival
+announcement can be added if it's wanted.
+
+## v0.18.3.46
+
+Menu: forced party-select — action-bar toggle reads the option name only (#66). LOCAL build.
+
+The v0.18.3.45 BAT confirmed the screen works — empty party and reserve slots
+announce, names and details read correctly. One glitch remained: flipping between
+Switch Member and Junction Exchange re-read the highlighted character every time
+("Switch Member, Quistis, ..." then "Junction Exchange, Quistis, ..."), which is
+noise when you're just choosing the mode.
+
+The trace confirmed that toggling the option keeps the same character highlighted
+— the cursor doesn't move — so there's no separate action-bar focus to read a new
+character from. The toggle now speaks only the option name. The character is
+still announced when you move onto or among the characters, so you hear the
+option name while choosing the mode and the character name when you're on the
+character cursor.
+
+Diagnostics: the forced-select capture window is widened (+0x100..+0x500) to help
+locate the byte that distinguishes action-bar focus from character focus, which a
+future build needs to auto-announce the character when you drop from the action
+bar onto the character cursor.
+
+## v0.18.3.45
+
+Menu: forced party-select polish — empty slots, action-bar toggle, clearer wording (#66). LOCAL build.
+
+The v0.18.3.44 BAT confirmed the live working-party read works (filled slots and
+reserve names now read correctly). This build clears the two small glitches that
+remained and improves the empty-slot wording.
+
+Empty reserve slots used to get cursor focus but say nothing, because the reserve
+announce only spoke when the on-screen text supplied a candidate name — and an
+empty portrait never does. The reserve side now reads the live working reserve
+list directly (the eight-position grid maps one-to-one onto it) and announces an
+empty slot instead of staying silent. If the detail text is momentarily stale on
+a filled slot, it now falls back to naming the member from memory rather than
+going quiet.
+
+Toggling the action bar between Switch Member and Junction Exchange used to land
+the cursor on a character without reading it. The mod now reads the option from
+the authoritative state byte (so the toggle is always caught) and, on a toggle,
+speaks the new option name followed by the character the cursor is on — for
+example, "Junction Exchange. Rinoa, active, Level 11, HP 653 of 653."
+
+Wording: empty active slots now say "Empty Party Slot" and empty reserve slots
+say "Empty Reserve Slot," so a blind player can tell which side a slot is on and
+where to move a member to get them into the active party. Empty slots are keyed
+by position, so moving between two empties re-announces each one.
+
+Diagnostics: the reference dump now prints eight reserve bytes to confirm the
+array length; the forced-select probe stays on for one more BAT.
+
+## v0.18.3.44
+
+Menu: forced party-select now reads the live working party (#66). LOCAL build.
+
+The previous build fixed the frozen-text problem but two bugs remained, and they
+shared one cause: the party list I was counting only updates when you leave the
+screen, not while you're on it. So once you added a third member, the mod still
+thought the party had two — the just-filled slot kept announcing "empty slot,"
+and the highlighted reserve was read one position off (landing on a party member
+instead), which is why moving across the reserves on the right went silent. Your
+screenshot (full party, Quistis highlighted, nothing spoken) confirmed it.
+
+This switches to the party data the screen itself is using, which updates the
+instant you place someone. Now a filled slot announces the character who's in it,
+moving across the active party keeps reading after you add someone, and the
+reserves — Quistis included — announce correctly. The probe stays on for one more
+capture to confirm the read and finish mapping the reserve side.
+
+Not yet pushed.
+
+## v0.18.3.43
+
+Menu: forced party-select now follows the cursor, not the on-screen text (#66).
+LOCAL build.
+
+The last build still went quiet in one situation: once you place a character
+into the party, the game stops refreshing the little detail panel's text, so the
+mod — which had been reading the highlighted character from that text — had
+nothing new to announce as you moved around, and the action bar would echo the
+last character instead. This reworks it to track the cursor position directly and
+name the character from the party data, which keeps updating no matter what the
+on-screen text does. Moving across the active party now reads reliably whether or
+not the party is full, an empty slot finally announces as "empty slot," and
+moving up to the action bar no longer re-reads a character.
+
+Reserve characters on the right are still read from the on-screen text for now, so
+that side can still lag in the frozen-text case; a follow-up will move it onto the
+same cursor-based path. The grayed-out "unavailable" flag is unchanged. The probe
+stays on for one more capture.
+
+Not yet pushed.
+
+## v0.18.3.42
+
+Menu: fix the forced party-select going quiet (#66). LOCAL build.
+
+The previous build correctly flagged the grayed-out character, but as you moved
+through the roster — especially heading into Junction Exchange — it grew
+unreliable and then stopped speaking. The cause: the menu's text buffer refreshes
+in a way that leaves about half the frames momentarily blank, and the spacing
+timer was being reset on those blank frames, which let them crowd out the real
+ones until nothing got read. Removing that timer fixes it — blank frames are now
+ignored, and characters are still only announced when they actually change, so
+there's no repetition.
+
+The grayed-out / "unavailable" announcement from the last build is confirmed
+working and stays. The discovery probe remains on for one more capture (the empty
+party slot, which the last run didn't reach).
+
+Not yet pushed.
+
+## v0.18.3.41
+
+Menu: forced party-select follow-up (#66). LOCAL build.
+
+The first audible version read everything correctly — the screen on open, each
+character's name, level, HP, and active-or-reserve status, and the top option.
+Two gaps turned up. Reserve characters who can't be added at that point in the
+story show up grayed out on screen (Quistis, before Timber) but were read like
+any other reserve; and landing on an empty party slot read a stray bit of party
+info instead of saying the slot was empty.
+
+This build flags the grayed-out characters: on the Switch Member option, a
+character the game won't let you add now is announced as "unavailable" (it stays
+selectable, and unflagged, under Junction Exchange, where you can still swap her
+junctions). The stray empty-slot announcement is already suppressed by the
+previous build's change to read the party from the live party list; saying
+"empty slot" outright comes next, once this playthrough pins down the cursor
+detail for it. The discovery probe is on for this one capture.
+
+Not yet pushed.
+
+## v0.18.3.40
+
+Menu: the forced party-select screen now talks (#66). LOCAL build — first
+audible version.
+
+At certain story beats the game forces a "make a party of 3" screen — the next
+one is when Rinoa joins after the Fake President Deling battle. The two discovery
+passes showed it's the same Switch Member screen as the main menu, just run in a
+different game mode, with the character names coming through the same on-screen
+text and the level, HP, and party data all readable the same way. So this reuses
+the Switch announcements wholesale.
+
+When the screen opens it says "Select party members," the help line, the current
+active party, and the highlighted character. As you move the cursor it reads each
+character as name, active or reserve, level, and HP — active or reserve decided
+from the live party list, since here the party can be short a member while you're
+adding one. It also reads the top option when you switch between Switch Member
+and Junction Exchange, announces the new party once a member is added, and speaks
+the "party has not been set" message if you try to leave with too few.
+
+The discovery probe from the last two builds is switched off (kept behind its
+flag).
+
+Not yet pushed.
+
+## v0.18.3.39
+
+Menu: refocus the forced party-select discovery probe on the right game mode
+(#66). LOCAL build, log-only, no behavior change.
+
+The v0.18.3.38 probe came up empty: testing the actual forced select (Rinoa
+joining after the Fake President Deling battle) showed the screen runs in its own
+game mode (10), not the regular menu mode, and the menu's internal subsystem
+marker the probe was watching for is never set there. So the forced screen is not
+just the main-menu Switch reached a different way — it's a separate screen in a
+separate mode.
+
+The probe now keys on that game mode instead. While the forced select is on
+screen it logs the on-screen text plus a snapshot of the menu-state cursor region
+— the whole region once on entry, then only the bytes that change as the cursor
+moves — which will pin down where this screen keeps its cursor and roster, and
+whether the character names come through the same text pipeline the rest of the
+menus use. Still log-only, off for ship.
+
+It also dumps a one-shot reference block on entry and exit — the savemap party
+lists, the menu roster, and, for all eight characters, the level and HP values
+from each of the sources the announce would read — so those can be checked against
+the numbers on screen and the real screen (a couple of F11 captures confirm it's
+layout-identical to the main-menu Switch screen). The goal is to gather
+everything the eventual announce needs in this one pass, since reaching the
+screen means refighting the boss each time.
+
+Not yet pushed.
+
+## v0.18.3.38
+
+Menu: begin the forced party-select chapter (#66) with a discovery probe. LOCAL
+build, log-only, no behavior change.
+
+The game forces a party-select screen at certain story beats — the next one is
+when Rinoa joins after the Fake President Deling battle. The deep-research doc
+says the Switch Member flow is the same one used "at forced party-select story
+points," so the forced screen probably reuses the party-select UI we just shipped
+for the main-menu Switch — just reached without the main menu open, which is the
+one condition the shipped poll requires.
+
+This build adds a log-only probe (PollForcedPselDiag, gated behind
+FORCED_PSEL_DIAG) called at the very top of the menu update, before the menu-mode
+gate, so it runs no matter what mode drives the forced screen. Whenever the
+party-select subsystem becomes active it logs a [ForcedPSel] line with the game
+mode, the top-menu cursor, the option byte, and an excerpt of the on-screen text.
+That tells us whether the forced select reuses the same module and layout (in
+which case the fix is small — broaden the live poll's gate) or needs its own path.
+
+No speech and nothing else changes. The probe is off for ship per the usual
+gate-don't-delete convention.
+
+Not yet pushed.
+
 ## v0.18.3.37
 
 Menu: Switch submenu announcements now include level and HP (#65). LOCAL build.

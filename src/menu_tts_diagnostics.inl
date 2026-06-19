@@ -822,3 +822,147 @@ static bool IsSubmonNoiseOffset(int off)
     return false;
 }
 
+// ============================================================================
+// v0.18.3.39 (#66) — forced party-select discovery probe (mode-10 reframe).
+// BAT of v0.18.3.38 found the forced select (Rinoa joining, after the Fake
+// President battle) runs in GAME MODE 10 — not menu mode 6 — and the menu
+// subsystem byte +0x1E8 is NOT 10 there, so it does not reuse the main-menu
+// Switch's signal. This reframe runs at the TOP of MenuTTS::Update (before any
+// game-mode gate) and, while game mode == 10, logs the GCW text plus a snapshot
+// of pMenuStateA[+0x1C0..+0x2C0): the full region on entry, then only the bytes
+// that change as the cursor moves — to locate this screen's cursor/roster.
+// Log-only, no speech. Off for ship; gate, don't delete.
+// ============================================================================
+#define FORCED_PSEL_DIAG 1
+
+#if FORCED_PSEL_DIAG
+// Diagnostic capture window in pMenuStateA. Widened v0.18.3.46 from the original
+// +0x1C0..+0x2C0 (256 B) to +0x100..+0x500 (1024 B) so the action-bar-vs-character
+// FOCUS byte is caught even if it lives outside the menu-cursor cluster (the menu
+// Switch focus byte +0x22E stays constant in mode 10, so the real one is unknown).
+static const int   FPS_DIAG_OFF    = 0x100;
+static const int   FPS_DIAG_LEN    = 0x400;
+static uint16_t    s_fpsPrevMode    = 0xFFFF;
+static uint8_t     s_fpsRegion[FPS_DIAG_LEN] = {};
+static bool        s_fpsRegionValid = false;
+static std::string s_fpsPrevGcw;
+
+// POD + SEH (no std::string here): read game mode + snapshot the diag window.
+static bool ForcedPselReadState(uint16_t& mode, uint8_t* region)
+{
+    bool ok = false;
+    __try {
+        mode = pGameMode ? *(uint16_t*)pGameMode : 0xFFFF;
+        uint8_t* pmd = (uint8_t*)pMenuStateA;
+        for (int i = 0; i < FPS_DIAG_LEN; i++) region[i] = pmd[FPS_DIAG_OFF + i];
+        ok = true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+    return ok;
+}
+
+// One-shot reference dump (SEH-guarded, no std::string): the data the eventual
+// announce would read, so the implementation can be written from a single BAT.
+// savemap party formation +0xAF0 / active +0xB04; menu roster +0x1DB; per-char
+// level-source EXP (savemap +0x48C + id*0x98 + 0x04) and menu HP array
+// (pMenuStateA +0x71E + id*0x20, cur +0 / max +2); computed-stats HP
+// (0x1CFF000 + slot*0x1D0, cur +0x172 / max +0x174). Cross-check against the
+// on-screen LV/HP (Rinoa 653/653, Squall 883/1044, Zell 799/994) to confirm
+// which sources are live in game mode 10.
+static void ForcedPselDumpRefs()
+{
+    __try {
+        uint8_t* sm  = (uint8_t*)0x1CFDC5C;     // SAVEMAP_BASE
+        uint8_t* pmd = (uint8_t*)pMenuStateA;
+        Log::Menu("[ForcedPSel-REF] savemap party +0xAF0=[%u,%u,%u,%u]  active +0xB04=[%u,%u,%u,%u]",
+                  (unsigned)sm[0xAF0],(unsigned)sm[0xAF1],(unsigned)sm[0xAF2],(unsigned)sm[0xAF3],
+                  (unsigned)sm[0xB04],(unsigned)sm[0xB05],(unsigned)sm[0xB06],(unsigned)sm[0xB07]);
+        Log::Menu("[ForcedPSel-REF] menu roster +0x1DB=[%u,%u,%u,%u,%u,%u,%u,%u]",
+                  (unsigned)pmd[0x1DB],(unsigned)pmd[0x1DC],(unsigned)pmd[0x1DD],(unsigned)pmd[0x1DE],
+                  (unsigned)pmd[0x1DF],(unsigned)pmd[0x1E0],(unsigned)pmd[0x1E1],(unsigned)pmd[0x1E2]);
+        // Working party (live in mode 10, unlike savemap +0xAF0): 3 active slots
+        // at +0x1EA, reserves from +0x1ED. +0x1EC == slot 3 confirmed by swap.
+        Log::Menu("[ForcedPSel-REF] working +0x1EA active=[%u,%u,%u] reserves=[%u,%u,%u,%u,%u,%u,%u,%u]",
+                  (unsigned)pmd[0x1EA],(unsigned)pmd[0x1EB],(unsigned)pmd[0x1EC],
+                  (unsigned)pmd[0x1ED],(unsigned)pmd[0x1EE],(unsigned)pmd[0x1EF],
+                  (unsigned)pmd[0x1F0],(unsigned)pmd[0x1F1],(unsigned)pmd[0x1F2],
+                  (unsigned)pmd[0x1F3],(unsigned)pmd[0x1F4]);
+        for (int id = 0; id < 8; id++) {
+            uint32_t exp    = *(uint32_t*)(sm  + 0x48C + id*0x98 + 0x04);
+            uint16_t mhpCur = *(uint16_t*)(pmd + 0x71E + id*0x20 + 0);
+            uint16_t mhpMax = *(uint16_t*)(pmd + 0x71E + id*0x20 + 2);
+            Log::Menu("[ForcedPSel-REF] id=%d  EXP=%u (lvl~%u)  menuHP=%u/%u",
+                      id, (unsigned)exp, (unsigned)(exp/1000+1),
+                      (unsigned)mhpCur, (unsigned)mhpMax);
+        }
+        for (int slot = 0; slot < 4; slot++) {
+            uint8_t* cs  = (uint8_t*)0x1CFF000 + slot*0x1D0;
+            uint16_t cur = *(uint16_t*)(cs + 0x172);
+            uint16_t max = *(uint16_t*)(cs + 0x174);
+            Log::Menu("[ForcedPSel-REF] compStats slot %d  HP=%u/%u",
+                      slot, (unsigned)cur, (unsigned)max);
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log::Menu("[ForcedPSel-REF] (read fault)");
+    }
+}
+
+static void PollForcedPselDiag()
+{
+    if (!pGameMode || !pMenuStateA) return;
+    uint16_t mode = 0xFFFF;
+    uint8_t region[FPS_DIAG_LEN];
+    if (!ForcedPselReadState(mode, region)) return;
+
+    // Forced select = game mode 10. Outside it, reset and (once) log the exit.
+    if (mode != 10) {
+        if (s_fpsPrevMode == 10) { Log::Menu("[ForcedPSel] EXIT mode 10->%u", (unsigned)mode); ForcedPselDumpRefs(); }
+        s_fpsPrevMode = mode;
+        s_fpsRegionValid = false;
+        s_fpsPrevGcw.clear();
+        return;
+    }
+
+    // mode == 10: capture the on-screen text (GCW).
+    std::string gcw;
+    {
+        uint8_t buf[2048];
+        int len = FieldDialog::SnapshotGcwBuffer(buf, sizeof(buf));
+        if (len > 0) gcw = FF8TextDecode::DecodeMenuText(buf, len);
+    }
+
+    if (s_fpsPrevMode != 10) {
+        // Entry: dump the full window once, line-by-line (so a wide window can't
+        // overrun a single log call), + the full GCW.
+        Log::Menu("[ForcedPSel] ENTER mode=10  region[+0x%03X..+0x%03X):",
+                  FPS_DIAG_OFF, FPS_DIAG_OFF + FPS_DIAG_LEN);
+        for (int i = 0; i < FPS_DIAG_LEN; i += 16) {
+            char line[96]; int p = 0;
+            p += sprintf(line + p, "  +%03X:", FPS_DIAG_OFF + i);
+            for (int j = 0; j < 16 && i + j < FPS_DIAG_LEN; j++)
+                p += sprintf(line + p, " %02X", region[i + j]);
+            Log::Menu("[ForcedPSel]%s", line);
+        }
+        Log::Menu("[ForcedPSel] ENTER gcw(%d)=\"%s\"", (int)gcw.size(), gcw.c_str());
+        ForcedPselDumpRefs();
+    } else {
+        // While inside: log only the bytes that changed (cursor moves / focus) + GCW.
+        if (s_fpsRegionValid) {
+            char ch[1600]; int c = 0;
+            for (int i = 0; i < FPS_DIAG_LEN && c < 1500; i++) {
+                if (region[i] != s_fpsRegion[i])
+                    c += sprintf(ch + c, " +%03X:%02X->%02X", FPS_DIAG_OFF + i,
+                                 (unsigned)s_fpsRegion[i], (unsigned)region[i]);
+            }
+            if (c > 0) Log::Menu("[ForcedPSel] region change:%s", ch);
+        }
+        if (gcw != s_fpsPrevGcw)
+            Log::Menu("[ForcedPSel] gcw(%d)=\"%s\"", (int)gcw.size(), gcw.c_str());
+    }
+
+    for (int i = 0; i < FPS_DIAG_LEN; i++) s_fpsRegion[i] = region[i];
+    s_fpsRegionValid = true;
+    s_fpsPrevGcw = gcw;
+    s_fpsPrevMode = mode;
+}
+#endif
+
