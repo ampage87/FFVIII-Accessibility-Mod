@@ -6,6 +6,85 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.51
+
+Menu: retire the Switch-screen discovery/diagnostic scaffolding for release (#65/#66). LOCAL build.
+
+With both Switch screens BAT-confirmed (the main-menu Switch and the forced
+party-select screen now share one engine), the discovery and confirmation tooling
+is no longer needed:
+
+- FORCED_PSEL_DIAG turned off (kept gated behind its #define, per the project's
+  gate-don't-delete rule, in case a future Switch issue needs the dual-screen probe).
+- The original #65 SWITCH_DISCOVERY_DIAG band-monitor (PollSwitchDiscoveryDiag /
+  ResetSwitchDiscoveryDiag and its dispatch branch in menu_tts.cpp) removed
+  outright. The screen is fully mapped and unified, and FORCED_PSEL_DIAG is a
+  superior general-purpose probe if anything ever needs revisiting, so this one had
+  nothing left to offer.
+- menu_tts_switch.inl's header comment refreshed to describe the unified +0x78
+  engine instead of the old GCW-token discovery approach.
+
+No runtime behavior change — this is diagnostics and dead code only. (The old
+GCW-only #65 implementation itself was already removed back in v0.18.3.49.)
+
+BAT: open the main menu and choose Switch — everything should still announce exactly
+as before, with the menu log now quiet of the [SwitchMenu] / [ForcedPSel] /
+[SwitchDiag] diagnostic lines.
+
+## v0.18.3.50
+
+Menu: fix the slight entry-announce delay on the main-menu Switch screen (#65). LOCAL build.
+
+On the v0.18.3.49 BAT the main-menu Switch worked correctly but the first
+announcement lagged a beat after selecting Switch. Cause (confirmed in
+ff8_menu.log): the unified engine's entry gate holds the first announce until the
+on-screen help text contains the option marker ("make a party of 3" or "Exchanges
+all that is junctioned"), but the main-menu Switch first renders its top-command
+help "Select party members" and only swaps to the option help a beat later — so the
+announce waited for that transition.
+
+The gate now also accepts "Select party members" as a screen-ready signal. The
+announce content (option, active party, highlighted member) all comes from working
+memory, not the help text, so it is correct the moment the screen is up; the marker
+wait was stricter than necessary. No change to the forced screen's behavior beyond
+the same earlier-by-a-frame entry, which is memory-driven and safe.
+
+BAT: open the main menu and choose Switch — the first announcement should come
+promptly, with everything else (members, empty slots, action-bar option, bar to
+character) still announcing as before.
+
+## v0.18.3.49
+
+Menu: unify the main-menu Switch screen with the forced party-select engine (#65/#66). LOCAL build.
+
+The main-menu Switch screen and the forced party-select screen are the same UI;
+their menu-state working blocks are identical, just shifted by a constant +0x78 in
+the main menu (focus +0x1B6 -> +0x22E, option +0x1E6 -> +0x25E, active party
++0x1EA -> +0x262 — three independently confirmed points). So both screens now run
+one engine: PollForcedPartySelect's body became PollSwitchScreen(state, off), and
+two thin wrappers drive it — off=0 for the forced screen (game mode 10) and
+off=0x78 for the main-menu Switch (menu mode 6). Per-screen announce state lives in
+a small struct so the two can't clobber each other.
+
+This retires the original GCW-only #65 implementation and brings the main-menu
+Switch to full parity with the forced screen: empty active/reserve slots announce
+("Empty Party Slot" / "Empty Reserve Slot"), the highlighted active and reserve
+members are read from live working memory (robust if the on-screen detail text
+freezes), and moving up onto the action bar / back down onto a character announces
+the option / the character via the focus byte. The "unavailable" suffix stays gated
+to the forced screen, where members can be story-locked.
+
+The forced-select discovery diagnostic is generalized to fire on either screen
+(tagged [ForcedPSel] or [SwitchMenu]) so one BAT confirms the +0x78 offsets; the
++0x100..+0x500 window already covers both working blocks. FORCED_PSEL_DIAG stays 1
+for this BAT.
+
+BAT: open the main menu and choose Switch. Confirm each member announces (name,
+active or reserve, level, HP); empty reserve cells say "Empty Reserve Slot"; moving
+up to the bar announces the option; coming back down announces the character; and
+toggling Switch <-> Junction says the option name only. If clean, the next push
+turns FORCED_PSEL_DIAG off and reads reserve names purely from +0x1ED.
+
 ## v0.18.3.48
 
 Menu: forced party-select — announce the action-bar option when you move up onto the bar (#66). LOCAL build.

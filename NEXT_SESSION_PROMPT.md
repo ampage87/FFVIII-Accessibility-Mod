@@ -1,10 +1,32 @@
-# Next Session Prompt — ACTIVE: #66 forced party-select / junction-switch screens (follow-up to shipped #65). HEAD = v0.18.3.37 (`b342a5df`); #65 CLOSED
+# Next Session Prompt — ACTIVE: #65/#66 Switch-screen wrap-up. `main` (pushed) = v0.18.3.48; LOCAL = .49 (unify) + .50 (entry-delay fix) BAT-confirmed, + .51 (release cleanup, BAT PENDING → then PUSH)
 
 ## Greeting & ritual
 
 Start every response with `## Claude Says`. Read `DEVNOTES.md` and THIS file before any work; `DEVNOTES_HISTORY.md` only when tracing a past decision. Then `github:list_issues` for the live backlog and confirm HEAD with `github:list_commits`.
 
 ## Where we are at session open
+
+**CURRENT STATE — #65/#66 Switch-screen wrap-up. `main` (pushed) = v0.18.3.48; LOCAL = v0.18.3.49 (unify) + .50 (entry-delay fix), both BAT-CONFIRMED; v0.18.3.51 (release cleanup) BAT PENDING → then PUSH.**
+
+**#66 forced party-select** (Rinoa joining after the Fake President battle, game mode 10) shipped at **v0.18.3.48** — reads/announces members with level+HP, empty slots, and the action-bar option / focused character via the focus byte +0x1B6. All `.44`–`.48` features BAT-confirmed by ear; pushed and verified on `main` (FF8OPC_VERSION 0.18.3.48 + the focus-byte code present).
+
+**v0.18.3.49 UNIFY (LOCAL, BAT-CONFIRMED):** the main-menu Switch screen (menu mode 6) and the forced screen are the SAME UI; their menu-state working blocks are identical, shifted by a constant **+0x78** in the main menu — confirmed on 3 points (focus +0x1B6→+0x22E, option +0x1E6→+0x25E, active party +0x1EA→+0x262). Both now run ONE engine: `PollForcedPartySelect`'s body became `PollSwitchScreen(SwitchScreenState& st, int off)` in `menu_tts_switch.inl`; thin wrappers drive it — `PollForcedPartySelect` (off=0, gates game mode 10) and `PollSwitchSubmenu`/`ResetSwitchSubmenu` (off=0x78) — the names `menu_tts.cpp` already calls, so the dispatch is UNCHANGED (forced poll at top of `Update`; main-menu Switch gated `s_prevCursor==6 && +0x1E8==10`). Per-screen announce state = two `SwitchScreenState` instances (`s_fpsForced`/`s_fpsMenu`). The old GCW-only #65 `PollSwitchSubmenu`/`ResetSwitchSubmenu`/`SwitchCandidatePhrase`/`s_sw*` were removed; shared `SwitchCharLevelHP`/`SwitchCollectNames`/`SwitchParseMembers` stay. `ForcedPselMenuFlag` stays at fixed +0x1DB (menu roster, mode-independent); the "unavailable" suffix gated to `off==0` (forced only). Result: main menu gains empty-slot announces, memory-first cursor-driven active/reserve reads, and focus-driven bar↔character cues — full parity.
+
+**OFFSETS (off-relative; main menu = +0x78):** focus +0x1B6 (2=char grid/0x0C=bar/0x0B transient), option +0x1E6 (0=Switch/1=Junction), cursor col +0x1E7 (0=active/1=reserve) / active-idx +0x1E8 / reserve-idx +0x1E9, active slots +0x1EA (3, 0xFF=empty), reserves +0x1ED. **Fixed (NOT shifted):** roster/unavail-flag +0x1DB, menu HP +0x71E, savemap +0xAF0/+0x48C.
+
+**DIAGNOSTIC:** `PollForcedPselDiag` (`FORCED_PSEL_DIAG`=1, `menu_tts_diagnostics.inl`) generalized to fire on BOTH screens — forced (mode 10) and main-menu Switch (mode 6 && +0x1E8==10) — tagging dumps `[ForcedPSel]` vs `[SwitchMenu]`; `ForcedPselDumpRefs(int off)` prints the right working block; the +0x100..+0x500 window covers both. No new call site (it already runs at the top of `Update`).
+
+**v0.18.3.49 + v0.18.3.50 BAT-CONFIRMED** — full parity on the main-menu Switch and a prompt first announce on entry. (.50 fixed a slight entry lag: the gate had waited for the option help marker, but the main-menu Switch first shows top-command help "Select party members" — the gate now accepts that too; announce content is memory-driven so it's correct immediately. Confirmed in ff8_menu.log: GCW = "Select party members" while +0x1E8==10.)
+
+**v0.18.3.51 (LOCAL, BAT PENDING) = release cleanup.** Both Switch screens confirmed, so the scaffolding is retired: `FORCED_PSEL_DIAG`→0 (kept gated, gate-don't-delete); the obsolete #65 `SWITCH_DISCOVERY_DIAG` band-monitor (`PollSwitchDiscoveryDiag`/`ResetSwitchDiscoveryDiag` + its `menu_tts.cpp` dispatch branch) removed outright — the screen is fully mapped AND unified, and `FORCED_PSEL_DIAG` is the superior general probe if ever needed; `menu_tts_switch.inl` header comment refreshed to the unified +0x78 engine. The old GCW-only #65 code (`s_sw*`/old `PollSwitchSubmenu`/`SwitchCandidatePhrase`) was already removed in .49. NO runtime TTS change — diagnostics + dead code only.
+
+**BAT (v0.18.3.51):** open the MAIN MENU → Switch — everything should still announce exactly as in .50, and the menu log should be quiet of `[SwitchMenu]` / `[ForcedPSel]` / `[SwitchDiag]` lines. **THEN PUSH** via `Utilities/push_to_github.ps1` (Aaron runs it; carries .49 unify + .50 delay fix + .51 cleanup, so `main` jumps .48→.51). Verify after with `curl raw.githubusercontent.com`.
+
+**Deliberately NOT done (optional future, not cleanup):** reserve names still prefer the GCW token with +0x1ED memory fallback — BAT-confirmed working; switching to memory-only is a behavior change deserving its own BAT, not a pre-push cleanup. **Next pick after the push: #61** (FF8TextDecode::Decode renders the page/line-break control code as a spoken "L" game-wide; root site identified).
+
+---
+
+**(Historical detail below — the incremental #65/#66 path that led here, superseded by the unify above.)**
 
 **#65 Switch submenu (main-menu) — SHIPPED & CLOSED** at v0.18.3.37 (`b342a5df`, push verified). **ACTIVE CHAPTER — #66: forced party-select / junction-switch story screens** (follow-up). Research doc: Switch Member is "only available on world map or at forced party-select story points" → the forced screens likely reuse the same party-select UI (`+0x1E8==10`, focus `+0x22E`==2 member list, same `<Name>LVHP` layout) but WITHOUT the main-menu context (`PollSwitchSubmenu` gates on `s_prevCursor==6`). **Hypothesis:** broaden the gate to `+0x1E8==10` alone → the forced screen may reuse the whole `.37` announce path. **UNKNOWNS (discovery BAT at a story-forced select):** is `pMenuStateA` populated, is `+0x1E8==10`, does the layout match. GCW clue: exiting Switch at Yaulny Canyon showed help "Select party members".
 

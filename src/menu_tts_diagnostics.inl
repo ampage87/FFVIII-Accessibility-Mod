@@ -187,94 +187,6 @@ static uint8_t ResolveDreamAwareCharId(uint8_t charIdx)
 }
 
 // ============================================================================
-// v0.18.3.34 (#65): Switch submenu discovery diagnostic. LOG-ONLY, no speech.
-// ----------------------------------------------------------------------------
-// Goal: find Switch's subsystem value (+0x1E8), its focus/phase byte, the
-// two-phase source/destination cursor offset(s), the active/reserve grouping,
-// and what a completed swap writes to the party arrays. We don't yet know the
-// Switch cursor offset, so instead of watching a hand-picked set we delta-
-// monitor two contiguous bands of the pMenuStateA menu-state region that
-// contain every known menu cursor (roster +0x1DB, char cursor +0x1E9, top
-// cursor +0x1E6, subsystem +0x1E8, focus +0x22E, the Rearrange slot cursors
-// +0x1D6/+0x1D7, and the sub-list cursors used by Item/Junction/Status), plus
-// both candidate savemap party arrays (mod's 3-byte +0xAF1 and the research
-// 4-byte +0x0B04). Gated to the Switch command (top cursor == 6) by the caller,
-// so other submenus never trigger it. No sighted step: Aaron just navigates
-// Switch by the game's cursor-move sounds; every byte that moves is logged.
-// Off for ship; gate, don't delete.
-// ============================================================================
-#define SWITCH_DISCOVERY_DIAG 0
-
-#if SWITCH_DISCOVERY_DIAG
-static const int  SWDIAG_A0 = 0x1D0; static const int SWDIAG_AN = 0x58;  // band A: 0x1D0..0x227
-static const int  SWDIAG_B0 = 0x228; static const int SWDIAG_BN = 0x68;  // band B: 0x228..0x28F (contiguous with A)
-static bool       s_swDiagArmed = false;
-static uint8_t    s_swBandA[SWDIAG_AN];
-static uint8_t    s_swBandB[SWDIAG_BN];
-static uint8_t    s_swParty[7];
-static DWORD      s_swLastDiag = 0;
-
-static void ResetSwitchDiscoveryDiag() { s_swDiagArmed = false; }
-
-static void PollSwitchDiscoveryDiag()
-{
-    DWORD now = GetTickCount();
-    if (now - s_swLastDiag < 100) return;   // 10 Hz is plenty for cursor moves
-    s_swLastDiag = now;
-    __try {
-        uint8_t* pmd = (uint8_t*)pMenuStateA;
-        uint8_t* sm  = (uint8_t*)SAVEMAP_BASE;
-        uint8_t party[7] = { sm[0xAF1], sm[0xAF2], sm[0xAF3],
-                             sm[0xB04], sm[0xB05], sm[0xB06], sm[0xB07] };
-
-        if (!s_swDiagArmed) {
-            s_swDiagArmed = true;
-            for (int i = 0; i < SWDIAG_AN; i++) s_swBandA[i] = pmd[SWDIAG_A0 + i];
-            for (int i = 0; i < SWDIAG_BN; i++) s_swBandB[i] = pmd[SWDIAG_B0 + i];
-            memcpy(s_swParty, party, 7);
-            Log::Menu("[SwitchDiag] === ENTER Switch (baseline) ===");
-            Log::Menu("[SwitchDiag] 1E6=%u 1E8=%u 1E9=%u 22E=%u 1B6=%u 1D6=%u 1D7=%u 1EC=%u",
-                       pmd[0x1E6], pmd[0x1E8], pmd[0x1E9], pmd[0x22E],
-                       pmd[0x1B6], pmd[0x1D6], pmd[0x1D7], pmd[0x1EC]);
-            // Roster at +0x1DB (all members incl. reserves, 0xFF-terminated)
-            char rb[200]; int p = 0;
-            for (int i = 0; i < 12; i++) {
-                uint8_t v = pmd[0x1DB + i];
-                const char* nm = (v < 8) ? CHAR_NAMES[v] : ((v == 0xFF) ? "END" : "?");
-                if (p < 180) p += sprintf(rb + p, "%u(%s) ", (unsigned)v, nm);
-                if (v == 0xFF) break;
-            }
-            Log::Menu("[SwitchDiag] roster +0x1DB: %s", rb);
-            Log::Menu("[SwitchDiag] party +0xAF1=(%u,%u,%u) +0x0B04=(%u,%u,%u,%u)",
-                       party[0], party[1], party[2],
-                       party[3], party[4], party[5], party[6]);
-            return;
-        }
-
-        for (int i = 0; i < SWDIAG_AN; i++)
-            if (pmd[SWDIAG_A0 + i] != s_swBandA[i]) {
-                Log::Menu("[SwitchDiag] +0x%03X: %u -> %u",
-                           SWDIAG_A0 + i, (unsigned)s_swBandA[i], (unsigned)pmd[SWDIAG_A0 + i]);
-                s_swBandA[i] = pmd[SWDIAG_A0 + i];
-            }
-        for (int i = 0; i < SWDIAG_BN; i++)
-            if (pmd[SWDIAG_B0 + i] != s_swBandB[i]) {
-                Log::Menu("[SwitchDiag] +0x%03X: %u -> %u",
-                           SWDIAG_B0 + i, (unsigned)s_swBandB[i], (unsigned)pmd[SWDIAG_B0 + i]);
-                s_swBandB[i] = pmd[SWDIAG_B0 + i];
-            }
-        static const char* PN[7] = { "AF1","AF2","AF3","B04","B05","B06","B07" };
-        for (int i = 0; i < 7; i++)
-            if (party[i] != s_swParty[i]) {
-                Log::Menu("[SwitchDiag] party[+0x%s]: %u -> %u",
-                           PN[i], (unsigned)s_swParty[i], (unsigned)party[i]);
-                s_swParty[i] = party[i];
-            }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
-}
-#endif // SWITCH_DISCOVERY_DIAG
-
-// ============================================================================
 // v0.08.27: Savemap offset verification — compare current offsets vs deep research
 // ============================================================================
 static void VerifySavemapOffsets()
@@ -833,7 +745,7 @@ static bool IsSubmonNoiseOffset(int off)
 // that change as the cursor moves — to locate this screen's cursor/roster.
 // Log-only, no speech. Off for ship; gate, don't delete.
 // ============================================================================
-#define FORCED_PSEL_DIAG 1
+#define FORCED_PSEL_DIAG 0
 
 #if FORCED_PSEL_DIAG
 // Diagnostic capture window in pMenuStateA. Widened v0.18.3.46 from the original
@@ -846,6 +758,9 @@ static uint16_t    s_fpsPrevMode    = 0xFFFF;
 static uint8_t     s_fpsRegion[FPS_DIAG_LEN] = {};
 static bool        s_fpsRegionValid = false;
 static std::string s_fpsPrevGcw;
+static bool        s_fpsDiagActive  = false;       // on EITHER Switch screen last frame
+static const char* s_fpsDiagTag     = "ForcedPSel"; // label of the screen we're on
+static int         s_fpsDiagOff     = 0;            // working-block base (0 forced / 0x78 menu)
 
 // POD + SEH (no std::string here): read game mode + snapshot the diag window.
 static bool ForcedPselReadState(uint16_t& mode, uint8_t* region)
@@ -868,7 +783,7 @@ static bool ForcedPselReadState(uint16_t& mode, uint8_t* region)
 // (0x1CFF000 + slot*0x1D0, cur +0x172 / max +0x174). Cross-check against the
 // on-screen LV/HP (Rinoa 653/653, Squall 883/1044, Zell 799/994) to confirm
 // which sources are live in game mode 10.
-static void ForcedPselDumpRefs()
+static void ForcedPselDumpRefs(int off)
 {
     __try {
         uint8_t* sm  = (uint8_t*)0x1CFDC5C;     // SAVEMAP_BASE
@@ -879,13 +794,15 @@ static void ForcedPselDumpRefs()
         Log::Menu("[ForcedPSel-REF] menu roster +0x1DB=[%u,%u,%u,%u,%u,%u,%u,%u]",
                   (unsigned)pmd[0x1DB],(unsigned)pmd[0x1DC],(unsigned)pmd[0x1DD],(unsigned)pmd[0x1DE],
                   (unsigned)pmd[0x1DF],(unsigned)pmd[0x1E0],(unsigned)pmd[0x1E1],(unsigned)pmd[0x1E2]);
-        // Working party (live in mode 10, unlike savemap +0xAF0): 3 active slots
-        // at +0x1EA, reserves from +0x1ED. +0x1EC == slot 3 confirmed by swap.
-        Log::Menu("[ForcedPSel-REF] working +0x1EA active=[%u,%u,%u] reserves=[%u,%u,%u,%u,%u,%u,%u,%u]",
-                  (unsigned)pmd[0x1EA],(unsigned)pmd[0x1EB],(unsigned)pmd[0x1EC],
-                  (unsigned)pmd[0x1ED],(unsigned)pmd[0x1EE],(unsigned)pmd[0x1EF],
-                  (unsigned)pmd[0x1F0],(unsigned)pmd[0x1F1],(unsigned)pmd[0x1F2],
-                  (unsigned)pmd[0x1F3],(unsigned)pmd[0x1F4]);
+        // Working party (live, unlike savemap +0xAF0): 3 active slots at +0x1EA,
+        // reserves from +0x1ED. The main-menu Switch block is this + 0x78, so the
+        // printed offset reflects which screen produced the dump.
+        Log::Menu("[ForcedPSel-REF] working +0x%X active=[%u,%u,%u] reserves=[%u,%u,%u,%u,%u,%u,%u,%u]",
+                  0x1EA+off,
+                  (unsigned)pmd[0x1EA+off],(unsigned)pmd[0x1EB+off],(unsigned)pmd[0x1EC+off],
+                  (unsigned)pmd[0x1ED+off],(unsigned)pmd[0x1EE+off],(unsigned)pmd[0x1EF+off],
+                  (unsigned)pmd[0x1F0+off],(unsigned)pmd[0x1F1+off],(unsigned)pmd[0x1F2+off],
+                  (unsigned)pmd[0x1F3+off],(unsigned)pmd[0x1F4+off]);
         for (int id = 0; id < 8; id++) {
             uint32_t exp    = *(uint32_t*)(sm  + 0x48C + id*0x98 + 0x04);
             uint16_t mhpCur = *(uint16_t*)(pmd + 0x71E + id*0x20 + 0);
@@ -913,16 +830,27 @@ static void PollForcedPselDiag()
     uint8_t region[FPS_DIAG_LEN];
     if (!ForcedPselReadState(mode, region)) return;
 
-    // Forced select = game mode 10. Outside it, reset and (once) log the exit.
-    if (mode != 10) {
-        if (s_fpsPrevMode == 10) { Log::Menu("[ForcedPSel] EXIT mode 10->%u", (unsigned)mode); ForcedPselDumpRefs(); }
-        s_fpsPrevMode = mode;
+    // Active on EITHER Switch screen: the forced select (game mode 10) or the
+    // main-menu Switch (menu mode 6 with the Switch subsystem +0x1E8==10). The
+    // +0x100..+0x500 window covers both working blocks (the main-menu block is the
+    // forced block + 0x78), so one probe confirms the +0x78 offsets in one BAT.
+    bool forced = (mode == 10);
+    bool menuSw = (mode == 6 && region[0x1E8 - FPS_DIAG_OFF] == 10);
+    bool active = forced || menuSw;
+
+    if (!active) {
+        if (s_fpsDiagActive) { Log::Menu("[%s] EXIT -> mode %u", s_fpsDiagTag, (unsigned)mode); ForcedPselDumpRefs(s_fpsDiagOff); }
+        s_fpsDiagActive  = false;
         s_fpsRegionValid = false;
         s_fpsPrevGcw.clear();
+        s_fpsPrevMode = mode;
         return;
     }
 
-    // mode == 10: capture the on-screen text (GCW).
+    const char* tag = forced ? "ForcedPSel" : "SwitchMenu";
+    int dumpOff     = forced ? 0x00 : 0x78;
+
+    // Capture the on-screen text (GCW).
     std::string gcw;
     {
         uint8_t buf[2048];
@@ -930,20 +858,20 @@ static void PollForcedPselDiag()
         if (len > 0) gcw = FF8TextDecode::DecodeMenuText(buf, len);
     }
 
-    if (s_fpsPrevMode != 10) {
+    if (!s_fpsDiagActive) {
         // Entry: dump the full window once, line-by-line (so a wide window can't
         // overrun a single log call), + the full GCW.
-        Log::Menu("[ForcedPSel] ENTER mode=10  region[+0x%03X..+0x%03X):",
-                  FPS_DIAG_OFF, FPS_DIAG_OFF + FPS_DIAG_LEN);
+        Log::Menu("[%s] ENTER mode=%u  region[+0x%03X..+0x%03X):",
+                  tag, (unsigned)mode, FPS_DIAG_OFF, FPS_DIAG_OFF + FPS_DIAG_LEN);
         for (int i = 0; i < FPS_DIAG_LEN; i += 16) {
             char line[96]; int p = 0;
             p += sprintf(line + p, "  +%03X:", FPS_DIAG_OFF + i);
             for (int j = 0; j < 16 && i + j < FPS_DIAG_LEN; j++)
                 p += sprintf(line + p, " %02X", region[i + j]);
-            Log::Menu("[ForcedPSel]%s", line);
+            Log::Menu("[%s]%s", tag, line);
         }
-        Log::Menu("[ForcedPSel] ENTER gcw(%d)=\"%s\"", (int)gcw.size(), gcw.c_str());
-        ForcedPselDumpRefs();
+        Log::Menu("[%s] ENTER gcw(%d)=\"%s\"", tag, (int)gcw.size(), gcw.c_str());
+        ForcedPselDumpRefs(dumpOff);
     } else {
         // While inside: log only the bytes that changed (cursor moves / focus) + GCW.
         if (s_fpsRegionValid) {
@@ -953,16 +881,19 @@ static void PollForcedPselDiag()
                     c += sprintf(ch + c, " +%03X:%02X->%02X", FPS_DIAG_OFF + i,
                                  (unsigned)s_fpsRegion[i], (unsigned)region[i]);
             }
-            if (c > 0) Log::Menu("[ForcedPSel] region change:%s", ch);
+            if (c > 0) Log::Menu("[%s] region change:%s", tag, ch);
         }
         if (gcw != s_fpsPrevGcw)
-            Log::Menu("[ForcedPSel] gcw(%d)=\"%s\"", (int)gcw.size(), gcw.c_str());
+            Log::Menu("[%s] gcw(%d)=\"%s\"", tag, (int)gcw.size(), gcw.c_str());
     }
 
     for (int i = 0; i < FPS_DIAG_LEN; i++) s_fpsRegion[i] = region[i];
     s_fpsRegionValid = true;
     s_fpsPrevGcw = gcw;
     s_fpsPrevMode = mode;
+    s_fpsDiagActive = true;
+    s_fpsDiagTag = tag;
+    s_fpsDiagOff = dumpOff;
 }
 #endif
 

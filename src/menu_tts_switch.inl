@@ -1,39 +1,23 @@
-// menu_tts_switch.inl — Switch submenu TTS (#65). Included from menu_tts.cpp.
-// Do not compile independently. No header guards / namespace (textual include).
+// menu_tts_switch.inl — Switch-screen TTS (#65 main-menu Switch + #66 forced
+// party-select). Included from menu_tts.cpp. Do not compile independently.
+// No header guards / namespace (textual include).
 //
-// Discovery (v0.18.3.34 [SwitchDiag] BAT, 2026-06-12):
-//   Subsystem byte  +0x1E8 == 10   identifies the Switch screen (Junction=17,
-//                                  Status=5, Magic=3, Ability=14).
-//   Focus byte      +0x22E:  12 = the two-option action bar
-//                             2 = the member-select list
-//   Action option   +0x25E:   0 = "Switch Member"   (help "Please make a party of 3")
-//                             1 = "Junction Exchange" (help "Exchanges all that is junctioned")
-//   The member list draws the 3 active members plus the highlighted candidate as
-//   <Name>LVHP tokens after the help string; the 4th token is whoever the cursor
-//   is on. We read those names from the rendered GCW text (speak-what's-shown),
-//   which avoids the source/destination cursor bytes (still unmapped). The on-
-//   screen LV/HP numbers bypass the menu-text pipeline, so we read them from
-//   memory by char-id (v0.18.3.37), reusing AnnounceJuncCharSelect's proven path.
+// Both screens are the SAME Switch Member UI; their pMenuStateA working block is
+// identical, shifted by +0x78 in the main menu. One engine, PollSwitchScreen(st,
+// off), drives both: off=0 forced (game mode 10), off=0x78 main menu (menu mode 6,
+// subsystem +0x1E8==10). Offsets (off-relative): focus +0x1B6 (2=char grid,
+// 0x0C=bar, 0x0B transient), option +0x1E6 (0=Switch/1=Junction), cursor col /
+// active-idx / reserve-idx +0x1E7/+0x1E8/+0x1E9, active slots +0x1EA (0xFF=empty),
+// reserves +0x1ED. Fixed (NOT shifted): menu roster +0x1DB, menu HP +0x71E,
+// savemap +0xAF0/+0x48C.
 //
-// Reuses CHAR_NAMES + ComputeCharLevel (defined earlier in the TU). No __try in
-// PollSwitchSubmenu (std::string in scope — C2712); the raw stat reads live in
-// the POD helper SwitchCharLevelHP, which has its own __try.
+// Reuses CHAR_NAMES + ComputeCharLevel (defined earlier in the TU). Raw stat reads
+// live in the POD helper SwitchCharLevelHP (its own __try), so the std::string-
+// scoped engine stays C2712-safe.
 
-static bool        s_swSubActive   = false;
-static uint8_t     s_swPrevFocus   = 0xFF;
-static uint8_t     s_swPrevOption  = 0xFF;     // +0x25E on the action bar
-static std::string s_swPrevCandidate;          // last announced member-list candidate
-static std::string s_swPrevTrio;               // last announced active trio (swap detection)
-static DWORD       s_swLastGcwMs   = 0;
-
-static void ResetSwitchSubmenu()
-{
-    s_swSubActive = false;
-    s_swPrevFocus = 0xFF;
-    s_swPrevOption = 0xFF;
-    s_swPrevCandidate.clear();
-    s_swPrevTrio.clear();
-}
+// The two Switch screens share one engine (see the #66 section below). Per-screen
+// announce state lives in SwitchScreenState there; this file keeps only the shared
+// name/level/HP helpers used by both.
 
 // Level + HP for a character id (0-7), reusing AnnounceJuncCharSelect's reads:
 // level from EXP (flat 1000/level), HP from the computed-stats slot when the
@@ -105,112 +89,6 @@ static int SwitchParseMembers(const std::string& gcw, const char* marker,
     return SwitchCollectNames(gcw.substr(start, end - start), outNames, outIds, maxN);
 }
 
-// "Name, active/reserve, Level N, HP X of Y." for the candidate at index idx.
-// Active = the candidate is one of the 3 on-screen active members (names[0..2]).
-// Falls back to "Name, active/reserve." if the LV/HP read fails.
-static std::string SwitchCandidatePhrase(const std::string* names, const int* ids, int n, int idx)
-{
-    bool active = (idx < n) &&
-                  (names[idx] == names[0] || names[idx] == names[1] || names[idx] == names[2]);
-    std::string s = names[idx] + (active ? ", active" : ", reserve");
-    int lvl = 0; uint16_t cur = 0, mx = 0;
-    if (ids[idx] >= 0 && ids[idx] <= 7 && SwitchCharLevelHP((uint8_t)ids[idx], lvl, cur, mx)) {
-        char buf[96];
-        sprintf(buf, ", Level %d, HP %u of %u.", lvl, (unsigned)cur, (unsigned)mx);
-        s += buf;
-    } else {
-        s += ".";
-    }
-    return s;
-}
-
-static void PollSwitchSubmenu()
-{
-    uint8_t* pmd = (uint8_t*)pMenuStateA;
-    uint8_t focus  = pmd[0x22E];
-    uint8_t option = pmd[0x25E];
-
-    if (!s_swSubActive) {
-        s_swSubActive = true;
-        s_swPrevFocus = 0xFF;
-        s_swPrevOption = 0xFF;
-        s_swPrevCandidate.clear();
-        s_swPrevTrio.clear();
-    }
-
-    // --- Action bar: the two options ---
-    if (focus == 12) {
-        if (option != s_swPrevOption || s_swPrevFocus != 12) {
-            if (option == 1)
-                ScreenReader::Speak("Junction Exchange. Exchanges all that is junctioned.", true);
-            else
-                ScreenReader::Speak("Switch Member. Please make a party of three.", true);
-            s_swPrevOption = option;
-        }
-        // leaving a member list -> re-cue its context next time
-        s_swPrevCandidate.clear();
-        s_swPrevTrio.clear();
-        s_swPrevFocus = focus;
-        return;
-    }
-
-    // --- Member-select list ---
-    if (focus == 2) {
-        bool justEntered = (s_swPrevFocus != 2);
-        DWORD now = GetTickCount();
-        if (!justEntered && (now - s_swLastGcwMs < 100)) { s_swPrevFocus = focus; return; }
-        s_swLastGcwMs = now;
-
-        uint8_t gcw[2048];
-        int len = FieldDialog::SnapshotGcwBuffer(gcw, sizeof(gcw));
-        std::string text = (len > 0) ? FF8TextDecode::DecodeMenuText(gcw, len) : std::string();
-
-        const char* marker = (option == 1) ? "Exchanges all that is junctioned" : "make a party of 3";
-        std::string names[4];
-        int ids[4] = { -1, -1, -1, -1 };
-        int n = SwitchParseMembers(text, marker, names, ids, 4);
-
-        std::string trio;
-        if (n >= 3) trio = names[0] + ", " + names[1] + ", " + names[2];
-
-        // On entering the list, announce context + the first candidate in one phrase.
-        if (justEntered) {
-            std::string s;
-            if (option == 1)      s = "Junction Exchange. Choose a character. ";
-            else if (n >= 3)      s = "Switch Member. Active party: " + trio + ". ";
-            else                  s = "Switch Member. ";
-            if (n >= 4) {
-                s += SwitchCandidatePhrase(names, ids, n, 3);
-                s_swPrevCandidate = names[3];
-            }
-            ScreenReader::Speak(s.c_str(), true);
-            s_swPrevTrio = trio;
-            s_swPrevFocus = focus;
-            return;
-        }
-
-        // A completed swap changes the active trio — announce the new party.
-        // Pin the candidate to the current slot so its echo does NOT interrupt the
-        // "Party is now ..." line; it re-announces only on the next cursor move.
-        if (n >= 3 && trio != s_swPrevTrio) {
-            std::string s = "Party is now " + trio + ".";
-            ScreenReader::Speak(s.c_str(), true);
-            s_swPrevTrio = trio;
-            if (n >= 4) s_swPrevCandidate = names[3];
-        }
-        // Otherwise announce the candidate under the cursor when it changes.
-        else if (n >= 4 && names[3] != s_swPrevCandidate) {
-            ScreenReader::Speak(SwitchCandidatePhrase(names, ids, n, 3).c_str(), true);
-            s_swPrevCandidate = names[3];
-        }
-        s_swPrevFocus = focus;
-        return;
-    }
-
-    // Transitional focus values — just track.
-    s_swPrevFocus = focus;
-}
-
 // ============================================================================
 // Forced party-select (#66) — the "make a party of 3" screen the story forces
 // (e.g. Rinoa joining after the Fake President battle). v0.18.3.38/.39 discovery
@@ -225,22 +103,23 @@ static void PollSwitchSubmenu()
 // names[0..2]).
 // ============================================================================
 
-static bool        s_fpsAnnActive = false;
-static std::string s_fpsPrevOpt;       // "s"witch member / "j"unction exchange
-static std::string s_fpsPrevCand;      // last announced candidate name
-static std::string s_fpsPrevActive;    // last announced active-member list
-static bool        s_fpsPrevPopup = false;
-static int         s_fpsPrevFocus = -1;   // +0x1B6: 2=character grid, 0x0C=action bar
+// Per-screen announce state. The forced screen (game mode 10) and the main-menu
+// Switch (menu mode 6) are the SAME UI: the menu-state working block is identical,
+// just shifted by +0x78 in the main menu (focus +0x1B6/+0x22E, option +0x1E6/+0x25E,
+// active party +0x1EA/+0x262 all differ by 0x78). One engine drives both, taking a
+// base offset; each screen keeps its own state instance.
+struct SwitchScreenState {
+    bool        annActive = false;
+    std::string prevOpt;        // "s"witch member / "j"unction exchange
+    std::string prevCand;       // last announced candidate name
+    std::string prevActive;     // last announced active-member list
+    bool        prevPopup  = false;
+    int         prevFocus  = -1; // focus byte: 2=character grid, 0x0C=action bar
+};
+static SwitchScreenState s_fpsForced;   // forced party-select (game mode 10), off=0
+static SwitchScreenState s_fpsMenu;     // main-menu Switch (menu mode 6),     off=0x78
 
-static void ResetForcedPartySelect()
-{
-    s_fpsAnnActive = false;
-    s_fpsPrevOpt.clear();
-    s_fpsPrevCand.clear();
-    s_fpsPrevActive.clear();
-    s_fpsPrevPopup = false;
-    s_fpsPrevFocus = -1;
-}
+static void ResetSwitchScreen(SwitchScreenState& st) { st = SwitchScreenState(); }
 
 // POD + SEH: game mode (pGameMode is uint16_t*; forced select = 10).
 static uint16_t ForcedPselGameMode()
@@ -254,11 +133,11 @@ static uint16_t ForcedPselGameMode()
 // (+0xAF0) only commits on exit, so during the operation we read the in-progress
 // 3 active slots at pMenuStateA+0x1EA (0xFF = empty). +0x1EC == slot 3 was
 // confirmed by a placement swap (+0x1EC 05->01 = Selphie->Zell).
-static bool ForcedPselIsActive(int id)
+static bool ForcedPselIsActive(int off, int id)
 {
     bool active = false;
     __try {
-        uint8_t* a = (uint8_t*)pMenuStateA + 0x1EA;
+        uint8_t* a = (uint8_t*)pMenuStateA + off + 0x1EA;
         for (int s = 0; s < 3; s++) { if (a[s] == id) { active = true; break; } }
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
     return active;
@@ -277,9 +156,9 @@ static uint8_t ForcedPselMenuFlag(int id)
 
 // "Name, active/reserve[, unavailable], Level N, HP X of Y." (active from +0xAF0;
 // LV/HP via the shared SwitchCharLevelHP). Falls back to "Name, active/reserve."
-static std::string ForcedPselCandidatePhrase(const std::string& name, int id, bool unavailable)
+static std::string ForcedPselCandidatePhrase(int off, const std::string& name, int id, bool unavailable)
 {
-    std::string s = name + (ForcedPselIsActive(id) ? ", active" : ", reserve");
+    std::string s = name + (ForcedPselIsActive(off, id) ? ", active" : ", reserve");
     if (unavailable) s += ", unavailable";
     int lvl = 0; uint16_t cur = 0, mx = 0;
     if (id >= 0 && id <= 7 && SwitchCharLevelHP((uint8_t)id, lvl, cur, mx)) {
@@ -297,11 +176,11 @@ static std::string ForcedPselCandidatePhrase(const std::string& name, int id, bo
 // savemap +0xAF0 it updates immediately as members are placed (savemap commits
 // only on exit). +0x1EC == slot 3 confirmed by a placement swap; +0x1ED begins
 // the reserves.
-static void ForcedPselActiveSlots(int slots[3])
+static void ForcedPselActiveSlots(int off, int slots[3])
 {
     slots[0] = slots[1] = slots[2] = 0xFF;
     __try {
-        uint8_t* a = (uint8_t*)pMenuStateA + 0x1EA;
+        uint8_t* a = (uint8_t*)pMenuStateA + off + 0x1EA;
         slots[0] = a[0]; slots[1] = a[1]; slots[2] = a[2];
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
@@ -310,11 +189,11 @@ static void ForcedPselActiveSlots(int slots[3])
 // active-slot index (+0x1E8), reserve index (+0x1E9). These keep updating even
 // when the GCW detail text freezes (e.g. after a member is placed), so the active
 // column is announced from memory rather than the (sometimes stale) GCW token.
-static void ForcedPselCursor(int& col, int& activeIdx, int& reserveIdx)
+static void ForcedPselCursor(int off, int& col, int& activeIdx, int& reserveIdx)
 {
     col = -1; activeIdx = -1; reserveIdx = -1;
     __try {
-        uint8_t* pmd = (uint8_t*)pMenuStateA;
+        uint8_t* pmd = (uint8_t*)pMenuStateA + off;
         col        = pmd[0x1E7];
         activeIdx  = pmd[0x1E8];
         reserveIdx = pmd[0x1E9];
@@ -326,10 +205,10 @@ static void ForcedPselCursor(int& col, int& activeIdx, int& reserveIdx)
 // (the GCW marker text can lag a frame on a toggle). Confirmed by three clean
 // 0<->1 flips that tracked the help text in the v0.18.3.44 BAT trace. Returns
 // -1 on an unreadable/unexpected value so the caller can fall back to the GCW.
-static int ForcedPselOption()
+static int ForcedPselOption(int off)
 {
     int v = -1;
-    __try { v = *((uint8_t*)pMenuStateA + 0x1E6); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    __try { v = *((uint8_t*)pMenuStateA + off + 0x1E6); } __except(EXCEPTION_EXECUTE_HANDLER) {}
     return (v == 0 || v == 1) ? v : -1;
 }
 
@@ -338,12 +217,12 @@ static int ForcedPselOption()
 // +0x1EA). The reserve portrait grid is 2 rows of 4 (indices 0..7); the cursor
 // index +0x1E9 maps 1:1 onto this array (idx 0 = Zell, idx 1 = Quistis in the
 // BAT). Returns -1 for an empty slot (0xFF), an out-of-range id, or oob index.
-static int ForcedPselReserveId(int rIdx)
+static int ForcedPselReserveId(int off, int rIdx)
 {
     int v = -1;
     __try {
         if (rIdx >= 0 && rIdx <= 7) {
-            uint8_t b = *((uint8_t*)pMenuStateA + 0x1ED + rIdx);
+            uint8_t b = *((uint8_t*)pMenuStateA + off + 0x1ED + rIdx);
             if (b <= 7) v = b;
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
@@ -356,34 +235,33 @@ static int ForcedPselReserveId(int rIdx)
 // Junction Exchange, no character cursor drawn; 0x0B is a transient while moving
 // up). Found by the v0.18.3.46 isolated-motion BAT — it sits just below the old
 // diagnostic window (+0x1C0), which is why earlier traces missed it.
-static int ForcedPselFocus()
+static int ForcedPselFocus(int off)
 {
     int v = -1;
-    __try { v = *((uint8_t*)pMenuStateA + 0x1B6); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    __try { v = *((uint8_t*)pMenuStateA + off + 0x1B6); } __except(EXCEPTION_EXECUTE_HANDLER) {}
     return v;
 }
 
-static void PollForcedPartySelect()
+static void PollSwitchScreen(SwitchScreenState& st, int off)
 {
-    if (ForcedPselGameMode() != 10) { if (s_fpsAnnActive) ResetForcedPartySelect(); return; }
-    bool justEntered = !s_fpsAnnActive;
+    bool justEntered = !st.annActive;
 
     // --- Memory-first state (reliable even when the GCW detail text freezes) ---
     int col = -1, aIdx = -1, rIdx = -1;
-    ForcedPselCursor(col, aIdx, rIdx);
+    ForcedPselCursor(off, col, aIdx, rIdx);
 
     // Action-bar-vs-character focus (+0x1B6): 2 = on the character grid, 0x0C = on
     // the action bar (0x0B transient). When focus drops from the bar back onto a
     // character the on-screen cursor "appears" on it, so we announce that character
     // then (handled below) — picking an option and landing on a character reads it.
-    int focus = ForcedPselFocus();
+    int focus = ForcedPselFocus(off);
     bool onBar           = (focus == 0x0B || focus == 0x0C);
-    bool returnedFromBar = (focus == 2 && (s_fpsPrevFocus == 0x0B || s_fpsPrevFocus == 0x0C));
-    bool movedToBar      = (onBar && s_fpsPrevFocus == 2);
-    s_fpsPrevFocus = focus;   // update now so early-return paths keep it current
+    bool returnedFromBar = (focus == 2 && (st.prevFocus == 0x0B || st.prevFocus == 0x0C));
+    bool movedToBar      = (onBar && st.prevFocus == 2);
+    st.prevFocus = focus;   // update now so early-return paths keep it current
 
     int slots[3];
-    ForcedPselActiveSlots(slots);
+    ForcedPselActiveSlots(off, slots);
     int K = 0;
     std::string activeList;
     for (int s = 0; s < 3; s++) {
@@ -401,25 +279,34 @@ static void PollForcedPartySelect()
 
     // "The party has not been set" popup (only meaningful on a populated frame).
     if (!text.empty() && text.find("party has not been set") != std::string::npos) {
-        if (!s_fpsPrevPopup) { ScreenReader::Speak("The party has not been set.", true); s_fpsPrevPopup = true; }
+        if (!st.prevPopup) { ScreenReader::Speak("The party has not been set.", true); st.prevPopup = true; }
         return;
     }
-    if (!text.empty()) s_fpsPrevPopup = false;
+    if (!text.empty()) st.prevPopup = false;
 
     // Which top option is active. From a populated GCW; otherwise keep the last.
     bool hasMarker = !text.empty() &&
         (text.find("make a party of 3") != std::string::npos ||
          text.find("Exchanges all that is junctioned") != std::string::npos);
-    if (justEntered && !hasMarker) return;   // wait for the screen text before the first announce
+    // Entry gate: announce as soon as we can confirm the screen is up. The option
+    // marker is the mid-screen signal, but the main-menu Switch first shows its
+    // top-command help "Select party members" a beat before the option help
+    // renders, so accept that too — holding for the option marker is what delayed
+    // the first announce on entry. The announce content (option, active party,
+    // highlighted member) is memory-driven, not GCW-driven, so it's correct the
+    // moment we're on the screen.
+    bool entryReady = hasMarker ||
+        (!text.empty() && text.find("Select party members") != std::string::npos);
+    if (justEntered && !entryReady) return;   // wait for the screen text before the first announce
 
     // Action option from +0x1E6 (0=Switch Member, 1=Junction Exchange) — the
     // authoritative byte in game mode 10, always current. Fall back to the GCW
     // marker, then to the last known option, only if the byte is unreadable.
-    int opt6 = ForcedPselOption();
+    int opt6 = ForcedPselOption(off);
     bool junction;
     if (opt6 == 0 || opt6 == 1) junction = (opt6 == 1);
     else if (hasMarker)         junction = (text.find("Exchanges all that is junctioned") != std::string::npos);
-    else                        junction = (s_fpsPrevOpt == "j");
+    else                        junction = (st.prevOpt == "j");
     const char* marker = junction ? "Exchanges all that is junctioned" : "make a party of 3";
 
     // Reserve name from the GCW detail token (names[K]); reserve column only,
@@ -440,7 +327,7 @@ static void PollForcedPartySelect()
             if (id >= 0 && id <= 7) {            // a filled active slot
                 char kb[16]; sprintf(kb, "a%d", id);
                 hKey = kb;
-                hPhrase = ForcedPselCandidatePhrase(CHAR_NAMES[id], id, false);
+                hPhrase = ForcedPselCandidatePhrase(off, CHAR_NAMES[id], id, false);
                 haveH = true;
             } else {                             // an empty active slot
                 char kb[16]; sprintf(kb, "aempty%d", aIdx);
@@ -450,18 +337,18 @@ static void PollForcedPartySelect()
             }
         }
     } else if (col == 1) {                       // reserve column (right)
-        int rid = ForcedPselReserveId(rIdx);     // live working reserve id (-1 if empty)
+        int rid = ForcedPselReserveId(off, rIdx); // live working reserve id (-1 if empty)
         if (haveGcwCand) {                       // GCW shows a candidate (proven path)
-            bool unavail = !junction && (ForcedPselMenuFlag(gcwCandId) != 0);
+            bool unavail = (off == 0) && !junction && (ForcedPselMenuFlag(gcwCandId) != 0);
             char kb[16]; sprintf(kb, "r%d", gcwCandId);
             hKey = kb;
-            hPhrase = ForcedPselCandidatePhrase(gcwCand, gcwCandId, unavail);
+            hPhrase = ForcedPselCandidatePhrase(off, gcwCand, gcwCandId, unavail);
             haveH = true;
         } else if (rid >= 0 && rid <= 7) {       // GCW token absent but a member is here (frozen detail text)
-            bool unavail = !junction && (ForcedPselMenuFlag(rid) != 0);
+            bool unavail = (off == 0) && !junction && (ForcedPselMenuFlag(rid) != 0);
             char kb[16]; sprintf(kb, "r%d", rid);
             hKey = kb;
-            hPhrase = ForcedPselCandidatePhrase(CHAR_NAMES[rid], rid, unavail);
+            hPhrase = ForcedPselCandidatePhrase(off, CHAR_NAMES[rid], rid, unavail);
             haveH = true;
         } else if (rIdx >= 0) {                  // confirmed empty reserve slot
             char kb[24]; sprintf(kb, "rempty%d", rIdx);
@@ -473,16 +360,16 @@ static void PollForcedPartySelect()
 
     // --- Entry ---
     if (justEntered) {
-        s_fpsAnnActive = true;
+        st.annActive = true;
         std::string s = junction
             ? std::string("Junction Exchange. Exchanges all that is junctioned. ")
             : std::string("Select party members. Please make a party of three. ");
         if (!junction && !activeList.empty()) s += "Active party: " + activeList + ". ";
         if (haveH) s += hPhrase;
         ScreenReader::Speak(s.c_str(), true);
-        s_fpsPrevOpt = junction ? "j" : "s";
-        s_fpsPrevActive = activeList;
-        s_fpsPrevCand = hKey;
+        st.prevOpt = junction ? "j" : "s";
+        st.prevActive = activeList;
+        st.prevCand = hKey;
         return;
     }
 
@@ -494,19 +381,19 @@ static void PollForcedPartySelect()
     // cursor-move branch when you actually move onto/among characters; the
     // cursor state is re-synced here so that branch doesn't double-fire.
     std::string optKey = junction ? "j" : "s";
-    if (optKey != s_fpsPrevOpt) {
+    if (optKey != st.prevOpt) {
         ScreenReader::Speak(junction ? "Junction Exchange." : "Switch Member.", true);
-        s_fpsPrevOpt = optKey;
-        s_fpsPrevActive = activeList;
-        s_fpsPrevCand = hKey;
+        st.prevOpt = optKey;
+        st.prevActive = activeList;
+        st.prevCand = hKey;
         return;
     }
 
     // --- Active party changed (a member was placed/swapped) ---
-    if (activeList != s_fpsPrevActive) {
+    if (activeList != st.prevActive) {
         if (!activeList.empty()) ScreenReader::Speak(("Party is now " + activeList + ".").c_str(), true);
-        s_fpsPrevActive = activeList;
-        s_fpsPrevCand = hKey;
+        st.prevActive = activeList;
+        st.prevCand = hKey;
         return;
     }
 
@@ -515,8 +402,8 @@ static void PollForcedPartySelect()
     // action item now highlighted (mirror of the reverse cue below).
     if (movedToBar) {
         ScreenReader::Speak(junction ? "Junction Exchange." : "Switch Member.", true);
-        s_fpsPrevOpt = junction ? "j" : "s";
-        s_fpsPrevCand = hKey;
+        st.prevOpt = junction ? "j" : "s";
+        st.prevCand = hKey;
         return;
     }
 
@@ -527,13 +414,29 @@ static void PollForcedPartySelect()
     // wants after picking Switch Member / Junction Exchange.
     if (returnedFromBar) {
         if (haveH) ScreenReader::Speak(hPhrase.c_str(), true);
-        s_fpsPrevCand = hKey;
+        st.prevCand = hKey;
         return;
     }
 
     // --- Cursor moved to a new entry ---
-    if (haveH && hKey != s_fpsPrevCand) {
+    if (haveH && hKey != st.prevCand) {
         ScreenReader::Speak(hPhrase.c_str(), true);
-        s_fpsPrevCand = hKey;
+        st.prevCand = hKey;
     }
 }
+
+// Forced party-select (game mode 10): the story-forced screen. Base offset 0.
+static void PollForcedPartySelect()
+{
+    if (ForcedPselGameMode() != 10) { if (s_fpsForced.annActive) ResetSwitchScreen(s_fpsForced); return; }
+    PollSwitchScreen(s_fpsForced, 0x00);
+}
+
+// Main-menu Switch (#65, menu mode 6): the SAME UI, working block shifted +0x78.
+// menu_tts.cpp gates entry (top cursor 6 && subsystem +0x1E8==10) and calls
+// ResetSwitchSubmenu on leaving, so the engine's entry/exit is driven by those
+// calls (no internal game-mode gate). This replaces the original GCW-only #65
+// implementation, giving the main menu the same memory-first cursor handling,
+// empty-slot announcements, and focus-driven action-bar cues as the forced screen.
+static void PollSwitchSubmenu()  { PollSwitchScreen(s_fpsMenu, 0x78); }
+static void ResetSwitchSubmenu() { ResetSwitchScreen(s_fpsMenu); }
