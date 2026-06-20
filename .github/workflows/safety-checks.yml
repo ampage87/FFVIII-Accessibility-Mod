@@ -172,3 +172,39 @@ jobs:
           python tests/gen_chase_fixture.py "Plan & Research Documents/ff8_walkmeshes.json" tests/chase_fixtures.h
           g++ -std=c++17 -O2 -o tests/chase_harness tests/chase_harness.cpp
           ./tests/chase_harness
+
+  world-map-harness:
+    name: World-map reachability harness (real geometry on committed grid)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Generate terrain fixture, compile the real geometry core, run the harness
+        run: |
+          echo "=== World-map reachability guard (#67 / world-map nav) ==="
+          echo ""
+          echo "Compiles the ACTUAL src/world_map_geometry.inl (engine-coord ->"
+          echo "segment mapping, per-vehicle traversability, BFS reachability)"
+          echo "against a committed snapshot of the wmx.obj terrain grid, and"
+          echo "asserts the Balamb continent's on-foot reachable set never"
+          echo "regresses: Balamb Garden, Balamb Town and Fire Cavern must stay"
+          echo "reachable; Dollet (on the Galbadian continent, across water) must"
+          echo "not; and exactly those three catalog locations may be reachable on"
+          echo "foot. The compile alone guards the geometry core's signatures; the"
+          echo "run hard-gates the Balamb invariant. Issue #67 changes this exact"
+          echo "math (the engine-coord -> grid mapping and the BFS), so the all-"
+          echo "continent work cannot silently strand the working Balamb nav."
+          echo ""
+          echo "The terrain grid is a baked snapshot, so this guards the mapping +"
+          echo "BFS against a known classification. A change to LoadTerrainGrid's"
+          echo "classification is verified in-game instead; re-capture the grid into"
+          echo "tests/world_map_terrain_grid.txt if that classification changes."
+          echo ""
+          python tests/gen_world_map_fixture.py tests/world_map_terrain_grid.txt tests/world_map_fixtures.h
+          g++ -std=c++17 -O2 -o tests/world_map_harness tests/world_map_harness.cpp
+          ./tests/world_map_harness

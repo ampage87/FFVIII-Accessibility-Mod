@@ -1,8 +1,13 @@
 # Generated at build/CI time from Plan & Research Documents/ff8_walkmeshes.json
 chase_fixtures.h
 
+# Generated at build/CI time from tests/world_map_terrain_grid.txt
+world_map_fixtures.h
+
 # Harness build outputs
 chase_harness
 chase_harness.exe
+world_map_harness
+world_map_harness.exe
 *.obj
 *.o

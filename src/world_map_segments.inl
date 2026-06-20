@@ -56,10 +56,9 @@ static uint8_t GetLocomotionMode()
     return mode;
 }
 
-// Forward declaration: GetVehicleType is defined later in this file (line ~1667)
-// alongside the rest of the vehicle classification helpers; we need it here
-// for GetWorldMapPosition_Active's vehicle dispatch.
-static VehicleType GetVehicleType(uint8_t mode);
+// GetVehicleType (and the rest of the coordinate / segment / BFS math) now
+// lives in world_map_geometry.inl, included before this file -- visible here
+// without a forward declaration.
 
 // ============================================================================
 // v0.14.103: GetWorldMapPosition_Active
@@ -204,18 +203,7 @@ static bool IsOnWorldMap()
     return (scene == 0);
 }
 
-// Wrap-aware distance calculation on a torus
-static double CalculateWrappedDistance(int32_t x1, int32_t y1, int32_t x2, int32_t y2)
-{
-    double dx = abs(x2 - x1);
-    double dy = abs(y2 - y1);
-    
-    // Check if wrapping gives shorter distance
-    if (dx > WM_WIDTH / 2)  dx = WM_WIDTH - dx;
-    if (dy > WM_HEIGHT / 2) dy = WM_HEIGHT - dy;
-    
-    return sqrt(dx * dx + dy * dy);
-}
+// CalculateWrappedDistance moved to world_map_geometry.inl (#67 test seam).
 
 // ============================================================================
 // File I/O helpers (v0.14.85, restored from v0.11.12 impl)
@@ -297,128 +285,13 @@ static bool WM_DecompressLZSS(const uint8_t* input, uint32_t inputSize,
 }
 
 // ============================================================================
-// Coordinate conversion: game world coords → segment grid (v0.14.85)
+// Coordinate / segment / vehicle / traversability math -> world_map_geometry.inl
 // ============================================================================
-// World map torus is 262144 x 196608, divided into a 32 x 24 grid of 8192-unit
-// segments. The X axis has a non-zero origin offset: per wmx.obj analysis,
-// game_X = seg_col * 8192 + 4096 - 131072. The +131072 below is the inverse
-// of that offset — without it, BFS starts in an ocean cell and filters
-// everything as unreachable. This was the v0.11.16 fix that finally made
-// terrain BFS work end-to-end ("Driving worked as expected!" — Aaron's BAT).
-// Y axis aligns naturally because the torus wrap absorbs any constant offset.
-static int WorldXToSegCol(int32_t x)
-{
-    int32_t shifted = x + 131072;
-    int32_t nx = ((shifted % 262144) + 262144) % 262144;
-    return (nx / 8192) % WMX_SEG_COLS;
-}
-
-static int WorldYToSegRow(int32_t y)
-{
-    int32_t ny = ((y % 196608) + 196608) % 196608;
-    return (ny / 8192) % WMX_SEG_ROWS;
-}
-
-// ============================================================================
-// Segment-to-world coordinate conversion (v0.14.94)
-// ============================================================================
-// Inverse of WorldXToSegCol/Row. Used by planner and drive when steering
-// toward a segment-center waypoint rather than a literal world coordinate.
-// Pulled into segments.inl with its sibling forward-coord conversions.
-// Convert a segment's center to world coordinates. Inverse of
-// WorldXToSegCol/Row:  world_x = col*8192 + 4096 - 131072,
-//                      world_y = row*8192 + 4096.
-// World map wraps both axes; for steering targets we emit the canonical
-// (un-wrapped) coordinate — TorusBearing handles wrap on its own.
-static void SegmentCenterToWorld(int col, int row, int32_t* outX, int32_t* outY)
-{
-    *outX = (int32_t)(col * 8192 + 4096) - 131072;
-    *outY = (int32_t)(row * 8192 + 4096);
-}
-
-// ============================================================================
-// Auto-drive helpers (v0.14.86)
-// ============================================================================
-// Bearing in native FF8 heading units (0-4095, 0=North, CW). Wrap-aware on
-// the world torus. Mirrors the math in AnnounceBearing but returns the raw
-// angle for the steering decision; AnnounceBearing converts to compass
-// directions for speech.
-static int TorusBearing(int32_t fromX, int32_t fromY, int32_t toX, int32_t toY)
-{
-    int32_t dx = toX - fromX;
-    int32_t dy = toY - fromY;
-    if (abs(dx) > (int32_t)WM_WIDTH / 2) {
-        if (dx > 0) dx -= (int32_t)WM_WIDTH;
-        else        dx += (int32_t)WM_WIDTH;
-    }
-    if (abs(dy) > (int32_t)WM_HEIGHT / 2) {
-        if (dy > 0) dy -= (int32_t)WM_HEIGHT;
-        else        dy += (int32_t)WM_HEIGHT;
-    }
-    // -dy because FF8 Y axis increases downward; atan2(dx, -dy) gives
-    // angle from +Y (North) clockwise, matching the heading convention.
-    double radians = atan2((double)dx, -(double)dy);
-    if (radians < 0) radians += 2.0 * 3.14159265358979;
-    int bearing = (int)(radians / (2.0 * 3.14159265358979) * 4096.0);
-    return bearing & 0xFFF;  // wrap to 0-4095
-}
-
-// ============================================================================
-// Vehicle classification (v0.14.85.3)
-// ============================================================================
-// Maps the raw locomotion byte to a coarse VehicleType used by reachability
-// rules. Conservative: only modes from the canonical list get non-foot
-// classifications. Unknown modes (including the transient mode 4 seen at
-// field-transition moments) default to VEH_ON_FOOT — safest for filtering
-// because the player IS likely on foot if they aren't in a known vehicle.
-static VehicleType GetVehicleType(uint8_t mode)
-{
-    if (mode == 0 || mode == 6) return VEH_ON_FOOT;       // Squall / Selphie foot
-    if (mode == 3)               return VEH_GARDEN;       // Ship: ocean access, BAT-validated v0.14.83
-    if (mode == 31)              return VEH_CHOCOBO;
-    if (mode >= 32 && mode <= 40) return VEH_CAR;
-    if (mode == 48)              return VEH_GARDEN;       // Garden mobile (ocean access)
-    if (mode == 50)              return VEH_RAGNAROK;     // No filter (flies anywhere)
-    return VEH_ON_FOOT;                                    // safe default for unknown / transient values
-}
-
-// Three BFS rule classes used by the v0.14.85.3 type-change-triggered rebuild:
-// 0 = land-only (foot, chocobo, car), 1 = ocean-allowed (Ship, Garden),
-// 2 = no-filter (Ragnarok). A rebuild only fires when the rule class
-// changes, so foot ↔ car ↔ chocobo transitions (all land-only) don't trigger
-// gratuitous rebuilds.
-static int GetBfsRuleClass(VehicleType v)
-{
-    if (v == VEH_RAGNAROK) return 2;
-    if (v == VEH_GARDEN)   return 1;
-    return 0;  // VEH_ON_FOOT, VEH_CHOCOBO, VEH_CAR all share land-only rules
-}
-
-// Whitelist of canonical locomotion-byte values. The byte at WM_LOCOMOTION
-// drifts through transient values (animation phase counters, field-transition
-// state, etc.) and announcing those would be noise. Only canonical values per
-// the research doc are eligible for vehicle-change announcements.
-static bool IsCanonicalLocomotion(uint8_t mode)
-{
-    return mode == 0 || mode == 3 || mode == 6 ||
-           mode == 31 ||
-           (mode >= 32 && mode <= 40) ||
-           mode == 48 || mode == 50;
-}
-
-// True iff the segment is reachable for the given vehicle. v0.14.103: 3-state
-// terrain classifier (LAND/FOREST/OCEAN). Foot/Chocobo can cross forest;
-// cars cannot (engine collision rejects forest entry from car locomotion
-// values 32-40). Garden/Ragnarok can cross any terrain.
-static bool IsSegmentTraversable(int row, int col, VehicleType veh)
-{
-    if (row < 0 || row >= WMX_SEG_ROWS || col < 0 || col >= WMX_SEG_COLS) return false;
-    uint8_t cell = s_terrainGrid[row][col];   // SegTerrainClass: 0=land, 1=forest, 2=ocean
-    if (veh == VEH_GARDEN || veh == VEH_RAGNAROK) return true;          // any segment
-    if (cell == SEG_OCEAN) return false;                                 // ocean blocks all non-Garden/Ragnarok
-    if (cell == SEG_FOREST && veh == VEH_CAR) return false;              // v0.14.103: cars can't enter forest
-    return true;                                                          // foot/chocobo on land or forest; car on land
-}
+// WorldXToSegCol, WorldYToSegRow, SegmentCenterToWorld, TorusBearing,
+// GetVehicleType, GetBfsRuleClass, IsCanonicalLocomotion and IsSegmentTraversable
+// were moved verbatim to world_map_geometry.inl (included before this file),
+// so the CI harness (tests/world_map_harness.cpp) can compile and guard the
+// engine-coord -> segment mapping and BFS rules on a host compiler. #67/#65.
 
 // ============================================================================
 // LoadTerrainGrid — reads wmx.obj from world.fs once at module init,

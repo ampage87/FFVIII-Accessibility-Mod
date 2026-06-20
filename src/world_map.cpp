@@ -59,6 +59,8 @@ namespace WorldMap {
 
 // .inl include chain. ORDER MATTERS:
 //   - state.inl first: declares types/state used by every later file.
+//   - geometry.inl: pure coord/segment/BFS math, no Win32/SEH so it is
+//     host-compilable; tests/world_map_harness.cpp guards it (#67/#65).
 //   - segments.inl: pure math, archive I/O.
 //   - trigger_data.inl: needs state.inl structs.
 //   - catalog.inl: defines LOCATION_COUNT used by planner.inl.
@@ -72,6 +74,7 @@ namespace WorldMap {
 //   - keys.inl last: calls StartAutoDrive + StopAutoDrive (drive.inl)
 //     and AnnounceLocation + AnnounceBearing (announce.inl).
 #include "world_map_state.inl"
+#include "world_map_geometry.inl"
 #include "world_map_segments.inl"
 #include "world_map_trigger_data.inl"
 #include "world_map_catalog.inl"

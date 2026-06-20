@@ -1,0 +1,36 @@
+// world_map_terrain_grid.txt - committed snapshot of the world-map terrain
+// classification, source for tests/gen_world_map_fixture.py.
+//
+// Lines beginning with // are comments. Data lines are exactly 32 characters
+// of: '#' = land, 'F' = forest, '~' = ocean. There must be exactly 24 data
+// lines (row 0 = north / top, col 0 = west / left).
+//
+// Captured from ff8_world.log under build v0.18.3.51 (the [TERRAIN] rowNN:
+// dump from LoadTerrainGrid). wmx.obj is static game data, so this is stable:
+//   [TERRAIN] Grid built: 185 land, 10 forest, 573 ocean (of 768).
+// Re-capture and replace these 24 lines if LoadTerrainGrid's classification
+// ever changes (e.g. a #67 terrain-classifier fix), then regenerate.
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~#~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~###~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~#~###~~###~~~~~~~
+~~~~~~~~~~~~~~~~#########~~#~~~~
+~~~~~~~~~~~##~~~~########~~##~~~
+~~~~~~~~~~~~##~~~~~~#~###~FF#~~~
+~~~~~~~~~~~~##~~~~~~~~##~~FFF#~~
+~~~~~~~#######~~~###~~~###~FF~~~
+~~~~~########F#~~~~~~~####~FF~~~
+~~~~##~########~~~~~~~#######~~~
+~~~#~~~~########~~~~~########~~~
+~~~~~~~~~###~~~~~~~~~########~~~
+~~~~~~~~~##~~~~~~~~~~###~###~~~~
+~~~~~~~~~#~~~~~~#~~~~###~~##~~~~
+~~~~~~~~~~~~~~~###~~~####~#~~~~~
+~~~~~~~~~~~~~#####~~~~##~##~~~~~
+~~~~~~~~~~~~##~~###~##~##~~~~~~~
+~~~~~~~~~~~~~#~###~~###~~~~~~~~~
+~~~~~~~~~~~~~#~~#~~~###~~~~~~~~~
+~~~~~~~~~~~~~###~#####~~~~~~~~~~
+~~~~~~~~~~~~~~########~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

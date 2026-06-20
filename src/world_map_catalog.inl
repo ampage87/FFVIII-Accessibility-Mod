@@ -90,59 +90,9 @@ static int FindLocationIndexByTargetCoords(int32_t tx, int32_t ty)
     return -1;
 }
 
-// ============================================================================
-// ComputeReachability — BFS flood-fill from player segment, populates
-// s_reachable[][] for the given vehicle's traversal rules. Restored from
-// v0.11.12 impl. 4-connected with torus wrapping.
-// ============================================================================
-static void ComputeReachability(int startCol, int startRow, VehicleType veh)
-{
-    memset(s_reachable, 0, sizeof(s_reachable));
-
-    if (startRow < 0 || startRow >= WMX_SEG_ROWS ||
-        startCol < 0 || startCol >= WMX_SEG_COLS) return;
-
-    // Player's current cell is always reachable.
-    s_reachable[startRow][startCol] = 1;
-
-    static int qCol[WMX_PLAYABLE_SEGS];
-    static int qRow[WMX_PLAYABLE_SEGS];
-    int qHead = 0, qTail = 0;
-    qCol[qTail] = startCol;
-    qRow[qTail] = startRow;
-    qTail++;
-
-    const int dx[] = { 0, 0, -1, 1 };
-    const int dy[] = { -1, 1, 0, 0 };
-
-    while (qHead < qTail) {
-        int cc = qCol[qHead];
-        int cr = qRow[qHead];
-        qHead++;
-
-        for (int d = 0; d < 4; d++) {
-            int nc = (cc + dx[d] + WMX_SEG_COLS) % WMX_SEG_COLS;
-            int nr = (cr + dy[d] + WMX_SEG_ROWS) % WMX_SEG_ROWS;
-
-            if (!s_reachable[nr][nc] && IsSegmentTraversable(nr, nc, veh)) {
-                s_reachable[nr][nc] = 1;
-                if (qTail < WMX_PLAYABLE_SEGS) {
-                    qCol[qTail] = nc;
-                    qRow[qTail] = nr;
-                    qTail++;
-                }
-            }
-        }
-    }
-
-    int reachCount = 0;
-    for (int r = 0; r < WMX_SEG_ROWS; r++)
-        for (int c = 0; c < WMX_SEG_COLS; c++)
-            if (s_reachable[r][c]) reachCount++;
-
-    Log::World("WorldMap: [BFS] From seg(%d,%d) veh=%d: %d/%d segments reachable",
-               startCol, startRow, (int)veh, reachCount, WMX_PLAYABLE_SEGS);
-}
+// ComputeReachability (BFS flood-fill -> s_reachable[][]) moved verbatim to
+// world_map_geometry.inl, included before this file. BuildDistanceCatalog
+// below calls it from there. Extracted for the #67/#65 host harness.
 
 // ============================================================================
 // Catalog management

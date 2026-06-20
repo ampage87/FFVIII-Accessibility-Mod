@@ -6,6 +6,46 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.52
+
+World map: lock in the working Balamb-continent navigation with a real-code CI regression guard, ahead of the #67 all-continent work. LOCAL build.
+
+Issue #67 (all-continent world-map navigation) is about to change the
+engine-coord -> segment mapping and the BFS reachability flood-fill. Those are
+exactly the functions that currently make on-foot navigation work on the Balamb
+continent, so before touching them we add a guard that fails loudly if a change
+strands Balamb.
+
+Pure extraction (no runtime behavior change):
+
+- The world-map coordinate / segment / BFS math is moved verbatim out of
+  world_map_segments.inl (WorldXToSegCol, WorldYToSegRow, SegmentCenterToWorld,
+  TorusBearing, GetVehicleType, GetBfsRuleClass, IsCanonicalLocomotion,
+  IsSegmentTraversable, CalculateWrappedDistance) and world_map_catalog.inl
+  (ComputeReachability) into a new src/world_map_geometry.inl.
+- geometry.inl is free of Win32, SEH, absolute-memory reads, and live game
+  state, so a host compiler (g++ on the CI runner) can compile it. It is
+  included right after world_map_state.inl, before every consumer, so the move
+  preserves declaration order and is behavior-identical.
+
+New CI guard (world-map-harness, mirrors the existing chase-harness):
+
+- tests/world_map_terrain_grid.txt: a committed snapshot of the wmx.obj terrain
+  classification (185 land / 10 forest / 573 ocean), captured from the
+  v0.18.3.51 [TERRAIN] log. wmx.obj is static game data, so it is stable.
+- tests/gen_world_map_fixture.py: bakes that grid into world_map_fixtures.h.
+- tests/world_map_harness.cpp: includes the REAL world_map_geometry.inl, seeds
+  the BFS from a Balamb on-foot position, and hard-asserts the on-foot reachable
+  set: Balamb Garden, Balamb Town and Fire Cavern reachable; Dollet (on the
+  Galbadian continent, across water) excluded; and exactly those three catalog
+  locations reachable on foot. The compile alone guards the geometry signatures.
+
+Verified in-container: harness PASS on the real grid, and a negative-control
+all-ocean grid correctly FAILs (Balamb Garden + Fire Cavern flip to unreachable).
+
+No runtime behavior change. BAT: build to confirm the extraction still links;
+world-map navigation should behave exactly as before.
+
 ## v0.18.3.51
 
 Menu: retire the Switch-screen discovery/diagnostic scaffolding for release (#65/#66). LOCAL build.
