@@ -6,6 +6,86 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.95
+
+World map (#69): diagnostics off for the push.
+
+Flipped `ROUTE_MAP_DIAG` from 1 to 0 in `world_map_planner.inl`, which silences the per-plan `[ROUTEMAP]`, `[ELEVSTEP]`, and `[ELEVMAP]` log dumps — the `DumpRouteMap` function and the elevation logs compile out, and the `elevBlockedEdges` counter stays `[[maybe_unused]]`. No behavior change: routing and the executor are identical to .94, which reached Dollet.
+
+This is the pre-push build. The #69 chain (.88 onward) is ready to land on main (v0.18.3.87) as one commit. The real wins are the .88 steepness-weighted planning and the .90 height-step guard, both general world-map routing improvements. The two Dollet hardcodes — the .81 coast patch and the .85 road-walkable override — are both kept, having been confirmed load-bearing; only the off-road penalty (already zero) was retired.
+
+## v0.18.3.94
+
+World map (#69): restore the road-walkable override — build 7, the real regression fix.
+
+Reading the initial plan instead of a re-plan settled the .92/.93 regression. From the same Galbadia save start that reached Dollet in .91, the .93 planner reported Dollet unreachable — a 14-cell path dead-ending 15 cells short, against the coast-patch wall. The only routing change from the working .91 build to the broken .93 was removing the .85 road-walkable override. The off-road penalty was already zero, so dropping it did nothing.
+
+The override is what makes the coast patch passable. The Timber→Dollet road runs straight through the patched box, and the override forces those road cells back to walkable, carving the corridor the route needs. Without it the patch walls the road off and cuts Dollet from the start. So both the coast patch and the override are load-bearing; only the off-road penalty was ever safe to retire.
+
+This build restores the override, putting routing back to the proven .91 state. Diagnostics stay on to confirm the plan reaches Dollet again. The lesson from #69's cleanup attempt: the height-step guard added in .90 genuinely improves general routing, but it does not replace the two Dollet hardcodes — both stay.
+
+## v0.18.3.93
+
+World map (#69): restore the Dollet coast patch — build 6, build-5 regression fix.
+
+Build 5 (v0.18.3.92) retired the coast patch on the theory that the height-step guard had made it redundant. The BAT regressed: with the patch gone, the clearance planner routed straight through the false-coast ledge — the exact box the patch used to block — and the on-foot drive wedged about 15km out, almost at the start. The guard was still working (it blocked 614 cliff edges and the cliff face still measured a ~1500-unit step), but the ledge is impassable in-game where its elevation is continuous, so the route enters it across a sub-threshold step the guard can't catch. That is the original #67 finding restated: no pure-geometry rule separates this ledge from real land. The height-step guard catches the cliff face, not the ledge approach.
+
+So the coast patch is load-bearing and is restored, along with its coordinate constants. The other two build-5 removals stay gone: the road-walkable override (the route map showed the western lane walkable without it) and the off-road penalty (already zero, a no-op). The net change from the last working build is only those two removals; routing is otherwise the proven path.
+
+Diagnostics stay on for this build to confirm the route is back on the western lane and avoids the re-blocked ledge. Once the far Galbadia→Dollet drive and a Balamb regression are clean, one more build silences the diagnostics and the whole #69 chain pushes as a single commit.
+
+## v0.18.3.92
+
+World map (#69): retire the road-crutch scaffolding — build 5, cleanup.
+
+Build 4 confirmed the height-step guard routes Galbadia→Dollet on its own with the road's cost preference gone, and a Balamb regression (Balamb Garden and Fire Cavern) still arrived. This build removes the three pieces of scaffolding the guard has made redundant.
+
+Gone: the v0.18.3.85 road-walkable override, which forced every road cell to walkable land; the v0.18.3.81 Dollet coast patch, the hardcoded box of cells around the false coast that were force-marked impassable, along with its coordinate constants; and the off-road penalty in the planner, which had already been zeroed in build 4 so removing it changes nothing.
+
+Kept: the height-step guard's road-to-road exemption. It only skips the cliff check between two cells that are both road — genuinely walkable ground across rendered height changes like bridges — and since nothing prefers road cells anymore it does no harm, so removing it would be an unnecessary risk.
+
+The meaningful change to verify is the coast-patch removal. Those ledge cells are now walkable nodes again, so the route relies entirely on the per-edge height-step guard to stay off them: the cliff edges onto the ledge are a ~1570-unit step against the 400 threshold, so they self-exclude. Diagnostics stay on for this build so the route map can confirm the ledge cells read as open land but carry no route. The far Galbadia→Dollet drive plus a Balamb regression are the test; once clean, one more build silences the diagnostics and the whole #69 chain pushes as a single commit.
+
+## v0.18.3.91
+
+World map (#69): retire the road's cost preference — build 4, the height-step guard now does the routing.
+
+Build 3 (mechanism 2, v0.18.3.90) proved the height-step guard: it blocked 629 cliff edges during planning, and the corridor diagnostic showed the real false-coast cliff is a 1570-unit adjacent step against a 400-unit threshold, with every walkable step along the successful route under 400. The threshold sits in a wide dead zone. But the route still leaned on the road: the v0.18.3.86 cost preference gave a road step cost 1 with no clearance penalty, so the road, not the guard, was steering the path.
+
+This build removes that preference. The road branch is gone from the planner's step cost — every cell now pays the same clearance-and-steepness cost — and the off-road penalty is zeroed. So the route is shaped entirely by terrain geometry: the height-step guard excludes the false-coast cliffs, the clearance penalty centers the corridor, and the steepness penalty pulls toward the flat valley floor. The road no longer gets a free pass.
+
+Three things stay in place for this build, to isolate the change: the height-step guard's road-to-road exemption, the v0.18.3.85 road-walkable override, and the v0.18.3.81 Dollet coast hardcode. They come out as cleanup in the next build once this one confirms the guard carries the route on its own. The test is the same far Galbadia→Dollet drive plus a Balamb regression — Dollet must still arrive and the route must still avoid every cliff cell, but now because the guard excluded them rather than because the road was cheaper.
+
+## v0.18.3.90
+
+World map (#69): height-step edge adjacency — build 3, MECHANISM 2, the core terrain-identification fix.
+
+Build 2 (WM_OFFROAD_PENALTY 40→20, v0.18.3.89) BAT'd clean: a far on-foot Galbadia→Dollet drive still threaded the canyon up the open lane to Dollet with no cut off the road onto a false-land cell, so halving the road's flat advantage did not regress routing.
+
+This build adds the mechanism #69 exists for. The 1024-unit grid is NODE-based — it asks "is this cell land?" — but a false coast is an EDGE problem: a flat beach cell sits next to a flat ledge cell, both read "land", but the step between them is an impassable cliff. The wmx vertex elevation was already read during the terrain load but collapsed into the per-cell steepness spread and discarded. Now a per-cell representative floor height (s_elevFine, the average of the polygon's three vertex elevations) is kept alongside s_steepFine, and the planner blocks an inter-cell edge whenever the absolute height difference between the two cells exceeds WM_CLIMB_STEP (400, tunable). A cliff then self-excludes geometrically, no matter what terrain type its cells claim to be.
+
+Road-to-road steps are exempt: the road overlay is ground-truth walkable across rendered height changes (ramps, bridges), and the exemption keeps the Timber→Dollet ribbon connected while WM_CLIMB_STEP is being calibrated — so an over-aggressive threshold cannot disconnect Dollet via the road. Stepping off the road onto a non-road cliff is still guarded, which is exactly where the false-land cuts happen.
+
+This is the geometry-based replacement that later builds will use to retire the road crutch (the v0.18.3.85 walkable override and v0.18.3.86 road-preference) and the v0.18.3.81 Dollet coast hardcode. Diagnostics (gated by ROUTE_MAP_DIAG): [ELEVSTEP] reports how many cliff edges the guard blocked during planning, and [ELEVMAP] reports the corridor's largest adjacent height step plus the start/destination cell elevations, so the real false-coast cliff magnitude is visible for calibrating WM_CLIMB_STEP.
+
+## v0.18.3.89
+
+World map (#69): lower WM_OFFROAD_PENALTY 40→20 — build 2 of road-free terrain identification.
+
+Build 1 (steepness-weighted planning, v0.18.3.88) BAT'd clean: a far (~13.2 km, dist=13235) on-foot Galbadia→Dollet drive threaded the canyon straight up the open lane to Dollet hugging the flat (steep≈0) floor with no detour onto blocked/steep cells, and arrived sweep-assisted (the #68 final-approach end-game, expected and tracked separately).
+
+This build begins retiring the road crutch. WM_OFFROAD_PENALTY — the flat penalty every non-road step pays on top of the clearance term — is halved from 40 to 20. The road stays clearance-exempt (cost 1) so it still wins the main corridor, but the smaller flat penalty lets steepness and clearance shape non-road routing more. It is deliberately conservative rather than going straight to 0: at 0 a flat open non-road cell would cost the same as a road cell, which could let the route cut off the road onto false-land cliffs (the original #67 failure) before the height-step edge-adjacency mechanism exists to guard against it. ROUTE_MAP_DIAG stays on to watch the route.
+
+## v0.18.3.88
+
+World map (#69): steepness-weighted planning — build 1 of road-free terrain identification.
+
+PlanPathFine now adds a steepness penalty (steepPen = s_steepFine / WM_STEEP_PENALTY_DIV, DIV=8) to the non-road step cost, so the clearance-weighted Dijkstra prefers the flat valley floor (steep≈0) — the terrain signal the road overlay was only ever a proxy for. The change is additive and conservative: road cells still cost 1 (untouched), so the road-following Galbadia→Dollet route cannot regress; the penalty only makes non-road routing prefer flatter ground, and on road-less continents (Balamb) every cell pays it but open ground is steep≈0, so the route is essentially unchanged.
+
+This is step 1 toward retiring the road crutch (the .85 road-walkable override + .86 road-preference) and the .81 DOLLET_COAST hardcode: subsequent builds lower WM_OFFROAD_PENALTY toward 0 and drop the .81 AABB to prove steepness alone holds the canyon. ROUTE_MAP_DIAG re-enabled so the BAT can see the route; set false before the #69 push. Arrival may still lean on the #68 re-plan/sweep fallbacks (executor end-game) — that is tracked separately; this build concerns the route, not the executor.
+
+Related: #69 (this workstream), #68 (executor end-game).
+
 ## v0.18.3.87
 
 World map (#67): yaw-based screen-relative 8-way on-foot steering — the executor fix the road work isolated.

@@ -623,26 +623,36 @@ static bool    s_walkGridLoaded = false;
 static uint16_t s_steepFine[WM_FINE_ROWS][WM_FINE_COLS];
 static const uint16_t WM_MTN_STEEP_BLOCK = 256;
 
-// #67 v0.18.3.81: Dollet false-coast no-walk patch bounds (world-coord AABB).
-// The thin coastal cliff ledge SE of Dollet (between the mountain and the bay)
-// reads as walkable LAND in wmx but is impassable on foot in-game; the route
-// planner shortcut straight up it and wedged the on-foot drive (issue #67). No
-// geometric rule -- terrain class, steepness, clearance, OR grid resolution --
-// separates this ledge from genuine land (validated offline across 7 distinct
-// rules: blanket cliff-blocking and coastal-ledge-blocking both DISCONNECT
-// Dollet from the same-continent start; 512-res reconnects the road but breaks
-// the Balamb Town->Fire Cavern regression; road-attraction reroutes only with
-// the clearance penalty disabled and is parameter-fragile). The difference
-// exists only in the engine's live collision, which offline geometry cannot
-// recover. Dollet is a one-off (coast on one side, the Timber->Dollet canyon
-// road on the other), so LoadTerrainGrid (segments.inl) marks this AABB
-// impassable by coordinate -- the surgical fix that cannot disconnect anything
-// elsewhere on the map. Bounds cover the ledge between Squall's wedge
-// (-24252,-26310) and Dollet (-15639,-39437); the canyon road to the WEST
-// stays open, so the clearance-weighted planner routes up the canyon and Dollet
-// remains reachable (both offline-validated against the live planner cost).
-// Expressed as world coords and converted via the same WorldX/YToFine* mapping
-// as everything else, so a future coordinate-mapping change can't desync it.
+// #69 v0.18.3.90 (mechanism 2): per-fine-cell ABSOLUTE elevation = the average
+// of the three vertex elevations (vwz, the int16 -z mesh value) of the wmx
+// polygon whose centre is in the cell. DISTINCT from s_steepFine, which is the
+// WITHIN-cell elevation SPREAD; s_elevFine is the cell's representative floor
+// height, used to detect the height STEP BETWEEN adjacent cells. A false coast
+// reads as walkable LAND per-cell but is a cliff at the EDGE between a beach
+// cell and a ledge cell -- the grid is NODE-based, the cliff is an EDGE -- so
+// per-cell class/steepness cannot see it. The planner blocks an inter-cell edge
+// when |s_elevFine[a]-s_elevFine[b]| > WM_CLIMB_STEP, so the cliff self-excludes
+// even though both cells are "land". This is the geometry-based replacement for
+// the .85/.86 road crutch + the .81 Dollet AABB. Sign of vwz is irrelevant --
+// only the absolute difference between adjacent cells matters.
+static int16_t s_elevFine[WM_FINE_ROWS][WM_FINE_COLS];
+// Max walkable inter-cell height step. Above this, a cell-to-cell edge is a
+// cliff and is blocked. TUNABLE and not yet calibrated against the wmx
+// elevation scale -- starting at 400 (above Dollet's walkable spread ~301, low
+// enough to catch a real coastal cliff). The road exemption (road-to-road steps
+// are never blocked) keeps the Timber->Dollet ribbon connected regardless, so
+// an over-aggressive value cannot disconnect Dollet via the road while the
+// [ELEVMAP] dump reveals the real cliff-step magnitude for calibration.
+static const int WM_CLIMB_STEP = 400;
+
+// #67 v0.18.3.81 (RESTORED v0.18.3.93): Dollet false-coast no-walk patch bounds
+// (world-coord AABB). Build 5 (.92) retired these; the .92 BAT regressed (the
+// clearance planner routed through the un-blocked ledge and wedged ~15km out),
+// because the height-step guard catches the cliff face but not the ledge's
+// continuous-elevation approach -- the original #67 "no geometric rule
+// separates this ledge from real land" finding. So the patch + these bounds
+// STAY. The ledge SE of Dollet reads as walkable LAND in wmx but is impassable
+// on foot in-game; the canyon road one cell WEST is the real approach.
 static const int32_t DOLLET_COAST_X0 = -24576;   // -> fine col 104 (west edge)
 static const int32_t DOLLET_COAST_X1 = -17408;   // -> fine col 111 (east edge)
 static const int32_t DOLLET_COAST_Y0 = -37888;   // -> fine row 59 (north edge)

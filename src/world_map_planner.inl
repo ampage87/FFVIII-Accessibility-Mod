@@ -495,6 +495,17 @@ static void DumpRouteMap(int startR, int startC, int goalR, int goalC,
         line[n] = '\0';
         Log::World("WorldMap: [ROUTEMAP] r%03d %s", r, line);
     }
+    // #69 mechanism 2: report the largest inter-cell elevation step in the
+    // dumped window + where, so WM_CLIMB_STEP can be calibrated against the
+    // real false-coast cliff height (the Dollet corridor is in this window).
+    int maxStep = 0, msr = minR, msc = minC;
+    for (int rr = minR; rr <= maxR; rr++)
+        for (int cc2 = minC; cc2 <= maxC; cc2++) {
+            if (cc2 + 1 <= maxC) { int s = (int)s_elevFine[rr][cc2] - (int)s_elevFine[rr][cc2+1]; if (s < 0) s = -s; if (s > maxStep) { maxStep = s; msr = rr; msc = cc2; } }
+            if (rr + 1 <= maxR) { int s = (int)s_elevFine[rr][cc2] - (int)s_elevFine[rr+1][cc2]; if (s < 0) s = -s; if (s > maxStep) { maxStep = s; msr = rr; msc = cc2; } }
+        }
+    Log::World("WorldMap: [ELEVMAP] window max adjacent elev-step=%d at fine(%d,%d) (WM_CLIMB_STEP=%d); elev S=%d D=%d",
+               maxStep, msc, msr, WM_CLIMB_STEP, (int)s_elevFine[startR][startC], (int)s_elevFine[tgtR][tgtC]);
 }
 #endif
 
@@ -516,13 +527,19 @@ static void DumpRouteMap(int startR, int startC, int goalR, int goalC,
 // also dissolves the segment-centre overshoot. Decimated by stride if it would
 // exceed DRIVE_PATH_MAX (real intra-continent paths are far shorter).
 //
-// #67 v0.18.3.86: flat extra cost charged for stepping onto any NON-road fine
-// cell, so the clearance-weighted Dijkstra prefers the ground-truth road. High
-// enough that a multi-cell off-road shortcut always loses to the road detour;
-// finite so non-road terrain stays usable where no road runs (start/end hops,
-// road-less continents -- where, with no road cells competing, every step pays
-// the same flat penalty and the route is unchanged). Tunable.
-static const uint32_t WM_OFFROAD_PENALTY = 40;
+// #69 v0.18.3.92: WM_OFFROAD_PENALTY (the .86 flat road/non-road cost split)
+// is RETIRED -- it was already 0 since build 4 (.91), so removing it is a
+// no-op. The route is shaped by clearance + steepness + the height-step guard;
+// nothing prefers road cells anymore. (Rationale history is in git / CHANGELOG.)
+
+// #69 v0.18.3.88: STEEPNESS PENALTY. The route should follow the flat valley
+// floor (steep~=0) because the terrain IS a corridor, not because a road runs
+// through it -- the road was only ever a proxy for the flat floor. Charge a
+// per-step cost proportional to the cell's steepness so the clearance-weighted
+// Dijkstra prefers flatter ground. Divisor scales s_steepFine (walkable cells
+// span ~0..400; blocked walls are already excluded) into the existing cost
+// band (offroad=40, clearance<=100). Tunable; SMALLER = stronger floor-pull.
+static const uint32_t WM_STEEP_PENALTY_DIV = 8;
 
 static bool PlanPathFine(int startCol, int startRow, VehicleType veh)
 {
@@ -610,6 +627,7 @@ static bool PlanPathFine(int startCol, int startRow, VehicleType veh)
     int bestR = startRow, bestC = startCol;
     int bestDist = abs(startRow - tgtRow) + abs(startCol - tgtCol);
     int expanded = 0;
+    [[maybe_unused]] int elevBlockedEdges = 0;   // #69 mechanism 2: cliff edges the height-step guard skipped (read only under ROUTE_MAP_DIAG)
     const int dc4[] = { 0, 0, -1, 1 };
     const int dr4[] = { -1, 1, 0, 0 };
     uint32_t curCost; int curIdx;
@@ -624,24 +642,38 @@ static bool PlanPathFine(int startCol, int startRow, VehicleType veh)
             int nr = (((cr + dr4[d]) % WM_FINE_ROWS) + WM_FINE_ROWS) % WM_FINE_ROWS;
             int nc = (((cc + dc4[d]) % WM_FINE_COLS) + WM_FINE_COLS) % WM_FINE_COLS;
             if (!IsFineTraversable(s_walkClassFine[nr][nc], s_steepFine[nr][nc], veh)) continue;
-            // #67 v0.18.3.86: ROAD-PREFERENCE. The road (s_roadFine) is the
-            // ground-truth-walkable Timber->Dollet ribbon, so prefer it
-            // strongly: a road step costs 1 with NO clearance penalty (the
-            // road needs no corridor-centering -- it IS the corridor), while a
-            // non-road step pays the clearance penalty PLUS the flat off-road
-            // penalty. This makes the route FOLLOW the road's bends instead of
-            // cutting straight up the false-land cliff the .85 BAT wedged on
-            // (the route left the road at fine(101,63) -- land -- exactly where
-            // the road jogs east to cols 104-107).
-            uint32_t stepCost;
-            if (s_roadFine[nr][nc]) {
-                stepCost = 1u;
-            } else {
-                int clrPen = WM_CLEAR_TARGET - (int)s_clearFine[nr][nc];
-                if (clrPen < 0) clrPen = 0;
-                stepCost = 1u + (uint32_t)(WM_CLEAR_PENALTY * clrPen)
-                              + WM_OFFROAD_PENALTY;
+            // #69 v0.18.3.90 (mechanism 2): HEIGHT-STEP EDGE GUARD. A false
+            // coast reads as walkable LAND per-cell but is a cliff at the EDGE
+            // between this cell and the neighbour -- the grid is NODE-based, the
+            // cliff is an EDGE. Block the step when the absolute floor-height
+            // difference exceeds WM_CLIMB_STEP, so the cliff self-excludes even
+            // though both cells are "land". Road-to-road steps are EXEMPT (the
+            // road is ground-truth walkable across rendered height changes like
+            // ramps/bridges; stepping OFF the road onto a non-road cliff is
+            // still guarded). The road exemption also keeps the Dollet ribbon
+            // connected while WM_CLIMB_STEP is being calibrated.
+            if (!(s_roadFine[cr][cc] && s_roadFine[nr][nc])) {
+                int elevStep = (int)s_elevFine[cr][cc] - (int)s_elevFine[nr][nc];
+                if (elevStep < 0) elevStep = -elevStep;
+                if (elevStep > WM_CLIMB_STEP) { elevBlockedEdges++; continue; }
             }
+            // #69 v0.18.3.91 (build 4): ROAD COST-PREFERENCE RETIRED. The road
+            // branch (road step = cost 1, clearance-exempt) is gone: EVERY cell
+            // now pays the same clearance + steepness cost, so the route is
+            // shaped by terrain GEOMETRY -- the height-step guard above excludes
+            // the false-coast cliffs, the clearance penalty centres the corridor,
+            // and the steepness penalty pulls to the flat floor. The road no
+            // longer gets a free pass; mechanism 2 (+ clearance + steepness)
+            // carries the route. WM_OFFROAD_PENALTY is now 0 (the road/non-road
+            // distinction it encoded is retired); the term is kept one build so
+            // the diff is isolated, removed in build 5. (The .85 road-walkable
+            // override + .81 Dollet AABB also stay this build -- dropped as
+            // cleanup in build 5 once this BAT proves the guard holds alone.)
+            int clrPen = WM_CLEAR_TARGET - (int)s_clearFine[nr][nc];
+            if (clrPen < 0) clrPen = 0;
+            uint32_t steepPen = (uint32_t)s_steepFine[nr][nc] / WM_STEEP_PENALTY_DIV;
+            uint32_t stepCost = 1u + (uint32_t)(WM_CLEAR_PENALTY * clrPen)
+                                   + steepPen;
             uint32_t nd = curCost + stepCost;
             if (nd < dist[nr][nc]) {
                 dist[nr][nc]   = nd;
@@ -687,6 +719,8 @@ static bool PlanPathFine(int startCol, int startRow, VehicleType veh)
     Log::World("WorldMap: [PLAN] Fine path: %d cells from fine(%d,%d) to fine(%d,%d) (nearest reachable to target fine(%d,%d), dist=%d, expanded %d, veh=%d, clearance-weighted)",
                s_drivePathLen, startCol, startRow, goalC, goalR, tgtCol, tgtRow, bestDist, expanded, (int)veh);
 #if ROUTE_MAP_DIAG
+    Log::World("WorldMap: [ELEVSTEP] #69 mechanism 2 height-step guard: blocked %d cliff edges during expansion (WM_CLIMB_STEP=%d)",
+               elevBlockedEdges, WM_CLIMB_STEP);
     DumpRouteMap(startRow, startCol, goalR, goalC, tgtRow, tgtCol, veh);
 #endif
     return true;

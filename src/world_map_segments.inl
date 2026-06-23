@@ -315,7 +315,8 @@ static uint8_t s_roadFine[WM_FINE_ROWS][WM_FINE_COLS];
 // far-north wrap seam is ocean and loses nothing). Point-in-triangle uses int64
 // cross-product signs.
 static void RasterizeTriFine(int32_t ax, int32_t ay, int32_t bx, int32_t by,
-                             int32_t cx, int32_t cy, uint8_t cls, uint16_t steep)
+                             int32_t cx, int32_t cy, uint8_t cls, uint16_t steep,
+                             int16_t elev)
 {
     int32_t minx = ax < bx ? (ax < cx ? ax : cx) : (bx < cx ? bx : cx);
     int32_t maxx = ax > bx ? (ax > cx ? ax : cx) : (bx > cx ? bx : cx);
@@ -340,6 +341,7 @@ static void RasterizeTriFine(int32_t ax, int32_t ay, int32_t bx, int32_t by,
             if (!(neg && pos)) {
                 s_walkClassFine[gy][gx] = cls;
                 s_steepFine[gy][gx]     = steep;
+                s_elevFine[gy][gx]      = elev;   // #69 mechanism 2: per-cell floor height
             }
         }
     }
@@ -482,6 +484,7 @@ static bool LoadTerrainGrid()
     // #67: fine grid starts all-ocean; non-ocean polygons rasterize over it.
     memset(s_walkClassFine, SEG_OCEAN, sizeof(s_walkClassFine));
     memset(s_steepFine, 0, sizeof(s_steepFine));   // #67 BAT 2: 0 = flat = never blocks
+    memset(s_elevFine, 0, sizeof(s_elevFine));     // #69 mechanism 2: 0 = baseline floor
     memset(s_roadFine, 0, sizeof(s_roadFine));     // #67 v0.18.3.84: road overlay
     int terrainHist[256] = {};                      // #67 v0.18.3.84: terrain-type tally
     int oceanSegs = 0, forestSegs = 0, landSegs = 0;
@@ -562,8 +565,12 @@ static bool LoadTerrainGrid()
                         int16_t emax = e0 > e1 ? (e0 > e2 ? e0 : e2) : (e1 > e2 ? e1 : e2);
                         int16_t emin = e0 < e1 ? (e0 < e2 ? e0 : e2) : (e1 < e2 ? e1 : e2);
                         uint16_t steep = (uint16_t)(emax - emin);
+                        // #69 mechanism 2: per-cell representative floor height
+                        // = poly average vertex elevation (for the planner's
+                        // height-step edge-adjacency guard).
+                        int16_t elev = (int16_t)(((int32_t)e0 + e1 + e2) / 3);
                         RasterizeTriFine(vwx[i0], vwy[i0], vwx[i1], vwy[i1],
-                                         vwx[i2], vwy[i2], cls, steep);
+                                         vwx[i2], vwy[i2], cls, steep, elev);
                     }
                 }
 
@@ -600,14 +607,22 @@ static bool LoadTerrainGrid()
         }
     }
 
-    // #67 v0.18.3.81: Dollet false-coast no-walk patch (hardcoded; rationale +
-    // bounds in DOLLET_COAST_* in state.inl). Applied AFTER rasterization and
-    // BEFORE the clearance BFS below so clearance, reachability, and the planner
-    // all treat the ledge as a wall. Marked as forced-steep MOUNTAIN so the
-    // existing foot/car block rule (cls==SEG_MOUNTAIN && steep>WM_MTN_STEEP_BLOCK)
-    // catches it with no change to IsFineTraversable; Garden/Ragnarok bypass the
-    // fine grid, so they are unaffected. Converted from the world-coord AABB via
-    // the same fine-cell mapping as the rest of the module.
+    // #67 v0.18.3.81 (RESTORED v0.18.3.93): Dollet false-coast no-walk patch
+    // (hardcoded; bounds in DOLLET_COAST_* in state.inl). Build 5 (.92) retired
+    // this on the theory that mechanism 2 (the height-step edge guard) excluded
+    // the ledge from geometry -- but the .92 BAT REGRESSED: with the patch gone
+    // the clearance planner routed straight through the ex-ledge (cols 104-110)
+    // and wedged ~15km out. The guard catches the cliff FACE (~1500-unit step)
+    // but NOT the ledge's in-game impassability where its elevation is
+    // continuous -- exactly the original #67 finding that no pure-geometry rule
+    // separates this ledge from real land. So the patch is load-bearing and
+    // STAYS. (The .85 road-walkable override + WM_OFFROAD_PENALTY were also
+    // retired in .92 and STAY retired -- the .92 [ROUTEMAP] showed the west lane
+    // walkable without the override, and the route avoids the ledge once this
+    // patch re-blocks it.) Applied AFTER rasterization, BEFORE the clearance BFS
+    // so clearance/reachability/planner all treat the ledge as a wall; marked
+    // forced-steep MOUNTAIN so the foot/car block rule catches it with no change
+    // to IsFineTraversable; Garden/Ragnarok bypass the fine grid.
     {
         int pc0 = WorldXToFineCol(DOLLET_COAST_X0), pc1 = WorldXToFineCol(DOLLET_COAST_X1);
         int pr0 = WorldYToFineRow(DOLLET_COAST_Y0), pr1 = WorldYToFineRow(DOLLET_COAST_Y1);
@@ -628,16 +643,19 @@ static bool LoadTerrainGrid()
                    (int)DOLLET_COAST_X0, (int)DOLLET_COAST_X1, (int)DOLLET_COAST_Y0, (int)DOLLET_COAST_Y1);
     }
 
-    // #67 v0.18.3.85: ROAD is ground-truth walkable. After rasterization AND
-    // the .81 false-coast patch, force every road cell (s_roadFine) to a
-    // walkable class with steep=0, so the road OVERRIDES both steep-mountain
-    // misclassification and the .81 patch wherever they fall on the road. The
-    // .84 [ROADMAP] dump proved the Timber->Dollet road is one continuous
-    // ribbon our grid was breaking -- the .81 patch alone blocked the road
-    // across cols[104..111] rows[59..69]. Non-road cells (incl. the rest of
-    // the false ledge) keep their classification, so ONLY the road reconnects.
-    // Applied BEFORE the clearance BFS below so clearance/reachability/planner
-    // all see the road as the open corridor through the cliff pinch.
+    // #67 v0.18.3.85 (RESTORED v0.18.3.94): ROAD is ground-truth walkable. After
+    // rasterization AND the .81 false-coast patch, force every road cell
+    // (s_roadFine) to a walkable class with steep=0, so the road OVERRIDES both
+    // steep-mountain misclassification and the .81 patch wherever they fall on
+    // the road. The Timber->Dollet road runs THROUGH the .81 box (cols 104-111
+    // rows 59-69); the .81 patch alone walls it off and DISCONNECTS Dollet from
+    // the start (proven: .93 retired this override and Dollet went unreachable,
+    // 14-cell path to a dead-end 15 cells short). Non-road cells (incl. the rest
+    // of the false ledge) keep their classification, so ONLY the road reconnects
+    // -- this is the carve-back that makes the .81 box passable along the road.
+    // Applied BEFORE the clearance BFS so clearance/reachability/planner all see
+    // the road as the open corridor through the cliff pinch. LOAD-BEARING; do
+    // NOT retire (the .92/.93 cleanup wrongly did and regressed).
     {
         int forcedRoad = 0, wasBlk = 0;
         for (int r = 0; r < WM_FINE_ROWS; r++)
