@@ -66,8 +66,11 @@ static const LocationEntry s_locations[] = {
     {"Alien Ship 3",              -12952,  -10202},
     {"Alien Ship 4",              -48806,    5808},
 
-    // Fire Cavern (early-game dungeon on Balamb Island)
-    {"Fire Cavern",                36864,  -28672}
+    // Fire Cavern (early-game dungeon on Balamb Island). #67: corrected from
+    // the speedrun-sourced placeholder (36864,-28672), which sits in open
+    // ocean ~5120 units off the continent (so the accurate fine-grid filter
+    // would wrongly drop it), to the real on-continent coordinate.
+    {"Fire Cavern",                30326,  -29221}
 };
 static const int LOCATION_COUNT = sizeof(s_locations) / sizeof(s_locations[0]);
 
@@ -137,29 +140,30 @@ static void BuildDistanceCatalog()
         }
     }
 
-    if (!s_terrainLoaded) {
+    if (!s_walkGridLoaded) {
         s_catalogCount = LOCATION_COUNT;
-        Log::World("WorldMap: [BFS] Terrain not loaded — catalog unfiltered (%d entries)",
+        Log::World("WorldMap: [BFS] Fine walk grid not loaded — catalog unfiltered (%d entries)",
                    s_catalogCount);
     } else {
-        VehicleType veh   = GetVehicleType(GetLocomotionMode());
-        int         pCol  = WorldXToSegCol(px);
-        int         pRow  = WorldYToSegRow(py);
-        Log::World("WorldMap: [BFS] Player at (%d,%d) -> seg(%d,%d), vehicle type %d",
-                   px, py, pCol, pRow, (int)veh);
+        VehicleType veh = GetVehicleType(GetLocomotionMode());
+        int         pfc = WorldXToFineCol(px);
+        int         pfr = WorldYToFineRow(py);
+        Log::World("WorldMap: [BFS] Player at (%d,%d) -> fine(col=%d,row=%d), vehicle type %d",
+                   px, py, pfc, pfr, (int)veh);
 
         if (veh == VEH_RAGNAROK) {
             s_catalogCount = LOCATION_COUNT;
             Log::World("WorldMap: [BFS] Ragnarok mode — catalog unfiltered (%d entries)",
                        s_catalogCount);
         } else {
-            ComputeReachability(pCol, pRow, veh);
+            // #67: continuous flood-fill over the fine rasterized walk grid
+            // replaces the 32x24 segment BFS. A location is kept if its fine
+            // cell (or an immediate neighbour, for coastal slop) is reachable.
+            ComputeReachabilityFine(pfc, pfr, veh);
 
             int kept = 0;
             for (int i = 0; i < LOCATION_COUNT; i++) {
-                int locCol = WorldXToSegCol(s_catalog[i].x);
-                int locRow = WorldYToSegRow(s_catalog[i].y);
-                if (s_reachable[locRow][locCol]) {
+                if (IsFineCellReachable(s_catalog[i].x, s_catalog[i].y)) {
                     if (kept != i) s_catalog[kept] = s_catalog[i];
                     kept++;
                 }

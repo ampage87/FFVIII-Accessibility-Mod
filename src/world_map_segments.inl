@@ -294,6 +294,98 @@ static bool WM_DecompressLZSS(const uint8_t* input, uint32_t inputSize,
 // engine-coord -> segment mapping and BFS rules on a host compiler. #67/#65.
 
 // ============================================================================
+// #67 v0.18.3.84: ROAD overlay -- s_roadFine marks fine cells covered by a
+// road/railroad polygon (wmx terrain 27/28). The road is the one mesh tag that
+// is both reliably walkable AND runs exactly Timber->Dollet, so we use it to
+// route through the mountains (bypassing cliff-vs-land misclassification) and
+// as ground-truth to refine the terrain grid. Declared here for now; migrates
+// to world_map_state.inl when the planner consumes it (build 2).
+// ============================================================================
+#define ROAD_MAP_DIAG 0
+static uint8_t s_roadFine[WM_FINE_ROWS][WM_FINE_COLS];
+
+// ============================================================================
+// #67: RasterizeTriFine -- rasterize one wmx triangle into s_walkClassFine.
+// ============================================================================
+// Writes `cls` (and its `steep`ness) into every fine cell whose CENTRE lies
+// inside the triangle and is still SEG_OCEAN (first non-ocean polygon
+// containing the centre wins; a proper mesh puts each cell centre in exactly
+// one triangle, so conflicts are edge-only and negligible). Coordinates are raw
+// mesh world units; the cell index is clamped to the grid (the far-east /
+// far-north wrap seam is ocean and loses nothing). Point-in-triangle uses int64
+// cross-product signs.
+static void RasterizeTriFine(int32_t ax, int32_t ay, int32_t bx, int32_t by,
+                             int32_t cx, int32_t cy, uint8_t cls, uint16_t steep)
+{
+    int32_t minx = ax < bx ? (ax < cx ? ax : cx) : (bx < cx ? bx : cx);
+    int32_t maxx = ax > bx ? (ax > cx ? ax : cx) : (bx > cx ? bx : cx);
+    int32_t miny = ay < by ? (ay < cy ? ay : cy) : (by < cy ? by : cy);
+    int32_t maxy = ay > by ? (ay > cy ? ay : cy) : (by > cy ? by : cy);
+
+    int gx0 = (int)(minx / WM_FINE_CELL); if (gx0 < 0) gx0 = 0;
+    int gx1 = (int)(maxx / WM_FINE_CELL); if (gx1 > WM_FINE_COLS - 1) gx1 = WM_FINE_COLS - 1;
+    int gy0 = (int)(miny / WM_FINE_CELL); if (gy0 < 0) gy0 = 0;
+    int gy1 = (int)(maxy / WM_FINE_CELL); if (gy1 > WM_FINE_ROWS - 1) gy1 = WM_FINE_ROWS - 1;
+
+    for (int gy = gy0; gy <= gy1; gy++) {
+        for (int gx = gx0; gx <= gx1; gx++) {
+            if (s_walkClassFine[gy][gx] != SEG_OCEAN) continue;   // first non-ocean wins
+            int32_t pcx = gx * WM_FINE_CELL + WM_FINE_CELL / 2;
+            int32_t pcy = gy * WM_FINE_CELL + WM_FINE_CELL / 2;
+            int64_t d1 = (int64_t)(pcx - bx) * (ay - by) - (int64_t)(ax - bx) * (pcy - by);
+            int64_t d2 = (int64_t)(pcx - cx) * (by - cy) - (int64_t)(bx - cx) * (pcy - cy);
+            int64_t d3 = (int64_t)(pcx - ax) * (cy - ay) - (int64_t)(cx - ax) * (pcy - ay);
+            bool neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+            bool pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+            if (!(neg && pos)) {
+                s_walkClassFine[gy][gx] = cls;
+                s_steepFine[gy][gx]     = steep;
+            }
+        }
+    }
+}
+
+// ============================================================================
+// #67 v0.18.3.84: RasterizeTriRoad -- flag fine cells covered by a road poly
+// into s_roadFine (overlay; no first-wins gate, roads sit on top of land). In
+// addition to the centre-in-triangle test, the three vertex cells and the
+// centroid cell are flagged unconditionally, so a road ribbon narrower than a
+// 1024-unit cell still registers instead of falling between cell centres.
+// ============================================================================
+static void RasterizeTriRoad(int32_t ax, int32_t ay, int32_t bx, int32_t by,
+                             int32_t cx, int32_t cy)
+{
+    int32_t vtx[4][2] = { {ax,ay}, {bx,by}, {cx,cy},
+                          {(ax+bx+cx)/3, (ay+by+cy)/3} };
+    for (int i = 0; i < 4; i++) {
+        int gx = (int)(vtx[i][0] / WM_FINE_CELL);
+        int gy = (int)(vtx[i][1] / WM_FINE_CELL);
+        if (gx >= 0 && gx < WM_FINE_COLS && gy >= 0 && gy < WM_FINE_ROWS)
+            s_roadFine[gy][gx] = 1;
+    }
+    int32_t minx = ax < bx ? (ax < cx ? ax : cx) : (bx < cx ? bx : cx);
+    int32_t maxx = ax > bx ? (ax > cx ? ax : cx) : (bx > cx ? bx : cx);
+    int32_t miny = ay < by ? (ay < cy ? ay : cy) : (by < cy ? by : cy);
+    int32_t maxy = ay > by ? (ay > cy ? ay : cy) : (by > cy ? by : cy);
+    int gx0 = (int)(minx / WM_FINE_CELL); if (gx0 < 0) gx0 = 0;
+    int gx1 = (int)(maxx / WM_FINE_CELL); if (gx1 > WM_FINE_COLS - 1) gx1 = WM_FINE_COLS - 1;
+    int gy0 = (int)(miny / WM_FINE_CELL); if (gy0 < 0) gy0 = 0;
+    int gy1 = (int)(maxy / WM_FINE_CELL); if (gy1 > WM_FINE_ROWS - 1) gy1 = WM_FINE_ROWS - 1;
+    for (int gy = gy0; gy <= gy1; gy++) {
+        for (int gx = gx0; gx <= gx1; gx++) {
+            int32_t pcx = gx * WM_FINE_CELL + WM_FINE_CELL / 2;
+            int32_t pcy = gy * WM_FINE_CELL + WM_FINE_CELL / 2;
+            int64_t d1 = (int64_t)(pcx - bx) * (ay - by) - (int64_t)(ax - bx) * (pcy - by);
+            int64_t d2 = (int64_t)(pcx - cx) * (by - cy) - (int64_t)(bx - cx) * (pcy - cy);
+            int64_t d3 = (int64_t)(pcx - ax) * (cy - ay) - (int64_t)(cx - ax) * (pcy - ay);
+            bool neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+            bool pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+            if (!(neg && pos)) s_roadFine[gy][gx] = 1;
+        }
+    }
+}
+
+// ============================================================================
 // LoadTerrainGrid — reads wmx.obj from world.fs once at module init,
 // classifies each of 768 playable segments as LAND or OCEAN by polygon
 // terrain types. Restored from v0.11.12 impl.
@@ -387,6 +479,11 @@ static bool LoadTerrainGrid()
     // counting forest polygons (terrain values 0-5) alongside ocean polygons
     // (32-34). Majority-of-polygons rule with priority: ocean > forest > land.
     memset(s_terrainGrid, 0, sizeof(s_terrainGrid));
+    // #67: fine grid starts all-ocean; non-ocean polygons rasterize over it.
+    memset(s_walkClassFine, SEG_OCEAN, sizeof(s_walkClassFine));
+    memset(s_steepFine, 0, sizeof(s_steepFine));   // #67 BAT 2: 0 = flat = never blocks
+    memset(s_roadFine, 0, sizeof(s_roadFine));     // #67 v0.18.3.84: road overlay
+    int terrainHist[256] = {};                      // #67 v0.18.3.84: terrain-type tally
     int oceanSegs = 0, forestSegs = 0, landSegs = 0;
     int totalRealPolys = 0, totalOceanPolys = 0, totalForestPolys = 0;
 
@@ -406,18 +503,44 @@ static bool LoadTerrainGrid()
 
             const uint8_t* blockBase = segData + blockOffset;
             uint8_t polyCount = blockBase[0];
-            // (vert_count = blockBase[1], norm_count = blockBase[2], pad = blockBase[3]
-            //  — not needed for terrain classification but kept for documentation.)
+            uint8_t vertCount = blockBase[1];   // #67: needed for fine rasterization
+            // (norm_count = blockBase[2], pad = blockBase[3] — unused here.)
 
             // Bounds-guard: polygon array must fit within the segment.
             uint32_t polyArrayEnd = blockOffset + WMX_BLOCK_HDR_SIZE +
                                     (uint32_t)polyCount * WMX_POLY_SIZE;
             if (polyArrayEnd > WMX_SEGMENT_SIZE) continue;
 
+            // #67: read this block's vertices into world space for fine
+            // rasterization. Vertices follow the polygon array; each is 8
+            // bytes: int16 x at +0, int16 (-elevation) at +2, int16 y at +4,
+            // uint16 pad at +6. World position adds the block origin -- a
+            // segment is 8192 units, each of its 4x4 blocks is 2048.
+            int bRow = b / 4, bCol = b % 4;
+            int32_t ox = (int32_t)col * 8192 + bCol * 2048;
+            int32_t oy = (int32_t)row * 8192 + bRow * 2048;
+            const uint8_t* vertBase = blockBase + WMX_BLOCK_HDR_SIZE +
+                                      (uint32_t)polyCount * WMX_POLY_SIZE;
+            uint32_t vertArrayEnd = polyArrayEnd + (uint32_t)vertCount * 8;
+            bool vertsOk = (vertArrayEnd <= WMX_SEGMENT_SIZE);
+            static int32_t vwx[256], vwy[256];
+            static int16_t vwz[256];   // #67 BAT 2: vertex elevation (-z) for steepness
+            if (vertsOk) {
+                for (int v = 0; v < vertCount; v++) {
+                    int16_t lvx = *(const int16_t*)(vertBase + v * 8 + 0);
+                    int16_t lvy = *(const int16_t*)(vertBase + v * 8 + 4);
+                    vwz[v]      = *(const int16_t*)(vertBase + v * 8 + 2);
+                    vwx[v] = ox + lvx;
+                    vwy[v] = oy + lvy;
+                }
+            }
+
             for (int p = 0; p < polyCount; p++) {
-                uint8_t terrain = blockBase[WMX_BLOCK_HDR_SIZE + p * WMX_POLY_SIZE
-                                            + WMX_TERRAIN_OFFSET];
-                if (terrain >= 32 && terrain <= 34) {
+                const uint8_t* poly = blockBase + WMX_BLOCK_HDR_SIZE + p * WMX_POLY_SIZE;
+                uint8_t terrain = poly[WMX_TERRAIN_OFFSET];
+                terrainHist[terrain]++;   // #67 v0.18.3.84: terrain-type tally
+                bool isOcean = (terrain >= 32 && terrain <= 34);
+                if (isOcean) {
                     segOceanCount++;
                 } else if (terrain <= 5) {
                     // Forest variants: 0=Galbadia, 1=Trabia, 2=Esthar,
@@ -425,6 +548,35 @@ static bool LoadTerrainGrid()
                     segForestCount++;
                 }
                 segPolyCount++;
+
+                // #67: rasterize non-ocean polygons into the fine grid. Ocean
+                // cells stay SEG_OCEAN from the memset. terrain 29 = mountain.
+                if (vertsOk && !isOcean) {
+                    uint8_t cls = (terrain == 29) ? SEG_MOUNTAIN
+                                : (terrain <= 5)  ? SEG_FOREST
+                                                  : SEG_LAND;
+                    uint8_t i0 = poly[0], i1 = poly[1], i2 = poly[2];
+                    if (i0 < vertCount && i1 < vertCount && i2 < vertCount) {
+                        // #67 BAT 2: per-poly steepness = vertex elevation spread.
+                        int16_t e0 = vwz[i0], e1 = vwz[i1], e2 = vwz[i2];
+                        int16_t emax = e0 > e1 ? (e0 > e2 ? e0 : e2) : (e1 > e2 ? e1 : e2);
+                        int16_t emin = e0 < e1 ? (e0 < e2 ? e0 : e2) : (e1 < e2 ? e1 : e2);
+                        uint16_t steep = (uint16_t)(emax - emin);
+                        RasterizeTriFine(vwx[i0], vwy[i0], vwx[i1], vwy[i1],
+                                         vwx[i2], vwy[i2], cls, steep);
+                    }
+                }
+
+                // #67 v0.18.3.84: ROAD overlay. Road polys (terrain 27/28 =
+                // Road/Railroad) also rasterize as SEG_LAND above; here we ALSO
+                // flag their fine cells in s_roadFine so the planner can treat
+                // the road as ground-truth walkable and route along it.
+                if (vertsOk && (terrain == 27 || terrain == 28)) {
+                    uint8_t r0 = poly[0], r1 = poly[1], r2 = poly[2];
+                    if (r0 < vertCount && r1 < vertCount && r2 < vertCount)
+                        RasterizeTriRoad(vwx[r0], vwy[r0], vwx[r1], vwy[r1],
+                                         vwx[r2], vwy[r2]);
+                }
             }
         }
 
@@ -447,6 +599,127 @@ static bool LoadTerrainGrid()
             landSegs++;
         }
     }
+
+    // #67 v0.18.3.81: Dollet false-coast no-walk patch (hardcoded; rationale +
+    // bounds in DOLLET_COAST_* in state.inl). Applied AFTER rasterization and
+    // BEFORE the clearance BFS below so clearance, reachability, and the planner
+    // all treat the ledge as a wall. Marked as forced-steep MOUNTAIN so the
+    // existing foot/car block rule (cls==SEG_MOUNTAIN && steep>WM_MTN_STEEP_BLOCK)
+    // catches it with no change to IsFineTraversable; Garden/Ragnarok bypass the
+    // fine grid, so they are unaffected. Converted from the world-coord AABB via
+    // the same fine-cell mapping as the rest of the module.
+    {
+        int pc0 = WorldXToFineCol(DOLLET_COAST_X0), pc1 = WorldXToFineCol(DOLLET_COAST_X1);
+        int pr0 = WorldYToFineRow(DOLLET_COAST_Y0), pr1 = WorldYToFineRow(DOLLET_COAST_Y1);
+        if (pc0 > pc1) { int t = pc0; pc0 = pc1; pc1 = t; }
+        if (pr0 > pr1) { int t = pr0; pr0 = pr1; pr1 = t; }
+        int patched = 0;
+        for (int r = pr0; r <= pr1; r++) {
+            if (r < 0 || r >= WM_FINE_ROWS) continue;
+            for (int c = pc0; c <= pc1; c++) {
+                if (c < 0 || c >= WM_FINE_COLS) continue;
+                s_walkClassFine[r][c] = SEG_MOUNTAIN;
+                s_steepFine[r][c]     = 0xFFFF;   // > WM_MTN_STEEP_BLOCK => blocked for foot/car
+                patched++;
+            }
+        }
+        Log::World("WorldMap: [TERRAIN] Dollet false-coast patch: blocked %d fine cells cols[%d..%d] rows[%d..%d] (world X[%d..%d] Y[%d..%d])",
+                   patched, pc0, pc1, pr0, pr1,
+                   (int)DOLLET_COAST_X0, (int)DOLLET_COAST_X1, (int)DOLLET_COAST_Y0, (int)DOLLET_COAST_Y1);
+    }
+
+    // #67 v0.18.3.85: ROAD is ground-truth walkable. After rasterization AND
+    // the .81 false-coast patch, force every road cell (s_roadFine) to a
+    // walkable class with steep=0, so the road OVERRIDES both steep-mountain
+    // misclassification and the .81 patch wherever they fall on the road. The
+    // .84 [ROADMAP] dump proved the Timber->Dollet road is one continuous
+    // ribbon our grid was breaking -- the .81 patch alone blocked the road
+    // across cols[104..111] rows[59..69]. Non-road cells (incl. the rest of
+    // the false ledge) keep their classification, so ONLY the road reconnects.
+    // Applied BEFORE the clearance BFS below so clearance/reachability/planner
+    // all see the road as the open corridor through the cliff pinch.
+    {
+        int forcedRoad = 0, wasBlk = 0;
+        for (int r = 0; r < WM_FINE_ROWS; r++)
+            for (int c = 0; c < WM_FINE_COLS; c++) {
+                if (!s_roadFine[r][c]) continue;
+                uint8_t cl = s_walkClassFine[r][c];
+                bool blk = (cl == SEG_OCEAN) ||
+                           (cl == SEG_MOUNTAIN && s_steepFine[r][c] > WM_MTN_STEEP_BLOCK);
+                s_walkClassFine[r][c] = SEG_LAND;
+                s_steepFine[r][c]     = 0;
+                forcedRoad++;
+                if (blk) wasBlk++;
+            }
+        Log::World("WorldMap: [ROADMAP] road-walkable override: %d road cells forced walkable (%d had been blocked by steep-mtn or the .81 patch)",
+                   forcedRoad, wasBlk);
+    }
+
+    // #67: tally the fine walkable grid and mark it loaded so the catalog
+    // switches onto the continuous flood-fill reachability path.
+    {
+        int fLand = 0, fForest = 0, fMtn = 0, fOcean = 0, fMtnBlocked = 0;
+        for (int r = 0; r < WM_FINE_ROWS; r++)
+            for (int c = 0; c < WM_FINE_COLS; c++) {
+                switch (s_walkClassFine[r][c]) {
+                    case SEG_FOREST:   fForest++; break;
+                    case SEG_MOUNTAIN: fMtn++;
+                        if (s_steepFine[r][c] > WM_MTN_STEEP_BLOCK) fMtnBlocked++;
+                        break;
+                    case SEG_OCEAN:    fOcean++;  break;
+                    default:           fLand++;   break;
+                }
+            }
+        // #67 v0.18.3.59: clearance field -- Chebyshev distance (in cells) from
+        // every walkable cell to the nearest BLOCKED cell (ocean or steep
+        // mountain), via multi-source BFS seeded with all blocked cells at 0.
+        // Each cell is enqueued exactly once (FIFO BFS is layer-monotonic), so
+        // the queue never exceeds the cell count. The planner uses this to route
+        // down corridor centres. Capped at 254 (255 = sentinel, never reached on
+        // a map this size since ocean bounds every continent).
+        int clrMax = 0, clrTight = 0;
+        {
+            static int clrQ[WM_FINE_COLS * WM_FINE_ROWS];
+            int qh = 0, qt = 0;
+            for (int r = 0; r < WM_FINE_ROWS; r++)
+                for (int c = 0; c < WM_FINE_COLS; c++) {
+                    uint8_t cl = s_walkClassFine[r][c];
+                    bool blk = (cl == SEG_OCEAN) ||
+                               (cl == SEG_MOUNTAIN && s_steepFine[r][c] > WM_MTN_STEEP_BLOCK);
+                    if (blk) { s_clearFine[r][c] = 0; clrQ[qt++] = r * WM_FINE_COLS + c; }
+                    else       s_clearFine[r][c] = 255;
+                }
+            while (qh < qt) {
+                int idx = clrQ[qh++];
+                int r = idx / WM_FINE_COLS, c = idx % WM_FINE_COLS;
+                if (s_clearFine[r][c] >= 254) continue;   // don't propagate past the cap
+                uint8_t nd = (uint8_t)(s_clearFine[r][c] + 1);
+                for (int dr = -1; dr <= 1; dr++)
+                    for (int dc = -1; dc <= 1; dc++) {
+                        if (dr == 0 && dc == 0) continue;
+                        int nr = r + dr, nc = c + dc;
+                        if (nr < 0 || nr >= WM_FINE_ROWS || nc < 0 || nc >= WM_FINE_COLS) continue;
+                        if (s_clearFine[nr][nc] > nd) {
+                            s_clearFine[nr][nc] = nd;
+                            clrQ[qt++] = nr * WM_FINE_COLS + nc;
+                        }
+                    }
+            }
+            for (int r = 0; r < WM_FINE_ROWS; r++)
+                for (int c = 0; c < WM_FINE_COLS; c++) {
+                    uint8_t cl = s_walkClassFine[r][c];
+                    bool walk = !((cl == SEG_OCEAN) ||
+                                  (cl == SEG_MOUNTAIN && s_steepFine[r][c] > WM_MTN_STEEP_BLOCK));
+                    if (!walk) continue;
+                    if (s_clearFine[r][c] > clrMax && s_clearFine[r][c] < 255) clrMax = s_clearFine[r][c];
+                    if (s_clearFine[r][c] <= 1) clrTight++;
+                }
+        }
+        s_walkGridLoaded = true;
+        Log::World("WorldMap: [WALKFINE] Fine grid (256x192) rasterized: %d land, %d forest, %d mountain (%d steep-blocked >%u), %d ocean (walkable = %d); clearance max=%d, wall-hugging cells(clr<=1)=%d",
+                   fLand, fForest, fMtn, fMtnBlocked, (unsigned)WM_MTN_STEEP_BLOCK, fOcean, fLand + fForest + (fMtn - fMtnBlocked), clrMax, clrTight);
+    }
+
     free(wmxData);
     s_terrainLoaded = true;
 
@@ -465,6 +738,51 @@ static bool LoadTerrainGrid()
         rowStr[WMX_SEG_COLS] = '\0';
         Log::World("WorldMap: [TERRAIN] row%02d: %s", r, rowStr);
     }
+
+    (void)terrainHist;
+#if ROAD_MAP_DIAG
+    // #67 v0.18.3.84: terrain-type histogram + ROAD overlay map. Confirms which
+    // wmx terrain types exist (and that road 27/28 is present), counts road
+    // fine cells, and prints the road ribbon over the fine class grid for the
+    // Galbadia/Dollet corridor -- so we can see the Timber->Dollet road
+    // relative to the cliff the planner has been routing into. Retire (set
+    // ROAD_MAP_DIAG 0) before the #67 push.
+    {
+        int roadCells = 0;
+        for (int r = 0; r < WM_FINE_ROWS; r++)
+            for (int c = 0; c < WM_FINE_COLS; c++)
+                if (s_roadFine[r][c]) roadCells++;
+        char hist[600]; int hp = 0;
+        for (int t = 0; t < 256; t++)
+            if (terrainHist[t] && hp < (int)sizeof(hist) - 16)
+                hp += snprintf(hist + hp, sizeof(hist) - hp, "%d:%d ", t, terrainHist[t]);
+        if (hp == 0) { hist[0] = '-'; hist[1] = '\0'; }
+        Log::World("WorldMap: [ROADMAP] road fine cells=%d; terrain-type histogram (type:polys): %s",
+                   roadCells, hist);
+        const int R0 = 45, R1 = 76, C0 = 88, C1 = 121;
+        int dCol = WorldXToFineCol(-15639), dRow = WorldYToFineRow(-39437); // Dollet catalog coord
+        Log::World("WorldMap: [ROADMAP] rows %d..%d cols %d..%d  R=road !=road-but-blocked D=Dollet ~ocean .land f forest m mtn ^mtn-blocked",
+                   R0, R1, C0, C1);
+        for (int r = R0; r <= R1 && r < WM_FINE_ROWS; r++) {
+            char line[80]; int lp = 0;
+            for (int c = C0; c <= C1 && c < WM_FINE_COLS; c++) {
+                uint8_t cl = s_walkClassFine[r][c];
+                bool blk = (cl == SEG_OCEAN) ||
+                           (cl == SEG_MOUNTAIN && s_steepFine[r][c] > WM_MTN_STEEP_BLOCK);
+                char ch;
+                if (s_roadFine[r][c])            ch = blk ? '!' : 'R';
+                else if (r == dRow && c == dCol) ch = 'D';
+                else if (cl == SEG_OCEAN)        ch = '~';
+                else if (cl == SEG_FOREST)       ch = 'f';
+                else if (cl == SEG_MOUNTAIN)     ch = blk ? '^' : 'm';
+                else                             ch = '.';
+                line[lp++] = ch;
+            }
+            line[lp] = '\0';
+            Log::World("WorldMap: [ROADMAP] r%03d %s", r, line);
+        }
+    }
+#endif
 
     return true;
 }
@@ -677,3 +995,87 @@ static bool LoadTriggerZones()
     free(wmsData);
     return true;
 }
+
+// ============================================================================
+// WM_CALIB_DIAG (#67) -- disambiguate the Galbadia "empty catalog" bug:
+// (a) coordinate-mapping skew vs (b) terrain-classifier mislabel. Passive and
+// fully blind-accessible -- no key, no sighted step. Two parts:
+//   1. DumpRegionGridDiag(): dumps the wmsetus Section-2 region map as a
+//      land/sea mask (same '#'/'~' format as the [TERRAIN] grid) plus raw
+//      region IDs, so the game's own land oracle can be overlaid on our
+//      classifier's grid. If they agree on where land is, the classifier is
+//      fine and the bug is the coordinate mapping; if they disagree where the
+//      player stands, the classifier is wrong.
+//   2. PollWorldCalibDiag(): traces the live position -> segment -> terrain
+//      class + region byte as the player walks (one line per new cell). Shows
+//      exactly where the player's real position maps and whether that cell is
+//      land per either oracle.
+// Gate-don't-delete: flip WM_CALIB_DIAG to 0 to retire after #67 is diagnosed.
+// ============================================================================
+#define WM_CALIB_DIAG 0
+
+#if WM_CALIB_DIAG
+static void DumpRegionGridDiag()
+{
+    if (!s_segmentRegionLoaded) {
+        Log::World("WorldMap: [WM-CALIB] region map NOT loaded -- cannot dump region grid");
+        return;
+    }
+    // Land/sea mask from the game's own region map (0xFF = ocean / none).
+    // Identical '#'/'~' format to the [TERRAIN] grid dump for direct overlay.
+    Log::World("WorldMap: [WM-CALIB] region land/sea mask (# = region present, ~ = 0xFF/none) -- overlay on [TERRAIN] grid:");
+    for (int r = 0; r < WMX_SEG_ROWS; r++) {
+        char rowStr[WMX_SEG_COLS + 1];
+        for (int c = 0; c < WMX_SEG_COLS; c++) {
+            rowStr[c] = (s_segmentRegionMap[r][c] == 0xFF) ? '~' : '#';
+        }
+        rowStr[WMX_SEG_COLS] = '\0';
+        Log::World("WorldMap: [WM-CALIB] regmask%02d: %s", r, rowStr);
+    }
+    // Raw region IDs (2-hex per cell) so we can identify WHICH region is which
+    // continent and cross-reference the planner's region IDs.
+    Log::World("WorldMap: [WM-CALIB] raw region IDs (00..FE = region, FF = none):");
+    for (int r = 0; r < WMX_SEG_ROWS; r++) {
+        char rowStr[WMX_SEG_COLS * 3 + 1];
+        int pos = 0;
+        for (int c = 0; c < WMX_SEG_COLS; c++) {
+            pos += snprintf(rowStr + pos, sizeof(rowStr) - pos, "%02X ", s_segmentRegionMap[r][c]);
+        }
+        Log::World("WorldMap: [WM-CALIB] regid%02d: %s", r, rowStr);
+    }
+}
+
+// Per-tick live-position trace. Logs only when the player's mapped segment
+// changes (one line per new cell as they walk -- no spam). Pure read; never
+// touches s_reachable, so it cannot perturb the live catalog's BFS state.
+static void PollWorldCalibDiag(int32_t px, int32_t py)
+{
+    // #67: dedup on the FINE cell so the trace has per-fine-cell granularity
+    // for mountain calibration (one line per new 1024-unit cell the player
+    // occupies), not just per coarse segment.
+    static int s_lastFineCol = -999, s_lastFineRow = -999;
+    int fcol = WorldXToFineCol(px);
+    int frow = WorldYToFineRow(py);
+    if (fcol == s_lastFineCol && frow == s_lastFineRow) return;
+    s_lastFineCol = fcol;
+    s_lastFineRow = frow;
+
+    int col = WorldXToSegCol(px);
+    int row = WorldYToSegRow(py);
+    bool inBounds = (row >= 0 && row < WMX_SEG_ROWS && col >= 0 && col < WMX_SEG_COLS);
+    uint8_t terrain = inBounds ? s_terrainGrid[row][col] : 0xEE;
+    uint8_t region  = inBounds ? s_segmentRegionMap[row][col] : 0xEE;
+    const char* tc = (terrain == SEG_OCEAN) ? "ocean" : (terrain == SEG_FOREST) ? "forest" : "land";
+    uint8_t fcls = s_walkClassFine[frow][fcol];
+    uint16_t fsteep = s_steepFine[frow][fcol];
+    const char* fc = (fcls == SEG_OCEAN) ? "ocean" : (fcls == SEG_MOUNTAIN) ? "MOUNTAIN"
+                   : (fcls == SEG_FOREST) ? "forest" : "land";
+    // #67 BAT 2: would this cell block foot travel under the current slope
+    // threshold? If the player is ever logged standing on a BLOCKED cell, the
+    // threshold (WM_MTN_STEEP_BLOCK) is too low and is sealing walkable ground.
+    bool fblocked = (fcls == SEG_MOUNTAIN && fsteep > WM_MTN_STEEP_BLOCK);
+    uint8_t loco = GetLocomotionMode();
+    Log::World("WorldMap: [WM-CALIB] pos(%d,%d) -> seg(col=%d,row=%d) terrain=%s region=0x%02X loco=%u | fine(col=%d,row=%d)=%s steep=%u%s",
+               px, py, col, row, tc, region, loco, fcol, frow, fc, (unsigned)fsteep, fblocked ? " BLOCKED" : "");
+}
+#endif

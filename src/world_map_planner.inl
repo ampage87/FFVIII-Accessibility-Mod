@@ -438,6 +438,260 @@ static bool PlanPath(int startCol, int startRow, VehicleType veh)
     return true;
 }
 
+// ============================================================================
+// #67 v0.18.3.67: route-map dump (diagnostic). Prints the REAL fine terrain
+// grid spanning the planned route, route overlaid, so a BAT can SHOW whether
+// the path threads an inland corridor or scrapes the coast -- and whether the
+// grid's walkable/blocked classification is even right. Runs at plan time, so
+// it logs the instant a drive starts (no need to drive into a jam). Legend:
+// '.'=land 'f'=forest 'm'=gentle-mountain '~'=ocean (traversable for this
+// vehicle); UPPERCASE 'X'/'F'/'^' = the same class but BLOCKED for it. Overlay
+// (wins over terrain): 'S'=route start (post-snap) 'D'=Dollet/target cell
+// 'G'=goal cell reached 'o'=route cell. Row 0 = north (top), col 0 = west.
+#define ROUTE_MAP_DIAG 0
+#if ROUTE_MAP_DIAG
+static void DumpRouteMap(int startR, int startC, int goalR, int goalC,
+                         int tgtR, int tgtC, VehicleType veh)
+{
+    int minR = startR, maxR = startR, minC = startC, maxC = startC;
+    auto bump = [&](int r, int c){ if(r<minR)minR=r; if(r>maxR)maxR=r; if(c<minC)minC=c; if(c>maxC)maxC=c; };
+    bump(goalR, goalC); bump(tgtR, tgtC);
+    for (int i = 0; i < s_drivePathLen; i++)
+        bump(UnpackRow(s_drivePath[i]), UnpackCol(s_drivePath[i]));
+    const int PAD = 8;
+    minR -= PAD; maxR += PAD; minC -= PAD; maxC += PAD;
+    if (minR < 0) minR = 0;
+    if (minC < 0) minC = 0;
+    if (maxR >= WM_FINE_ROWS) maxR = WM_FINE_ROWS - 1;
+    if (maxC >= WM_FINE_COLS) maxC = WM_FINE_COLS - 1;
+    if (maxR - minR > 50) maxR = minR + 50;
+    if (maxC - minC > 90) maxC = minC + 90;
+
+    Log::World("WorldMap: [ROUTEMAP] rows %d..%d cols %d..%d  .=land f=forest m=mtn ~=ocean (CAPS/X/^=blocked) S=start D=dollet G=goal o=route",
+               minR, maxR, minC, maxC);
+    char line[112];
+    for (int r = minR; r <= maxR; r++) {
+        int n = 0;
+        for (int c = minC; c <= maxC && n < (int)sizeof(line) - 1; c++) {
+            uint8_t cls = s_walkClassFine[r][c];
+            bool trav = IsFineTraversable(cls, s_steepFine[r][c], veh);
+            char ch;
+            switch (cls) {
+                case SEG_LAND:     ch = trav ? '.' : 'X'; break;
+                case SEG_FOREST:   ch = trav ? 'f' : 'F'; break;
+                case SEG_MOUNTAIN: ch = trav ? 'm' : '^'; break;
+                case SEG_OCEAN:    ch = '~'; break;
+                default:           ch = trav ? ':' : '?'; break;
+            }
+            bool isPath = false;
+            for (int i = 0; i < s_drivePathLen; i++)
+                if (UnpackRow(s_drivePath[i]) == r && UnpackCol(s_drivePath[i]) == c) { isPath = true; break; }
+            if      (r == startR && c == startC) ch = 'S';
+            else if (r == tgtR   && c == tgtC)   ch = 'D';
+            else if (r == goalR  && c == goalC)  ch = 'G';
+            else if (isPath)                     ch = 'o';
+            line[n++] = ch;
+        }
+        line[n] = '\0';
+        Log::World("WorldMap: [ROUTEMAP] r%03d %s", r, line);
+    }
+}
+#endif
+
+// ============================================================================
+// PlanPathFine (#67 stage 2) -- fine-grid clearance-weighted route planner.
+// ============================================================================
+// Replaces the coarse 32x24 A* (PlanPath) for the actual routing. Clearance-
+// weighted Dijkstra over the 256x192 fine grid using the SAME slope-aware
+// traversability rule as catalog reachability (IsFineTraversable on
+// s_walkClassFine + s_steepFine), so the route goes AROUND mountains/ocean
+// instead of through them, and the clearance penalty (s_clearFine) pulls it
+// toward corridor CENTRES rather than wall edges. 4-connected, torus-wrapped. Routes to the reachable fine cell NEAREST the destination
+// coordinate (s_driveTargetX/Y) -- the target itself when reachable, else the
+// closest walkable approach. (Routing to "any cell of the goal region" stopped
+// short at a near edge of a large region and steered into a cliff.) The
+// path is stored as packed fine cells in s_drivePath (PackSeg works unchanged:
+// fine col 0-255 / row 0-191 fit the row<<8|col layout); the drive follows it
+// with a small lookahead and steers toward fine-cell centres (1024-unit), which
+// also dissolves the segment-centre overshoot. Decimated by stride if it would
+// exceed DRIVE_PATH_MAX (real intra-continent paths are far shorter).
+//
+// #67 v0.18.3.86: flat extra cost charged for stepping onto any NON-road fine
+// cell, so the clearance-weighted Dijkstra prefers the ground-truth road. High
+// enough that a multi-cell off-road shortcut always loses to the road detour;
+// finite so non-road terrain stays usable where no road runs (start/end hops,
+// road-less continents -- where, with no road cells competing, every step pays
+// the same flat penalty and the route is unchanged). Tunable.
+static const uint32_t WM_OFFROAD_PENALTY = 40;
+
+static bool PlanPathFine(int startCol, int startRow, VehicleType veh)
+{
+    s_drivePathLen = 0; s_drivePathIdx = 0; s_drivePathPlanned = false;
+
+    if (!s_walkGridLoaded) {
+        Log::World("WorldMap: [PLAN] Fine grid not loaded \u2014 fine planner cannot run");
+        return false;
+    }
+    if (s_driveGoalSegCount == 0) {
+        Log::World("WorldMap: [PLAN] No goal segments \u2014 fine planner cannot run");
+        return false;
+    }
+    if (startRow < 0 || startRow >= WM_FINE_ROWS ||
+        startCol < 0 || startCol >= WM_FINE_COLS) {
+        Log::World("WorldMap: [PLAN] Fine start (%d,%d) out of range", startCol, startRow);
+        return false;
+    }
+
+    // Snap the start to the nearest traversable fine cell (the player may stand
+    // on a coastal/edge cell whose centre fell in an ocean or blocked polygon).
+    if (!IsFineTraversable(s_walkClassFine[startRow][startCol],
+                           s_steepFine[startRow][startCol], veh)) {
+        const int SNAP = 4; bool snapped = false;
+        for (int rad = 1; rad <= SNAP && !snapped; rad++)
+            for (int dr = -rad; dr <= rad && !snapped; dr++)
+                for (int dc = -rad; dc <= rad && !snapped; dc++) {
+                    int nr = (((startRow + dr) % WM_FINE_ROWS) + WM_FINE_ROWS) % WM_FINE_ROWS;
+                    int nc = (((startCol + dc) % WM_FINE_COLS) + WM_FINE_COLS) % WM_FINE_COLS;
+                    if (IsFineTraversable(s_walkClassFine[nr][nc], s_steepFine[nr][nc], veh)) {
+                        startRow = nr; startCol = nc; snapped = true;
+                    }
+                }
+        if (!snapped) {
+            Log::World("WorldMap: [PLAN] Fine start not traversable, no walkable cell nearby");
+            return false;
+        }
+    }
+
+    static uint32_t dist  [WM_FINE_ROWS][WM_FINE_COLS];
+    static int      parent[WM_FINE_ROWS][WM_FINE_COLS];
+    for (int r = 0; r < WM_FINE_ROWS; r++)
+        for (int c = 0; c < WM_FINE_COLS; c++) dist[r][c] = 0xFFFFFFFFu;
+
+    // #67 v0.18.3.59: clearance-weighted Dijkstra (min-heap of cost<<32|cell,
+    // lazy deletion) instead of a plain BFS. Step cost = 1 + WM_CLEAR_PENALTY *
+    // (cells of clearance below WM_CLEAR_TARGET), so the route is pulled toward
+    // the CENTRE of walkable corridors -- threading the canyon instead of
+    // scraping its walls, which is what made the wall-hugging shortest path jam
+    // the drive against cliffs the 1024-unit grid mislabels as walkable.
+    static uint64_t heap[2 * WM_FINE_COLS * WM_FINE_ROWS];
+    int heapSize = 0;
+    auto hpush = [&](uint32_t cost, int idx) {
+        if (heapSize >= (int)(sizeof(heap) / sizeof(heap[0]))) return;
+        heap[heapSize] = ((uint64_t)cost << 32) | (uint32_t)idx;
+        int i = heapSize++;
+        while (i > 0) { int p = (i - 1) / 2; if (heap[p] <= heap[i]) break;
+            uint64_t t = heap[p]; heap[p] = heap[i]; heap[i] = t; i = p; }
+    };
+    auto hpop = [&](uint32_t* oc, int* oidx) -> bool {
+        if (heapSize == 0) return false;
+        uint64_t top = heap[0];
+        *oc = (uint32_t)(top >> 32); *oidx = (int)(uint32_t)(top & 0xFFFFFFFFu);
+        heap[0] = heap[--heapSize]; int i = 0;
+        for (;;) { int l = 2*i+1, r = 2*i+2, s = i;
+            if (l < heapSize && heap[l] < heap[s]) s = l;
+            if (r < heapSize && heap[r] < heap[s]) s = r;
+            if (s == i) break; uint64_t t = heap[i]; heap[i] = heap[s]; heap[s] = t; i = s; }
+        return true;
+    };
+
+    // Routing goal = the destination coordinate's fine cell. Flood the reachable
+    // component from the player (clearance-weighted) and route to the cell
+    // nearest the target -- the target itself when reachable (the common case;
+    // the catalog already vetted it), else the closest walkable approach.
+    // Routing to "any goal-region cell" was wrong: region 0x01 (Dollet's) is
+    // large and reaches right next to the player, so the flood stopped 3 cells
+    // north and the drive steered into the cliff (v0.18.3.56 BAT).
+    int tgtCol = WorldXToFineCol(s_driveTargetX);
+    int tgtRow = WorldYToFineRow(s_driveTargetY);
+
+    dist[startRow][startCol] = 0; parent[startRow][startCol] = -1;
+    hpush(0, startRow * WM_FINE_COLS + startCol);
+
+    int bestR = startRow, bestC = startCol;
+    int bestDist = abs(startRow - tgtRow) + abs(startCol - tgtCol);
+    int expanded = 0;
+    const int dc4[] = { 0, 0, -1, 1 };
+    const int dr4[] = { -1, 1, 0, 0 };
+    uint32_t curCost; int curIdx;
+    while (hpop(&curCost, &curIdx)) {
+        int cr = curIdx / WM_FINE_COLS, cc = curIdx % WM_FINE_COLS;
+        if (curCost > dist[cr][cc]) continue;   // stale heap entry
+        expanded++;
+        int dToTgt = abs(cr - tgtRow) + abs(cc - tgtCol);
+        if (dToTgt < bestDist) { bestDist = dToTgt; bestR = cr; bestC = cc; }
+        if (bestDist == 0) break;   // reached the target cell; can't improve
+        for (int d = 0; d < 4; d++) {
+            int nr = (((cr + dr4[d]) % WM_FINE_ROWS) + WM_FINE_ROWS) % WM_FINE_ROWS;
+            int nc = (((cc + dc4[d]) % WM_FINE_COLS) + WM_FINE_COLS) % WM_FINE_COLS;
+            if (!IsFineTraversable(s_walkClassFine[nr][nc], s_steepFine[nr][nc], veh)) continue;
+            // #67 v0.18.3.86: ROAD-PREFERENCE. The road (s_roadFine) is the
+            // ground-truth-walkable Timber->Dollet ribbon, so prefer it
+            // strongly: a road step costs 1 with NO clearance penalty (the
+            // road needs no corridor-centering -- it IS the corridor), while a
+            // non-road step pays the clearance penalty PLUS the flat off-road
+            // penalty. This makes the route FOLLOW the road's bends instead of
+            // cutting straight up the false-land cliff the .85 BAT wedged on
+            // (the route left the road at fine(101,63) -- land -- exactly where
+            // the road jogs east to cols 104-107).
+            uint32_t stepCost;
+            if (s_roadFine[nr][nc]) {
+                stepCost = 1u;
+            } else {
+                int clrPen = WM_CLEAR_TARGET - (int)s_clearFine[nr][nc];
+                if (clrPen < 0) clrPen = 0;
+                stepCost = 1u + (uint32_t)(WM_CLEAR_PENALTY * clrPen)
+                              + WM_OFFROAD_PENALTY;
+            }
+            uint32_t nd = curCost + stepCost;
+            if (nd < dist[nr][nc]) {
+                dist[nr][nc]   = nd;
+                parent[nr][nc] = curIdx;
+                hpush(nd, nr * WM_FINE_COLS + nc);
+            }
+        }
+    }
+
+    int goalR = bestR, goalC = bestC;
+    if (goalR == startRow && goalC == startCol) {
+        Log::World("WorldMap: [PLAN] Fine BFS: start already the closest reachable cell to target fine(%d,%d) (expanded %d, veh=%d) -- direct steer",
+                   tgtCol, tgtRow, expanded, (int)veh);
+        return false;
+    }
+
+    // Reconstruct goal->start via parents, then store start->goal.
+    static uint16_t rev[WM_FINE_COLS * WM_FINE_ROWS];
+    int rc = 0, curR = goalR, curC = goalC;
+    while (!(curR == startRow && curC == startCol)) {
+        rev[rc++] = PackSeg(curR, curC);
+        int pr = parent[curR][curC];
+        if (pr < 0) break;
+        curR = pr / WM_FINE_COLS; curC = pr % WM_FINE_COLS;
+        if (rc >= (int)(sizeof(rev) / sizeof(rev[0]))) break;
+    }
+    rev[rc++] = PackSeg(startRow, startCol);
+    int total = rc;
+
+    if (total <= DRIVE_PATH_MAX) {
+        for (int i = 0; i < total; i++) s_drivePath[i] = rev[total - 1 - i];
+        s_drivePathLen = total;
+    } else {
+        // Stride-sample to fit, preserving both endpoints.
+        for (int i = 0; i < DRIVE_PATH_MAX; i++) {
+            int srcRev = (int)((int64_t)i * (total - 1) / (DRIVE_PATH_MAX - 1));
+            s_drivePath[i] = rev[total - 1 - srcRev];
+        }
+        s_drivePathLen = DRIVE_PATH_MAX;
+    }
+    s_drivePathIdx     = 0;
+    s_drivePathPlanned = true;
+    Log::World("WorldMap: [PLAN] Fine path: %d cells from fine(%d,%d) to fine(%d,%d) (nearest reachable to target fine(%d,%d), dist=%d, expanded %d, veh=%d, clearance-weighted)",
+               s_drivePathLen, startCol, startRow, goalC, goalR, tgtCol, tgtRow, bestDist, expanded, (int)veh);
+#if ROUTE_MAP_DIAG
+    DumpRouteMap(startRow, startCol, goalR, goalC, tgtRow, tgtCol, veh);
+#endif
+    return true;
+}
+
 static bool PlanDrivePath(int32_t startX, int32_t startY)
 {
     s_drivePathLen      = 0;
@@ -485,7 +739,11 @@ static bool PlanDrivePath(int32_t startX, int32_t startY)
         return true;
     }
 
-    return PlanPath(startCol, startRow, veh);
+    // #67 stage 2: route on the FINE slope-aware grid (around mountains/ocean),
+    // not the coarse 32x24 segment grid that has no mountain class.
+    int startFineCol = WorldXToFineCol(startX);
+    int startFineRow = WorldYToFineRow(startY);
+    return PlanPathFine(startFineCol, startFineRow, veh);
 }
 
 // ============================================================================

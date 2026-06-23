@@ -632,7 +632,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
         // F3/F4 = Speech rate -/+ | Shift+F3/F4 = Speech volume -/+
         // F5/F6 = SFX vol -/+ | F7/F8 = BGM vol -/+
         // F11 = On-demand screenshot
-        // F12 reserved for per-session diagnostics (none active in this build)
+        // F12 = #67 world-map camera-control discovery diagnostic (per-session)
         // Navigation (-/+/Backspace) handled inside FieldNavigation::Update()
         // T / Shift+T handled inside CountdownTimer::Update() (v0.15.12.0)
         {
@@ -643,6 +643,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
             static bool s_f5was = false, s_f6was = false;
             static bool s_f7was = false, s_f8was = false;
             static bool s_f11was = false;
+            static bool s_f12was = false;
             static bool s_vWas = false;
 
             bool grave = (GetAsyncKeyState(VK_OEM_3) & 0x8000) != 0;
@@ -655,6 +656,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
             bool f7 = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
             bool f8 = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
             bool f11 = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
+            bool f12 = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
             bool vkey = (GetAsyncKeyState('V') & 0x8000) != 0;
             bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
             bool alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
@@ -728,6 +730,15 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
                          seq, shotName, F11_CHAN_LABEL[ch]);
                 ScreenReader::Speak(L"Screenshot captured.", true);
             }
+            if (f12 && !s_f12was && !alt) {
+                // #67: world-map camera-control discovery diagnostic
+                // (TriggerCameraScan checks on-world-map / not-driving itself
+                // and announces why if it can't run). Injects the real G/H
+                // camera-rotate keys to find the camera-angle field and test
+                // whether on-foot walking is camera-relative. Gated on !alt
+                // like every other F-key. (Superseded the .65 heading scan.)
+                WorldMap::TriggerCameraScan();
+            }
             if (vkey && !s_vWas) {
                 wchar_t verMsg[128];
                 wsprintfW(verMsg, L"Version %hs", FF8OPC_VERSION);
@@ -741,6 +752,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
             s_f5was = f5; s_f6was = f6;
             s_f7was = f7; s_f8was = f8;
             s_f11was = f11;
+            s_f12was = f12;
             s_vWas = vkey;
         }
         

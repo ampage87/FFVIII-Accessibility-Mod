@@ -6,6 +6,531 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.87
+
+World map (#67): yaw-based screen-relative 8-way on-foot steering — the executor fix the road work isolated.
+
+The road-preference build did its job: routing is solved. The planned route follows the road up and around to Dollet, and the screenshot from the last test showed Squall physically standing on the paved road. But he still wedged at the very start, and the trace finally pins the blocker with no ambiguity, and it isn't routing. He's on the road, the road runs due north there, but the camera yaw points north-north-west — and on foot, pressing "up" walks him in the yaw direction, about 28 degrees off the road. That small drift carried him off the thin road ribbon into the cliff beside it, every time. Reverse shoved him back; up walked him into it again.
+
+The heading-based steering inherited from .80 can only press pure cardinals — up, or a left/right "pivot." But on foot there's nothing to pivot: the yaw is a fixed camera angle per region, not a facing you can turn. Left and right are screen-relative walk keys, not rotation. So it could never aim the diagonal needed to walk a road bearing that sits between north and north-east. That was the flaw in the .80 unification — it correctly found that "up walks at the yaw," but a yaw you can read is not a facing you can steer.
+
+This build steers in screen space, which is the correct use of the camera-yaw work. The target's direction relative to screen-up is simply its bearing minus the yaw; the steering presses the nearest of eight arrow combinations — the four cardinals plus the four diagonals — so the character walks toward the target and staircases along the road's bends. At the spot where he kept wedging, that picks up-and-right, walking him north-east along the road instead of north-west into the cliff.
+
+The on-foot path is split back off the vehicle steering (vehicles keep the heading turn-then-go, untouched; the old dead screen-basis code stays as dead code). Routing, the path cursor, the steer-target and its line-of-sight clamp, stuck detection, re-planning, the reverse-burst un-wedge, and final approach are all unchanged. One assumption to verify: that pressing right walks screen-right (yaw plus ninety degrees clockwise). If the test shows him steering to the wrong side at a bend, that's a one-line swap of right and left.
+
+BAT: an on-foot drive to Dollet. Expect the new `[YAWDRIVE]` trace to press up-and-right rather than pure up at the start, Squall to walk north-east along the road instead of into the cliff, the path index to climb past zero, the distance to fall past 19.5 km, and ideally arrival as he staircases along the road. Also a Balamb on-foot drive as a regression check (vehicles are untouched, but this confirms foot steering still works on a road-less continent where the route is open ground). Two things to watch: handedness (wrong-way at a turn → swap right/left), and whether two-key diagonals actually produce diagonal movement (if not, he'll jerk between the two cardinals but should still net toward the target; the fallback is a time-multiplexed cardinal staircase). If he follows the road but stalls at a tight bend, that's a local-geometry tune, not the steering model.
+
+**BAT'd — ARRIVED. #67 solved.** The on-foot drive walked the road all the way to Dollet and reached the destination. It crawled the final ~3 km on approach — sluggish but successful — which is a candidate polish for later and was deliberately left untouched so as not to disturb the working drive. Routing (the .84–.86 road pivot) and the yaw-based screen-relative executor (this build) together drive Squall on foot from Galbadia to Dollet, which had been the open blocker for #67 throughout this arc.
+
+Ship: all five #67 per-session diagnostics turned off for the push — `DRIVE_STEER_DIAG` (state.inl) false, `ROUTE_MAP_DIAG` (planner.inl) 0, `ROAD_MAP_DIAG` (segments.inl) 0, `WM_CALIB_DIAG` (segments.inl) 0, `CAMERA_SCAN_DIAG` (camera_scan.inl) 0. All are pure logging / F12 gates: every call site is `#if`-guarded and `TriggerCameraScan` keeps its `#else` stub, so F12 still links, and the road overlay, route, and steering are all unconditional — only the log spam is gone, no behavior change. One final rebuild-and-confirm BAT (clean build with diagnostics off + the drive still reaches Dollet, plus a Balamb regression), then the .54-onward chain pushes as a single commit (main advances from v0.18.3.52 `74bc49a2`) and #67 closes. Next after the push: BAT 3 = world-map catalog coordinate audit.
+
+## v0.18.3.86
+
+World map (#67): road-preference in the planner — build 3 of the road pivot. The route now follows the road instead of leaving it.
+
+The .85 override solved routing in principle — it reconnected the road and the planner *could* use it — but the drive still wedged about 13.5 km out, right at the start, oscillating in place and never advancing. The screenshot at the wedge showed Squall at the foot of a coastal cliff, and the road and route maps together showed exactly what went wrong: the start cell is itself a road cell, and the road winds continuously up to Dollet — but the route left the road one cell north of the start, where the road bends east, and instead cut straight up the column onto non-road land. That land is the cliff face. The planner took the straight shortcut because it was a couple of cells shorter than following the road's bend, and drove into the rock.
+
+The cause was that the clearance-weighted planner had no idea the road existed. It cut corners off the road wherever an off-road shortcut was shorter — straight into the false-land cliffs the road exists to avoid.
+
+This build teaches the planner to prefer the road. A step onto a road cell now costs the minimum, with no clearance penalty — the road is the corridor, so it needs no centering. A step onto a non-road cell pays the clearance penalty plus a flat off-road penalty, so any multi-cell off-road shortcut loses to staying on the road, and the route follows the road's bends all the way to Dollet. The penalty is finite, so non-road ground stays usable for the short hops at the start and end and on continents with no road at all — where, with no road cells to compete, every step pays the same flat penalty and the route is unchanged (so Balamb and other road-less drives are unaffected). This also sidesteps the earlier lesson that road-attraction fights the clearance penalty: the clearance term is simply zeroed on road cells.
+
+Note the on-foot executor is still the heading-based turn-then-go from .80, which can't truly steer on foot — but at the .85 wedge that wasn't the differentiator: both it and a correct camera-yaw-based steerer would have pressed the same arrow there, because the route pointed straight into the cliff. The route was the wall. If the route now follows the road but the executor mis-steers at the road's turns, the next build is the camera-yaw-based screen-relative steering (read the yaw, choose the arrow whose screen direction points at the target) — the correct use of the camera disassembly, which .80 misapplied as a steerable facing.
+
+BAT: an on-foot drive to Dollet. Expect the route map to stay on the road — following the eastward bend instead of cutting up the cliff — the distance to actually fall past 13.5 km along the road, and ideally arrival. Also a Balamb on-foot drive as a regression check (the cost change touches every route, but road-less routes should be identical). If the route now hugs the road but the character still oscillates at a turn, that isolates the executor and the camera-yaw steering is next. After a clean drive, set the remaining #67 diagnostics false and push the .54-onward chain as a single commit. Pending BAT.
+
+## v0.18.3.85
+
+World map (#67): road-walkable override — build 2 of the road pivot. The route now follows the reconnected Timber-to-Dollet road instead of the inferred terrain.
+
+The .84 dump confirmed everything we needed. The histogram showed road types 27 and 28 present with 3,605 and 1,875 polygons, rasterizing to 623 road fine cells; the ribbon reaches Dollet (a road cell sits directly beside the Dollet marker), and the Dollet-drive start cell is itself on the road. It also explained, finally, why the planner kept driving into the cliff: the road does not run straight north up the column the planner was using — at the cliff it jogs east by two to three cells and climbs to Dollet from there, while the column the planner preferred reads as walkable land in the grid but is the cliff face in the game (and dead-ends into ocean a few cells further north, so it was never a through route).
+
+And it caught one of our own earlier changes making things worse. A long stretch of the road was being force-*blocked* by our own grid — the dump marked those cells distinctly — and they cluster in exactly the rectangle the .81 Dollet false-coast patch blocks. That patch, added to fence off a false coast ledge, sits right on top of the real road. A few more road cells run through cells we mislabel as steep mountain.
+
+So this build makes the road authoritative. After rasterization and after the .81 patch, every road cell is forced to walkable land with zero steepness, which overrides both the steep-mountain misclassification and the .81 patch wherever they fall on the road — reconnecting the road into one continuous walkable ribbon from the start to Dollet, while leaving every non-road cell (including the rest of the false ledge) exactly as it was. It is applied before the clearance pass, so reachability, clearance, and the planner all see the road as the open corridor. Through the cliff pinch the road is now the only walkable path, so the existing clearance-weighted planner is funneled onto it with no planner rewrite. A new log line reports how many road cells were forced walkable and how many of those had been blocked, and the road map (still printed) now renders the previously-blocked road cells as open road — a built-in before/after check.
+
+BAT: an on-foot drive to Dollet. Expect the override line to report a non-zero count of previously-blocked road cells, the road map's blocked-road marks to have flipped to open road, the route to jog east onto the road around the cliff instead of driving into it, the distance to drop past 12 km, and arrival. Also a Balamb on-foot drive as a regression check, since forcing road cells changes the grid (Balamb's route is on a different continent). If the route now follows the road but the executor wanders off it in the open stretches — unlikely, since steering works on open ground — build 3 adds an explicit road-preference to the planner. If it still wedges, the traces show whether the problem is the route (still off the road) or the executor (on the road but mis-steering). After a clean drive, set the remaining #67 diagnostics false and push the .54-onward chain as a single commit. Pending BAT.
+
+## v0.18.3.84
+
+World map (#67): road extraction — a load-only diagnostic, and a deliberate pivot away from fixing the steering and toward using the road as ground-truth.
+
+Three steering builds in a row (.80, .82, .83) all ended the same way: wedged about 12 km out, at the same place. By the project's own rule, three identical outcomes mean the diagnosis is wrong, so this build stops patching the executor. Two F11 screenshots settle what is actually happening — Squall is standing at the foot of a sheer cliff face, grass at his feet, rock rising straight up to the north — and the trace agrees: he walks freely north up to the row 63/64 boundary and then cannot cross it, reverse frees him south, and he never enters the next row. The planner routes up that column because the coarse grid calls it walkable land. In the game it is a wall.
+
+That is the answer to the question Aaron asked — why we keep hitting mountains when the mod supposedly knows the terrain. The mod does not read true walkability. It rasterizes the world-map mesh into a coarse grid of 1024-unit cells and guesses whether each cell is walkable from the polygon's terrain-type byte and an estimated steepness. Both guesses fail exactly at cliffs and narrow passes: a cliff face and the flat ground at its base land in adjacent cells, and the rasterizer marks a cell walkable if any land polygon touches it, so cliff bases come out as walkable; and the steepness threshold was tuned to keep towns reachable, not to match collision, so steep faces slip under it. The planner is routing confidently across a model of walkability that is wrong precisely where it matters.
+
+The fix Aaron pointed to is the right one: the mesh tags road and railroad polygons explicitly (terrain types 27 and 28), and the road is the one signal that is both reliably walkable and runs exactly where we need to go — Timber to Dollet, threading the mountains by construction. Instead of inferring walkability across broken terrain and steering around its errors, route along the road; and use the road as ground-truth to refine the grid (road cells are walkable; off-road cells the grid calls land but that sit wedged between the road and a mountain band are suspect cliff).
+
+This build is step one, and it is pure observation with zero behavior change. The terrain loader now captures road polygons into a new road overlay (the rasterizer flags every cell the road triangle covers, plus the three vertex cells and the centroid, so a road ribbon narrower than a cell still registers), tallies a histogram of every terrain type it sees, and logs a `[ROADMAP]` block: the road cell count, the type-to-polygon-count histogram (which confirms that 27/28 are present and how many polygons carry them), and an ASCII map of the Dollet corridor with the road ribbon drawn over the terrain classification — so we can finally see the Timber-to-Dollet road relative to the cliff the planner keeps routing into. Road cells over a cell we currently block are flagged distinctly, since those are exactly the road-mis-tagged-as-mountain cases the refinement needs to fix.
+
+BAT: load a Galbadia world-map save — no driving needed, the dump fires once when the terrain loads — and send `Logs/ff8_world.log`. In the `[ROADMAP]` block, check that the histogram confirms road types 27/28, that the road cell count is greater than zero and the ribbon forms a continuous chain to Dollet, and whether any road cells are flagged as currently blocked. Build 2 then routes the Dollet drive along the road, forces road cells walkable, and flags the suspect off-road cliff cells. `ROAD_MAP_DIAG` retires before the #67 push. Pending BAT.
+
+## v0.18.3.83
+
+World map (#67): a forward-collision guard on the steering law — a first step toward terrain-reactive execution, after stepping back to re-evaluate the whole auto-drive system.
+
+The .82 line-of-sight clamp did its job: the trace shows the steer target moved to the clamped near cell northwest of the player, exactly as intended. But he still wedged about 12 km out at the same cliff corner, and the trace pinned down why. The target was north-northwest, his facing was due north, and the bearing error was 318 — just inside the roughly 320-unit steering deadzone. So the law read him as "aligned" and drove straight north, into the blocked cell the route bends west around. The stuck-check reverse backed him off, the unchanged law walked him right back, and his heading never changed the whole time because he never pivoted: the error never exceeded the deadzone.
+
+Stepping back (at Aaron's request): no amount of tuning the steer target fixes this. The executor is an open-loop bearing-follower — it aims at a route point and trusts the engine's wall-sliding to carry him — and it is blind to the terrain directly in front of the character. "Roughly aimed" within the deadzone can still be aimed straight into a wall, and once nosed in he can neither advance nor turn. The real fix is to make execution react to what is actually ahead, the way a robot's local controller sits under a global planner. The planner here is already correct; only the executor is blind.
+
+This build adds the minimal, highest-leverage version of that: a forward-collision guard. Before the steering law commits to driving straight, it converts the current facing into a world direction, probes the fine grid cell one cell ahead, and if that cell is blocked for foot/car (ocean, or steep mountain) it refuses to go straight and instead presses toward the target side. In this region the world-map controls turn out to be screen-relative — the heading value is the fixed per-region camera yaw, frozen through straight, pivot, and a 600-unit reverse, which is the .73 behavior rather than the .80 "right rotates the facing" reading — so pressing left walks him sideways, west, into the open corridor the route follows. On a region where the controls genuinely rotate the facing, the same press pivots him there instead. Either way he stops nosing into the rock. The guard reads the grid in front of him, so it only fires when something is actually there; open-ground steering and the deadzone are unchanged, so there is no return of the orbiting or oscillation from earlier builds. It reuses the existing pivot key choice and adds no new state, and the .82 clamp and the planner are untouched. The `[HDG-DIAG]` trace gains a GUARD marker so a pivot taken inside the deadzone is visible as the guard firing.
+
+BAT: an on-foot drive to Dollet. At the corner, expect `[HDG-DIAG]` to show GUARD with a left (or right) key when the cell ahead is blocked, him moving west around the cliff instead of pinning on it, the distance dropping past 12 km, and arrival. Also a Balamb on-foot drive as a regression check, since the guard is in every planned drive's steering — though it only acts next to a wall. If he rounds this corner but cannot make the next turn, the follow-on is the full feeler-fan controller (probe several headings, reject the blocked ones, take the open one that best progresses toward the target) plus a blocked-direction memory so recovery converges. If he still pins, the trace shows whether GUARD fired and which key, which tells us whether the issue is the guard or the control model. If it arrives, set the remaining #67 diagnostics false and push the .54-onward chain as a single commit. Pending BAT.
+
+## v0.18.3.82
+
+World map (#67): tight-corner navigation — clamp the steer target to a clear line of sight, and give the on-foot drive the reverse un-wedge it had been missing.
+
+The .81 coastal patch worked: the route went up the west canyon and the distance dropped from 15.8 km to 11 km. But he then wedged at a real cliff corner. The F11 screenshot shows him pressed against the south face of a rock massif with open grass to his west; the winding route bends northwest up the next column around that rock. Two problems put him there and kept him there.
+
+First, the steer target. The lookahead aims at the first route cell about 2400 units ahead, and at this corner that cell sat on the far side of the cliff — so the heading law pointed him north-northwest straight into the rock. On the world map the controls are tank-style: up walks in the facing direction, left and right rotate, and rotation only takes effect while moving forward. Nosed into the cliff he could neither advance nor turn, and the heading froze. The fix wires in the `FineLineClearFootCar` line-of-sight check (already present but never called): the lookahead target is walked back to the farthest route cell reachable from the player by a clear straight line, so he aims along the open corridor — here, west around the cliff — and turns there in open ground before reaching the rock. It engages only near walls; on open ground the far line is already clear, so the stable far target stands and there is no return of the orbiting from the .78 work.
+
+Second, and worse, the on-foot drive had no working recovery at all. The .80 unify routed on-foot steering onto the vehicle heading law by dead-branching the old screen-relative path, but it left on-foot recovery pointing at the sidestep — whose only consumer lives inside that now-dead branch. So when he wedged, the stuck check logged "SIDESTEP left" and pressed no key. A lateral sidestep could not have freed a nosed-in character on tank controls anyway; the only move that works is reverse. On-foot recovery now fires the same down-arrow reverse-burst the vehicles use, backing him off the cliff into open ground where the pivot can finish rotating him to the route bearing and carry him around the corner. Down moves the character on foot (confirmed back in the .71 work).
+
+BAT: an on-foot drive to Dollet. Expect the `[HDG-DIAG]` steer target to track the open corridor rather than sitting on a fixed point across a cliff, reverse bursts (a D in the keys column) if he does contact the rock, the distance dropping past 11 km, and arrival. Also a Balamb on-foot drive as a regression check, since this changes both the lookahead and the recovery for every planned drive. If he still wedges, the trace separates the two halves — whether the steer target moved (the clamp) and whether reverse fired (the recovery) — so we know which to pursue. If it arrives, set the remaining #67 diagnostics false and push the .54-onward chain as a single commit. Pending BAT.
+
+## v0.18.3.81
+
+World map (#67): hardcoded no-walk patch over the false coastal strip southeast of Dollet, so the on-foot auto-drive routes up the canyon road instead of into the bay.
+
+After the .80 heading-unify build still wedged about 15.8 km out at the same east-to-north coastal corner, an offline analysis of the actual world-map mesh (wmx.obj, parsed byte-exact) finally located the real root cause, and it is the route planner, not the steering executor. The planner was sending the character straight up a thin coastal cliff ledge that reads as walkable land in the mesh data but is impassable on foot in the running game. The steering was faithfully driving a route into the sea.
+
+The mesh also confirms the real path: Dollet sits on a Road/Railroad corridor (mesh terrain types 28 and 27) — the Timber-to-Dollet canyon road — that runs one cell to the west of where the character wedged. The planner never preferred it because the fine grid collapses every land type to a single class and discards the road tag, so the road looked no better than the shorter coastal ledge.
+
+The ledge cannot be distinguished from genuine walkable land by any geometric rule. This was checked offline across seven distinct approaches: blanket-blocking the cliff terrain types disconnects Dollet from the same-continent start (validated three ways); blocking only the ocean-adjacent cliff cells both disconnects Dollet and fails to remove the strip; a finer 512-unit grid reconnects the road but breaks the known-good Balamb Town to Fire Cavern regression by fragmenting coastlines; and a road-attraction cost bias reroutes correctly only when the clearance penalty is disabled, and is otherwise too parameter-fragile to ship. The difference between the false ledge and real land exists only in the engine's live collision, which offline geometry cannot recover.
+
+Since Dollet is genuinely unusual — coast on one side, the canyon road on the other — the fix is a bounded, hardcoded no-walk patch keyed to the ledge's world coordinates, which (unlike the global rules) cannot disconnect anything elsewhere on the map. `LoadTerrainGrid` now marks the ledge's coordinate box impassable right after the mesh is rasterized, before the clearance field and reachability are computed, so the planner, the clearance routing, and the catalog all see it as a wall. It is implemented as forced-steep mountain so it rides the existing foot/car block rule with no change to the traversability function; Garden and Ragnarok bypass the fine grid and are unaffected. The patch bounds live in `DOLLET_COAST_X0/X1/Y0/Y1` in `world_map_state.inl` and are expressed in world coordinates, converted through the same fine-cell mapping as the rest of the module so a future remap can't desync them.
+
+This was validated offline against the live clearance-weighted planner cost: with the patch the route runs west onto the canyon road and up to Dollet rather than north up the coast, and Dollet stays reachable. Balamb is on a different continent and different cells, so it is untouched.
+
+BAT: an on-foot drive to Dollet. Expect a `[TERRAIN] Dollet false-coast patch: blocked N fine cells` line at load, the `[ROUTEMAP]` route to run west and up the canyon rather than north up the coast, the distance to drop past 15.8 km, and arrival. Also a Balamb on-foot drive as a regression check. If it arrives, set the remaining #67 diagnostics false and push the .54-onward chain as a single commit. Pending BAT.
+
+## v0.18.3.80
+
+World map (#67): unify on-foot steering onto the heading-based turn-then-go (the same law the car steering already uses).
+
+The v0.18.3.79 [YAWPROBE] BAT was decisive and positive. With the character actually walking — footsteps confirmed audibly — holding UP walked a straight line whose compass bearing equals the camera yaw at 0x0203ED02. The camera happened to rotate mid-run (holding RIGHT pushed the yaw up), which handed us two forward-walk measurements at two different yaws in a single run, and both matched within a degree: at yaw 316 degrees he walked 315 degrees, and at yaw 355 degrees he walked 356 degrees. Holding UP did not rotate the camera (the yaw was steady through each forward burst), and RIGHT increased the yaw clockwise.
+
+So 0x0203ED02 is the live on-foot facing — not frozen (the .72/.73 "frozen" reads were the character wedged or pressing UP into terrain, which doesn't rotate the camera) and not screen-relative-per-region. The relationship carries zero offset in the game's own bearing units: the yaw you want is simply the target's TorusBearing (0 = north, clockwise). That is exactly what the existing vehicle steering already computes — error equals target bearing minus heading; when the error exceeds the deadzone, pivot RIGHT if the error is positive (RIGHT raises the yaw) else LEFT; otherwise drive straight — and it already works for cars.
+
+The fix is therefore a unification, not a new algorithm. The on-foot executor branch (the .74-.78 screen-relative basis plus the .77 greedy arrow-probe, all built on the now-disproven frozen-heading reading) is bypassed by forcing its gate false, and left in place as dead code the way the retired calibration was. On foot now falls through to the same heading turn-then-go as vehicles. Nothing else changes: routing, cursor, waypoint selection, stuck detection, replan, sweep, reverse-burst, and final approach are all untouched. The on-foot [HDG-DIAG] trace now logs for the foot drive.
+
+BAT: an on-foot drive to Dollet. Expect [HDG-DIAG] to show the heading tracking the target bearing, the error shrinking as he aligns, then straight frames carrying him along the route, the distance dropping past 15.8 km, and arrival. Also a Balamb on-foot drive as a regression check, since this routes the foot drive through the previously vehicle-only branch. If he wedges at a tight corner and can't pivot out — the old .66-.72 failure mode, where turning needs a little open space — that is now a geometry and recovery problem, not a steering-law problem: the clearance router already avoids tight corners and the reverse-burst un-wedge exists, so tune those rather than reverting to the probe. Pending BAT.
+
+## v0.18.3.79
+
+World map (#67): diagnostic build, no steering change. An offline disassembly of FF8_EN.exe located the world-map camera, and it reframes the whole navigation problem.
+
+The value the mod has been reading as `GetWorldMapHeading` (0x0203ED02) was never a character heading. It is the camera yaw — the compass rotation of the world-map camera, on a 0-to-4096 = 360-degree scale (its live value of 501 is about 44 degrees). The view-matrix builder at .text 0x552D20 feeds it, together with the camera pitch at 0x0203FE52 (the roughly 45-degree downward tilt), into the PSX rotation/transform library. The yaw is set on region transitions and eased toward a target by a follow routine at no more than 16 units per frame. It reads as frozen on foot because the on-foot world-map camera simply holds a fixed yaw for each region — which is exactly why holding a single arrow walks a straight line whose world direction differs from region to region.
+
+This supersedes the entire heading / basis / probe steering arc from .66 through .78. With the camera yaw readable, navigation no longer needs an empirically measured basis or an orbit-prone arrow probe: read the yaw each frame, rotate the world-space bearing to the target by the negative yaw to get a screen direction, and press the nearest arrow; re-read the yaw when the player crosses into a new region and the steering stays correct automatically. The yaw can also be written directly (the region-transition writers do exactly that), so locking or controlling the camera is available if it proves useful.
+
+This build replaces only the F12 diagnostic body in `world_map_camera_scan.inl`, keeping its external symbols so nothing else needs rewiring. The dead .73 G/H camera-rotate scan is retired. The new probe ([YAWPROBE]) holds UP for about 1.2 seconds while sampling position and yaw every 250 ms, then RIGHT, then UP again, and logs the net world vector for each hold along with the computed offset between the UP-walk bearing and the yaw, plus the turn sense. It confirms the yaw drives movement and measures the single constant the steering rewrite needs.
+
+BAT: on the world map, standing still (not driving), press F12 and hold still for about six seconds (fully automated, with TTS on start and completion; if a random encounter interrupts, fight it and the probe restarts). Send `Logs/ff8_world.log`. Then walk into the next region and press F12 again. In the [YAWPROBE] summary the yaw should differ between the two regions while the offset stays the same, which proves the movement is yaw-driven, and the turn sense should be about plus or minus 90. No steering or routing behavior changes in this build. The next build is the yaw-based steering rewrite using the measured offset.
+
+## v0.18.3.78
+
+World map (#67): fix the greedy-probe orbit by aiming at a far route target instead of the adjacent cell.
+
+The v0.18.3.77 BAT (greedy arrow-probe) proved the probe steering itself works — it correctly presses cardinals and moves him on open ground — but he still hung ~15.8 km out. The trace and the F11 screenshot together showed why, and it isn't a wall: the screenshot shows Squall standing on open green grass with a clear field to the north (the cliffs and the Dollet road are far in the background), and the trace shows the path cursor stuck at the first route cell the entire time with the target bearing swinging wildly (231 → 255 → 329 → 152 → …) every quarter-second. That swing is the signature of orbiting.
+
+The steer target was the immediately adjacent route cell (~1024 units away). Every ~180-unit walk step swung the bearing to it by ~15°, so the probe re-decided every window and circled the first waypoint instead of committing to a direction and crossing north into the open field.
+
+Fix: aim the steer target at the first route cell at least `DRIVE_PLAN_LOOKAHEAD_DIST` (~2400 units) ahead along the path, not the adjacent cell. A ~2400-unit target's bearing moves only ~4° per step, so it's stable and the probe locks onto the northward cardinal and carries him up the corridor, advancing the cursor. The far target was cut to one cell back in v0.18.3.64 only because the heading-pivot steering of that era drove straight at a far target and jammed into walls; the greedy probe doesn't jam (it rejects walled cardinals and staircases), so a far target is now both safe and necessary to stop the orbit. The probe logic, cursor advance, stuck/replan, sidestep, and vehicle path are unchanged. Pending BAT.
+
+## v0.18.3.77
+
+World map (#67): pivot the on-foot steering executor off the maintained screen→world basis to a greedy empirical arrow-probe.
+
+Three BATs in a row (.74 stale basis, .75 corrupt basis, .76 guard-frozen basis) produced the same outcome — clean eastward progress to ~15.8 km, then sawing east-west at the route corner, never turning north. By the project's own rule, three identical outcomes means the diagnosis is wrong: the maintained-basis approach is the wrong tool. The .76 trace was decisive — even with the guard holding the basis stable at `uHat`≈(1,0), pressing the basis-predicted `U-L-` combination drove him *west* (the basis predicted NNE), and he oscillated 15887↔17404 on the same fine row, never going north. A predicted screen→world basis is unreliable exactly where the camera swings (the corner), and two-key diagonals don't combine the way the basis assumes. The route itself is fine (the planner threads the gap; the steer target is the adjacent next cell) — the executor simply can't convert "go toward that cell" into the right arrow.
+
+New approach: trust only measured progress. Hold one cardinal arrow for `DRIVE_PROBE_WINDOW_MS` (250 ms); measure the window's displacement; keep the arrow if it both moved him (≥ `DRIVE_PROBE_MIN_MOVE` = 40 units) and lined up with the target direction (alignment ≥ `DRIVE_PROBE_ALIGN_MIN` = 0.55, ~within 57°); otherwise rotate to the next cardinal (UP → RIGHT → DOWN → LEFT). No basis, no trigonometry, no diagonals — immune to camera swing and wall-slide because it only believes what it measures. Around the corner this naturally staircases: the walled direction fails the minimum-move test and it takes the open cardinal that actually progresses toward the next route cell. `DRIVE_PROBE_MAX_FAILS` (8) non-progressing windows in a row signals a genuine pocket and triggers a re-plan.
+
+The start-of-drive UP/RIGHT calibration is disarmed (its basis is now unused); `RefreshBasisAxis`/`OrthonormalizeAgainst` and the basis state are now dead code, left in place. The path cursor, steer-target selection, sidestep, stuck/replan, and the vehicle steering path are all unchanged. `[SRDIAG]` now logs the committed arrow and fail count instead of `uHat`/`rHat`. Pending BAT.
+
+## v0.18.3.76
+
+World map (#67): add a slide-rejection guard to the screen-relative on-foot steering's basis refresh.
+
+The v0.18.3.75 BAT was real progress — the refresh fix worked on open ground (`uHat`/`rHat` tracked smoothly, frozen no longer) and produced the best on-foot progress yet, distance 16754→15807 (~950 units) following the route east then north. But at the route corner he stalled against a blocked cell and the predicted wall-slide corruption hit: `uHat` rotated ~90° to point east as the per-tick refresh learned from wall-slide motion (the character's real motion follows the wall, not the pressed arrow), and the corrupted basis then drove him backward (distance climbed 15807→17404).
+
+Fix: only refine the basis when the observed motion agrees with the pressed arrow's predicted screen direction (dot > `DRIVE_BASIS_AGREE_MIN` = 0.50, ~within 60°). Gentle camera tracking on open ground always agrees and passes; perpendicular or reversed wall-slide motion disagrees and is rejected, preserving the good basis. No other behaviour change. Pending BAT.
+
+## v0.18.3.75
+
+World map (#67): fix the screen-relative on-foot steering's dead basis-refresh — the root cause of the v0.18.3.74 jam.
+
+The .74 BAT trace showed the new steering working at first (distance dropped 15337→15028 while moving ~186 units/frame) then wedging at the same ~15 km coastal neck, with the smoking gun that `uHat`/`rHat` never changed across the entire drive. The live basis-refresh was gated by `DRIVE_BASIS_REFRESH_MIN` = 40, but per-tick walking motion is only ~15 units, so refresh never fired and the basis stayed frozen at the drive-start camera angle while the world camera swung over 15 km — by the neck "press UP" no longer meant north.
+
+Fix: lower `DRIVE_BASIS_REFRESH_MIN` to 10 so the basis tracks actual per-tick motion (still excludes sub-1-unit wedge jitter), and after refreshing one axis from single-arrow motion, Gram-Schmidt the other axis perpendicular to it (`OrthonormalizeAgainst`) so the frame rotates rigidly with the camera and can't collapse. No other behaviour change. Pending BAT.
+
+## v0.18.3.74
+
+World map (#67): rebuild on-foot world-map auto-drive steering as screen-relative self-calibrating control.
+
+The v0.18.3.73 camera diagnostic ruled out camera control (injecting the manual's G/H camera keys produced no memory change and no walk-vector rotation), but confirmed the on-foot walk basis is clean and that the screen→world mapping differs by region. So on foot the mod now measures the screen→world basis from the character's own motion — a brief UP then RIGHT probe at drive start gives the screen-up and screen-right world vectors — and each tick decomposes the vector to the target onto those axes and presses the 8-way arrow combination toward it, refreshing the basis live from single-arrow motion. No heading, no pivot, no camera control. Vehicles keep the existing heading-based steering (gated on-foot only); routing, arrival, sweep, and planner-eligibility are unchanged. On-foot stuck recovery is now a lateral sidestep instead of the reverse burst. New state/constants in `world_map_state.inl`; `WrapWorldDelta`/`RefreshBasisAxis` helpers and the calibration + steering rewrite in `world_map_drive.inl`. Throttled `[SRDIAG]` trace.
+
+## v0.18.3.73
+
+World map (#67): F12 camera-control discovery diagnostic; no steering or behavior change.
+
+The v0.18.3.72 BAT trace settled the on-foot steering problem. WM_HEADING (0x0203ED02) is frozen -- it read a constant 501 through the entire jam, including while the character walked 600+ units in every direction during the DOWN bursts -- so it is NOT the on-foot facing, and the whole closed-loop heading-pivot steering since .66 has been steering against a dead constant. On-foot world-map movement is directional walking: arrows walk the character screen-relative (measured from the trace, UP -> world (+132,-132), DOWN -> world (-132,+138), a camera tilted about 45 degrees). The drive presses UP, which walks him north-east into the east coast and pins him; the stuck check fires DOWN, which walks him south-west into open land; the reverse ends and UP walks him straight back to the same pin -- an eternal loop no reverse-recovery could break.
+
+Direction (Aaron): have the mod own the camera so it can both perceive and control orientation. The FF8 PC manual confirms the world-map camera keys are G (rotate counter-clockwise) and H (rotate clockwise), not the Q/E first guessed.
+
+This build retires the old F12 heading scan (world_map_heading_scan.inl, HEADING_SCAN_DIAG 0 -- it injected RIGHT/LEFT, which are walk keys on foot, so it rotated nothing and never found a facing) and adds world_map_camera_scan.inl (CAMERA_SCAN_DIAG 1). F12 now calls WorldMap::TriggerCameraScan. The new scan is fully automated while the player holds still (about 5 seconds, TTS on start and completion, pause/resume around random encounters): it measures a short UP-walk vector (A), taps H five times (clockwise) sampling three memory windows (foot 0x0203EE00, hdng 0x0203ED00, save 0x01CFFEB8) after each tap, measures UP-walk (B), taps G five times (counter-clockwise), then measures UP-walk (C). From the [CAMDIAG] lines in ff8_world.log we read: the window offset whose baseline-delta ramps through the H taps and reverses through the G taps (the camera-angle field), whether the A/B/C walk vectors rotate (movement is camera-relative), and the per-tap rotation amount.
+
+This decides the architecture: if G/H rotate the camera and a value tracks it, the fix locks the camera to a canonical angle so UP always means a known world direction; otherwise on-foot drives steer by direct screen-relative arrow presses using the empirically-derived walk basis, like F9 field nav.
+
+BAT: on the world map, standing still and not driving, press F12; hold still about 5 seconds (a Gil readout during the G taps is expected; if an encounter interrupts, fight it and the scan auto-restarts), then send Logs/ff8_world.log.
+
+## v0.18.3.72
+
+World map (#67, BAT 2 stage 2): make the reverse un-wedge actually fire.
+
+The .71 reverse never fired because it had a separate 4-use budget (MAX_WEDGE_REVERSE) that was spent early and never reset across the encounter-fragmented drive, so every later mid-route stuck check fell through to a futile re-plan of the identical route. Dropped the separate budget: the reverse now fires on every mid-route stuck check while give-up headroom remains (stuckCount < DRIVE_STUCK_MAX), and stuckCount keeps climbing so the drive still gives up if reversing never helps. stuckCount resets on resume, so each post-encounter segment gets a fresh set of attempts. DOWN-only. (Superseded by the .73 finding that WM_HEADING is frozen and the steering model itself was wrong; kept for the record.)
+
+## v0.18.3.71
+
+World map: the reverse un-wedge recovery now actually fires (#67, BAT 2 stage 2).
+
+The key fact this build acts on: pressing the down arrow on the world map really does move the character backward, confirmed in-game. So reversing off a wall is a sound escape — the problem was never that reverse doesn't work, it's that the recovery code that was supposed to press down for the player never triggered. Across the last three builds it was gated on a "hard-wedge" detector that the wall-oscillation kept defeating, so it fired zero times.
+
+This moves the trigger onto the one detector that fires reliably: the stuck-check, which logs "Stuck check N of 6" every three seconds like clockwork. On a mid-route stuck check it now fires a reverse burst before escalating to a re-plan or giving up. The burst is down-only — no simultaneous turn — because turning while wedged does nothing (the heading is frozen) and only muddied the earlier attempts; a clean backward push into open ground is what works, and normal steering re-aims him once he's free. The burst is bounded per drive, and its budget renews whenever a reverse actually gets him closer, so a genuinely hopeless jam still ends in a re-plan or a clean stop rather than reversing forever.
+
+Also confirmed this run: the .70 clearance change had no effect on the route, and that's correct — the route-map showed it already threading the single open corridor between the ocean and a band of impassable mountains, so there was no more-open lane to move it to. Routing to Dollet is fine; the only blocker is the start-cell wedge this build targets.
+
+BAT: drive to Dollet. At the jam, expect a "Stuck, reverse un-wedge burst" line in the world log followed by reverse frames in the steering trace with a down key pressed. The thing to watch is whether his position actually shifts on those frames — if he backs off the wall, re-aims, and continues, the deadlock is broken.
+
+## v0.18.3.70
+
+World map: made the route planner strongly prefer open ground over the shortest distance (#67, BAT 2 stage 2).
+
+The v0.18.3.69 screenshots were the breakthrough. They show the character standing on a thin strip of shore at the very edge of the water, with a wide-open grass field right beside him — and the route is driving him along that waterline instead of up through the open ground. The log matches: he saws back and forth hundreds of units east-west along the shore, his heading frozen, never progressing, because "forward" at a water boundary just slides him along it. This isn't something the reverse recovery can fix; it's a route that hugs the coast when open land is available, which is exactly the routing problem flagged earlier.
+
+The planner already had a mild preference for staying clear of edges, but far too weak — a cell right against the water cost only about thirteen versus one for open ground, so the shortest path won and ran along the shore. This build raises that preference sharply: an edge-hugging cell now costs around eighty versus one for open ground, so the route detours well inland to stay on open terrain and only comes down to the water at the destination itself, which is unavoidably coastal. Reachability is unchanged — the weighting only affects which of the available paths is chosen, so a genuinely narrow-only passage is still taken when there's no alternative.
+
+This changes every route, so the BAT should include a Balamb drive to check nothing regressed, alongside the Dollet drive. The route-map dump in the world log prints the chosen path the instant a drive starts, so it'll show immediately whether the route now runs through open ground instead of along the coast. The weights are a first cut and easy to tune from what the route-map shows.
+
+## v0.18.3.69
+
+World map: fixed the wedge detector so the reverse recovery actually fires (#67, BAT 2 stage 2).
+
+The v0.18.3.68 BAT showed the reverse un-wedge never engaged — there wasn't a single recovery line or reverse keypress in the whole log. The reason: the jam at the corner isn't stillness, it's vibration. The character bounces about sixty units east-west every frame while making no real forward progress, and those bounces kept resetting the movement timer the recovery was watching, so it never concluded he was stuck. The mod's own slower stuck-check did see it correctly (six and nine units of net travel over three seconds), but that only leads to giving up, not recovering.
+
+The fix keys the wedge on net travel from an anchor point rather than raw per-frame movement: the anchor only resets when he genuinely relocates a couple hundred units, so vibrating in place now counts as wedged after a beat and the reverse fires.
+
+This BAT is also the decisive test of whether the down arrow does anything on the world map, because in the v0.18.3.68 log pressing left to turn while moving sixty-plus units did not rotate him at all — his heading stayed frozen the entire time. So turning is dead while he's jammed, which is exactly why backing off the wall to relocate is the needed escape. BAT: drive to Dollet — at the corner expect reverse-burst lines and reverse frames in the heading trace; the thing to read is whether his position actually shifts on those frames. If it does, the recovery works; if it doesn't, the down arrow is inert here and the next build attacks the problem from routing instead. Plus a Balamb drive for regressions.
+
+## v0.18.3.68
+
+World map: added a reverse un-wedge recovery so the auto-drive can get itself out of a corner (#67, BAT 2 stage 2).
+
+The route-map dump from v0.18.3.67 answered the routing question: the path to Dollet is directionally correct — it heads northeast and reaches the target — but its northern leg runs along the coast, because the ground inland is broken up by mountain in the terrain grid. The recurring jam, about 15km out, is at the corner where the route turns from heading east to heading north, and that corner sits right against the coast.
+
+The trace pinned down why the corner is fatal. On the world map the character only rotates while he's actually moving forward. So when he noses into the coast at the corner he can't move, which means he can't turn, which means his heading freezes — and he just keeps pressing forward into the same water indefinitely. The closed-loop steering itself is fine; it drove smoothly from 19km down to 17km on the open stretch before a random encounter paused it. What was missing was any way to recover from a wedge.
+
+This build adds that recovery. When the drive is genuinely wedged — no real movement for a beat longer than the existing wall-slide window — it reverses off the wall for a short burst while turning toward the target, which regains open ground and motion and brings him out re-aimed, then normal steering resumes. The reverse is bounded to a few bursts per wedge, and the budget only renews when a reverse actually gets him closer to the destination, so a true dead-end still falls through to the existing stuck-detection, re-plan, and give-up rather than reversing forever. A counterproductive nudge that used to shove him rightward when he was jammed-but-aimed has been removed, since at this corner it pushed him away from the left turn he needed.
+
+Under the hood the drive can now press the down arrow (reverse), and the heading trace gained a reverse band and a down-key column so a BAT shows the recovery happening. BAT: auto-drive to Dollet — at the coastal corner expect lines reporting a reverse un-wedge burst, and heading-trace frames where he actually backs off the wall and his heading starts changing again, then him rounding the corner and continuing. Also a Balamb drive to check for regressions.
+
+## v0.18.3.67
+
+World map: added a route-map diagnostic to verify auto-drive is actually choosing the right path to Dollet (#67, BAT 2 stage 2).
+
+The v0.18.3.66 closed-loop steering still jammed about 15km from Dollet, on a narrow coastal strip with a cliff to the northwest and ocean to the east, and the heading trace showed his facing frozen the whole time — he couldn't rotate out of the corner. But the more important open question is whether the route itself is correct: Dollet is reached through an inland canyon, not by hugging the coast, and the log only ever printed the route's two endpoints, never the cells in between, so there was no way to tell whether the planner threaded the canyon or scraped the shore.
+
+This build adds `DumpRouteMap`, which runs at plan time and logs an ASCII map of the real fine terrain grid spanning the chosen route, with the route drawn on top (land, forest, mountain, ocean, which cells are blocked, and the start, destination, and route cells). It logs the instant a drive starts, so there's no need to drive into the jam. The map lets us see directly whether the path is the canyon or a coastal sliver, and whether the grid's own walkable/blocked classification is even right. No steering or routing behavior changed.
+
+BAT: start a Dollet auto-drive and send `Logs/ff8_world.log`; the `[ROUTEMAP]` block shows the route over the terrain.
+
+## v0.18.3.66
+
+World map: rebuilt the auto-drive steering as closed-loop control on the character's real facing (#67, BAT 2 stage 2).
+
+The F12 heading scan from v0.18.3.65 settled it: `WM_HEADING` (the value the mod already reads) is the live facing. Holding right made it climb steadily and holding left made it count back down, in the same compass units the bearing math already uses. The earlier "frozen" reading was a misdiagnosis — the value was never dead. During those failed drives the character genuinely wasn't turning: he was jammed pressing forward-and-turn into terrain, which the engine won't rotate, so his facing stayed at its resting value. The motion-derived workaround we switched to then added wall-slide corruption on top, which is what produced the oscillation.
+
+The steering now reads the real heading and uses a turn-then-go law: when it needs to correct, it pivots with turn-only (no forward — holding forward into terrain is what locked the rotation before, and turn-only rotates him freely, exactly as the scan showed); once he's aimed at the next point on the route, it drives him straight; very close to the destination it just walks forward onto the trigger; and a watchdog forces a pivot if he stops moving while aimed. Because the heading is now accurate, the pivot stops the instant he's aligned, which removes the oscillation outright. All routing is reused unchanged — this is the steering law only, and it's general, not per-destination.
+
+A light `[HDG-DIAG]` trace logs the real heading against the target bearing each tick so a drive confirms the loop is tracking. BAT: auto-drive to Dollet (he should thread the canyon and arrive) plus a Balamb drive to check for regressions.
+
+## v0.18.3.65
+
+World map: stepped back from steering tuning to a live-facing discovery diagnostic (#67, BAT 2 stage 2).
+
+Ten builds of steering work were all compensating for one missing sensor: the mod cannot read which way the character is facing. `WM_HEADING` (0x0203ED02) is frozen — it returns a constant the whole session — so steering has been running on a heading reconstructed from the character's motion, which lags every turn and is corrupted whenever he slides along a wall (his motion then follows the wall, not his facing). That is the source of the recent oscillate-then-wedge failures. The real facing does exist in memory (FFNx reads the live world-map camera out of `sub_4023D0`; the savemap world-map struct carries a rotation field) — we just have the wrong address.
+
+The new `world_map_heading_scan.inl` finds it deterministically and without any sighted step. On the world map, press F12: while the player holds still, the mod injects a known turn (RIGHT for ~1.6s, then LEFT for ~1.6s, turn-only so he pivots roughly in place) and dumps three candidate memory windows (around the foot position, around `WM_HEADING`, and the savemap rotation field) as 16-bit words every 150ms. The live facing is the value that ramps one way during the RIGHT turn and reverses during the LEFT turn, logged under `[HSCAN]` in `ff8_world.log`.
+
+Announces "Heading scan complete" when it finishes, and pauses/resumes automatically if a random encounter pulls the player off the world map mid-scan (driven by the same world-map exit/entry detection auto-drive already uses). F12 is gated on `!alt` like every other F-key; it was the free per-session diagnostic key. No steering or routing behavior changes in this build — once the facing address is known, the next build rebuilds steering as proper closed-loop control on a real heading, reusing all existing routing.
+
+## v0.18.3.64
+
+World map: damps the auto-drive's steering oscillation and tightens its aim, so it follows the canyon instead of spinning in place (#67, BAT 2 stage 2).
+
+The `.63` build was real progress -- the turn sign held correct and the player drove the right direction, covering about 3 km toward Dollet -- but then he pinned at a tight canyon bend and oscillated in place: his heading swung roughly 180 degrees past the target and back every frame, his position barely moved, and his distance to Dollet stuck at 16 km until the stuck-check fired.
+
+Two causes. The turning had no damping -- holding the turn key every frame over-rotates well past the target, then reverses and overshoots back, so he never settles. And aiming three cells ahead again pointed at a spot across the canyon wall, so he mashed into it and his motion-derived heading just read the wall-deflected movement.
+
+Two fixes. He now aims at the very next cell on the route, which is always walkable and directly adjacent, so the line to it can never cross a wall. And the turn is duty-cycled -- it turns briefly, then drives straight briefly, repeating -- so the straight stretches let his heading catch up and he converges on course instead of spinning. While genuinely wedged against terrain he still turns continuously to work free.
+
+BAT: auto-drive to Dollet -- the `[DRIVE-DIAG]` error to target should actually shrink and stay small instead of swinging wide, his per-tick movement should stay positive, and his distance should keep dropping past 16 km to arrival. Also auto-drive to a Balamb destination to confirm no regression. (The diagnostic is turned off before the #67 push.)
+
+## v0.18.3.63
+
+World map: fixes the wrong-direction auto-drive that the `.62` heading fix exposed -- the turn sign is now fixed instead of self-calibrated, and the steering aims along the route instead of across the canyon wall (#67, BAT 2 stage 2 follow-up).
+
+The `.62` build was the breakthrough: deriving his facing from his own motion made him mobile for the first time -- he crossed the continent instead of grinding into the coast. But he drove to Galbadia Garden instead of Dollet, and the trace showed two reasons.
+
+First, the runtime turn-sign calibration flipped the sign the wrong way. It learned which way to turn by watching the derived heading rotate, but in the canyon he slides along walls -- and while sliding, his movement direction follows the wall, not the way he's facing. So the calibration read garbage and concluded that pressing right turned him left. The sign doesn't actually need to be guessed: the bearing system is compass-style (north is zero, clockwise), so pressing right always turns him clockwise, which raises the bearing. The sign is now fixed at that value and the wall-corrupted calibration is gone.
+
+Second, at the very start he was pointed almost straight at the target but wedged against the canyon wall, and the steering was aiming at a point far ahead in a straight line -- which pointed through that wall. So the wall-slide spun him almost completely around before he broke free, and he committed to the wrong direction. The steering now aims a few cells ahead along the actual route instead of at a far straight-line point, so the aim stays inside the winding corridor.
+
+BAT: auto-drive to Dollet -- the `[DRIVE-DIAG]` lines should show the turn sign steady at +1, the error to target shrinking as he follows the canyon, and him heading down the canyon toward Dollet rather than off toward Galbadia Garden. Also auto-drive to a Balamb destination to confirm no regression. (The diagnostic is turned off before the #67 push.)
+
+## v0.18.3.62
+
+World map: auto-drive steers by a heading derived from the player's actual motion, fixing the real root cause behind every stuck drive (#67, BAT 2 stage 2 root-cause fix).
+
+The v0.18.3.61 diagnostic settled it: `GetWorldMapHeading()` returns a frozen value (540) for the entire drive -- the heading never changed once, even while position and the pressed keys varied. Every steering decision is `targetBearing - heading`, so with a fixed wrong heading the left/right choice came out wrong: it curved Squall west, away from Dollet (which is east of him), into the coastline, and left him pushing forward into collision. That is why none of the six prior steering reworks helped -- the routing and the trig were always correct, but they were computed against a facing that didn't reflect reality.
+
+The fix stops trusting that read. His facing is now derived from his own motion: the bearing of his recent position delta is the direction he is actually moving, which is exactly what the steering needs. It is re-sampled every time he has moved far enough for a clean bearing. The one thing we cannot know up front -- whether pressing RIGHT raises or lowers that bearing -- is learned at runtime: when a turn rotates the derived heading, the code records which way it went and sets the turn sign accordingly, so a wrong initial guess corrects itself within a sample and cannot steer the wrong way for long. He always presses forward (no turning in place) so there is always motion to measure, and a wall-slide forces a turn if he stops moving against terrain. Both the mid-route and the final-approach steering now use this; both previously fed off the broken heading.
+
+The `[DRIVE-DIAG]` trace stays in and now logs the derived heading against the raw (broken) one, the signed error to the target, and the learned turn sign, so the BAT can confirm the derived heading tracks his motion and the error shrinks.
+
+BAT: auto-drive to Dollet -- the `[DRIVE-DIAG]` lines should show the derived heading tracking his movement (not stuck at 540), the error to target shrinking, and him actually moving toward Dollet. Also auto-drive to a Balamb destination to confirm no regression. (The diagnostic is turned off before the #67 push.)
+
+## v0.18.3.61
+
+World map: diagnostic build for the stuck auto-drive follow -- adds a throttled per-tick steering trace, no behavior change (#67, BAT 2 stage 2 diagnostic).
+
+Six BATs of the on-foot Dollet auto-drive have failed, and the fixes haven't converged because the actual steering behavior isn't visible. Each was diagnosed from a "moved N units in 3000ms" stuck-check every three seconds plus a single screenshot. The .60 BAT left Squall essentially stationary (16 units in 3 seconds) near the coastal start, recovery-replanning until a random encounter, and that data cannot tell apart two opposite failures: pivoting in place (turning forever, never committing forward) versus pressing forward into walkmesh collision the 1024-unit grid can't see. Those need opposite fixes, so guessing between them isn't working.
+
+This build adds a throttled `[DRIVE-DIAG]` trace (about five lines per second) in `UpdateAutoDrive`, logging position and distance moved since the last line, heading and its change, the bearing to the target, the relative bearing and folded offset, which keys are pressed (up/left/right), and which band the steering law took (straight, arc, pivot, or final). The per-line distance-moved distinguishes the cases: a pivot band with the heading changing but no movement is pivoting in place; an up key pressed with no movement is walking into collision; a large distance is real progress. There is no steering or routing change in this build.
+
+The diagnostic is gated behind `DRIVE_STEER_DIAG` and must be turned off (or removed) before the #67 push.
+
+BAT: auto-drive to Dollet, let it sit stuck for about ten seconds, then send `ff8_world.log` (the `[DRIVE-DIAG]` lines) and an F11. The trace will show exactly why he isn't moving, and the next build will be a targeted fix.
+
+## v0.18.3.60
+
+World map: mid-route auto-drive steering uses a dead-zone arc law to stop the heading from oscillating (#67, BAT 2 stage 2 fix 4).
+
+The v0.18.3.59 BAT routed correctly (clearance-weighted, 23 cells to Dollet) but the drive oscillated in place at the start: Squall rocked back and forth across the boundary between two cells, creeping forward only a few units, until a random encounter interrupted. The screenshot confirmed he was on foot near the coast (the steady `loco=35` is locomotion-byte noise, not a car).
+
+Diagnosed offline against the real route, the cause is the steering law itself, not the routing or the look-ahead -- from both cells he rocked between, the look-ahead points the same way. The old law pressed forward only when the target was within about 17.5 degrees of the player's heading and otherwise turned in place, at a fixed rate with no damping. So the heading overshot the target direction and rocked across it, and because most of that swing was outside the forward window, the player turned far more than he advanced. Across the five prior BATs the routing failures (.55, .56) are fixed and the following failures (.57 drift, .58 crawl, .59 oscillation) all trace to this one discrete turn-law.
+
+Fix: only the mid-route branch of the steering decision (beyond final-approach distance) is replaced. It now folds the relative bearing into an absolute offset plus a side -- so there is no hard left/right boundary for the heading to rock on -- and applies three bands: within `STEER_DEADZONE` (~28 degrees) drive straight with no turning, which damps the overshoot because the player stops correcting once roughly aimed; within `STEER_FWD_CONE` (~50 degrees) drive forward while turning (arc toward the target); beyond that, pivot in place toward the target for sharp bends, as before. The final-approach steering is unchanged. Both thresholds are tunable constants -- widen the dead-zone if it still oscillates, narrow it if it drifts into walls.
+
+This changes every drive's long-distance steering, so it needs a regression check on a known-good Balamb drive as well as Dollet.
+
+BAT: auto-drive to Dollet (thread the canyon and arrive; any `[DRIVE] re-planning` lines are recovery, not failure) and to a Balamb destination (confirm no regression).
+
+## v0.18.3.59
+
+World map: auto-drive pre-plans a clearance-centered route and follows it smoothly, with stuck-recovery (#67, BAT 2 stage 2 fix 3).
+
+Four BATs of the fine planner each peeled a distinct bug. The last two exposed a real tension in following the route: a far look-ahead drifts off the path and jams against a wall (v0.18.3.57), while a one-cell look-ahead crawls in place (v0.18.3.58). The crawl is the steering law: it walks forward only when the target is within ~45 degrees of the player's heading and otherwise turns in place, so a one-cell (1024-unit) target -- whose bearing swings wildly as the player inches -- makes the drive spin instead of advance.
+
+Offline analysis of the real map reframed the problem: the walkable route to Dollet is a genuinely narrow, winding canyon, roughly one to two fine cells (1024-2048 units) wide. Even a route deliberately weighted toward open space averages only 1.7 cells of clearance from a wall. Our 1024-unit terrain grid is a coarse approximation of the game's actual walkmesh, and its error is largest exactly in those one-cell-wide spots -- which is why following the wall-hugging shortest path kept jamming.
+
+Three coordinated changes implement "pre-plan the route, then drive smoothly along it":
+
+Clearance-weighted routing. A new clearance field (`s_clearFine`) holds each walkable cell's Chebyshev distance to the nearest blocked cell, computed once at grid-load by a multi-source BFS. `PlanPathFine` is now a clearance-weighted Dijkstra: a step into a low-clearance cell costs extra (`1 + WM_CLEAR_PENALTY * (WM_CLEAR_TARGET - clearance)`), so the route threads the corridor center wherever any margin exists instead of scraping the wall.
+
+Min-distance look-ahead. The drive now steers at the first path cell at least `DRIVE_PLAN_LOOKAHEAD_DIST` (2400 units) ahead of the player -- far enough to keep the bearing stable so the drive commits to forward motion (no crawl), close enough that the straight-line cut stays inside the clearance-centered corridor (no drift).
+
+Mid-route stuck recovery. When stuck mid-route, the drive re-plans from the player's current position (a fresh clearance route from where he actually is) up to `DRIVE_MAX_REPLANS` times before giving up, rather than stranding him after six dead checks.
+
+Container-verified on the real wmx.obj: the clearance Dijkstra routes 30 cells to Dollet's cell (average clearance 1.70, reaches the target); an offline follow-simulation using the real steering law arrives with ~720 units of path deviation at this look-ahead. Geometric-trigger destinations (Fire Cavern, early Balamb Garden) still use simple-coord steering and are unaffected.
+
+BAT: auto-drive to Dollet and to Galbadia Garden. Expect `[WALKFINE]` to report clearance stats, `[PLAN] Fine path ... clearance-weighted`, and the player to thread the canyon and arrive. Any `[DRIVE] re-planning` lines are recovery in action, not failure.
+
+## v0.18.3.58
+
+World map: auto-drive follows the planned path cell-by-cell instead of a far lookahead (#67, BAT 2 stage 2 fix 2).
+
+The v0.18.3.57 BAT planned the route correctly -- 27 fine cells around the cliff to the actual Dollet target -- but the drive still failed ~12 km out. The `[WM-CALIB]` trace showed the player drifting east off the planned corridor (the path goes straight up column 100, then turns east near row 62) and jamming against a cliff at fine(103,64), with the blocked cliff cell at fine(103,63) directly north.
+
+Cause: the line-of-sight lookahead. It steered toward the farthest path cell reachable by a clear cell-centre straight line (up to 8 ahead). Early in the corridor it locked onto a path cell that was diagonally northeast, so the straight-line bearing pulled the player off the straight-north corridor. The 1024-unit cell-centre Bresenham check passed, but the game's finer cliff geometry between cell centres blocked the diagonal, so the player drifted ~3 cells east into a cliff pocket and jammed. A long lookahead cuts corners -- the recurring failure mode across these BATs.
+
+Fix: the drive now steers to `s_drivePath[idx+1]` only -- the next path cell. Consecutive path cells are 4-adjacent and walkable, so the player can't cut a corner or drift off-corridor, and because the path cursor re-projects to the nearest path cell each tick, a collision nudge steers him back onto the path rather than stranding him. This trades steering smoothness for faithfully hugging the route. `FineLineWalkable` is now unused.
+
+BAT: auto-drive to Dollet and to Galbadia Garden -- the player should follow the path corridor around the cliff and arrive.
+
+## v0.18.3.57
+
+World map: auto-drive planner routes to the destination, not the goal region (#67, BAT 2 stage 2 fix).
+
+The v0.18.3.56 BAT failed to reach Dollet. The fine planner ran, but `PlanPathFine` routed to the nearest cell of the goal REGION (`s_driveGoalSegs`), and Dollet's region 0x01 is large -- it reaches right up next to the player. So the BFS found a region cell 3 fine cells north, declared the path complete there, and the drive then switched to steering at the real Dollet coordinate (northeast) and walked straight back into the same cliff. The offline check missed this because it used a single goal segment, not the full region.
+
+Fix: `PlanPathFine` now floods the reachable component from the player and routes to the visited fine cell NEAREST the destination coordinate (`s_driveTargetX`/`s_driveTargetY`) -- which is the target itself when it is reachable (the common case; the catalog reachability filter already vetted it), or the closest walkable approach otherwise. The BFS breaks as soon as it reaches the target cell (distance 0). `s_driveGoalSegs` is now used for arrival detection only, not routing.
+
+Container-verified on the real wmx.obj: the Dollet drive now routes 20 fine cells AROUND the cliff to the actual target fine(112,57) at distance 0, with zero blocked cells on the path (427 cells flooded before reaching it). The LOS-lookahead steering (unchanged from v0.18.3.56) remains corner-cut-safe.
+
+BAT: auto-drive to Dollet and to Galbadia Garden -- ff8_world.log should show '[PLAN] Fine path: N cells ... nearest reachable to target' and the drive should route around the mountains and ARRIVE, not hang.
+
+## v0.18.3.56
+
+World map: auto-drive planner now routes on the fine slope-aware grid (#67, BAT 2 stage 2).
+
+The v0.18.3.55 BAT confirmed stage 1 (catalog unchanged, no walkable ground wrongly blocked) but the Dollet auto-drive hung ~13.5 km out at the base of a steep mountain cliff: the planner's coarse 32x24 A* (PlanPath over s_terrainGrid, segment-centre waypoints) has no mountain class, so it laid a waypoint due north straight into a cliff the fine grid already knew was impassable.
+
+PlanPathFine replaces the coarse A* for routing: a 4-connected, torus-wrapped BFS over the 256x192 fine grid using the SAME IsFineTraversable rule as catalog reachability (s_walkClassFine + s_steepFine, so steep mountains and ocean block), to the nearest walkable fine cell whose coarse segment is in the goal region (s_driveGoalSegs). The route is stored as packed fine cells in s_drivePath (the existing row<<8|col packing already fits fine indices 0-255 / 0-191).
+
+The drive follows the route with a line-of-sight lookahead: each tick it advances a path cursor to the nearest cell ahead, then steers toward the farthest path cell still reachable in a clear walkable straight line (FineLineWalkable Bresenham check, up to 8 cells). This smooths the 4-connected staircase AND guarantees steering never aims the player across a blocked cell -- a fixed lookahead was shown to cut the cliff corner. On the final approach (or once the cursor reaches the path end) it steers straight at the real destination coordinate, which also dissolves the old segment-centre overshoot. New geometry helpers: FineCellCenterToWorld (inverse of WorldXToFineCol/Row) and FineLineWalkable.
+
+Scope: region/goal selection (MatchProgramForCatalog / CollectGoalSegments) and arrival detection are unchanged -- only the routing grid changed. Planner-ineligible, geometric-trigger destinations (Fire Cavern, early Balamb Garden) still use simple-coord steering and are unaffected, so Balamb on-foot navigation does not regress.
+
+Container-verified on the real wmx.obj: the Dollet drive routes 20 fine cells AROUND the cliff (fine(101,65) -> fine(112,57)) with zero blocked cells on the path, and the LOS lookahead crosses no blocked cell at any cursor position. The cliff cell due north of the stuck point (fine(101,61), MOUNTAIN steep=450) is correctly blocked.
+
+## v0.18.3.55
+
+World map: slope-aware fine grid -- mountains block on foot (#67, BAT 2 stage 1).
+
+Motivation. The auto-drive route planner was terrain-naive: it routed its A*
+over the coarse 32x24 segment grid, which has no mountain class at all (type-29
+mountains were folded into "land" by the majority classifier) and no sub-segment
+resolution, so it could route a straight line through a segment that is mostly
+impassable mountain. The BAT-1 fine grid distinguished mountains but still
+treated them as walkable. This stage makes the fine grid (which the catalog
+reachability uses, and which the planner will use in stage 2) aware of which
+mountain terrain is actually passable.
+
+Terrain re-evaluation (empirical, on the real wmx.obj). A full terrain-type
+histogram plus per-type elevation profile confirmed: (1) the six undocumented
+types present -- 17, 18, 23, 24, 25, 31 -- all sit at normal land elevations
+(not sea level) and are gentle, so they are genuine walkable land, not hidden
+water; there is no inland-lake terrain type, all map water is the ocean class
+(32-34) already blocked. (2) The real impassable terrain we were not accounting
+for is mountains (type 29): 54,297 polys, by far the steepest type (mean vertex
+elevation spread ~297 vs <160 for walkable land). The vertex elevation field --
+read during the wmx load but previously discarded -- gives a clean per-polygon
+steepness signal.
+
+Change. The fine rasterizer now stores a per-cell steepness (the max-min vertex
+elevation spread of the polygon whose centre is in the cell) alongside the
+class, in a new s_steepFine grid. IsFineTraversable now blocks a MOUNTAIN-class
+cell whose steepness exceeds WM_MTN_STEEP_BLOCK (256) for foot/chocobo/car;
+gentle mountain cells (passes, plateaus) stay walkable, so the map does not
+over-fragment -- blanket type-29 blocking isolated Esthar and split Edea from
+Centra because real passes exist. The slope gate is kept to the MOUNTAIN class
+on purpose: a type-agnostic slope block would wrongly seal steep roads/bridges.
+Garden and Ragnarok ignore it (hover/fly).
+
+Threshold calibration. Offline against the real wmx.obj: at 256, every Galbadia
+and Balamb catalog destination stays reachable from its seed AND the full
+reachable catalog set is identical to no-blocking for both seeds (zero locations
+dropped or added), while ~1,300 of 2,138 steep mountain cells are blocked. The
+threshold is refined in-game by the [WM-CALIB] trace, which now logs each cell's
+steepness and a BLOCKED flag -- if the player is ever logged standing on a
+BLOCKED cell, the threshold is too low and is sealing walkable ground.
+
+Scope. Reachability/catalog only. The AD planner still routes on the coarse grid
+this stage; stage 2 will point it at the fine grid (terrain-aware routing, which
+also dissolves the segment-centre steering overshoot). The CI harness gains a
+slope-gate smoke test (gentle pass walkable, steep face blocks). Container-
+verified: the edited fine-grid core compiles clean and the slope logic behaves
+(gentle mountain walkable, steep mountain blocked on foot, Garden crosses both).
+
+BAT: load a Galbadia world-map save, then a Balamb save, and cycle the catalog
+each time. Expect the SAME destinations as v0.18.3.54 (none lost). In
+ff8_world.log, [WALKFINE] reports the mountain steep-blocked count, and
+[WM-CALIB] logs steep=N per cell as you walk -- it must never tag a cell you are
+standing on as BLOCKED.
+
+## v0.18.3.54
+
+World map: fix all-continent navigation and rework reachability (#67, BAT 1).
+
+Root cause. The engine-coord -> segment mapping centred the X axis (+131072 =
+half the 262144 torus width) but NOT the Y axis. WorldYToSegRow added nothing,
+so world-Y=0 binned to the north edge instead of the vertical centre, and every
+western / Galbadia coordinate landed on an ocean cell. On-foot reachability
+then reached only the player's own cell and filtered the whole Galbadia catalog
+to zero. Balamb kept working only because its catalog coords and the live
+position shared the same wrong mapping. The old comment claimed the torus wrap
+"absorbs any constant offset" -- false: a constant offset shifts which discrete
+cell every coordinate lands in. Fix: add +98304 (half the 196608 height =
+12*8192) in WorldYToSegRow and subtract it in the inverse SegmentCenterToWorld.
+Proven three independent ways offline: catalog land-hits go 9/26 -> 26/26;
+region IDs cluster per-continent; the live Galbadia position maps OCEAN -> LAND.
+
+Reachability rework. With the coordinate fix in place, the 32x24 segment grid
+is too coarse to be both correct and continent-separating -- no land/ocean
+threshold simultaneously keeps coastal same-continent locations (e.g. Fire
+Cavern) and separates continents across narrow straits. Replaced the segment
+BFS (for catalog filtering) with a fine model: the wmx polygons are rasterized
+into a 256x192 grid of 1024-unit cells (four classes -- land, forest, mountain,
+ocean) and reachability is a 4-connected continuous flood-fill in that grid,
+torus-wrapped, where ocean blocks and mesh T-junctions don't. The rasterization
+is folded into the existing wmx load in LoadTerrainGrid (it now also reads each
+block's vertices and point-in-triangle-rasterizes every non-ocean polygon); the
+catalog filter calls ComputeReachabilityFine + IsFineCellReachable instead of
+the coarse path. Validated offline 17/17, and the exact C++ path was run on the
+real wmx.obj before this build: a Galbadia seed reaches Dollet, Galbadia
+Garden, Deling, Timber and Winhill (and nothing across water); a Balamb seed
+still reaches only Balamb Garden, Balamb Town and Fire Cavern.
+
+Mountains. wmx terrain type 29 is MOUNTAINS (steep -- average face slope ~57
+degrees, and the map's single most common land type), not "City/Town" as a
+community table had it. It gets its own fine class and, for now, is treated as
+walkable land. The passive calibration trace ([WM-CALIB], previously coarse-
+segment, now also reporting the per-fine-cell class including MOUNTAIN, deduped
+per 1024-unit cell) gathers ground truth on where the player actually walks;
+BAT 2 will use it to block impassable mountains for foot travel. The only known
+inaccuracy in BAT 1 is a Trabia<->Esthar merge through shared mountains, which
+doesn't affect gameplay until disc-3 Esthar; Galbadia, Balamb and Centra are
+cleanly ocean-separated regardless.
+
+Also: corrected the Fire Cavern catalog coordinate from the open-ocean
+placeholder (36864,-28672), ~5120 units off the Balamb coast, to the real
+on-continent (30326,-29221) -- the accurate filter would otherwise drop it. The
+world_map_harness is reworked from a coarse-reachability check (now invalid
+under the fine model) into a coordinate-mapping guard that pins the corrected
++98304 / +131072 centering for one known location per continent, plus a fine
+flood-fill smoke test. A committed 256x192 fine fixture to guard the real
+geography in CI is a queued follow-up.
+
+BAT: build, then load a Galbadia world-map save and cycle the location catalog
+-- Galbadia destinations (Deling, Timber, Galbadia Garden, Dollet, Winhill)
+should now populate. Then load a Balamb save and confirm it still lists only
+Garden, Town and Fire Cavern. ff8_world.log carries the [WALKFINE] grid tally,
+the [BFS] fine-cell filter result, and the [WM-CALIB] per-cell class trace.
+
+## v0.18.3.53
+
+World map: add WM_CALIB_DIAG, a passive diagnostic to pin down why the Galbadia continent's location catalog comes up empty (#67). LOCAL diag build.
+
+On-foot navigation works on Balamb but not Galbadia: there, the player's live
+position maps onto a world-grid cell classed as ocean (with ocean neighbours
+too), so the BFS reaches only its own cell and the catalog filters to zero. Two
+candidate causes, and the v0.14.73 rule says confirm empirically rather than
+guess: (a) the engine-coord -> segment mapping is skewed for the western
+hemisphere, or (b) the terrain classifier mislabels Galbadia land as ocean.
+
+This diagnostic settles it using the game's own region map (wmsetus Section 2,
+already loaded into s_segmentRegionMap) as an independent land oracle:
+
+- DumpRegionGridDiag() logs the region map once at init as a '#'/'~' land/sea
+  mask in the same format as the existing [TERRAIN] grid dump, plus the raw
+  region IDs. Overlaying the two grids shows whether the game and our
+  classifier agree on where Galbadia's land is.
+- PollWorldCalibDiag() traces the live position -> segment(col,row) -> terrain
+  class + region byte as the player walks, one line per new cell (no spam). It
+  is a pure read and never touches the BFS reachable array.
+
+Both are gated behind WM_CALIB_DIAG at the end of world_map_segments.inl and
+wired into Poll() / Initialize(). Fully passive and blind-accessible: no key,
+no sighted step. No runtime or TTS behavior change -- logging only.
+
+BAT: load the Galbadia world-map save and walk the continent for ~30 seconds,
+then send the [WM-CALIB] regmask / regid grid and the position-trace lines from
+ff8_world.log. If the region map shows Galbadia land where the player walks but
+the terrain grid says ocean, the classifier is wrong; if both show ocean where
+the player stands while Galbadia's region-land sits at different cells, the
+coordinate mapping is wrong and the offset between them gives the fix.
+
 ## v0.18.3.52
 
 World map: lock in the working Balamb-continent navigation with a real-code CI regression guard, ahead of the #67 all-continent work. LOCAL build.

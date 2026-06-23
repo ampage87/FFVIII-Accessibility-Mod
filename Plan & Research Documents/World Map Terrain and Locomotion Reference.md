@@ -1,6 +1,15 @@
 # World Map Terrain & Locomotion Reference Data
 ## Source: github.com/ff8-speedruns/ff8-memory (wmTerrain.md + locomotion.md)
 
+> **CORRECTION (#67 offline wmx analysis):** Two entries below are WRONG, per the byte-exact
+> parse in `World Map Reachability Rework - offline wmx analysis findings.md` (authoritative):
+> (1) **Type 29 is MOUNTAINS, not "City/Town/Enterable Area"** — it is the steepest (avg 57 deg)
+> and most common (54,297 polys) land type and forms every continent's interior ranges; it is
+> IMPASSABLE on foot. The old "Do NOT filter by terrain-29" advice in Phase 1 below is therefore
+> wrong for on-foot reachability (mountains DO block). (2) The on-foot land/ocean BFS must run on a
+> fine rasterized grid (continuous flood-fill), not the 32x24 segment majority grid, which only
+> separated continents by accident of a coordinate bug. See the findings doc.
+
 ## Terrain Types (wmx.obj polygon byte 13 / offset 0x0D)
 
 | Value | Description | Category |
@@ -22,7 +31,7 @@
 | 16 | Galbadia Dirt | LAND |
 | 27 | Railroad | LAND |
 | 28 | Road | LAND |
-| 29 | City/Town/Enterable Area | LAND |
+| 29 | **MOUNTAINS** (mislabeled "City/Town" in source; impassable on foot) | LAND-but-impassable |
 | 32 | Ocean - Shallow | OCEAN |
 | 33 | Ocean - Light | OCEAN |
 | 34 | Ocean - Dark | OCEAN |

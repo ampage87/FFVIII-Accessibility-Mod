@@ -314,6 +314,139 @@ static const DWORD  DRIVE_STUCK_CHECK_INTERVAL_MS = 3000;  // stuck-detection sa
 static const double DRIVE_STUCK_THRESHOLD       = 100.0;   // movement floor in one window
 static const int    DRIVE_STUCK_MAX             = 6;       // 6 windows × 3s = 18s no movement → give up
 
+// #67 BAT 2 stage 2 (v0.18.3.59): planner-path follow + recovery tuning.
+// DRIVE_PLAN_LOOKAHEAD_DIST: the drive steers at the first path cell at least
+// this many world units ahead (straight-line) of the player. The v0.18.3.58
+// BAT crawled because a one-cell (1024u) target sits inside the steering law's
+// turn-in-place cone -- the bearing swings as the player inches, so it spins
+// instead of driving. A target ~2400u out keeps the bearing stable (forward
+// motion) while staying close enough to the clearance-centred route that the
+// straight-line cut stays inside the corridor (offline follow sim: deviation
+// ~720u at this range vs >1600u at a 4+ cell lookahead).
+static const double DRIVE_PLAN_LOOKAHEAD_DIST   = 2400.0;
+// Mid-route stuck recovery: after this many stuck windows on a planned drive,
+// re-plan from the player's CURRENT position (a fresh clearance route from
+// where he actually is) rather than giving up. Bounded per drive so a true
+// hard-jam still terminates instead of looping.
+static const int    DRIVE_REPLAN_TRIGGER        = 2;       // stuck windows before a recovery re-plan
+static const int    DRIVE_MAX_REPLANS           = 8;       // recovery re-plans per drive before give-up
+
+// #67 v0.18.3.60: mid-route arc-steering bands (relBearing units; 4096 = 360deg,
+// so 1deg ~= 11.4 units). The old law walked forward only within ~17.5deg of the
+// target and turned in place otherwise, with no damping -- so the heading
+// overshot the target and rocked across it (v0.18.3.59 oscillated in place).
+// New mid-route law: within STEER_DEADZONE of dead-ahead, drive STRAIGHT with no
+// turn (this damps the overshoot -- the player stops correcting once roughly
+// aimed); between deadzone and STEER_FWD_CONE, drive forward AND turn (arc);
+// beyond the cone, turn in place toward the target (handles sharp path bends,
+// like the old law). Tunable: widen the deadzone if it still oscillates, narrow
+// it if it drifts into walls. Final-approach steering is unchanged.
+static const int    STEER_DEADZONE              = 320;     // ~28deg: drive straight, no turning
+static const int    STEER_FWD_CONE              = 576;     // ~50deg: forward while turning up to here
+
+// #67 v0.18.3.62: motion-derived heading + self-calibrating turn sign. The
+// v0.18.3.61 diagnostic proved GetWorldMapHeading() returns a frozen value (540)
+// during a drive, so every relBearing was computed against a fake facing and the
+// steering turned the wrong way into terrain. Instead we derive the player's
+// facing from his ACTUAL motion (bearing of his recent position delta) and learn
+// whether RIGHT raises or lowers that bearing by watching how it rotates when we
+// turn -- so a wrong initial guess self-corrects within a sample. Heading -1 =
+// not yet known (bootstrap: drive straight to establish it).
+static int      s_driveMoveHeading    = -1;   // 0..4095, or -1 = unknown
+static int32_t  s_driveHeadRefX       = 0;    // ref point for the next heading sample
+static int32_t  s_driveHeadRefY       = 0;
+static int      s_driveTurnSign       = 1;    // +1: RIGHT raises bearing; -1: RIGHT lowers it
+static bool     s_driveTurnedSinceRef = false;
+static bool     s_driveLastTurnRight  = false;
+static DWORD    s_driveLastMoveTime   = 0;    // wall-slide: last time he actually moved
+static int32_t  s_driveLastMovePosX   = 0;
+static int32_t  s_driveLastMovePosY   = 0;
+static DWORD    s_driveWedgeReverseUntil = 0;   // #67 v0.18.3.68: reverse-burst end tick (0 = not reversing)
+static int      s_driveWedgeReverseCount = 0;   // reverse bursts used since the last genuine progress
+static double   s_driveWedgeProgressDist = 0.0; // watermark: closest dist-to-target seen; refreshes the reverse budget
+static int32_t  s_driveWedgeAnchorX      = 0;   // #67 v0.18.3.69: net-displacement wedge anchor (defeats wall-vibration)
+static int32_t  s_driveWedgeAnchorY      = 0;
+static DWORD    s_driveWedgeAnchorTime   = 0;
+static const int   MOVE_HEADING_MIN_DELTA = 50;   // motion (units) needed to trust a heading sample
+static const int   TURN_CAL_MIN_DELTA     = 80;   // heading change needed to trust a sign calibration
+static const DWORD WALL_SLIDE_MS          = 600;  // stationary this long -> force a turn to slide off
+static const int   WALL_SLIDE_EPS         = 40;   // movement under this (units) counts as "not moving"
+// #67 v0.18.3.68: reverse un-wedge tuning.
+static const DWORD  HARD_WEDGE_MS         = 1200;  // no real movement this long -> reverse off the wall
+static const DWORD  REVERSE_BURST_MS      = 600;   // duration of one reverse burst
+static const int    MAX_WEDGE_REVERSE     = 4;     // reverse bursts before falling through to stuck-detection
+static const double WEDGE_PROGRESS_EPS    = 500.0; // got this much closer to target -> refresh the reverse budget
+static const double WEDGE_NET_EPS         = 250.0; // #67 v0.18.3.69: net travel under this over HARD_WEDGE_MS = wedged (vibration-proof)
+static const int   DRIVE_LOOKAHEAD_CELLS   = 1;    // #67 v0.18.3.64: aim at the NEXT route cell only (always walkable-adjacent, never across a wall)
+static const DWORD TURN_DUTY_ON_MS         = 60;   // #67 v0.18.3.64: duty-cycle the turn to damp overshoot -- turn this long...
+static const DWORD TURN_DUTY_OFF_MS        = 120;  // ...then go straight this long (forward frames let the heading catch up)
+
+// ============================================================================
+// #67 v0.18.3.74: SCREEN-RELATIVE self-calibrating on-foot steering
+// ============================================================================
+// The v0.18.3.73 camera diagnostic was decisive: WM_HEADING (0x0203ED02) is
+// FROZEN on foot, G/H do NOT rotate the camera (nothing in memory responded to
+// 5 taps each), and the UP-walk vector never changed -- on foot the arrows WALK
+// screen-relative, and the screen->world mapping differs by region (UP was NE at
+// the Dollet jam, NW near Galbadia Garden). So on-foot steering cannot use a
+// heading or control the camera; instead it MEASURES the screen->world basis
+// from the character's own motion (press an arrow, read the world delta) and
+// presses the arrow combo whose screen direction points at the target. The
+// basis is measured at drive start (a brief UP then RIGHT probe) and refreshed
+// live from single-arrow motion, so it tracks the camera as it swings. Vehicle
+// drives keep the existing heading-based steering (cars rotate-then-go).
+enum DriveCalPhase { DCAL_NONE = 0, DCAL_PROBE_UP, DCAL_SETTLE_UR, DCAL_PROBE_RIGHT, DCAL_DONE };
+static DriveCalPhase s_driveCalPhase = DCAL_DONE;
+static DWORD    s_driveCalStart = 0;
+static int32_t  s_driveCalX = 0, s_driveCalY = 0;   // current probe's start position
+static int      s_driveCalTry = 0;
+static double   s_camUx = 0.0, s_camUy = -1.0;      // screen-UP    -> world unit vector (default North)
+static double   s_camRx = 1.0, s_camRy =  0.0;      // screen-RIGHT -> world unit vector (default East)
+static bool     s_camBasisValid = false;
+static bool     s_drivePrevUp = false, s_drivePrevDown = false, s_drivePrevLeft = false, s_drivePrevRight = false;
+static int32_t  s_drivePrevX = 0, s_drivePrevY = 0;
+static bool     s_drivePrevHadKeys = false;
+static DWORD    s_driveSidestepUntil = 0;           // screen-relative un-wedge: slide laterally past an obstacle
+static int      s_driveSidestepSign  = 1;           // alternates each stuck (right / left)
+
+// #67 v0.18.3.77: GREEDY EMPIRICAL ARROW-PROBE state (replaces the basis decision).
+// Hold ONE cardinal arrow; each window measure whether it moved the character
+// toward the steer target; keep it if so, else rotate to the next cardinal.
+// Trusts only MEASURED progress -- immune to camera swing / wall-slide that
+// defeated the maintained screen->world basis across the .74/.75/.76 BATs.
+static int      s_driveProbeArrow   = 0;     // 0=UP 1=RIGHT 2=DOWN 3=LEFT (committed cardinal)
+static bool     s_driveProbeValid   = false; // false until the first window is armed
+static int32_t  s_driveProbeAnchorX = 0, s_driveProbeAnchorY = 0;  // position at window start
+static DWORD    s_driveProbeTime    = 0;     // window start tick
+static int      s_driveProbeFails   = 0;     // consecutive non-progressing windows
+
+static const DWORD  DRIVE_CAL_PROBE_MS      = 320;   // hold each calibration probe arrow this long
+static const DWORD  DRIVE_CAL_SETTLE_MS     = 150;   // settle between the UP and RIGHT probes
+static const int    DRIVE_CAL_MIN_MOVE      = 60;    // min world units moved to accept a probe
+static const int    DRIVE_CAL_MAX_TRY       = 3;     // probe retries before falling back
+static const double STEER_AXIS_C            = 0.383; // cos(67.5deg): 8-way arrow thresholds
+static const int    DRIVE_BASIS_REFRESH_MIN = 10;    // #67 v0.18.3.75: min single-arrow move (units) to refresh the basis. Was 40 -- ABOVE the per-tick walk delta (~15u), so the .74 BAT never refreshed and the basis went stale over a 15km drive as the camera swung. 10 tracks walking motion while still excluding wedge jitter (<1u/tick).
+static const double DRIVE_BASIS_EMA         = 0.30;  // EMA weight pulling the basis toward fresh motion
+static const double DRIVE_BASIS_AGREE_MIN   = 0.50;  // #67 v0.18.3.76: only refine the basis when observed motion agrees with the pressed arrow's predicted direction (dot > this, ~within 60deg). The .75 BAT tracked fine on open ground but a wall stall at the route corner fed perpendicular/reversed slide motion into the refresh, rotating uHat ~90deg off and driving him BACKWARD. Rejecting disagreeing motion blocks that while still allowing gradual camera tracking (which always agrees closely).
+static const DWORD  DRIVE_SIDESTEP_MS       = 700;   // lateral slide burst on a mid-route stuck
+
+// #67 v0.18.3.77: greedy arrow-probe tuning.
+static const DWORD  DRIVE_PROBE_WINDOW_MS    = 250;   // hold one cardinal this long, then evaluate the window
+static const double DRIVE_PROBE_MIN_MOVE     = 40.0;  // must actually move this far in the window (else the arrow is walled -> rotate)
+static const double DRIVE_PROBE_ALIGN_MIN    = 0.55;  // window motion must align with the target dir within ~57deg to KEEP the arrow
+static const int    DRIVE_PROBE_MAX_FAILS    = 8;     // this many non-progressing windows in a row -> re-plan (genuine pocket / dead end)
+
+// #67 v0.18.3.61: per-tick steering DIAGNOSTIC. DRIVE_STEER_DIAG gates a
+// throttled [DRIVE-DIAG] trace in UpdateAutoDrive (position + delta-moved,
+// heading + delta, target bearing, relBearing/off, keys pressed, and which band
+// the law took) so the stuck-follow behavior is finally visible tick-by-tick
+// instead of inferred from 3-second stuck-checks. The delta-moved per line tells
+// pivot-in-place (no forward key, heading turning) apart from forward-into-
+// collision (UP pressed but position frozen). Per-session diagnostic -- set
+// false (or remove this block + the trace) before the #67 push.
+static const bool   DRIVE_STEER_DIAG            = false;  // #67 SHIPPED v0.18.3.87: Dollet on-foot drive arrived; trace retired
+static const int    DRIVE_STEER_DIAG_INTERVAL_MS = 200;    // throttle (~5 lines/sec)
+
 // v0.14.87 — sweep search constants. Activated when on-foot drive is stuck
 // inside the final-approach zone (target within 1000 units but no entrance
 // trigger has fired). Past chats v0.11.10 validated 6-phase alternating
@@ -336,6 +469,7 @@ static int32_t  s_driveStuckX            = 0;
 static int32_t  s_driveStuckY            = 0;
 static DWORD    s_driveStuckCheckTime    = 0;
 static int      s_driveStuckCount        = 0;
+static int      s_driveReplanCount       = 0;      // #67 v0.18.3.59: mid-route recovery re-plans used this drive
 static bool     s_driveApproachAnnounced = false;  // one-shot guard
 static bool     s_driveOnFootAtStart     = true;   // v0.14.87: captured at StartAutoDrive; arrival semantics differ
 static DWORD    s_finalApproachEnterTick = 0;      // v0.14.87: when player crossed below FINAL_APPROACH_DIST (0 = not yet)
@@ -414,6 +548,12 @@ static bool s_keyRightHeld = false;
 // ignores it) and essential for cars. Critically, A is NOT an extended
 // key, so PressKey/ReleaseKey are called with extended=false.
 static bool s_keyGasHeld   = false;
+// #67 v0.18.3.68: DOWN arrow (reverse), VK_DOWN (0x28), scan 0x50, extended.
+// Drives the wedge-recovery reverse burst -- backing off a wall the drive
+// cannot turn away from (on the world map the character only rotates WHILE
+// moving forward, so a forward-wedge freezes the heading; reversing regains
+// motion and room).
+static bool s_keyDownHeld  = false;
 
 // ============================================================================
 // Terrain grid + BFS reachability state (v0.14.85, extended in v0.14.103)
@@ -430,13 +570,99 @@ static bool s_keyGasHeld   = false;
 // [col] is rebuilt per catalog build via BFS flood-fill from the player's
 // current segment.
 enum SegTerrainClass : uint8_t {
-    SEG_LAND   = 0,   // walkable by all locomotion classes (default)
-    SEG_FOREST = 1,   // walkable on foot/Chocobo; impassable for cars
-    SEG_OCEAN  = 2    // walkable only by Garden/Ragnarok
+    SEG_LAND     = 0,   // walkable by all locomotion classes (default)
+    SEG_FOREST   = 1,   // walkable on foot/Chocobo; impassable for cars
+    SEG_OCEAN    = 2,   // walkable only by Garden/Ragnarok
+    SEG_MOUNTAIN = 3    // #67: wmx terrain type 29. Impassable on foot (confirmed steep:
+                        // avg face slope 57deg, the map's most common land type). BAT 1
+                        // treats it as walkable land while the terrain logger calibrates
+                        // it against real movement; BAT 2 flips it to blocked for foot.
+                        // The coarse s_terrainGrid never emits this -- only the fine grid.
 };
 static uint8_t s_terrainGrid[WMX_SEG_ROWS][WMX_SEG_COLS];   // values from SegTerrainClass
 static uint8_t s_reachable  [WMX_SEG_ROWS][WMX_SEG_COLS];
 static bool    s_terrainLoaded = false;
+
+// ============================================================================
+// #67: Fine rasterized walkable grid + continuous-flood-fill reachability
+// ============================================================================
+// The 32x24 segment grid (s_terrainGrid) is too coarse for reachability: with
+// the corrected coordinate mapping, NO land/ocean threshold both keeps same-
+// continent coastal locations (e.g. Fire Cavern) AND separates continents
+// across thin ocean straits (majority-rule drops coastal land; any-land bridges
+// every continent into one blob). The faithful model rasterizes the wmx polygons
+// into a fine grid (1024-unit cells, 256x192) and flood-fills in continuous
+// space -- ocean straits block, mesh T-junctions don't. Validated offline 17/17
+// (Balamb incl. Fire Cavern isolated; every other continent correctly unreachable
+// on foot). See `Plan & Research Documents/World Map Reachability Rework -
+// offline wmx analysis findings.md`.
+//
+// s_walkClassFine holds a SegTerrainClass per fine cell -- the class of the wmx
+// polygon containing the cell centre, or SEG_OCEAN where no land polygon covers
+// it. s_reachFine is the per-build flood-fill visited mask. s_walkGridLoaded
+// gates the catalog onto the fine path; on load failure the catalog stays
+// unfiltered (safer than a wrong filter).
+static const int WM_FINE_CELL = 1024;                        // world units per fine cell
+static const int WM_FINE_COLS = 256;                         // 262144 / 1024
+static const int WM_FINE_ROWS = 192;                         // 196608 / 1024
+static uint8_t s_walkClassFine[WM_FINE_ROWS][WM_FINE_COLS];  // SegTerrainClass per fine cell
+static uint8_t s_reachFine     [WM_FINE_ROWS][WM_FINE_COLS]; // flood-fill visited (0/1)
+static bool    s_walkGridLoaded = false;
+
+// #67 BAT 2 (slope-aware mountains): per-fine-cell steepness = the elevation
+// spread (max - min vertex elevation) of the wmx polygon whose centre is in
+// the cell. A MOUNTAIN-class cell whose steepness exceeds WM_MTN_STEEP_BLOCK is
+// an impassable steep face for foot/chocobo/car; gentler mountain cells are
+// passes/plateaus and stay walkable, so the map doesn't over-fragment (blanket
+// type-29 blocking isolated Esthar and split Edea/Centra -- real passes exist).
+// Garden/Ragnarok ignore it (hover/fly). The threshold was calibrated offline
+// against destination reachability -- at 256, every Galbadia and Balamb catalog
+// destination stays reachable and the full reachable set is unchanged vs no
+// blocking -- and is refined in-game via the [WM-CALIB] steepness trace (if the
+// player is ever logged standing on a BLOCKED cell, the threshold is too low).
+static uint16_t s_steepFine[WM_FINE_ROWS][WM_FINE_COLS];
+static const uint16_t WM_MTN_STEEP_BLOCK = 256;
+
+// #67 v0.18.3.81: Dollet false-coast no-walk patch bounds (world-coord AABB).
+// The thin coastal cliff ledge SE of Dollet (between the mountain and the bay)
+// reads as walkable LAND in wmx but is impassable on foot in-game; the route
+// planner shortcut straight up it and wedged the on-foot drive (issue #67). No
+// geometric rule -- terrain class, steepness, clearance, OR grid resolution --
+// separates this ledge from genuine land (validated offline across 7 distinct
+// rules: blanket cliff-blocking and coastal-ledge-blocking both DISCONNECT
+// Dollet from the same-continent start; 512-res reconnects the road but breaks
+// the Balamb Town->Fire Cavern regression; road-attraction reroutes only with
+// the clearance penalty disabled and is parameter-fragile). The difference
+// exists only in the engine's live collision, which offline geometry cannot
+// recover. Dollet is a one-off (coast on one side, the Timber->Dollet canyon
+// road on the other), so LoadTerrainGrid (segments.inl) marks this AABB
+// impassable by coordinate -- the surgical fix that cannot disconnect anything
+// elsewhere on the map. Bounds cover the ledge between Squall's wedge
+// (-24252,-26310) and Dollet (-15639,-39437); the canyon road to the WEST
+// stays open, so the clearance-weighted planner routes up the canyon and Dollet
+// remains reachable (both offline-validated against the live planner cost).
+// Expressed as world coords and converted via the same WorldX/YToFine* mapping
+// as everything else, so a future coordinate-mapping change can't desync it.
+static const int32_t DOLLET_COAST_X0 = -24576;   // -> fine col 104 (west edge)
+static const int32_t DOLLET_COAST_X1 = -17408;   // -> fine col 111 (east edge)
+static const int32_t DOLLET_COAST_Y0 = -37888;   // -> fine row 59 (north edge)
+static const int32_t DOLLET_COAST_Y1 = -27648;   // -> fine row 69 (south edge)
+
+// #67 BAT 2 stage 2 (v0.18.3.59): per-fine-cell CLEARANCE = the Chebyshev
+// distance (in cells, capped at 255) to the nearest BLOCKED cell (ocean OR
+// steep-mountain). Computed once at grid-load by a multi-source BFS from every
+// blocked cell. The drive planner uses it to route down the CENTRE of walkable
+// corridors instead of the wall-hugging shortest path: a Dijkstra step into a
+// low-clearance cell costs extra (WM_CLEAR_PENALTY per cell below
+// WM_CLEAR_TARGET), so the route threads the canyon centre wherever any margin
+// exists. Offline analysis of the Dollet canyon: the wall-hugging shortest path
+// runs 21 cells within 1 cell of a wall; the clearance-weighted route cuts that
+// to 15 and lifts average clearance 1.2 -> 1.7. Blocked cells have clearance 0;
+// the field is computed against the foot/car blocker set (ocean + steep
+// mountain), which is the relevant one for every planner-eligible drive.
+static uint8_t s_clearFine[WM_FINE_ROWS][WM_FINE_COLS];
+static const int WM_CLEAR_PENALTY = 20;  // #67 v0.18.3.70: extra Dijkstra cost per clearance-cell below target. Raised 6->20 to PREFER OPEN GROUND over short distance (Aaron: prioritize an open, clean path over minimizing distance). At 20 a wall/water-adjacent cell (clearance 1) costs ~81 vs 1 for open, so the route detours far to stay clear of edges -- the .69 BAT screenshot showed the drive sawing east-west along a shoreline with wide-open grass right beside it, because the old weight (6) let the route hug the coast.
+static const int WM_CLEAR_TARGET  = 5;   // #67 v0.18.3.70: want >=5 cells of clearance (raised 3->5); below that the per-cell penalty applies, so the route stays well clear of water/mountain edges and only dips to low clearance at the unavoidable coastal destination itself
 
 // ============================================================================
 // Segment-region byte map (v0.14.94)

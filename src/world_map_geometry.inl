@@ -40,12 +40,24 @@ static double CalculateWrappedDistance(int32_t x1, int32_t y1, int32_t x2, int32
 // Coordinate conversion: game world coords -> segment grid (v0.14.85)
 // ============================================================================
 // World map torus is 262144 x 196608, divided into a 32 x 24 grid of 8192-unit
-// segments. The X axis has a non-zero origin offset: per wmx.obj analysis,
-// game_X = seg_col * 8192 + 4096 - 131072. The +131072 below is the inverse
-// of that offset -- without it, BFS starts in an ocean cell and filters
-// everything as unreachable. This was the v0.11.16 fix that finally made
-// terrain BFS work end-to-end ("Driving worked as expected!" -- Aaron's BAT).
-// Y axis aligns naturally because the torus wrap absorbs any constant offset.
+// segments. BOTH axes carry a half-extent centering offset: per wmx.obj
+// analysis, game_X = seg_col*8192 + 4096 - 131072 and game_Y = seg_row*8192 +
+// 4096 - 98304. The +131072 (half width = 16*8192) and +98304 (half height =
+// 12*8192) below are the inverses of those offsets.
+//
+// #67 (2026-06-20): the Y offset was MISSING here, and that was the all-
+// continent navigation bug. The prior comment claimed "Y axis aligns naturally
+// because the torus wrap absorbs any constant offset" -- that is WRONG. A
+// constant offset is NOT absorbed by the wrap when binning into discrete
+// cells; it shifts which cell every coordinate lands in. Without +98304,
+// world-Y=0 mapped to the north edge instead of the vertical centre, so every
+// western / Galbadia coordinate landed on an ocean cell and on-foot BFS reached
+// nothing (Galbadia catalog came up empty). Proven 3 ways: 9/26 -> 26/26
+// catalog locations land on land; region IDs cluster per-continent; the live
+// player position maps OCEAN -> LAND. X (+131072) was the v0.11.16 fix; Y was
+// simply overlooked, and Balamb kept working only because catalog coords and
+// the live position shared the same (wrong) mapping. See `Plan & Research
+// Documents/World Map Reachability Rework - offline wmx analysis findings.md`.
 static int WorldXToSegCol(int32_t x)
 {
     int32_t shifted = x + 131072;
@@ -55,7 +67,8 @@ static int WorldXToSegCol(int32_t x)
 
 static int WorldYToSegRow(int32_t y)
 {
-    int32_t ny = ((y % 196608) + 196608) % 196608;
+    int32_t shifted = y + 98304;   // #67: half-height centering, mirrors the X +131072
+    int32_t ny = ((shifted % 196608) + 196608) % 196608;
     return (ny / 8192) % WMX_SEG_ROWS;
 }
 
@@ -67,7 +80,7 @@ static int WorldYToSegRow(int32_t y)
 static void SegmentCenterToWorld(int col, int row, int32_t* outX, int32_t* outY)
 {
     *outX = (int32_t)(col * 8192 + 4096) - 131072;
-    *outY = (int32_t)(row * 8192 + 4096);
+    *outY = (int32_t)(row * 8192 + 4096) - 98304;   // #67: mirror WorldYToSegRow's +98304
 }
 
 // ============================================================================
@@ -189,4 +202,147 @@ static void ComputeReachability(int startCol, int startRow, VehicleType veh)
 
     Log::World("WorldMap: [BFS] From seg(%d,%d) veh=%d: %d/%d segments reachable",
                startCol, startRow, (int)veh, reachCount, WMX_PLAYABLE_SEGS);
+}
+
+// ============================================================================
+// #67: Fine-grid coordinate mapping + continuous-flood-fill reachability
+// ============================================================================
+// The fine grid is 256x192 cells of 1024 world units, centred the same way as
+// the segment grid (+131072 X, +98304 Y) so a player coordinate and the
+// rasterized wmx geometry share one frame. The grid arrays (s_walkClassFine,
+// s_reachFine) and the WM_FINE_* constants live in world_map_state.inl (game)
+// or the harness scaffolding (test). This replaces the 32x24 segment BFS for
+// catalog reachability: continents that the coarse grid bridged across straits
+// (or split at coastal cells) resolve correctly here. See the findings doc.
+static int WorldXToFineCol(int32_t x)
+{
+    int32_t shifted = x + 131072;
+    int32_t nx = ((shifted % 262144) + 262144) % 262144;
+    return (nx / WM_FINE_CELL) % WM_FINE_COLS;
+}
+
+static int WorldYToFineRow(int32_t y)
+{
+    int32_t shifted = y + 98304;
+    int32_t ny = ((shifted % 196608) + 196608) % 196608;
+    return (ny / WM_FINE_CELL) % WM_FINE_ROWS;
+}
+
+// Inverse of WorldXToFineCol / WorldYToFineRow: the world coordinate of a fine
+// cell's centre. The shifted-space centre is col*1024 + 512; subtract the
+// half-map centering (131072 X, 98304 Y) to return to world space. The torus
+// wrap is handled by the bearing math downstream, so one representative is fine.
+// #67 stage 2: the AD planner now steers toward fine-cell centres (1024-unit)
+// instead of segment centres (8192-unit), so its route hugs walkable ground.
+static void FineCellCenterToWorld(int col, int row, int32_t* x, int32_t* y)
+{
+    *x = col * WM_FINE_CELL + WM_FINE_CELL / 2 - 131072;
+    *y = row * WM_FINE_CELL + WM_FINE_CELL / 2 - 98304;
+}
+
+// True iff a fine cell of the given class + steepness is passable for the
+// vehicle. #67 BAT 2 (slope-aware): a MOUNTAIN cell steeper than
+// WM_MTN_STEEP_BLOCK is an impassable face for foot/chocobo/car; gentler
+// mountain cells are passes/plateaus and stay walkable. The slope gate is kept
+// to the MOUNTAIN class on purpose -- a type-agnostic slope block would wrongly
+// seal steep roads/bridges (type 28 road, type 12 bridge both have steep
+// individual polys). Garden/Ragnarok cross anything (hover/fly).
+static bool IsFineTraversable(uint8_t cls, uint16_t steep, VehicleType veh)
+{
+    if (veh == VEH_GARDEN || veh == VEH_RAGNAROK) return true;
+    if (cls == SEG_OCEAN) return false;
+    if (cls == SEG_FOREST && veh == VEH_CAR) return false;   // cars can't enter forest
+    if (cls == SEG_MOUNTAIN && steep > WM_MTN_STEEP_BLOCK) return false;  // steep face
+    return true;   // LAND, gentle MOUNTAIN, and (foot/chocobo) FOREST
+}
+
+// True iff the straight (Bresenham) line of fine cells from (r0,c0) to (r1,c1)
+// is entirely traversable for the vehicle. The AD drive's line-of-sight
+// lookahead uses this so steering never aims across a blocked (ocean / steep-
+// mountain) cell -- the corner-cut that would walk the player into a cliff.
+// Non-wrapped: the drive only probes a few cells ahead, well inside a continent.
+static bool FineLineWalkable(int r0, int c0, int r1, int c1, VehicleType veh)
+{
+    int dr = abs(r1 - r0), dc = abs(c1 - c0);
+    int sr = (r1 > r0) ? 1 : -1, sc = (c1 > c0) ? 1 : -1;
+    int err = dc - dr, r = r0, c = c0;
+    for (;;) {
+        if (r < 0 || r >= WM_FINE_ROWS || c < 0 || c >= WM_FINE_COLS) return false;
+        if (!IsFineTraversable(s_walkClassFine[r][c], s_steepFine[r][c], veh)) return false;
+        if (r == r1 && c == c1) break;
+        int e2 = 2 * err;
+        if (e2 > -dr) { err -= dr; c += sc; }
+        if (e2 <  dc) { err += dc; r += sr; }
+    }
+    return true;
+}
+
+// 4-connected continuous flood-fill from the player's fine cell over passable
+// cells, torus-wrapped on both axes. Fills s_reachFine. If the seed cell is
+// not passable (player on a coastal cell whose centre fell in an ocean poly),
+// snap to the nearest passable cell within SNAP_RADIUS before filling.
+static void ComputeReachabilityFine(int startCol, int startRow, VehicleType veh)
+{
+    memset(s_reachFine, 0, sizeof(s_reachFine));
+    if (startRow < 0 || startRow >= WM_FINE_ROWS ||
+        startCol < 0 || startCol >= WM_FINE_COLS) return;
+
+    if (!IsFineTraversable(s_walkClassFine[startRow][startCol],
+                           s_steepFine[startRow][startCol], veh)) {
+        const int SNAP_RADIUS = 4;
+        bool snapped = false;
+        for (int rad = 1; rad <= SNAP_RADIUS && !snapped; rad++) {
+            for (int dr = -rad; dr <= rad && !snapped; dr++) {
+                for (int dc = -rad; dc <= rad && !snapped; dc++) {
+                    int nr = (((startRow + dr) % WM_FINE_ROWS) + WM_FINE_ROWS) % WM_FINE_ROWS;
+                    int nc = (((startCol + dc) % WM_FINE_COLS) + WM_FINE_COLS) % WM_FINE_COLS;
+                    if (IsFineTraversable(s_walkClassFine[nr][nc],
+                                          s_steepFine[nr][nc], veh)) {
+                        startRow = nr; startCol = nc; snapped = true;
+                    }
+                }
+            }
+        }
+        if (!snapped) return;   // nothing passable nearby
+    }
+
+    static int qIdx[WM_FINE_COLS * WM_FINE_ROWS];
+    int qHead = 0, qTail = 0;
+    s_reachFine[startRow][startCol] = 1;
+    qIdx[qTail++] = startRow * WM_FINE_COLS + startCol;
+
+    const int dc4[] = { 0, 0, -1, 1 };
+    const int dr4[] = { -1, 1, 0, 0 };
+    while (qHead < qTail) {
+        int cur = qIdx[qHead++];
+        int cr = cur / WM_FINE_COLS;
+        int cc = cur % WM_FINE_COLS;
+        for (int d = 0; d < 4; d++) {
+            int nr = (((cr + dr4[d]) % WM_FINE_ROWS) + WM_FINE_ROWS) % WM_FINE_ROWS;
+            int nc = (((cc + dc4[d]) % WM_FINE_COLS) + WM_FINE_COLS) % WM_FINE_COLS;
+            if (!s_reachFine[nr][nc] &&
+                IsFineTraversable(s_walkClassFine[nr][nc], s_steepFine[nr][nc], veh)) {
+                s_reachFine[nr][nc] = 1;
+                if (qTail < WM_FINE_COLS * WM_FINE_ROWS)
+                    qIdx[qTail++] = nr * WM_FINE_COLS + nc;
+            }
+        }
+    }
+}
+
+// True iff the location at (x,y) is reachable: its fine cell or any of its 8
+// neighbours is in the flood-filled set (1-cell tolerance for coastal/edge
+// coordinates that sit just off the walkable centre).
+static bool IsFineCellReachable(int32_t x, int32_t y)
+{
+    int col = WorldXToFineCol(x);
+    int row = WorldYToFineRow(y);
+    for (int dr = -1; dr <= 1; dr++) {
+        for (int dc = -1; dc <= 1; dc++) {
+            int nr = (((row + dr) % WM_FINE_ROWS) + WM_FINE_ROWS) % WM_FINE_ROWS;
+            int nc = (((col + dc) % WM_FINE_COLS) + WM_FINE_COLS) % WM_FINE_COLS;
+            if (s_reachFine[nr][nc]) return true;
+        }
+    }
+    return false;
 }

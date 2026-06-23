@@ -81,6 +81,8 @@ namespace WorldMap {
 #include "world_map_announce.inl"
 #include "world_map_planner.inl"
 #include "world_map_drive.inl"
+#include "world_map_heading_scan.inl"
+#include "world_map_camera_scan.inl"
 #include "world_map_arrival.inl"
 #include "world_map_keys.inl"
 
@@ -97,6 +99,13 @@ void Poll()
         s_wmEntryTick = GetTickCount();   // v0.14.90.3: arm locomotion-byte suppression
         s_catalogBuilt = false;
         Log::World("WorldMap: Entered world map");
+
+#if HEADING_SCAN_DIAG
+        HScanResume();   // #67: resume a heading scan that an encounter interrupted
+#endif
+#if CAMERA_SCAN_DIAG
+        CamScanResume(); // #67: resume a camera diagnostic an encounter interrupted
+#endif
 
         if (s_driveActive) {
             // v0.14.88: drive paused during a random encounter, now resuming.
@@ -148,6 +157,13 @@ void Poll()
         s_catalogBuilt = false;
         Log::World("WorldMap: Exited world map");
 
+#if HEADING_SCAN_DIAG
+        HScanPause();   // #67: pause a running heading scan (encounter / field entry)
+#endif
+#if CAMERA_SCAN_DIAG
+        CamScanPause(); // #67: pause a running camera diagnostic (encounter / field entry)
+#endif
+
         // v0.14.96: defer the arrival decision; ResolveDeferredArrival resolves
         // based on the settled game mode (MODE_FIELD = arrival, battle modes =
         // encounter). v0.16.0 Part B added a distance cap inside the arrival
@@ -190,6 +206,20 @@ void Poll()
         lastX = px;
         lastY = py;
     }
+
+#if WM_CALIB_DIAG
+    // #67 calibration: trace live pos -> segment -> terrain + region as the
+    // player walks (one line per new cell). Passive read; retire by flipping
+    // WM_CALIB_DIAG to 0 in world_map_segments.inl.
+    PollWorldCalibDiag(px, py);
+#endif
+
+#if HEADING_SCAN_DIAG
+    UpdateHeadingScan();   // #67: live-facing discovery state machine (F12)
+#endif
+#if CAMERA_SCAN_DIAG
+    UpdateCameraScan();    // #67: camera-control discovery state machine (F12)
+#endif
 
     PollKeys();
 }
@@ -280,6 +310,12 @@ void Initialize()
     } else {
         Log::World("WorldMap: [INIT] Trigger-zone load failed -- see preceding [TRIGGER-DUMP] entries");
     }
+
+#if WM_CALIB_DIAG
+    // #67 calibration: dump the game's own region land/sea grid once at init,
+    // for overlay against the [TERRAIN] classifier grid above.
+    DumpRegionGridDiag();
+#endif
 
     LogTriggerPrograms();
 
