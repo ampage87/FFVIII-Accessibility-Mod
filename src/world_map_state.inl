@@ -18,6 +18,23 @@
 // catalog.inl asserts LOCATION_COUNT <= MAX_LOCATIONS at compile time.
 
 // ============================================================================
+// v0.18.3.101: Runtime walkability diagnostic gate
+// ============================================================================
+// Defined in state.inl (the first-included file) so both the variable
+// declaration below AND the call sites in segments.inl / world_map.cpp
+// all see the same macro value.
+#define WM_RUNTIME_WALK_DIAG 1
+
+// ============================================================================
+// v0.18.3.104: Triangle-navmesh diagnostic gate (NON-INVASIVE port)
+// ============================================================================
+// Defined here (first-included file) so world_map_navmesh.inl's #if guard, the
+// Reset/AddTriangle/Build calls in segments.inl, and Navmesh_LogConnectivity()
+// in world_map.cpp all see the same value. LOCAL-ONLY while the navmesh is
+// diagnostic-only (no routing depends on it yet -- the .99 chain still drives).
+#define NAVMESH_DIAG 1
+
+// ============================================================================
 // Sizing upper bound for state arrays (v0.16.0)
 // ============================================================================
 // State arrays indexed by catalog slot are sized to MAX_LOCATIONS, NOT to
@@ -331,6 +348,19 @@ static const double DRIVE_PLAN_LOOKAHEAD_DIST   = 2400.0;
 static const int    DRIVE_REPLAN_TRIGGER        = 2;       // stuck windows before a recovery re-plan
 static const int    DRIVE_MAX_REPLANS           = 8;       // recovery re-plans per drive before give-up
 
+// #70 v0.18.3.97: departure bridge-out. A planned route that starts inside a
+// tiny disconnected pocket (the Dollet shelf -- the #69 height-step guard seals
+// the coastal shelf IN, the same way it keeps routes off the cliff) expands
+// only a handful of cells and dead-ends far short of the target. Detect that
+// (expanded <= WM_POCKET_MAX_EXPANDED AND still WM_POCKET_MIN_DIST cells short)
+// and steer to the nearest ROAD cell -- the guard-exempt escape ramp the
+// character arrived on -- then re-plan from there. Mirrors the arrival sweep.
+static const int    WM_POCKET_MAX_EXPANDED  = 40;     // pocket if the BFS reached <= this many cells
+static const int    WM_POCKET_MIN_DIST      = 6;      // ...AND the route ends >= this many cells short of target
+static const double WM_BRIDGE_ARRIVE_DIST   = 1536.0; // reached the road once within ~1.5 fine cells of it
+static const int    WM_BRIDGE_MAX           = 6;      // give-up guard: max bridge attempts per drive
+static const int    WM_BRIDGE_ROAD_RADIUS   = 30;     // nearest-road ring search limit (fine cells)
+
 // #67 v0.18.3.60: mid-route arc-steering bands (relBearing units; 4096 = 360deg,
 // so 1deg ~= 11.4 units). The old law walked forward only within ~17.5deg of the
 // target and turned in place otherwise, with no damping -- so the heading
@@ -444,7 +474,7 @@ static const int    DRIVE_PROBE_MAX_FAILS    = 8;     // this many non-progressi
 // pivot-in-place (no forward key, heading turning) apart from forward-into-
 // collision (UP pressed but position frozen). Per-session diagnostic -- set
 // false (or remove this block + the trace) before the #67 push.
-static const bool   DRIVE_STEER_DIAG            = false;  // #67 SHIPPED v0.18.3.87: Dollet on-foot drive arrived; trace retired
+static const bool   DRIVE_STEER_DIAG            = true;   // #70 v0.18.3.98: re-enabled to watch the bridge-out steer toward the road cell (set false before push)
 static const int    DRIVE_STEER_DIAG_INTERVAL_MS = 200;    // throttle (~5 lines/sec)
 
 // v0.14.87 — sweep search constants. Activated when on-foot drive is stuck
@@ -456,7 +486,17 @@ static const DWORD  SWEEP_TURN_BASE_MS      = 800;   // phase 1 turn duration; +
 static const DWORD  SWEEP_WALK_DURATION_MS  = 3000;  // walk forward 3s per phase
 static const DWORD  FINAL_APPROACH_TIMEOUT_MS = 6000;// in final approach >6s without exit → sweep
 
-static bool     s_driveActive            = false;
+#if WM_RUNTIME_WALK_DIAG
+// v0.18.3.102: the one-shot runtime-walkmesh dump is armed on world-map entry
+// and fired from Poll() once the mesh is actually populated -- NOT merely once
+// [0x020402DC] is non-zero (the .101 BAT proved that fires too early, while the
+// player position is still (0,0) and the descriptor entries are garbage).
+static bool s_rtWalkDumpPending  = false;  // armed on world-map entry
+static int  s_rtWalkSettleTicks  = -1;     // -1 until player position valid; then counts ticks since (settle delay)
+static int  s_rtWalkPollTicks    = 0;      // total ticks polled since armed (fire-anyway safety budget)
+#endif
+
+static bool s_driveActive            = false;
 static int32_t  s_driveTargetX           = 0;
 static int32_t  s_driveTargetY           = 0;
 static char     s_driveTargetName[64]    = {};
@@ -470,6 +510,12 @@ static int32_t  s_driveStuckY            = 0;
 static DWORD    s_driveStuckCheckTime    = 0;
 static int      s_driveStuckCount        = 0;
 static int      s_driveReplanCount       = 0;      // #67 v0.18.3.59: mid-route recovery re-plans used this drive
+static int      s_drivePlanExpanded      = 0;      // #70 v0.18.3.97: node count from the last PlanPathFine
+static int      s_drivePlanDist          = 0;      // #70: cells from the route end to the target (0 = reached)
+static bool     s_driveBridgeActive      = false;  // #70: bridging out of a start pocket toward the nearest road cell
+static int32_t  s_driveBridgeX           = 0;      // #70: bridge target (nearest road cell, world coords)
+static int32_t  s_driveBridgeY           = 0;
+static int      s_driveBridgeCount       = 0;      // #70: bridge attempts used this drive (bounded by WM_BRIDGE_MAX)
 static bool     s_driveApproachAnnounced = false;  // one-shot guard
 static bool     s_driveOnFootAtStart     = true;   // v0.14.87: captured at StartAutoDrive; arrival semantics differ
 static DWORD    s_finalApproachEnterTick = 0;      // v0.14.87: when player crossed below FINAL_APPROACH_DIST (0 = not yet)
@@ -608,6 +654,75 @@ static const int WM_FINE_ROWS = 192;                         // 196608 / 1024
 static uint8_t s_walkClassFine[WM_FINE_ROWS][WM_FINE_COLS];  // SegTerrainClass per fine cell
 static uint8_t s_reachFine     [WM_FINE_ROWS][WM_FINE_COLS]; // flood-fill visited (0/1)
 static bool    s_walkGridLoaded = false;
+
+// ============================================================================
+// v0.18.3.101: Runtime walkability dump addresses
+// ============================================================================
+// Verified from FF8_EN.exe byte analysis (session 2026-06-24). The earlier
+// theory in this block (0x020426C0 as a stride-40 ADJACENCY array) was WRONG
+// and has been corrected. What was actually established:
+//
+// THE RUNTIME WALKMESH ADJACENCY (the structure we want):
+//   0x020402DC = pointer to the polygon DESCRIPTOR ARRAY ("descBase").
+//     Written ONCE at 0x542F17 by the world-map data-load batch pointer setup
+//     (sub_542DA0 family): ecx = table[idx*4 + 0x01E9DC3C] + 0x01E9DC3C, then
+//     mov [0x020402DC], ecx. 0x01E9DC3C is BSS (its file offset exceeds the
+//     22.1MB exe size) -> runtime-allocated and populated from world.fs, NOT
+//     baked in the exe. So [0x020402DC] becomes non-zero exactly when the mesh
+//     blob finishes loading and stays valid for the whole world-map session:
+//     it is the RELIABLE READINESS SIGNAL (poll [0x020402DC] != 0).
+//   Descriptor entry = 12 bytes. For polygon N:
+//     adjListPtr = *(uint32_t*)(descBase + N*12 + 0)
+//     (+4 dword and +8 word are other per-poly fields; confirmed at 0x548B50
+//      lea eax,[eax+edx*4] with edx=idx*3 => idx*12, the +0 dword stored to
+//      0x0203EE80 just before the collision sub_548300 call).
+//   Adjacency list = WORDS at STRIDE 32 (0x20). Read the word at offset 0 of
+//     each 32-byte entry; advance by 32. Sentinels: 0xFFFF = END of list,
+//     0xFFFE = IMPASSABLE edge (cliff / ocean boundary); any other value is a
+//     neighbour polygon index. (Confirmed at the sentinel-checking code near
+//     0x548800: mov ax,[ecx]; cmp 0xFFFF je end; cmp 0xFFFE je skip;
+//     mov ax,[ecx+0x20]; add ecx,0x20.)
+//   => To BFS the whole mesh: read descBase, then for each poly N walk its
+//      adjListPtr stride-32 collecting non-sentinel neighbours.
+//
+// OPEN EMPIRICAL QUESTION (the whole point of the RTWALK diagnostic): does the
+//   0xFFFE edge set encode the Dollet-shelf isolation, or is the shelf blocked
+//   ONLY by the wmsetus zone-trigger system? If the shelf is REACHABLE in this
+//   graph, the runtime mesh will NOT by itself solve #70 and the .81 AABB stays.
+//   Only a successful live read answers it -- never achieved as of .101.
+//
+// 0x0203EE80 = pointer to the CURRENT polygon's adjacency list (set just before
+//   the collision sub_548300 call). Same stride-32 walk applies. (This address
+//   ALSO aliases WM_POS_X earlier in this file -- the foot DWORDs and this adj
+//   pointer occupy overlapping documented uses across game states; the RTWALK
+//   probe reads it purely as a sanity check, not for BFS.)
+//
+// DISCARDED / UNRELIABLE (kept as constants only because existing diag code
+// references them; do NOT build the BFS on these):
+//   0x020426C0 = transformed polygon GEOMETRY (positions/normals, written by
+//     sub_548300), NOT adjacency. Iterated stride 0x28 (40) elsewhere but holds
+//     geometry, not neighbour lists. The "stride-40 adjacency" theory was wrong.
+//   0x02045C40 = a polygon COUNT (dword) tied to the 0x020426C0 geometry array;
+//     a live BAT read it as 11 at one tick (mesh not yet populated) so it is
+//     NOT a dependable count for the descriptor array. Offline-confirmed total
+//     polygon count is 473193 (ocean 315777, forest 16187).
+//   0x0203FD5C = path-dependent: the collision resolver writes the current
+//     polygon INDEX here, but sub_548AF0 writes 0 (ebx is xor'd and never
+//     changed) -- which is why it read 0 during 40s of active driving. Do not
+//     trust it as either an index or a pointer.
+//   0x02040304 = current polygon index (word), only transiently non-zero during
+//     a collision frame.
+static const uintptr_t WM_RT_DESC_BASE    = 0x020402DC; // ptr to polygon descriptor array (READINESS SIGNAL: != 0 when mesh loaded)
+static const int       WM_RT_DESC_STRIDE  = 12;          // bytes per polygon descriptor; +0 = adj-list ptr
+static const int       WM_RT_ADJ_STRIDE   = 32;          // bytes per adjacency-list entry; word at +0 = neighbour idx / sentinel
+static const uintptr_t WM_RT_CUR_ADJ_PTR  = 0x0203EE80;  // ptr to the current polygon's adjacency list
+static const uintptr_t WM_RT_POLY_ARRAY   = 0x020426C0; // DISCARDED: transformed geometry, NOT adjacency (kept for legacy diag refs)
+static const uintptr_t WM_RT_POLY_IDX     = 0x02040304; // current polygon index (word, per-frame, transient)
+static const uintptr_t WM_RT_POLY_COUNT   = 0x02045C40; // a poly count tied to the geometry array -- UNRELIABLE (read 11 live)
+static const uintptr_t WM_RT_POLY_PTR     = 0x0203FD5C; // path-dependent (0 in the sub_548AF0 path) -- do not trust
+static const int       WM_RT_ENTRY_STRIDE = 40;          // geometry-array stride (NOT adjacency)
+static const uint16_t  WM_RT_SENTINEL_END   = 0xFFFF;   // end of adjacency list
+static const uint16_t  WM_RT_SENTINEL_NOADJ = 0xFFFE;   // impassable edge (cliff / ocean boundary)
 
 // #67 BAT 2 (slope-aware mountains): per-fine-cell steepness = the elevation
 // spread (max - min vertex elevation) of the wmx polygon whose centre is in

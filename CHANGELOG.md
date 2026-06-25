@@ -6,6 +6,142 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.104
+
+World map (#70 / navmesh): port the container-validated triangle navmesh into the build as a NON-INVASIVE diagnostic -- build + connectivity probe only, with zero change to the working planner or executor (the .99 chain still drives). Everything is gated behind `NAVMESH_DIAG` (LOCAL-only, like `WM_RUNTIME_WALK_DIAG`).
+
+This is the first half of the navmesh plan: prove the mesh BUILDS and CONNECTS in-game before any routing depends on it. The coarse 1024-unit fine grid blurs cliffs and coastlines and needs a chain of compensating hardcodes (the .81 false-coast box, the .85 road override, the #69 height-step guard); the true navmesh keeps the wmx triangles AS triangles -- world-space vertex dedup -> exact shared-edge adjacency -> axis-aligned T-junction bridging -> CSR -> A* with a per-edge height-step gate -- so a later BAT can retire most of that chain.
+
+The module (`src/world_map_navmesh.inl`, host-compilable: no Win32/SEH/absolute-memory, std::vector/std::sort only) was developed offline against the real wmx.obj and then host-compiled and run in-container (`tests/test_navmesh.cpp`, g++ -std=c++17, 0 failures), reproducing the offline numbers to the digit:
+
+- 157,416 navigable triangles
+- 253 connected components after T-junction bridging. Exact shared-edge adjacency alone fragments the mesh into 642 islands: a triangle on one side of a seam spans two sub-edges the other side splits, so they share collinear geometry but not a vertex pair. All seams are axis-aligned, so bridging single-use boundary edges that overlap a collinear boundary edge stitches them.
+- largest component 74,308 triangles
+- flood from the Galbadia save coord (-29270,-24056) at gate 400 reaches Dollet, Timber, Galbadia Garden and Deling City, and correctly does NOT reach Balamb (across the ocean)
+- A* Galbadia->Dollet = 30,259 units / 126 triangles
+
+Integration: `LoadTerrainGrid` (segments.inl) now -- gated -- `Navmesh_Reset()`s before its segment loop, `Navmesh_AddTriangle()`s each non-ocean triangle from inside the existing `RasterizeTriFine` block (reusing the same verts and `i0/i1/i2<vertCount` guard, so the navmesh sees triangles identical to the fine grid), then `Navmesh_Build()`s and logs `[NAVMESH]` tris/components/largest. `world_map.cpp` gains `<vector>` and the `world_map_navmesh.inl` include (after geometry.inl, before segments.inl), and `Initialize()` calls `Navmesh_LogConnectivity()` from the Galbadia coord (which also exercises A* end-to-end with a route to Dollet).
+
+CAVEAT (Finding 4) stands: the navmesh canNOT model the Dollet false-coast -- that ledge is impassable by engine collision, not by anything in the mesh data. Its triangles carry common walkable ground types and are byte-indistinguishable from real land, and exact-edge adjacency leaves Dollet unreachable, so the legitimate route needs the same bridging the false coast uses -- geometry cannot separate them. The .81 exclusion stays; the durable fix is the disassembly track (find how the engine builds its per-edge walkmesh).
+
+BAT .104: drive on the world map, or just load a Galbadia save (the build fires at terrain load, the connectivity diagnostic at Initialize). Expect in `Logs/ff8_world.log`:
+
+- `[NAVMESH] built 157416 triangles, 253 components, largest=74308`
+- the flood line ending `-> 35527 reachable (gate=400)`
+- Dollet / Timber / Galbadia Garden / Deling City REACHABLE; Balamb Garden / Balamb Town not reachable
+- `[NAVMESH] A* ref->Dollet: len=30259 tris=126 (path found)`
+
+If the numbers match offline, the in-game build is sound and the next BAT swaps routing onto the navmesh (retire the coarse fine-grid path + the .85 override; keep .81 as the one exclusion). If the build crashes or the numbers differ, the in-game wmx parse diverged from offline -- compare the parse. LOCAL-ONLY diagnostic, never pushed.
+
+## v0.18.3.103
+
+World map (#67/#68/#69/#70): relax the runtime-walkmesh gate so the dump fires on scene-init alone, finally yielding the post-load probe.
+
+The v0.18.3.102 re-gate did its first job correctly: at world-map entry the poll showed foot=(0,0) and adj0/adj1 = 0xFFFF914E/0xFFFFB006, and the gate refused to fire -- no premature garbage dump (the .101 failure mode is gone). Position then became valid and the 30-tick settle armed. But the dump never fired at all. The readiness condition also required adj0/adj1 to read as plausible pointers (in [0x00010000, 0x7FFF0000)), and those descriptor dwords stayed 0xFFFFxxxx, so it never passed; meanwhile the 1200-tick fire-anyway budget (~20s) wasn't reached in the ~15s the session captured. So neither path fired, and we still have no post-load probe -- which is the entire reason the diagnostic exists.
+
+The mistake was making adjacency-pointer sanity a hard gate rather than a logged observation. Gating on "the descriptor entries look like pointers" blocks the dump in exactly the case we most need to see: where the structural model is wrong and the entries never look like pointers.
+
+Fix (world_map.cpp Poll): drop adj0ok/adj1ok from the `ready` condition. The dump now fires on scene-init alone -- descBase != 0 AND foot position valid AND the 30-tick settle -- roughly 0.5s after the world map initializes. adj0ok/adj1ok are still computed and surfaced in the firing log line as (ptr?0/1), so we keep the signal without letting it block the dump. This finally produces the post-load DumpRuntimeWalkability() probe of poly[0..9] plus the observed polyCount.
+
+Emerging signal to resolve on the next BAT: descBase+0 and descBase+12 read 0xFFFF914E / 0xFFFFB006, and since the .102 `ready` never fired across ~15s well past the settle, those values appear not to resolve into pointers even after the scene initializes. That hints the descriptor-array interpretation (descBase + N*12 -> adjacency-list pointer) may be wrong rather than merely mistimed. The .103 dump decides it: sane neighbour indices with WALL/END sentinels means the model is right and .101/.102 were purely a timing problem; entries still 0xFFFFxxxx with polyCount now reading 473193 means the structural model itself is wrong, and the next step is re-deriving it (e.g. treating the +0 field as a base-relative or signed offset, or re-checking what 0x020402DC actually points at). No behavior change outside the diagnostic. LOCAL-ONLY diagnostic build (WM_RUNTIME_WALK_DIAG remains 1; never pushed).
+
+## v0.18.3.102
+
+World map (#67/#68/#69/#70): re-gate the runtime-walkmesh diagnostic so the dump fires once the mesh is populated, not at world-map entry.
+
+The v0.18.3.101 BAT was a milestone: the [RTWALK] dump fired for the first time ever. [0x020402DC] (the descriptor-array base, "descBase") read non-zero (0x01E9FDCC), the dump executed, and the SEH guards caught the bad reads instead of crashing -- the plumbing is proven. But it fired too early. At the world-map ENTRY tick the scene had not finished initializing: the player position was still (0,0) (the [DEFER] "position became valid" line fires on the NEXT tick), the observed polyCount read 11 (real total is 473193), and the descriptor entries were garbage -- poly[0] adjPtr=0xFFFF914E, polys 4-9 were small increasing offsets (0x268, 0x298, 0x308, 0x39C, 0x404, 0x484), all of which FAULTed when dereferenced.
+
+Root cause: descBase is written during the world-map data-load pointer setup (table[idx] + 0x01E9DC3C, at 0x542F17) BEFORE world.fs finishes streaming the descriptor entries it points to -- and that streaming completes around the same time the player position becomes valid. So "descBase != 0" is necessary but not sufficient as a readiness signal, and the old one-shot cleared its pending flag on that first tick, so the mesh was never re-read once the data was actually there. This is the same lesson as the retired countdown, now precisely located: wait for the mesh, but anchor the wait to scene-initialization, not to world-map entry.
+
+Fix (world_map.cpp Poll + world_map_state.inl): keep polling and only fire DumpRuntimeWalkability() once the mesh looks populated. Readiness now requires all of: descBase != 0; the player foot position valid (footX|footY != 0) and held valid for a 30-tick settle; and the first two descriptor adjacency pointers (descBase+0, descBase+12) reading as plausible pointers, in [0x00010000, 0x7FFF0000) -- a range that cleanly rejects BOTH the 0x2xx-style offsets and the 0xFFFFxxxx-style kernel garbage seen in .101. A bounded fire-anyway budget (1200 polled ticks) guarantees the dump still fires even if it never settles. That fallback is itself diagnostic: if the post-load dump STILL shows garbage descriptor entries after the mesh is definitely loaded (position valid, polyCount finally correct), then the structural interpretation of the descriptor array -- not the timing -- is wrong, which is the next thing to learn.
+
+The two old diagnostic fields (s_rtWalkDumpPending plus the vestigial countdown) are replaced by three: s_rtWalkDumpPending (armed on entry), s_rtWalkSettleTicks (-1 until position valid, then counts ticks since), and s_rtWalkPollTicks (total ticks polled, the fire-anyway budget); all three reset on world-map entry. No behavior change outside the diagnostic. LOCAL-ONLY diagnostic build (WM_RUNTIME_WALK_DIAG remains 1; never pushed). The auto-drive itself is untouched -- the idx-8/31 wedge ~15 km out remains the pre-existing #68 executor corner issue, and the .99 planner fix is confirmed working (the [PLAN] line produces a real multi-cell route and the path index climbs before the executor pins).
+
+## v0.18.3.101
+
+World map (#67/#68/#69/#70): runtime walkability diagnostic -- read the game's own polygon adjacency from RAM.
+
+After 45+ builds of heuristic-based grid approximation, we're going to the source. The game loads the entire world mesh at startup and maintains a polygon adjacency array at 0x20426C0. Each entry (40 bytes) contains the adjacent polygon indices; 0xFFFE means no adjacent polygon = impassable edge (cliff/ocean). The player's current polygon index lives at 0x2040304.
+
+This build adds DumpRuntimeWalkability() (gated WM_RUNTIME_WALK_DIAG=1, called once from LoadTerrainGrid): reads polyCount from 0x20409E0, reads startIdx from 0x2040304, then BFS-floods the full reachable polygon set from startIdx through the adjacency array, then re-parses wmx.obj to map each polygon to its fine cell, marks those cells in a 256x192 grid, dumps [RTWALK] lines to ff8_world.log and writes Logs/wm_rt_walk.bin (49KB binary). Local only; diag flag stays on.
+
+BAT v0.18.3.101: load Galbadia world-map save. Check ff8_world.log for [RTWALK] lines. Key reads:
+- polyCount=N (expect ~473000), startIdx=M (expect non-zero, <polyCount)
+- reachable polygons=N (expect ~450000 from Galbadia)
+- PlayerStart: REACHABLE (sanity check)
+- Dollet, Timber, G-Garden: REACHABLE
+- Shelf(S): this is the critical question -- REACHABLE means game mesh connects it to mainland (confirmed by offline analysis), NOT-REACHABLE means the runtime adjacency isolates it (would mean our shelf problem has a clean fix)
+- ASCII coast map shows '#' where the game's own adjacency says unreachable
+- wm_rt_walk.bin written (send for offline analysis)
+If polyCount=0: polygon array not populated at terrain-load time -- move call to first Poll() tick instead.
+DIAG flags: DRIVE_STEER_DIAG=true, ROUTE_MAP_DIAG=1, WM_RUNTIME_WALK_DIAG=1 (all LOCAL).
+
+## v0.18.3.100
+
+World map (#68): corner-cap the route lookahead so the executor stops cutting corners into walls.
+
+The .99 planner fix landed and the pocket is solved: from a Dollet start the plan changed from "start already the closest reachable cell, expanded 5" to a real 61-cell route that reaches its goal (dist 0, expanded 733), and the character followed it ~6 km out of the shelf and onto the road. He then wedged again, but on a different problem and one already tracked as #68.
+
+The route here is an L: a long west leg, then a one-cell-wide canyon running north. The steer-target picker scans forward along the path for the first cell at least ~2400 units away, so while he was still finishing the west leg it aimed ~2400 units up the north leg. The straight line to that target cuts across the inside of the corner, so he drifted diagonally and pinned against the canyon's east wall instead of following the west leg into the corner and turning. On top of that, the ~2400-unit threshold landed right on the corner cell, so small position jitter flipped the target between the corner cell (aim back, southeast) and a cell up the next leg (aim forward, northwest) — the #68 whipsaw — and the reverse un-wedge just fed it. He never advanced past that cell.
+
+The fix caps the forward lookahead at a sharp sustained bend. While scanning forward, if the path direction (the sign of the row/column step between adjacent fine cells) turns away from the current leg's direction and the new direction persists for at least two cells, that cell is the leg's apex — aim there and stop. So he aims at the corner, walks the leg into it, and only then turns up the next leg from inside the corridor. Straight and open legs still scan to the full ~2400 units (stable bearing, no orbit — this preserves the .78 anti-orbit far target), and a staircase (alternating single-cell steps) is not a sustained turn so it also keeps the far target. The monotonic path cursor and the .82 line-of-sight clamp are unchanged. Foot and vehicle both use this path.
+
+DRIVE_STEER_DIAG and ROUTE_MAP_DIAG stay on.
+
+BAT: from a Dollet start, drive to Timber. Expect him to follow the west leg to the corner (X decreasing to about -23040) without cutting away early, turn up the north canyon, and `[YAWDRIVE]` idx to climb past 5 (the old wedge) with the steer target no longer flipping between (-23040,-41472) and (-23040,-37376). Regression: an into-Dollet drive still arrives and a Balamb drive still routes and arrives (the cap only shortens the lookahead at sustained corners). If he reaches the corner but still pins there, that points to a real in-game wall at the apex rather than a cut, and the next step is a lateral escape in the wedge recovery (today the executor only presses toward-target or reverses; it never tries sideways to get around a wall) — an F11 at the wedge would show open-ground versus wall.
+
+## v0.18.3.99
+
+World map (#70): the real fix — let the planner step onto the road.
+
+The previous two builds tried to escape the Dollet pocket with an executor "bridge" that steered toward the nearest road cell. The .98 BAT showed that bridge firing but self-destructing: the nearest road cell is about 1450 units from the start, which is inside the bridge's arrival radius (1536), so it "arrived" on the same tick it was set — before the character moved — then re-planned, re-pocketed, and re-bridged, burning all six attempts in under a second. After that it direct-steered at Timber, walked into the pocket's south wall, and gave up 32 km out. The nearest road cell was also northeast (toward Dollet), the opposite of the southwest direction to Timber.
+
+The deeper reason it kept hitting walls: the #69 height-step guard exempts a step only when *both* cells are road. The Dollet exit start sits on the coastal shelf, which is not a road cell, so the single step from the shelf onto the adjacent canyon road is a non-road-to-road step that the guard blocks (the shelf-to-road elevation jump is large). The search is sealed into a five-cell pocket and never reaches the road at all — it gives up immediately ("start already the closest reachable cell, expanded 5") and falls back to straight-line steering into the wall. Driving *in* works because the route is already on the road the whole way to the shelf edge and the #68 sweep hops the final cell; driving *out* needs that first hop *onto* the road, which the guard forbade.
+
+The fix is one line in the planner: extend the guard exemption from "both cells are road" to "the destination cell is road." Stepping onto a road from any adjacent cell is now always allowed, because the road is ground-truth walkable. The shelf connects to the adjacent canyon road, the search gets on the road, and road-to-road steps carry the route southwest to Timber — exactly the canyon route the #69 work was built for. The executor then follows a normal path instead of running at a wall. Stepping *off* a road onto a non-road cliff stays guarded (asymmetric, so no new cliff-climbing), and road-less continents like Balamb have no road cells, so the condition is identical to before there — no regression.
+
+The .97/.98 executor bridge stays in the code but goes dormant: with the road connected the search now reaches Timber, so the pocket test (a small expansion that ends far from target) can't fire. ROUTE_MAP_DIAG and DRIVE_STEER_DIAG stay on for this BAT.
+
+BAT: from a Dollet start, drive to Timber. The `[PLAN]` line should change from "start already the closest reachable cell ... expanded 5 ... direct steer" to a real "Fine path: N cells ... dist 0 (or small), expanded large"; the `[ROUTEMAP]` route should run southwest along the canyon road; `[YAWDRIVE]` idx should climb past 0/0 as he follows the path; there should be no `[DRIVE] Pocketed` line; and he should arrive. Regression: an into-Dollet drive still arrives, and a Balamb drive still routes and arrives. If the plan still says "expanded 5," the shelf's neighbours toward the road are themselves blocked (then we widen the on-ramp rule); if it routes onto the road but he physically wedges trying to walk shelf-to-road in-game, the executor needs a lateral escape — but the route will at least point the right way.
+
+## v0.18.3.98
+
+World map (#70): the .97 bridge-out never fired — fixed.
+
+The .97 build still wedged about 32 km out on the Dollet to Timber drive. The world log showed why: that drive takes PlanPathFine's early-return-false branch ("[PLAN] Fine BFS: start already the closest reachable cell … expanded 5 -- direct steer", then `return false`), not the success branch the .97 bridge was written around. Inside the tiny five-cell pocket no cell is closer to Timber than the start itself, so PlanPathFine returns false. The bridge decision in PlanDrivePath was gated `if (ok && …)`, so with `ok` false it was skipped entirely; the planner fell through to direct-steer at Timber, nosed into the sealing cliff, burned six reverse-bursts, and gave up at dist about 32716.
+
+The pocket has two shapes: the success branch (a route that dead-ends far short — .96's dist 37, expanded 8) and this early-return-false branch (the start is already the closest reachable cell, expanded 5). Only the first was handled.
+
+Two surgical changes in world_map_planner.inl fix it. First, the early-return-false branch now also sets the pocket signal (s_drivePlanExpanded / s_drivePlanDist) — previously it was set only on the success path, so the bridge read stale values when the planner returned false. Second, the bridge gate drops the `ok &&` term and keys purely on the pocket signal (expanded ≤ 40 and dist ≥ 6, within six attempts), regardless of PlanPathFine's return value. This is safe: the bridge block runs only immediately after PlanPathFine, so the signals are always fresh, and normal drives expand hundreds of cells and reach dist about 0, so the pocket test cannot false-trigger.
+
+Nothing else changed. The executor (StartAutoDrive bridge reset, the bridge-arrival re-plan, and the steer-target override in UpdateAutoDrive), the state constants and variables, and FindNearestRoadWorld were all already complete and correct from .97 — the earlier belief that the planner had been stripped was a stale read. DRIVE_STEER_DIAG is re-enabled so the next BAT's [YAWDRIVE] trace shows the bridge steering toward the road cell (set false before push). Lesson: world_map_planner.inl uses CRLF line endings, so edit_file multi-line anchors must use \r\n.
+
+BAT: from a Dollet start, drive to Timber. Expect "[DRIVE] Pocketed start fine(112,59) (expanded 5, dist N) -> BRIDGE-OUT to nearest road cell at world(X,Y)", [YAWDRIVE] steering toward that road cell, "[DRIVE] Bridged out of pocket (reached road) -> re-planning to Timber", a fresh [PLAN] Fine path from the road cell that reaches Timber, then arrival. Regression: an into-Dollet drive still arrives, and a Balamb drive prints no [DRIVE] Pocketed line.
+
+## v0.18.3.97
+
+World map (#70): universal departure bridge-out — the fix for the Dollet exit pocket.
+
+The .96 diagnostic confirmed the pocket three ways (route-map, elevation map, and the F11 screenshot): Dollet sits on a coastal shelf at elevation −1287, sealed in by the #69 height-step guard (six blocked cliff edges around the start) plus the .81 box to the south. The screenshot showed the character on a rock shelf ringed by cliff faces, with open green ground visible beyond but not adjacent.
+
+Driving in works because the route rides the road (road-to-road edges are exempt from the height-step guard) up to the shelf edge, then the #68 sweep hops the last cell on. That sweep is a one-way bridge: driving out, the start is on the shelf, which isn't a road cell, so every edge off it is guard-blocked and the planner reaches only eight cells before dead-ending 37 short of the target.
+
+The fix mirrors the sweep at departure. PlanPathFine now stores the pocket signal (s_drivePlanExpanded, s_drivePlanDist). PlanDrivePath, after planning, treats a start as pocketed when the BFS expanded ≤ WM_POCKET_MAX_EXPANDED (40) cells and the route still ends ≥ WM_POCKET_MIN_DIST (6) cells short, within WM_BRIDGE_MAX (6) attempts. When pocketed it finds the nearest road cell (FindNearestRoadWorld, an outward ring search over s_roadFine within 30 cells) and sets a bridge target. UpdateAutoDrive then steers at that road cell instead of the dead-end route, using the existing yaw-based 8-way steering and reverse-burst; once within WM_BRIDGE_ARRIVE_DIST (~1.5 cells) of the road it drops bridge mode and re-plans from there. The road's guard-exempt edges let the fresh plan route normally toward the target. Bridge state resets per drive in StartAutoDrive.
+
+Because the bridge only fires on a genuine pocket (normal drives expand hundreds of cells and reach the target), into-Dollet and Balamb drives are untouched — no regression. ROUTE_MAP_DIAG stays on for this BAT.
+
+BAT: reach Dollet by auto-drive, then auto-drive to Timber. Expect a `[DRIVE] Pocketed start … BRIDGE-OUT` line, the character walking toward the road (the SW / lower-left green), a `[DRIVE] Bridged out of pocket → re-planning` line, a fresh `[PLAN]` from the road cell that reaches Timber, and arrival. Regression: into-Dollet still arrives, and a Balamb drive fires no bridge.
+
+## v0.18.3.96
+
+World map (#70): diagnostic build — see the Dollet exit pocket. No behavior change.
+
+The #69 chain is pushed (main is v0.18.3.95, commit c591803b). New issue #70: auto-driving *away from* Dollet wedges at the start. From the Dollet start the planner expands only 8 cells before the frontier is exhausted and dead-ends 37 cells short of Timber — Dollet is a small disconnected pocket. Driving *in* works because the #68 final-approach sweep bridges the last bit in, but that bridge is one-way, so departure strands the planner inside the pocket.
+
+This was judged **not** exclusive to Dollet — the sweep is a general fallback, walking on foot into any small pocket has the same failure, and a small disconnected component is a general property of the 1024-unit grid — so the fix will be a universal departure-side bridge-out rather than widening the .85 override. Before building it, this diagnostic flips `ROUTE_MAP_DIAG` back on (local only; main stays clean at .95) so the route-map and elevation dumps reveal the pocket's exact walls and whether an open exit faces the target. The bridge has to push a direction that actually leaves the pocket, so the walls need to be seen first.
+
+BAT: reach Dollet by auto-drive, then auto-drive to Timber; send the world log. Read the `[ROUTEMAP]` from the Dollet→Timber plan — the `S` pocket, the `^` walls around it (including the .81 box), and whether a `.` corridor opens toward the target.
+
 ## v0.18.3.95
 
 World map (#69): diagnostics off for the push.

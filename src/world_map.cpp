@@ -47,6 +47,7 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <vector>
 #include "ff8_accessibility.h"
 #include "ff8_addresses.h"
 #include "world_map.h"
@@ -75,6 +76,7 @@ namespace WorldMap {
 //     and AnnounceLocation + AnnounceBearing (announce.inl).
 #include "world_map_state.inl"
 #include "world_map_geometry.inl"
+#include "world_map_navmesh.inl"
 #include "world_map_segments.inl"
 #include "world_map_trigger_data.inl"
 #include "world_map_catalog.inl"
@@ -99,6 +101,18 @@ void Poll()
         s_wmEntryTick = GetTickCount();   // v0.14.90.3: arm locomotion-byte suppression
         s_catalogBuilt = false;
         Log::World("WorldMap: Entered world map");
+
+#if WM_RUNTIME_WALK_DIAG
+        // v0.18.3.102: arm the one-shot runtime-walkmesh dump and reset its
+        // gating counters. The dump is fired from Poll() once the mesh is
+        // actually populated (position valid + settle delay + descriptor
+        // entries read as plausible pointers), not merely once [0x020402DC]
+        // is non-zero -- the .101 BAT proved that fires before world.fs has
+        // finished streaming the mesh.
+        s_rtWalkDumpPending = true;
+        s_rtWalkSettleTicks = -1;
+        s_rtWalkPollTicks   = 0;
+#endif
 
 #if HEADING_SCAN_DIAG
         HScanResume();   // #67: resume a heading scan that an encounter interrupted
@@ -194,6 +208,76 @@ void Poll()
 
     CheckVehicleChange();
     UpdateAutoDrive();
+
+#if WM_RUNTIME_WALK_DIAG
+    // v0.18.3.102: re-gated runtime-walkmesh dump. The .101 BAT proved that
+    // [0x020402DC] (descBase) goes non-zero at world-map ENTRY, before world.fs
+    // finishes streaming the mesh -- so firing on descBase!=0 read garbage
+    // (player pos still (0,0), polyCount=11, descriptor entries 0xFFFF914E /
+    // 0x00000268...). Now we keep polling and only fire once the mesh looks
+    // populated: descBase set AND player position valid for a short settle AND
+    // the first two descriptor entries read as plausible pointers. A bounded
+    // fire-anyway budget guarantees we still get a dump even if it never
+    // settles -- and if THAT dump still shows garbage after the mesh is
+    // definitely loaded, the structural interpretation (not the timing) is
+    // wrong, which is itself the answer we need.
+    if (s_rtWalkDumpPending) {
+        const uint32_t RT_PTR_LO  = 0x00010000u;  // below this = offset/garbage (saw 0x268..0x484)
+        const uint32_t RT_PTR_HI  = 0x7FFF0000u;  // above this = kernel/garbage (saw 0xFFFF914E)
+        const int      RT_SETTLE  = 30;           // ticks position must stay valid before trusting the mesh
+        const int      RT_POLL_MAX = 1200;        // fire-anyway budget so we never silently never-fire
+
+        uint32_t descBase = 0, footX = 0, footY = 0, adj0 = 0, adj1 = 0;
+        __try {
+            descBase = *(const uint32_t*)0x020402DCu;
+            footX    = *(const uint32_t*)0x0203EE80u;   // foot-X (also the aliased "adj ptr" slot)
+            footY    = *(const uint32_t*)0x0203EE84u;   // foot-Y
+            if (descBase) {
+                adj0 = *(const uint32_t*)(descBase + 0 * 12);
+                adj1 = *(const uint32_t*)(descBase + 1 * 12);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+        static uint32_t s_lastBase = 0xDEADBEEF;
+        if (descBase != s_lastBase) {
+            Log::World("WorldMap: [RTWALK] poll [020402DC]=0x%08X foot=(0x%08X,0x%08X) adj0=0x%08X adj1=0x%08X",
+                       descBase, footX, footY, adj0, adj1);
+            s_lastBase = descBase;
+        }
+
+        bool posValid = (footX != 0 || footY != 0);
+        if (!posValid) {
+            s_rtWalkSettleTicks = -1;                       // scene not initialized yet
+        } else if (s_rtWalkSettleTicks < 0) {
+            s_rtWalkSettleTicks = 0;                        // just became valid
+            Log::World("WorldMap: [RTWALK] position valid (0x%08X,0x%08X) -- starting %d-tick settle",
+                       footX, footY, RT_SETTLE);
+        } else {
+            s_rtWalkSettleTicks++;
+        }
+
+        bool adj0ok = (adj0 >= RT_PTR_LO && adj0 < RT_PTR_HI);
+        bool adj1ok = (adj1 >= RT_PTR_LO && adj1 < RT_PTR_HI);
+        // v0.18.3.103: adj-sanity is now LOGGED, not gated. The .102 BAT showed the
+        // gate correctly suppressed the premature entry-tick dump -- but then NEVER
+        // fired, because adj0/adj1 stayed 0xFFFFxxxx (out of pointer range) and the
+        // 1200-tick fire-anyway budget wasn't reached in the session window, so we
+        // never got the post-load probe (the whole point). Fire on scene-init alone
+        // (descBase + position valid + settle), regardless of whether the entries
+        // look like pointers; the dump itself reveals whether the descriptor model
+        // is right (sane neighbour indices) or wrong (still 0xFFFFxxxx, polyCount ok).
+        bool ready  = (descBase != 0) && posValid && (s_rtWalkSettleTicks >= RT_SETTLE);
+        bool fireAnyway = (++s_rtWalkPollTicks >= RT_POLL_MAX);
+
+        if (ready || fireAnyway) {
+            s_rtWalkDumpPending = false;
+            Log::World("WorldMap: [RTWALK] firing dump (%s): descBase=0x%08X settle=%d polled=%d adj0=0x%08X(ptr?%d) adj1=0x%08X(ptr?%d)",
+                       ready ? "mesh-ready" : "FIRE-ANYWAY budget hit -- data may be incomplete",
+                       descBase, s_rtWalkSettleTicks, s_rtWalkPollTicks, adj0, adj0ok ? 1 : 0, adj1, adj1ok ? 1 : 0);
+            DumpRuntimeWalkability();
+        }
+    }
+#endif
 
     // Track significant position changes (placeholder for future features).
     int32_t px, py, pz;
@@ -299,6 +383,17 @@ void Initialize()
     } else {
         Log::World("WorldMap: [INIT] Terrain grid load failed -- catalog will be unfiltered");
     }
+
+#if NAVMESH_DIAG
+    // v0.18.3.104: BAT 1 navmesh connectivity probe. Flood the true navmesh
+    // from the Galbadia save coord (the offline reference start) and log which
+    // catalog destinations are reachable + an A* route to Dollet, to confirm
+    // the in-game build matches the offline numbers (157416 tris / 253 comps /
+    // largest 74308; Dollet/Timber/Galbadia Garden/Deling City reachable;
+    // A* ref->Dollet ~30259 / 126 tris). s_locations + LOCATION_COUNT +
+    // NM_CLIMB_STEP are all visible here (after the full .inl chain).
+    Navmesh_LogConnectivity(s_locations, LOCATION_COUNT, -29270, -24056, NM_CLIMB_STEP);
+#endif
 
     if (LoadTriggerZones()) {
         Log::World("WorldMap: [INIT] Trigger-zone hex dump complete (see [TRIGGER-DUMP] entries above)");

@@ -201,6 +201,8 @@ static void StartAutoDrive(int catIdx)
     s_driveStuckCheckTime    = now;
     s_driveStuckCount        = 0;
     s_driveReplanCount       = 0;   // #67 v0.18.3.59: fresh recovery budget per drive
+    s_driveBridgeActive      = false; // #70 v0.18.3.97: fresh bridge-out state per drive
+    s_driveBridgeCount       = 0;
     // #67 v0.18.3.62: reset motion-derived heading tracking for the new drive.
     s_driveMoveHeading    = -1;     // unknown until he moves
     s_driveHeadRefX       = px;
@@ -339,6 +341,25 @@ static void UpdateAutoDrive()
 
     double dist = CalculateWrappedDistance(px, py, s_driveTargetX, s_driveTargetY);
     DWORD now = GetTickCount();
+
+    // #70 v0.18.3.97: bridge-out arrival. While bridging out of a start pocket,
+    // once the character reaches the nearest road cell, drop bridge mode and
+    // re-plan from here -- the road's guard-exempt edges let the fresh plan
+    // route normally toward the target.
+    if (s_driveBridgeActive) {
+        double distBridge = CalculateWrappedDistance(px, py, s_driveBridgeX, s_driveBridgeY);
+        if (distBridge < WM_BRIDGE_ARRIVE_DIST) {
+            Log::World("WorldMap: [DRIVE] Bridged out of pocket (reached road, dB=%.0f) -> re-planning to %s",
+                       distBridge, s_driveTargetName);
+            s_driveBridgeActive   = false;
+            PlanDrivePath(px, py);
+            s_driveProbeValid     = false;
+            s_driveStuckCount     = 0;
+            s_driveStuckX         = px;
+            s_driveStuckY         = py;
+            s_driveStuckCheckTime = now;
+        }
+    }
 
     // #67 v0.18.3.68: refresh the reverse un-wedge budget on genuine progress
     // toward the target (got >= WEDGE_PROGRESS_EPS closer). Reversing is bounded
@@ -588,16 +609,62 @@ static void UpdateAutoDrive()
     // steer to the real destination coordinate.
     int32_t steerX = s_driveTargetX;
     int32_t steerY = s_driveTargetY;
-    if (s_drivePathPlanned && s_drivePathLen > 0 &&
+    if (s_driveBridgeActive) {
+        // #70 v0.18.3.97: steer at the road cell, not the dead-end pocket route.
+        steerX = s_driveBridgeX;
+        steerY = s_driveBridgeY;
+    } else if (s_drivePathPlanned && s_drivePathLen > 0 &&
         s_drivePathIdx < s_drivePathLen - 1 &&
         dist >= DRIVE_FINAL_APPROACH_DIST) {
         int wi = s_drivePathIdx;
+        // #68 v0.18.3.100: CORNER-CAP the forward lookahead at a sharp SUSTAINED
+        // bend. The route winds; the ~2400u lookahead on one leg lands on the
+        // NEXT leg, so the straight chord cuts the inside of the corner and pins
+        // the character against the canyon wall the route goes around. The .99
+        // planner fix put him on a real 61-cell road route, then he wedged at
+        // idx 5/61 exactly this way (an L: long WEST leg, then a 1-cell-wide
+        // NORTH canyon; the lookahead aimed up the north leg while he was still
+        // on the west leg -> he cut the corner, pinned against the east wall,
+        // and the steer target whipsawed between the corner cell and an up-leg
+        // cell). Stopping the lookahead at the leg's apex makes him aim AT the
+        // corner, walk the leg into it, then turn up the next leg from inside
+        // the corridor -- no cut, no pin. Straight/open legs keep the far
+        // lookahead (stable bearing, no orbit -- preserves .78); a staircase
+        // (alternating 1-cell steps) is NOT a sustained turn so it also keeps
+        // the far target. Foot + vehicle both benefit (neither should cut a
+        // corner into a wall).
+        int legDR = 0, legDC = 0;
+        if (s_drivePathIdx < s_drivePathLen - 1) {
+            int dr0 = UnpackRow(s_drivePath[s_drivePathIdx + 1]) - UnpackRow(s_drivePath[s_drivePathIdx]);
+            int dc0 = UnpackCol(s_drivePath[s_drivePathIdx + 1]) - UnpackCol(s_drivePath[s_drivePathIdx]);
+            legDR = (dr0 > 0) - (dr0 < 0);
+            legDC = (dc0 > 0) - (dc0 < 0);
+        }
         for (int j = s_drivePathIdx; j <= s_drivePathLen - 1; ++j) {
             int32_t cx, cy;
             FineCellCenterToWorld(UnpackCol(s_drivePath[j]), UnpackRow(s_drivePath[j]), &cx, &cy);
             int32_t ddx = cx - px, ddy = cy - py;
             WrapWorldDelta(ddx, ddy);
             wi = j;
+            // corner cap: if the path bends away from the current leg direction
+            // when leaving cell j, and the new direction PERSISTS (sustained,
+            // not a staircase), j is the leg's apex -- aim there and stop.
+            if (j > s_drivePathIdx && j + 1 <= s_drivePathLen - 1) {
+                int sdr = UnpackRow(s_drivePath[j + 1]) - UnpackRow(s_drivePath[j]);
+                int sdc = UnpackCol(s_drivePath[j + 1]) - UnpackCol(s_drivePath[j]);
+                int sDR = (sdr > 0) - (sdr < 0);
+                int sDC = (sdc > 0) - (sdc < 0);
+                if (sDR != legDR || sDC != legDC) {
+                    bool sustained = true;
+                    if (j + 2 <= s_drivePathLen - 1) {
+                        int s2dr = UnpackRow(s_drivePath[j + 2]) - UnpackRow(s_drivePath[j + 1]);
+                        int s2dc = UnpackCol(s_drivePath[j + 2]) - UnpackCol(s_drivePath[j + 1]);
+                        sustained = (((s2dr > 0) - (s2dr < 0)) == sDR &&
+                                     ((s2dc > 0) - (s2dc < 0)) == sDC);
+                    }
+                    if (sustained) break;   // wi = j is the corner apex
+                }
+            }
             if ((double)ddx * ddx + (double)ddy * ddy >=
                 DRIVE_PLAN_LOOKAHEAD_DIST * DRIVE_PLAN_LOOKAHEAD_DIST)
                 break;

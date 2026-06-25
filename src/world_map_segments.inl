@@ -1,6 +1,7 @@
 // world_map_segments.inl - Coordinate / archive / segment-math layer
 //
 // PART OF world_map.cpp -- TEXTUAL INCLUDE. Do NOT compile standalone.
+// WM_RUNTIME_WALK_DIAG is defined in world_map_state.inl (included first).
 //
 // Sits between state.inl (data) and the higher-level modules (catalog,
 // planner, drive). Holds:
@@ -490,6 +491,10 @@ static bool LoadTerrainGrid()
     int oceanSegs = 0, forestSegs = 0, landSegs = 0;
     int totalRealPolys = 0, totalOceanPolys = 0, totalForestPolys = 0;
 
+#if NAVMESH_DIAG
+    Navmesh_Reset();   // v0.18.3.104: accumulate non-ocean triangles for the true navmesh
+#endif
+
     for (int seg = 0; seg < WMX_PLAYABLE_SEGS; seg++) {
         int row = seg / WMX_SEG_COLS;
         int col = seg % WMX_SEG_COLS;
@@ -571,6 +576,14 @@ static bool LoadTerrainGrid()
                         int16_t elev = (int16_t)(((int32_t)e0 + e1 + e2) / 3);
                         RasterizeTriFine(vwx[i0], vwy[i0], vwx[i1], vwy[i1],
                                          vwx[i2], vwy[i2], cls, steep, elev);
+#if NAVMESH_DIAG
+                        // v0.18.3.104: feed the SAME triangle (identical verts
+                        // + i0/i1/i2<vertCount guard) into the true navmesh so
+                        // it sees exactly what the fine grid does.
+                        Navmesh_AddTriangle(vwx[i0], vwy[i0], vwz[i0],
+                                            vwx[i1], vwy[i1], vwz[i1],
+                                            vwx[i2], vwy[i2], vwz[i2], terrain);
+#endif
                     }
                 }
 
@@ -606,6 +619,21 @@ static bool LoadTerrainGrid()
             landSegs++;
         }
     }
+
+#if NAVMESH_DIAG
+    // v0.18.3.104: build the true triangle navmesh from the accumulated
+    // triangles (vertex dedup -> exact shared-edge adjacency -> axis-aligned
+    // T-junction bridging -> CSR). NON-INVASIVE: nothing routes on it yet;
+    // Navmesh_LogConnectivity() (from Initialize) is the BAT 1 probe.
+    if (Navmesh_Build()) {
+        int nmComp = 0, nmLargest = 0;
+        Navmesh_ComponentStats(&nmComp, &nmLargest);
+        Log::World("WorldMap: [NAVMESH] built %d triangles, %d components, largest=%d",
+                   Navmesh_TriangleCount(), nmComp, nmLargest);
+    } else {
+        Log::World("WorldMap: [NAVMESH] build produced 0 triangles");
+    }
+#endif
 
     // #67 v0.18.3.81 (RESTORED v0.18.3.93): Dollet false-coast no-walk patch
     // (hardcoded; bounds in DOLLET_COAST_* in state.inl). Build 5 (.92) retired
@@ -737,6 +765,14 @@ static bool LoadTerrainGrid()
         Log::World("WorldMap: [WALKFINE] Fine grid (256x192) rasterized: %d land, %d forest, %d mountain (%d steep-blocked >%u), %d ocean (walkable = %d); clearance max=%d, wall-hugging cells(clr<=1)=%d",
                    fLand, fForest, fMtn, fMtnBlocked, (unsigned)WM_MTN_STEEP_BLOCK, fOcean, fLand + fForest + (fMtn - fMtnBlocked), clrMax, clrTight);
     }
+
+#if WM_RUNTIME_WALK_DIAG
+    // v0.18.3.101: defer -- the polygon array at 0x20426C0 is not populated
+    // until the world map renders its first frame. Poll() checks polyCount
+    // each tick and fires DumpRuntimeWalkability() once it reads > 0.
+    s_rtWalkDumpPending = true;
+    Log::World("WorldMap: [RTWALK] dump deferred -- will fire on first Poll() tick with polyCount > 0");
+#endif
 
     free(wmxData);
     s_terrainLoaded = true;
@@ -1013,6 +1049,82 @@ static bool LoadTriggerZones()
     free(wmsData);
     return true;
 }
+
+// ============================================================================
+// WM_RUNTIME_WALK_DIAG (v0.18.3.101)
+// ============================================================================
+#if WM_RUNTIME_WALK_DIAG
+static void DumpRuntimeWalkability()
+{
+    // Read the polygon DESCRIPTOR ARRAY base. For polygon N:
+    //   adjListPtr = *(uint32_t*)(descBase + N*WM_RT_DESC_STRIDE)
+    // and the adjacency list is words at WM_RT_ADJ_STRIDE: 0xFFFF = end,
+    // 0xFFFE = impassable edge, else neighbour polygon index. See the long
+    // note in world_map_state.inl for how this was verified.
+    //
+    // NOTE: WM_RT_POLY_COUNT (0x02045C40) is UNRELIABLE here -- it is tied to
+    // the separate geometry array and read 11 in a live BAT. We log it only as
+    // an observation; the probe loop uses a fixed small range so a bad count
+    // cannot truncate it. A full BFS (later) must derive the count differently
+    // (e.g. the offline-confirmed 473193) or walk until descriptor entries go
+    // null, NOT trust this address.
+    uint32_t descBase = 0;
+    uint32_t polyCountObs = 0;
+    __try {
+        descBase     = *(const uint32_t*)WM_RT_DESC_BASE;
+        polyCountObs = *(const uint32_t*)WM_RT_POLY_COUNT;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log::World("WorldMap: [RTWALK] SEH fault reading descBase/count -- aborting");
+        return;
+    }
+
+    Log::World("WorldMap: [RTWALK] descBase=0x%08X  polyCount(obs,unreliable)=%u",
+               descBase, polyCountObs);
+
+    if (descBase == 0) {
+        Log::World("WorldMap: [RTWALK] descBase is 0 -- mesh not loaded (should not reach here; Poll polls for != 0)");
+        return;
+    }
+
+    // Probe the adjacency lists for the first few polygon indices to verify the
+    // descriptor->adj-list->stride-32 structure prints sensible neighbours.
+    Log::World("WorldMap: [RTWALK] Probing adjacency lists for polys 0..9 (descStride=%d adjStride=%d):",
+               WM_RT_DESC_STRIDE, WM_RT_ADJ_STRIDE);
+    for (uint32_t pi = 0; pi < 10; pi++) {
+        uint32_t adjPtr = 0;
+        __try { adjPtr = *(const uint32_t*)(descBase + pi * WM_RT_DESC_STRIDE); }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            Log::World("WorldMap: [RTWALK]   poly[%u]: FAULT reading descriptor", pi);
+            break;
+        }
+        if (adjPtr == 0) {
+            Log::World("WorldMap: [RTWALK]   poly[%u]: adjPtr=NULL", pi);
+            continue;
+        }
+        // Walk up to 8 adjacency entries (word at +0 of each stride-32 entry).
+        char buf[160]; int bp = 0;
+        for (int k = 0; k < 8; k++) {
+            uint16_t w = 0;
+            __try { w = *(const uint16_t*)(adjPtr + k * WM_RT_ADJ_STRIDE); }
+            __except (EXCEPTION_EXECUTE_HANDLER) {
+                bp += snprintf(buf + bp, sizeof(buf) - bp, "FAULT "); break;
+            }
+            if (w == WM_RT_SENTINEL_END)   { bp += snprintf(buf + bp, sizeof(buf) - bp, "END"); break; }
+            if (w == WM_RT_SENTINEL_NOADJ) { bp += snprintf(buf + bp, sizeof(buf) - bp, "WALL "); continue; }
+            bp += snprintf(buf + bp, sizeof(buf) - bp, "%u ", w);
+        }
+        Log::World("WorldMap: [RTWALK]   poly[%u]: adjPtr=0x%08X neighbours=[%s]", pi, adjPtr, buf);
+    }
+
+    // Sanity probe of the CURRENT-polygon adjacency pointer. NOTE: this address
+    // (0x0203EE80) aliases the foot-position X DWORD on the live world map, so
+    // while the player is moving this most likely reads as a coordinate, not a
+    // pointer -- the value tells us which meaning is active this tick.
+    uint32_t curAdjPtr = 0;
+    __try { curAdjPtr = *(const uint32_t*)WM_RT_CUR_ADJ_PTR; } __except(EXCEPTION_EXECUTE_HANDLER){}
+    Log::World("WorldMap: [RTWALK] [0203EE80] (aliases foot-X) = 0x%08X", curAdjPtr);
+}
+#endif  // WM_RUNTIME_WALK_DIAG
 
 // ============================================================================
 // WM_CALIB_DIAG (#67) -- disambiguate the Galbadia "empty catalog" bug:

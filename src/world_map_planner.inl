@@ -448,7 +448,7 @@ static bool PlanPath(int startCol, int startRow, VehicleType veh)
 // vehicle); UPPERCASE 'X'/'F'/'^' = the same class but BLOCKED for it. Overlay
 // (wins over terrain): 'S'=route start (post-snap) 'D'=Dollet/target cell
 // 'G'=goal cell reached 'o'=route cell. Row 0 = north (top), col 0 = west.
-#define ROUTE_MAP_DIAG 0
+#define ROUTE_MAP_DIAG 1
 #if ROUTE_MAP_DIAG
 static void DumpRouteMap(int startR, int startC, int goalR, int goalC,
                          int tgtR, int tgtC, VehicleType veh)
@@ -652,7 +652,16 @@ static bool PlanPathFine(int startCol, int startRow, VehicleType veh)
             // ramps/bridges; stepping OFF the road onto a non-road cliff is
             // still guarded). The road exemption also keeps the Dollet ribbon
             // connected while WM_CLIMB_STEP is being calibrated.
-            if (!(s_roadFine[cr][cc] && s_roadFine[nr][nc])) {
+            // #70 v0.18.3.99: stepping ONTO a road cell is guard-EXEMPT from ANY
+            // cell, not just road->road. The road is ground-truth walkable, so a
+            // pocket sealed by the height-step guard (the Dollet coastal shelf, the
+            // exit start) can now connect to the adjacent canyon road and route
+            // normally SW to Timber, instead of dead-ending 5 cells in and falling
+            // back to straight-line steering into the wall. Stepping OFF a road onto
+            // a non-road cliff stays guarded (asymmetric -> no new cliff-climbing),
+            // and road-less continents (Balamb) are unaffected (no road cells, so
+            // this condition is identical to before there).
+            if (!s_roadFine[nr][nc]) {
                 int elevStep = (int)s_elevFine[cr][cc] - (int)s_elevFine[nr][nc];
                 if (elevStep < 0) elevStep = -elevStep;
                 if (elevStep > WM_CLIMB_STEP) { elevBlockedEdges++; continue; }
@@ -687,6 +696,11 @@ static bool PlanPathFine(int startCol, int startRow, VehicleType veh)
     if (goalR == startRow && goalC == startCol) {
         Log::World("WorldMap: [PLAN] Fine BFS: start already the closest reachable cell to target fine(%d,%d) (expanded %d, veh=%d) -- direct steer",
                    tgtCol, tgtRow, expanded, (int)veh);
+        // #70 v0.18.3.98: this IS a pocket -- BFS walled in (best cell is the start
+        // itself) yet far from target. Expose the signal so PlanDrivePath bridges out
+        // even though PlanPathFine returns false here.
+        s_drivePlanExpanded = expanded;
+        s_drivePlanDist     = bestDist;
         return false;
     }
 
@@ -718,12 +732,37 @@ static bool PlanPathFine(int startCol, int startRow, VehicleType veh)
     s_drivePathPlanned = true;
     Log::World("WorldMap: [PLAN] Fine path: %d cells from fine(%d,%d) to fine(%d,%d) (nearest reachable to target fine(%d,%d), dist=%d, expanded %d, veh=%d, clearance-weighted)",
                s_drivePathLen, startCol, startRow, goalC, goalR, tgtCol, tgtRow, bestDist, expanded, (int)veh);
+    // #70 v0.18.3.97: expose the pocket signal to PlanDrivePath's bridge-out decision.
+    s_drivePlanExpanded = expanded;
+    s_drivePlanDist     = bestDist;
 #if ROUTE_MAP_DIAG
     Log::World("WorldMap: [ELEVSTEP] #69 mechanism 2 height-step guard: blocked %d cliff edges during expansion (WM_CLIMB_STEP=%d)",
                elevBlockedEdges, WM_CLIMB_STEP);
     DumpRouteMap(startRow, startCol, goalR, goalC, tgtRow, tgtCol, veh);
 #endif
     return true;
+}
+
+// #70 v0.18.3.97: nearest road cell (as a world coordinate) to a fine cell, via
+// an outward ring search over s_roadFine. The road is the guard-exempt escape
+// ramp out of an elevation-sealed pocket; bridging the character to it lets a
+// fresh plan route normally (road-to-road edges bypass the height-step guard).
+static bool FindNearestRoadWorld(int sc, int sr, int32_t* ox, int32_t* oy)
+{
+    for (int rad = 1; rad <= WM_BRIDGE_ROAD_RADIUS; ++rad) {
+        for (int dr = -rad; dr <= rad; ++dr) {
+            for (int dc = -rad; dc <= rad; ++dc) {
+                if (dr > -rad && dr < rad && dc > -rad && dc < rad) continue; // ring perimeter only
+                int r = sr + dr, c = sc + dc;
+                if (r < 0 || r >= WM_FINE_ROWS || c < 0 || c >= WM_FINE_COLS) continue;
+                if (s_roadFine[r][c]) {
+                    FineCellCenterToWorld(c, r, ox, oy);
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 static bool PlanDrivePath(int32_t startX, int32_t startY)
@@ -777,7 +816,38 @@ static bool PlanDrivePath(int32_t startX, int32_t startY)
     // not the coarse 32x24 segment grid that has no mountain class.
     int startFineCol = WorldXToFineCol(startX);
     int startFineRow = WorldYToFineRow(startY);
-    return PlanPathFine(startFineCol, startFineRow, veh);
+    bool ok = PlanPathFine(startFineCol, startFineRow, veh);
+
+    // #70 v0.18.3.97: departure bridge-out. If the route starts in a tiny pocket
+    // (the BFS expanded only a few cells AND dead-ended well short of target),
+    // the start is sealed in by the #69 height-step guard (the Dollet shelf).
+    // Steer to the nearest road cell -- the guard-exempt ramp the character
+    // arrived on -- then UpdateAutoDrive re-plans from there. Bounded per drive.
+    s_driveBridgeActive = false;
+    // #70 v0.18.3.98: key on the pocket signal regardless of PlanPathFine's return
+    // value. The real Dollet pocket exits via the early-return-FALSE branch
+    // ("start already closest reachable"), so the old `ok &&` gate skipped the
+    // bridge entirely. The block is only reached right after PlanPathFine runs, so
+    // the signals are always fresh; normal drives expand hundreds + reach dist~0,
+    // so the pocket test still cannot false-trigger.
+    if (s_drivePlanExpanded <= WM_POCKET_MAX_EXPANDED &&
+        s_drivePlanDist >= WM_POCKET_MIN_DIST &&
+        s_driveBridgeCount < WM_BRIDGE_MAX) {
+        int32_t bx, by;
+        if (FindNearestRoadWorld(startFineCol, startFineRow, &bx, &by)) {
+            s_driveBridgeActive = true;
+            s_driveBridgeX = bx;
+            s_driveBridgeY = by;
+            s_driveBridgeCount++;
+            Log::World("WorldMap: [DRIVE] Pocketed start fine(%d,%d) (expanded %d, dist %d) -> BRIDGE-OUT to nearest road cell at world(%d,%d) (attempt %d/%d)",
+                       startFineCol, startFineRow, s_drivePlanExpanded, s_drivePlanDist,
+                       (int)bx, (int)by, s_driveBridgeCount, WM_BRIDGE_MAX);
+        } else {
+            Log::World("WorldMap: [DRIVE] Pocketed start fine(%d,%d) (expanded %d, dist %d) but no road cell within %d cells -- cannot bridge",
+                       startFineCol, startFineRow, s_drivePlanExpanded, s_drivePlanDist, WM_BRIDGE_ROAD_RADIUS);
+        }
+    }
+    return ok;
 }
 
 // ============================================================================
