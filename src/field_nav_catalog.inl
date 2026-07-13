@@ -18,28 +18,9 @@
 //            the v0.12.17 VARBLOCK-POS unreachable `if (false)` block is
 //            dropped. Git history at v0.17.6.2 preserves it.
 
-// v0.17.8.3: Known FF8 field SYM names for playable / party-swap characters.
-// Field scripts name the party entities after the character (with optional
-// shadow/duplicate suffixes like 'squalls', 'squallsd', 'zells'), so a prefix
-// match against these bases identifies a party member regardless of which
-// field-local model slot the engine assigned. Draw points ('drpoint'), save
-// points ('savePoint'/'saveline'), and generic NPCs never match, so this is a
-// safe discriminator for the party filter (see RefreshCatalog). Includes the
-// Laguna dream party (laguna/kiros/ward) and the intro/tutorial playables
-// (seifer/edea).
-static bool IsPartyCharacterSym(const char* sym)
-{
-    if (!sym || sym[0] == '\0') return false;
-    static const char* const kBases[] = {
-        "squall", "zell", "selphie", "quistis", "rinoa", "irvine",
-        "laguna", "kiros", "ward", "seifer", "edea"
-    };
-    for (int b = 0; b < (int)(sizeof(kBases) / sizeof(kBases[0])); b++) {
-        size_t n = strlen(kBases[b]);
-        if (_strnicmp(sym, kBases[b], n) == 0) return true;
-    }
-    return false;
-}
+// v0.18.3.228: IsPartyCharacterSym / PartyCharacterDisplayName moved to
+// field_nav_helpers.inl (included earlier, so both stay visible here) to keep
+// this file under the 80 KB source-size CI guard.
 
 static void RefreshCatalog()
 {
@@ -60,6 +41,7 @@ static void RefreshCatalog()
         // One-shot diagnostic dumps (extracted v0.17.7.0).
         // See field_nav_catalog_diag.inl. Each helper no-ops on subsequent calls.
         DumpEntityDiagOnce(base, lim);
+        DumpExtendedEntityScanOnce(base, entCount);   // v0.18.3.231 DIAG
         DumpBgDiagOnce(lim);
         DumpPartyStateOnce();
         DumpCoordDiagOnce(base, lim);
@@ -89,6 +71,35 @@ static void RefreshCatalog()
                     symName = s_symNames[symIdxFilt];
             }
 
+            // v0.18.3.228: Race-free TALKABILITY signal. Runtime flags (talk
+            // @0x24B / push @0x249) are set by TALKRADIUS/TALKON during script
+            // execution, so a talkable NPC can still read talk=0 at scan time.
+            // The static JSM hasTalkSetup flag (script uses TALKRADIUS or TALKON)
+            // is parsed at load and cannot race. On ggsta1 TALKRADIUS never fires
+            // at all (scripts use TALKON), so runtime capture alone missed the
+            // station attendant 'ekiin' and the 'gsm*' students.
+            bool jsmTalk = false;
+            {
+                int symIdxT = s_symOthersOffset + i;
+                if (symIdxT >= 0 && symIdxT < s_symNameCount) {
+                    const FieldArchive::JSMEntityInfo* jsmT = FindJSMBySym(s_symNames[symIdxT]);
+                    if (jsmT && jsmT->hasTalkSetup) jsmTalk = true;
+                }
+            }
+            // Runtime capture (v0.18.3.227) is kept as a secondary signal: it
+            // catches entities whose talk radius is enabled dynamically at
+            // runtime rather than declared in the static script.
+            bool talkable = (talkonoff > 0) || jsmTalk ||
+                            (i < MAX_ENTITIES && s_entTalkRadius[i] > 0);
+
+            // v0.18.3.228: per-entity scan trace (see field_nav_catalog_diag.inl).
+            // v0.18.3.234: once per field load, not on every rebuild.
+            if (!s_scanTraced)
+                LogScanEntity(i, symName, (int)modelId, (unsigned)triId,
+                              (int)talkonoff, (int)pushonoff, (int)throughonoff, jsmTalk,
+                              (unsigned)(i < MAX_ENTITIES ? s_entTalkRadius[i] : 0),
+                              talkable, fpX, fpY);
+
             // v0.14.108 / v0.17.8.3: Party-member / non-interactive-character filter.
             // A FOLLOWING party member is identified by behavioral fingerprint:
             // a visible character (model 0-9) the player walks through
@@ -109,22 +120,35 @@ static void RefreshCatalog()
             // never drops an exit. Race: TALKRADIUS setting talkonoff after this
             // scan could transiently filter an NPC; mitigated by per-F9 refresh.
             {
-                bool isVisibleChar = (modelId >= 0 && modelId < 10);
-                bool noInteract    = (talkonoff == 0 && pushonoff == 0);
-                // Model-based: an unnamed visible character the player walks
-                // through is a following party member.
-                bool isFollower    = isVisibleChar && noInteract && throughonoff > 0;
-                // Name-based: a party-character SYM with no talk/push, regardless
-                // of model or walk-through. Covers standing members (model 0-9,
-                // thru=0) and high-model scene actors (model >= 10, thru>0).
-                bool isNamedParty  = noInteract && IsPartyCharacterSym(symName);
-                if (i != s_playerEntityIdx && (isFollower || isNamedParty)) {
-                    Log::Field("FieldNavigation: [party-filter] ent%d model=%d sym='%s' "
-                               "filtered (%s; thru=%d)",
-                               i, (int)modelId, symName,
-                               isFollower ? "following party member"
-                                          : "named party member",
-                               (int)throughonoff);
+                // v0.18.3.232: PARTY FILTER — driven by setpc, not the SYM name.
+                //
+                // setpc (0x255) holds the character ID (0-7) for an entity that is
+                // an actual party character, and 0xFE for anything that is not. The
+                // catalog already trusts this byte to identify the player.
+                //
+                // The previous SYM-based rules were built on a false premise. The
+                // engine instantiates only the ACTIVE party members, while the JSM
+                // SYM list names all six playable characters, so every NPC slot is
+                // shifted. On ggsta1 (party = Squall+Zell+Quistis) slot2 is Quistis
+                // but carries SYM 'irvine', and the station attendant in slot3
+                // carries SYM 'rinoa' — so the "named party member" rule deleted the
+                // train guard the player needs to buy a ticket, along with two
+                // students. Only the two slots whose shifted SYMs happened to look
+                // non-party survived, which is exactly the reported symptom.
+                //
+                // setpc has no such ambiguity: a real NPC is never a party character
+                // no matter which SYM lands on it. Party members are still filtered
+                // (preserving the v0.17.8.3 dormitory/classroom behavior), EXCEPT
+                // when talkable — an interactable party member is kept and labeled by
+                // proper name, per the interactable-party-member requirement.
+                bool noInteract  = (talkonoff == 0 && pushonoff == 0 && !talkable);
+                bool isPartyChar = IsPartyCharacterSetpc(setpc);
+                if (i != s_playerEntityIdx && isPartyChar && noInteract) {
+                    const char* pn = PartyCharacterNameById(setpc);
+                    Log::Field("FieldNavigation: [party-filter] ent%d model=%d setpc=%d (%s) "
+                               "sym='%s' filtered (party member; thru=%d)",
+                               i, (int)modelId, (int)setpc, pn ? pn : "?",
+                               symName, (int)throughonoff);
                     continue;
                 }
             }
@@ -184,12 +208,28 @@ static void RefreshCatalog()
             // (PUSHRADIUS fires in init, TALKRADIUS fires later), so push-only
             // at catalog-build time doesn't mean "object" for visible characters.
             // The pushonoff → Object path only applies to invisible (model<0) entities.
+            // v0.18.3.228: `talkable` (static JSM talk setup, or either runtime
+            // signal) classifies the entity as an NPC up front, so a talkable NPC
+            // whose talkonoff flag has not been set yet no longer falls through to
+            // the push-only skip below and get discarded.
             EntityType etype = ENT_UNKNOWN;
-            if (talkonoff > 0)                    etype = ENT_NPC;
+            if (talkable)                         etype = ENT_NPC;
             else if (pushonoff > 0 && modelId >= 10) etype = ENT_NPC;   // v0.07.97: walking NPC, talk not yet set
-            else if (pushonoff > 0 && modelId >= 0) continue;   // v0.12.12: visible push-only entity (walking student) — not interactable, skip
+            else if (pushonoff > 0 && modelId >= 0) {
+                // v0.12.12: visible push-only entity — not interactable, skip.
+                // v0.18.3.228: now logs its reason instead of dropping silently.
+                if (!s_scanTraced) LogScanDropPushOnly(i, symName, (int)modelId);
+                continue;
+            }
             else if (pushonoff > 0)               etype = ENT_OBJECT;
-            else if (throughonoff > 0)             etype = ENT_EXIT;
+            // v0.18.3.230: the EXIT branch now requires an INVISIBLE entity.
+            // throughonoff just means "the player can walk through this"; on a
+            // visible character that makes it an NPC, not an exit. ggsta1's
+            // 'ekiin'/'gsl0' (model 8, thru=1) were surfacing as type=Exit, which
+            // is both wrong to announce and wrong for navigation grouping. Real
+            // exits are invisible trigger entities (model < 0) — and genuine map
+            // exits come from the trigger-line/gateway path anyway, not from here.
+            else if (throughonoff > 0 && modelId < 0) etype = ENT_EXIT;
             else                                  etype = ENT_NPC;  // visible character, default to NPC
             bool hasModel = (modelId >= 0);
             bool hasInteraction = (talkonoff > 0 || pushonoff > 0 || throughonoff > 0);
@@ -305,11 +345,42 @@ static void RefreshCatalog()
                     ei_info.type = ENT_SAVE_POINT;
                     entName = "Save Point";
                 }
+                // v0.18.3.227: Label interactable party members by proper name.
+                // v0.18.3.232: name party characters from setpc, NOT the SYM.
+                //
+                // A party character only reaches here if the party filter KEPT it —
+                // i.e. it is talkable — so announcing "Squall"/"Quistis" instead of a
+                // generic "NPC" is accurate and more useful. Deriving the name from
+                // setpc (the character ID) rather than the SYM is what makes it SAFE:
+                // the SYM list is shifted relative to the runtime slots, so a
+                // SYM-based label would happily announce the G-Garden train guard as
+                // "Rinoa". setpc is 0xFE on every genuine NPC, so no NPC, draw point
+                // or save point can be mislabeled as a party member.
+                if (ei_info.type == ENT_NPC) {
+                    const char* partyName = PartyCharacterNameById(setpc);
+                    if (partyName) {
+                        entName = partyName;
+                        Log::Field("FieldNavigation: [catalog] ent%d setpc=%d labeled as party "
+                                   "member '%s' (sym='%s' talkable=%d)",
+                                   i, (int)setpc, partyName, symName, talkable ? 1 : 0);
+                    }
+                }
                 strncpy(ei_info.name, entName, sizeof(ei_info.name) - 1);
                 ei_info.name[sizeof(ei_info.name) - 1] = '\0';
                 fresh[i] = ei_info;
+                if (!s_scanTraced)
+                    LogScanKeep(i, symName, EntityTypeName(ei_info.type), ei_info.name);
+            } else {
+                // v0.18.3.228: the other formerly-silent drop path (unplaced
+                // placeholder entity) now records its reason.
+                if (!s_scanTraced)
+                    LogScanDropUnplaced(i, symName, (int)modelId, (unsigned)triId,
+                                        fpX, fpY, hasModel, isSpecialJSM);
             }
         }
+        // v0.18.3.234: the scan trace has now emitted one full pass for this
+        // field; suppress it on subsequent rebuilds (RefreshCatalog runs ~1/sec).
+        s_scanTraced = true;
 
         // v05.70: Screen filtering — exclude entities on the other side of
         // any active SETLINE trigger line from the player. This hides NPCs

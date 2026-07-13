@@ -159,3 +159,70 @@
                    "Interaction %d [v0.17.8.8]", sym, n);
     }
 }
+
+// v0.18.3.233: RUNTIME-ENTITY vs SPECIAL-TRIGGER dedupe.
+//
+// The v0.17.8.8 pass above only dedupes JSM-injected objects (sentinel <= -300)
+// against trigger lines. It never considers RUNTIME entities (entityIdx >= 0),
+// so a save-point OBJECT standing on its own save line was surfaced twice: once
+// correctly as "Save Point" (the line) and once as a bogus generic "NPC" (the
+// entity). Confirmed on bgryo1_4 (B-Garden dormitory), where the save point is
+// entity slot 3 sitting at (-171,283) -- the exact centre of the save line:
+//
+//   ent3   model=11 tri=26 setpc=254  fp/4096 = (-171,283)   -> "NPC"
+//   line2  TRIGGER  center=(-171,283)                        -> "Save Point"
+//
+// The entity cannot be recognised as a save point by name: the SYM->slot mapping
+// is unrecoverable on fields that instantiate only a subset of their SYMs (this
+// field instantiates 4 of 16), so ent3 resolves to the SYM 'zell'. It is not a
+// party character (setpc=254), so the party filter correctly keeps it -- which is
+// what exposed the duplicate. Model IDs are field-local, so they cannot identify
+// it either.
+//
+// Position is the reliable signal: a generic entity sitting ON a specifically-
+// typed trigger IS that trigger's object. Keep the informative entry (the named
+// Save/Draw/Shop/Card line) and drop the generic duplicate. Only untyped ENT_NPC
+// entries are eligible, so a genuinely named NPC is never removed, and the player
+// is explicitly exempt (they may simply be standing on the save point).
+{
+    const float ENT_DUP_DIST = 96.0f;
+    bool entDupRemoved[MAX_CATALOG] = {};
+    for (int a = 0; a < newCount; a++) {
+        int ai = newCatalog[a].entityIdx;
+        if (ai < 0) continue;                        // runtime entities only
+        if (ai == s_playerEntityIdx) continue;       // never drop the player
+        if (newCatalog[a].type != ENT_NPC) continue; // only generic NPC entries
+        float ax, ay;
+        if (!GetEntityPos(ai, ax, ay)) continue;
+        for (int b = 0; b < newCount; b++) {
+            if (b == a) continue;
+            int bi = newCatalog[b].entityIdx;
+            if (bi > -200 || bi <= -300) continue;   // B must be a trigger line
+            if (!(newCatalog[b].type == ENT_SAVE_POINT ||
+                  newCatalog[b].type == ENT_DRAW_POINT ||
+                  newCatalog[b].type == ENT_SHOP ||
+                  newCatalog[b].type == ENT_CARD_GAME))
+                continue;                            // ...with a specific meaning
+            int tb = -(bi + 200);
+            if (tb < 0 || tb >= s_capturedLineCount) continue;
+            float bx = (float)(s_capturedLines[tb].x1 + s_capturedLines[tb].x2) / 2.0f;
+            float by = (float)(s_capturedLines[tb].y1 + s_capturedLines[tb].y2) / 2.0f;
+            float ddx = ax - bx, ddy = ay - by;
+            if (ddx*ddx + ddy*ddy > ENT_DUP_DIST*ENT_DUP_DIST) continue;
+            entDupRemoved[a] = true;
+            Log::Field("FieldNavigation: [dedup] dropped entity ent%d ('%s') at (%.0f,%.0f): "
+                       "same object as %s line%d at (%.0f,%.0f) [v0.18.3.233]",
+                       ai, newCatalog[a].name, ax, ay,
+                       EntityTypeName(newCatalog[b].type), tb, bx, by);
+            break;
+        }
+    }
+    int ew = 0;
+    for (int r = 0; r < newCount; r++) {
+        if (!entDupRemoved[r]) {
+            if (ew != r) newCatalog[ew] = newCatalog[r];
+            ew++;
+        }
+    }
+    newCount = ew;
+}

@@ -58,9 +58,19 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
     s_playerTri          = 0xFFFF;
     s_setTriCallCount    = 0;
     s_structFallbackLogged = 0;
+    // v0.18.3.227: Clear the per-entity talk-radius capture table for the new
+    // field. TALKRADIUS opcodes in this field's init script will repopulate it.
+    memset(s_entTalkRadius, 0, sizeof(s_entTalkRadius));
     // v05.58: ENTDIAG/BGDIAG disabled — keep flags true to skip dumps.
     s_entDiagDumped      = true;
-    s_bgDiagDumped       = true;
+    s_bgDiagDumped       = true;   // v0.18.3.231: BGDIAG done — ruled out the bg array
+    s_extScanDumped      = true;   // v0.18.3.234: EXTSCAN done — train staff found
+    // v0.18.3.234: re-arm the catalog scan trace ONCE per field load. The [SCAN]/
+    // [SCAN-KEEP]/[SCAN-DROP] lines are what made the missing-NPC bugs diagnosable
+    // (the drop paths used to discard entities with no log line at all), so they
+    // are kept — but RefreshCatalog runs about once a second, so tracing every
+    // rebuild would flood the log. Once per field is enough to diagnose.
+    s_scanTraced         = false;
     s_coordDiagDumped    = true;   // v0.12.11: DISABLED — coordinate diagnostic served its purpose
     s_partyDiagDumped    = false;  // v0.14.107: re-arm the [party-state] dump for this field load
     s_coordPrevPlayerTri = 0;       // v06.13: reset for shared-edge CoordSample

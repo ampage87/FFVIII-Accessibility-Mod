@@ -6,6 +6,81 @@
 // Helpers
 // ============================================================================
 
+// v0.17.8.3: Known FF8 field SYM names for playable / party-swap characters.
+// Field scripts name the party entities after the character (with optional
+// shadow/duplicate suffixes like 'squalls', 'squallsd', 'zells'), so a prefix
+// match against these bases identifies a party member regardless of which
+// field-local model slot the engine assigned. Draw points ('drpoint'), save
+// points ('savePoint'/'saveline'), and generic NPCs never match, so this is a
+// safe discriminator for the party filter (see RefreshCatalog). Includes the
+// Laguna dream party (laguna/kiros/ward) and the intro/tutorial playables
+// (seifer/edea).
+// v0.18.3.228: moved here from field_nav_catalog.inl for size compliance.
+static bool IsPartyCharacterSym(const char* sym)
+{
+    if (!sym || sym[0] == '\0') return false;
+    static const char* const kBases[] = {
+        "squall", "zell", "selphie", "quistis", "rinoa", "irvine",
+        "laguna", "kiros", "ward", "seifer", "edea"
+    };
+    for (int b = 0; b < (int)(sizeof(kBases) / sizeof(kBases[0])); b++) {
+        size_t n = strlen(kBases[b]);
+        if (_strnicmp(sym, kBases[b], n) == 0) return true;
+    }
+    return false;
+}
+
+// v0.18.3.228: Proper display name for a party-character SYM. Returns the
+// capitalized character name ("Squall", "Zell", ...) when the SYM matches a
+// known party-character base, else nullptr. Bases are ordered longest-first so a
+// longer name is tested before any shorter prefix of it. Used to label
+// interactable party members — those the party filter now KEEPS because they
+// have talk setup — instead of announcing them as a generic "NPC".
+static const char* PartyCharacterDisplayName(const char* sym)
+{
+    if (!sym || sym[0] == '\0') return nullptr;
+    struct NamePair { const char* base; const char* display; };
+    static const NamePair kNames[] = {
+        { "selphie", "Selphie" }, { "quistis", "Quistis" }, { "squall", "Squall" },
+        { "seifer",  "Seifer"  }, { "irvine",  "Irvine"  }, { "laguna", "Laguna" },
+        { "rinoa",   "Rinoa"   }, { "kiros",   "Kiros"   }, { "zell",   "Zell"   },
+        { "ward",    "Ward"    }, { "edea",    "Edea"    },
+    };
+    for (int i = 0; i < (int)(sizeof(kNames) / sizeof(kNames[0])); i++) {
+        size_t n = strlen(kNames[i].base);
+        if (_strnicmp(sym, kNames[i].base, n) == 0) return kNames[i].display;
+    }
+    return nullptr;
+}
+
+// v0.18.3.232: Party-character identity from the entity's setpc byte (0x255).
+//
+// This is the AUTHORITATIVE party test — far more reliable than the SYM name.
+// The engine writes the character ID (0-7) into setpc for an entity that is an
+// actual party character, and 0xFE for anything that is not. The catalog already
+// trusts this byte to find the player (setpc == 0).
+//
+// The SYM name cannot be trusted for this: the engine only instantiates the
+// ACTIVE party members, while the JSM SYM list names all six playable
+// characters, so every NPC slot is shifted. On ggsta1 the party is
+// Squall+Zell+Quistis, yet slot2 (setpc=3 = Quistis) carries SYM 'irvine' and the
+// station attendant in slot3 carries SYM 'rinoa' — which is exactly why the
+// SYM-based party filter deleted the train staff.
+static const char* PartyCharacterNameById(uint8_t setpc)
+{
+    static const char* const kChars[] = {
+        "Squall", "Zell", "Irvine", "Quistis", "Rinoa", "Selphie", "Seifer", "Edea"
+    };
+    if (setpc < (uint8_t)(sizeof(kChars) / sizeof(kChars[0]))) return kChars[setpc];
+    return nullptr;   // 0xFE (or anything else) = not a party character
+}
+
+// True when this entity IS one of the playable party characters.
+static bool IsPartyCharacterSetpc(uint8_t setpc)
+{
+    return PartyCharacterNameById(setpc) != nullptr;
+}
+
 // v0.14.107: Active party formation lookup.
 //
 // FF8 stores the active party as a 4-byte array at savemap+0xAF0 (= absolute

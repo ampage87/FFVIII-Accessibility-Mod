@@ -6,6 +6,124 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.234
+
+**Release prep for the NPC-catalog fixes (.229 - .233). No behavior change to shipped features.**
+
+- `AUTOTEST_CMD_ENABLED` back to `0` (test-only command channel, gated off by default).
+- `EXTSCAN` retired (`s_extScanDumped` initialized true). The code is retained — re-arming it is what located the G-Garden Station train staff, and it is the right tool if the entity array ever needs re-triage on a new field.
+- `BGDIAG` retired again (it ruled out the background array).
+- The `[SCAN]` / `[SCAN-KEEP]` / `[SCAN-DROP]` catalog trace is **kept**, but now emits once per field load rather than on every rebuild. `RefreshCatalog` runs roughly once a second, so tracing each rebuild flooded the log. This trace is what made the missing-NPC bugs diagnosable at all — both drop paths previously discarded entities with no log line whatsoever, which is precisely why the train guard and the students were invisible for so long. It stays.
+
+Verified against the field: G-Garden Station lists five NPCs (one Station Staff, four students) and the F11 screenshot shows exactly five NPCs on screen, with the Squall/Zell/Quistis party correctly excluded. The B-Garden dormitory lists no NPCs, and the save point appears once.
+
+## v0.18.3.233
+
+**NPC catalog: dedupe a runtime entity against the special trigger it stands on.** Fixes the B-Garden dormitory save point being announced twice — once correctly as "Save Point", once as a bogus generic "NPC".
+
+The v0.17.8.8 dedupe only compares JSM-injected objects (sentinel <= -300) against trigger lines; it never considers **runtime entities**. On `bgryo1_4` the save point is a runtime entity sitting exactly on its own save line:
+
+```
+ent3   model=11 tri=26 setpc=254  fp/4096 = (-171,283)   -> "NPC"
+line2  TRIGGER  center=(-171,283)                        -> "Save Point"
+```
+
+The entity cannot be identified by name. The SYM->slot mapping is unrecoverable on fields that instantiate only a subset of their SYMs (this one instantiates 4 of 16, skipping non-party characters *and* several ordinary entities), so `ent3` resolves to the SYM `zell`. Model IDs are field-local, so `modelId == 24` doesn't catch it either. It is not a party character (`setpc=254`), so the v0.18.3.232 filter correctly keeps it — which is what made the long-standing duplicate visible. Previously the SYM-based party filter swallowed it as "Zell", hiding the bug rather than fixing it.
+
+Position is the reliable signal: a generic entity standing ON a specifically-typed trigger *is* that trigger's object. The new pass keeps the informative entry (the named Save/Draw/Shop/Card line) and drops the generic duplicate. Only untyped `ENT_NPC` entries are eligible, so a named NPC is never removed, and the player is exempt (they may simply be standing on the save point).
+
+## v0.18.3.232
+
+**NPC catalog: the party filter was keying off a misaligned SYM name — use `setpc` instead.** This is the root cause of the missing G-Garden Station train guard, and of party-member NPCs being wrongly excluded. The `[EXTSCAN]` dump made it visible:
+
+```
+slot0 sym='squall'  setpc=0     <- party (Squall)
+slot1 sym='zell'    setpc=1     <- party (Zell)
+slot2 sym='irvine'  setpc=3     <- party, but 3 = QUISTIS, not Irvine
+slot3 sym='rinoa'   setpc=254   <- NOT a party member
+slot4 sym='selphie' setpc=254   <- NOT a party member
+slot5 sym='quistis' setpc=254   <- NOT a party member
+```
+
+The engine instantiates only the **active** party members, while the JSM SYM list names all six playable characters — so every NPC slot is shifted. With a Squall/Zell/Quistis party on `ggsta1`, the station attendant lands in slot3 wearing the SYM `rinoa`, and two students land in slots 4-5 wearing `selphie`/`quistis`. The SYM-based "named party member" rule therefore deleted the train guard and two students, while the two slots whose shifted SYMs happened to look non-party survived — precisely the reported symptom (two students shown, no staff). The guard was never absent from the data; it was being discarded under a false name.
+
+Fix: drive the party filter from `setpc` (0x255), which holds the character ID (0-7) for a genuine party character and `0xFE` for everything else. The catalog already trusts this byte to identify the player, and it carries no SYM-alignment ambiguity: a real NPC is never a party character regardless of which SYM lands on its slot. Party members remain filtered (preserving v0.17.8.3 dormitory/classroom behavior) unless they are talkable, in which case they are kept and labeled by proper name.
+
+Party names are now also derived from `setpc` rather than the SYM. That is what makes the labeling safe — a SYM-based label would cheerfully announce the train guard as "Rinoa". Since `setpc` is `0xFE` on every genuine NPC, no NPC, draw point or save point can be mislabeled as a party member.
+
+Supersedes the SYM-gating in .229: that fix was aimed at the same symptom via the wrong signal.
+
+## v0.18.3.231
+
+**Diagnostic: extended entity scan.** `ggsta1` reports `otherCount=10` while its own JSM declares `O=13`. The BGDIAG dump ruled out the background array (its 8 entries are the same character entities), so the missing G-Garden Station train staff is in neither array the catalog reads — and the three JSM entities the scan never reaches are exactly `gsm3`, `director0` and `traincont` (*train conductor*). Adds a one-shot `[EXTSCAN]` dump that reads past the engine's reported entity count up to `MAX_ENTITIES` and prints what is actually in those slots, to establish whether the reported count is simply short. Diagnostic only; to be removed before shipping.
+
+## v0.18.3.230
+
+**NPC catalog: a walk-through visible character is an NPC, not an Exit.** With .229 surfacing them, `ggsta1`'s `ekiin` and `gsl0` were landing in the catalog as `type=Exit`:
+
+```
+[SCAN-KEEP] ent6 sym='ekiin' type=Exit name='NPC'
+[SCAN-KEEP] ent7 sym='gsl0'  type=Exit name='NPC'
+```
+
+`throughonoff` only means "the player can walk through this". On a *visible* character that makes it an NPC; it is not an exit. The EXIT branch of the classification now requires an invisible entity (`modelId < 0`). Real exits are invisible trigger entities, and genuine map exits come from the trigger-line/gateway path rather than this branch, so nothing is lost.
+
+Also re-arms the background-entity dump (`BGDIAG`) as a temporary diagnostic: the G-Garden Station train staff is absent from the runtime "others" array entirely (only 10 entities exist there — six party characters, `ekiin`, `gsl0`, and two unpositioned `gsm*` script entities), so the staff must be reached through a different array. Diagnostic only; to be disabled before shipping.
+
+## v0.18.3.229
+
+**NPC catalog: the follower heuristic was eating real NPCs — gate it on the SYM name.** This is the actual fix for the missing G-Garden Station NPCs; the `[SCAN]` tracing added in .228 made the cause unambiguous.
+
+The `[SCAN]` trace on `ggsta1` showed that **no entity on that field ever sets the talk or push flags at all**, so the talkability theories behind .227/.228 were both dead ends (`ekiin` also lives in the JSM's background/character category, for which the scanner builds no classification record, so `hasTalkSetup` could never be true for it). Ordinary NPCs actually reach the catalog through the *final else-branch* of the classification (`talk==0 && push==0 && thru==0 -> ENT_NPC`).
+
+The real culprit was the v0.14.108 follower rule: `visible model (0-9) + no talk/push + throughonoff > 0 -> following party member`. Walk-through is **not** exclusive to followers — `ekiin` (the station attendant who sells the train ticket) and `gsl0` are ordinary model-8 NPCs whose scripts set `THROUGHON`:
+
+```
+[SCAN] ent6 sym='ekiin' model=8 talk=0 push=0 thru=1   ->  filtered (following party member)
+[SCAN] ent7 sym='gsl0'  model=8 talk=0 push=0 thru=1   ->  filtered (following party member)
+```
+
+Because they were filtered before classification, they never reached the else-branch that would have made them NPCs, and they vanished from the catalog.
+
+Fix: gate the follower rule on the SYM name — the discriminator the v0.17.8.3 note already argues is the safe one. A walk-through character is only treated as a follower when it carries a party-character SYM (including shadow/duplicate suffixes like `squalls`/`zells`, caught by the prefix match) or has no SYM at all. A distinct non-party SYM is kept. Party members are still filtered via the name-based rule, so the v0.17.8.3 dormitory/classroom behavior is preserved.
+
+Retained from .227/.228: interactable party members are labeled by proper name (`PartyCharacterDisplayName()`), the `talkable` signal (static JSM talk-setup OR either runtime signal) still forces `ENT_NPC` classification where it applies, and the `[SCAN]`/`[SCAN-KEEP]`/`[SCAN-DROP]` tracing stays — the push-only and unplaced skips used to discard entities with no log line at all, which is precisely why this bug was so hard to see.
+
+Note on the "students": `gsm0`/`gsm1` are unpositioned script entities (`model=-1`, `fp=(0,0)`), not rendered characters, and are correctly excluded — they have no position to navigate to.
+
+## v0.18.3.228
+
+**NPC catalog: static JSM talk-setup is the talkability signal (superseded by .229 — see above).** Live capture on `ggsta1` (G-Garden Station) showed the v0.18.3.227 approach was necessary but not sufficient: `TALKRADIUS` never executes on that field at all (0 hook fires), because the scripts use `TALKON`. The runtime radius table stayed empty and the NPCs were still dropped.
+
+The `ggsta1` scan showed exactly who was being lost and how:
+
+```
+[party-filter] ent6 model=8 sym='ekiin' filtered (following party member; thru=1)
+[party-filter] ent7 model=8 sym='gsl0'  filtered (following party member; thru=1)
+```
+
+`ekiin` is the station attendant who sells the train ticket (Japanese *eki-in*, 駅員) and `gsm0/gsm1/gsm3` are the chatting students — none are party members. They carry `talk=0 push=0 thru=1` at scan time, so the `isFollower` heuristic (visible model 0–9 + no talk/push + walk-through) mislabeled them as *following party members*, while the students died on the push-only and unplaced skips.
+
+Fix: take talkability from the JSM scanner's existing `hasTalkSetup` flag (true when the entity's script uses `TALKRADIUS` **or** `TALKON`). It is parsed statically from the field archive at load, so it cannot race with script execution, and unlike the runtime flags it sees `TALKON` entities. `RefreshCatalog` now derives one `talkable` signal (static JSM talk setup, OR either runtime signal — the .227 capture is retained as a secondary source for dynamically-enabled talk radii) and uses it for both classification and the party filter:
+
+- **Classification** — `talkable` classifies as `ENT_NPC` up front, so a talkable NPC never falls through to the push-only skip.
+- **Party filter** — a talkable character is never filtered, so real NPCs stop being mistaken for followers. A party member with no talk setup is still filtered, preserving v0.17.8.3 dormitory/classroom behavior.
+- **Naming** — interactable party members are labeled by proper name via `PartyCharacterDisplayName()`; only party-character SYMs match, so draw/save points cannot be mislabeled.
+
+Also adds `[SCAN]` / `[SCAN-KEEP]` / `[SCAN-DROP]` tracing. The push-only skip and the unplaced-entity skip previously discarded entities with **no log line at all**, which is why the missing NPCs were invisible to diagnosis; every drop path now records its reason.
+
+## v0.18.3.227
+
+**NPC catalog: race-free talkability via TALKRADIUS capture.** Fixes two reported catalog defects — talkable NPCs missing (the G-Garden train guard who sells you the ticket, and the chatting students in the station), and interactable party members being excluded.
+
+Root cause: the catalog classified entities from the *runtime interaction flags* (`talkonoff` @0x24B, `pushonoff` @0x249). Those flags are set by the `TALKRADIUS`/`PUSHRADIUS` opcodes during field-script execution, and `PUSHRADIUS` fires in init while `TALKRADIUS` fires later. So at catalog-scan time a genuinely talkable NPC can still read `talkonoff == 0` while already having `pushonoff > 0`. Such an entity fell through to the v0.12.12 "visible push-only entity" rule (`pushonoff > 0 && modelId >= 0 → continue`) and was silently dropped from the catalog. The same stale-flag problem made the party filter treat a talkable party member as a non-interactive follower and filter it out.
+
+Fix: stop trusting the transient flags and capture the ground truth at its source. `HookedTalkradius` already intercepts every `TALKRADIUS` execution — and *only* entities that actually declare a talk radius reach it. It now maps the entity pointer back to its "others" index and records the radius (offset 0x1F8, empirically confirmed: `CHANGED @0x1F8: 128 -> 300`) into a new per-entity side table `s_entTalkRadius[]`, cleared per field load by `HookedFieldScriptsInit`. `RefreshCatalog` reads that table instead of the flag:
+
+- **Classification** — a captured talk radius classifies the entity as `ENT_NPC` up front, so talkable NPCs no longer fall into the push-only skip. Race-free: the table is populated by the time the player browses the catalog, and offset-robust — no struct-layout guessing during the scan.
+- **Party filter** — `noInteract` now also requires *no* captured talk radius. A party member you can talk to is kept; a pure follower/scene actor (no talk radius) is still filtered, preserving the v0.17.8.3 dormitory/classroom behavior.
+- **Naming** — interactable party members are labeled by proper name ("Squall", "Zell", …) via the new `PartyCharacterDisplayName()` rather than a generic "NPC". Only party-character SYMs match, so draw points and save points cannot be mislabeled.
+
 ## v0.18.3.225
 
 Release prep (no behavior change to shipped features): (1) **Source-size CI guard** — `world_map_drive.inl` (156 KB) and `world_map_planner.inl` (96 KB) had both grown past the 80 KB hard-fail limit during the unpushed world-map work. Split, byte-identical, into sub-80 KB `.inl` chunks: `world_map_drive.inl` → `world_map_drive_helpers.inl` (38 KB, the AD lifecycle/escape helpers) + `world_map_drive.inl` (59 KB, `UpdateAutoDrive` head) + `world_map_drive_exec.inl` (61 KB, the executor tail, included mid-function); `world_map_planner.inl` → `world_map_planner.inl` (54 KB) + `world_map_planner2.inl` (43 KB). Splits are pure textual `#include` relocations at statement/block boundaries (verified between the `NAVMESH_DIAG`/`WM_MOTION_DIAG` blocks and preserving forward-declaration order), so the compiled code is unchanged. world_map.cpp include order updated. Every `src/*.{cpp,inl}` now passes the 80 KB guard. (2) **Autotest channel gated OFF by default** — `AUTOTEST_CMD_ENABLED` set to 0 so the file-polled keystroke-injection test channel (`autotest_cmd.inl`) is inert in shipped builds; the code remains for future test sessions (flip to 1 + rebuild).

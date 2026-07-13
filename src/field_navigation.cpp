@@ -598,6 +598,30 @@ static const int SET_TRI_LOG_MAX   = 0;
 // v05.58: ENTDIAG/BGDIAG dumps removed — entity classification confirmed working.
 static bool      s_entDiagDumped   = true;   // true = skip old ENTDIAG dump
 
+// v0.18.3.227: Race-free interactability capture.
+// The TALKRADIUS/PUSHRADIUS opcodes fire during field-script execution, which
+// often runs AFTER the first catalog scan. That means an entity's runtime
+// talkonoff/pushonoff FLAGS (0x24B/0x249) can still read 0 at catalog-build
+// time even for genuinely talkable NPCs (the "train guard" symptom). We instead
+// capture the radius directly in the opcode hook — which fires ONLY for entities
+// that actually declare a radius — into a per-entity side table keyed by entity
+// index. This is race-free (populated by the time the player browses the
+// catalog) and offset-robust (no struct-layout guessing at scan time). Cleared
+// on field load by HookedFieldScriptsInit. A nonzero entry means "this entity
+// is talkable this field", used by RefreshCatalog for both classification and
+// the party-member filter.
+static uint16_t  s_entTalkRadius[MAX_ENTITIES] = {};
+
+// v0.18.3.231: one-shot extended entity scan (reads past the engine's reported
+// entity count). Retired — kept for re-arming if the entity array ever needs
+// re-triage on a new field (this is what located the G-Garden train staff).
+static bool      s_extScanDumped = true;
+
+// v0.18.3.234: catalog scan trace, emitted ONCE per field load (reset by
+// HookedFieldScriptsInit). RefreshCatalog runs ~1/sec, so tracing every rebuild
+// would flood the log; once per field is enough to diagnose a missing entity.
+static bool      s_scanTraced    = true;
+
 // v05.50: Background entity diagnostic dump flag (reset on field load).
 static bool      s_bgDiagDumped    = true;   // true = skip old BGDIAG dump
 

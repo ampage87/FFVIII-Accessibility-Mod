@@ -147,6 +147,27 @@ static int __cdecl HookedTalkradius(int entityPtr)
         uint8_t* ent = (uint8_t*)(uint32_t)entityPtr;
         int16_t  modelId = *(int16_t*)(ent + 0x218);
 
+        // v0.18.3.227: Capture talkability for the catalog (race-free).
+        // The talk radius the handler just wrote lives at offset 0x1F8
+        // (empirically confirmed: TALKRADIUS changed @0x1F8 128->300). Map the
+        // entity pointer back to its "others" index and record the radius so
+        // RefreshCatalog can treat this entity as talkable regardless of the
+        // transient talkonoff flag. Only entities that execute TALKRADIUS reach
+        // here, so a nonzero table entry is a definitive "talkable" signal.
+        if (FF8Addresses::pFieldStateOthers) {
+            uint8_t* obase = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+            if (obase) {
+                ptrdiff_t d = ent - obase;
+                if (d >= 0 && (d % (ptrdiff_t)ENTITY_STRIDE) == 0) {
+                    int idx = (int)(d / (ptrdiff_t)ENTITY_STRIDE);
+                    if (idx >= 0 && idx < MAX_ENTITIES) {
+                        uint16_t r = *(uint16_t*)(ent + 0x1F8);
+                        if (r > 0) s_entTalkRadius[idx] = r;
+                    }
+                }
+            }
+        }
+
         Log::Field("FieldNavigation: [TALKRAD] ent=0x%08X model=%d",
                    (uint32_t)entityPtr, (int)modelId);
 

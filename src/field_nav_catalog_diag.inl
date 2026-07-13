@@ -52,6 +52,83 @@ static void DumpEntityDiagOnce(uint8_t* base, uint8_t lim)
     s_entDiagDumped = true;
 }
 
+// v0.18.3.231 DIAG: Extended entity scan.
+//
+// ggsta1 reports otherCount=10 while its JSM declares O=13. The three entities
+// the scan therefore never reaches are 'gsm3', 'director0' and 'traincont' —
+// and the G-Garden Station train staff (absent from every array we have dumped)
+// is very likely 'traincont'. This dump reads PAST the engine's reported count,
+// up to MAX_ENTITIES, and prints what is actually in those slots. If slots 10-12
+// hold real models/positions, the reported count is not the true array length
+// and the catalog loop is simply stopping short.
+//
+// Reads are inside the caller's __try; each slot is a fixed ENTITY_STRIDE block,
+// so over-reading stays within the allocation the engine sized for MAX entities.
+static void DumpExtendedEntityScanOnce(uint8_t* base, uint8_t entCount)
+{
+    if (s_extScanDumped) return;
+    s_extScanDumped = true;
+    Log::Field("FieldNavigation: [EXTSCAN] === reported otherCount=%d, scanning 0..%d ===",
+               (int)entCount, MAX_ENTITIES - 1);
+    for (int i = 0; i < MAX_ENTITIES; i++) {
+        uint8_t* block = base + ENTITY_STRIDE * i;
+        int16_t  modelId = *(int16_t*)(block + 0x218);
+        uint16_t triId   = *(uint16_t*)(block + 0x1FA);
+        uint8_t  setpc   = *(block + 0x255);
+        uint8_t  talk    = *(block + 0x24B);
+        uint8_t  push    = *(block + 0x249);
+        uint8_t  thru    = *(block + 0x24C);
+        int32_t  fpX     = *(int32_t*)(block + 0x190);
+        int32_t  fpY     = *(int32_t*)(block + 0x194);
+        int symIdx = s_symOthersOffset + i;
+        const char* sym = (symIdx >= 0 && symIdx < s_symNameCount) ? s_symNames[symIdx] : "(none)";
+        Log::Field("FieldNavigation: [EXTSCAN] slot%-2d %s sym='%s' model=%d tri=%u setpc=%d "
+                   "talk=%d push=%d thru=%d fp=(%d,%d)",
+                   i, (i < (int)entCount) ? "IN " : "OUT", sym,
+                   (int)modelId, (unsigned)triId, (int)setpc,
+                   (int)talk, (int)push, (int)thru, fpX, fpY);
+    }
+    Log::Field("FieldNavigation: [EXTSCAN] === end ===");
+}
+
+// v0.18.3.228: Catalog scan tracing. Every entity the scan sees is logged with
+// the signals that decide its fate, and BOTH drop paths log their reason. The
+// push-only skip and the unplaced-entity skip previously discarded entities with
+// no log line at all, which is exactly why the missing ggsta1 NPCs (the 'ekiin'
+// station attendant, the 'gsm*' students) were invisible to diagnosis.
+// Kept here rather than inline in field_nav_catalog.inl to hold that file under
+// the 80 KB source-size CI guard.
+static void LogScanEntity(int i, const char* sym, int modelId, unsigned triId,
+                          int talk, int push, int thru, bool jsmTalk,
+                          unsigned rtRad, bool talkable, int fpX, int fpY)
+{
+    Log::Field("FieldNavigation: [SCAN] ent%d sym='%s' model=%d tri=%u "
+               "talk=%d push=%d thru=%d jsmTalk=%d rtRad=%u talkable=%d fp=(%d,%d)",
+               i, sym, modelId, triId, talk, push, thru,
+               jsmTalk ? 1 : 0, rtRad, talkable ? 1 : 0, fpX, fpY);
+}
+
+static void LogScanKeep(int i, const char* sym, const char* typeName, const char* name)
+{
+    Log::Field("FieldNavigation: [SCAN-KEEP] ent%d sym='%s' type=%s name='%s'",
+               i, sym, typeName, name);
+}
+
+static void LogScanDropPushOnly(int i, const char* sym, int modelId)
+{
+    Log::Field("FieldNavigation: [SCAN-DROP] ent%d sym='%s' model=%d "
+               "push-only visible entity, not talkable -- skipped", i, sym, modelId);
+}
+
+static void LogScanDropUnplaced(int i, const char* sym, int modelId, unsigned triId,
+                                int fpX, int fpY, bool hasModel, bool specialJSM)
+{
+    Log::Field("FieldNavigation: [SCAN-DROP] ent%d sym='%s' model=%d tri=%u fp=(%d,%d) "
+               "not placed (hasModel=%d specialJSM=%d) -- skipped",
+               i, sym, modelId, triId, fpX, fpY,
+               hasModel ? 1 : 0, specialJSM ? 1 : 0);
+}
+
 // v05.50: Background entity diagnostic dump. Logs the entire backgrounds
 // array with execution_flags, bgstate, and candidate SYM indices to
 // determine the correct mapping.
