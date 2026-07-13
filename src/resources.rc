@@ -170,3 +170,6 @@ IDR_AD_MAPPING          RCDATA "..\\Audio Descriptions\\mapping.txt"
 
 // NVDA controller client DLL (embedded for single-file distribution)
 IDR_NVDA_CLIENT_DLL     RCDATA "..\\TOLK\\nvdaControllerClient.dll"
+
+// v0.18.3.172: world-map auto-drive teleport cue (rising shimmer). In src/ next to this file.
+IDR_WAV_TELEPORT        RCDATA "teleport_1_rising_shimmer.wav"

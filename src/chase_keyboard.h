@@ -115,6 +115,21 @@ void SetKeyUp(uint8_t dikCode);
 void ClearAllKeys();
 
 // ============================================================================
+// v0.18.3.215: Autotest key OVERLAY (independent of chase Auto)
+// ============================================================================
+//
+// Unlike the chase synthetic buffer (which REPLACES the keyboard state and
+// only while chase Auto is active), the overlay is OR-ed into every 256-byte
+// GetDeviceState result the game sees, active or not. This is the delivery
+// path for the automated-BAT command channel (autotest_cmd.inl): OS-level
+// SendInput injection reaches GetAsyncKeyState readers (mod hotkeys) but NOT
+// FF8's DirectInput buffer for direction keys, so the overlay writes the DIK
+// bytes at the exact point FF8 reads them. Zero-cost when no overlay key is
+// held (single counter check per read).
+void SetOverlayKey(uint8_t dikCode, bool down);
+void ClearOverlay();
+
+// ============================================================================
 // Convenience: PS/2 scancode + extended-flag -> DIK conversion
 // ============================================================================
 //

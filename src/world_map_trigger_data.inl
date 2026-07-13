@@ -378,3 +378,42 @@ static void LogTriggerPrograms()
                    (unsigned)p.num_clauses, clausesBuf);
     }
 }
+
+// ============================================================================
+// v0.18.3.206: DECODED ENTRY FIRING AREAS (offline/TRIGGER_FIRING_AREAS.md).
+// The trigger system is now FULLY decoded from the exe + wmsetus Section 8:
+// a field entry fires only while standing on a wmx poly with byte14 bit 3 set
+// (hand-painted entry polys at each gate mouth), inside the program's 8192u
+// segment, within the clause's sub-segment coordinate bounds, with the vehicle
+// and story gates satisfied. The former "unknown" predicate bits were the
+// sub-segment bounds; 0xFF08 is the destination ACTION, not a region test.
+// This table holds, per catalog destination, a VALIDATED aim point inside the
+// firing area plus the area's bbox: aim = drive-target override; bbox = the
+// final-approach mow zone (replaces the blind orbit, which at Timber circled
+// radius 610-1330u around a firing patch that lies entirely within 432u --
+// the orbit had a hole exactly where the target was). Validated against the
+// .205 log: Dollet's successful entry fired ON its area edge; every failed
+// Timber orbit position lies OUTSIDE its area.
+struct EntryAimInfo {
+    const char* name;         // catalog name (matched against s_driveTargetName)
+    int32_t     aimX, aimY;   // validated point inside the firing area
+    int32_t     x0, x1;       // area bbox x [min,max]
+    int32_t     y0, y1;       // area bbox y [min,max]
+    bool        footOnly;     // no FOOT_ALT clause: cannot be entered by car
+};
+static const EntryAimInfo s_entryAims[] = {
+    { "Timber",           -22580,  -5291, -22685, -22371,  -5632,  -5120, true  },
+    { "Dollet",           -14513, -39119, -15409, -13516, -39951, -38175, false },
+    { "Balamb Town",       12560, -26800,  12288,  12884, -26896, -26624, false },
+    { "Balamb Garden",     24304, -30300,  23552,  25410, -31370, -29696, true  },
+    { "Fire Cavern",       30239, -29528,  30112,  30394, -29750, -29192, true  },
+    { "Galbadia Garden",  -36895, -27082, -37764, -35964, -28036, -26236, true  },
+    { "Galbadia Station", -38914, -24767, -39426, -38398, -24936, -24682, true  },
+};
+static const int ENTRY_AIM_COUNT = (int)(sizeof(s_entryAims) / sizeof(s_entryAims[0]));
+static int FindEntryAim(const char* name)
+{
+    for (int i = 0; i < ENTRY_AIM_COUNT; i++)
+        if (strcmp(s_entryAims[i].name, name) == 0) return i;
+    return -1;
+}

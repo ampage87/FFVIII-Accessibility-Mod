@@ -1,333 +1,8 @@
-// world_map_drive.inl - Auto-drive lifecycle + key injection (with v0.16.0 Part C)
-//
-// PART OF world_map.cpp -- TEXTUAL INCLUDE. Do NOT compile standalone.
-//
-// Held-key injection via keybd_event (PressKey/ReleaseKey/SetDriveKeys/
-// ReleaseAllDriveKeys) plus the auto-drive lifecycle: StartAutoDrive,
-// StopAutoDrive, StartSweep, UpdateAutoDrive.
-//
-// v0.16.0 Part C: StartAutoDrive checks s_destPlannerEligible[catIdx]
-// before routing through PlanDrivePath. Ineligible destinations skip the
-// planner entirely and use simple-coord steering (the v0.11.11-era design).
-// This prevents the v0.14.95 closest-active-region fallback from misrouting
-// drives toward unrelated destinations.
-
-// keybd_event-based key injection. Arrow keys use scan codes 0x48 (UP),
-// 0x4B (LEFT), 0x4D (RIGHT), all extended-key scancodes. v0.14.102 added
-// the 'extended' parameter so A (gas pedal) and W (reverse) can be sent as
-// non-extended keys per the v0.11.14 design.
-static void PressKey(BYTE vk, BYTE scan, bool extended = true)
-{
-    keybd_event(vk, scan, extended ? KEYEVENTF_EXTENDEDKEY : 0, 0);
-}
-
-static void ReleaseKey(BYTE vk, BYTE scan, bool extended = true)
-{
-    keybd_event(vk, scan, (extended ? KEYEVENTF_EXTENDEDKEY : 0) | KEYEVENTF_KEYUP, 0);
-}
-
-static void ReleaseAllDriveKeys()
-{
-    if (s_keyUpHeld)    { ReleaseKey(VK_UP,    0x48); s_keyUpHeld    = false; }
-    if (s_keyLeftHeld)  { ReleaseKey(VK_LEFT,  0x4B); s_keyLeftHeld  = false; }
-    if (s_keyRightHeld) { ReleaseKey(VK_RIGHT, 0x4D); s_keyRightHeld = false; }
-    if (s_keyDownHeld)  { ReleaseKey(VK_DOWN,  0x50); s_keyDownHeld  = false; }
-    // v0.14.102: also release the gas pedal (A key, NOT extended).
-    if (s_keyGasHeld)   { ReleaseKey('A',      0x1E, false); s_keyGasHeld = false; }
-}
-
-// Idempotent press/release: only generates events on state changes.
-static void SetDriveKeys(bool up, bool left, bool right, bool down = false)
-{
-    if (up    && !s_keyUpHeld)    { PressKey(VK_UP,    0x48); s_keyUpHeld    = true; }
-    if (!up   &&  s_keyUpHeld)    { ReleaseKey(VK_UP,  0x48); s_keyUpHeld    = false; }
-    if (left  && !s_keyLeftHeld)  { PressKey(VK_LEFT,  0x4B); s_keyLeftHeld  = true; }
-    if (!left &&  s_keyLeftHeld)  { ReleaseKey(VK_LEFT, 0x4B); s_keyLeftHeld = false; }
-    if (right && !s_keyRightHeld) { PressKey(VK_RIGHT, 0x4D); s_keyRightHeld = true; }
-    if (!right&&  s_keyRightHeld) { ReleaseKey(VK_RIGHT,0x4D); s_keyRightHeld = false; }
-    // #67 v0.18.3.68: DOWN arrow (reverse) for the wedge-recovery burst.
-    if (down  && !s_keyDownHeld)  { PressKey(VK_DOWN,  0x50); s_keyDownHeld  = true; }
-    if (!down &&  s_keyDownHeld)  { ReleaseKey(VK_DOWN,0x50); s_keyDownHeld  = false; }
-    // v0.14.102: gas pedal mirrors UP arrow. A key (scan 0x1E, NOT extended).
-    if (up    && !s_keyGasHeld)   { PressKey('A',      0x1E, false); s_keyGasHeld   = true; }
-    if (!up   &&  s_keyGasHeld)   { ReleaseKey('A',    0x1E, false); s_keyGasHeld   = false; }
-}
-
-// #67 v0.18.3.74: wrap a world-space delta into the torus' shortest representative.
-static void WrapWorldDelta(int32_t& dx, int32_t& dy)
-{
-    const int32_t W = (int32_t)WM_WIDTH, H = (int32_t)WM_HEIGHT;
-    if (dx >  W / 2) dx -= W;
-    if (dx < -W / 2) dx += W;
-    if (dy >  H / 2) dy -= H;
-    if (dy < -H / 2) dy += H;
-}
-
-// #67 v0.18.3.74: pull a measured basis axis toward a freshly observed unit
-// motion (EMA), renormalized. Tracks the world-map camera as it swings mid-drive.
-static void RefreshBasisAxis(double& ax, double& ay, double nx, double ny)
-{
-    ax = ax * (1.0 - DRIVE_BASIS_EMA) + nx * DRIVE_BASIS_EMA;
-    ay = ay * (1.0 - DRIVE_BASIS_EMA) + ny * DRIVE_BASIS_EMA;
-    double l = sqrt(ax * ax + ay * ay);
-    if (l > 1e-6) { ax /= l; ay /= l; }
-}
-
-// #67 v0.18.3.75: re-perpendicularize unit axis (ax,ay) against unit (bx,by)
-// (Gram-Schmidt), keeping the screen basis a valid rotating orthonormal frame as
-// the camera swings. Without this, refreshing only the UP axis (the common case
-// -- steering presses UP most of the time) would let uHat drift onto rHat and
-// collapse the basis.
-static void OrthonormalizeAgainst(double& ax, double& ay, double bx, double by)
-{
-    double d = ax * bx + ay * by;
-    ax -= d * bx; ay -= d * by;
-    double l = sqrt(ax * ax + ay * ay);
-    if (l > 1e-6) { ax /= l; ay /= l; }
-}
-
-// #67 v0.18.3.82: is the straight line between two fine cells clear of cells
-// that block FOOT/CAR travel (ocean, or steep mountain) -- the SAME block rule
-// the clearance field and IsFineTraversable use for foot/car. Self-contained
-// (reads only s_walkClassFine/s_steepFine + the SEG_*/WM_MTN_STEEP_BLOCK consts
-// in state.inl) so it has no include-order dependency. Torus-aware; samples each
-// interpolated cell between the endpoints. Used to clamp the drive's lookahead
-// steer target so it is never aimed THROUGH a cliff corner the winding route
-// goes AROUND. (The Dollet patch ledge is forced-steep MOUNTAIN, so it counts as
-// blocked here too -- the target can't be aimed across it either.)
-static bool FineLineClearFootCar(int c0, int r0, int c1, int r1)
-{
-    int dc = c1 - c0, dr = r1 - r0;
-    if (dc >  WM_FINE_COLS / 2) dc -= WM_FINE_COLS;
-    if (dc < -WM_FINE_COLS / 2) dc += WM_FINE_COLS;
-    if (dr >  WM_FINE_ROWS / 2) dr -= WM_FINE_ROWS;
-    if (dr < -WM_FINE_ROWS / 2) dr += WM_FINE_ROWS;
-    int adc = dc < 0 ? -dc : dc;
-    int adr = dr < 0 ? -dr : dr;
-    int steps = adc > adr ? adc : adr;
-    if (steps <= 0) return true;
-    for (int i = 1; i <= steps; i++) {
-        int cc = c0 + (int)((int64_t)dc * i / steps);
-        int rr = r0 + (int)((int64_t)dr * i / steps);
-        int wc = ((cc % WM_FINE_COLS) + WM_FINE_COLS) % WM_FINE_COLS;
-        int wr = ((rr % WM_FINE_ROWS) + WM_FINE_ROWS) % WM_FINE_ROWS;
-        uint8_t cls = s_walkClassFine[wr][wc];
-        if (cls == SEG_OCEAN ||
-            (cls == SEG_MOUNTAIN && s_steepFine[wr][wc] > WM_MTN_STEEP_BLOCK))
-            return false;
-    }
-    return true;
-}
-
-// ============================================================================
-// Auto-drive lifecycle (v0.14.86)
-// ============================================================================
-static void StopAutoDrive(const char* reason)
-{
-    if (!s_driveActive) return;
-    ReleaseAllDriveKeys();
-    s_driveActive = false;
-    s_sweepActive = false;
-    s_sweepPhase = 0;
-    s_sweepTurning = true;
-    s_finalApproachEnterTick = 0;
-    s_drivePathLen      = 0;
-    s_drivePathIdx      = 0;
-    s_drivePathPlanned  = false;
-    s_driveGoalSegCount = 0;
-    s_driveAwaitingArrivalDecision = false;
-    s_driveExitTick                = 0;
-    s_destFootFriendly     = true;
-    s_drivePlannerEligible = true;   // v0.16.0.2: reset to safe default
-    // #67 v0.18.3.74: screen-relative steering teardown.
-    s_driveCalPhase      = DCAL_DONE;
-    s_camBasisValid      = false;
-    s_driveSidestepUntil = 0;
-    s_drivePrevHadKeys   = false;
-    if (reason && *reason) {
-        ScreenReader::Speak(reason, true);
-        Log::World("WorldMap: [DRIVE] Stopped: %s", reason);
-    } else {
-        Log::World("WorldMap: [DRIVE] Stopped (silent)");
-    }
-}
-
-static void StartAutoDrive(int catIdx)
-{
-    if (s_driveActive) return;
-    if (!s_catalogBuilt || s_catalogCount == 0) {
-        ScreenReader::Speak("No locations available.", true);
-        return;
-    }
-    if (catIdx < 0 || catIdx >= s_catalogCount) {
-        ScreenReader::Speak("Invalid destination.", true);
-        return;
-    }
-
-    int32_t px, py, pz;
-    GetWorldMapPosition_Active(&px, &py, &pz);
-    if (px == 0 && py == 0) {
-        ScreenReader::Speak("Position unavailable. Try again.", true);
-        return;
-    }
-
-    s_sweepAbortCount = 0;
-
-    const LocationEntry& dest = s_catalog[catIdx];
-
-    // v0.14.89: prefer refined entry coord when available.
-    int locIdx = FindLocationIndexByTargetCoords(dest.x, dest.y);
-    if (locIdx >= 0 && s_refinedHas[locIdx]) {
-        s_driveTargetX = s_refinedX[locIdx];
-        s_driveTargetY = s_refinedY[locIdx];
-        Log::World("WorldMap: [DRIVE] Using refined entry for %s: (%d,%d) instead of catalog (%d,%d)",
-                   dest.name, s_refinedX[locIdx], s_refinedY[locIdx], dest.x, dest.y);
-    } else {
-        s_driveTargetX = dest.x;
-        s_driveTargetY = dest.y;
-    }
-    strncpy(s_driveTargetName, dest.name, sizeof(s_driveTargetName) - 1);
-    s_driveTargetName[sizeof(s_driveTargetName) - 1] = '\0';
-
-    double dist = CalculateWrappedDistance(px, py, dest.x, dest.y);
-    DWORD now = GetTickCount();
-
-    s_driveActive            = true;
-    s_driveStartTime         = now;
-    s_driveLastAnnounce      = now;
-    s_driveLastDist          = dist;
-    s_driveStuckX            = px;
-    s_driveStuckY            = py;
-    s_driveStuckCheckTime    = now;
-    s_driveStuckCount        = 0;
-    s_driveReplanCount       = 0;   // #67 v0.18.3.59: fresh recovery budget per drive
-    s_driveBridgeActive      = false; // #70 v0.18.3.97: fresh bridge-out state per drive
-    s_driveBridgeCount       = 0;
-    // #67 v0.18.3.62: reset motion-derived heading tracking for the new drive.
-    s_driveMoveHeading    = -1;     // unknown until he moves
-    s_driveHeadRefX       = px;
-    s_driveHeadRefY       = py;
-    s_driveTurnSign       = 1;      // initial guess; self-calibrates from observed rotation
-    s_driveTurnedSinceRef = false;
-    s_driveLastTurnRight  = false;
-    s_driveLastMoveTime   = now;
-    s_driveLastMovePosX   = px;
-    s_driveLastMovePosY   = py;
-    s_driveWedgeReverseUntil = 0;       // #67 v0.18.3.68: fresh reverse un-wedge state
-    s_driveWedgeReverseCount = 0;
-    s_driveWedgeProgressDist = dist;
-    s_driveWedgeAnchorX      = px;       // #67 v0.18.3.69: net-displacement wedge anchor
-    s_driveWedgeAnchorY      = py;
-    s_driveWedgeAnchorTime   = now;
-    s_driveApproachAnnounced = (dist < DRIVE_APPROACH_DIST);
-    s_finalApproachEnterTick = 0;
-    s_sweepActive            = false;
-    s_sweepPhase             = 0;
-    s_sweepTurning           = true;
-
-    s_driveOnFootAtStart = (s_lastVehicle < 0) ||
-                           (GetVehicleType((uint8_t)s_lastVehicle) == VEH_ON_FOOT);
-
-    // #67 v0.18.3.74: screen-relative steering reset + calibration arm (foot only).
-    // The basis (what UP / RIGHT do in world space) is measured at drive start so
-    // we never assume a fixed camera orientation. A close start or a vehicle skips
-    // the probe and relies on the default + live refresh.
-    s_camBasisValid      = false;
-    s_camUx = 0.0; s_camUy = -1.0;          // default North until measured
-    s_camRx = 1.0; s_camRy =  0.0;          // default East  until measured
-    s_drivePrevHadKeys   = false;
-    s_driveSidestepUntil = 0;
-    s_driveSidestepSign  = 1;
-    s_driveProbeValid    = false;   // #67 v0.18.3.77: re-probe the steering arrow on a fresh drive
-    s_driveCalTry        = 0;
-    // #67 v0.18.3.77: the greedy arrow-probe needs no measured basis, so skip the
-    // UP/RIGHT calibration wobble entirely -- it just trusts measured progress.
-    s_driveCalPhase = DCAL_DONE;
-    s_camBasisValid = true;
-
-    int distKm = (int)(dist / 1000.0);
-    char buf[160];
-    if (distKm < 1) {
-        snprintf(buf, sizeof(buf), "Driving to %s. Very close.", s_driveTargetName);
-    } else {
-        snprintf(buf, sizeof(buf), "Driving to %s. %d kilometers.", s_driveTargetName, distKm);
-    }
-    ScreenReader::Speak(buf, true);
-    Log::World("WorldMap: [DRIVE] Start \u2192 %s at (%d,%d), dist=%.0f units (%d km)",
-               s_driveTargetName, s_driveTargetX, s_driveTargetY, dist, distKm);
-
-    // v0.14.103.7: classify foot-friendliness for the sweep-abort threshold.
-    s_destFootFriendly = IsLocationFootFriendly(s_driveTargetX, s_driveTargetY);
-    {
-        int destCol = WorldXToSegCol(s_driveTargetX);
-        int destRow = WorldYToSegRow(s_driveTargetY);
-        uint8_t destReg = (s_segmentRegionLoaded &&
-                           destCol >= 0 && destCol < WMX_SEG_COLS &&
-                           destRow >= 0 && destRow < WMX_SEG_ROWS)
-                          ? s_segmentRegionMap[destRow][destCol]
-                          : 0xFF;
-        Log::World("WorldMap: [DRIVE] Destination foot-friendly=%s (target seg(%d,%d) region=0x%02X)",
-                   s_destFootFriendly ? "YES" : "NO",
-                   destCol, destRow, (unsigned)destReg);
-    }
-
-    // v0.14.94: run the path planner once. Sets s_drivePath[]/Len/Idx/Planned
-    // and s_driveGoalSegs[]/Count. On failure (Ragnarok, region map not
-    // loaded, no matching trigger program, no path), s_drivePathPlanned
-    // stays false and AD falls back to catalog-center steering with the
-    // v0.14.93 distance-based arrival heuristic. UpdateAutoDrive picks the
-    // active mode from s_drivePathPlanned each tick.
-    //
-    // v0.16.0 Part C: gate on s_destPlannerEligible[locIdx]. Geometric-trigger
-    // destinations (no foot clause in s_triggerPrograms[] for this region)
-    // must skip the planner entirely -- the v0.14.95 closest-active-region
-    // fallback misroutes them toward unrelated destinations. They use the
-    // v0.11.11-era simple-coord steering (catalog-center, bearing-based)
-    // implemented in UpdateAutoDrive's non-planner branch.
-    //
-    // v0.16.0.1: index by locIdx (s_locations master-table position) NOT
-    // catIdx (s_catalog BFS-filtered/distance-sorted position). The v0.16.0
-    // BAT showed Fire Cavern (master idx 37, catIdx 2) reading Dollet's
-    // eligibility (master idx 2 = YES) and running the planner anyway,
-    // hitting the closest-active-region fallback toward seg(18,20). Part B
-    // caught the off-target arrival but the planner walk shouldn't have
-    // fired at all. FindLocationIndexByTargetCoords resolves locIdx above.
-    //
-    // v0.16.0.2: persist the decision in s_drivePlannerEligible so the
-    // replan-on-world-map-re-entry path in Poll() can honor it too. The
-    // v0.16.0.1 BAT showed Fire Cavern starting correctly via simple-coord
-    // (planned=0) but the replan after a random encounter called
-    // PlanDrivePath unconditionally and converted the drive to planner-
-    // routed toward the wrong destination. One decision, made once.
-    bool plannerEligible = (locIdx >= 0 && locIdx < LOCATION_COUNT &&
-                            s_destPlannerEligible[locIdx]);
-    s_drivePlannerEligible = plannerEligible;
-    if (plannerEligible) {
-        PlanDrivePath(px, py);
-    } else {
-        Log::World("WorldMap: [DRIVE] Geometric-trigger destination %s (locIdx=%d, planner-ineligible) \u2014 using simple-coord steering",
-                   s_driveTargetName, locIdx);
-        s_drivePathLen      = 0;
-        s_drivePathIdx      = 0;
-        s_drivePathPlanned  = false;
-        s_driveGoalSegCount = 0;
-    }
-}
-
-static void StartSweep(int32_t px, int32_t py, DWORD now)
-{
-    s_sweepActive   = true;
-    s_sweepPhase    = 1;
-    s_sweepTurning  = true;
-    s_sweepStateEnd = now + SWEEP_TURN_BASE_MS;
-    s_driveStuckX = px;
-    s_driveStuckY = py;
-    s_driveStuckCheckTime = now;
-    s_driveStuckCount = 0;
-    ScreenReader::Speak("Searching for entrance.", true);
-    Log::World("WorldMap: [DRIVE-SWEEP] Started (target=%s, phase 1 turning right %dms)",
-               s_driveTargetName, SWEEP_TURN_BASE_MS);
-}
+// world_map_drive.inl - UpdateAutoDrive (the per-frame AD executor).
+// v0.18.3.225: the lifecycle helpers moved to world_map_drive_helpers.inl and
+// the function body is split at ~half via a mid-function include of
+// world_map_drive_exec.inl, so each .inl stays under the 80 KB CI guard.
+// world_map.cpp includes: ..._helpers.inl, then THIS file.
 
 static void UpdateAutoDrive()
 {
@@ -341,6 +16,13 @@ static void UpdateAutoDrive()
 
     double dist = CalculateWrappedDistance(px, py, s_driveTargetX, s_driveTargetY);
     DWORD now = GetTickCount();
+
+    // v0.18.3.151: reverse-un-wedge exit-heading sweep counter. Advanced once per
+    // reverse burst (stuck-trigger below); the reverse key-set turns by a swept side
+    // so successive bursts back out of a pocket on different headings instead of
+    // reversing straight back into the same wall (the .150 SW/Alien-Ship pocket:
+    // DOWN-only freed 32u then immediately re-wedged, d+0 forever).
+    static int s_unwedgeSweep = 0;
 
     // #70 v0.18.3.97: bridge-out arrival. While bridging out of a start pocket,
     // once the character reaches the nearest road cell, drop bridge mode and
@@ -404,7 +86,7 @@ static void UpdateAutoDrive()
     }
 
     // v0.14.99: Sweep abort on drift. MUST run BEFORE the sweep state machine.
-    if (s_sweepActive && dist > DRIVE_FINAL_APPROACH_DIST * 1.5) {
+    if (s_sweepActive && dist > DRIVE_FINAL_APPROACH_DIST * 3.0) {   // v0.18.3.144 (#70): widen entrance search 1500->3000 (Timber marker sits >1500u from its real entry trigger; STEPGUARD keeps the spiral on land)
         s_sweepAbortCount++;
         int abortLimit = s_destFootFriendly ? DRIVE_BOUNCE_ABORT_THRESHOLD : 1;
         if (s_sweepAbortCount >= abortLimit) {
@@ -419,39 +101,54 @@ static void UpdateAutoDrive()
             return;
         }
         Log::World("WorldMap: [DRIVE-SWEEP] Aborting (drifted out of final approach: dist=%.0f, threshold=%.0f) \u2014 retry %d/%d, returning to normal steering",
-                   dist, DRIVE_FINAL_APPROACH_DIST * 1.5, s_sweepAbortCount, DRIVE_BOUNCE_ABORT_THRESHOLD);
+                   dist, DRIVE_FINAL_APPROACH_DIST * 3.0, s_sweepAbortCount, DRIVE_BOUNCE_ABORT_THRESHOLD);
         s_sweepActive            = false;
         s_sweepPhase             = 0;
         s_sweepTurning           = true;
         s_finalApproachEnterTick = 0;
     }
 
-    // Sweep state machine.
+    // Sweep state machine -- v0.18.3.196: SPIRAL-ORBIT entrance search.
     if (s_sweepActive) {
-        if (now >= s_sweepStateEnd) {
-            if (s_sweepTurning) {
-                s_sweepTurning = false;
-                s_sweepStateEnd = now + SWEEP_WALK_DURATION_MS;
-                Log::World("WorldMap: [DRIVE-SWEEP] Phase %d walk start (%dms)",
-                           s_sweepPhase, SWEEP_WALK_DURATION_MS);
-            } else {
-                s_sweepPhase++;
-                if (s_sweepPhase > SWEEP_MAX_PHASES) {
-                    StopAutoDrive("Could not find entrance.");
-                    return;
-                }
-                s_sweepTurning = true;
-                DWORD turnDur = SWEEP_TURN_BASE_MS + (DWORD)(s_sweepPhase - 1) * 200;
-                s_sweepStateEnd = now + turnDur;
-                const char* dir = (s_sweepPhase % 2 == 1) ? "right" : "left";
-                Log::World("WorldMap: [DRIVE-SWEEP] Phase %d turn start (%s, %dms)",
-                           s_sweepPhase, dir, turnDur);
-            }
+        // The old blind turn+walk walked forward from wherever the character faced, drifted ~3000u
+        // and bounced. Instead, steer the character AROUND the target on an expanding circle, so it
+        // stays local and sweeps across an entry trigger that is OFFSET from the icon (e.g. Galbadia
+        // Garden: the icon sits on the visual ring while the real field trigger is at the CENTER). The
+        // moment the field loads the arrival machinery ends the drive (MODE_FIELD) and capture-on-
+        // success persists the true entrance. Steering uses the camera yaw (proven), and the orbit
+        // never leaves ~900u of the target so it can't drift out and bounce.
+        static double s_orbitAng  = 0.0;
+        static DWORD  s_orbitLast = 0;
+        if (s_orbitLast == 0 || (now - s_orbitLast) > 1000) s_orbitLast = now;   // (re)seed after a pause
+        double dt = (double)(now - s_orbitLast) / 1000.0; s_orbitLast = now;
+        // v0.18.3.197: ANGLE SPEED tied to what the character can actually walk at the current
+        // radius (the .196 fixed 2.5 rad/s outran it past ~643u, so the outer rings were never
+        // reached). Cap angular speed to char_speed / R so the character keeps up and the circle is
+        // truly traced out to the widened max radius.
+        int Rcur = 250 + s_sweepPhase * 180; if (Rcur > 1500) Rcur = 1500;
+        double wmax = 900.0 / (double)(Rcur > 1 ? Rcur : 1);   // ~char speed (u/s) / R
+        double w = wmax < 1.6 ? wmax : 1.6;
+        s_orbitAng += dt * w;
+        if (s_orbitAng >= 6.283185307179586) {
+            s_orbitAng -= 6.283185307179586;
+            s_sweepPhase++;       // one revolution done; widen the circle
+            if (s_sweepPhase > SWEEP_MAX_PHASES) { StopAutoDrive("Could not find entrance."); return; }
+            int rr = 250 + s_sweepPhase * 180; if (rr > 1500) rr = 1500;
+            Log::World("WorldMap: [DRIVE-SWEEP] orbit revolution %d/%d (radius %d)",
+                       s_sweepPhase, SWEEP_MAX_PHASES, rr);
         }
-        bool wantUp    = !s_sweepTurning;
-        bool wantRight = s_sweepTurning && (s_sweepPhase % 2 == 1);
-        bool wantLeft  = s_sweepTurning && (s_sweepPhase % 2 == 0);
-        SetDriveKeys(wantUp, wantLeft, wantRight);
+        int R = 250 + s_sweepPhase * 180; if (R > 1500) R = 1500;
+        int32_t ox = s_driveTargetX + (int32_t)(sin(s_orbitAng) * (double)R);
+        int32_t oy = s_driveTargetY - (int32_t)(cos(s_orbitAng) * (double)R);
+        int brg  = TorusBearing(px, py, ox, oy);
+        int camY = GetWorldMapCameraYaw();
+        int base = (camY >= 0) ? camY : 0;
+        int rel  = (((brg - base) % 4096) + 4096) % 4096;
+        int k    = ((rel + 256) / 512) % 8;   // nearest 8-way key toward the orbit point
+        SetDriveKeys(k == 7 || k == 0 || k == 1,   // up
+                     k == 5 || k == 6 || k == 7,   // left
+                     k == 1 || k == 2 || k == 3,   // right
+                     k == 3 || k == 4 || k == 5);  // down
         return;
     }
 
@@ -461,7 +158,58 @@ static void UpdateAutoDrive()
             s_finalApproachEnterTick = now;
             Log::World("WorldMap: [DRIVE] Entered final approach zone (dist=%.0f)", dist);
         }
+        // v0.18.3.206: [TRIGREADY] -- live view of the decoded entry condition during the
+        // approach: is the engine's CURRENT poly an entry poly (byte14 bit 3, read from the
+        // engine's own record), and are we inside the decoded firing-area bbox? One glance
+        // at the log now separates "standing in the right place but not on an entry poly"
+        // from "never reached the area at all".
+        if (DRIVE_STEER_DIAG && s_driveEntryAim >= 0) {
+            static DWORD s_trT = 0;
+            if (now - s_trT >= 500) {
+                const EntryAimInfo& ea = s_entryAims[s_driveEntryAim];
+                const bool inA = (px >= ea.x0 && px <= ea.x1 && py >= ea.y0 && py <= ea.y1);
+                Log::World("WorldMap: [TRIGREADY] pos(%d,%d) entryPoly=%d inArea=%d dist=%.0f",
+                           px, py, EngineOnEntryPoly() ? 1 : 0, inA ? 1 : 0, dist);
+                s_trT = now;
+            }
+        }
         if (now - s_finalApproachEnterTick > FINAL_APPROACH_TIMEOUT_MS) {
+            // v0.18.3.206: MOW THE DECODED FIRING AREA instead of the blind spiral. The
+            // .205 Timber failure: the orbit swept radii 610-1330u around a firing patch
+            // that lies entirely within 432u of the seed -- a hole exactly where the
+            // target was. Serpentine waypoints INSIDE the decoded bbox (clipped to 768u
+            // around the aim for big areas), fed to the normal executor (full steering,
+            // collision recovery, arrival machinery). Two attempts, then the old sweep.
+            if (s_driveEntryAim >= 0 && s_mowTried < 2) {
+                s_mowTried++;
+                const EntryAimInfo& ea = s_entryAims[s_driveEntryAim];
+                int32_t cx0 = ea.x0, cx1 = ea.x1, cy0 = ea.y0, cy1 = ea.y1;
+                if (cx1 - cx0 > 768) { cx0 = ea.aimX - 384; cx1 = ea.aimX + 384; }
+                if (cy1 - cy0 > 768) { cy0 = ea.aimY - 384; cy1 = ea.aimY + 384; }
+                int n = 0; bool rev = (s_mowTried == 2);   // 2nd attempt mows the other way
+                for (int32_t yy = cy0 + 48; yy <= cy1 - 16 && n < DRIVE_PATH_MAX - 1; yy += 96, rev = !rev) {
+                    const int32_t xa = rev ? (cx1 - 32) : (cx0 + 32);
+                    const int32_t xb = rev ? (cx0 + 32) : (cx1 - 32);
+                    for (int half = 0; half < 2; half++) {
+                        const int32_t wx = half ? xb : xa;
+                        s_drivePathWX[n] = wx; s_drivePathWY[n] = yy;
+                        int fc = WorldXToFineCol(wx), fr = WorldYToFineRow(yy);
+                        if (fr < 0) fr = 0; else if (fr >= WM_FINE_ROWS) fr = WM_FINE_ROWS - 1;
+                        if (fc < 0) fc = 0; else if (fc >= WM_FINE_COLS) fc = WM_FINE_COLS - 1;
+                        s_drivePath[n] = PackSeg(fr, fc);
+                        n++;
+                    }
+                }
+                if (n >= 2) {
+                    s_drivePathLen = n; s_drivePathIdx = 0;
+                    s_drivePathPlanned = true; s_drivePathWorld = true;
+                    s_finalApproachEnterTick = now;   // fresh window for the mow pass
+                    Log::World("WorldMap: [ENTRYMOW] pass %d: mowing firing area, %d waypoints, box x[%d,%d] y[%d,%d]",
+                               s_mowTried, n, cx0, cx1, cy0, cy1);
+                    ScreenReader::Speak("Searching the entrance area.", true);
+                    return;
+                }
+            }
             Log::World("WorldMap: [DRIVE] Final-approach timeout (%dms in zone, no entry)",
                        (int)(now - s_finalApproachEnterTick));
             StartSweep(px, py, now);
@@ -472,6 +220,14 @@ static void UpdateAutoDrive()
     }
 
     // Stuck detection.
+    // v0.18.3.204 G3: SUPPRESSED while a CAMW-REC recovery episode is active. The .203 log
+    // shows the generic stuck-check firing 10-second replans (identical routes) WHILE the
+    // fan/wall-follow was mid-recovery, wasting ~30s per episode and yanking the route out
+    // from under it. Recovery owns the situation; the F2/G3 route-based give-up (40s without
+    // 128u of route progress) is the terminal backstop instead.
+    if (s_camwRec != 0) {
+        s_driveStuckX = px; s_driveStuckY = py; s_driveStuckCheckTime = now;
+    } else
     if (now - s_driveStuckCheckTime >= DRIVE_STUCK_CHECK_INTERVAL_MS) {
         double moved = CalculateWrappedDistance(s_driveStuckX, s_driveStuckY, px, py);
         if (moved < DRIVE_STUCK_THRESHOLD) {
@@ -516,8 +272,14 @@ static void UpdateAutoDrive()
             // fire each stuck check (~3s) while there's give-up headroom; the
             // progress watermark renews the budget once a reverse gets him
             // closer, else it escalates to re-plan / give-up below.
-            if (dist >= DRIVE_FINAL_APPROACH_DIST && s_driveStuckCount < DRIVE_STUCK_MAX) {
+            if (!s_drivePathWorld && dist >= DRIVE_FINAL_APPROACH_DIST && s_driveStuckCount < DRIVE_STUCK_MAX) {
+                // v0.18.3.165: reverse-burst recovery is for the OLD fine-cell path only. On the
+                // native 128u path it fires constantly and shoves the character backward (screen-
+                // relative DOWN), overriding the sequential+probe executor (the .164 run: keys all
+                // -D--, dist GREW). The probe already finds a walkable direction every frame, and
+                // genuine dead-ends fall through to the mid-route re-plan below, so skip it here.
                 s_driveWedgeReverseUntil = now + REVERSE_BURST_MS;
+                s_unwedgeSweep++;   // v0.18.3.151: next burst exits on a different heading
                 Log::World("WorldMap: [DRIVE] Stuck -> reverse un-wedge burst (check %d/%d, dist=%.0f, DOWN-only off the wall%s)",
                            s_driveStuckCount, DRIVE_STUCK_MAX, dist, isOnFoot ? ", on foot" : "");
                 s_driveStuckX         = px;
@@ -526,8 +288,22 @@ static void UpdateAutoDrive()
                 return;
             }
             if (isOnFoot && dist < DRIVE_FINAL_APPROACH_DIST && s_driveStuckCount >= 2) {
-                Log::World("WorldMap: [DRIVE] Stuck in final approach → sweep");
-                StartSweep(px, py, now);
+                // v0.18.3.182: FINAL-APPROACH ENTRY via position-write. The .181 run navigated
+                // Dollet->Timber perfectly (1 teleport) and reached dist=67 -- the doorstep -- but
+                // then stalled: at the route END there's no pursuit lookahead, so the native executor
+                // orbits the fixed target, and the on-foot SWEEP freezes (it's heading-based and can't
+                // steer screen-relative on-foot movement). The terrain to the target is open and the
+                // target cell is walkable. Drive the last stretch by writing the character ONTO the
+                // target -- proven to cross the town-entry trigger in .158 (that's how it entered
+                // Dollet) -- grounded at the engine's true height (.178) so it isn't left floating.
+                int eZ = 0; __try { eZ = *(volatile int32_t*)0x0203FE30; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                int oZ = WorldGroundHeightLocal(s_driveTargetX, s_driveTargetY);
+                int32_t tgZ = (oZ != WGH_NO_GROUND) ? oZ : ((eZ != 0) ? eZ : 0x7FFFFFFF);
+                WriteWorldMapPosition(s_driveTargetX, s_driveTargetY, tgZ);
+                PlayTeleportCue();
+                Log::World("WorldMap: [DRIVE] final approach on foot -> position-write onto target (%d,%d) z=%d to cross town entry",
+                           s_driveTargetX, s_driveTargetY, tgZ);
+                s_driveStuckCount = 0; s_driveStuckX = s_driveTargetX; s_driveStuckY = s_driveTargetY; s_driveStuckCheckTime = now;
                 return;
             }
             // #67 v0.18.3.59: mid-route stuck recovery. Before giving up, re-plan
@@ -537,6 +313,69 @@ static void UpdateAutoDrive()
             // DRIVE_MAX_REPLANS per drive so a true hard-jam still terminates.
             // Planner-routed mid-route drives only (final approach uses the sweep
             // above; simple-coord drives have no path to re-plan).
+            // v0.18.3.170: PINCH ASSIST (native path). A mid-route stuck on the native 128u path
+            // means the 8-way executor is orbiting a narrow ramp/canyon it can't thread (calibration
+            // isn't exact enough in-game to hold the sub-cell line). Instead of re-planning the same
+            // route, slide the character along the planner's gate-verified centerline through the
+            // pinch, then resume native keys. Bounded to ~24 waypoints per burst so encounters are
+            // only skipped through the pinch; if still pinched after, it re-triggers and advances
+            // another burst, guaranteeing forward progress.
+            // v0.18.3.185: PINCH TELEPORT DISABLED (Aaron's call). It fired far too often, became a
+            // crutch, and the post-write stale-Z grounding cascaded it the WHOLE way to Timber. The
+            // native fan-out recovery below (empirical unstick, now ordered toward the target) escapes
+            // the oracle-invisible wedges on its own -- the .183 ->Dollet drive already arrived with
+            // ZERO teleports, proving native recovery threads a full leg. On a hard stuck we now re-plan
+            // (block just below) instead of teleporting; only the final-approach town-entry write
+            // remains (it has to cross the entry trigger). Offline sim: blind 0-7 sweep completed
+            // 5/18 harsh-wall legs, fan-out completed 13/18 harsh and 35/36 at realistic wall density.
+            if (false && s_drivePathWorld && s_drivePathPlanned && s_drivePathLen > 0 &&
+                dist >= DRIVE_FINAL_APPROACH_DIST &&
+                s_driveStuckCount >= DRIVE_REPLAN_TRIGGER) {
+                s_driveAssistActive = true;
+                s_driveAssistEndIdx = s_drivePathIdx + 8;   // v0.18.3.171: SHORT burst -- nudge through the
+                                                            // immediate pinch, then hand back so native does
+                                                            // the open-terrain walking (and rolls encounters).
+                if (s_driveAssistEndIdx > s_drivePathLen - 1) s_driveAssistEndIdx = s_drivePathLen - 1;
+                int32_t snapX = s_drivePathWX[s_drivePathIdx], snapY = s_drivePathWY[s_drivePathIdx];
+                // v0.18.3.184: ground the teleport at the ORACLE height, NOT the engine register.
+                // 0x0203FE30 is STALE immediately after a position-write -- it still holds the PREVIOUS
+                // cell's height until the engine re-settles the character by walking. The .183
+                // Dollet->Timber log proved the .178 "trust the engine when it disagrees" rule is
+                // backwards here: at the snap cell the stale engine read -786 while the oracle (which
+                // matches the engine's height function EXACTLY during real walking, diff 0) read -1271,
+                // so .178 grounded the character at -786 -- 485u ABOVE the true ground -> floating ->
+                // the engine refuses key input -> d+0 frozen -> the pinch re-fires and teleports the
+                // WHOLE way to Timber. (The .177 "overhang" that motivated .178 was itself a stale
+                // engine read, not a real overlap.) Grounding at the oracle keeps the char on the
+                // mesh so native keys resume after the burst. The engine register is only a last
+                // resort when the oracle has no ground (ocean/void).
+                int engZnow = 0; __try { engZnow = *(volatile int32_t*)0x0203FE30; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                int oraZ = WorldGroundHeightLocal(snapX, snapY);
+                s_driveTeleZ = 0x7FFFFFFF;   // burst grounds per-cell at the oracle (chA), never the stale engine Z
+                int32_t snapZ = (oraZ != WGH_NO_GROUND) ? oraZ : ((engZnow != 0) ? engZnow : 0x7FFFFFFF);
+                WriteWorldMapPosition(snapX, snapY, snapZ); // snap onto centerline + ground the char
+                {
+                    int engZ = 0, engH = 0;
+                    __try { engZ = *(volatile int32_t*)WM_POS_Z; engH = *(volatile int32_t*)0x0203FE30; }
+                    __except (EXCEPTION_EXECUTE_HANDLER) {}
+                    Log::World("WorldMap: [TELEZ] snap(%d,%d) ourZ=%d engZ(before)=%d engH=%d",
+                               snapX, snapY, snapZ, engZ, engH);
+                }
+                s_driveStuckCount = 0; s_driveStuckX = px; s_driveStuckY = py; s_driveStuckCheckTime = now;
+                // v0.18.3.172: audio cue + post-teleport distance announcement for the blind player.
+                PlayTeleportCue();
+                {
+                    double tdist = CalculateWrappedDistance(snapX, snapY, s_driveTargetX, s_driveTargetY);
+                    int tkm = (int)(tdist / 1000.0);
+                    char tbuf[160];
+                    if (tkm < 1) snprintf(tbuf, sizeof(tbuf), "%s. Very close.", s_driveTargetName);
+                    else         snprintf(tbuf, sizeof(tbuf), "%d kilometers to %s.", tkm, s_driveTargetName);
+                    ScreenReader::Speak(tbuf, true);
+                }
+                Log::World("WorldMap: [DRIVE] pinch -> position-write assist along route centerline (idx %d -> %d)",
+                           s_drivePathIdx, s_driveAssistEndIdx);
+                return;
+            }
             if (s_drivePlannerEligible && s_drivePathPlanned &&
                 dist >= DRIVE_FINAL_APPROACH_DIST &&
                 s_driveStuckCount >= DRIVE_REPLAN_TRIGGER &&
@@ -544,6 +383,21 @@ static void UpdateAutoDrive()
                 s_driveReplanCount++;
                 Log::World("WorldMap: [DRIVE] Stuck mid-route -- re-planning from current position (recovery %d/%d)",
                            s_driveReplanCount, DRIVE_MAX_REPLANS);
+#if NAVMESH_DIAG
+                // v0.18.3.161: record the obstacle we jammed on (toward the next waypoint) so the
+                // re-plan routes AROUND the real cliff the height-model-based planner stepped into.
+                if (s_drivePathPlanned && s_drivePathLen > 0) {
+                    int wbi = s_drivePathIdx + 1; if (wbi > s_drivePathLen - 1) wbi = s_drivePathLen - 1;
+                    int32_t wbx, wby;
+                    FineCellCenterToWorld(UnpackCol(s_drivePath[wbi]), UnpackRow(s_drivePath[wbi]), &wbx, &wby);
+                    int32_t bdx = wbx - px, bdy = wby - py; WrapWorldDelta(bdx, bdy);
+                    double bl = sqrt((double)bdx * bdx + (double)bdy * bdy);
+                    if (bl > 1.0) {
+                        AddNavBlock(px + (int32_t)(bdx / bl * 384.0), py + (int32_t)(bdy / bl * 384.0));
+                        Log::World("WorldMap: [DRIVE] marked discovered obstacle ahead (nav-block #%d)", s_navBlkN);
+                    }
+                }
+#endif
                 PlanDrivePath(px, py);
                 s_driveProbeValid     = false;   // #67 v0.18.3.77: re-probe on the new route
                 s_driveStuckCount     = 0;
@@ -569,7 +423,162 @@ static void UpdateAutoDrive()
     // player (never backward), then steer toward a small lookahead further along
     // the path -- this hugs the walkable route around obstacles instead of
     // cutting a straight line at a far segment centre.
+    // v0.18.3.179 DIAG: dump the FULL planned route once per (re)plan. The offline sim (with the
+    // mod's exact mesh) finds a clean gate-legal route to Dollet that the executor threads with zero
+    // teleports -- so either the in-game planner routes differently (onto the cliff) or the executor
+    // can't follow the clean route. This dump settles it: compare the in-game waypoints to the
+    // offline clean route.
+    if (s_drivePathPlanned && s_drivePathWorld && s_drivePathLen > 0) {
+        static int s_dbgLen = -1; static int32_t s_dbgW0 = 0x7FFFFFFF;
+        if (s_drivePathLen != s_dbgLen || s_drivePathWX[0] != s_dbgW0) {
+            s_dbgLen = s_drivePathLen; s_dbgW0 = s_drivePathWX[0];
+            Log::World("WorldMap: [ROUTEDUMP] len=%d idx=%d", s_drivePathLen, s_drivePathIdx);
+            for (int i = 0; i < s_drivePathLen; i += 4) {
+                char b[220]; int p = 0;
+                for (int j = i; j < i + 4 && j < s_drivePathLen; j++)
+                    p += snprintf(b + p, sizeof(b) - p, "%d:(%d,%d) ", j, s_drivePathWX[j], s_drivePathWY[j]);
+                Log::World("WorldMap: [ROUTEDUMP] %s", b);
+            }
+        }
+    }
     if (s_drivePathPlanned && s_drivePathLen > 0) {
+      if (s_drivePathWorld) {
+        // v0.18.3.164: SEQUENTIAL advance -- only step the cursor forward once we've REACHED the
+        // current 128u waypoint (within ~80u). The old .163 "advance while the next is closer"
+        // rule mis-picked waypoints in winding canyons and steered the character across the wall
+        // it was supposed to round (the Dollet->Timber jam). Offline sim: this clean sequential
+        // follow threads the canyons (17/18 trio pairs).
+        // v0.18.3.181: PURSUIT cursor advance. The .164 "advance only within 80u" left the character
+        // ORBITING waypoints it couldn't converge on -- 8-way granularity (45deg) overshoots a close
+        // fixed target, so it never got within 80u, dithered, and the stuck-check teleported (the .180
+        // log: oscillating 124-208u from the waypoint, moving but never advancing). Instead, set the
+        // cursor just AHEAD of the character's NEAREST route waypoint (never backward). The steer target
+        // is then always a stable ~1-cell-ahead point that moves forward with the character -> the
+        // bearing stays steady, the key stays held (no dither), and it flows THROUGH waypoints instead
+        // of orbiting them.
+        {
+            // v0.18.3.183: search only a small window ahead, and ONLY advance when the character is
+            // ACTUALLY near a forward waypoint. The .181 version had no distance guard and scanned the
+            // whole route, so when the character was stuck the "nearest forward" was just the current
+            // cursor -> the cursor ran 1/frame to the route END while the character stood still, and
+            // then a single assist snapped it the WHOLE way (Dollet->Timber in one ~32000u teleport).
+            int nj = s_drivePathIdx; double bd = 1e30;
+            int jend = s_drivePathIdx + 6; if (jend > s_drivePathLen) jend = s_drivePathLen;
+            for (int j = s_drivePathIdx; j < jend; j++) {
+                double dj = CalculateWrappedDistance(px, py, s_drivePathWX[j], s_drivePathWY[j]);
+                if (dj < bd) { bd = dj; nj = j; }
+            }
+            // v0.18.3.201: HEIGHT-AWARE waypoint advance (offline-sim proven, 24/24 pairs).
+            // The 2D radius test alone marked a waypoint "reached" while the character stood
+            // ~200u BELOW it (on a validated ramp flanked by a cliff); the cursor then aimed
+            // past the ramp into the cliff face, where every heading was gate-blocked -- the
+            // exact live "advanced then wedged" jam. Also require the character's ground
+            // height to be within 100u of the waypoint's before advancing.
+            // v0.18.3.202: advance radius 192 -> 64. The .201 BAT proved the engine hard-blocks
+            // when a non-walkable poly is within ~112u AHEAD (offline/BAT201_ANALYSIS.md); a 192u
+            // advance radius permits ~90u corner cuts off the validated polyline -- fatal in the
+            // ~200u-wide corridors this map is full of. 64u keeps the pursuit line pinned to the
+            // planned centerline the clearance-aware planner (.202) verified.
+            // v0.18.3.208: ABEAM advance. The .207 neck grind: G4 centerline discipline
+            // walks a line PARALLEL to the waypoint row (char held z~-25086, waypoints on
+            // the -25024 row, ~62u lateral offset), so the 64u advance radius never
+            // triggered even as the character walked PAST the waypoints -- the cursor
+            // pinned and the stall machinery churned. Also advance when laterally near
+            // (<=144u) AND the NEXT waypoint is already closer than the current one
+            // (we're abeam or beyond it). Height gate applies to both paths.
+            bool advNow = (bd <= 64.0);
+            if (!advNow && bd <= 144.0 && nj < s_drivePathLen - 1) {
+                double dnx = CalculateWrappedDistance(px, py, s_drivePathWX[nj + 1], s_drivePathWY[nj + 1]);
+                if (dnx < bd) advNow = true;
+            }
+            if (advNow) {                      // only step the cursor forward when we've reached a waypoint
+                int wpH = WorldGroundHeightLocal(s_drivePathWX[nj], s_drivePathWY[nj]);
+                int chH = WorldGroundHeightLocal(px, py);
+                bool hOk = (wpH == WGH_NO_GROUND || chH == WGH_NO_GROUND || abs(wpH - chH) < 100);
+                if (hOk) {
+                    int adv = nj + 1; if (adv > s_drivePathLen - 1) adv = s_drivePathLen - 1;
+                    if (adv > s_drivePathIdx) s_drivePathIdx = adv;
+                } else if (DRIVE_STEER_DIAG) {
+                    static DWORD s_wpadvT = 0;
+                    if (now - s_wpadvT >= 1000) {
+                        Log::World("WorldMap: [WPADV] hold at wp %d: wpH=%d charH=%d (dh=%d) -- 2D-close but not reached vertically",
+                                   nj, wpH, chH, wpH - chH);
+                        s_wpadvT = now;
+                    }
+                }
+            }
+            // v0.18.3.202: F2 ROUTE-PROGRESS watchdog (REPLACES the .186 goalDist cursor skip).
+            // The .201 BAT proved the goalDist skip is poison on horseshoe routes: G-Garden->
+            // Dollet legitimately walks AWAY from Dollet for ~7km, so "goalDist not improving"
+            // fired every 1.5s, raced the cursor +4 cells each time, and the character beelined
+            // to skipped-ahead waypoints -- 86u off the centerline, into the north wall's 112u
+            // probe cone, hard freeze. Progress is now measured ALONG THE ROUTE (distance to the
+            // current waypoint + 128u per remaining cell). The cursor is NEVER skipped past
+            // unreached waypoints; if route-progress stalls >=4s the leg is BLOCKED and the F3
+            // recovery (fan-out / retreat / learned-block replan, in the steering block) takes it.
+            if (s_driveEscapeActive) {
+                // v0.18.3.222: the firing-area escape deliberately steers OFF the
+                // route (toward the destination, around the area), so route
+                // progress does not advance -- suppress the stall/give-up
+                // watchdogs and let them reseed when the escape clears.
+            } else {
+                // v0.18.3.216: identity includes s_driveWatchdogGen so a battle/field
+                // pause-resume reseeds the clock (stale-clock instant stall fix).
+                DWORD rpKey = s_driveStartTime + s_driveWatchdogGen;
+                static DWORD  s_rpT = 0; static double s_rpBest = 1e30; static DWORD s_rpDrive = 0;
+                if (s_rpDrive != rpKey) { s_rpDrive = rpKey; s_rpT = 0; s_rpBest = 1e30; }
+                double wpd = CalculateWrappedDistance(px, py, s_drivePathWX[s_drivePathIdx], s_drivePathWY[s_drivePathIdx]);
+                double remaining = wpd + 128.0 * (double)(s_drivePathLen - 1 - s_drivePathIdx);
+                if (remaining < s_rpBest - 64.0) {          // real route progress -> reset
+                    s_rpBest = remaining; s_rpT = now;
+                } else if (remaining > s_rpBest + 512.0) {  // re-plan / route change: re-seed, don't punish
+                    s_rpBest = remaining; s_rpT = now;
+                } else if (s_rpT != 0 && now - s_rpT >= 4000) {
+                    s_camwRouteBlocked = true;              // consumed by the F3 recovery
+                    s_rpT = now; s_rpBest = remaining;
+                    if (DRIVE_STEER_DIAG)
+                        Log::World("WorldMap: [DRIVE] route-progress stalled 4s (remaining=%.0f, idx=%d/%d) -> F3 recovery",
+                                   remaining, s_drivePathIdx, s_drivePathLen);
+                    // v0.18.3.207: STALL ESCALATION. The .206 Timber leg stalled 10 times in
+                    // a row at the SAME cursor (idx 59, char oscillating ~119u from a waypoint
+                    // it could never reach) -- the fan always escaped somewhere, so the fan-
+                    // exhaust retreat/replan never fired, and only the 40s give-up ended it.
+                    // Track consecutive stalls at one cursor: 2nd stall = the waypoint itself
+                    // is unreachable -> skip the cursor past it (bounded, height gate waived,
+                    // logged); 3rd stall = force the retreat->replan path (each stall already
+                    // learned a block via G1, so the replan carries new knowledge).
+                    static int s_rpStallIdx = -1; static int s_rpStallN = 0;
+                    if (s_drivePathIdx == s_rpStallIdx) s_rpStallN++;
+                    else { s_rpStallIdx = s_drivePathIdx; s_rpStallN = 1; }
+                    if (s_rpStallN == 2) {
+                        int adv = s_drivePathIdx + 1;
+                        if (adv > s_drivePathLen - 1) adv = s_drivePathLen - 1;
+                        s_drivePathIdx = adv;
+                        Log::World("WorldMap: [WPSKIP] waypoint unreachable after 2 stalls -> cursor %d/%d",
+                                   s_drivePathIdx, s_drivePathLen);
+                    } else if (s_rpStallN >= 3) {
+                        s_rpStallN = 0; s_rpStallIdx = -1;
+                        s_camwRec = 3;
+                        s_camwRetreatLeft = (s_camwCrumbN < 6) ? s_camwCrumbN : 6;
+                        Log::World("WorldMap: [CAMW-REC] 3 stalls at one cursor -> forced retreat + replan");
+                    }
+                } else if (s_rpT == 0) {                    // first frame of a drive: seed
+                    s_rpBest = remaining; s_rpT = now;
+                }
+                // v0.18.3.204 G3: leg give-up -- ONLY route-based (the generic stuck-stop is
+                // suppressed while recovery runs). If route-remaining hasn't improved 128u in
+                // ~40s despite recovery, this leg genuinely can't proceed from here.
+                static DWORD  s_rpGiveT = 0; static double s_rpGiveBest = 1e30; static DWORD s_rpGiveDrive = 0;
+                if (s_rpGiveDrive != rpKey) { s_rpGiveDrive = rpKey; s_rpGiveT = now; s_rpGiveBest = remaining; }  // v0.18.3.216: rpKey (see above)
+                if (remaining < s_rpGiveBest - 128.0) { s_rpGiveBest = remaining; s_rpGiveT = now; }
+                else if (remaining > s_rpGiveBest + 512.0) { s_rpGiveBest = remaining; s_rpGiveT = now; }  // replan jump
+                else if (now - s_rpGiveT >= 40000) {
+                    StopAutoDrive("Cannot reach the destination from here.");
+                    return;
+                }
+            }
+        }
+      } else {
         int pfc = WorldXToFineCol(px);
         int pfr = WorldYToFineRow(py);
         while (s_drivePathIdx < s_drivePathLen - 1) {
@@ -580,6 +589,50 @@ static void UpdateAutoDrive()
             int dCur  = abs(pfr - cR) + abs(pfc - cC);
             int dNext = abs(pfr - nR) + abs(pfc - nC);
             if (dNext <= dCur) s_drivePathIdx++; else break;
+        }
+      }
+    }
+
+    // v0.18.3.170: PINCH ASSIST execution. While active, walk the character along the verified
+    // route centerline one 32u step per frame toward the current waypoint (the cursor advance above
+    // moves s_drivePathIdx forward as each waypoint is reached). Every step is collision-free by the
+    // planner's own edge check, so this always clears the pinch. Hand back to native keys once we've
+    // advanced past the jam (s_driveAssistEndIdx) or reached the path end.
+    // v0.18.3.171: SETTLE handoff. After a position-write assist, give the engine a few frames with
+    // NO input and NO writes so it re-acquires the character on the walkmesh and re-enables key
+    // movement -- the .170 BAT froze on the first native frames after each assist (d+0 on every key,
+    // even in open terrain), which is the engine not yet responding to keys after a direct position
+    // write. Then native (with calibration resynced below) takes over.
+    if (s_driveSettleFrames > 0) {
+        s_driveSettleFrames--;
+        ReleaseAllDriveKeys();
+        s_driveStuckX = px; s_driveStuckY = py; s_driveStuckCheckTime = now;
+        return;
+    }
+    if (s_driveAssistActive) {
+        if (!s_drivePathWorld || !s_drivePathPlanned || s_drivePathLen <= 0 ||
+            s_drivePathIdx >= s_driveAssistEndIdx || s_drivePathIdx >= s_drivePathLen - 1) {
+            s_driveAssistActive = false;
+            s_driveSettleFrames = 5;   // settle, then resync native (below) and walk
+            s_driveNavResync    = true;
+        } else {
+            int32_t tx = s_drivePathWX[s_drivePathIdx], ty = s_drivePathWY[s_drivePathIdx];
+            int32_t adx = tx - px, ady = ty - py; WrapWorldDelta(adx, ady);
+            double al = sqrt((double)adx * adx + (double)ady * ady);
+            int32_t cx = px, cy = py;
+            if (al >= 1.0) { cx = px + (int32_t)(adx / al * 32.0); cy = py + (int32_t)(ady / al * 32.0); }
+            int curHa = WorldGroundHeightLocal(px, py);
+            int chA   = WorldGroundHeightLocal(cx, cy);
+            if (chA != WGH_NO_GROUND && (curHa == WGH_NO_GROUND || abs(chA - curHa) < 200)) {
+                int32_t bz = (s_driveTeleZ != 0x7FFFFFFF) ? s_driveTeleZ : chA;   // v0.18.3.178: engine-true Z at bad cells
+                WriteWorldMapPosition(cx, cy, bz);    // write Z too, keep the char grounded
+                ReleaseAllDriveKeys();
+                s_driveStuckX = px; s_driveStuckY = py; s_driveStuckCheckTime = now; // keep stuck watermark fresh
+                return;
+            }
+            s_driveAssistActive = false;   // centerline step unexpectedly blocked -> settle + native recover
+            s_driveSettleFrames = 5;
+            s_driveNavResync    = true;
         }
     }
 
@@ -609,7 +662,62 @@ static void UpdateAutoDrive()
     // steer to the real destination coordinate.
     int32_t steerX = s_driveTargetX;
     int32_t steerY = s_driveTargetY;
-    if (s_driveBridgeActive) {
+    // v0.18.3.221: FIRING-AREA ESCAPE overrides all other steering. Drive
+    // straight for the escape point until the character is clear of the area,
+    // then hand back to the normal route (which had its leading in-area
+    // waypoints skipped when the escape was armed).
+    if (s_driveEscapeActive) {
+        // v0.18.3.223: hold while the character is inside the steer-arm box OR the
+        // straight line to the on-route target still crosses it -- i.e. until the
+        // character has rounded the area and can head to the route unobstructed.
+        int stillIn = 0;
+        if (s_driveEscapeAreaIdx >= 0) {
+            const EntryAimInfo& ea = s_entryAims[s_driveEscapeAreaIdx];
+            double bx0 = ea.x0 - EA_STEER_ARM, by0 = ea.y0 - EA_STEER_ARM;
+            double bx1 = ea.x1 + EA_STEER_ARM, by1 = ea.y1 + EA_STEER_ARM;
+            bool inside = InPaddedArea(ea, px, py, EA_STEER_ARM);
+            bool lineBlocked = SegCrossesBox(px, py, s_driveEscapeTgtX, s_driveEscapeTgtY,
+                                             bx0, by0, bx1, by1);
+            stillIn = (inside || lineBlocked) ? 1 : 0;
+        }
+        if (stillIn == 1) {
+            // Route AROUND the area's box toward the captured on-route waypoint.
+            EscapeSteerAround(s_driveEscapeAreaIdx, px, py,
+                              s_driveEscapeTgtX, s_driveEscapeTgtY, &steerX, &steerY);
+            static DWORD s_escLogT = 0;
+            if (DRIVE_STEER_DIAG && now - s_escLogT >= 500) {
+                Log::World("WorldMap: [ESCAPE] routing around %s: pos(%d,%d) -> steer(%d,%d) [tgt (%d,%d)]",
+                           s_entryAims[s_driveEscapeAreaIdx].name, px, py, steerX, steerY,
+                           s_driveEscapeTgtX, s_driveEscapeTgtY);
+                s_escLogT = now;
+            }
+        } else {
+            s_driveEscapeActive  = false;
+            // v0.18.3.223: resume at the ON-ROUTE ESCAPE TARGET index, then the
+            // nearest waypoint AT OR AHEAD of it. The .222 "nearest overall"
+            // re-snap picked a waypoint BEHIND the character (Timber's route
+            // hugs the area before curving to Yaulny, so its early waypoints sit
+            // back toward Timber) -- steering there drove the character back in.
+            if (s_drivePathPlanned && s_drivePathWorld && s_drivePathLen > 0) {
+                int floor = (s_driveEscapeTgtIdx > s_drivePathIdx)
+                            ? s_driveEscapeTgtIdx : s_drivePathIdx;
+                if (floor > s_drivePathLen - 1) floor = s_drivePathLen - 1;
+                int bestJ = floor; double bestD = 1e30;
+                for (int j = floor; j < s_drivePathLen; j++) {
+                    double dj = CalculateWrappedDistance(px, py, s_drivePathWX[j], s_drivePathWY[j]);
+                    if (dj < bestD) { bestD = dj; bestJ = j; }
+                }
+                s_drivePathIdx = bestJ;
+            }
+            Log::World("WorldMap: [ESCAPE] cleared %s (wide berth) at (%d,%d) -- resuming route (idx=%d/%d, escTgtIdx=%d)",
+                       (s_driveEscapeAreaIdx >= 0) ? s_entryAims[s_driveEscapeAreaIdx].name : "?",
+                       px, py, s_drivePathIdx, s_drivePathLen, s_driveEscapeTgtIdx);
+            s_driveEscapeAreaIdx = -1;
+        }
+    }
+    if (s_driveEscapeActive) {
+        // escape steering set above; skip normal target/path selection
+    } else if (s_driveBridgeActive) {
         // #70 v0.18.3.97: steer at the road cell, not the dead-end pocket route.
         steerX = s_driveBridgeX;
         steerY = s_driveBridgeY;
@@ -685,17 +793,64 @@ static void UpdateAutoDrive()
         // (stable bearing, no orbit -- preserves the .78 fix). The route cursor
         // holds s_drivePathIdx on the cell nearest the player, whose line is
         // trivially clear, so the clamp always terminates with a valid target.
-        {
+        // #70 v0.18.3.109: BYPASS the coarse-grid LOS clamp on a navmesh funnel
+        // path. The funnel legs are navmesh-walkable by construction, but the
+        // corridor legitimately crosses fine cells the COARSE 1024u grid marks
+        // blocked (the .81 Dollet-coast box, false-coast steep-mountain), and
+        // FineLineClearFootCar reads that grid -- so on the navmesh path it walked
+        // the steer target back to the player's own cell (.108 BAT: idx pinned
+        // 0/30, steer target ~1 cell ahead, player on open grass oscillating; the
+        // navmesh said walkable, the coarse grid said blocked, the clamp trusted
+        // the coarse grid). The corner-cap above keeps the aim inside the corridor
+        // on a navmesh path, so the clamp is both redundant and harmful there.
+        if (!s_driveNavmeshPath) {
+            // #70 v0.18.3.129: FLOOR the LOS-clamp walkback at idx+1 so the steer
+            // target can never collapse onto the player's OWN cell. On the .128
+            // breakthrough run the drive followed the road ~15km to ~5km from
+            // Dollet, then a region-entry re-plan dropped a fresh navmesh route
+            // whose every forward straight-line crosses the .81 false-coast box
+            // (cols 104-111 rows 59-69, forced steep-mountain): FineLineClearFootCar
+            // marked them all blocked, so this clamp walked wi all the way back to
+            // s_drivePathIdx -- the player's CURRENT cell -- leaving the steer
+            // target ~12u away. targetBearing then went to noise and the 8-way
+            // sector flipped (-D-R/--L-/-DL-) at idx 0/8 until a random battle
+            // paused the drive. The NEXT path cell (idx+1) is navmesh-adjacent by
+            // construction, so steering AT it is always walkable even when the
+            // COARSE grid marks the straight line blocked; flooring there keeps the
+            // drive staircasing forward through the false-coast cells into Dollet
+            // instead of oscillating in place. The .110 funnel-corner protection is
+            // intact for every cell beyond idx+1 -- the clamp still walks far
+            // targets back to the nearest clear cell, it just never lands on the
+            // player himself (which steers nowhere).
+            int wiFloor = s_drivePathIdx + 1;
+            if (wiFloor > s_drivePathLen - 1) wiFloor = s_drivePathLen - 1;
             int pfc = WorldXToFineCol(px), pfr = WorldYToFineRow(py);
-            while (wi > s_drivePathIdx &&
+            while (wi > wiFloor &&
                    !FineLineClearFootCar(pfc, pfr,
                                          UnpackCol(s_drivePath[wi]),
                                          UnpackRow(s_drivePath[wi]))) {
                 wi--;
             }
         }
-        FineCellCenterToWorld(UnpackCol(s_drivePath[wi]), UnpackRow(s_drivePath[wi]),
-                              &steerX, &steerY);
+        // v0.18.3.155: STABLE SEQUENTIAL follow (offline-sim proven). Override the far
+        // ~2400u lookahead / corner-cap / LOS-clamp 'wi' computed above. With the .154
+        // direct-heading write working, that far selector OSCILLATED between adjacent
+        // corridor cells (BAT: steer whipsawed (-29184,-26112)<->(-29184,-27136), idx
+        // pinned 0/28, the character limit-cycled and never advanced). Each A* path cell
+        // is navmesh-adjacent to the next, so steering AT the next cell (idx+1) and letting
+        // the path cursor advance walks the validated polyline with no corner-cut and no
+        // oscillation. Sim: this carries the char the full ~20km from the stuck start to
+        // Dollet's doorstep, vs ~700u net for the oscillating selector.
+        wi = s_drivePathIdx + 1;
+        if (wi > s_drivePathLen - 1) wi = s_drivePathLen - 1;
+        if (s_drivePathWorld) {
+            // v0.18.3.164: aim at the CURRENT 128u waypoint (sequential follow; the advance loop
+            // above moves the cursor on once we reach it). Hugs the validated corridor exactly.
+            steerX = s_drivePathWX[s_drivePathIdx]; steerY = s_drivePathWY[s_drivePathIdx];
+        } else {
+            FineCellCenterToWorld(UnpackCol(s_drivePath[wi]), UnpackRow(s_drivePath[wi]),
+                                  &steerX, &steerY);
+        }
     }
 
     // #67 v0.18.3.66: CLOSED-LOOP steering on the REAL facing. The .65 F12
@@ -759,325 +914,8 @@ static void UpdateAutoDrive()
     }
     bool hardWedge = (now - s_driveWedgeAnchorTime) > HARD_WEDGE_MS;
 
-    // #67 v0.18.3.80: on-foot UNIFIED onto the heading-based turn-then-go (the
-    // vehicle branch below). The v0.18.3.79 [YAWPROBE] BAT proved 0x0203ED02 IS
-    // the LIVE on-foot facing -- NOT frozen, NOT screen-relative: holding UP walks
-    // a straight line whose COMPASS bearing == the yaw (matched within 1deg at two
-    // different yaws in one run: yaw 316deg -> walked 315deg, yaw 355deg -> 356deg),
-    // holding UP does NOT rotate the camera (yaw steady through each forward burst),
-    // and RIGHT INCREASES the yaw (clockwise). So on foot desiredYaw == the target's
-    // TorusBearing and the vehicle law err=TorusBearing-heading / turn-then-go
-    // applies verbatim with ZERO offset. The .74-.78 screen-basis + greedy-probe
-    // detour was built on the now-disproven "frozen heading" reading; it is bypassed
-    // (gate forced false; left in place as dead code like the retired calibration)
-    // so EVERYONE uses the heading steering below.
-    if (false && isOnFoot) {
-        // ===== #67 v0.18.3.74: SCREEN-RELATIVE self-calibrating steering =====
-        // On foot, arrows WALK screen-relative and WM_HEADING is frozen (.73
-        // diagnostic). Measure the screen->world basis from the character's own
-        // motion, then press the arrow combo whose screen direction points at the
-        // target. No heading, no pivot, no camera control.
-        //
-        // (A) Calibrate the basis once per drive: UP -> world delta = screen-up
-        // vector; RIGHT -> screen-right vector. Returns each tick until done.
-        if (s_driveCalPhase != DCAL_DONE) {
-            DWORD el = now - s_driveCalStart;
-            switch (s_driveCalPhase) {
-                case DCAL_PROBE_UP:
-                    SetDriveKeys(true, false, false, false);
-                    if (el >= DRIVE_CAL_PROBE_MS) {
-                        int32_t cdx = px - s_driveCalX, cdy = py - s_driveCalY;
-                        WrapWorldDelta(cdx, cdy);
-                        double cl = sqrt((double)cdx * cdx + (double)cdy * cdy);
-                        if (cl >= DRIVE_CAL_MIN_MOVE) {
-                            s_camUx = cdx / cl; s_camUy = cdy / cl;
-                            Log::World("WorldMap: [SRDIAG] CAL UP -> uHat=(%.3f,%.3f) from d(%d,%d) len=%.0f",
-                                       s_camUx, s_camUy, cdx, cdy, cl);
-                            s_driveCalPhase = DCAL_SETTLE_UR; s_driveCalStart = now; s_driveCalTry = 0;
-                            SetDriveKeys(false, false, false, false);
-                        } else if (++s_driveCalTry >= DRIVE_CAL_MAX_TRY) {
-                            Log::World("WorldMap: [SRDIAG] CAL UP no move (len=%.0f); keeping uHat default (%.3f,%.3f)",
-                                       cl, s_camUx, s_camUy);
-                            s_driveCalPhase = DCAL_SETTLE_UR; s_driveCalStart = now; s_driveCalTry = 0;
-                            SetDriveKeys(false, false, false, false);
-                        } else {
-                            s_driveCalX = px; s_driveCalY = py; s_driveCalStart = now;
-                        }
-                    }
-                    return;
-                case DCAL_SETTLE_UR:
-                    SetDriveKeys(false, false, false, false);
-                    if (el >= DRIVE_CAL_SETTLE_MS) {
-                        s_driveCalPhase = DCAL_PROBE_RIGHT; s_driveCalStart = now;
-                        s_driveCalX = px; s_driveCalY = py; s_driveCalTry = 0;
-                    }
-                    return;
-                case DCAL_PROBE_RIGHT:
-                    SetDriveKeys(false, false, true, false);
-                    if (el >= DRIVE_CAL_PROBE_MS) {
-                        int32_t cdx = px - s_driveCalX, cdy = py - s_driveCalY;
-                        WrapWorldDelta(cdx, cdy);
-                        double cl = sqrt((double)cdx * cdx + (double)cdy * cdy);
-                        if (cl >= DRIVE_CAL_MIN_MOVE) {
-                            s_camRx = cdx / cl; s_camRy = cdy / cl;
-                            Log::World("WorldMap: [SRDIAG] CAL RIGHT -> rHat=(%.3f,%.3f) from d(%d,%d) len=%.0f | basis ready",
-                                       s_camRx, s_camRy, cdx, cdy, cl);
-                            s_camBasisValid = true; s_driveCalPhase = DCAL_DONE;
-                            SetDriveKeys(false, false, false, false);
-                        } else if (++s_driveCalTry >= DRIVE_CAL_MAX_TRY) {
-                            s_camRx = -s_camUy; s_camRy = s_camUx;   // perpendicular fallback; live-refresh fixes handedness
-                            Log::World("WorldMap: [SRDIAG] CAL RIGHT no move (len=%.0f); derived rHat=(%.3f,%.3f) from uHat",
-                                       cl, s_camRx, s_camRy);
-                            s_camBasisValid = true; s_driveCalPhase = DCAL_DONE;
-                            SetDriveKeys(false, false, false, false);
-                        } else {
-                            s_driveCalX = px; s_driveCalY = py; s_driveCalStart = now;
-                        }
-                    }
-                    return;
-                default:
-                    s_driveCalPhase = DCAL_DONE;
-                    break;
-            }
-        }
 
-        // ===== #67 v0.18.3.77: GREEDY EMPIRICAL ARROW PROBE =====
-        // PIVOT off the maintained screen->world basis. The .74/.75/.76 BATs all
-        // sawed east-west at the route corner: a predicted basis is unreliable
-        // exactly where the camera swings, and a 2-key diagonal (U-L-) drove him
-        // WEST when the basis said NNE. This trusts ONLY measured progress: hold
-        // ONE cardinal arrow for a window, measure whether it moved him toward the
-        // steer target; KEEP it if the motion both happened (>=MIN_MOVE) and lined
-        // up with the target (align>=ALIGN_MIN), else ROTATE to the next cardinal.
-        // No basis, no trig, no diagonals -- can't be fooled by camera swing or
-        // wall-slide. Single-arrow motion is clean; only the basis + 2-key combo
-        // were the problem. Around the corner this naturally STAIRCASES: it
-        // rejects the walled direction (<MIN_MOVE) and takes the open cardinal
-        // that actually progresses toward the next route cell.
-        bool inSidestep = (s_driveSidestepUntil != 0 && now < s_driveSidestepUntil);
-
-        int32_t tdx = steerX - px, tdy = steerY - py;
-        WrapWorldDelta(tdx, tdy);
-        double tl = sqrt((double)tdx * tdx + (double)tdy * tdy);
-        double thx = (tl >= 1.0) ? tdx / tl : 0.0;
-        double thy = (tl >= 1.0) ? tdy / tl : 0.0;
-
-        if (inSidestep) {
-            // keep the probe window fresh so it re-evaluates cleanly once the
-            // lateral slide ends
-            s_driveProbeAnchorX = px; s_driveProbeAnchorY = py; s_driveProbeTime = now;
-        } else if (!s_driveProbeValid) {
-            s_driveProbeValid   = true;
-            s_driveProbeArrow   = 0;                                // start by trying UP
-            s_driveProbeAnchorX = px; s_driveProbeAnchorY = py;
-            s_driveProbeTime    = now; s_driveProbeFails = 0;
-        } else if (now - s_driveProbeTime >= DRIVE_PROBE_WINDOW_MS) {
-            int32_t wdx = px - s_driveProbeAnchorX, wdy = py - s_driveProbeAnchorY;
-            WrapWorldDelta(wdx, wdy);
-            double disp  = sqrt((double)wdx * wdx + (double)wdy * wdy);
-            double along = (disp >= 1.0) ? (wdx * thx + wdy * thy) / disp : 0.0;  // alignment with target dir
-            bool good = (disp >= DRIVE_PROBE_MIN_MOVE) && (along >= DRIVE_PROBE_ALIGN_MIN);
-            if (good) {
-                s_driveProbeFails = 0;                                 // committed arrow is working -- keep it
-            } else {
-                s_driveProbeArrow = (s_driveProbeArrow + 1) & 3;       // rotate UP->RIGHT->DOWN->LEFT
-                if (++s_driveProbeFails >= DRIVE_PROBE_MAX_FAILS) {     // no cardinal progresses: genuine pocket
-                    s_driveProbeFails = 0;
-                    if (s_drivePlannerEligible && s_drivePathPlanned &&
-                        s_driveReplanCount < DRIVE_MAX_REPLANS) {
-                        s_driveReplanCount++;
-                        Log::World("WorldMap: [DRIVE] Probe found no progressing arrow -- re-planning (recovery %d/%d)",
-                                   s_driveReplanCount, DRIVE_MAX_REPLANS);
-                        PlanDrivePath(px, py);
-                        s_driveProbeValid = false;
-                        return;
-                    }
-                }
-            }
-            s_driveProbeAnchorX = px; s_driveProbeAnchorY = py; s_driveProbeTime = now;
-        }
-
-        if (inSidestep) {
-            wantRight = (s_driveSidestepSign > 0);
-            wantLeft  = (s_driveSidestepSign < 0);
-        } else if (tl >= 1.0) {
-            switch (s_driveProbeArrow) {
-                case 0: wantUp    = true; break;
-                case 1: wantRight = true; break;
-                case 2: wantDown  = true; break;
-                case 3: wantLeft  = true; break;
-            }
-        }
-
-        if (DRIVE_STEER_DIAG) {
-            static DWORD   s_srLast  = 0;
-            static int32_t s_srLastX = 0, s_srLastY = 0;
-            if (now - s_srLast >= (DWORD)DRIVE_STEER_DIAG_INTERVAL_MS) {
-                double dmoved = CalculateWrappedDistance(s_srLastX, s_srLastY, px, py);
-                const char* an = (s_driveProbeArrow == 0) ? "UP"
-                               : (s_driveProbeArrow == 1) ? "RIGHT"
-                               : (s_driveProbeArrow == 2) ? "DOWN" : "LEFT";
-                Log::World("WorldMap: [SRDIAG] pos(%d,%d) d+%.0f | tgtBrg=%d arrow=%s fails=%d | dist=%.0f idx=%d/%d keys=%s%s%s%s%s",
-                           px, py, dmoved, targetBearing, an, s_driveProbeFails,
-                           dist, s_drivePathIdx, s_drivePathLen,
-                           wantUp ? "U" : "-", wantDown ? "D" : "-",
-                           wantLeft ? "L" : "-", wantRight ? "R" : "-",
-                           inSidestep ? " SIDESTEP" : "");
-                s_srLast = now; s_srLastX = px; s_srLastY = py;
-            }
-        }
-    } else if (isOnFoot) {
-        // ===== #67 v0.18.3.87: YAW-BASED SCREEN-RELATIVE 8-WAY STEERING =====
-        // On foot, hdg (0x0203ED02) is the FIXED per-region CAMERA YAW, not a
-        // steerable facing: .79's [YAWPROBE] proved holding UP walks a straight
-        // line at the yaw bearing (within 1deg) and RIGHT walks screen-right
-        // (yaw +90 CW). So the arrows are screen-relative WALK keys, and the
-        // .80-.86 heading turn-then-go CANNOT steer here -- it presses pure UP
-        // (= the yaw direction). On the .86 road BAT that was fatal: routing was
-        // SOLVED (Squall stood ON the road, route correct up the road), but the
-        // road ran due north while the yaw pointed NNW, so UP walked him ~28deg
-        // off the thin road into the cliff beside it, every time (he could not
-        // press the diagonal needed to track the road). FIX: steer in SCREEN
-        // space. screenAngle = targetBearing - yaw is the target's direction
-        // relative to screen-up (what UP walks); press the nearest of 8 arrow
-        // combos (cardinals + diagonals) so he walks toward the target and
-        // STAIRCASES along the road's bends. No turn-then-go, no pivot (a fixed
-        // camera can't be rotated), no basis/probe. The reverse-burst un-wedge
-        // (DOWN = screen-down, backs him off a wall) is kept for stuck recovery.
-        if (inReverseBurst) {
-            wantDown = true;
-        } else {
-            int screenAngle = ((int)targetBearing - (int)heading) & 0xFFF;
-            // Nearest 8-way sector (each 512 wide, centred on k*512). RIGHT
-            // walks screen-right = yaw +90 CW (screenAngle +1024) -- the ONE
-            // handedness assumption; if the BAT shows he tracks bends the wrong
-            // way (steers consistently to the wrong side at a turn), swap
-            // RIGHT<->LEFT below (equivalently negate screenAngle). One line.
-            int sector = ((screenAngle + 256) >> 9) & 7;
-            switch (sector) {
-                case 0: wantUp = true;                       break; // screen-up
-                case 1: wantUp = true; wantRight = true;     break; // up-right
-                case 2: wantRight = true;                    break; // right
-                case 3: wantDown = true; wantRight = true;   break; // down-right
-                case 4: wantDown = true;                     break; // down
-                case 5: wantDown = true; wantLeft = true;    break; // down-left
-                case 6: wantLeft = true;                     break; // left
-                case 7: wantUp = true; wantLeft = true;      break; // up-left
-            }
-        }
-        if (DRIVE_STEER_DIAG) {
-            static DWORD   s_yawLast  = 0;
-            static int32_t s_yawLastX = 0, s_yawLastY = 0;
-            if (now - s_yawLast >= (DWORD)DRIVE_STEER_DIAG_INTERVAL_MS) {
-                double dmoved = CalculateWrappedDistance(s_yawLastX, s_yawLastY, px, py);
-                int scrAng = ((int)targetBearing - (int)heading) & 0xFFF;
-                Log::World("WorldMap: [YAWDRIVE] pos(%d,%d) d+%.0f | yaw=%u tgtBrg=%d scrAng=%d | steer(%d,%d) dist=%.0f idx=%d/%d | keys=%s%s%s%s%s%s",
-                           px, py, dmoved, (unsigned)heading, targetBearing, scrAng,
-                           steerX, steerY, dist, s_drivePathIdx, s_drivePathLen,
-                           wantUp ? "U" : "-", wantDown ? "D" : "-",
-                           wantLeft ? "L" : "-", wantRight ? "R" : "-",
-                           inReverseBurst ? " REVERSE" : "", wallJam ? " JAM" : "");
-                s_yawLast = now; s_yawLastX = px; s_yawLastY = py;
-            }
-        }
-    } else {
-    if (inReverseBurst) {
-        // #67 v0.18.3.71: DOWN-only reverse off the wall. Aaron confirmed DOWN
-        // moves the character on the world map, so this is a clean backward burst
-        // into open ground; normal steering re-aims him once he's free. No
-        // simultaneous turn -- turning while wedged does nothing (.68/.69) and
-        // only muddied the motion. The burst is now TRIGGERED from the stuck
-        // check (proven to fire) rather than the hard-wedge vibration detector,
-        // which never fired across the .68/.69/.70 BATs.
-        wantDown = true;
-    } else if (hardWedge && dist >= FINAL_APPROACH_FORWARD_DIST &&
-               s_driveWedgeReverseCount < MAX_WEDGE_REVERSE) {
-        // Vestigial fast-path: net-displacement hard-wedge (rarely trips).
-        // DOWN-only, same as above; the stuck-check trigger is primary.
-        s_driveWedgeReverseUntil = now + REVERSE_BURST_MS;
-        s_driveWedgeReverseCount++;
-        wantDown = true;
-        Log::World("WorldMap: [DRIVE] Hard wedge -> reverse un-wedge burst %d/%d (off=%d, dist=%.0f)",
-                   s_driveWedgeReverseCount, MAX_WEDGE_REVERSE, off, dist);
-    } else if (dist < FINAL_APPROACH_FORWARD_DIST) {
-        wantUp = true;                       // very close: walk straight onto the trigger
-    } else if (off > STEER_DEADZONE) {
-        // PIVOT, turn-only. RIGHT raises the heading (clockwise) toward a target
-        // clockwise of us (err>=0); LEFT lowers it. NO forward -- holding UP into
-        // terrain locks the rotation.
-        if (err >= 0) wantRight = true;
-        else          wantLeft  = true;
-    } else {
-        // #67 v0.18.3.83: FORWARD-COLLISION GUARD. off<=STEER_DEADZONE means
-        // "roughly aimed" -- but roughly-aimed-into-a-cliff is still a cliff. The
-        // .82 BAT wedged with off=318 just inside the ~320 deadzone, walking due
-        // north into the blocked fine(103,63) the route goes WEST around (hdg
-        // frozen at 36 the whole time -- he never pivoted because off never
-        // exceeded the deadzone, and the reverse just backed him into the same
-        // wall again). So before committing UP, look where he's about to step:
-        // probe the fine cell ~1 cell ahead of the CURRENT facing/camera-up, and
-        // if it's blocked for foot/car, do NOT go straight -- press toward the
-        // target side (err sign) instead. On this region's screen-relative
-        // controls that walks him sideways into the open corridor; on a
-        // turn-then-go region it pivots him there. Either way he stops nosing into
-        // the rock. The guard reads the grid in front of him, so it fires ONLY
-        // when something is actually there -- open-road steering and the deadzone
-        // are unchanged (no orbit/oscillation regression).
-        double th   = (double)heading / 4096.0 * 6.283185307179586;
-        double dirX = sin(th), dirY = -cos(th);   // heading 0=N(-Y), clockwise; +X=E
-        int32_t aheadX = px + (int32_t)(dirX * 1024.0);   // one fine cell ahead
-        int32_t aheadY = py + (int32_t)(dirY * 1024.0);
-        int afc = WorldXToFineCol(aheadX), afr = WorldYToFineRow(aheadY);
-        if (afc >= 0 && afc < WM_FINE_COLS && afr >= 0 && afr < WM_FINE_ROWS) {
-            uint8_t acls = s_walkClassFine[afr][afc];
-            if (acls == SEG_OCEAN ||
-                (acls == SEG_MOUNTAIN && s_steepFine[afr][afc] > WM_MTN_STEEP_BLOCK))
-                fwdGuard = true;
-        }
-        if (fwdGuard) {
-            if (err >= 0) wantRight = true;      // toward the target / open route side
-            else          wantLeft  = true;
-        } else {
-            wantUp = true;                       // aligned and clear -> drive straight
-        }
-    }
-
-    // #67 v0.18.3.66/.68: heading-VERIFICATION trace. hdg should rotate toward
-    // tgtBrg while PIVOTing/REVERSE, err should shrink, off small on STRAIGHT.
-    // Set DRIVE_STEER_DIAG=false before the #67 push.
-    if (DRIVE_STEER_DIAG) {
-        static DWORD   s_diagLast  = 0;
-        static int32_t s_diagLastX = 0;
-        static int32_t s_diagLastY = 0;
-        if (now - s_diagLast >= (DWORD)DRIVE_STEER_DIAG_INTERVAL_MS) {
-            double dmoved = CalculateWrappedDistance(s_diagLastX, s_diagLastY, px, py);
-            const char* band = wantDown ? "REVERSE"
-                             : (dist < FINAL_APPROACH_FORWARD_DIST) ? "FINAL"
-                             : wantUp  ? "STRAIGHT"
-                             : "PIVOT";
-            Log::World("WorldMap: [HDG-DIAG] pos(%d,%d) d+%.0f | hdg=%u tgtBrg=%d err=%+d off=%d | steer(%d,%d) dist=%.0f idx=%d/%d | keys=%s%s%s%s %s%s%s",
-                       px, py, dmoved, (unsigned)heading,
-                       targetBearing, err, off,
-                       steerX, steerY, dist, s_drivePathIdx, s_drivePathLen,
-                       wantUp ? "U" : "-", wantDown ? "D" : "-",
-                       wantLeft ? "L" : "-", wantRight ? "R" : "-",
-                       band, wallJam ? " JAM" : "", fwdGuard ? " GUARD" : "");
-            s_diagLast  = now;
-            s_diagLastX = px;
-            s_diagLastY = py;
-        }
-    }
-    }  // end vehicle (else) heading-based steering
-
-    SetDriveKeys(wantUp, wantLeft, wantRight, wantDown);
-
-    // #67 v0.18.3.74: record this tick's keys + position for the next-tick
-    // on-foot basis refresh (the live screen->world calibration).
-    s_drivePrevUp      = wantUp;
-    s_drivePrevDown    = wantDown;
-    s_drivePrevLeft    = wantLeft;
-    s_drivePrevRight   = wantRight;
-    s_drivePrevX       = px;
-    s_drivePrevY       = py;
-    s_drivePrevHadKeys = (wantUp || wantDown || wantLeft || wantRight);
-}
+// v0.18.3.225: UpdateAutoDrive body continues in world_map_drive_exec.inl
+// (split to keep each .inl under the 80 KB CI size guard; textual include,
+//  byte-identical to the pre-split single function).
+#include "world_map_drive_exec.inl"

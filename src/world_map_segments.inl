@@ -92,12 +92,47 @@ static void GetWorldMapPosition_Active(int32_t* x, int32_t* y, int32_t* z)
     // Default to foot DWORDs.
     GetWorldMapPosition(x, y, z);
 
+    // v0.18.3.217: FOOT-MOTION OVERRIDE. The engine's per-frame integrator
+    // updates the foot DWORDs ONLY while the player IS the foot character
+    // (they freeze when a vehicle is mounted -- the documented basis of this
+    // whole function). Therefore: if the foot DWORDs are actively changing,
+    // the player is on foot RIGHT NOW and any non-foot s_lastVehicle byte is
+    // stale/garbage. Observed live (BAT .216, 21:40:22): walking out of
+    // Dollet committed locomotion=33 (VEH_CAR) on a foot-only save; every
+    // _Active read then returned the savemap car_pos (26319,-30537) on the
+    // Balamb continent -- poisoning the drive-start distance (55 km instead
+    // of 35), the ROUTENET hop-on (declined: wrong continent), the resume
+    // replan (A* burned its 10s budget ocean-routing), the learned trigger
+    // circle, and the off-target field identification ("Balamb Garden").
+    static int32_t s_fmPrevX = INT32_MIN, s_fmPrevY = 0;
+    static DWORD   s_fmLastMoveTick = 0;
+    DWORD fmNow = GetTickCount();
+    if (s_fmPrevX == INT32_MIN) {                 // first sample this session
+        s_fmPrevX = *x; s_fmPrevY = *y; s_fmLastMoveTick = fmNow;
+    } else if (*x != s_fmPrevX || *y != s_fmPrevY) {
+        s_fmPrevX = *x; s_fmPrevY = *y; s_fmLastMoveTick = fmNow;
+    }
+    bool footAlive = (fmNow - s_fmLastMoveTick) < 2000;
+
     // Determine current vehicle from the debounced state. Use s_lastVehicle
     // (the committed locomotion byte) rather than a fresh GetLocomotionMode
     // read, so transient byte cycling during AD doesn't flip us between
     // sources mid-drive. GetVehicleType maps the byte to VehicleType.
     if (s_lastVehicle < 0) return;   // not yet sampled → keep foot DWORDs
     VehicleType veh = GetVehicleType((uint8_t)s_lastVehicle);
+
+    if (veh != VEH_ON_FOOT && footAlive) {
+        // Foot DWORDs are integrating => player is the foot character.
+        // Transition-only forensic log (same pattern as VEH-POS-FALLBACK).
+        static int s_fmLastLoggedVehicle = -1;
+        if (s_lastVehicle != s_fmLastLoggedVehicle) {
+            Log::World("WorldMap: [VEH-POS-OVERRIDE] foot DWORDs are moving; "
+                       "ignoring stale locomotion=%d and using foot pos (%d,%d)",
+                       s_lastVehicle, *x, *y);
+            s_fmLastLoggedVehicle = s_lastVehicle;
+        }
+        return;
+    }
 
     uintptr_t addr = 0;
     const char* tag = nullptr;
@@ -303,7 +338,10 @@ static bool WM_DecompressLZSS(const uint8_t* input, uint32_t inputSize,
 // to world_map_state.inl when the planner consumes it (build 2).
 // ============================================================================
 #define ROAD_MAP_DIAG 0
-static uint8_t s_roadFine[WM_FINE_ROWS][WM_FINE_COLS];
+// v0.18.3.128 (#70): s_roadFine DECLARATION moved to world_map_state.inl (so the
+// navmesh connection gate NmEngineStepBlocked can read it for the road-cell
+// exemption). Still populated below by RasterizeTriRoad in the LoadTerrainGrid
+// polygon loop, exactly as before.
 
 // ============================================================================
 // #67: RasterizeTriFine -- rasterize one wmx triangle into s_walkClassFine.
@@ -539,7 +577,13 @@ static bool LoadTerrainGrid()
                     int16_t lvy = *(const int16_t*)(vertBase + v * 8 + 4);
                     vwz[v]      = *(const int16_t*)(vertBase + v * 8 + 2);
                     vwx[v] = ox + lvx;
-                    vwy[v] = oy + lvy;
+                    // #70 fix: wmx vertex Y (word2) runs 0..-2048; the height-query mesh
+                    // frame (NmGameToMeshY) runs the opposite way, so 'oy + lvy' placed
+                    // every triangle ~one block off in Y and the query read the adjacent
+                    // shallow coast (~-200) instead of the deep ground (~-595) -> the 200
+                    // step gate severed the link (the Galbadia/Timber wedge). Negating lvy
+                    // aligns the navmesh with the query. Proven vs 205 [GROUNDH] samples.
+                    vwy[v] = oy - lvy;
                 }
             }
 
@@ -580,9 +624,29 @@ static bool LoadTerrainGrid()
                         // v0.18.3.104: feed the SAME triangle (identical verts
                         // + i0/i1/i2<vertCount guard) into the true navmesh so
                         // it sees exactly what the fine grid does.
-                        Navmesh_AddTriangle(vwx[i0], vwy[i0], vwz[i0],
-                                            vwx[i1], vwy[i1], vwz[i1],
-                                            vwx[i2], vwy[i2], vwz[i2], terrain);
+                        // v0.18.3.107: feed ALL non-ocean triangles -- NO
+                        // poly[0x0E] bit7 filter. The .105 bit7 filter was wrong:
+                        // it deleted the gentle terr-27/29 ramps of the real
+                        // canyon approach to Dollet, leaving only bit7-set cliffs
+                        // (offline bottleneck to Dollet 1018u). On-foot
+                        // walkability is now modeled by ELEVATION STEP in
+                        // Navmesh_Build (z-aware bridging + z-gated proximity),
+                        // matching the fine grid's steepness rule. See #70.
+                        // v0.18.3.189: feed ONLY truly foot-walkable polys. The engine's on-foot
+                        // walkable flag is poly[0x0F] bit7 -- NOT a terrain type, and NOT the .105
+                        // poly[0x0E] (byte 14) that was tried and discarded as "wrong" (it was simply
+                        // the wrong byte). Proven on wmx.obj: bit7 is SET on every land/road poly and
+                        // CLEAR on all 315777 ocean polys AND all 54291 cliff-face (terrain-29) polys --
+                        // exactly the surfaces the engine refuses on foot (the Dollet canyon descent,
+                        // the high-ground region rims the .187 BAT froze on). With cliffs excluded,
+                        // WorldGroundHeightLocal returns NO_GROUND there, so the GRID planner routes
+                        // AROUND them instead of straight down a wall the character then wedges on. The
+                        // gentle road/land ramps (bit7 set) stay, so legitimate routes are unaffected.
+                        if ((poly[0x0F] & 0x80) != 0) {
+                            Navmesh_AddTriangle(vwx[i0], vwy[i0], vwz[i0],
+                                                vwx[i1], vwy[i1], vwz[i1],
+                                                vwx[i2], vwy[i2], vwz[i2], terrain);
+                        }
 #endif
                     }
                 }
@@ -591,7 +655,16 @@ static bool LoadTerrainGrid()
                 // Road/Railroad) also rasterize as SEG_LAND above; here we ALSO
                 // flag their fine cells in s_roadFine so the planner can treat
                 // the road as ground-truth walkable and route along it.
-                if (vertsOk && (terrain == 27 || terrain == 28)) {
+                // v0.18.3.134 (#70): ALSO include terrain 12 = BRIDGE. Dollet (and
+                // other coastal towns) connect to the mainland road across a short
+                // raised BRIDGE deck, which is a distinct terrain type the overlay
+                // previously excluded -- so the navmesh road-bridge, the gate's
+                // road-road exemption, the .85 walkable override and the .127 floor
+                // clamp all skipped it, leaving the bridge deck connected only to
+                // the deep water beside it. A* then refused the severed bridge and
+                // dived the coast (the #70 4km wedge). Tagging the bridge as road
+                // folds it into the road network so all four mechanisms connect it.
+                if (vertsOk && (terrain == 27 || terrain == 28 || terrain == 12)) {
                     uint8_t r0 = poly[0], r1 = poly[1], r2 = poly[2];
                     if (r0 < vertCount && r1 < vertCount && r2 < vertCount)
                         RasterizeTriRoad(vwx[r0], vwy[r0], vwx[r1], vwy[r1],
@@ -625,11 +698,105 @@ static bool LoadTerrainGrid()
     // triangles (vertex dedup -> exact shared-edge adjacency -> axis-aligned
     // T-junction bridging -> CSR). NON-INVASIVE: nothing routes on it yet;
     // Navmesh_LogConnectivity() (from Initialize) is the BAT 1 probe.
+    //
+    // #70 v0.18.3.135: BRIDGE the road->Dollet gap BEFORE the build, so the gate
+    // exemption + .127 clamp + .85 [ROADMAP] override all see it. CORRECTED from
+    // the .130 tag, which tagged the WRONG cell. The .134 [DOLLETBRIDGE] corridor
+    // dump revealed the real geography: a shallow ROAD CAUSEWAY runs along fine
+    // row 55 from c107 east to c112 (already road = terr 28/6, floorZ ~-500), and
+    // Dollet town is fine(c112,r57). The gap is the 2-cell column from the causeway
+    // end c112,r55 -> c112,r56 -> Dollet c112,r57: c112,r56 is deep-coast non-road,
+    // and the ~2-cell (2048u) jump exceeds the radius bridge's 1536u, so the navmesh
+    // leaves Dollet connected to the causeway only via the deep coast and A* dives
+    // it (the #70 4km wedge). The OLD .130 tag c113,r56 was a red herring -- terrain
+    // 29 (mountain spur) at -172, ISOLATED (its one large triangle tri#38418
+    // centroid-bins to a different cell, so the radius bridge never reached it), and
+    // not on the causeway. FIX: tag the REAL gap cell c112,r56 AND the Dollet town
+    // cell c112,r57 as road, turning the 2-cell jump into two 1-cell hops
+    // (c112,r55 <-> c112,r56 <-> c112,r57) the radius bridge can span; unlike
+    // c113,r56 these cells have many small triangles binned in-cell. The exemption
+    // then keeps those connections, the clamp shallows them, and [ROADMAP] forces
+    // them walkable -- completing an all-road path into Dollet that A* prefers over
+    // the coast dive. s_roadFine is [row][col]. Hardcoded one-off like the .81/.85
+    // Dollet patches; retire once #70 is BAT-confirmed + pushed.
+    s_roadFine[56][112] = 1;   // gap cell between the r55 causeway end and Dollet town
+    s_roadFine[57][112] = 1;   // Dollet town cell (catalog tri#38414) -> joins the road
     if (Navmesh_Build()) {
         int nmComp = 0, nmLargest = 0;
         Navmesh_ComponentStats(&nmComp, &nmLargest);
-        Log::World("WorldMap: [NAVMESH] built %d triangles, %d components, largest=%d",
-                   Navmesh_TriangleCount(), nmComp, nmLargest);
+        Log::World("WorldMap: [NAVMESH] built %d triangles, %d components, largest=%d; gate dropped %d connections, road-cell exemption kept %d",
+                   Navmesh_TriangleCount(), nmComp, nmLargest, s_nmStepBlocked, s_nmRoadExempt);
+
+        // v0.18.3.127 (#70): correct the mean-of-corners floorZ artifact at ROAD
+        // cells. A navmesh triangle straddling a canyon rim reads a deep MEAN
+        // floorZ (e.g. -1341 at the Timber->Dollet road's r63 crossing) even
+        // where the walkable road surface is shallow, which makes A* unable to
+        // tell the shallow road from the deep canyon next to it -- so A* dives.
+        // The road is ground-truth walkable (s_roadFine exists precisely to route
+        // through the mountains past cliff-vs-land misclassification), so clamp
+        // any anomalously-deep floorZ at a road cell up to a moderate road depth.
+        // This is a model correction, not steering. It corrects A*'s COST only;
+        // the .120 connection gate (corner heights, decided during the build
+        // above) is unaffected, so the [ROADCON] severance walk on the next BAT
+        // shows whether cost-correction alone is enough.
+        {
+            const int32_t ROAD_FLOOR_DEEP  = -1000;  // deeper than this at a road cell = artifact
+            const int32_t ROAD_FLOOR_CLAMP = -500;   // clamp up to this moderate road depth
+            int nClampRoad = 0, ntTri = Navmesh_TriangleCount();
+            for (int t = 0; t < ntTri; t++) {
+                if (s_nmFloor[t] >= ROAD_FLOOR_DEEP) continue;
+                int32_t cgx, cgy;
+                if (!Navmesh_TriangleCentroidGame(t, &cgx, &cgy)) continue;
+                int fcc = WorldXToFineCol(cgx), fcr = WorldYToFineRow(cgy);
+                if (fcr < 0 || fcr >= WM_FINE_ROWS || fcc < 0 || fcc >= WM_FINE_COLS) continue;
+                if (!s_roadFine[fcr][fcc]) continue;
+                s_nmFloor[t] = ROAD_FLOOR_CLAMP;
+                nClampRoad++;
+            }
+            Log::World("WorldMap: [ROADFLOOR] clamped %d road-cell triangles deeper than %d up to %d (mean-of-corners artifact fix)", nClampRoad, ROAD_FLOOR_DEEP, ROAD_FLOOR_CLAMP);
+        }
+
+        // ---- [DOLLETBRIDGE] terrain-type map of the Dollet approach (v0.18.3.134, #70, READ-ONLY) ----
+        // Confirms the bridge hypothesis. Dumps: (1) the global terrain-type
+        // histogram (is terr 12=bridge present? how many polys?), (2) every
+        // terr-12 bridge triangle map-wide with its cell, (3) every navmesh
+        // triangle in the Dollet road-end -> town corridor with terrain type,
+        // floor and road-status. After the .134 fix the terr-12 cells should now
+        // read road=1 and join the road body. Pure logging; adds no connections.
+        {
+            char hist[768]; int hp = 0;
+            for (int tt = 0; tt < 256; tt++)
+                if (terrainHist[tt] && hp < (int)sizeof(hist) - 16)
+                    hp += snprintf(hist + hp, sizeof(hist) - hp, "%d:%d ", tt, terrainHist[tt]);
+            if (hp == 0) { hist[0] = '-'; hist[1] = '\0'; }
+            Log::World("WorldMap: [DOLLETBRIDGE] terrain-type histogram (type:polys): %s", hist);
+
+            const int ntTri = Navmesh_TriangleCount();
+            int nBridge = 0;
+            for (int t = 0; t < ntTri; t++) {
+                if (s_nmTerr[t] != 12) continue;
+                int32_t cgx, cgy;
+                if (!Navmesh_TriangleCentroidGame(t, &cgx, &cgy)) continue;
+                const int fc = WorldXToFineCol(cgx), fr = WorldYToFineRow(cgy);
+                const bool inb = (fr >= 0 && fr < WM_FINE_ROWS && fc >= 0 && fc < WM_FINE_COLS);
+                if (nBridge < 48)
+                    Log::World("WorldMap: [DOLLETBRIDGE] BRIDGE(terr12) tri#%d fine(c%d,r%d) floorZ=%d road=%d",
+                               t, fc, fr, s_nmFloor[t], (inb && s_roadFine[fr][fc]) ? 1 : 0);
+                nBridge++;
+            }
+            Log::World("WorldMap: [DOLLETBRIDGE] total terr-12 bridge triangles map-wide: %d", nBridge);
+
+            // Dollet road-end -> town corridor (fine rows 54..61, cols 107..114)
+            const int DR0 = 54, DR1 = 61, DC0 = 107, DC1 = 114;
+            for (int t = 0; t < ntTri; t++) {
+                int32_t cgx, cgy;
+                if (!Navmesh_TriangleCentroidGame(t, &cgx, &cgy)) continue;
+                const int fc = WorldXToFineCol(cgx), fr = WorldYToFineRow(cgy);
+                if (fr < DR0 || fr > DR1 || fc < DC0 || fc > DC1) continue;
+                Log::World("WorldMap: [DOLLETBRIDGE] tri#%d fine(c%d,r%d) terr=%d floorZ=%d road=%d",
+                           t, fc, fr, (int)s_nmTerr[t], s_nmFloor[t], (s_roadFine[fr][fc]) ? 1 : 0);
+            }
+        }
     } else {
         Log::World("WorldMap: [NAVMESH] build produced 0 triangles");
     }

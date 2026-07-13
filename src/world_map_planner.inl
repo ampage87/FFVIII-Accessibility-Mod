@@ -765,167 +765,325 @@ static bool FindNearestRoadWorld(int sc, int sr, int32_t* ox, int32_t* oy)
     return false;
 }
 
-static bool PlanDrivePath(int32_t startX, int32_t startY)
+#if NAVMESH_DIAG && NAVMESH_ROUTING
+// === v0.18.3.123 ROAD-VERIFICATION DIAGNOSTIC (read-only; remove after diagnosis) ===
+// The navmesh A* IGNORES the road overlay (s_roadFine) -- it routes on the
+// triangle mesh + 200-step gate alone. So dump the FULL route (not the .112
+// 40-cap) and flag each waypoint against the known-walkable Timber->Dollet road.
+// If the route tracks the road, our walkability model matches reality (the
+// executor is the only problem left); if it diverges into the deep canyon the
+// road avoids, the model is still passing spurious terrain (same family as the
+// retracted switchback). The road is NEVER consulted by the planner -- only by
+// this diagnostic, so it is not a navigational crutch.
+static void NavmeshDumpRouteRoad(const std::vector<int>& path,
+                                 int32_t startX, int32_t startY,
+                                 int32_t goalX, int32_t goalY,
+                                 const char* label)
 {
-    s_drivePathLen      = 0;
-    s_drivePathIdx      = 0;
-    s_drivePathPlanned  = false;
-    s_driveGoalSegCount = 0;
-
-    if (!s_segmentRegionLoaded) {
-        Log::World("WorldMap: [PLAN] Region map not loaded \u2014 fallback to catalog-center steering");
-        return false;
+    int dn = (int)path.size();
+    Log::World("WorldMap: [ROADV:%s] %d tris; start(%d,%d) fine(c%d,r%d) floorZ=%d -> goal(%d,%d) fine(c%d,r%d) floorZ=%d",
+               label, dn, startX, startY, WorldXToFineCol(startX), WorldYToFineRow(startY),
+               (dn > 0 ? (int)s_nmFloor[path[0]] : 0),
+               goalX, goalY, WorldXToFineCol(goalX), WorldYToFineRow(goalY),
+               (dn > 0 ? (int)s_nmFloor[path[dn-1]] : 0));
+    int prevZ = 0, onRoad = 0, minZ = 0x3FFFFFFF, maxZ = -0x3FFFFFFF;
+    for (int i = 0; i < dn; i++) {
+        int32_t gx = 0, gy = 0; Navmesh_TriangleCentroidGame(path[i], &gx, &gy);
+        int zz = (int)s_nmFloor[path[i]];
+        int fc = WorldXToFineCol(gx), fr = WorldYToFineRow(gy);
+        bool road = (fr >= 0 && fr < WM_FINE_ROWS && fc >= 0 && fc < WM_FINE_COLS)
+                    && (s_roadFine[fr][fc] != 0);
+        if (road) onRoad++;
+        if (zz < minZ) minZ = zz;
+        if (zz > maxZ) maxZ = zz;
+        Log::World("WorldMap: [ROADV:%s]   [%d] tri#%d game(%d,%d) fine(c%d,r%d) floorZ=%d dZ=%+d %s",
+                   label, i, path[i], gx, gy, fc, fr, zz, (i == 0 ? 0 : zz - prevZ),
+                   road ? "ROAD" : "off");
+        prevZ = zz;
     }
-
-    VehicleType veh   = (s_lastVehicle < 0) ? VEH_ON_FOOT
-                                            : GetVehicleType((uint8_t)s_lastVehicle);
-    uint16_t    story = GetCurrentStoryFlag();
-
-    if (veh == VEH_RAGNAROK) {
-        Log::World("WorldMap: [PLAN] Ragnarok mode \u2014 skipping planner (catalog-center steering)");
-        return false;
-    }
-
-    uint8_t region = 0;
-    int progIdx = MatchProgramForCatalog(s_driveTargetX, s_driveTargetY,
-                                         veh, story, &region);
-    if (progIdx < 0) {
-        return false;
-    }
-
-    s_driveGoalSegCount = CollectGoalSegments(region);
-    if (s_driveGoalSegCount == 0) {
-        Log::World("WorldMap: [PLAN] Region 0x%02X has zero cells in s_segmentRegionMap \u2014 fallback",
-                   (unsigned)region);
-        return false;
-    }
-
-    int startCol = WorldXToSegCol(startX);
-    int startRow = WorldYToSegRow(startY);
-
-    if (IsGoalSegment(startRow, startCol)) {
-        s_drivePathLen     = 0;
-        s_drivePathIdx     = 0;
-        s_drivePathPlanned = true;
-        Log::World("WorldMap: [PLAN] Player already in goal segment seg(%d,%d) region=0x%02X \u2014 empty path",
-                   startCol, startRow, (unsigned)region);
-        return true;
-    }
-
-    // #67 stage 2: route on the FINE slope-aware grid (around mountains/ocean),
-    // not the coarse 32x24 segment grid that has no mountain class.
-    int startFineCol = WorldXToFineCol(startX);
-    int startFineRow = WorldYToFineRow(startY);
-    bool ok = PlanPathFine(startFineCol, startFineRow, veh);
-
-    // #70 v0.18.3.97: departure bridge-out. If the route starts in a tiny pocket
-    // (the BFS expanded only a few cells AND dead-ended well short of target),
-    // the start is sealed in by the #69 height-step guard (the Dollet shelf).
-    // Steer to the nearest road cell -- the guard-exempt ramp the character
-    // arrived on -- then UpdateAutoDrive re-plans from there. Bounded per drive.
-    s_driveBridgeActive = false;
-    // #70 v0.18.3.98: key on the pocket signal regardless of PlanPathFine's return
-    // value. The real Dollet pocket exits via the early-return-FALSE branch
-    // ("start already closest reachable"), so the old `ok &&` gate skipped the
-    // bridge entirely. The block is only reached right after PlanPathFine runs, so
-    // the signals are always fresh; normal drives expand hundreds + reach dist~0,
-    // so the pocket test still cannot false-trigger.
-    if (s_drivePlanExpanded <= WM_POCKET_MAX_EXPANDED &&
-        s_drivePlanDist >= WM_POCKET_MIN_DIST &&
-        s_driveBridgeCount < WM_BRIDGE_MAX) {
-        int32_t bx, by;
-        if (FindNearestRoadWorld(startFineCol, startFineRow, &bx, &by)) {
-            s_driveBridgeActive = true;
-            s_driveBridgeX = bx;
-            s_driveBridgeY = by;
-            s_driveBridgeCount++;
-            Log::World("WorldMap: [DRIVE] Pocketed start fine(%d,%d) (expanded %d, dist %d) -> BRIDGE-OUT to nearest road cell at world(%d,%d) (attempt %d/%d)",
-                       startFineCol, startFineRow, s_drivePlanExpanded, s_drivePlanDist,
-                       (int)bx, (int)by, s_driveBridgeCount, WM_BRIDGE_MAX);
-        } else {
-            Log::World("WorldMap: [DRIVE] Pocketed start fine(%d,%d) (expanded %d, dist %d) but no road cell within %d cells -- cannot bridge",
-                       startFineCol, startFineRow, s_drivePlanExpanded, s_drivePlanDist, WM_BRIDGE_ROAD_RADIUS);
-        }
-    }
-    return ok;
+    Log::World("WorldMap: [ROADV:%s] SUMMARY %d/%d waypoints on road, floorZ [%d..%d]",
+               label, onRoad, dn, (dn > 0 ? minZ : 0), (dn > 0 ? maxZ : 0));
 }
 
-// ============================================================================
-// ComputePlannerEligibility (v0.16.0 -- Part C)
-// ============================================================================
-// Called once at Initialize() time, AFTER LoadTriggerZones (so s_segmentRegionMap
-// is populated) and AFTER the catalog is registered (so s_locations[] is valid).
-// Walks every catalog entry, finds its region byte from s_segmentRegionMap,
-// and scans s_triggerPrograms[] looking for at least one clause that names
-// that region with a foot vehicle code (TRIG_VEH_FOOT 0x80 or TRIG_VEH_FOOT_ALT
-// 0x84). If such a clause exists, the destination is "planner-eligible" and
-// StartAutoDrive will route via PlanDrivePath / A* + closest-active-region.
-// If no foot clause matches, the destination is a geometric-trigger destination
-// (entered via terrain-29 polygon trigger, no wmsetus script event); the A*
-// planner cannot represent it and its closest-active-region fallback will
-// misroute the drive toward unrelated destinations (e.g. Fire Cavern catalog
-// at region 0x0C maps only to program 20's Garden clause, no foot clause; the
-// v0.14.95 fallback picks an unrelated active region and routes the player
-// across the map).
-//
-// Geometric-trigger destinations include: Fire Cavern, early-game Balamb Garden
-// (before mobile-Garden phase), several chocobo forests on small islands. AD
-// for these falls back to v0.11.11-era simple-coord steering toward catalog
-// coordinates -- not perfect but bounded and predictable.
-//
-// Logs each catalog entry's classification at init for diagnostic clarity.
-// Defaults all flags to false; if s_segmentRegionLoaded is false (e.g.
-// LoadTriggerZones failed), no entry is marked eligible -- safer than
-// over-marking and routing into the wrong destination.
-static void ComputePlannerEligibility()
+// v0.18.3.123: one-shot road oracle, fired once at world-load. Logs (1) the
+// road's bounding box (where s_roadFine actually runs) and (2) an A* along the
+// road's own endpoints, Timber->Dollet, dumped + road-flagged. If THAT route
+// tracks the road the model is sound; if even it dives into a canyon, the model
+// -- not the executor -- is what is broken.
+static void RoadVerifyTimberDollet()
 {
-    memset(s_destPlannerEligible, 0, sizeof(s_destPlannerEligible));
+    int minC = 9999, maxC = -1, minR = 9999, maxR = -1, cells = 0;
+    for (int r = 0; r < WM_FINE_ROWS; r++)
+        for (int c = 0; c < WM_FINE_COLS; c++)
+            if (s_roadFine[r][c]) {
+                cells++;
+                if (c < minC) minC = c;
+                if (c > maxC) maxC = c;
+                if (r < minR) minR = r;
+                if (r > maxR) maxR = r;
+            }
+    if (cells > 0) {
+        int32_t x0, y0, x1, y1;
+        FineCellCenterToWorld(minC, minR, &x0, &y0);
+        FineCellCenterToWorld(maxC, maxR, &x1, &y1);
+        Log::World("WorldMap: [ROADV] road extent: %d cells, fine col[%d..%d] row[%d..%d], game X[%d..%d] Y[%d..%d]",
+                   cells, minC, maxC, minR, maxR, x0, x1, y0, y1);
+    } else {
+        Log::World("WorldMap: [ROADV] road extent: 0 cells (s_roadFine empty)");
+    }
 
-    if (!s_segmentRegionLoaded) {
-        Log::World("WorldMap: [INIT] Planner-eligibility: s_segmentRegionMap not loaded, no destinations marked eligible");
+    const int32_t TIMBER_X = -22564, TIMBER_Y = -4867;
+    const int32_t DOLLET_X = -15639, DOLLET_Y = -39437;
+    int tT = Navmesh_FindTriangleGame(TIMBER_X, TIMBER_Y);
+    int tD = Navmesh_FindTriangleGame(DOLLET_X, DOLLET_Y);
+    if (tT < 0 || tD < 0) {
+        Log::World("WorldMap: [ROADV:TIMBER-DOLLET] start/goal tri not found (Timber #%d, Dollet #%d)", tT, tD);
+        return;
+    }
+    std::vector<int> path;
+    double L = Navmesh_AStar(tT, tD, -1, &path);
+    if (L < 0.0 || path.size() < 2) {
+        Log::World("WorldMap: [ROADV:TIMBER-DOLLET] A* NO path (Timber #%d -> Dollet #%d)", tT, tD);
+        return;
+    }
+    NavmeshDumpRouteRoad(path, TIMBER_X, TIMBER_Y, DOLLET_X, DOLLET_Y, "TIMBER-DOLLET");
+}
+
+// v0.18.3.124 ROAD-CONNECTIVITY diagnostic (read-only): is the player-walkable
+// Timber->Dollet road actually CONNECTED in the navmesh, or did the .120
+// 200-step gate sever it (forcing A* into the canyon detour the .123 dumps
+// showed -- 80/232 on road, dive to floorZ -1567)? (1) 8-connected BFS over the
+// fine-grid road cells (s_roadFine) from Timber toward Dollet -> the ordered
+// road ribbon + a fine-grid continuity check. (2) Walk the ribbon (decimated):
+// log each checkpoint's navmesh floorZ (does the ROAD itself stay shallow, or
+// is the navmesh deep under it?) and run a short-range A* to the previous
+// checkpoint -- a few shallow tris = road navmesh-connected there; no path, or
+// a sub-path that dives below floorZ -1000 = the gate SEVERED the road there
+// and A* must leave it. Pinpoints the break. The road is never used to STEER --
+// only to probe the mesh, so this stays inside the verify-not-crutch line.
+static void RoadConnectivityDiag()
+{
+    const int32_t TIMBER_X = -22564, TIMBER_Y = -4867;
+    const int32_t DOLLET_X = -15639, DOLLET_Y = -39437;
+    int tc = WorldXToFineCol(TIMBER_X), tr = WorldYToFineRow(TIMBER_Y);
+    int dc = WorldXToFineCol(DOLLET_X), dr = WorldYToFineRow(DOLLET_Y);
+
+    auto snapRoad = [&](int& c, int& r) -> bool {
+        if (r >= 0 && r < WM_FINE_ROWS && c >= 0 && c < WM_FINE_COLS && s_roadFine[r][c]) return true;
+        for (int rad = 1; rad <= 10; rad++)
+            for (int dd = -rad; dd <= rad; dd++)
+                for (int ee = -rad; ee <= rad; ee++) {
+                    int nr = r + dd, nc = c + ee;
+                    if (nr < 0 || nr >= WM_FINE_ROWS || nc < 0 || nc >= WM_FINE_COLS) continue;
+                    if (s_roadFine[nr][nc]) { r = nr; c = nc; return true; }
+                }
+        return false;
+    };
+    if (!snapRoad(tc, tr) || !snapRoad(dc, dr)) {
+        Log::World("WorldMap: [ROADCON] no road cell near Timber/Dollet -- cannot trace ribbon");
         return;
     }
 
-    int eligibleCount = 0;
-    for (int catIdx = 0; catIdx < LOCATION_COUNT; catIdx++) {
-        int col = WorldXToSegCol(s_locations[catIdx].x);
-        int row = WorldYToSegRow(s_locations[catIdx].y);
-        if (row < 0 || row >= WMX_SEG_ROWS || col < 0 || col >= WMX_SEG_COLS) {
-            Log::World("WorldMap: [INIT] Planner-eligibility: %s (%d,%d) -> seg out of range -> NO",
-                       s_locations[catIdx].name, s_locations[catIdx].x, s_locations[catIdx].y);
-            continue;
-        }
-        uint8_t region = s_segmentRegionMap[row][col];
-        if (region == 0xFF) {
-            Log::World("WorldMap: [INIT] Planner-eligibility: %s seg(%d,%d) region=0xFF (no region) -> NO",
-                       s_locations[catIdx].name, row, col);
-            continue;
-        }
-
-        // Walk s_triggerPrograms[] looking for any clause that names this
-        // region with a foot vehicle code.
-        bool footClauseFound = false;
-        for (int p = 0; p < TRIGGER_PROGRAM_COUNT && !footClauseFound; p++) {
-            const TriggerProgram& prog = s_triggerPrograms[p];
-            for (uint32_t c = 0; c < prog.num_clauses && !footClauseFound; c++) {
-                const TriggerClause& cl = prog.clauses[c];
-                if (cl.region != region) continue;
-                if (cl.vehicle == TRIG_VEH_FOOT || cl.vehicle == TRIG_VEH_FOOT_ALT) {
-                    footClauseFound = true;
-                }
-            }
-        }
-
-        s_destPlannerEligible[catIdx] = footClauseFound;
-        if (footClauseFound) {
-            eligibleCount++;
-            Log::World("WorldMap: [INIT] Planner-eligibility: %s seg(%d,%d) region=0x%02X -> YES",
-                       s_locations[catIdx].name, row, col, region);
-        } else {
-            Log::World("WorldMap: [INIT] Planner-eligibility: %s seg(%d,%d) region=0x%02X -> NO (no foot clause; will use simple-coord steering)",
-                       s_locations[catIdx].name, row, col, region);
+    static bool seen[WM_FINE_ROWS][WM_FINE_COLS];
+    static int  par [WM_FINE_ROWS][WM_FINE_COLS];
+    static int  q   [WM_FINE_ROWS * WM_FINE_COLS];
+    for (int zr = 0; zr < WM_FINE_ROWS; zr++)
+        for (int zc = 0; zc < WM_FINE_COLS; zc++) seen[zr][zc] = false;
+    int qh = 0, qt = 0;
+    seen[tr][tc] = true; par[tr][tc] = -1; q[qt++] = tr * WM_FINE_COLS + tc;
+    const int d8r[8] = {-1,-1,-1, 0, 0, 1, 1, 1};
+    const int d8c[8] = {-1, 0, 1,-1, 1,-1, 0, 1};
+    bool reached = false;
+    while (qh < qt) {
+        int cur = q[qh++]; int cr = cur / WM_FINE_COLS, cc = cur % WM_FINE_COLS;
+        if (cr == dr && cc == dc) { reached = true; break; }
+        for (int k = 0; k < 8; k++) {
+            int nr = cr + d8r[k], nc = cc + d8c[k];
+            if (nr < 0 || nr >= WM_FINE_ROWS || nc < 0 || nc >= WM_FINE_COLS) continue;
+            if (seen[nr][nc] || !s_roadFine[nr][nc]) continue;
+            seen[nr][nc] = true; par[nr][nc] = cur; q[qt++] = nr * WM_FINE_COLS + nc;
         }
     }
-    Log::World("WorldMap: [INIT] Planner-eligibility: %d of %d catalog entries are planner-eligible",
-               eligibleCount, LOCATION_COUNT);
+    // v0.18.3.125: the road overlay (s_roadFine = wmx terrain 27/28 only)
+    // fragments where the road climbs through terrain-29 MOUNTAINS, so the BFS
+    // usually cannot reach Dollet's own road cell. Find the reached road cell
+    // CLOSEST to Dollet (the far end of Timber's main road component), report
+    // how far short of Dollet it stops, and dump the terrain types in the gap
+    // toward Dollet. If the gap is terrain 29 (SEG_MOUNTAIN), that IS the
+    // mountain-pass road the 27/28 overlay misses (the #70 root cause) -- not a
+    // real break in the road.
+    int bestCell = tr * WM_FINE_COLS + tc; double bestD = 1e18;
+    for (int rr = 0; rr < WM_FINE_ROWS; rr++)
+        for (int cc2 = 0; cc2 < WM_FINE_COLS; cc2++) {
+            if (!seen[rr][cc2]) continue;
+            double dd = (double)(rr - dr) * (rr - dr) + (double)(cc2 - dc) * (cc2 - dc);
+            if (dd < bestD) { bestD = dd; bestCell = rr * WM_FINE_COLS + cc2; }
+        }
+    int bcr = bestCell / WM_FINE_COLS, bcc = bestCell % WM_FINE_COLS;
+    int rlen = 0; { int c2 = bestCell; while (c2 != -1) { rlen++; c2 = par[c2 / WM_FINE_COLS][c2 % WM_FINE_COLS]; } }
+    Log::World("WorldMap: [ROADCON] Timber road component = %d cells, ribbon Timber->road-end = %d cells; %s; road-end fine(c%d,r%d) is %d cells short of Dollet fine(c%d,r%d)",
+               qt, rlen, reached ? "REACHES Dollet road cell" : "does NOT reach Dollet road cell",
+               bcc, bcr, (int)(sqrt(bestD) + 0.5), dc, dr);
+
+    Log::World("WorldMap: [ROADCON] gap profile road-end->Dollet (terrain: 27/28=road 29=MOUNTAIN 32-34=ocean <=5=forest else=land):");
+    int adr = (dr > bcr) ? (dr - bcr) : (bcr - dr);
+    int adc = (dc > bcc) ? (dc - bcc) : (bcc - dc);
+    int nsteps = (adr > adc) ? adr : adc;
+    if (nsteps < 1) nsteps = 1;
+    for (int s = 0; s <= nsteps; s++) {
+        double t = (double)s / nsteps;
+        int rr  = (int)(bcr + (dr - bcr) * t + 0.5);
+        int cc2 = (int)(bcc + (dc - bcc) * t + 0.5);
+        if (rr < 0 || rr >= WM_FINE_ROWS || cc2 < 0 || cc2 >= WM_FINE_COLS) continue;
+        int32_t wx, wy; FineCellCenterToWorld(cc2, rr, &wx, &wy);
+        int tri = Navmesh_FindTriangleGame(wx, wy);
+        int terr = (tri >= 0) ? (int)s_nmTerr[tri] : -1;
+        int fz   = (tri >= 0) ? (int)s_nmFloor[tri] : 99999;
+        Log::World("WorldMap: [ROADCON]   gap[%d] fine(c%d,r%d) road=%d terrain=%d floorZ=%d tri#%d",
+                   s, cc2, rr, (int)s_roadFine[rr][cc2], terr, fz, tri);
+    }
+
+    // v0.18.3.126: now that we can trace a continuous road, run the original
+    // SEVERANCE test on it -- walk the road ribbon Timber->road-end and check
+    // navmesh connectivity along it. Does the navmesh connect the road's
+    // triangles (so A* COULD follow the shallow road) or sever them (forcing
+    // the canyon detour the .123 dumps showed)? Log each checkpoint's navmesh
+    // floorZ + terrain + a short-range A* to the previous checkpoint; flag
+    // SEVERED on no-path or a sub-path diving below floorZ -1000.
+    static int ribbon[WM_FINE_ROWS * WM_FINE_COLS];
+    int rn = 0; { int c2 = bestCell; while (c2 != -1) { ribbon[rn++] = c2; c2 = par[c2 / WM_FINE_COLS][c2 % WM_FINE_COLS]; } }
+    Log::World("WorldMap: [ROADCON] severance walk Timber->road-end (%d-cell ribbon, road-end %d cells from Dollet):", rn, (int)(sqrt(bestD) + 0.5));
+    int step = rn / 16 + 1;
+    int prevTri = -1; int breaks = 0;
+    for (int i = rn - 1; i >= 0; i -= step) {
+        int cell = ribbon[i]; int cr = cell / WM_FINE_COLS, cc = cell % WM_FINE_COLS;
+        int32_t wx, wy; FineCellCenterToWorld(cc, cr, &wx, &wy);
+        int tri = Navmesh_FindTriangleGame(wx, wy);
+        int fz   = (tri >= 0) ? (int)s_nmFloor[tri] : 99999;
+        int terr = (tri >= 0) ? (int)s_nmTerr[tri] : -1;
+        if (prevTri >= 0 && tri >= 0) {
+            std::vector<int> seg;
+            double segL = Navmesh_AStar(prevTri, tri, -1, &seg);
+            int minZ = 0x3FFFFFFF, nt = (int)seg.size();
+            for (int s = 0; s < nt; s++) { int z = (int)s_nmFloor[seg[s]]; if (z < minZ) minZ = z; }
+            bool brk = (segL < 0.0) || (nt > 0 && minZ < -1000);
+            if (brk) breaks++;
+            Log::World("WorldMap: [ROADCON]   road[%d] fine(c%d,r%d) terr=%d floorZ=%d | navA*=%d %dtris minZ=%d%s",
+                       i, cc, cr, terr, fz, (int)segL, nt, (nt > 0 ? minZ : 0),
+                       brk ? "  <== SEVERED" : "  ok");
+        } else {
+            Log::World("WorldMap: [ROADCON]   road[%d] fine(c%d,r%d) terr=%d floorZ=%d (Timber end)", i, cc, cr, terr, fz);
+        }
+        prevTri = tri;
+    }
+    Log::World("WorldMap: [ROADCON] SEVERANCE SUMMARY %d of ~%d road segments SEVERED (0 = road navmesh-connected; >0 = the gate cut the walkable road)", breaks, (rn - 1) / step);
 }
+
+// v0.18.3.106 (#70 routing swap): route on the walkability-filtered triangle
+// navmesh. A* (ungated -- poly[0x0E] walkability is the passability test) from
+// the start triangle to the destination triangle, then convert each triangle
+// CENTROID to a fine cell so the existing #68 executor (which consumes
+// s_drivePath as packed fine cells) follows it UNCHANGED. Consecutive duplicate
+// cells are dropped. Returns false if the navmesh has no path (caller falls
+// back to the fine-grid planner) so a transient pre-build drive still routes.
+static bool PlanDrivePathNavmesh(int32_t startX, int32_t startY)
+{
+    int startTri = Navmesh_FindTriangleGame(startX, startY);
+    int goalTri  = Navmesh_FindTriangleGame(s_driveTargetX, s_driveTargetY);
+    if (startTri < 0 || goalTri < 0) return false;
+    // v0.18.3.111 (#70): REVERT the .108 funnel string-pull -- it cut chords
+    // STRAIGHT ACROSS non-walkable cliff terrain. The SSF's degenerate centroid
+    // portals (at the bridge / proximity links that share no edge) give the
+    // string-pull no real left/right walls, so it pulls taut THROUGH a box-
+    // canyon wall: the F11 at the 17km wedge shows Squall steered into a vertical
+    // rock face, steer target locked NW (-31232,-31232) ACROSS the cliff while
+    // Dollet is NE. The LOS clamp can't catch it (the coarse 1024u grid reads the
+    // cliff as walkable land -- which is why .109 clamp-OFF == .110 clamp-ON, byte
+    // for byte). Use the raw A* triangle CENTROIDS as waypoints instead: each
+    // centroid is strictly inside a walkable triangle, and consecutive centroids
+    // are joined by a shared edge or a short (<=400u, z-gated <=300u) bridge/prox
+    // neck, so the path stays ON walkable ground and the chords are too short to
+    // span a cliff. Rasterized dense below (same as the funnel) so the executor
+    // still reads adjacent legs. (The executor's far-lookahead can still cut a
+    // corner across a cliff the coarse clamp misses -- the .107 ~12km wedge --
+    // which is the next, separate step: a navmesh-resolution walkability clamp.)
+    std::vector<int32_t> cornGX, cornGY;
+    std::vector<int> tris;
+    // v0.18.3.119 (#70): A* UNGATED on floor-step. The .118 floor-step gate at
+    // 200 FAILED -- its [NAVPATH] still dived into the box canyon (floorZ -566
+    // -> -1601) because A* just found a GENTLER centroid descent (every step
+    // <=197) that the 200 gate permits: s_nmFloor is the MEAN of 3 corner
+    // heights, so a cliff face reads as a gentle staircase and NO floor-step
+    // threshold separates the canyon from the corridor (176u neck). The fix is
+    // upstream -- Navmesh_AddTriangle now drops cliff-face tris by true per-tri
+    // SLOPE (the engine's actual collision quantity), so the canyon walls are
+    // gone from the graph and A* must take the corridor; no edge gate needed.
+    double navL = Navmesh_AStar(startTri, goalTri, -1, &tris);
+    int triCount = (int)tris.size();
+    if (navL < 0.0 || tris.size() < 2) {
+        Log::World("WorldMap: [PLAN] navmesh A* NO path: start tri#%d -> goal tri#%d -- fine-grid fallback",
+                   startTri, goalTri);
+        return false;
+    }
+    for (size_t i = 0; i < tris.size(); i++) {
+        int32_t cgx, cgy;
+        if (Navmesh_TriangleCentroidGame(tris[i], &cgx, &cgy)) {
+            cornGX.push_back(cgx); cornGY.push_back(cgy);
+        }
+    }
+    if (cornGX.size() < 2) return false;
+
+    // v0.18.3.123 ROAD-VERIFICATION: full route dump + per-waypoint road flag
+    // (replaces the .112 40-cap [NAVPATH] dump). See NavmeshDumpRouteRoad above.
+    NavmeshDumpRouteRoad(tris, startX, startY, s_driveTargetX, s_driveTargetY, "DRIVE");
+
+    // rasterize the corner polyline into dense fine cells (~512u steps, shortest
+    // torus delta, dedup consecutive) so consecutive cells are adjacent and the
+    // executor's corner-cap reads each funnel leg as a sustained run.
+    int n = 0; int last = -1;
+    auto emitCell = [&](int32_t wx, int32_t wy) {
+        int fc = WorldXToFineCol(wx), fr = WorldYToFineRow(wy);
+        if (fr < 0 || fr >= WM_FINE_ROWS || fc < 0 || fc >= WM_FINE_COLS) return;
+        uint16_t packed = PackSeg(fr, fc);
+        if ((int)packed == last) return;
+        if (n < DRIVE_PATH_MAX) { s_drivePath[n++] = packed; last = (int)packed; }
+    };
+    for (size_t i = 0; i + 1 < cornGX.size() && n < DRIVE_PATH_MAX; i++) {
+        int32_t x0 = cornGX[i],   y0 = cornGY[i];
+        int32_t x1 = cornGX[i+1], y1 = cornGY[i+1];
+        int32_t dx = x1 - x0, dy = y1 - y0;
+        if      (dx >  NM_WX / 2) dx -= NM_WX;   // shortest torus delta (game coords)
+        else if (dx < -NM_WX / 2) dx += NM_WX;
+        if      (dy >  NM_WY / 2) dy -= NM_WY;
+        else if (dy < -NM_WY / 2) dy += NM_WY;
+        int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
+        int span = adx > ady ? adx : ady;
+        int steps = span / 512 + 1;
+        for (int s = 0; s <= steps && n < DRIVE_PATH_MAX; s++) {
+            int32_t wx = x0 + (int32_t)((int64_t)dx * s / steps);
+            int32_t wy = y0 + (int32_t)((int64_t)dy * s / steps);
+            emitCell(wx, wy);
+        }
+    }
+    if (n < 2) return false;
+    s_drivePathLen      = n;
+    s_drivePathIdx      = 0;
+    s_drivePathPlanned  = true;
+    s_drivePlanExpanded = 9999;   // not a pocket -> the bridge-out stays off
+    s_drivePlanDist     = 0;
+    // s_driveNavmeshPath stays FALSE: v0.18.3.110 REVERTED the .109 executor coarse-grid bypass -- it REGRESSED. The funnel's dense/degenerate corners NEED the executor's LOS clamp to keep the steer target on a clear straight line; with the clamp bypassed the steer target locked onto a WRONG-WAY funnel corner (steer(-31232,-31232) = WEST, away from Dollet) and the drive walked into a wall at 15-17km, vs .108's clean 4km WITH the clamp active. The FineLineClearFootCar LOS clamp + #83 fwd-guard stay ACTIVE on the navmesh path (= the .108 executor). (The clamp's .81-box over-clamp near Dollet is a separate, narrower final-approach problem.)
+    Log::World("WorldMap: [PLAN] navmesh centroids: start tri#%d -> goal tri#%d = %d tris -> %d centroids -> %d fine cells",
+               startTri, goalTri, triCount, (int)cornGX.size(), n);
+    return true;
+}
+#endif
+
+// ===== v0.18.3.145 (#70): FAITHFUL GRID PLANNER =====
+// Plans on the ACTUAL walkable surface using the engine-faithful block-local height query
+// (WorldGroundHeightLocal) + the engine's 200 step gate -- the SAME rule the executor's
+// STEPGUARD applies -- instead of the triangle-navmesh A*, which kept routing through
+// faithfully-unreachable deep pockets (the Timber->G-Garden stall chose a waypoint at -1305
+// behind a 239u cliff). 8-neighbour A* on a 128u grid within a bbox around start+goal; emits
+// deduped fine cells into s_drivePath (same format as the other planners). Goal is the global
+// s_driveTargetX/Y. Offline this routes all three acceptance trios correctly. No exotic STL
+// (this .inl is inside namespace WorldMap, so no headers added) -- std::vector + a manual heap.

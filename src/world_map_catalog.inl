@@ -29,6 +29,16 @@ static const LocationEntry s_locations[] = {
     {"Dollet",                    -15639,  -39437},
     {"Timber",                    -22564,   -4867},
     {"Galbadia Garden",           -37471,  -25062},
+    // v0.18.3.199: the train/Galbadia station is a SEPARATE enterable field whose
+    // footprint sits right beside the Galbadia Garden icon -- auto-drive to
+    // G-Garden kept entering it. It has no research marker, so it was never in
+    // this catalog. Added as its own destination.
+    // v0.18.3.200: base set to the REAL coordinate discovered from the .198
+    // mis-capture (logged as "Migrated mis-captured coord (-38394,-24803)"), so
+    // distance/reachability and manual-capture attribution are correct (the .199
+    // placeholder was ~800u east of the icon; the station is actually ~920u WEST).
+    // Rename freely if a better canonical name is known.
+    {"Galbadia Station",          -38394,  -24803},
     {"Deling City",               -61806,  -28649},
     {"Tomb of the Unknown King",  -42471,  -36562},
     {"D-District Prison",         -55306,   -4841},

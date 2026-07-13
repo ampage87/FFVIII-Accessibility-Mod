@@ -6,6 +6,1487 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.225
+
+Release prep (no behavior change to shipped features): (1) **Source-size CI guard** — `world_map_drive.inl` (156 KB) and `world_map_planner.inl` (96 KB) had both grown past the 80 KB hard-fail limit during the unpushed world-map work. Split, byte-identical, into sub-80 KB `.inl` chunks: `world_map_drive.inl` → `world_map_drive_helpers.inl` (38 KB, the AD lifecycle/escape helpers) + `world_map_drive.inl` (59 KB, `UpdateAutoDrive` head) + `world_map_drive_exec.inl` (61 KB, the executor tail, included mid-function); `world_map_planner.inl` → `world_map_planner.inl` (54 KB) + `world_map_planner2.inl` (43 KB). Splits are pure textual `#include` relocations at statement/block boundaries (verified between the `NAVMESH_DIAG`/`WM_MOTION_DIAG` blocks and preserving forward-declaration order), so the compiled code is unchanged. world_map.cpp include order updated. Every `src/*.{cpp,inl}` now passes the 80 KB guard. (2) **Autotest channel gated OFF by default** — `AUTOTEST_CMD_ENABLED` set to 0 so the file-polled keystroke-injection test channel (`autotest_cmd.inl`) is inert in shipped builds; the code remains for future test sessions (flip to 1 + rebuild).
+
+## v0.18.3.224
+
+World map (#72): **escape resumes at the on-route target index, not the nearest waypoint — completes the Timber→Dollet fix.** With .223 the route-around escape drove correctly out of Timber (N then W to (−23474,−5336) heading toward Yaulny), but on clear the .222 "re-snap to nearest overall waypoint" picked waypoint 6 at (−23168,−5280), which is BEHIND the character back toward Timber (the Yaulny↔Timber edge hugs Timber before curving away, so its early waypoints sit back at the area), and the executor pivoted to steer NE into Timber → re-entry. Fix: `ArmFiringAreaEscape` now records `s_driveEscapeTgtIdx` (the index of the first on-route waypoint outside the area), and on clear the cursor resumes at the nearest waypoint AT OR AHEAD of that index — never behind it. Balamb (route already heads away from the area) is unaffected since its nearest forward waypoint was already ahead.
+
+## v0.18.3.223
+
+World map (#72): **escape routes AROUND the area, toward the route (not the destination) — fixes Timber→Dollet.** Aaron's G-Garden→Timber→Dollet run: the first leg worked, but Timber→Dollet failed. The character spawns NORTH of Timber while the route to Dollet leaves SOUTHWEST (via Yaulny Plains); .222 steered straight at the destination (Dollet, to the SOUTH), which crossed Timber (re-entry) and then cleared on the wrong — north — side, displacing the character onto the wrong part of the network so every routenet replan declined ("no transit-legal network path", then "off-network 15000u+"). Fix: the escape now (a) captures the first on-route waypoint that lies OUTSIDE the area's steer-arm box as its target, and (b) routes AROUND the padded box toward it via `EscapeSteerAround` (inside→exit nearest edge; outside+clear→target; outside+blocked→best reachable box corner, using a Liang–Barsky `SegCrossesBox`), holding until the character is outside the box AND has an unobstructed line to that on-route waypoint. This follows the routenet's own validated exit direction instead of cutting through the area. Balamb starts (destination on the clear side) reduce to the same straight-line behavior as .222.
+
+## v0.18.3.222
+
+World map (#72): **firing-area escape — wide-berth revision.** Aaron's live BAT of .221 failed where my automated run passed: same BG spawn (24549,−29313) and same skip to waypoint 12, but his run hit an engine collision block at (24655,−29348) steering toward waypoint 12 (BG's NE-corner, edge-hugging) and recovery couldn't escape — the documented *stateful* MRU find-poly cache (BAT203): his prior movement near BG poisoned the cache so the skimming move that was clear in my fresh-spawn run now falsely blocks. Root cause in .221: the destination-steer only armed when the start was *inside* the 192u padded bbox; the BG spawn is ~383u north of the edge, so the character drove straight at the edge-hugging rejoin waypoint. Fix: (1) arm the destination-steer within a WIDE `EA_STEER_ARM`=768u berth of a non-target area and hold it until 768u clear, so the character follows the direct (collision-free) line to the destination well past the area before rejoining the route; (2) suppress the route-progress stall + 40s give-up watchdogs while the escape is active (it deliberately steers off-route); (3) on clear, re-snap the path cursor to the waypoint nearest the character (it walked a chord during the escape). The waypoint-excursion skip (192u) is unchanged.
+
+## v0.18.3.221
+
+World map (#72): **firing-area escape — the B-Garden→Fire Cavern re-entry fix.** The world-map spawn after exiting B-Garden's front gate sits ~4u inside BG's own decoded firing bbox (north edge y=−29696; spawn ≈y −29700), and BG's flagged-poly patch is south around x=24576, so every BG→Fire Cavern drive re-entered the BG field within ~560ms — before the executor could steer clear — and the mod cannot auto-walk back out of a field, so the drive dead-ended. Fix: when a drive starts OR resumes with the character inside a NON-target `s_entryAims` firing bbox, `ArmFiringAreaEscape` drives straight out by the bbox's NEAREST edge + 256u (which at the BG spawn is a short northward step, away from the flagged patch), skips any leading world-path waypoints still inside the bbox (routenet edges begin at the location aim, deep inside the area), and self-clears once the character is outside the bbox — then the normal route to the destination takes over. `[ESCAPE]` log lines. Target's own area is exempt (arriving there is the goal). Representation-independent (overrides steerX/steerY ahead of bridge/path selection); no effect on drives that start in open terrain, so the Galbadia routes are unchanged.
+
+## v0.18.3.220
+
+World map (#72): **resume replan deferred until the engine position settles** — fourth bug caught by the automated BAT loop. The world-map re-entry resume replanned on the same frame as re-entry, when `GetWorldMapPosition_Active` still returns the PRE-pause position (observed 23:54: replan from (24380,-29748) while the character actually spawned at (24576,-29406)). The routenet hop-on point therefore landed inside Balamb Garden's firing area and the first steering frames walked straight back into the field — an off-target entry loop at BG on the BG→Fire Cavern case. The resume path now sets `s_driveResumeReplanTicks = 20`; all drive processing holds (keys already released) until the deferred replan runs from the live, settled position. Watchdog-gen bump and the "Resuming drive" announcement remain immediate.
+
+## v0.18.3.219
+
+World map (#72): **routenet per-drive plan cap no longer counts battle resumes** — third bug caught by the automated BAT loop. The .209 "4 network plans per drive" limiter keyed only on `s_driveStartTime`; on the 35 km Dollet→Timber leg with a random encounter every ~600 units, the first three battle resumes exhausted the budget and every later resume was `[ROUTENET] declined → grid fallback` mid-corridor — the grid planner wandered (distance to Timber rising across resumes, WPSKIP churn). Cap identity now includes `s_driveWatchdogGen` (the .216 pause-resume generation): each battle/field resume refreshes the budget while the cap still bounds replan-grind within continuous driving.
+
+## v0.18.3.218
+
+Test automation channel v4 (#72 infrastructure): AtInject now also raises the key's VirtualKey via SendInput from inside the game process, alongside the DIK overlay. External OS-level key synthesis set neither FF8's DirectInput buffer nor VK async state for arrows, so GetAsyncKeyState readers — the mod's own hotkeys (catalog = / - / \, F-keys) and the field camera-calibration observer's arrow sampling — never saw channel-injected directions; field auto-drive stayed permanently "Camera not yet calibrated" under automation. Key table gains a `vk` column; dual-form direction entries raise the VK once (arrow form only); N-prefixed diagnostics stay overlay-only. Catalog and drive hotkeys are now drivable through the command file too, removing the window-focus dependency entirely.
+
+## v0.18.3.217
+
+World map (#72): **foot-motion override in GetWorldMapPosition_Active** — second bug caught by the automated BAT loop. Walking out of Dollet onto the world map committed locomotion=33 (VEH_CAR) via WM-ENTRY-DEBOUNCE on a foot-only save; every `_Active` position read then returned the stale savemap `car_pos` (26319,-30537), on the Balamb continent. One wrong source, five symptoms observed live at 21:40–21:44: drive-start distance 55 km instead of 35, `[ROUTENET] declined` (hop-on from the wrong continent), resume replan burning its full 10 s A* budget trying to route across the ocean, a bogus learned trigger circle, and an off-target field entry identified as "Balamb Garden". Fix encodes the function's own documented invariant: the engine integrates the foot DWORDs ONLY while the player is the foot character (they freeze when mounted), so if the foot position changed within the last 2 s, any non-foot locomotion byte is stale and the foot DWORDs win (`[VEH-POS-OVERRIDE]`, transition-only logging). Real vehicle rides are unaffected — mounted foot DWORDs freeze, the override disarms, and the vehicle dispatch proceeds as before.
+
+## v0.18.3.216
+
+World map (#72): **stale watchdog clocks across battle/field pause-resume** — first bug caught by the automated BAT loop. The .202 route-progress watchdog and .204 route-based give-up reseed their clocks only when `s_driveStartTime` changes, and a pause-resume keeps the same drive: after any battle longer than 4s the first resumed frame fired "route-progress stalled 4s → F3 recovery", and after one longer than 40s it instantly fired `StopAutoDrive("Cannot reach the destination from here.")` (observed live 21:24:14: resume replanned fine — `plan ok, 1 leg via Hasberry Plains<->Dollet` — then stalled+stopped within the same second). Fix: new `s_driveWatchdogGen` incremented in the world-map re-entry resume path; both watchdog identity checks key on `s_driveStartTime + s_driveWatchdogGen`, so resume reseeds cleanly. No change to watchdog thresholds or behavior within a continuous drive.
+
+## v0.18.3.215
+
+Test automation channel v3 (#72 infrastructure): delivery switched from SendInput to a new ChaseKeyboard DIK **overlay**. Empirical .213/.214 finding: OS-injected scancode events (arrow and numpad forms alike, JAWS exited) reach GetAsyncKeyState readers but never appear in FF8's DirectInput keyboard buffer for direction keys, while letter keys do. Rather than fight the OS input stack, the autotest channel now ORs its held DIK bytes into every 256-byte GetDeviceState result inside the existing chase_keyboard detour — the exact point FF8 reads its keyboard (proven by the v0.15.9.11.3.3 leak-probe). New `ChaseKeyboard::SetOverlayKey/ClearOverlay`; overlay applies in both pass-through and chase-substitution paths; zero cost when idle. autotest_cmd.inl AtInject now writes the overlay.
+
+## v0.18.3.214
+
+Test automation channel v2 (#72 infrastructure, follows .213): (1) Direction commands now dual-inject BOTH scancode forms — extended (arrow) and non-extended (numpad) — because the .213 arrow-only injection moved no menu cursor; FF8 2013's default keyboard directions are the NUMPAD keys (DIK_NUMPAD8/2/4/6). N-prefixed names (NUP/NDOWN/NLEFT/NRIGHT) force numpad-only for diagnostics. (2) New `SHOT` command captures a screenshot via BattleTTS::RequestScreenshotAsync without relying on the F11 hotkey, which requires window focus games can steal. Still inert without `Logs/autotest_cmd.txt`.
+
+## v0.18.3.213
+
+Test automation infrastructure (#72): new file-polled remote key-injection channel (`src/autotest_cmd.inl`, included from dinput8.cpp). External automation (Claude's computer-use tooling) cannot deliver extended-scancode keys — arrow keys — to FF8's DirectInput-only keyboard pipeline (the v0.14.102 failure class); letters arrive, arrows never do. The mod now polls `Logs/autotest_cmd.txt` (250 ms cadence when idle), parses `KEY <NAME>[+<NAME>] [holdMs]` / `WAIT <ms>` commands, injects them with correct KEYEVENTF_SCANCODE|KEYEVENTF_EXTENDEDKEY semantics via SendInput, acknowledges every command as `[AUTOTEST]` lines in ff8_mod.log, and deletes the file after consumption. Completely inert when the file doesn't exist; gate `AUTOTEST_CMD_ENABLED`. No change to any player-facing system.
+
+## v0.18.3.212
+
+Logging infrastructure: logs are now readable while the game runs. `Log::Init` and `NavLog::Init` open all channel files with `_fsopen(..., _SH_DENYWR)` instead of `fopen_s`, whose default share mode denies all concurrent access. External tools (live BAT telemetry during automated world-map test drives) can now tail `Logs/ff8_*.log` mid-session; the game remains the only writer. No behavioral change to any game system.
+
+## v0.18.3.211
+
+World map (#72): **The Galbadia pass is retired. Timber (and Dollet) traffic now routes the long way east, over corridors that are proven both live and in the corrected simulator.**
+
+Aaron, your .210 drive settled the last open question. The transit fix itself worked perfectly -- the log shows the clean chain Station -> East Plains -> bypass -> West Plains -> Timber with zero field entries -- but you then cycled 26-29 km from Timber without ever crossing the pass, riding the exact max-clearance line the offline work said was the best line that exists. That was the experiment: the corrected engine replica predicted only 6-8 units of margin there, and live says 6-8 units isn't enough. So the pass is confirmed impassable on foot in practice, and this is exactly the scenario the route network was built for -- when a corridor is proven bad, we don't tune the executor again, we change the MAP. This build is a data change:
+
+1. **The pass edge is gone** from the network tables (the polyline is kept on record offline, marked impassable-live). Nothing routes through x~-44600 anymore.
+2. **Timber connects via the east side instead.** The 50 km Dollet<->Timber corridor that already sim-validated end-to-end in both directions is now split at two new open-plains junctions so everything can use it: **Yaulny Plains** (NE of G-Garden, at the one mountain-belt crossing the corrected replica accepts) and **Hasberry Plains** (on the coast at Dollet's doorstep, deliberately OUTSIDE Dollet's field trigger, so Timber traffic passes Dollet without being yanked into it -- the .210 "never drive through a location" rule stays absolute). Plus one new 2.1 km link from GG East Plains onto that corridor, freshly validated both directions.
+3. **Two honest notes.** First: I checked the Timber-Dollet ROAD your init diagnostic maps (the 46-triangle centerline) as a shortcut. Its canyon neck near (-30040,-20000) is a ~64-unit sliver in the engine's collision -- narrower than the pass we just proved impassable -- so I did NOT ship it; the network keeps the wider inland corridor and only parallels the road on the Timber approach. Second: the .205 shortcut track east of G-Garden (through the massif-tip gap) deterministically fails the corrected simulator at a steep terrace seam, so it's retired too; GG->Dollet now goes via the same east corridor at essentially the same length (31 km vs 35 km spliced before).
+
+The payoff: the full offline matrix (both directions, full executor sim, all pairs) is **20/20 arrived** for the first time -- .210 had 4 known failures, .209 had 4. G-Garden->Timber is ~31.6 km (it was 53 km through the pass on paper), Station->Timber ~34.3 km, Dollet->Timber ~49.9 km. These are LONG drives -- expect several minutes of steady cruising, not a stuck character. If progress ever stalls, the .203 pause/resume and the grid fallback still own it.
+
+BAT .211: rebuild via deploy.vbs, confirm 0.18.3.211. **Test 1 (the retry): start where you were -- near G-Garden / the Station -- and auto-drive to Timber in one go.** Expect `[ROUTENET] plan ok ... via` naming `GG East Plains<->Yaulny Plains Yaulny Plains<->Timber` (NO pass, NO West Plains leg), the drive heading NE across the plains, north up the inland channel, across the belt, and down to Timber's gate with the usual entry machinery -- steady progress the whole way. **Test 2: Dollet -> Timber directly** -- it should ride the same corridor via Hasberry Plains without re-entering Dollet on the way out. **Test 3 (regression): any Balamb drive.** Send Logs/ff8_world.log either way. LOCAL; NOT pushed.
+
+---
+
+## v0.18.3.210
+
+World map (#71): **Route-network routes can no longer drive THROUGH a location to get somewhere else.**
+
+Aaron, the .209 log showed the network itself working -- the plans were clean polylines and the executor followed them -- but my route chooser had a real flaw, and it's exactly what you felt: three of the four plans ran *via* Galbadia Garden or Galbadia Station as intermediate stops on the way to Timber. Those node points aren't road markers; they're the aim points INSIDE each location's field-entry trigger. So the drive dutifully steered into the Garden/Station trigger mid-route and the game yanked you into the field -- the three OFF-TARGET pauses at 10:23:24, 10:24:03 and 10:24:29 before you (rightly) cancelled. I had an "avoid driving through locations" penalty in there, but it only made such routes *more expensive*, not illegal, and the alternatives happened to be longer. My fault; that rule is now absolute:
+
+1. **Hard transit rule.** A location node can be where a route STARTS (you're standing at its mouth, e.g. you just left the Station) or where it ENDS (it's your destination) -- it can never be a waypoint in the middle. Junction nodes (the open-plains ones) route freely.
+2. **A new validated junction bypass: GG East Plains <-> GG West Plains.** With transit forbidden, the two plains flanking Galbadia Garden had no legal link (every old path between them went through the Garden or the Station). The new edge swings north around the Garden's firing area and south past the Station's, sim-validated end-to-end in both directions like every other edge, and confirmed to stay clear of every decoded firing box. Your Station-side -> Timber route is now `... GG East Plains <-> GG West Plains, GG West Plains <-> Timber` -- no location stopovers.
+3. **The short "hop onto the network" legs got the same discipline.** The straight-line hop now also checks it doesn't clip a foreign firing area (the detour version already did); if it would, the planner routes around or declines and the old grid planner takes the drive.
+
+Re-ran the full offline matrix under the new rule: 16/20 directed pairs arrive, the same 16 as .209 -- the rule and the bypass cost nothing (the 4 holdouts are the one known Dollet-corridor sim quirk, unchanged, documented in ROUTENET.md). The failing .209 scenario itself (east of the Station, drive to Timber via both plains) now simulates clean end-to-end.
+
+BAT .210: rebuild via deploy.vbs, confirm 0.18.3.210. **Test 1 (the .209 retry): start where you were -- near Galbadia Garden / the Station -- and auto-drive to Timber in one go.** Expect a `[ROUTENET] plan ok ... via` line that names ONLY Plains junctions in the middle (no `Galbadia Garden<->` or `Galbadia Station<->` legs unless one of them is where you start), no OFF-TARGET field pauses, the pass crossing, and the Timber gate machinery. **Test 2: the same but starting right at the Station exit** (start-at-mouth case). **Test 3 (regression): any Balamb drive.** Send Logs/ff8_world.log either way. LOCAL; NOT pushed.
+
+---
+
+## v0.18.3.209
+
+World map (#70): **The structural fix -- a precomputed, offline-VALIDATED route network. The planner now follows exact polylines (including the z=-25086 pass line no grid row can express) instead of quantized grid rows.**
+
+Aaron, the .208 log settled it: this was never going to be fixed at the executor. The route row through the Galbadia pass is z=-25024 (the nearest 128-unit grid row); the only reliable line is z~-25086 -- BETWEEN the rows, 88 units from the ~1-unit sliver wall -- and your character spent 22 seconds pinned at x~-44460 with zero net progress while the recovery machinery churned (G4 never logged; it only runs outside recovery, and the drive was in recovery almost the whole time there). I also updated the offline engine replica with what your log proves: inside the sticky wall-foot zone, steps PARALLEL to the wall never succeed (only steps that move AWAY do). Under that corrected model the old sim's "it crawls through eventually" result disappears and the .208 grind replicates exactly -- and, importantly, the z~-25086 max-clearance line still crosses the pass cleanly in BOTH directions. That corrected simulator is what everything below was validated against.
+
+What's new:
+
+1. **A route NETWORK, not another spot fix** (`src/world_map_routenet.inl`, generated by `offline/gen_routenet.py`, full story in `offline/ROUTENET.md`): 11 nodes (the decoded entry aims + two "Plains" junctions that let Station<->Timber/Dollet routes bypass G-Garden's firing area) and 12 edges -- exact polylines refined onto each corridor's MAXIMUM-CLEARANCE channel and driven end-to-end in the corrected engine replica WITH the full executor simulation (camera-write, slide, recovery), in both directions, before being baked in. The pass edge holds z=-25088 through the neck. One edge (the Dollet east corridor) is additionally anchored by the only live proof we have: your successful .205 drive's own logged track.
+2. **Planner order**: `PlanDrivePath` tries the network FIRST -- a short local hop onto the nearest edge point (straight if clear, else a small bounded A* that respects learned blocks and foreign firing areas), the network edges to the point nearest the destination, a short hop off. Everything is spliced into the same `s_drivePathWX/WY` polyline the executor already follows tightly. If the network declines (too far from an edge, no path, hop blocked, or 4 network plans already this drive), it says so in the log and grid A* runs EXACTLY as before -- nothing else changed: camera-write executor, F2/F3/G4, ABEAM, ENTRYMOW, pause/resume all intact.
+3. **Log tag `[ROUTENET]`**: "plan ok: hopOn=..., N leg(s) via <node chain>, hopOff, total M pts" on success; "declined: <reason>" otherwise.
+
+Offline validation matrix (corrected replica, full executor sim, spliced network paths, both directions): 16/20 directed pairs arrive with zero recovery resumes -- including ALL FOUR Timber long-hauls through the pass (G-Garden->Timber ~2,900 sim frames, ~90 s of driving). The 4 non-passing cells are one single spot on the Dollet corridor where the replica's deterministic cache model disagrees with your live .205 full-speed crossing (documented in ROUTENET.md; both flanks validate, and if it ever grinds live the existing recovery + grid fallback own it).
+
+BAT .209: rebuild via deploy.vbs, confirm 0.18.3.209. **Test 1 (the flagship): from near G-Garden, auto-drive to Timber in one go.** Expect `[ROUTENET] plan ok ... via Galbadia Garden<->GG West Plains GG West Plains<->Timber`, the drive heading SW past the Garden, through the pass on the new line (steady westbound progress past x=-44600 -- the thing that has never happened), up the long north leg, and the .206 entry machinery at Timber's gate. **Test 2: Dollet -> G-Garden or Station** (exercises the live-proven east corridor). **Test 3 (regression): any Balamb drive** (Garden/Town/Fire Cavern all on-network now). If a drive starts far from any edge you'll see `[ROUTENET] declined: off-network` and the old grid behavior -- that's by design. Send Logs/ff8_world.log either way. LOCAL; NOT pushed.
+
+---
+
+## v0.18.3.208
+
+World map (#70): **Two surgical fixes for the Galbadia pass -- the centerline discipline can now SEE the sliver wall, and waypoints you walk PAST now count as reached.**
+
+Progress hidden inside the .207 failure: the G-Garden avoidance worked (no field entries, no manual steering needed for the region), the plan was fast, and the drive crossed 13 km before sticking -- at the same narrow pass, in a new and finally fully-explained way. The log shows the character at (-44500,-24946), the pass's north sticky lane, with the route row at z=-25024: the proven passable centerline is z~-25086, and this corridor is so narrow that NO 128-unit grid row is safely centered -- the executor has to hold the centerline between the rows. Two things stopped it:
+
+1. **G4 centerline discipline never engaged** -- its side-clearance probes used the fast 32-unit cache, which cannot see the ~1-unit sliver wall that forms the corridor's north side. Probes now use the 8-unit FootBlocked8 (still cached; 20 lookups/frame), so the corridor is detected and the aim offsets to the true middle.
+2. **Waypoints could never be "reached" from the centerline.** The advance radius is 64u, but centerline walking runs ~62u laterally offset from the waypoint row -- the character walked PAST waypoint after waypoint with the cursor pinned (the ten-in-a-row stall pattern). New ABEAM advance: also step the cursor when laterally near (<=144u) and the NEXT waypoint is already closer than the current one. Height gate unchanged.
+
+BAT .208: rebuild via deploy.vbs, confirm 0.18.3.208. Same test: from near G-Garden, auto-drive to Timber in one go. Through the pass expect steady (possibly slow) progress with the cursor ticking -- no [WPSKIP] chains -- then the long north leg and the .206 entry machinery at Timber's gate ([TRIGREADY]/[ENTRYMOW]). Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+---
+
+## v0.18.3.207
+
+World map (#70): **Routes now avoid the DECODED trigger regions (the circles were the wrong shape), and stalled waypoints escalate instead of grinding.**
+
+The .206 log shows two clean failure modes:
+
+1. **G-Garden kept swallowing the drive.** Its field fired 2,990 units from the learned-circle center -- the region is far bigger (and boxier) than any circle we learned -- and the "start inside = exempt" rule then let each RESUMED route cross the region again: four field entries in 40 seconds, until you steered around it by hand. The circles were always a stopgap; since .206 we have the real decoded firing-area geometry, so the planner now applies it directly: any route cell inside a NON-TARGET decoded area costs heavily, with no start-inside exemption (the trigger re-arms as soon as you step off the entry polys, so crossing was never actually safe). Plans that start inside a region now leave by the shortest path and stay out. The learned circles remain only for locations we haven't decoded yet.
+2. **The Timber leg died oscillating at one waypoint.** The character spent 40 seconds ~119 units from waypoint 59 -- close, but never within the 64-unit advance radius, with the recovery fan always finding SOME direction to move (so the fan-exhaust path never fired) and the route watchdog stalling ten times in a row until the give-up ended the drive. New stall escalation: two consecutive stalls at the same cursor mean the waypoint itself is unreachable -> skip past it; three mean the local geometry is hopeless -> forced retreat and replan (each stall already learned an obstacle cell, so the replan genuinely differs).
+
+BAT .207: rebuild via deploy.vbs, confirm 0.18.3.207. From near G-Garden, auto-drive to Timber in one go -- the route should now skirt the Garden's region on its own (no manual steering, no field entries; watch the `[TRIGAVOID]`/plan lines), cross to Timber, and use the .206 entry machinery at the gate (`[TRIGREADY]`, possibly `[ENTRYMOW]`). If a waypoint jams, expect `[WPSKIP]` then at worst one forced replan -- not a 40s grind. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+---
+
+## v0.18.3.206
+
+World map (#70): **Entrances are now targeted from the engine's own decoded trigger geometry -- no more guessing, no more blind orbits.**
+
+Great BAT: the neck is beaten, Dollet entered cleanly. The Timber entry failure turned out to be the perfect case study, and it pushed us to FINISH decoding the field-entry trigger system (offline/TRIGGER_FIRING_AREAS.md has the full evidence):
+
+- A field entry fires only while standing on a walkmesh poly with **byte14 bit 3** set -- hand-painted entry polys at each gate mouth -- inside the destination's 8192u segment, within per-clause sub-segment coordinate bounds (the long-mysterious "unknown" predicate bits), with vehicle and story gates satisfied. Two old model errors fixed on the way: 0xFF08 is the destination ACTION (not a region test), and programs pair to destinations by segment index.
+- **Timber's firing area is a tiny 314x512-unit wedge.** The seed coordinate was actually inside it -- but the .205 drive pinned at a wall 391 units west, and the rescue orbit swept radii 610-1330u around a patch that lies entirely within 432u: the orbit had a HOLE exactly where the target was. Every logged orbit position is provably outside the area.
+- The model validates against reality: Dollet's successful .205 entry fired precisely on its decoded area's edge, and the known G-Garden/Station/Balamb/Fire-Cavern entrances all sit inside their decoded areas.
+
+What .206 does with it:
+
+1. **A decoded entry-area table** (7 locations: Timber, Dollet, Balamb Town, Balamb Garden, Fire Cavern, Galbadia Garden, Galbadia Station) with a validated aim point and the firing-area bbox each. At drive start, if the destination's target coordinate lies outside its decoded area it is retargeted to the aim point; proven refined coords that are already inside (Timber's seed, G-Garden's entrance) are kept.
+2. **The blind spiral is replaced by MOWING the decoded area.** If the field hasn't fired after the final-approach window, the drive lays serpentine waypoints INSIDE the firing-area bbox (clipped to ~768u around the aim for the big areas) and walks them with the full normal executor -- steering, collision recovery, arrival machinery. Two passes (opposite directions), then the old sweep remains as a last resort for undecoded locations.
+3. **[TRIGREADY] diagnostics** during every final approach: each half-second the log shows whether the character is inside the decoded area and whether the engine's OWN current-poly record carries the entry flag (read live from the engine, no oracle). If an entry ever fails again, one glance separates "right place, wrong poly" from "never reached the area".
+4. Foot-only destinations (no car-entry clause: Timber, Fire Cavern, both Gardens, the Station) are flagged in the log at drive start.
+
+BAT .206: rebuild via deploy.vbs, confirm 0.18.3.206. Drive Dollet -> Timber (the failure case): expect the drive to aim at the gate wedge, and if the trigger doesn't fire on arrival, "Searching the entrance area" followed by a short back-and-forth walk INSIDE the gate mouth -- it should drop into Timber within a pass or two. Then re-confirm Dollet and one Balamb-side entry if convenient (Balamb Town / Fire Cavern use the same table). Watch `[ENTRYAIM]`, `[TRIGREADY]` (entryPoly should flip to 1 right as the field loads), `[ENTRYMOW]`. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+---
+
+## v0.18.3.205
+
+World map (#70): **Fix the .204 freeze -- planning is now hard-budgeted and can never hang the game again.**
+
+What you hit wasn't a crash: the moment auto-drive started, the game thread went INSIDE the route planner and stayed there. The log shows it plainly -- the first plan attempt ran 45 seconds and failed, and the automatic wide-margin retry (a search area four times larger) then ran indefinitely. Music kept playing because audio lives on its own thread; input, footsteps, and the V key all share the frozen game thread. Two .204 changes caused it, both mine: switching the planner's walkability cache from 32-unit to 8-unit resolution cut its hit rate ~16x (nearly every probe became a fresh walkmesh query), and using that fine resolution as a HARD gate severed routes the .203 planner could find -- which is what pushed it into the giant fallback search.
+
+Three fixes, keeping everything .204 added:
+
+1. **The A* hot path is back on the fast 32-unit cache** (proven ~8s plans in .203). The 8-unit sliver-catching fidelity survives exactly where it's cheap: the once-per-plan route validation sweep and the executor's per-frame wall checks (a new separate FootBlocked8 cache).
+2. **The near-wall cost ring is memoized per cell** instead of being recomputed on every edge arrival (it was being evaluated 8x per cell -- a big slice of the 45 seconds).
+3. **Hard wall-clock budget: 10 seconds for the entire planning call.** The A* loop checks the deadline every 2048 expansions and bails; the wrapper stops escalating margins past it, accepts a validation-imperfect plan rather than re-planning (the executor's recovery owns imperfections anyway), and on total failure falls through to the legacy navmesh/road planners so the drive still functions. Worst case from pressing the auto-drive key is now a ~10-second hitch with a spoken drive start after it -- never a hang.
+
+Everything else from .204 (engine-truth learning, wall-follow hysteresis, replan discipline, centerline steering, trigger-circle avoidance, pause-and-resume) is unchanged.
+
+BAT .205: rebuild via deploy.vbs, confirm 0.18.3.205. Expect a hitch of up to ~10s when the Dollet drive starts (watch `[PLAN]` lines: "GRID planner ok" ideally; "A* wall-clock bail"/"budget exhausted" are the new safety valves). Then the same four-location loop: G-Garden -> Dollet, Dollet -> Timber, Timber -> G-Garden, G-Garden -> Station, with the .204 expectations (slow nibbling near walls is normal; `[CAMW-REC]` overlay rising on blocks). Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+---
+
+## v0.18.3.204
+
+World map (#70): **The engine's collision gate is partly STATEFUL -- stop trying to predict it perfectly; learn it, hug centerlines, and recover with discipline.**
+
+The .203 BAT was the decisive experiment. Trigger avoidance worked (zero field entries), the drive crossed 8 km cleanly, and then ground to a halt at the .201 neck in a new signature: engine block -> fan escape -> "waypoint bearing clear" -> blocked again within a second, dozens of times, at bearings our oracle called clear. The offline refit against ALL the data (1,217 accepted steps + 53 logged rejections) proved why no model ever quite fit: **the engine's find-poly uses an 8-entry recently-used triangle cache hit-tested in block-local coordinates without verifying the block** -- a recently-touched mountain triangle from a neighbouring block "captures" later queries. About half of the .203 rejections are simply not predictable by ANY stateless model. Two static facts did emerge: a ~1-unit sliver wall (z=-24936) that point-probes step over, and the corridor's true passable line (centerline z~-25086, ~98u clearance per side -- the .203 route line ran 36-88u from walls, inside the engine's sticky rejection zone).
+
+So .204 stops chasing a perfect oracle and makes the system converge anyway (offline: G-Garden -> Dollet arrives with ZERO replans; still arrives even when the planner is deliberately left on the old wrong model; full 20/20 validation matrix):
+
+- **Swept probes replace point probes** (8u sampling steps -- catches the sliver; same false-rejection rate as before on all walked steps), applied as lazy route validation: the final plan is swept-checked and failing legs get a x6 soft cost with one cheap re-plan, instead of paying the sweep on every A* edge.
+- **Learn on EVERY engine block, trusting the engine over the oracle.** The oracle veto is gone (it's exactly what kept the .203 loop ignorant); repeated blocks at one wall thicken the fence (112/176/240u fallbacks); a prune valve releases learned cells if they'd ever make the goal unplannable (offline, a 9-cell fence once turned G-Garden into a graph island -- the valve is load-bearing).
+- **Wall-follow with hysteresis and commitment.** Exit only after the waypoint bearing sweeps clear 8 frames in a row AND at least 64u of travel; a re-block within 2s resumes the same side with doubled commitment (up to 512u) instead of re-fanning. The fan itself now tries 32 absolute bearings (two full circles) so the one open lane can't be missed.
+- **Replan discipline.** Recovery replans require NEW learned knowledge (else the fence is inflated first so the graph genuinely changes), start at the wide 24.5k margin, and the generic stuck-check is suppressed while recovery runs (in .203 it burned three 10-second replans on identical routes mid-recovery). The terminal give-up is route-based: no 128u of route progress in 40s.
+- **Centerline discipline.** In corridors narrower than ~288u of total side clearance, the aim is offset toward the middle (perpendicular clearance probes, clamp +-96u) -- through the .203 neck this holds exactly the passable line.
+- Near-wall cells cost x4 in the planner, pulling routes to corridor middles to begin with.
+
+Expected behavior on this BAT (offline-calibrated): one plan, no field entries, visibly SLOW "nibbling" progress on wall-adjacent stretches (that's the engine's sticky zone -- normal, not a bug), at most a couple of recovery episodes at the neck, arrival in roughly 2.5-5 minutes for G-Garden -> Dollet.
+
+BAT .204: rebuild via deploy.vbs, confirm 0.18.3.204. G-Garden -> Dollet, then Dollet -> Timber, Timber -> G-Garden, G-Garden -> Station. Key log reads: `[CAMW-REC]` should show blocks being LEARNED immediately (overlay count rising), wall-follows exiting after real travel (not instantly), no more than ~2 replans at any one spot, `[NAVBLK-PRUNE]`/`[PLAN] swept validation` lines are informative not alarming. If it still can't pass the neck, the log now contains everything needed to prove the neck engine-impassable, and the learned fence will push the next plan onto the wide southern detour automatically. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+---
+
+## v0.18.3.203
+
+World map (#70): **Field triggers are regions, not points -- learn their footprints, route around them, and pause-and-resume drives through them.**
+
+The .202 BAT vindicated everything below the surface: steering was flawless (trim within +-4, waypoints ticking, the character marched dead-straight west along the planned route). What killed both drives was the world itself: Galbadia Garden's 'ggview1' field trigger fired **1815 units** from its entrance coordinate -- the entire plateau around the Garden is the trigger -- and the Dollet route clipped it. The drive stopped with "entered field; not arrival", and the retry then wandered into the Station's trigger the same way. Two structural gaps: the mod treated location entrances as points, and an off-target field entry killed the drive entirely.
+
+Three changes:
+
+1. **Learned trigger footprints.** Every off-target field entry during a drive now records the entered location's observed trigger radius (entry distance + margin) into a session table, `[TRIGAVOID]` in the log. The grid planner soft-penalizes route cells inside any known circle that is neither the drive's destination nor the circle the drive starts inside -- that second exemption matches the engine's own behavior, since a trigger you spawn inside stays disarmed until you leave it (which is exactly why drives *leaving* G-Garden never re-entered it). Soft, not hard: if the only corridor crosses a trigger region, the route still goes through and change 3 handles the consequence.
+2. **Seeded the two circles we already know.** G-Garden's plateau (radius 2048) and the Station (radius 1536) are seeded at startup from the .202 observations, so the very first drive of a session routes around them -- no re-learning visit needed.
+3. **Off-target field entry now PAUSES the drive instead of killing it.** The announcement tells you where you ended up and that the drive will continue: "Entered Galbadia Garden, not the destination. Return to the world map and I'll continue to Dollet." The existing world-map re-entry machinery (already used for random encounters) replans and resumes -- and the new plan starts inside the now-disarmed circle with the learned radius on the map, so it walks out cleanly. A pause older than 5 minutes cancels quietly on re-entry (you clearly moved on). This is also how through-travel is *supposed* to work when a trigger region genuinely blocks the only corridor: enter, cross the field, exit the far side, drive continues.
+
+No steering, collision-model, or recovery changes -- .202's camera-write executor, 112u clearance planning, and F3 recovery are untouched and were all working in the BAT log.
+
+BAT .203: rebuild via deploy.vbs, confirm 0.18.3.203. Re-run the loop: G-Garden -> Dollet first (from wherever you are -- if you start on the Garden plateau the circle is disarmed and exempt), then Dollet -> Timber, Timber -> G-Garden, G-Garden -> Station. Watch `[TRIGAVOID]` (seeding at init, "plan avoids N circles" at plan time, any new learning), and if a route must cross a trigger anyway, expect the pause announcement -- walk back out to the world map and the drive should resume by itself ("Resuming drive to..."). Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+---
+
+## v0.18.3.202
+
+World map (#70): **The engine's real collision rule is a 112-unit lookahead -- clearance-aware planning + engine-block recovery.**
+
+The .201 BAT gave us exactly the data needed. The good news first: camera-write steering is CONFIRMED live -- trim stayed within +-9 units, the engine heading tracked every write, and the two short hops (G-Garden, Station) arrived cleanly. The G-Garden -> Dollet freeze was something else entirely, and the offline replication nailed it by fitting the engine's collision rule against all 545 walked steps plus the frozen state (`offline/BAT201_ANALYSIS.md`):
+
+**The engine validates ~112 units AHEAD of the character, not just the 32-unit step.** A step is allowed only if the destination is walkable ground AND a probe ~112u along the heading also lands on foot-walkable terrain. When that probe hits a mountain/ocean poly, the engine hard-blocks -- no wall slide, d+0 -- which is why the character stood immobile aiming at open ground it could see 32u ahead. No 32u model fits the data; the probe-distance window fitted from the log is 101-126u. The .201 route was fine on walkability but wrong on CLEARANCE, and the racing cursor made it worse: the old "no goal-progress -> skip cursor" watchdog misread the legitimate away-from-Dollet leg of the horseshoe route as stalling (goalDist rises for ~7km on that route!), skipped the cursor +4 cells every 1.5s, and the resulting beeline dragged the character 86u off the centerline into the wall's probe cone.
+
+Four changes, all sim-proven (offline suite: the failing route replicated to within 8 units of the logged freeze point; then with the fixes G-Garden -> Dollet arrives with ZERO recoveries, and 20/24 validation pairs pass -- the 4 misses are all Tears' Point, see below):
+
+1. **Clearance-aware planner.** PlanPathGrid's 32u edge sub-march now also rejects non-walkable terrain at each sub-point AND runs the 112u probe along the edge direction from every sub-point (directed edges -- the gate is anisotropic). Routes now leave wall clearance the way the engine demands. Plus: a margin ladder (retry with a ~49k bbox when the 22.5k one fails -- the correct Dollet horseshoe needs ~20k), and goal relaxation (if the exact goal cell is unreachable, path to the nearest reached cell within ~1km and let the arrival radius / entrance sweep finish -- the Fire Cavern pattern). A cached block-lookup keeps plan cost sane.
+2. **Route-progress watchdog (the goalDist cursor skip is DELETED).** Progress is measured along the route (distance to current waypoint + cells remaining); the cursor is never skipped past unreached waypoints. A 4s stall now hands control to the new recovery instead of corrupting the follow.
+3. **Engine-block recovery.** When the character freezes (under 8u of motion across 20 frames) or route progress stalls: fan out bearings around the waypoint bearing until one produces real measured motion, wall-follow it until the waypoint bearing's own 112u probe clears, and if the fan exhausts, retreat along our own breadcrumbs, LEARN the obstacle cell into the discovered-block overlay, and re-plan -- every re-plan now routes around what the drive has actually learned, so the .201 sterile identical-replan loop is structurally gone. (Offline, this recovery alone -- even with the OLD wrong planner -- still got G-Garden -> Dollet home; that's the scalability margin.) Replan budget raised 8 -> 24 since replans are now productive. Waypoint advance radius tightened 192 -> 64 to keep the pursuit line on the verified centerline.
+4. **Product finding -- Tears' Point:** under the fitted engine rule, Tears' Point's walkable pocket is genuinely disconnected on foot from Lunar Gate / Sorceress Memorial (the only gap is a 1-2 cell zigzag the 112u probe can never thread). This matches the game shipping it as a vehicle destination. On-foot validation now excludes it; worth one live confirmation walk sometime.
+
+BAT .202: rebuild via deploy.vbs, confirm 0.18.3.202. Drive G-Garden -> Dollet (the freeze), then Dollet -> Timber, Timber -> G-Garden, and G-Garden -> Galbadia Station -- the four-location free-walk you asked for. Expect `[PLAN]` possibly slower on the first Dollet plan (bigger bbox + probes; watch for a hitch), `[CAMW]` lines now carry `aim`/`rec` (rec=0 normal, 1 fan, 2 wall, 3 retreat), `[CAMW-REC]` narrates any recovery, and `[DRIVE] route-progress stalled` replaces the old no-progress skips. If a drive still freezes, the log will show whether the fitted rule missed (rec cycles without escape) or the planner needs the learned cell (overlay count rising). Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+---
+
+## v0.18.3.201
+
+World map (#70): **Camera-write steering -- the executor now controls the camera, and the engine aims the character itself.**
+
+This build is based on a full reverse-engineering of the world-map camera system from FF8_EN.exe (documented in `offline/CAMERA_EXE_ANALYSIS.md`). The decisive finding: one engine function (0x557A90) recomputes the on-foot move heading EVERY tick, before movement is applied, as `heading = cameraYaw + key*512 + terrainBias/2`. That one line explains years of steering pain: writing the heading register could never stick while a key was held (.156), and pressing 8-way keys could only aim in 45-degree steps of a camera we didn't control -- the calibration bootstrap, empirical unstick, and steering commitment (.159-.200) were all fighting that quantization. It also vindicates the .173 formula: last night's "inconsistent" [CAMYAW] measurements were poisoned by wall-slide (blocked steps slide along the wall edge, so measured motion was the wall direction, not the heading); the camera register was right all along.
+
+So the executor now steers the strongest lever the engine offers -- the camera itself:
+
+- Each frame it writes the camera yaw = bearing to the current waypoint (terrain-bias-compensated), zeroes the camera's follow velocity so the engine's own camera physics can't drift what we wrote, and holds plain UP. The engine then turns the character to exactly that bearing itself (snap within ~9deg, else 45deg/frame -- at most 4 frames), and ALL native movement runs untouched: collision, wall-slide, step counting, random encounters.
+- A closed-loop trim compares actual motion bearing against the aimed bearing on clean moves and slowly nulls any persistent constant error, so a convention offset or un-modeled bias self-corrects instead of wedging.
+- Regions with a locked/forced camera (the frozen yaw 3556 in last night's log) are handled: the lock flag is cleared for the drive and restored when it stops. Scripted cinematic cameras pause the writes entirely.
+- Accessibility win: the camera now always faces the direction of travel while auto-driving, so screen-relative audio cues stay consistent with motion.
+- Second change, executor-adjacent and sim-proven: waypoint advance is now HEIGHT-AWARE. The old 2D "within 192u" test could mark a waypoint reached while the character stood ~200u below it on a ramp; the cursor then aimed past the ramp into the cliff face -- the exact "advanced then wedged" jam from the G-Garden -> Dollet/Timber BATs. The cursor now also requires the character's ground height within 100u of the waypoint's.
+
+Validation: the offline simulator was rebuilt with the full camera transform (camera velocity physics, heading turn rate, terrain bias, step gate, wall slide -- `offline/nav_sim.py`) and run over ALL 24 directed validation routes (Galbadia four: Timber/Dollet/G-Garden/G-Station; Balamb trio; Esthar trio). 24/24 arrive, including both G-Garden -> Dollet and G-Garden -> Timber that wedged live last night; robust to a 180-degree-wrong starting camera, a forced-yaw region lock, and terrain bias of +-64. Results in `offline/SIM_CAMERA_RESULTS.md`. The .200 8-way executor is kept compiled as a fallback (`DRIVE_CAMWRITE` in `world_map_state.inl`).
+
+BAT .201: rebuild via deploy.vbs, confirm 0.18.3.201. First re-drive G-Garden -> Dollet, then G-Garden -> Timber (the two live wedges), then spot-check a known-good pair (Timber -> Dollet). Watch `[CAMW]` lines: `mh` (engine heading) should track `wrote` within ~bias/2 after <=4 frames, `trim` should settle near a constant, and the drives should stop spinning in place. If a drive still wedges, the `[WPADV]`/`[CAMW]` lines will separate planner-vs-executor. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+---
+
+## v0.18.3.200
+
+World map (#70): **Pin both Galbadia destinations to their real coordinates -- Galbadia Garden's entrance is finally known.**
+
+The .199 BAT gave us the two coordinates we've been missing. The station migration worked (log: `Migrated mis-captured coord (-38394,-24803): Galbadia Garden -> Galbadia Station`), and when you walked into the real Galbadia Garden, the new field-identity logging caught it: field **'ggview1'** (fieldId 0x02C8) at **(-37475,-26232)** -- about 1170u south of the map icon and clearly distinct from the station. So both places are now nailed down:
+
+- **Galbadia Garden** is hard-seeded to (-37475,-26232), its real 'ggview1' entrance -- the same approach that made Timber reliable. Auto-drive to G-Garden now aims straight at the entrance instead of orbiting the icon. It's forced after the persisted table loads, so no stale value can override it, and it stays capture-exempt so a drive that strays into the adjacent station can't re-poison it.
+- **Galbadia Station**'s catalog base is corrected to its real coordinate (-38394,-24803). The .199 placeholder was ~800u east of the icon; the station is actually ~920u west, so manual-entry attribution now lands on the right one.
+- The one-time .199 migration block is removed -- it did its job (and both coordinates are now hard-coded), so keeping it would have fought the new seed.
+
+Please confirm on this BAT: driving to "Galbadia Garden" should now enter the Garden ('ggview1') rather than the station. One caveat worth a look -- 'ggview1' reads like a Garden *view* field; if it turns out to be a fly-by rather than the enterable Garden, tell me and I'll hunt for the true interior trigger.
+
+---
+
+## v0.18.3.199
+
+World map (#70): **Turn the mis-captured station into its own destination, and un-poison Galbadia Garden.**
+
+The .198 run drove to G-Garden but entered the adjacent train/Galbadia **station** -- a separate field whose footprint sits right next to the G-Garden map icon -- and the arrival capture then saved the station's coordinate as G-Garden's "entrance." So the mod would "drive to G-Garden" by heading to the station. That station is a real place worth navigating to, and its coordinate is the only record of where it is, so instead of throwing it away we keep it:
+
+1. **New catalog destination "Galbadia Station."** The station had no research marker, so it was never a selectable location. It's now its own entry in the catalog, right beside Galbadia Garden.
+2. **Migrates the discovered coordinate to it, automatically.** On startup, the coordinate that was mis-saved under "Galbadia Garden" is moved to the new Galbadia Station entry and the table is rewritten -- so the station is immediately navigable to its real spot, and Galbadia Garden is cleared. No file editing or log-fishing on your end. (One-time on machines that ran .198; the station keeps refining itself on future visits.)
+3. **Galbadia Garden stays capture-exempt.** Neither auto-drive nor manual walk-in records a coordinate for G-Garden, so the station can't re-poison it. Auto-drive still aims at G-Garden's icon and runs the .197 orbit. Every manual field entry now also logs its field id + name + position, so when you walk into the *real* Galbadia Garden the log will show its exact coordinate and I'll hard-seed it (the way Timber's gate is seeded).
+
+So after this build you'll have both "Galbadia Garden" and "Galbadia Station" as destinations; the station points at the real location we found, and G-Garden is clean and waiting for a confirmed entrance. Other locations are unaffected and still capture normally.
+
+Note on the name: I've called it "Galbadia Station" as a clear placeholder -- tell me if it has a better canonical name and I'll rename it.
+
+---
+
+## v0.18.3.198
+
+World map (#70): **Capture a location's entrance when you walk in manually, not just under auto-drive.**
+
+Answering "did my manual G-Garden entry get captured?" -- no, it didn't, and this fixes that. Until now the entry-capture only ran while an auto-drive was active, so after the orbit gave up and you walked into Galbadia Garden by hand, nothing recorded where its entrance was. Now every time the world map exits into a field with no drive running, the mod pins that spot as the nearest location's refined entry and saves it to the persisted table -- so just playing normally fills in the real entrances.
+
+Guardrails so this can't corrupt good data: it only writes a location that doesn't already have a refined entry (the hand-validated Timber gate / Balamb / Fire Cavern seeds and any drive-captured coord are never overwritten by a looser manual guess), and it only attributes a capture when the exit point is within 3000u of a location icon (catalog locations are kilometres apart, so the match is unambiguous; far-off cutscene fields like the forest ~4700u from the G-Garden icon are ignored). Random-battle exits are ignored too.
+
+Net effect: on the next session, walking into Galbadia Garden once permanently pins its true entrance, and every future auto-drive there aims straight at it.
+
+This build also still carries the .197 orbit change below. The two are orthogonal -- the orbit only runs *during* an auto-drive that's hunting an entrance; the manual capture only runs when you enter *without* a drive -- so a single BAT exercises both without confounding the diagnosis. Say the word if you'd rather I split them.
+
+---
+
+## v0.18.3.197
+
+World map (#70): **Slow the orbit so it reaches its outer rings (G-Garden entry, take 2).**
+
+The .196 orbit worked -- the position trace shows the character cleanly circling the icon -- but it only reached ~643u out, not the intended 900, and gave up. Cause: the angle advanced at a fixed 2.5 rad/s, which outruns the character past ~643u (at radius R the character must walk R*omega u/s; 2.5 rad/s at 900u = 2250 u/s, far above its ~1240 u/s pace), so the outer rings were never actually traced.
+
+This ties the angular speed to what the character can walk at the current radius (omega = ~char_speed / R, capped) so the circle is genuinely traced at every radius, and widens the search to 1500u (250 + 180 per revolution). So the orbit now sweeps the full disk out to 1500u around the icon and should cross G-Garden's offset center trigger.
+
+Honest caveat: on the .196 run the character passed within 11u of the icon without triggering, so G-Garden's entry is definitely offset from the icon, not on it. If 1500u still doesn't reach it, the entry is genuinely far from the map marker (possibly the forest-side approach that showed up earlier), and we'll need to locate it directly rather than search around the icon -- I'll flag that from the next log.
+
+---
+
+## v0.18.3.196
+
+World map (#70): **Spiral-orbit entrance search (fixes Galbadia Garden's first entry).**
+
+Galbadia Garden's icon sits on its visual ring while the field trigger is at the center, offset a few hundred units on flat open ground -- so the character reached the icon (within 6u) but never crossed the trigger, and the old sweep walked forward for 3 seconds from wherever it faced, drifted ~3000u away, and bounced ("you may need to enter on foot"). Shortening the walk (.194) didn't help because the sweep is heading-based and never returns toward the target -- more/shorter probes just drift further.
+
+Replaced the sweep's blind turn-and-walk with a **spiral orbit**: it steers the character AROUND the target on a circle (camera-yaw-based steering, the proven method), advancing the angle each frame and widening the radius each revolution (150 -> 900u). The character circles the icon and crosses the offset center trigger; the instant the field loads, the arrival machinery ends the drive and (with .195) persists the true center coordinate to disk, so the next trip is direct. The orbit never leaves ~900u of the target, so it can't drift out and bounce.
+
+Low-risk: this only runs as the final-approach last resort (towns whose entry is near the icon or a targeted gate -- Dollet, Timber -- load before the sweep engages), and it gives up after 16 revolutions if nothing is found. Together with .195 (persistence), the first successful entry of any icon-offset town now pins it permanently.
+
+---
+
+## v0.18.3.195
+
+World map (#70): **Persist captured entry coordinates to disk (accumulate a real-entrance table).**
+
+Every time the drive successfully enters a location, the mod already captures the exact spot the field loaded -- the real entrance (walled-town gate, open-town center, etc.), which is more accurate than the research icon. Until now that lived only in memory and was lost on restart, which is why Balamb, Fire Cavern and Timber had to be hard-coded. This build writes those captures to a small text file next to the mod DLL (`ff8opc_refined_entries.txt`, name/X/Y per line) on every capture, and loads it at startup (after the hard-coded seeds, so a real captured entrance overrides its estimate). So once any location is entered even once, future trips target its true entrance directly and permanently -- and the file grows toward a complete table of entrances that can eventually ship with the mod so players never deal with this. The file is plain text and safe to share.
+
+Note: this does not yet fix Galbadia Garden's first entry -- that still needs the orbiting final-approach search (its icon is offset from the center trigger and it hasn't captured yet). That's the next build; persistence is the foundation that makes each capture stick once the orbit gets it in.
+
+---
+
+## v0.18.3.194
+
+World map (#70): **Tighten the final-approach sweep into a bounded local entry search (Galbadia Garden).**
+
+G-Garden reaches its map icon to within 6 units but never loads: Galbadia Garden is a large circular structure whose icon sits on the ring, while the field trigger is at the CENTER, offset a few hundred units. That offset isn't in the walkmesh (the ground is uniform terrain -- the ring is part of the visual model, not the mesh) and the game files don't store a separate building-center coordinate (RE confirmed the stored placements equal the offset markers), so there's no coordinate to read; the character has to walk across the center trigger.
+
+The old sweep walked forward for 3 seconds per phase, which drifted the character ~3000u away and bounced ("you may need to enter on foot") instead of covering the area. This build makes it a tight rotating local search: SWEEP_WALK_DURATION_MS 3000 -> 800 (short ~800u probes that stay in the final-approach zone) and SWEEP_MAX_PHASES 6 -> 16 (enough rotating probes to sweep the ring and cross the center). When it crosses the trigger the town loads, and the existing capture-on-success records the true center coordinate -- which is exactly the model center, obtained by walking into it once. After that first entry, trips are direct.
+
+Low-risk by design: the sweep is only the last-resort final-approach behavior (towns whose entry is near the icon, like Dollet and Timber's gate, enter before/at the start of it), and the drift-abort safeguard still catches any runaway. This generalizes to any open town whose icon is offset from its trigger.
+
+---
+
+## v0.18.3.193
+
+World map (#70): **Foot-retry the planner when the vehicle byte latches a bad non-foot value -- fixes "auto-drive keeps forgetting where it's going."**
+
+The long play session exposed a planner failure. Its own `[PLAN-DEBUG]` shows the cause: the drive was planning with `veh=3` (a non-foot vehicle), so every one of the 38 town-entry trigger programs failed its vehicle check ("FAIL veh (player veh=3)"), the walk found zero active regions, and `PlanDrivePath` returned false -- dropping the drive to dumb straight-line steering (`planned=0`). That straight-line mode ignores the route, so the character wandered: the "keeps forgetting where it's going" behavior. Toggling AD off/on re-planned once the locomotion byte had settled, which is why it self-corrected.
+
+Root cause: the world-map locomotion byte occasionally latches a bogus non-foot value (this session it stuck at `s_lastVehicle=33`, a car mode, after the Laguna sequence / random encounters). The planner already reads the debounced `s_lastVehicle`, but a *wrong* debounced value still disables it entirely. Fix: if `MatchProgramForCatalog` finds no program for the read vehicle, **retry as ON-FOOT** before giving up. World-map auto-drive is a foot feature, so a stale vehicle byte can no longer strand the drive on straight-line steering. When the vehicle reads correctly (the normal case) the first match succeeds and nothing changes.
+
+This should also help the G-Garden approach from the same session: those drives were running on the broken `planned=0` steering, so restoring the real planned route should clean up the final approach. (Galbadia Garden's icon is in fully open ground -- no wall/gate, unlike Timber -- so any residual not-entering there is a separate entry-offset the capture-on-success will pin on first successful entry.)
+
+---
+
+## v0.18.3.192
+
+World map (#70): **Target Timber's gate MOUTH (not the throat) so auto-drive walks into the town.**
+
+.191 confirmed the revert was clean (Timber reaches its icon, no Dollet loop). This re-enables the gate fix correctly. The .190 mistake was aiming at the gate *throat* (-22532,-5603), a road cell 7/8 enclosed by wall -- so boxed in that the clearance-weighted planner detoured 55km and looped back into Dollet. Profiling the road north from the icon shows why: it runs at zero wall-adjacency for ~480u, then closes into a gate and dead-ends at the town wall (y=-5539). The right target is the **last open road cell at that threshold, (-22564,-5507)** -- only 4/8 enclosed, reached by a straight open road. So the route stays ~35km heading away from Dollet (no detour, no loop), and the character finishes right at Timber's entrance instead of ~640u short at the icon.
+
+Seeded (-22564,-5507) as Timber's refined-entry default (same mechanism as Balamb/Fire Cavern). If the threshold doesn't auto-trigger the field, the character is now at the gate itself (vs far outside), so worst case is no worse than .189 -- and it can't loop back into Dollet. Other walled towns (Deling) still pending the same mouth-based treatment after this validates.
+
+---
+
+## v0.18.3.191
+
+World map (#70): **Revert the .190 Timber gate seed -- it caused a 55km detour that looped back into Dollet.**
+
+The .190 BAT regressed Dollet->Timber: auto-drive kept running back into Dollet. Cause: the gate coordinate I seeded for Timber (-22532,-5603) is the gate *throat* -- a road cell 7/8 enclosed by wall. Targeting a cell that deep in a pocket made the planner build a pathological ~55km route to reach it (vs ~35km straight), and that route immediately looped the character back across Dollet's own entry trigger right after it exited Dollet, so it re-entered Dollet on a loop.
+
+Reverted to the icon (Timber returns to .189 behavior: reaches the icon, doesn't auto-enter). The gate concept is still correct -- Timber is genuinely walled and the entrance is the road gate -- but two things need rework before re-enabling it: (1) aim at the gate MOUTH on the natural approach road (the last open road cell before the wall), not the enclosed throat, so the route stays sensible; and (2) handle the just-exited-town re-entry (when a drive starts at the town the player just left, the character is standing on that town's trigger, so the first leg must steer away from it before pursuing the route).
+
+---
+
+## v0.18.3.190
+
+World map (#70): **Target walled towns' road GATE instead of their icon (Timber entry fix).**
+
+The .189 BAT reached Timber's icon but never entered it: the character walked to within 1 unit of the icon and sat ~6 seconds with no field-load, because the icon (-22564,-4867) sits ~630u OUTSIDE Timber's wall. With the .189 walkability fix, the wall is now visible, and the geometry is unambiguous: a terrain-28 road runs north from the icon and threads a narrow GATE into Timber's non-walkable wall structure. The entrance is that gate, not the icon. (Open towns -- Dollet, the Gardens -- have their entry on open road right by the icon, which is why they already worked.)
+
+So this isn't a coordinate that exists in the game files (three reverse-engineering passes + an online search confirmed FF8 stores no town->entry-coordinate table; entry is a region/footprint crossing). It's geometry we can now read from the corrected walkmesh. An offline gate-finder follows the road from each town icon and, where the road runs into a wall-enclosed pocket, takes the road cell most enclosed by non-walkable wall (the gate throat). Across all 22 enterable catalog towns it flags exactly two as walled -- Timber and Deling City -- and leaves the other 20 on their icons. Timber's gate computed to (-22532,-5603), validated to ~116u of an independent road-dead-end estimate.
+
+This build seeds **Timber's gate (-22532,-5603)** as a refined-entry default (the same mechanism that hard-codes Balamb Town and Fire Cavern), so auto-drive targets the gate and walks through the entrance. Deling City (gate estimate 2078u from its icon) is held back pending validation -- its offset is large enough that I want a BAT to confirm before trusting it. The runtime capture-on-success still pins the exact trigger on first entry.
+
+---
+
+## v0.18.3.189
+
+World map (#70): **Use the engine's real on-foot walkability flag (poly[0x0F] bit7) so the planner stops routing onto surfaces the engine refuses.**
+
+This is the root cause behind the canyon stall, the .187 flat-ground freeze, and every "engine blocks where my model says walkable" we've chased. Aaron's question -- don't we already have the walkmesh? -- was right: `world/wmx.obj` is the full walkmesh, and the engine's per-polygon on-foot walkable flag is **byte 0x0F, bit 7**. The mod was deciding walkability from terrain type instead (ocean-only exclusion), and an earlier attempt (.105) used byte **0x0E** -- the wrong byte -- found it broke routes, and concluded "walkability isn't a flag, it's the step gate." It is a flag; it was just read one byte off.
+
+Proof on wmx.obj: bit7 of byte 0x0F is SET on every land/road polygon and CLEAR on all 315,777 ocean polygons AND all ~54,291 cliff-face (terrain-29) polygons -- 55,713 polys (11.8%) the mod was treating as walkable that the engine refuses on foot. Offline spot-checks after the fix: the Dollet canyon cliff -> non-walkable; the (-21984,-26304) flat spot the .187 BAT froze on, its north neighbor -> non-walkable (matching the freeze exactly); the Dollet rim and ordinary ground -> still walkable.
+
+Fix: the navmesh feed now adds a triangle only when `(poly[0x0F] & 0x80) != 0`. Since the GRID planner's edge oracle (`WorldGroundHeightLocal`) reads the navmesh, cliffs now return NO_GROUND and A* routes around them on the gentle road/land surfaces (bit7 set) the engine actually walks. The `EDGE_GATE` stays reverted at 200; this flag, not a slope number, is the correct walkability test, and it should also reduce the overhang height-mispicks (overlapping non-walkable polys are no longer candidates).
+
+One caveat to confirm on BAT: if the only Dollet->Timber connection was through cliff polys, the planner will now report no foot route rather than wedging -- the log's `[PLAN]` line will show whether it found the around-route. `[MFRAME]` stays on. The offline oracle (`ff8_walkmesh.py`) was corrected to the same flag.
+
+---
+
+## v0.18.3.188
+
+World map (#70): **Revert the .187 edge-gate change (it regressed ->Dollet); record what the data now proves about the real blocker.**
+
+The .187 `EDGE_GATE=24` experiment regressed ->Dollet -- it failed 14km out instead of arriving. The `[MFRAME]` capture shows why, and it's important: tightening the gate rerouted the drive through (-21984,-26304), which is **flat, open, high ground** (height ~-120, oracle and engine agree exactly, all 8 directions <24/32u). The character held UP there for 150ms+ and **did not move** -- frozen on terrain that is walkable by every height measure. So the engine refused movement at a spot with no height obstacle at all.
+
+That rules out the slope/gate theory as the *general* explanation: the engine also blocks at **walkmesh-region boundaries** -- the edge of the connected walkable surface -- which a height-only model (our oracle, and therefore the planner and the executor probe) simply cannot see. The .187 gate didn't cause this; it only steered a previously-working leg into a spot where it bites. A gate value can't fix a boundary that isn't a height difference.
+
+This build reverts EDGE_GATE to 200, restoring the .186 behavior (->Dollet arrives; Dollet->Timber still stalls at the canyon, unchanged). The `[MFRAME]` diagnostic stays on -- every frame where the character holds a key on walkable-height ground but doesn't move is a direct sample of a real walkmesh boundary, which is exactly the data needed to reconstruct the engine's true walkable topology (the missing layer above height). That topology -- not another gate tweak -- is the next thing to build.
+
+---
+
+## v0.18.3.187
+
+World map (#70): **Recalibrate the planner's edge gate to the engine's real walk limit (~24/32u, measured) so it stops routing down un-walkable cliffs.**
+
+The .186 `[MFRAME]` capture answered the Dollet->Timber stall conclusively. Two facts from the real run:
+
+1. **The heights were never wrong.** The engine's true ground (`eZ`) and our oracle (`oZ`) agreed within 1 unit across all 2247 frames -- zero disagreements. Not a mesh problem.
+
+2. **The engine's real per-step walk limit is ~24, not 200.** Across 1927 logged on-foot moves the engine *never* took a step steeper than ~23 height per 32u (a hard ceiling; p99 = 20, max = 23), and it was flatly blocked trying to descend the canyon ramp leaving Dollet at 65-90/32u. The planner's edge gate was 200 -- about 8x too lenient -- so it routed the character straight down a cliff the engine refuses to walk, and it pinned on the rim sliding east-west.
+
+This also explains Aaron's question -- "why can it reach Dollet but not leave it the same way?": it is *not* the same way. Tracing both drives' positions, ->Dollet approached entirely on gentle high ground from the northwest (heights -148..-858) and never touched the canyon; Dollet->Timber gets aimed straight into it. The planner picked the cliff because, at gate 200, the descent looked both walkable and shorter than the long way around.
+
+Fix: split the planner gate. The clearance/snap heuristics keep the looser 200, but the **hard A\* edge-traversal check** now uses `EDGE_GATE = 24` -- the measured engine ceiling. The 0xC8=200 RE'd earlier is presumably in finer engine height units or over a larger step than this 32u sub-march. With the canyon descent correctly blocked, A* must route Dollet->Timber around it on the same gentle high ground ->Dollet proved walkable. Per-32u offline flood-fill confirms a gate-24 path stays on the rim/high ground (the canyon descent only "opens" at gate 32, which is why 24 keeps the planner off it). Executor probe gates are intentionally left at 200 for this build to isolate the change -- the new route avoids steep terrain, so the on-foot probe never faces it. `[MFRAME]` stays on to confirm the new route is followed.
+
+---
+
+## v0.18.3.186
+
+World map (#70): **No-progress cursor skip -- unstick the drive from an unreachable waypoint above the Dollet canyon.**
+
+The .185 BAT reached Dollet cleanly (and with the teleport gone, zero teleports), but stalled leaving Dollet for Timber. Diagnosis from the world log + the stuck-screenshot + the offline mesh: the character drifted ~420u off the planned centerline onto a grassy ledge at the lip of the canyon. The next route waypoint sits across a cliff steeper than the engine's step gate (a -225u drop over 32u), so the character can never get within the 192u threshold that advances the pursuit cursor. The cursor stuck at the same waypoint, the character kept aiming at that unreachable point, and -- because it could still wall-slide a little each frame -- it oscillated in place (camera-relative steering flipping between two wall-slide keys). The empirical fan-out recovery (.185) never engaged because that keys off NO MOVEMENT, and the character was always nominally moving.
+
+Fix: a no-progress watchdog on the pursuit cursor. If the drive hasn't gotten meaningfully closer to the destination (>150u) for ~1.5s, skip the cursor forward a few cells so the aim moves PAST the unreachable waypoint onto one the character can actually reach (the planned route winds around the cliff). It is rate-limited and bounded (a few cells per window, never 1/frame), so it cannot run away like the pre-.183 cursor did -- and with the pinch teleport gone, an over-skip merely makes the character walk natively toward a slightly-further waypoint instead of teleporting. Legitimate walking always shows far more than 150u of progress per window, so the watchdog only fires on a true stall.
+
+Honest note on validation: the offline simulator could not reproduce this specific micro-trap -- its mesh oracle is too coarse to model the engine's exact wall-slide direction (in-game, UP slides to ~123deg; the offline model slides to the nearest 45deg key), so the simulated character always completes the leg. The mechanism here is nonetheless pinned conclusively from the real world log, the stuck-position geometry, and the screenshot. The `[DRIVE] no-progress -> skip cursor` diagnostic is logged so the next BAT will show whether/where it fires.
+
+Sim-fidelity capture (this build): added an unthrottled per-frame `[MFRAME]` log during auto-drive (`WM_MOTION_DIAG`, world log). Each line records the position and character Z, the camera-yaw register, the bearing the executor *intended* (`ib = cam + hand*navK*512`), the engine's true ground height (`eZ`, `0x0203FE30`) vs our oracle (`oZ`), the cursor index, the keys held, and a millisecond timestamp. Offline this lets the simulator learn the two things it currently can't model: (1) the engine's exact wall-slide -- intended bearing vs the actual motion measured between consecutive frames -- and (2) a dense engine-truth ground map (eZ) over every position driven, to correct the oracle-miss cells map-wide. It also yields per-frame dt for an exact speed model. Diagnostic-only; set `WM_MOTION_DIAG` to 0 to silence.
+
+---
+
+## v0.18.3.185
+
+World map (#70): **Disable the pinch teleport; make native walking reliable with fan-out recovery.**
+
+Aaron's call: the pinch-point teleport was firing far too often, becoming a crutch, and risking downstream complications. Disabled it. Two findings from the .183/.184 logs and the offline sim drove the replacement:
+
+1. **Native walking already completes legs without teleporting.** The .183 ->Dollet drive arrived with **zero** teleports, escaping all three real jams on its own. The teleport only fired on Dollet->Timber, where the stale-Z grounding then cascaded it the whole way. So the teleport was never load-bearing for arrival -- only for masking slow recovery.
+
+2. **The wedges are oracle-invisible and the recovery sweep was mis-ordered.** Of 86 frozen frames on the smooth ->Dollet drive, 0 were walls the planner/oracle predicts and 77 were "oracle-miss" -- the engine blocked movement on terrain my height model reads as flat and open in all 8 directions (thin collision edges the coarse height sampling misses). These can't be predicted from geometry; the only fix is *measured* recovery. But the empirical-unstick swept the 8 keys blindly (0,1,2..7), so it often held a key pointing backwards and crawled or never escaped -- the 12-frame jam that only broke when the camera happened to rotate.
+
+Fix: the empirical recovery now **fans out around the current target direction** (goal heading first, then +/-1, +/-2...), re-centered each frame on the live camera yaw, so it locks onto a walkable heading toward the waypoint within a step or two. Offline executor sim (calibrated to the logged physics: ~62 units/frame, bearing = camera_yaw + key*512): blind sweep completed 5/18 legs under harsh synthetic walls, fan-out completed 13/18 harsh and **35/36 at the realistic ~10% wall density the game actually shows**. On a hard stuck the drive now re-plans instead of teleporting; only the final-approach town-entry write (needed to cross the entry trigger) remains. Camera-yaw / `[YAWDRIVE]` / `[OBAD]` diagnostics stay in to confirm the jams clear natively.
+
+---
+
+## v0.18.3.184
+
+World map (#70): **Ground teleports at the oracle height, not the stale engine register -- the real cause of "it kept teleporting" on Dollet -> Timber.**
+
+The .183 Dollet -> Timber log showed 4 teleports clustered just outside Dollet, every landing `d+0` (frozen) even though all 8 directions at those cells were walkable. Root cause: the .178 pinch-assist grounded each teleport at the engine register `0x0203FE30`, preferring it over our oracle whenever they disagreed by >120u. But that register is **stale immediately after a position-write** -- it still holds the previous cell's height until the engine re-settles the character by walking. At the snap cell the stale engine read -786 while the oracle read -1271 (the oracle matches the engine's height function exactly during real walking, diff 0), so the .178 rule grounded the character at -786 -- **485u above the true ground**. Floating -> the engine refuses key input -> `d+0` frozen -> the stuck check fires the pinch again -> it hops the whole way to Timber. (The "camera looks different leaving Dollet" symptom was a red herring: the camera-yaw error was huge only *because* the char was frozen, with no clean motion to measure; while actually moving the camera error was ~7 units.)
+
+Fix: teleport grounding (both the snap and every burst step) now uses the oracle height `WorldGroundHeightLocal`, falling back to the engine register only when the oracle has no ground (ocean/void). The .177 "overhang" that originally motivated .178 was itself a stale engine read, not a real overlap. Diagnostics (`[TELEZ]`, `[OBAD]`, `[CAMYAW]`) left in to confirm the post-teleport freeze is gone.
+
+---
+
+## v0.18.3.183
+
+World map (#70): **Fix the runaway pursuit cursor -- the bug behind "it teleported the whole way to Timber."**
+
+Answering Aaron's question: in the .181 Dollet->Timber run the character DID teleport almost the entire way -- and it was a flaw in the .181 pursuit advance, not intended behavior. The log showed the character stuck near Dollet at (-16098,-37102) (dist ~32800 from Timber) while the cursor `idx` ran from 2 to 264/265. Then one assist snapped the character from Dollet straight to Timber's doorstep (dist 67) in a single ~32000u teleport.
+
+Root cause: the .181 pursuit advance set `cursor = nearest-forward-waypoint + 1` by scanning the WHOLE remaining route with NO distance guard. When the character is stuck, the "nearest forward waypoint" is just the current cursor, so the cursor advances by 1 every frame and runs to the route END regardless of where the character is -- and the pinch-assist then position-writes the character onto that runaway cursor (the far end). (->Dollet worked because the character actually walked, so the cursor legitimately tracked it.)
+
+Fix: scan only a small window ahead (6 waypoints) and ONLY advance the cursor when the character is actually within ~192u of a forward waypoint. So the cursor tracks the character as it walks but cannot run ahead while it's stuck -- and if a genuine stall does trigger the assist, it snaps a SHORT distance to the nearby cursor, not the whole route. Files: `world_map_drive.inl`. This is on top of .182's final-approach town entry, so a clean Dollet->Timber run should now WALK the route and ENTER Timber.
+
+BAT .183: REBUILD via deploy.vbs, confirm Version 0.18.3.183. Drive Dollet->Timber. Expect the character to WALK the route (occasional short assist only at genuine pinches, not one giant jump) and enter Timber at the end. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.182
+
+World map (#70): **Final-approach town entry via position-write -- the character now crosses the entry trigger instead of stalling at the doorstep.**
+
+.181 was a big win: only 1 teleport in the whole session, ->Dollet ARRIVED, and Dollet->Timber navigated all the way down to dist=67 -- Timber's doorstep -- through many random encounters. So navigation is essentially solved. The remaining failure is the FINAL APPROACH: at the route END there's no pursuit lookahead, so the native executor orbits the fixed target, gets stuck ~67u short, and the on-foot SWEEP fires -- which freezes (the sweep is heading-based and can't steer on-foot screen-relative movement; the log showed the position frozen at (-22592,-4928) cycling sweep phases). The terrain to the target is fully open and the target cell is walkable, so the character was just stuck circling outside the entry.
+
+Fix: on foot, when stuck in final approach, write the character ONTO the target instead of sweeping. Position-write is proven to cross a town-entry trigger -- that's how .158 entered Dollet -- and it's grounded at the engine's true height (.178). This is a short, controlled final hop onto the destination (the place where preserving encounters no longer matters). Replaces the broken on-foot sweep. Files: `world_map_drive.inl`. One behavioral change vs .181; pursuit advance, commitment, grounding, and diagnostics all stay.
+
+BAT .182: REBUILD via deploy.vbs, confirm Version 0.18.3.182. Drive Dollet->Timber (and Timber->Dollet). Expect the full trip to complete -- the character should walk the route and actually ENTER Timber at the end (the rising-shimmer cue will play for the final entry hop). Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.181
+
+World map (#70): **Pursuit cursor advance -- aim at a moving point just ahead of the character instead of trying to hit each waypoint within 80u. Stops the orbit/overshoot that the .180 commitment exposed.**
+
+.180's commitment fixed the d+0 freeze (the character now MOVES, d+62), but the .180 log showed the next layer: it ORBITS the close waypoint. 8-way movement (45deg granularity) overshoots a fixed close target, so it never gets within the 80u advance threshold -- it oscillated 124-208u from the waypoint, moving but never advancing, until the stuck-check teleported. Nine teleports, all this pattern.
+
+Fix: replace the "advance only within 80u" cursor rule with PURSUIT advance -- each frame, set the cursor just ahead of the character's NEAREST route waypoint (never backward). The steer target is then a stable point ~1 cell ahead that moves forward with the character, so the bearing stays steady (no dither), the key stays held (the engine gets its sustained press), and the character flows THROUGH waypoints instead of orbiting them. The faithful key-hold sim confirms pursuit advance gives a stable held key and removes the orbit. .180 commitment stays (complementary), as do the diagnostics. One behavioral change vs .180.
+
+BAT .181: REBUILD via deploy.vbs, confirm Version 0.18.3.181. Drive Timber<->Dollet both ways. Expect the character to walk smoothly along the route with far fewer teleport shimmers -- it should no longer circle waypoints. Send Logs/ff8_world.log (dense [YAWDRIVE] should show steady forward progress, idx climbing smoothly). LOCAL; NOT pushed.
+
+## v0.18.3.180
+
+World map (#70): **Steering commitment -- hold each key ~150ms instead of re-deciding every frame. Fixes the dither that was the real cause of the teleports.**
+
+The .179 dense diagnostics nailed it. The route is fine (gate-legal, gradual) and the terrain at the stall is fully open (all 8 directions walkable, the path to the next waypoint a gentle ramp). The teleports come from a STEERING DITHER: as the character nears a waypoint, the bearing to that (close) target swings every frame, so the chosen key flips every frame -- and the engine only translates the character on a SUSTAINED key hold, so the rapid flipping produces d+0 (frozen in open terrain) until the stuck-check teleports. The move-heading register swinging 100->3700->4000 every frame with d+0 was the smoking gun.
+
+This also explains why my sim never reproduced it: the sim applied the chosen key instantly each frame with no press/release cost. I added a key-hold model to the sim (move only on a sustained hold), which reproduced the teleporting -- and confirmed that COMMITTING to a key fixes it (re-deciding every frame: teleports; holding ~4 frames: near zero).
+
+Fix (`world_map_drive.inl`): once the running probe picks a key, hold it ~150ms before re-deciding -- a low-frequency steering loop that re-aims often enough to follow the route but slow enough that the engine gets a real sustained press. It switches early only if the held key becomes blocked. Bootstrap and empirical-unstick keep managing their own keys. One behavioral change vs .179; .178 grounding and the .179 diagnostics stay in so this BAT also confirms the dither is gone.
+
+BAT .180: REBUILD via deploy.vbs, confirm Version 0.18.3.180. Drive Timber<->Dollet both ways. Expect far fewer teleport shimmers -- the character should walk smoothly through the spots that dithered/teleported before. Send Logs/ff8_world.log (the dense [YAWDRIVE] should now show sustained d+ instead of the 0/32/0 flutter). LOCAL; NOT pushed.
+
+## v0.18.3.179
+
+World map (#70): **Diagnostic build: dump the planned route + denser movement log -- the one piece of data I can't get offline.**
+
+I did the full offline deconstruction you asked for, and it ruled out the obvious suspects: (1) my offline mesh is IDENTICAL to the mod's runtime mesh -- my height query matches the in-game `ourHL` on all 1353 samples (diff 0), and both match the engine during real walking (diff ~1), so the mesh is correct and we do NOT need to extract game files; (2) a clean, fully gate-legal route to Dollet EXISTS -- plain/clearance/road A* all find it (0 bad edges); (3) the executor threads that clean route in the sim with zero teleports under both wall-slide and no-slide physics. So the sim cannot reproduce the in-game teleporting, which means the real cause is one of two things I can't observe offline: the in-game planner produced a DIFFERENT (worse) route than my clean one, or the engine's real per-frame movement stalls where the sim doesn't.
+
+This build adds the data to settle it (no navigation behavior change vs .178; .178's grounding stays):
+1. **`[ROUTEDUMP]`** -- logs the full planned route (every waypoint) once per (re)plan. Comparing the in-game waypoints to my offline clean route tells me directly whether the planner is the problem.
+2. **Denser movement log** -- `[YAWDRIVE]` throttle 200ms -> 50ms, for the per-frame key->position movement model (to match the engine's real movement physics in the sim if the route turns out fine).
+
+Files: `world_map_drive.inl` (ROUTEDUMP), `world_map_state.inl` (diag interval). Read-only diagnostics.
+
+BAT .179: REBUILD via deploy.vbs, confirm Version 0.18.3.179. Drive Timber->Dollet. Send Logs/ff8_world.log -- the `[ROUTEDUMP]` block (the full route) and the denser `[YAWDRIVE]` lines are what I need. This should be the last diagnostic build before I can fix the actual cause in the sim and validate it. LOCAL; NOT pushed.
+
+## v0.18.3.178
+
+World map (#70): **Ground teleports at the engine's TRUE height at overhang cells -- fixes the post-teleport freeze that the empirical workaround couldn't (you can't move a frozen character).**
+
+The .177 log (4 teleports ->Dollet) showed .176's empirical steering only fired at ONE cell and still teleported there with d+0 -- a FROZEN character, which empirical can't move. Root cause, confirmed from the [TELEZ]/[GROUNDHL] data: at overhang cells our oracle height is wrong by hundreds of units (e.g. oraH=-221 where the engine's true height is -551), and .174 grounds the teleport at that WRONG oracle Z -> the character floats ~330u above the real ground -> the engine refuses to move it -> frozen -> re-teleport (the -27368 wedge).
+
+Fix: at teleport time, compare the engine's true current height (0x0203FE30) to our oracle; if they disagree (>120u) the cell is a flat overhang and the engine height is the correct ground, so ground the whole teleport burst at the engine height instead of the bad oracle Z. On normal/descending ground (oracle agrees) we keep the per-cell oracle height so descents still ground right. Files: `world_map_drive.inl`. One behavioral change vs .177 (.177's diagnostics stay in).
+
+This should make the overhang-cell teleports RECOVER (character grounded -> native/empirical can walk on) instead of freezing-and-re-teleporting. It does NOT change the steep-ramp teleports (start-climb, canyon descent) -- those are the genuine 8-way-on-steep-grade limit, and the real fix for them is correcting the height model at the source, which needs the runtime-mesh reverse-engineering I'm doing offline from the .177 [RTRAW] dump.
+
+BAT .178: REBUILD via deploy.vbs, confirm Version 0.18.3.178. Drive Timber<->Dollet both ways. Expect the wedge/freeze teleports (the ones that repeated at one spot) to be gone; some ramp teleports may remain. Send Logs/ff8_world.log (the [TELEZ] lines now show whether engine-true grounding was used). LOCAL; NOT pushed.
+
+## v0.18.3.177
+
+World map (#70): **.176 navigation fix + diagnostic data capture in one BAT.** Adds the data I need to make the offline sim faithful, riding on top of .176's empirical-at-bad-cells steering.
+
+Two data additions (no navigation behavior change vs .176):
+1. **Dense engine-truth heights** -- the `[GROUNDHL]` height sampler (our height vs the engine's true 0x0203FE30, every frame the player moves) was throttled to 250ms; now 60ms (4x denser). This gives a dense map of true heights vs our oracle along the driven corridors -- exactly where the oracle is wrong -- so I can make the sim faithful for those routes and characterize the overhang cells.
+2. **Raw runtime-walkmesh hex dump** (`[RTRAW]`) -- the existing structured runtime-mesh dump has never parsed correctly (adjacency reads fault; the in-memory layout was never solved). So instead of guessing the structure in-mod, this dumps 8192 raw bytes from the runtime mesh descriptor (0x020402DC -> descBase) once per session. I'll reverse-engineer the real layout OFFLINE by cross-referencing it against wmx.obj. That's the path to fixing the ~15% height-model errors at their source (the engine surfaces my offline mesh is missing) and finally making the sim match the engine map-wide.
+
+Both are read-only diagnostics (SEH-guarded). Files: `world_map.cpp`. Version bump over .176 so the build validates; the navigation logic is exactly .176.
+
+BAT .177: REBUILD via deploy.vbs, confirm Version 0.18.3.177. Drive Timber<->Dollet both ways (this tests .176's empirical steering -- listen for fewer teleport shimmers). Send Logs/ff8_world.log -- it now also contains the dense [GROUNDHL] samples and the one-time [RTRAW] hex block I need to improve the sim. LOCAL; NOT pushed.
+
+## v0.18.3.176
+
+World map (#70): **Found the root cause -- the offline height model is wrong at ~15% of cells. Detect those cells (engine height vs our height disagree) and drive empirically off the engine there instead of trusting the bad oracle.**
+
+Stepping back and mining the .175 log (17 teleports across ->Dollet and ->Timber) found the underlying problem behind ALL the wedges/stalls/teleports: `WorldGroundHeightLocal` is wrong at ~15% of cells. It's usually perfect (median diff 1u vs the engine's true height) but at overhang/overlap cells it's off by up to 802u -- the engine stands on a LOWER surface that our offline mesh (parsed from wmx.obj) doesn't even contain (e.g. engine -551 where our mesh only has -132; engine -883 where our mesh tops out at -710). At those cells: the oracle-gated probe approves steps the engine blocks (-> wedge, the d+0 chains), the teleport grounds the character at the wrong Z (-> float -> freeze), and the planner mis-gates. My offline sim CANNOT catch this because the sim's collision *is* the oracle -- so there's no oracle-vs-engine gap to reproduce. That's why every executor tweak only half-worked.
+
+The engine, however, exposes the character's TRUE current ground height at 0x0203FE30. This build reads it each frame and compares to our oracle; when they disagree by >120u the oracle is untrustworthy at that cell, so the executor DROPS oracle-gated steering and drives EMPIRICALLY -- exact-yaw direction (0x0203ED02, confirmed) plus the engine's real measured movement -- until it's back on ground the oracle gets right. The engine's real collision becomes the source of truth exactly where our model is blind. A `[OBAD]` diag logs each such cell (engH vs oraH). Files: `world_map_drive.inl`. One behavioral change vs .175.
+
+Honest caveat: this can't be validated in my offline sim (sim == oracle), so the BAT is the test. The proper long-term fix is to make the sim faithful by dumping the engine's RUNTIME walkmesh (there's a DumpRuntimeWalkability diagnostic) and loading it offline -- then I could fix the mesh/height model directly and validate. If this empirical-at-bad-cells approach helps but isn't enough, that runtime-mesh dump is the next step.
+
+BAT .176: REBUILD via deploy.vbs, confirm Version 0.18.3.176. Drive Timber<->Dollet both ways. Expect fewer teleport shimmers, especially at the spots that wedged before (the start region and the x~-22464 corridor). Send Logs/ff8_world.log -- the [OBAD] lines show where the oracle is wrong and whether empirical steering carried the character through. LOCAL; NOT pushed.
+
+## v0.18.3.175
+
+World map (#70): **Staircase along the route on steep ramps -- prefer the key closest to the path direction that still progresses, so native threads the ramps instead of drifting off and teleporting.**
+
+.174 was a big win (teleports 11->3, native walking ~30%->73%, reached the canyon, encounters rolling). Analyzing the 3 remaining teleports: all three are gate-legal but STEEP RAMPS -- the mandatory start-region climb and the canyon descent into the basin (the steepness penalty can't avoid them; the descent is geometrically required since Dollet sits in low terrain). At those ramps the character was MOVING and closing distance, then stalled: the probe optimizes raw distance-to-waypoint, so when the direct (path-direction) key hits the steep grade and is gate-blocked, the greedy pick veers SIDEWAYS off the gate-legal centerline and the character drifts into the wall beside the ramp. A human descends by staircasing along the ramp.
+
+This build makes the probe do that: PORD is ordered nearest-to-path first (direct, then +/-1, +/-2 ...), and it now takes the CLOSEST-to-path key that still makes forward progress (>4u), instead of the greediest. So when the direct key is gate-blocked on a ramp, it steps to the adjacent key that hugs the ramp (staircase) rather than the sideways key that maximizes distance reduction. Falls back to the old greedy pick if nothing within the path cone progresses. Builds on the .173 exact-yaw steering and .174 grounding. Files: `world_map_drive.inl` (one-line selection change in the native probe). One behavioral change vs .174.
+
+This is an executor change my offline sim can't fully validate (it's too idealized to reproduce the in-game ramp drift), so the BAT is the test. It's conservative -- it only changes which walkable key is chosen when several progress, and falls back to prior behavior -- so worst case it's no worse than .174.
+
+BAT .175: REBUILD via deploy.vbs, confirm Version 0.18.3.175. Drive Timber<->Dollet (both directions -- especially Dollet->Timber). Listen for fewer teleport shimmers, particularly on the climbs/descents. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.174
+
+World map (#70): **Ground the character on teleport (write Z) -- fix the post-teleport freeze that was causing the teleport chains.**
+
+Good news from .173: the camera-yaw register fix is CONFIRMED working. `[CAMYAW]` shows the register (0x0203ED02) predicts the actual motion within ~1deg on clean steps (reg=3595 -> pred=523, meas=512). Exact steering works and native walks open terrain.
+
+The remaining problem, now pinned down: after a position-write teleport the character FREEZES -- `d+0` on every key at the exact landing spot -- while the move-heading register keeps swinging as the empirical sweep cycles keys. So the engine RECEIVES input (facing changes) but refuses to TRANSLATE the character. That's the signature of an UNGROUNDED character (the engine won't let you walk in the air). On Dollet->Timber it froze after every teleport and re-teleported like clockwork every 8 waypoints; that's the "still teleporting a lot" you saw.
+
+Root cause: `WriteWorldMapPosition` wrote X/Y but not Z, on the assumption (from the .157 note) that the engine snaps Z to the walkmesh each frame. The .173 freeze shows it does NOT after a far jump -- the character is left ungrounded and immovable. Fix: write Z (our validated `WorldGroundHeightLocal`, which matches the engine's height within ~14u) along with X/Y on every teleport step, so the character lands grounded and native key-movement works immediately. Also added a one-line `[TELEZ]` diag (our Z vs the engine's Z/height at the snap) to confirm the Z convention in the log.
+
+This is a hypothesis-driven fix: the engine freeze is internal state my offline walkmesh sim can't reproduce, so the BAT is the test. If `[TELEZ]` shows our Z is wildly off the engine's, the convention differs and I'll correct it; if grounding doesn't un-freeze, the cause is a stale walkmesh-node cache instead and I'll target that next. Files: `world_map_drive.inl`. One behavioral change vs .173.
+
+BAT .174: REBUILD via deploy.vbs, confirm Version 0.18.3.174. Drive Dollet<->Timber. Expect: after a teleport the character actually WALKS (native resumes) instead of freezing, so far fewer teleport shimmers. Send Logs/ff8_world.log (the [TELEZ] and post-teleport [YAWDRIVE] d+ values are the key data). LOCAL; NOT pushed.
+
+## v0.18.3.173
+
+World map (#70): **Steer by the REAL camera yaw (register 0x0203ED02) instead of learning it from motion -- the core reliability fix.**
+
+The step-back diagnosis: native walking was unreliable because the executor LEARNED the screen->world camera angle from noisy motion feedback, and the residual error drifted the character off pinches (causing the orbits/teleport-spam). Our own prior RE (the v0.18.3.79 [YAWPROBE] BAT) already proved the fixed per-region camera yaw lives at 0x0203ED02 -- holding UP walks the world bearing == that yaw within ~1deg, and RIGHT = yaw+90 clockwise -- but the executor wasn't reading it.
+
+This build reads 0x0203ED02 each frame and uses it directly as the world bearing of screen-UP (`s_navTheta = camYaw`, hand=+1), so the 8-way keys map to exact world directions (yaw + k*45deg). The probe (pick the walkable key nearest the target), empirical unstick, pinch teleport (+.172 audio cue), and re-plan all stay as safety nets. The learned-calibration bootstrap now only runs if the register read faults (-1). A `[CAMYAW]` diag line logs the register value vs the measured motion bearing each frame so this BAT confirms the register is right (expect err within a few degrees on clean steps).
+
+Offline sim basis: with exact-yaw steering the executor reaches all six trio legs with ZERO teleports at every camera angle/swing; the in-game question the sim can't answer is whether 0x0203ED02 reads true -- which is what the [CAMYAW] log settles. Files: `world_map_drive.inl` (GetWorldMapCameraYaw + use it in the native executor). One behavioral change vs .172. Couldn't compile here -- watch the build.
+
+EXPECTED: the character walks toward the destination in the correct direction far more reliably, with the teleport shimmer becoming rare (only at true sub-cell pinches) instead of constant. If [CAMYAW] err is large/random, 0x0203ED02 isn't the right register and it auto-falls-back to learned calibration (no worse than .172) -- tell me and I'll adjust the address.
+
+BAT .173: REBUILD via deploy.vbs, confirm Version 0.18.3.173. Drive Timber<->Dollet (and a trio leg or two). Listen for far fewer teleport shimmers and report whether it mostly WALKS now. Send Logs/ff8_world.log (the [CAMYAW] lines are the key data). LOCAL; NOT pushed.
+
+## v0.18.3.172
+
+World map (#70): **Teleport audio cue + distance announcement.** When the auto-drive recovery teleport fires (position-write back onto the route), play a rising-shimmer SFX and announce the remaining distance to the destination, so a blind player hears that a teleport happened and how far is left.
+
+The wav (`teleport_1_rising_shimmer.wav`, in `src/`) is embedded as an RCDATA resource (`IDR_WAV_TELEPORT`, id 7000) for single-file distribution, loaded once and played from memory via `PlaySound(SND_MEMORY|SND_ASYNC)` (winmm). On each teleport the mod plays the cue, then `ScreenReader::Speak`s the post-teleport distance (e.g. "10 kilometers to Dollet.", or "<dest>. Very close." under 1km). Files: `resources.h`, `resources.rc`, `world_map.cpp` (winmm + resources include), `world_map_drive.inl` (PlayTeleportCue + wiring in the teleport trigger). Additive; no navigation behavior change. Couldn't compile here -- watch the build.
+
+Note on the bigger picture: this rides on the CURRENT teleport, which still fires often (the over-teleporting from .171 is unchanged here), so expect to hear the shimmer repeatedly per drive -- that's also a useful signal of how often it teleports. The reliability rebuild (steer by the real camera-yaw register `0x0203ED02` instead of learned calibration, walkable-biased routing, and shortest-distance snap-back teleport) is the next change; the offline sim already shows exact-yaw steering reaches all six trio legs with zero teleports, so the cue should become rare once that lands.
+
+BAT .172: REBUILD via deploy.vbs, confirm Version 0.18.3.172. Drive any auto-drive route; confirm the rising-shimmer plays on each teleport and the distance-to-destination is announced. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.171
+
+World map (#70): **Make native walking actually do the work -- short assist bursts + a settle/resync handoff so the character WALKS the open terrain and the assist only nudges through pinches.**
+
+.170 reached both Dollet and Timber, but Aaron flagged that it felt like the character was mostly teleporting. The log confirmed it: native walking worked at each drive start (idx 1->12, 1->11, 2->10, ~75-85% moving) and in some open stretches (idx 36->65, advanced 29), but right after most assist bursts native FROZE -- `d+0` on every key for the full stuck window, even where the terrain is open -- then the assist re-fired. With the fixed 24-waypoint burst, that chained the assist across ~70% of each route. The freeze is the engine not responding to key input for a stretch after a direct position write (it intermittently resumes fine -- idx 36 -- and intermittently freezes -- idx 89).
+
+Three changes so native does the walking:
+1. SHORT bursts -- the assist now advances ~8 waypoints (was 24), just enough to nudge through the immediate pinch, then hands back so native walks the open terrain (and rolls encounters). If native re-stalls it re-triggers another short hop.
+2. SETTLE handoff -- after an assist, a few frames with NO input and NO writes let the engine re-acquire the character on the walkmesh and re-enable key movement before native resumes (directly targets the post-write freeze).
+3. CALIBRATION resync -- native drops its stale screen->world calibration after an assist and re-learns it from fresh key presses, instead of reading the position-write teleport as a bogus motion sample.
+
+Files: `world_map_drive.inl`. Couldn't compile here -- watch the build. EXPECTED in the log: short `pinch -> ... assist (idx X -> X+8)` bursts separated by long runs of native `[YAWDRIVE]` frames that ADVANCE idx (real walking), not back-to-back assists. If native still freezes `d+0` right after every settle, that's evidence the engine won't resume key-movement after a position write at all, and the path forward is full position-write + driving the encounter counter (the option B we discussed).
+
+BAT .171: REBUILD via deploy.vbs, confirm Version 0.18.3.171. Drive Timber<->Dollet. Watch whether the character visibly WALKS most of the way (with occasional brief assists at pinches) vs teleports. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.170
+
+World map (#70): **Hybrid pinch assist -- when the native 8-way executor orbits a narrow ramp/canyon it can't thread, slide the character along the planner's gate-verified route centerline through the pinch, then resume native keys. Reliable threading everywhere; encounters preserved except through the brief assists.**
+
+.169's surface-aware snap worked -- the character cleared the start and got far along the route (idx 52/135). It then ORBITED the Timber<->Dollet canyon ~10km from Dollet: the route descends a necessary one-cell-wide ramp into a low basin (everything toward Dollet is lower terrain, down to h=-1385), and the native 8-way executor circled the rim instead of tracking the descent -- getting within ~150u of the ramp waypoint but never the 80u needed to advance, looping forever (it did roll a random encounter mid-orbit, confirming encounters work on native movement).
+
+Root cause, confirmed by porting the FULL planner+executor stack into the offline sim: with PERFECT calibration the sim threads this ramp from every approach and every camera angle (0/8 orbit). The only thing the sim does that the game can't is calibrate the screen->world mapping exactly. In-game the executor learns that mapping from noisy motion feedback, and the residual error -- harmless on open ground -- is enough to walk the character off a one-cell-wide ramp. That's a fundamental limit of pure native-key steering at sub-cell pinches.
+
+Fix (Aaron's chosen direction): a HYBRID. The native 8-way executor still drives all open-terrain travel (so random encounters roll normally almost everywhere). When it stalls mid-route on the native path (the orbit signature -- small net displacement despite moving), instead of re-planning the same unthreadable route, the mod slides the character along the planner's route centerline by position-write -- one 32u step per frame toward each waypoint, gated by the engine's own rule. Every 128u edge of that centerline was already verified collision-free at 32u by the planner, so the assist always clears the pinch (offline-validated: position-write along the pit-route centerline traverses every 32u step gate-legally). It runs in bounded ~24-waypoint bursts, then hands control back to native keys; if still pinched it re-triggers and advances another burst, guaranteeing forward progress. Encounters are skipped only during these short assists.
+
+Files: `world_map_drive.inl` (PINCH ASSIST state + trigger in the mid-route stuck handler, native path only + execution block after the cursor advance, reusing the .157 WriteWorldMapPosition). One behavioral change vs .169. Couldn't compile here -- watch the build. In the log, a pinch now shows `[DRIVE] pinch -> position-write assist along route centerline (idx X -> Y)` then the character advancing smoothly through and resuming native keys.
+
+BAT .170: REBUILD via deploy.vbs, confirm Version 0.18.3.170. Drive the trio legs, especially Timber->Dollet (the canyon that orbited at ~10km out). Expect: native walking on open ground; at the canyon a brief assist slides the character through the ramp/pit, then native resumes, and it reaches Dollet. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.169
+
+World map (#70): **Surface-aware start snap -- plan the route on the surface the character is ACTUALLY standing on, not whatever surface its grid-cell center happens to land on. Fixes the character being routed up a cliff it can't climb.**
+
+.168's empirical unstick worked -- in the BAT the character was no longer frozen; it moved and the keys cycled. But it then paced in place near the start (`x` pinned at -27898, `y` swinging 350u) and never progressed. Running the ACTUAL planner+executor stack through the offline sim reproduced it exactly and found the root cause: the character stood on the lower road at h=-547, but its 128u grid cell's CENTER lands at x=-27840 -- 58u east, ACROSS a 400u cliff, on the upper mountain (h=-143). The planner snapped the start to that cell and planned the whole route along the UPPER surface; the executor (correct heights) then refused to climb the 400u cliff to reach waypoint 1, so it paced along the base. This happens anywhere the character stands within ~64u of a cliff edge.
+
+The fix (`world_map_planner.inl`, PlanPathGrid): snap the start to the nearest grid cell whose center height is within the step gate (200) of the character's ACTUAL ground height (`WorldGroundHeightLocal(startX,startY)`), falling back to the old any-walkable snap only if none is found. The route then stays on the character's own surface. Offline-validated: the faithful planner (heights + road preference + clearance + gate) routed east-north into the cliff from the .168 pin and the follower jammed; with the surface-aware snap it routes south along the lower road and the follower ARRIVES. The trio landmark starts are all on flat ground (cell-center height within 2-7u of the character), so the snap is a no-op there -- no change to the validated trio routes; it only re-snaps near cliff edges. One behavioral change vs .168. Couldn't compile here -- watch the build.
+
+BAT .169: REBUILD via deploy.vbs, confirm Version 0.18.3.169. Drive the trio legs, especially the one that paced near the start last time (start ~(-27898,-25508), heading to Dollet). Expect the route to head south along the lower road (not east into the cliff) and the character to progress and arrive. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.168
+
+World map (#70): **Empirical unstick -- when the calibrated probe wedges (no clean motion to recalibrate from), sweep the ACTUAL keys, find the one that really moves the character, and recalibrate from it. Breaks the calibration deadlock behind every jam.**
+
+.167 BAT (clearance routing in) jammed harder than .166: the character was **completely wedged** -- `pos(-27866,-25268) d+0 idx=1/137 keys=U--R JAM` -- pressing the same key forever and never moving, with `yaw` static. Root cause (visible across .159-.167): the on-foot native executor steers by a learned screen->world calibration (`s_navTheta`), and the probe validates the cell it PREDICTS each key lands on. But `s_navTheta` only updates when the character moves cleanly (>8u). The instant it stops moving, the calibration freezes -- so the probe keeps committing a key that points into a wall, the character can't move, and with no motion the calibration can never self-correct. A calibration deadlock: every jam this whole arc has been one.
+
+This build adds an **empirical unstick** to the native executor (`world_map_drive.inl`). When the character makes no real progress for a few 250ms windows, it stops trusting the (stale) calibration and **measures reality**: it sweeps the actual 8 keys one window at a time, and the moment a key produces real displacement that REDUCES distance to the next waypoint, it re-derives `s_navTheta` from that measured world bearing and resumes the calibrated probe. It needs no valid calibration to escape -- it trusts only what actually moved the character -- so a wedged character can always find its way off the wall and re-orient. The normal (moving) path is unchanged: the sweep only engages after ~750ms of zero progress, before the 3s re-plan.
+
+This is the .77-era empirical probe idea (which had been left inert in a dead `if(false)` block) reintroduced as a fallback under the corrected height model + sequential follow + clearance routing, rather than as the primary steerer (where it used to orbit far targets). One behavioral change vs .167. Couldn't compile here -- watch the build. In the log, a wedge should now show the keys CYCLING (U, U-R, -R, ...) instead of locked, then resuming forward travel.
+
+BAT .168: REBUILD via deploy.vbs, confirm Version 0.18.3.168. Drive the trio legs (esp. anything that wedged before -- Timber<->Dollet, and wherever .167 stuck at -27866,-25268). Expect: on a wedge the keys cycle for ~1-2s, the character backs/sidesteps off the wall, then resumes toward the waypoint and arrives. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.167
+
+World map (#70): **Clearance-biased routing -- route down the OPEN MIDDLE of corridors, not the shortest path that hugs the wall. Fixes the Timber<->Dollet canyon jam.**
+
+.166 BAT (clean executor, heights perfect) still jammed at the same canyon (pos ~(-23337,-32089), idx 1, U--- JAM, d+4). The tell was directional: Dollet->Timber threaded the canyon but Timber->Dollet did not. The shortest-path planner route hugs the canyon wall, and the 8-way on-foot character (45deg steps) drifts into the wall it's grazing -- a human walks down the middle of the corridor, and the planner needs to too (Aaron's diagnosis).
+
+This build adds a CLEARANCE bias to PlanPathGrid (`world_map_planner.inl`): each cell's cost gains a penalty for every one of its 8 neighbours that is off-mesh or across a >=200 cliff, so A* prefers cells with open space around them and the route runs down the middle of corridors. Validated in the offline sim with the sequential+probe executor: clearance-biased routing reaches **6/6 Galbadia pairs including Timber->Dollet** (was the one persistent failure); shortest-path routing failed it.
+
+The executor (sequential follow + probe, .164-.166) and the corrected height model (.162) are unchanged. One behavioral change (the planner's cost adds a wall-clearance term). The penalty only biases the route toward open ground, which is strictly easier for the 8-way executor, so it can't regress threadability. Couldn't compile here -- watch the build.
+
+BAT .167: REBUILD via deploy.vbs, confirm Version 0.18.3.167. Drive Timber<->Dollet (the canyon, both directions) and the other trio legs. Expect the route to stay off the canyon walls, the character to thread it (forward keys, idx advancing), and arrival. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.166
+
+World map (#70): **Executor cleanup -- remove the dead legacy steering code that cluttered the on-foot path and the logs. (Includes the .165 reverse-burst gate.) No behavior change vs .165; clearer + quieter.**
+
+Per Aaron's request, reviewed the on-foot executor for legacy hacks that could interfere with following the planner's path. Findings: the only thing that still INTERFERED was the reverse-burst recovery, already gated off on the native path in .165. The rest is inert but confusing, so this build removes/marks it:
+- **Removed** the 8-way `sector` + STEPGUARD redirect block from the active on-foot branch. It computed a `sector` that was immediately discarded (`(void)sector`), so it never steered anything -- it only flooded every log with hundreds of `[STEPGUARD]` lines (which made BAT logs hard to read). Gone.
+- **Confirmed inert** (left as documented dead code): the `if (false && isOnFoot) { ... }` block (the retired .74-era DCAL camera-basis calibration + greedy arrow-probe, ~155 lines) -- it is compiler-stripped (`false &&`) and cannot run; and the vehicle-only branch (cars/Ragnarok, out of scope for walking).
+
+The live on-foot path is now just: read position -> sequential cursor advance along the 128u world path -> steer at the current waypoint -> native self-calibrating camera + height-model probe -> press the 8-way key; with stuck -> mid-route re-plan (discovered-obstacle) as recovery. No reverse-burst, no STEPGUARD, no sector switch, no dead calibration in the active path. Couldn't compile here -- brace-balance checked by hand; watch the build.
+
+BAT .166: REBUILD via deploy.vbs, confirm Version 0.18.3.166. Same test as .165 -- drive from the Galbadia-Garden area to Dollet/Timber and the trio legs. Logs should now be much cleaner (no [STEPGUARD] spam); expect forward `U`/`U-R`/`U-L` keys, `dist` falling, `idx` advancing, arrival. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.165
+
+World map (#70): **Stop the reverse-burst recovery from fighting the new executor. It was firing nonstop and shoving the character backward, overriding the .164 sequential+probe follow.**
+
+.164 BAT: from the cramped SW (Galbadia Garden) start the character went the WRONG way -- `dist` GREW 21052->24561, `idx` stuck at 1, and the `[YAWDRIVE]` keys were almost all `-D--` REVERSE. The legacy reverse-burst recovery (a screen-relative DOWN shove, meant for the old fine-cell steering) was triggering every stuck-check (~3s) and dominating the frame, so the new sequential+probe executor in the non-reverse branch barely ran -- and each burst pushed the character away from the target.
+
+The offline sim confirmed the executor itself is fine: the sequential+probe follower reaches Timber, Dollet, AND Galbadia Garden from that exact SW start (-30261,-24291). So the fix is just to stop the reverse-burst from interfering on the native path.
+
+This build gates the reverse-burst trigger on `!s_drivePathWorld` (`world_map_drive.inl`): on the native 128u path it no longer fires; the probe finds a walkable direction every frame, and genuine dead-ends fall through to the existing mid-route re-plan (with discovered-obstacle marking) instead of a blind backward shove. The fine-cell fallback path keeps the old reverse-burst. One behavioral change (disable reverse-burst on the native path). Couldn't compile here -- watch the build.
+
+BAT .165: REBUILD via deploy.vbs, confirm Version 0.18.3.165. Drive from the Galbadia-Garden area to Dollet/Timber and the other trio legs. Expect mostly forward `U`/`U-R`/`U-L` keys (not `-D-- REVERSE`), `dist` FALLING, `idx` advancing steadily, and arrival. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.164
+
+World map (#70): **Clean executor: sequential path-follow + corridor probe. Fixes the canyon jams -- the executor was picking the wrong waypoint and drifting into walls.**
+
+.163 BAT (heights perfect, diff 0-1) still jammed in a deep canyon. Aaron's insight was right: the world map IS foot-navigable through these canyons (players do it), so 8-way keys are sufficient -- the executor was the problem. The offline sim confirmed it precisely:
+- The .163 cursor-advance rule ("advance while the NEXT waypoint is closer than the current") mis-picks waypoints in a winding canyon and steers the character across the wall the route went around. Replacing it with **sequential** follow (reach the current 128u waypoint within ~80u, THEN target the next) threads the canyon and reaches Dollet with plain 8-way movement -- no planner change, no finer mesh needed.
+- A second, directional drift at the tightest pinches is fixed by a **probe**: among the 8-way keys (calibrated-nearest first), pick the one whose 32u step is walkable (|dH|<200, via the now-correct .162 height model) and most reduces distance to the waypoint. So the character hugs the corridor and rounds canyon walls instead of drifting in.
+
+In the sim, sequential follow alone = 8/10 of the hard pairs; sequential + probe = **17/18 trio pairs** (only Timber->Dollet forward still drifts at one pinch -- Dollet->Timber and all other Galbadia pairs pass, so the corridor is fine; that last one is a candidate for clearance-biased routing next).
+
+This build ports both to the mod's native-key executor (`world_map_drive.inl`): sequential cursor advance, steer at the current 128u waypoint, and the height-model probe for key selection. The camera self-calibration (.159/.160) and correct heights (.162) are unchanged. One behavioral change (the path-follow/selection logic -- the "clean executor" rebuild). Couldn't compile here -- watch the build.
+
+BAT .164: REBUILD via deploy.vbs, confirm Version 0.18.3.164. Drive Dollet->Timber, Timber->Dollet, and the Galbadia-Garden legs. Expect the character to hug the route through the canyons (steer stepping ~128u, idx advancing steadily) and reach the destinations. If one specific leg still drifts at a pinch, send the log -- that points to clearance-biased routing as the final touch. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.163
+
+World map (#70): **Follow the planner's PRECISE 128u path, not the 1024u-decimated one. The executor was cutting corners across the very cliffs the route detoured around -- the Dollet->Timber canyon jam.**
+
+.162 BAT confirmed the height fix worked (`[GROUNDH] diff` is 0-1 everywhere now, was up to 420) -- but the character STILL jammed at the Dollet exit. The cause is a resolution mismatch: PlanPathGrid VALIDATES the route at 128u (sub-marching every edge, rejecting |dH|>=200) but then STORES it as 1024u "fine cells" (8x coarser). The executor aimed at the next fine cell ~1024u away and walked a straight line to it -- cutting across the cliff the 128u route had carefully gone around. In a canyon that straight-line shortcut runs into the wall, and the character wedges (`keys=U--R JAM`, `idx` stuck at 0).
+
+Fix: PlanPathGrid now also records the path in WORLD coordinates at its native **128u** resolution (`s_drivePathWX/WY`, new in `world_map_state.inl`), and the executor follows THOSE -- advancing the cursor to the nearest upcoming 128u waypoint and steering ~one 128u step ahead. So the character hugs the validated corridor exactly and threads canyons instead of cutting across cliffs. The 1024u fine-cell path is still kept for other consumers; other (fallback) planners leave `s_drivePathWorld=false` so the executor uses the old fine-cell follow for them. Combined with the .162 correct heights, the planner avoids real cliffs AND the executor now actually walks the avoidance path. One behavioral change (path-follow resolution). Couldn't compile here -- watch the build.
+
+On "a more precise mesh": the underlying height mesh is now faithful to the engine (.162, <=14u everywhere) and the planner already reasons at 128u; this build makes the executor honor that precision. If a specific corridor (e.g. a very narrow canyon mouth) still proves too tight at 128u, the planner's STEP can be dropped to 64u within the route bbox -- the offline sim showed 64u threads the tightest cases (Fire Cavern). Holding that in reserve pending this BAT.
+
+BAT .163: REBUILD via deploy.vbs, confirm Version 0.18.3.163. Drive Dollet->Timber (the canyon jam) and the other trio legs. Expect the character to follow the route closely (steer target now steps ~128u at a time, `idx` advancing steadily) and round the Dollet-exit cliff instead of wedging on it. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.162
+
+World map (#70): **Height-model root-cause fix (map-wide). The ground-height query now picks the TOPMOST containing surface, like the engine -- not the nearest-centroid triangle. This is the scalable fix for the phantom cliffs that have blocked routing across the whole map.**
+
+Per Aaron's direction, I went after the root cause instead of region patches, using the `[GROUNDH]` diagnostic (which logs the engine's true height `engineH`) as ground truth. Mining every BAT log gave **3,852 (position, engineH) samples**. The offline sim's height oracle reproduces `engineH` to <=14u (mean 0.64u) on ALL of them -- so the engine's rule is known and the bug is purely in the mod's height query.
+
+The rule: where multiple polygons overlap a point, the engine stands the character on the **topmost** surface. Heights are stored "up = negative", so topmost = the **most-negative barycentric height** among the containing non-ocean polys (e.g. an elevated road sits above lower ground; you walk on the road). The mod's `WorldGroundHeightLocal` instead selected the **nearest-centroid** triangle, which often grabbed a lower overlapping poly and returned a height off by up to **420u** -- a phantom cliff. That poisoned the planner's 32u `|dH|<200` edge check (it read a smooth height and routed straight across real cliffs) and the executor's collision, which is what wedged the character (the .157 freeze and the .160 Dollet->Timber jam were both this).
+
+Fix (`world_map_navmesh.inl`): `WorldGroundHeightLocal` now selects the containing triangle with the most-negative barycentric height at the query point (topmost), preferring the home block. Validated map-wide: the same rule in the sim matches `engineH` on 3,852/3,852 samples with zero >30u disagreements (was 144 disagreements up to 420u). With corrected heights the sim's trio acceptance rises and Galbadia->Timber now routes cleanly; the planner no longer sees phantom cliffs anywhere. The offline sim's `query()` was updated to the same rule (kept as the faithful reference). One behavioral change (height-query selection). Couldn't compile here -- watch the build.
+
+BAT .162: REBUILD via deploy.vbs, confirm Version 0.18.3.162. Drive the trio legs, especially Dollet->Timber (the .160/.161 jam) and any leg that previously wedged. `[GROUNDH]` `diff` should now be small (<=~15) everywhere -- watch for it. Expect far fewer jams / `nav-block` lines and clean arrival. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.161
+
+World map (#70): **Discovered-obstacle re-planning -- when the character jams on a real cliff the route stepped into, mark it and re-plan around it. Fixes the Dollet->Timber jam.**
+
+.160 BAT: BIG progress -- native-key movement reached Dollet (engine-driven, encounters intact), confirming the executor works. Dollet->Timber then failed: the character jammed at the Dollet exit (`pos(-16196,-36961)`, `keys=U--R JAM`) at a REAL cliff (STEPGUARD `|dH|>=200` to the NE; heights correct here, `diff=0`), reverse-burst back, re-approached, and limit-cycled.
+
+Why the planner routed across it: PlanPathGrid does correctly sub-march every 128u edge at 32u and reject `|dH|>=200` -- but it reads heights from `WorldGroundHeightLocal`, which is WRONG at some overlapping-triangle cells (its height differs from the engine's, as the .157 BAT showed: diff=420). Along this edge the planner read a smooth height and approved a step the engine then blocks. Fixing the height model is a deep walkmesh task; this build adds a robust self-correction instead.
+
+**Discovered-obstacle re-planning** (`world_map_planner.inl` + `world_map_drive.inl`): when the executor hits the mid-route stuck recovery, it records the spot just ahead (toward the next waypoint) in a nav-block list; PlanPathGrid treats blocked spots as impassable, so the re-plan routes AROUND the cliff. Successive jams add more blocks, so the drive learns the real obstacles the height model misses and threads past them. Blocks persist across drives (discovered cliffs are real). The native-key executor (.159/.160) is unchanged. One behavioral change (re-plan avoids discovered obstacles). Couldn't compile here -- watch the build.
+
+BAT .161: REBUILD via deploy.vbs, confirm Version 0.18.3.161. Drive Dollet->Timber (the .160 jam). Expect: at the cliff it jams briefly, logs `marked discovered obstacle ahead (nav-block #N)` and re-plans, then routes AROUND and continues -- `dist` falling, `idx` advancing, arrival. (If it still ends short, send the log -- repeated nav-block lines will show it learning the corridor.) Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.160
+
+World map (#70): **Fix the camera-angle calibration's signed-wrap (a port typo). The .159 char walked ~180deg the WRONG way; this one line was the cause.**
+
+.159 BAT: native-key movement is working -- the character walks with real arrow presses (the engine moves it; encounters/steps would count). But it locked onto `U-L-` and drifted ~180deg the WRONG way (NW while Dollet is SE), `dist` grew, `idx` never advanced. That's the signature of a 180deg calibration error, and it was a typo in the port: the camera-angle update's signed-wrap was `((implied - theta) % 4096 + 4096) % 4096 - 2048`, which is missing the `+2048` BEFORE the mod -- so a 180deg discrepancy evaluates to ZERO error and the estimate happily locks 180deg off, steering the character backwards. The offline sim used the correct formula (`((obs - thEst + 2048) % 4096) - 2048`) and converged, which is why the sim passed while the build walked backwards.
+
+This build corrects the one line to `((implied - s_navTheta + 2048) % 4096 + 4096) % 4096 - 2048` (`world_map_drive.inl`), matching the sim. Everything else (the .159 self-calibrating native-key controller) is unchanged. One behavioral change (the calibration math). Couldn't compile here -- watch the build.
+
+BAT .160: REBUILD via deploy.vbs, confirm Version 0.18.3.160. Drive a same-continent leg from open ground. Expect the brief UP/RIGHT calibration wiggle, then the character to walk TOWARD the target -- `dist` FALLING and `idx` advancing 0->1->2..., with normal random battles. (If it still drifts in a tight start pocket, try starting from open ground -- the pocket is the hardest case.) Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.159
+
+World map (#70): **Native-key empirical steering -- the engine walks the character (steps + encounters intact), with the mod self-calibrating the screen->world mapping and pressing the right arrow. Replaces the .157/.158 position-write (which teleported and bypassed encounters).**
+
+The .158 position-write reached Dollet -- proving the route + waypoint logic are right -- but Aaron correctly flagged that writing position teleports the character: the step counter never advances, so random encounters (and anything keyed to steps) are skipped. Per Aaron's call, this build switches to fully engine-native movement.
+
+The problem this has always foundered on: on foot the arrows move SCREEN-RELATIVE (UP = a camera-relative world direction that differs by region and swings), so pressing UP doesn't walk toward a world target and heading can't aim the character (.156). The new executor solves it by SELF-CALIBRATION, now possible because we can read the world position every frame: at drive start it briefly presses UP then RIGHT to learn the camera angle (`s_navTheta`) and chirality (`s_navHand`); thereafter each frame it presses the 8-way arrow combo whose learned world bearing points at the next waypoint, and continuously re-learns the camera angle from the observed motion (so it tracks camera swing / region changes). The engine performs every step, so the step counter ticks and encounters roll exactly as in manual walking; the existing battle pause/resume already handles encounters mid-drive.
+
+Validated in the rebuilt offline sim with a screen-relative engine model (a key moves the char along camera_angle + k*45deg, with wall-slide): the self-calibrating controller reaches the trio targets under a constant camera, a smoothly drifting camera, and per-region camera jumps. (`world_map_drive.inl`: on-foot steering replaced by the self-calibrating native-key controller; no position/heading writes.) One behavioral change (the on-foot drive mechanism). Couldn't compile here -- watch the build.
+
+BAT .159: REBUILD via deploy.vbs, confirm Version 0.18.3.159. Drive a same-continent leg from open ground (e.g. toward Dollet on Galbadia, or Balamb Garden <-> Balamb town). Expect: a brief UP/RIGHT wiggle at the start (calibration), then the character WALKS the route with normal arrow movement -- `[YAWDRIVE]` keys should show varied 8-way combos (U--R, --LR-style), `pos` changing, `dist` falling, `idx` advancing, and random battles occurring normally (drive should pause/resume around them). Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.158
+
+World map (#70): **Unblock position-write: gate the step on ON-MESH only, drop the |dH| check that the mod's buggy height poisons. The .157 char couldn't move because the mod's height at the start cell is wrong by 420.**
+
+.157 BAT: position-write went in, but the character never moved (`pos` constant, `d+0`, all STEPGUARD sectors "blocked"). The diagnostic shows why -- the mod's height query is WRONG at this location:
+`[GROUNDH] pos(-28380,-25511) ... ourH=-145 engineH=-565 diff=420`.
+The mod thinks the ground is -145 while the engine's real ground is -565 (off by 420; elsewhere this diff is ~1). So the executor's `|dH| < 200` step gate -- which trusts the mod's height -- sees a phantom cliff in every direction and refuses to write, so the character is frozen. Position-write itself was never exercised (the gate blocked it before any write). The offline sim has CORRECT heights here, so it can't reproduce a mod-only height bug -- it confirms the route is walkable; the executor was just being poisoned by the mod's bad height data.
+
+This build gates the position step on **on-mesh (not ocean/off-mesh) only** and drops the `|dH|` check (`world_map_drive.inl`). The planner already validated the route and the engine snaps Z to its real ground each frame, so we only need to avoid stepping into the sea; the genuine per-step height change on a planned route is small. This both unblocks movement AND finally tests whether the engine respects position writes. One behavioral change. Couldn't compile here -- watch the build.
+
+Known remaining issue (separate, for a follow-up): the mod's height extraction (`WorldGroundHeightLocal` / the walkmesh) is wrong at some cells (the diff=420 here). That corrupts the PLANNER too, so some routes may be poor until the height model is made faithful (the offline sim's height oracle is correct and can be the reference for that fix).
+
+BAT .158: REBUILD via deploy.vbs, confirm Version 0.18.3.158. Drive toward Dollet from open ground. The key question: does `pos` now CHANGE (the character actually moves)? If yes, position-write works and we'll see `dist` fall / `idx` advance -- send the log so I can see how far it gets. If `pos` still doesn't change at all, the engine is re-asserting position and I'll change the injection point. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.157
+
+World map (#70): **POSITION-WRITE navigation -- drive the on-foot character by writing its world position along the route, because on-foot movement is screen-relative and CANNOT be steered by heading. The decisive root-cause fix.**
+
+.156 BAT was the proof: the character moved in 8-way world directions that IGNORE the written heading -- `yaw` tracked our writes exactly, but the actual move bearing clustered at fixed values (512 / 2560 / 3584) regardless of heading or target, and it circled the start (stuck ~20km out). This confirms the long-standing note that on the world map ON FOOT the arrows WALK screen-relative (UP = a camera-relative world direction), so the heading register does not aim the character. Every heading approach we tried -- arrow-turn (.149-.153), direct-heading-write (.154-.156) -- was therefore doomed.
+
+The fix removes heading from the loop entirely. The mod runs inside the game and the engine snaps the player's Z to the walkmesh under X/Y each frame, so we DRIVE the character by **writing WM_POS_X/WM_POS_Y** one engine foot-step (32u) per frame straight toward the next route waypoint, gated by the engine's own rule (destination walkable + |dH| < 200 via `WorldGroundHeightLocal`), and press NO keys (so the engine's screen-relative input movement can't fight the write). This makes the character follow the planner's (already 32u-validated, .147) route exactly.
+
+Validated in the rebuilt offline sim, which now models the engine rule faithfully (after the .156-session walkability correction): the identical 32u position-stepping reaches the actual in-game start->Dollet case and **15/18 trio pairs** (Balamb 6/6, Esthar 6/6, Galbadia 3/6). The 3 misses are Timber-corridor pairs that graze a real cliff at the coarse grid resolution -- the planner-resolution upgrade (finer/navmesh routing) is the remaining follow-up; the executor itself is correct. (`world_map_drive.inl`: new `WriteWorldMapPosition`; on-foot steering replaced by the 32u position-step.) One behavioral change (the on-foot drive mechanism). Couldn't compile here -- watch the build.
+
+Key risk this BAT settles: whether the engine respects position writes (it respected heading writes in .154, same address space + Poll timing, and we press no keys, so it should). If `[YAWDRIVE]` shows `pos` NOT changing as written, the engine re-asserts position and we'd need a different injection point.
+
+BAT .157: REBUILD via deploy.vbs, confirm Version 0.18.3.157. Drive toward Dollet (or any same-continent leg) from open ground. Expect `pos` to step steadily toward the target, `dist` to FALL, `idx` to advance, and arrival. If it stops dead at a specific spot, send that log (cliff = planner-resolution follow-up). Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.156
+
+World map (#70): **Heading offset fix -- write heading = targetBearing (drop the .152 +2048). The .155 char walked 180deg AWAY from its now-stable target; this turns it around.**
+
+.155 BAT: the sequential-follow fix worked -- the steer target is now STABLE (locked on one cell, no more whipsaw). But the character still failed, and the log is unambiguous: it moved CONSISTENTLY AWAY from that stable steer point -- distance-to-steer grew 1131 -> 2452 while it pressed UP with the heading written toward the target, and dist-to-Dollet climbed 20580 -> 22155. A clean, consistent ~180deg error (not noise) means heading DOES drive on-foot movement, but the forward convention for the DIRECT-WRITE path is forward-bearing = heading itself -- so writing heading = targetBearing+2048 sends it exactly backwards. (The .152 +2048 was inferred from throttled arrow-steer samples and is wrong for direct-write.)
+
+I reproduced it in the sim under the relationship the log revealed (forward travels along the written heading): from the in-game start, heading=tgt+2048 ends 30,527u from Dollet (wanders away), while heading=tgt heads toward it (within ~6km, then jams on a cliff -- see below). This build drops the offset: **write heading = targetBearing & 0xFFF** (`world_map_drive.inl`). One behavioral change. Couldn't compile here -- watch the build.
+
+Expected next obstacle (not this fix): the mod's planner validates routes with a 1024u per-cell mountain-steepness class, not the engine's exact 32u |dH|<200 step rule, so the char may now drive correctly toward Dollet and then JAM at a specific cliff the route grazes. If so, the planner-fidelity upgrade (32u edge validation, already designed/proven in the sim) is the next step.
+
+BAT .156: REBUILD via deploy.vbs, confirm Version 0.18.3.156. Drive toward Dollet (or any same-continent leg) from open ground. In `[YAWDRIVE]` expect `dist` to FALL steadily and `idx` to advance 0->1->2... (the char heading toward, not away from, the steer). It should get much closer / arrive; if it stops at a specific cliff partway, send that log -- that's the planner-fidelity step. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.155
+
+World map (#70): **Stable sequential waypoint follow -- steer at the NEXT path cell instead of a far lookahead. Fixes the steer-target oscillation that made the (now-working) direct-heading character circle. Offline-sim proven.**
+
+.154 BAT result: the direct-heading write WORKS -- `[YAWDRIVE]` shows `yaw` landing exactly on the written value (diff=0 on most frames) and the character moving fast (d+187/frame). But it failed to reach Dollet because it CIRCLED: the steer target whipsawed between adjacent corridor cells -- (-29184,-26112) x41, (-29184,-27136) x54, (-30208,-26112) x29 -- so the character ping-ponged between them, `idx` pinned at 0/28, net 31u in 3s. The cause is the steer SELECTOR: the far ~2400u lookahead + corner-cap + LOS-clamp picks a far cell that flips as the character moves (the old .77/.78 'orbit', which a far target only masked for the old turn-controller -- with direct heading it resurfaces).
+
+I updated the offline sim to replicate this: a direct-heading character with an oscillating steer target limit-cycles (net ~700u, no progress), exactly like the BAT. Switching the executor to **stable sequential follow** -- aim at the next path cell, advance the cursor only as cells are reached -- carries the same character the full ~20km from the stuck start all the way to Dollet's doorstep.
+
+This build applies that fix (`world_map_drive.inl`): the steer target is overridden to the **next path cell** (`s_drivePathIdx + 1`) instead of the far lookahead `wi`. Each A* path cell is navmesh-adjacent to the next, so steering cell-to-cell walks the validated polyline with no corner-cut and no oscillation. Direct-heading (.154), planner, and stuck/reverse recovery are unchanged. One behavioral change (the steer-target selection). Couldn't compile here -- watch the build.
+
+BAT .155: REBUILD via deploy.vbs, confirm Version 0.18.3.155. Drive a same-continent leg (e.g. toward Dollet from open ground on Galbadia, or Balamb Garden <-> Balamb town). In `[YAWDRIVE]` expect `steer` to step forward through cells (not flip between two), `idx` to ADVANCE 0->1->2..., `dist` to fall steadily, and arrival. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.154
+
+World map (#70): **Direct-heading steering -- write the move-heading register and walk, instead of pressing LEFT/RIGHT and fighting the engine's coarse turn rate. Offline-sim proven.**
+
+I rebuilt the offline simulator to replicate the WHOLE auto-drive stack against the engine's real rule (32u/frame foot step, reject if non-walkable or |dH|>=200) and used it to find the fix instead of BAT-tweaking. Findings (full write-up in `offline/NAV_SIM_FINDINGS.md`):
+- The sim first wrongly reported Tears Point unreachable; that was a SIM bug (it classified foot-walkable as byte15&0x80, which excludes terrain type 29 "mountain" = 54k polys). The mod's real rule -- ocean = terrain 32-34, else walkable, steep faces handled by |dH| -- is correct; with it fixed the sim's walkable mesh went 98,814 -> 148,314 triangles (matching the mod's 157,416) and Tears Point connects to Lunar Gate / Sorceress Memorial, as Aaron confirmed. The mod's MESH is fine.
+- With correct connectivity, the remaining failure is the EXECUTOR. The faithful sim reproduces the `.152/.153` spin exactly: the game's per-frame turn step (~512-1024 / 45-90deg) dwarfs the alignment deadzone, so arrow-key steering turned on 138 of 149 frames and walked on only 8 -- no progress. An executor that simply keeps the character on the route reaches all trio pairs (Balamb 6/6, Galbadia 6/6, Esthar connected).
+
+This build replaces the on-foot arrow-key turn loop with **direct-heading steering** (`world_map_drive.inl`): each frame it WRITES the move-heading register `0x0203FE52` so the forward-travel direction (heading+2048) points at the steer target, then presses UP. No LEFT/RIGHT, so there is no turn-rate/deadzone spin. The write is SEH-guarded in its own helper (`WriteWorldMapHeading`) to keep SEH out of `UpdateAutoDrive`'s C++ scope. The planner, waypoint selection, and the reverse-burst/stuck recovery are unchanged. One behavioral change (the steering mechanism). Couldn't compile here -- watch the build.
+
+Key risk this BAT settles: whether the engine respects a written heading on foot. We press no turn key, and the move builder (0x53DA20) reads 0x0203FE52 each frame, so it should hold. If `[YAWDRIVE]` shows `yaw` NOT tracking the written value (it re-derives heading), the fallback is arrow steering + exact path-follow (also designed).
+
+BAT .154: REBUILD via deploy.vbs, confirm Version 0.18.3.154. Drive a SAME-CONTINENT leg from open ground (e.g. Balamb Garden <-> Balamb town, or a Galbadia leg while on Galbadia). In `[YAWDRIVE]` expect `yaw` to closely track `(tgtBrg+2048)&0xFFF`, mostly `U---` keys, `dist` falling, and `idx` advancing 0->1->2.... Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.153
+
+World map (#70): **Drive-while-steering -- the character now WALKS and curves toward the target instead of spinning in place. (And: the .152 180-degree fix is confirmed -- forward now reduces distance.)**
+
+.152 BAT: the 180deg offset is correct -- when the character walks `U---` now, `dist` DECREASES and it moves toward the waypoint (e.g. yaw=2089/tgtBrg=295 -> `U---` -> dist 21295->20967, moving east toward steer). But it still made no net progress: counting the `[YAWDRIVE]` frames, **138 of 149 TURNED and only 8 WALKED** (47 JAM), `idx` never left 0/22. The per-frame turn step is 512-1024 units (45-90deg) -- far larger than the old 384 (34deg) deadzone -- so the heading always overshoots the "aligned" window and the stop-and-turn law can never settle to press UP. It just spins.
+
+This build replaces the stop-and-turn law with **drive-while-steering** (`world_map_drive.inl`): pure-turn ONLY when the target is >90deg behind (bring it in front first); otherwise press UP to WALK and add a turn to curve toward the target while moving (>~22deg off). The reverse bursts already proved DOWN+turn arcs the character, so UP+turn arcs too -- this converts spin-in-place into forward arcs and guarantees progress whenever the target is within 90deg. The .150 handedness and .152 180deg offset are preserved; the .151 swept un-wedge stays. One behavioral change (the steering control law). Couldn't compile here -- watch the build.
+
+TESTING NOTE (important): every BAT since .150 has started from the same cramped far-SW corner (near Alien Ship 3 / Kashkabald, ~(-29000..-31500, -22000..-24000)) with Dollet/Timber as the target. That start is the worst possible case -- tight terrain that jams the character -- and Dollet/Timber are on the GALBADIA continent, which is likely not even walkable-reachable from there (different landmass across ocean). For a fair BAT, start auto-drive from OPEN ground on the SAME continent as the target -- e.g. one of the designed acceptance trios: Balamb Garden <-> Balamb town (Balamb continent), or Timber <-> Dollet <-> Galbadia Garden once standing on the Galbadia continent.
+
+BAT .153: REBUILD via deploy.vbs, confirm Version 0.18.3.153. Start auto-drive from open ground toward a same-continent target. In `[YAWDRIVE]` expect many more `U---` (and `U` combined with `L`/`R` as it curves), `dist` trending DOWN, and `idx` advancing 0->1->2.... Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.152
+
+World map (#70): **180-degree steering fix -- the character was walking the OPPOSITE way it aimed. Steering now aligns the forward-travel direction (heading+180) to the target. Plus: .151 confirmed the character moves again.**
+
+.151 BAT: the swept un-wedge WORKED -- the d+0 deadlock is broken. The character moves (reverse bursts now carry an L/R: `-D-R`, `-DL-`, with large `d+190..228` escapes) and, when it locks a heading, walks smooth and fast (`d+130`/frame at a stable yaw). But it never reached waypoint 0 -- it hunted, drifted, and even wandered into a random battle.
+
+The `[YAWDRIVE]` data exposed why: the character WALKS 180deg away from where it "aligns". Verified two ways: (1) at `yaw=573` (~aligned to `tgtBrg=494`, which points NE) the forward `U---` motion was SW and `dist` GREW 22872 -> 23972 while it "drove forward"; (2) a reverse burst at `yaw=1755` moved SE -- exactly consistent with **forward-travel = heading + 180deg**. The move-heading register (`0x0203FE52`, adopted in .148) is 180deg opposite the `(sin,-cos)` bearing convention `tgtBrg` is built on, so the tank steering was aligning the character's BACK to the target. (The .150 "confirmation" was misleading: the character was wedged there and never actually walked, so the 180deg error couldn't show.)
+
+This build adds a 2048 (180deg) offset to the target bearing in the on-foot tank err (`world_map_drive.inl`), so steering aligns the FORWARD direction to the target instead of the facing. Turn handedness (.150) is unchanged -- a constant shift of the target doesn't change which key reduces err. The swept un-wedge (.151) is kept. One behavioral change (the 180deg steering offset). Couldn't compile here -- watch the build.
+
+BAT .152: REBUILD via deploy.vbs, confirm Version 0.18.3.152. Start auto-drive (ideally from open ground) on a trio leg, e.g. Dollet<->Timber. In `[YAWDRIVE]`, `dist` should now DECREASE as the character walks `U---` (it should reach waypoint 0, then idx should advance 1,2,3...), instead of growing. If it still drifts away, the offset sign/amount needs another look. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.151
+
+World map (#70): **Reverse un-wedge now sweeps its exit heading -- so the character stops backing straight into the wall it's pinned against. Plus: the .150 handedness fix is CONFIRMED working.**
+
+.150 BAT: the handedness swap WORKED -- the `[YAWDRIVE]` trail shows the character facing the target (`yaw=1550 ~ tgtBrg=1526`, keys `U---`) with **no more oscillation** (the .149 hunting between yaw 366<->3950 is gone). Steering now aligns correctly; that was the blocker through .148/.149.
+
+But this run never got to exercise it over a leg, because it started from a HARD TERRAIN WEDGE in the far SW (near Alien Ship 3 / Kashkabald, pos ~(-29139,-23963)). The character was pinned against a wall on the route side: facing the target and pressing `U---`, it moved `d+0` every frame -- the engine's collision validator rejects every forward 32u step (wall dead ahead). The existing **DOWN-only reverse un-wedge** can't escape a tight pocket: it backs off ~32u, then normal steering re-aims at the target and walks straight back into the same wall (`d+0` forever, stuck-checks 1..6, then give up). Note `[GROUNDH]` confirms valid ground here (ourH==engineH, contain=1) and one reverse frame did move `d+32`, so movement IS possible -- it's a wall pocket, not bad data.
+
+This build sweeps the reverse exit: each successive reverse burst adds an alternating turn (straight / left / right, cycling via a per-burst counter), so the character backs out of a pocket on **different headings** instead of re-entering the same wall. Contained entirely to the reverse-burst key-set; the validated tank steering (.149/.150) is untouched. One behavioral change (the un-wedge exit sweep). Couldn't compile here -- watch the build.
+
+BAT .151: REBUILD via deploy.vbs, confirm Version 0.18.3.151. Two things to try: (1) from THIS wedged SW spot, start a drive and watch whether the swept reverse bursts now free the character (the `-D--` bursts should sometimes carry an `L`/`R` and the position should eventually change / re-plan onto a moving route); (2) the cleaner validation of the .150 steering fix -- start auto-drive from OPEN ground (e.g. walk a few steps into the clear first, or run the .149 Dollet->Timber leg), where the character should now turn-to-face and walk the route without the old oscillation. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.150
+
+World map (#70): **Tank-steering handedness fix -- swapped LEFT<->RIGHT. The .149 BAT proved the turn direction was inverted.**
+
+.149 BAT: tank control WORKED -- the character turned (`---R`/`--L-`) and walked (`U---`) and made real progress north from Dollet toward Timber (~9km). But it then JAMmed ~11km out, oscillating around North instead of turning to face the southbound target. The `[YAWDRIVE]` trail is unambiguous: at `yaw=366` with `err=+1579` the executor pressed **RIGHT**, and the next frame `yaw=3950` -- i.e. RIGHT *lowered* the heading (366 -> -146), the opposite of the assumed CW convention. So the controller turned the wrong way at every corner, the err sign flipped each frame, and it hunted between yaw 366 and 3950 (~+/-256 around North) while the target sat at ~1941, never converging -> JAM.
+
+This build swaps the one line in the on-foot tank branch (`world_map_drive.inl`): `err>0` (target is CW / higher bearing) now presses **LEFT** (which raises the heading), and `err<0` presses **RIGHT**. Everything else -- the collision-aware road-preferring planner (.147), true heading source (.148), and turn-then-walk tank model (.149) -- is unchanged. This is the single behavioral change that .149's code comment flagged as the likely follow-up.
+
+One behavioral change (steering handedness). Couldn't compile here -- watch the build.
+
+BAT .150: REBUILD via deploy.vbs, confirm Version 0.18.3.150. Drive Dollet->Timber (the .149 oscillation spot) and the other trio pairs both directions. Watch `[YAWDRIVE]`: at a corner the yaw should now move TOWARD `tgtBrg` and converge (no hunting between ~366/3950), then walk `U---`. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.149
+
+World map (#70): **TANK-CONTROL steering. Replaced the on-foot 8-way sector switch with turn-to-face-then-walk-forward, matching the engine's tank-style movement.**
+
+.148 BAT: with the true heading (`WM_HEADING`=0x0203FE52), the character reached Dollet but wedged on Dollet->Timber. The log showed why: at the wedge, `yaw=613` but `tgtBrg=2635` -- the target was ~180deg BEHIND the character's facing, and the old 8-way sector switch mapped that to **DOWN** (`case 4`) and reversed straight into a wall (`d+0, JAM`) instead of turning around. The 8-way switch assumed screen-relative STRAFING (UP/DOWN/LEFT/RIGHT = screen directions), but world-map movement is **tank-style**: LEFT/RIGHT TURN the heading, UP=forward, DOWN=reverse. So "target behind" must mean "turn around", not "press down". (The camera-yaw era hid this because the lagging yaw rarely reported a clean 180deg.)
+
+This build replaces the `switch(sector)` in the on-foot branch (`world_map_drive.inl`) with **tank control**: compute signed `err = targetBearing - heading`; if |err| > ~34deg, press LEFT/RIGHT to TURN toward the target (no forward); once aligned, press UP to walk. RIGHT raises the heading (CW) -- swap R<->L if a BAT shows wrong handedness. The collision-aware + road-preferring planner (.147) and true-heading source (.148) are unchanged; the planner makes the route collision-free and the engine's own wall-slide + the reverse-burst recover edge cases. (The .143 STEPGUARD/sector code above is left compiled but unused by steering.)
+
+This is the intended complete executor: faithful collision-aware route (.147) + true heading (.148) + tank steering (.149). One behavioral change (the steering model). Couldn't compile here -- watch the build.
+
+BAT .149: REBUILD via deploy.vbs, confirm Version 0.18.3.149. Drive Dollet->Timber (the .148 wedge) and the other trio pairs. Watch `[YAWDRIVE]`: the character should TURN to face the route (keys -L-- / ---R) then walk (U---), and NOT reverse into walls when the target is behind. If it consistently turns the WRONG way at corners, swap RIGHT<->LEFT (one line, noted in the code). Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.148
+
+World map (#70): **EXECUTOR heading fix -- steering now references the TRUE move heading instead of the laggy camera yaw. `WM_HEADING` (read by `GetWorldMapHeading`) changed 0x0203ED02 -> 0x0203FE52.**
+
+.147 BAT: the collision-aware road-preferring planner compiled and produced routes (`[PLAN] GRID planner ok`), but Timber->Galbadia Garden STILL wedged at the same ~7.6km canyon-rim spot -- because the EXECUTOR steering was still wrong, not the route. World-map movement is TANK-style: the character walks along its **heading** `0x0203FE52` (move builder `0x53DA20` reads it at `0x53eca5`), and the camera yaw `0x0203ED02` only LERPS toward it (`0x558592`), lagging up to ~66deg after a region warp. The mod's `GetWorldMapHeading` read the camera yaw `WM_HEADING=0x0203ED02`, so at the Galbadia exit the steering's reference angle was ~90deg stale -> pressing UP sent the character off-target -> wedge.
+
+This build: **`WM_HEADING` 0x0203ED02 -> 0x0203FE52** (`world_map_state.inl`), so `GetWorldMapHeading()` (and the 8-way screen-relative steering that uses it) now references the character's actual facing/move heading, which updates as he turns -- no camera lag. The collision-aware + road-preferring planner from .147 is unchanged. (Heading announcements that use `WM_HEADING` now report true facing too -- more accurate.)
+
+One behavioral change (the heading source). Confirmed via disasm that 0x0203FE52 is the move heading (NOT camera pitch, as an older note claimed). Couldn't compile here -- watch the build.
+
+BAT .148: REBUILD via deploy.vbs, confirm Version 0.18.3.148. Drive Timber->Galbadia Garden (the rim that wedged) and the other trio pairs. The character should now steer toward the route correctly at the Galbadia exit (no ~90deg drift). Re-confirm Dollet/Timber. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.147
+
+World map (#70): **Collision-aware, road-preferring grid planner (re-enabled & upgraded). This incorporates the engine's actual collision rule into route planning so routes are proactively collision-free at the engine's own 32u/frame granularity, and follows roads.**
+
+Reverse-engineered the collision system: the on-foot move validator `0x53E7A0` steps the character **32 units/frame** (`mov [ebp+0xc],0x20`; car 0x40, Ragnarok 0x100) and **rejects a step iff |candH - curH| >= 200** between consecutive 32u landings (find-poly `0x53EB80` + barycentric height `0x402620`). Offline this exactly reproduces the in-game wedges.
+
+This build upgrades `PlanPathGrid` (`world_map_planner.inl`) and makes it PRIMARY again:
+1. **Faithful 32u-landing edge validation** -- each 128u grid edge is sub-marched at 32u and rejected on any |dH|>=200 or no-ground, using the engine-faithful `WorldGroundHeightLocal`. (The .145 version only checked 128u cell-center endpoints, which step over thin cliffs the character then wedges on.)
+2. **Road preference** -- edges into road cells (`s_roadFine`, terrain 27/28/12) cost 1/3, so A* follows the gentle reliable corridors (the road the .143 planner used to reach Dollet/Timber) instead of grazing marginal cross-country terrain near the 200 gate.
+Navmesh stays as the height oracle; falls back to the navmesh/fine planners if the grid planner fails.
+
+Offline (faithful 32u sim, camera/heading model in offline/CAMERA_STEERING.md): Esthar trio fully walkable; Galbadia/Balamb routes follow roads and stay gentle (maxdH ~174-198). NOTE: couldn't compile here -- watch the build; plan-time cost is an A* with a ground query per cell (C++ fast, ~sub-second).
+
+KNOWN NEXT STEP (not in this build): the EXECUTOR still steers off the laggy **camera yaw** `0x0203ED02`. The actual move heading is `0x0203FE52` (confirmed: the move-vector builder `0x53DA20` reads it at `0x53eca5`); the camera only lerps toward it (`0x558592`), lagging up to ~66deg after a region warp -- that lag is the Galbadia-exit drift. Next build: point steering at `0x0203FE52` (and/or write it to aim). Deferred here to keep this change attributable.
+
+BAT .147: REBUILD via deploy.vbs, confirm Version 0.18.3.147. Drive the trio pairs; watch `[PLAN] GRID planner ok ... -> N fine cells` and whether routes now follow roads / stop wedging on cross-country cliffs. Dollet/Timber should still work. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.146
+
+World map (#70): **.145 grid planner REGRESSED (Dollet wedged 16km out, G-Garden still wedged) -- because routing was never the bottleneck. The real blocker is a CAMERA/STEERING problem at the Galbadia exit. Disabled the grid planner (back to the known-good .143 navmesh planner); next focus = the world-map camera->movement transform.**
+
+.145 BAT: the grid planner compiled and produced sensible routes (steering G-Garden to a real westward waypoint -31232,-25088, NOT the old -1305 pocket), but the character still wedged at the SAME canyon-rim spot (~-30500,-24810) and also 16km from Dollet. Offline proof this is NOT terrain/routing: the path from the stuck point to its waypoint is gentle -- max 65u per 40u step (well under the 200 gate), descending smoothly -545 -> -300, and the faithful (walkable-pref) and nearest-centroid height queries agree there. Yet in the log the character presses UP and actually moves ~90deg off (X-flipped) -- the rotated-camera issue from the brief 5b ("pressing up drifts the char the opposite way"). The screen-relative yaw->key steering is wrong at this camera-rotated spot, so the character can't aim through the rim regardless of route. The grid planner made it worse by cutting cross-country into that area instead of following the ROAD (which is why the navmesh/road planner reached Dollet/Timber in .143).
+
+This build: **disabled the .145 grid planner** (`#if NAVMESH_DIAG && 0` around the PlanPathGrid call in world_map_planner.inl; the function is kept for later). PlanDrivePath falls back to the navmesh planner = the known-good .143 path that reached Dollet and Timber. No other change.
+
+NEXT (not in this build): the world-map camera->movement transform. The on-foot steering assumes pressing UP walks at the yaw bearing (0x0203ED02); at the Galbadia exit that assumption is ~90deg wrong. Investigate how the engine maps the world-map camera/yaw to walk direction (the camera item from the brief Phase 1) and correct the screen-relative steering there.
+
+BAT .146: REBUILD via deploy.vbs, confirm Version 0.18.3.146. Sanity-check that Dollet and Timber drives still work (grid planner off, navmesh planner restored). G-Garden is expected to STILL wedge at the rim until the camera fix -- that's the next task. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.145
+
+World map (#70): **.144 BAT still failed Timber->Galbadia-Garden -- the navmesh A* STILL routed into the -1305 deep pocket (waypoint -32256,-27136) even with `road-cell exemption kept 0`, so removing the exemption wasn't enough (and it hurt seam connectivity). Reverted that, and replaced the path planner with a FAITHFUL GRID PLANNER that routes on the real walkable surface.**
+
+.144 result: build log showed `road-cell exemption kept 0` (removal took effect) but the drive wedged in the identical ~7km spot, still steering to the -1305 pocket waypoint (idx 3/13) -- so that pocket is bridged into the navmesh by something other than the road exemption (a proximity/T-junction bridge whose connection the gate's centroid-plane march doesn't catch across the gap). Offline, a faithful grid router from the exact stuck point finds a clean 320-waypoint route to G-Garden (0 cliffs, all walkable, nowhere near the pocket) -- so the navmesh *router* is the weak link, not connectivity.
+
+This build:
+1. **Reverted the .144 road-cell exemption removal** (it didn't fix the stall and hurt seam connectivity / the Timber drive).
+2. **New `PlanPathGrid` (`world_map_planner.inl`), now the PRIMARY planner.** 8-neighbour A* on a 128u grid within a bbox around start+goal, using the engine-faithful `WorldGroundHeightLocal` for ground and the engine's 200 step gate for walkability -- the SAME rule the executor's STEPGUARD uses, so the planner never produces a route the executor will refuse. Emits deduped fine cells into `s_drivePath` (same format as the navmesh/fine planners); falls through to the old planners on failure. No new headers (the .inl is inside `namespace WorldMap`): std::vector + a hand-rolled binary heap, literal sentinels.
+
+This is the offline-validated router (it routes all three acceptance trios correctly, and specifically routes the stuck point -> G-Garden in 320 waypoints avoiding the pocket). The navmesh stays as the height oracle (`WorldGroundHeightLocal`); only path planning changed.
+
+NOTE: I could not compile here -- watch the build for errors in the new function. Also watch plan-time cost: A* over the continent calls `WorldGroundHeightLocal` per cell (cached), ~a few hundred ms for a long route; if drive-start/replan hitches, we can coarsen the grid or cap the bbox.
+
+BAT .145: REBUILD via deploy.vbs, confirm Version 0.18.3.145. From the Dollet/Timber save, drive Timber->Galbadia Garden -- watch for `[PLAN] GRID planner ok: ... -> N fine cells` and confirm it routes around the canyon (no stall at ~7km, no steering to -32256,-27136). Then re-confirm Dollet and Timber drives still work. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.144
+
+World map (#70): **.143 BAT reached Dollet (entered) and Timber, but (1) wouldn't ENTER Timber and (2) the Timber->Galbadia-Garden drive stalled ~7km out. Two fixes: drop the navmesh road-cell step-gate exemption (the stall), and widen the entrance search (the entry).**
+
+.143 BAT result: the step-guard worked (`[STEPGUARD]` 287x vs DEEPGUARD 2378x; `[GROUNDH]` mean |diff| 1.5 over 837), Squall auto-drove to Dollet and entered, and drove to Timber. Two new issues, both isolated offline:
+
+(1) **G-Garden stall = the navmesh router planned a physically-impossible route.** The drive pinned ~(-30480,-24850) heading to route waypoint 0 = (-32256,-27136), never advancing. That waypoint is at height -1305 in a DISCONNECTED component, behind a 239u cliff -- the engine's 200 gate makes it unreachable, so STEPGUARD (correctly) refused it and the drive wedged. Cause: `NmEngineStepBlocked`'s road-cell exemption KEPT >=200 connections between road cells, falsely bridging deep "road" pockets into the graph so A* routed through them. On the faithful mesh the engine's uniform 200 gate is ground truth (the real road has no >=200 step), so the exemption is unnecessary and harmful. **Fix: removed the road-cell exemption** -- the gate now blocks every >=200 step, road or not. Offline, the Galbadia trio stays connected without it and a faithful Timber->G-Garden route exists (343 waypoints, all walkable). (`ROADFLOOR` clamp left alone -- it only affects A* cost, not connectivity.) Added `validate_route()` to the offline model (offline/) which samples a planned route at the engine's 40u per-frame scale and flags any >=200 cliff/ocean -- it flags the bad leg and passes the faithful route.
+
+(2) **Timber wouldn't enter = its world-map marker is too far from the real entry trigger.** The character reached the marker exactly (dist 3-10, jittering) but no field loaded; the entrance sweep then drifted out of the 1500u zone and aborted twice (`[DRIVE-BOUNCE]`). Dollet only worked because its marker sat ~293u from its trigger (`dogate_2`). **Fix (best-effort): widened the sweep search radius 1500->3000** (`DRIVE_FINAL_APPROACH_DIST * 1.5 -> * 3.0`); STEPGUARD keeps the wider spiral on land. The durable fix is capturing Timber's real entry coord (a one-time on-foot entry + `[MAPJUMP-HOOK]`, like the Balamb Town / Fire Cavern refined defaults) -- do that if .144 still bounces.
+
+Two behavioral changes this build (gate exemption + sweep radius); logs separate them (G-Garden = routing, Timber = `[DRIVE-SWEEP]`). The .142 Y-flip, .143 step-guard, block-local query, and deep-trap recovery are unchanged.
+
+BAT .144: REBUILD via deploy.vbs, confirm Version 0.18.3.144. From the Dollet save: (a) drive to Timber and let the wider sweep run -- does it enter, or how far/which direction does `[DRIVE-SWEEP]` drift? (b) drive Timber->Galbadia Garden -- it should now route around the canyon instead of stalling at ~7km. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.143
+
+World map (#70): **.142 BAT reached Dollet (the height fix WORKED -- `[GROUNDH]` diff collapsed from ~390 to ~1, mean 1.1 over 538 samples), but Dollet->Timber wedged at the Dollet exit. Cause: the .138 DEEPGUARD now mis-fires on the corrected deep ground. Replace it with a faithful forward step-guard.**
+
+.142 BAT result: the Y-flip made the height query faithful (538 `[GROUNDH]` samples, mean |diff| 1.1, max 162 on 2 overlap cells; 536/538 within 10u) and Squall reached Dollet. Dollet->Timber then wedged: `[DEEPGUARD]` fired 2378x, 1127 of them at the Dollet-exit road cell (c112,r57) redirecting the walk AWAY from west -- the only way to Timber -- so he nosed into the wall (hard wedge, moved 0 units). Root cause: DEEPGUARD (`world_map_drive.inl`) compares fine cells 1024u apart against `WM_CLIMB_STEP`(400); on the now-correct mesh the road descends gradually from the shallow coast (~-193) to the deep inland ground (~-595), which the engine walks fine (per-frame dH << 200) but DEEPGUARD reads as an unclimbable >400 ledge one cell over. Offline, replaying the faithful Dollet->Timber route (305 waypoints, per-step max dH = 83) showed DEEPGUARD false-blocking 80/304 steps.
+
+Fix: replace DEEPGUARD with a **faithful forward step-guard** -- before committing the 8-way sector, probe ~128u ahead along each candidate sector's bearing using the (now-validated) block-local height query `WorldGroundHeightLocal`, and mark a sector UNSAFE only if the destination is off-mesh/ocean (no ground) or the height step is >= 200 (the engine's own 0x53E7A0 gate). Rotate to the nearest safe sector; no-op on open walkable ground. Offline this blocks 0/304 steps of the walkable route while still rejecting the sea. The on-foot executor otherwise had NO forward terrain check, so this also adds real (faithful) wall/coast avoidance.
+
+One behavioral change (the on-foot steering guard). `WM_CLIMB_STEP` / `s_elevFine` are now unused by the guard. The .142 Y-flip, block-local query, and the deep-trap stuck/reverse recovery are unchanged.
+
+BAT .143: REBUILD via deploy.vbs, confirm Version 0.18.3.143. From the Dollet save, auto-walk to Timber. Watch for `[STEPGUARD]` redirects (should be rare, only at real cliffs/coast) and confirm he leaves the Dollet exit westward instead of wedging. Send Logs/ff8_world.log. If he reaches Timber, the Galbadia trio is closed in-game; then retire the remaining DOLLET coast block / ROADFLOOR / road-bridge hacks one BAT at a time. LOCAL; NOT pushed.
+
+## v0.18.3.142
+
+World map (#70): **THE WEDGE FIX -- the navmesh was mirrored along Y inside every block. One-line placement fix in `LoadTerrainGrid`: `vwy = oy - lvy` (was `oy + lvy`).**
+
+Root cause, proven offline against the binary + the raw wmx bytes + all 205 `[GROUNDH]` samples in the last log: the wmx vertex's in-plane Y (word2 at vert+4) runs 0..-2048, but the height query maps game->mesh via `NmGameToMeshY` which runs the OPPOSITE way. Placing `vwy = oy + lvy` put every triangle ~one 2048u block off in Y, so `WorldGroundHeightLocal`'s home block contained the ADJACENT shallow coastal triangle (~-200) instead of the real deep ground (~-595). That ~390u error is exactly what the 200u step gate turns into the Galbadia/Timber wedge. This is the very shallow-vs-deep triangle the .140/.141 BATs saw (ourH -201 vs engine -545); the block-local query alone could not fix it because the home block itself held the misplaced geometry.
+
+Fix: negate the local Y. Replicating the mod's exact parser reproduces the same 157,416-triangle navmesh; with the flip, the ported height matches the engine across ALL 205 `[GROUNDH]` samples (mean 0.6u, max ~5u, vs ~390u before). Offline, the three acceptance trios (Galbadia / Balamb / Esthar) are walkable both ways. Full disassembly + faithful port + analysis under `offline/` (REQUIREMENTS.md, VALIDATION.md, PATCH_phase5.md).
+
+One behavioral change only (the placement sign). The .138 deep-trap guard, the block-local query, and all overlays are unchanged. The hardcoded DOLLET coast block / `[ROADFLOOR]` clamp / road bridges were compensating for the mirror and can be retired one-BAT-at-a-time AFTER this is confirmed.
+
+BAT .142: REBUILD via deploy.vbs, confirm Version 0.18.3.142. Load the Balamb save, walk from outside the Garden DOWN to the beach -- `[GROUNDH]` diff should now be ~0 (was ~344 stationary at the Garden). Then auto-walk to Dollet, and onward to Timber. Send Logs/ff8_world.log. LOCAL; NOT pushed.
+
+## v0.18.3.141
+
+World map (#70): **the .140 BAT (both continents) proved our height query is NOT faithful, so pivot to the engine's OWN method. This build adds a BLOCK-LOCAL height query beside the global one as a second diagnostic, to validate it against the engine before wiring Stage 2.**
+
+.140 BAT result (query NOT faithful -- the .139 "it works" was luck on a flat patch): walking from outside Balamb Garden down to the beach, the engine's live height (0x0203FE30) is clearly GROUND TRUTH -- it climbs smoothly from ~-643 by the Garden to ~0 at the waterline. Our `WorldGroundHeight` fails two ways: (1) STATIONARY by the Garden, ourH held -201 while the engine held -545 -- a diff of 344 at a dead stop, which kills the .139 lag theory; our triangle 52942 (corners -172/-260/-239) is a spurious SHALLOW triangle amid good deep ones (neighbours -514..-560 matched the engine). (2) On the beach the global point-location returns NON-containing triangles (barycentric weights to -15.8/16.5 -- the point is nowhere near the returned triangle), so the query extrapolates that triangle's plane to garbage (ourH -472 where the engine reads ~0). Root cause, confirmed against the disassembly: the engine looks up height BLOCK-LOCALLY (find-poly 0x53EB80 reads a precomputed block index, hands it to block-loader 0x553E00, searches only that block's polys), whereas our `Navmesh_FindTriangleMesh` scans the ENTIRE mesh and, among containing triangles, picks the nearest centroid -- so it grabs an overhang triangle reaching in from a neighbour block, and on the coast it falls back to a far triangle. A literal call to 0x53EB80 is possible (cdecl, 2 pointers, returns a found-flag -- confirmed at its call site) but arg1 is a 260-byte engine movement-context buffer with the block index at +0x20; building that by hand risks an out-of-bounds block-loader read (crash). So we replicate the METHOD instead -- pure C++, no engine call, no crash risk.
+
+This build (READ-ONLY diagnostic, no steering change -- one BAT):
+
+1. **`WorldGroundHeightLocal(gx,gy)`** (`world_map_navmesh.inl`): the engine-faithful block-local query. A lazily-built CSR index buckets every navmesh triangle by its centroid's 2048u mesh block (`NmBlockOf` / `NmBuildBlockIndex`; the mesh frame is shifted a whole number of blocks from the engine frame, so the grid aligns). The query restricts the search to the point's home block + its 8 neighbours (torus-wrapped) and, among containing triangles, PREFERS one bucketed to the home block -- so a neighbour's overhang loses to the home block's own ground. Returns `WGH_NO_GROUND` when nothing in the 3x3 contains the point (honest -- no extrapolation) and reports the containing-triangle count for overlap visibility. Same barycentric math and mesh frame as `WorldGroundHeight`.
+2. **`[GROUNDHL]` logged beside `[GROUNDH]`** (`world_map.cpp`, same 250ms throttle): both queries' triangle / corners / barycentric / height and each one's diff vs the engine's live 0x0203FE30, every world-map frame.
+
+The decisive read: at the spots the global query failed -- the stationary Garden (engine -545, global ourH -201) and the beach (engine ~0, global garbage) -- does `[GROUNDHL]` match the engine (small diff)? If yes, block-local is the fix and Stage 2 gates on it. `contain=N` also says whether the Garden cell really has overlapping triangles (overhang confirmed) and whether the beach is covered at all (if `[GROUNDHL]` is tri=NONE on the sand, those polys were filtered out of the navmesh and we feed the raw coast next).
+
+BAT .141: REBUILD via deploy.vbs, confirm Version 0.18.3.141. On the world map, walk the SAME routes as .140 -- around the Galbadia start over varied ground, then load the Balamb save and walk from outside the Garden DOWN to the beach (pause a moment by the Garden, and again on the sand). Send Logs/ff8_world.log. Compare `[GROUNDHL]` vs `[GROUNDH]` vs `engineH` at those spots. The .138 deep-trap guard stays. LOCAL; NOT pushed.
+
+## v0.18.3.140
+
+World map (#70): **Stage 1 BAT validated the height query WORKS -- but exposed a ~92u offset to characterize before Stage 2. This build enriches the `[GROUNDH]` diagnostic (triangle + corner heights + barycentric) and moves it to every world-map frame, so the offset can be sampled across varied terrain and BOTH continents by walking manually.**
+
+.139 BAT result (query WORKS; one open question): every `[GROUNDH]` sample found a valid triangle (no NOTRI) and our height tracked the engine's closely as the player moved -- ourH ~-438, engineH ~-530, the diff holding ~+92 within +-5 across all samples. That confirms the hard parts are right: coordinate frame, the file<->engine Z mirror, vertex layout, sign (UP=negative), and the barycentric interpolation. For contrast the old coarse fine-grid reads this same cell as -165 (off by ~365) -- so our query is a big accuracy gain. The open question is that ~92u offset (ours consistently LESS negative). For the Stage 2 step gate (|heightAhead - heightHere| >= 200) a CONSTANT offset cancels exactly, so it wouldn't matter; the risk is a TERRAIN-VARYING offset, which would mean we're point-locating a different surface triangle than the engine (our height changed ~2x faster than the engine's over these positions -- a mild hint we may be on a steeper triangle). We couldn't tell, because the drive WEDGED AGAIN at the Galbadia exit (c103,r66, idx 2/23, never progressing -- the same executor no-collision weakness) so every sample is from one small patch. Aaron doesn't recognize the offset; he has a Balamb-continent save to add cross-region data.
+
+This build (READ-ONLY diagnostic, still no steering change -- one BAT):
+
+1. **`WorldGroundHeight` gains optional debug out-params** (`world_map_navmesh.inl`): the chosen triangle index, its 3 corner heights, and the barycentric weights. Stage 2 still calls `WorldGroundHeight(gx,gy)` with no out-params (no overhead).
+2. **`[GROUNDH]` moved to `Poll()` and enriched** (`world_map.cpp`; removed from `world_map_drive.inl`). It now fires on EVERY world-map frame (throttled 250ms) -- so it logs while the player walks MANUALLY, not only during a wedged auto-drive -- and logs `tri=N corners(h0,h1,h2) bary(a,b,c) ourH=.. engineH=.. diff=..`. Gated on new `GROUNDH_VALIDATE` (flip to 0 to silence).
+
+The decisive reads: (a) does engineH fall WITHIN our triangle's corner range [min..max]? If yes, we're on the right surface and the offset is a benign sampling/smoothing artifact that cancels in the gate; if engineH sits OUTSIDE the corners (e.g. corners ~-440 but engineH -530), we're point-locating the WRONG triangle and that must be fixed before Stage 2. (b) Is the diff ~constant across terrain AND across the two continents? Constant -> cancels in the Stage 2 gate -> proceed; varying -> a triangle-selection problem to fix first.
+
+BAT .140: REBUILD via deploy.vbs, confirm Version 0.18.3.140. On the world map, WALK MANUALLY around the Galbadia start over varied ground (flat, near the coast/slopes), then load the BALAMB save and walk around there too (no auto-drive needed -- the probe fires every frame now). Send Logs/ff8_world.log. Read the `[GROUNDH]` lines per the two questions above. If engineH sits within corners AND the diff is ~constant everywhere, Stage 1 is validated -> Stage 2 (wire the 200-step gate into the steering). The .138 deep-trap guard stays. LOCAL; NOT pushed.
+
+## v0.18.3.139
+
+World map (#70): **start REPLICATING the engine's on-foot collision rule, so the executor finally has universal wall avoidance. Stage 1 (this build, READ-ONLY): the exact ground-height query + a live validation against the engine, before any steering change.**
+
+.138 BAT result (INCONCLUSIVE -- forward wedged before the guard could be tested, NOT a regression): the build was clean (Version 0.18.3.138), the corner-safety revert confirmed (0 `[CORNERSAFE]`, forward plan clean 25 tris -> 31 cells), but the FORWARD trip wedged at the Galbadia EXIT -- c100,r70, idx 3/31, ~18km short of Dollet -- crawling NE from spawn, stalling every ~3s, reverse-nudged, finally hard-wedged pressing into terrain (20.5km -> 18.3km over the whole run). `[DEEPGUARD]` fired 0x, so the deep-trap guard was never exercised -- no return trip, no deep coast reached. This is NOT a .138 regression: the guard never ran, the corner-safety revert only touches the Dollet area, the inland path is identical to .137 (which reached Dollet), and the guard couldn't have helped here anyway (it redirects away from deep cells BELOW the player, and this is a wall ABOVE). It is the on-foot executor's known weakness: **it has no collision check at all** -- the forward-collision guard is vehicle-only, so the 8-way walk just presses toward the target and noses into walls, clearing this spot only intermittently (.135/.137 got through on RNG/battle timing). That weakness is exactly what this work fixes.
+
+The engine's on-foot rule is fully decoded (WMX_OBJ_FORMAT.md S12): for each candidate move it barycentrically interpolates the exact ground height under the destination and REJECTS the move when |dH| from the current height >= 200 (0xC8). Foot is exempt from the per-vehicle ground-type bits, so this 200-step is the ONLY thing that stops Squall. We're replicating it (not calling the game fn speculatively -- pure, debuggable, and three points define one plane so any correct interp matches the engine to sub-unit rounding). Three stages: (1 this build) the validated height query; (2) gate the on-foot steering on the 200-step -> universal wall avoidance; (3) replace the planner's coarse fine-grid walkability, retiring the .81 hardcode + WM_CLIMB_STEP, closing #69.
+
+Stage 1 code (READ-ONLY -- adds a query + a diagnostic, no steering/behaviour change, so it's one BAT):
+
+1. **Persistent corner heights** (`world_map_navmesh.inl`). The navmesh already stores every triangle's 3 vertices, but freed the per-corner heights after build (kept only the mean floor). Added `s_nmH0/H1/H2` populated alongside `s_nmZ*` in `Navmesh_AddTriangle` and cleared in `Navmesh_Reset` -- a persistent copy for runtime queries.
+2. **`WorldGroundHeight(gx,gy)`** (`world_map_navmesh.inl`). Replicates the engine's interpolation (find-polygon 0x53EB80 -> point-in-tri + plane interp 0x402620): `Navmesh_FindTriangleGame` point-locates the triangle, then barycentric interp of the height from its 3 corner heights (in mesh coords, the frame the stored verts use). Returns `WGH_NO_GROUND` (0x7FFFFFFF sentinel) when no triangle covers the point. No spatial index needed yet -- Stage 1 calls it once per frame for validation; the 8-queries-per-frame index is a Stage 2 concern.
+3. **`[GROUNDH]` validation** (`world_map_drive.inl`, on-foot branch, under `DRIVE_STEER_DIAG`, throttled). Logs our `WorldGroundHeight(px,py)` next to the engine's LIVE interpolated ground height at `0x0203FE30` -- the exact value its own 200-step gate compares -- with their diff. If ourH tracks engineH as the player moves, the replication is PROVEN faithful against the engine itself (stronger than re-reading the disassembly), and Stage 2 can gate steering on it.
+
+BAT .139: REBUILD via deploy.vbs, confirm Version 0.18.3.139, then trigger the on-foot auto-drive (Galbadia save -> toward Dollet; it's fine if it crawls/wedges at the Galbadia exit -- we only need it MOVING to sample heights). KEY read: the `[GROUNDH]` lines -- does `ourH` track `engineH` (diff near 0) as the player's position changes across flat ground and slopes? If yes, Stage 1 is validated -> proceed to Stage 2 (wire the 200-step gate into the steering, which should clear the Galbadia wedge and let the forward trip reach Dollet). If `ourH=NOTRI` everywhere, or there's a large constant diff or a constant ratio, the height query or the 0x0203FE30 address is off -- the validation is the safety net that makes a wrong first attempt cheap, and only THEN do I re-disassemble 0x53EB80/0x402620 to find the discrepancy. The .138 deep-trap guard stays in (it handles the one-way DESCENT the symmetric 200-step rule allows -- complementary to the wall avoidance). LOCAL; NOT pushed.
+
+## v0.18.3.138
+
+World map (#70): **.137's gate FIXED the forward trip (reaches Dollet again), but the return still drifts -- and it's an EXECUTOR problem, not a path one, so path-reshaping can't fix it. Revert the corner-safety; add a deep-trap steering guard that stops the 8-way walk from slipping into the one-way deep cell beside the causeway.**
+
+.137 BAT result: the elevation gate worked. On the forward trip the corner-safety fired only 4 times (the deep corners, drops 882-1429); the 3 benign inland insertions that wedged .136 at c101,r70 (drops < 800) are gone, so Timber->Dollet reaches town again. BUT the Dollet->Timber return still wedges, and the log proves it is not the path: the plan is correct, `[CORNERSAFE]` inserted the c112,r55 corner (drop 1429), and the executor's steer target is c112,r55 the whole time -- yet within ten frames of leaving Dollet the player goes c112,r57 -> c112,r56 -> drifts WEST into deep-coast c111,r56 (floorZ -1374) while its yaw is still rotating, and traps there (can't climb the +874 back out; re-plans from inside the trap and never escapes). The corner is in the path and targeted, but the 8-way yaw steering slips off it on the very first move. So path-reshaping cannot fix the return.
+
+Two changes this build (the guard is the one new behaviour; the revert restores the .135 baseline the forward trip already worked from):
+
+1. **REVERTED the diagonal corner-safety** in `PlanDrivePathNavmesh` (`world_map_planner.inl`). It can't fix the return (the executor drifts off the reshaped path) and the forward trip reached Dollet without it in .135, so it was adding risk and a confounding variable for no benefit. `PlanDrivePathNavmesh` is back to building the raw centroid polyline and rasterizing it directly.
+
+2. **DEEP-TRAP STEERING GUARD** (`world_map_drive.inl`, the on-foot 8-way steering). The walk-bearing for 8-way sector k is (heading + k*512). Before committing the chosen sector, the guard finds the player's orthogonal world-neighbours whose fine-grid floor (s_elevFine) sits more than the on-foot climb limit (WM_CLIMB_STEP) BELOW the player's cell -- a one-way ledge he can't climb back from. If the chosen sector's walk bearing points within 90 degrees of such a neighbour (would push him toward it), it rotates the sector to the nearest one that doesn't. At the Dollet exit this turns the drifting NNW walk (toward the deep WEST cell) into NNE, keeping the player on the c112 road column up to the causeway. It is a no-op wherever there is no deep neighbour, so open-road and inland drives are unchanged. Logs `[DEEPGUARD]` (with the player's elevation and which directions were blocked) when it redirects.
+
+BAT .138: REBUILD via deploy.vbs, confirm Version 0.18.3.138, then drive the ROUND TRIP (Galbadia save -> on foot to Dollet, enter, exit, back toward Timber). KEY reads: the FORWARD trip should still reach Dollet (the guard is a no-op or keeps it off the coast -- either is fine); on the RETURN, `[DEEPGUARD]` should fire at/just after the Dollet exit and redirect the sector (e.g. 3->4), the player should walk UP the c112 column to the causeway WITHOUT its position entering c111,r56 or dropping to floorZ ~-1374, and then head west toward Timber. If `[DEEPGUARD]` does NOT fire, read its `pElev` value -- the player's own cell may read too deep for the relative check, and the reference needs adjusting. If the round trip drives clean both ways, #70 is ready to close + push. LOCAL; NOT pushed.
+
+## v0.18.3.137
+
+World map (#70): **.136 corner-safety REGRESSED the forward trip -- it reshaped the WHOLE route, not just the Dollet causeway, and wedged the drive at the start. Fix: gate the corner insertion on a real DEEP DROP so it only fires at genuine deep-coast ledges, not benign inland road corners.**
+
+.136 BAT result (REGRESSION -- failed to reach Dollet): the diagonal corner-safety fired SEVEN times, all along the benign inland Timber->Galbadia road (c101..108, r55..67), because its trigger was too loose -- it inserted a road corner whenever a diagonal leg's avoided corner was merely NON-road, and the inland road is full of gentle non-road corners that are not hazards at all. Those 7 rerouted waypoints changed the working forward path's direction and the executor wedged on it: the drive jammed at the very start (idx 0/33, c99,r72 -> first waypoint c100,r69, `U--R JAM`), recovered, then jammed again at c101,r70 (idx 3-4/33) trying to climb to c101,r67, and never reached Dollet. The route itself was still 25/25 on road -- the failure was purely the executor following the corner-reshaped path. (.135's forward drive worked precisely because it followed the raw centroid path the executor is tuned for.)
+
+Root cause: the insertion criterion keyed on "avoided corner is non-road," but the actual hazard is a DEEP LEDGE -- a corner whose floor sits far below the road, that the player drifts into and can't climb back out of (the Dollet deep-coast trap, drop ~1100u). A merely-non-road corner of gentle inland land is harmless, so reshaping the path there is all cost and no benefit.
+
+The fix (one behavioural change, the same `PlanDrivePathNavmesh` corner-safety block in `world_map_planner.inl`): GATE the insertion on the floor drop between the road corner and the avoided corner. Only insert when |s_elevFine[road] - s_elevFine[avoided]| exceeds 2x the on-foot climb limit (~800u) -- a genuine deep-coast ledge -- so the gentle inland road (undulations < ~450u) is left untouched and only the causeway-edge deep coast (drop ~1100u, the Dollet drift) triggers a reshape. Logs the `drop` value per insertion so the BAT shows exactly which legs fired and how deep. Everything else from .135/.136 is unchanged.
+
+BAT .137: REBUILD via deploy.vbs, confirm Version 0.18.3.137, then drive the ROUND TRIP again (Galbadia save -> on foot to Dollet, enter, exit, back toward Timber). KEY reads: `[CORNERSAFE]` should now fire roughly ONCE, at the Dollet causeway edge (drop ~1100), NOT seven times along the inland road; the FORWARD drive should reach Dollet again (no early idx-0/c101,r70 jam); and the RETURN should follow the causeway west without dropping into c111,r56 or wedging. If the forward trip reaches Dollet AND the return drives clean, #70 is ready to close + push. **Fallback:** if the forward trip STILL breaks (the one kept Dollet-approach corner disrupts the executor too), the path-reshaping approach is the wrong tool -- revert corner-safety entirely and pivot to a steering/stuck-recovery fix that never touches the working forward path. LOCAL; NOT pushed.
+
+## v0.18.3.136
+
+World map (#70): **.135 SUCCEEDED -- Timber->Dollet now drives on-foot all the way into town. But the return trip wedged: the executor drifts off a narrow road causeway into the deep coast beside it. Fix: diagonal corner safety -- reshape diagonal path legs that graze a deep corner into an L through the road.**
+
+.135 BAT result: forward SUCCESS. Timber->Dollet drove 25/25 waypoints on road, all shallow, straight into Dollet -- the corrected c112,r56 + c112,r57 gap tags connected the causeway into town and A* took the shallow road. That's #70's core goal met. THEN the round trip failed: leaving Dollet toward Timber, the player wedged ~immediately. The `[ROADV:DRIVE]` plan from Dollet is correct (46/50 waypoints on road, routing c112,r57 -> c112,r56 -> c111,r55 onto the causeway -> west to Timber, shallow throughout) -- so the navmesh routes the return fine. The failure is the EXECUTOR: the first leg out of Dollet is the diagonal c112,r56 -> c111,r55, which runs along the causeway edge, and the cell directly south of the target (c111,r56) is deep coast at floorZ -1374. The 8-way yaw steering didn't turn north hard enough across that diagonal, so the player slid one row south into c111,r56 -- a one-way ledge (it descended in fine, but climbing the +874 back up to the road exceeds the engine's on-foot step limit), and wedged. The reverse-recovery just oscillated (back east toward Dollet, forward into the same deep cell, repeat). The forward trip dodges this because it drops straight DOWN the c112 column into Dollet (c112,r56 -> c112,r57, orthogonal), no causeway-edge diagonal.
+
+The fix (one behavioural change, `PlanDrivePathNavmesh` in `world_map_planner.inl`): DIAGONAL CORNER SAFETY. After the navmesh A* centroid polyline is built, walk it; wherever a leg steps diagonally between two cells (|dc|==1 and |dr|==1) and exactly ONE of the two orthogonal corner cells is road (the other a non-road deep cell), insert the ROAD corner as an intermediate waypoint. The Dollet exit becomes c112,r56 -> c112,r55 -> c111,r55 -- both legs orthogonal and on road, so the steering can't graze the deep corner. No-op when both corners are road (diagonal already safe) or both non-road (a genuine bridge across non-road terrain the insert couldn't improve), so it does nothing to the forward trip (whose Dollet legs are all orthogonal) or to road-less continents. Consistent with the principle that the road overlay only VALIDATES/shapes the path the navmesh already routed -- it never steers. Logs `[CORNERSAFE]` per insertion.
+
+BAT .136: REBUILD via deploy.vbs, confirm Version 0.18.3.136, then drive the ROUND TRIP: Galbadia save -> on foot to Dollet (should still arrive), enter Dollet, exit, then on foot back toward Timber. Send Logs/ff8_world.log. KEY reads: forward still reaches Dollet (`[ROADV:DRIVE]` mostly ROAD, arrival); on the return, `[CORNERSAFE]` should log a road-corner insertion at the Dollet exit (diag c112,r56->c111,r55 -> insert c112,r55); the return `[YAWDRIVE]` should follow the causeway WEST without dropping to floorZ ~-1374 or wedging in c111,r56; and the drive should make real westward progress toward Timber instead of jamming ~immediately out of Dollet. Random battles interrupt + resume. LOCAL; NOT pushed. If the round trip drives clean both ways, #70 is ready to close + push.
+
+## v0.18.3.135
+
+World map (#70): **the .134 [DOLLETBRIDGE] map proved the Dollet "bridge" is NOT terrain 12 -- it's a 2-cell deep-coast gap between a shallow ROAD CAUSEWAY and Dollet town that the radius bridge can't span. Fix: correct the .130 gap tag to the REAL gap cells (c112,r56 + Dollet's c112,r57), and drop the red-herring c113,r56 tag.**
+
+.134 BAT result: terrain 12 (bridge) DOES exist -- 1113 polygons -- but the `[DOLLETBRIDGE]` locator showed every one of them is in the eastern continents (fine cells ~c181-191, r86-93, the long Horizon-style bridges); there is NO type-12 terrain anywhere near Dollet. So the .134 overlay change correctly tagged those distant bridges as road (harmless, and right for those towns later) but never touched Dollet: the `[ROADV:DRIVE]` route was byte-identical (dives the deep coast at c109,r60, 2/22 waypoints on road), the drive wedged at idx 4/9 ~4.7km out, and `[ROADCON]` severance stayed 1 of 14 at the same cell.
+
+But the `[DOLLETBRIDGE]` corridor dump (every triangle in fine rows 54-61, cols 107-114) revealed the real geography. There is a shallow ROAD CAUSEWAY already in the overlay: fine row 55 runs as continuous railroad (terr 28/6) from c107 east to c112 at floorZ ~-500 to -950, riding over the deep water. The deep coast the route keeps diving into is terrain 14 (NOT ocean) at c109-111, rows 56-61, floorZ -1300 to -2000. So the road to Dollet isn't missing -- it's the r55 causeway. The problem is the last 2 cells: the causeway ends at c112,r55, Dollet town is c112,r57, and c112,r56 between them is deep-coast non-road. That ~2-cell (2048u) jump exceeds the radius road bridge's 1536u, so the navmesh leaves Dollet connected to the causeway only via the deep coast, and A* dives it (the #70 4km wedge). And the cell we'd tagged since .130, c113,r56, was a RED HERRING -- terrain 29 (a mountain spur) at -172, ISOLATED (its one oversized triangle tri#38418 centroid-bins to a different cell, so the radius bridge never reached it), and not on the causeway at all.
+
+The fix (one behavioural change, `LoadTerrainGrid` in `world_map_segments.inl`): replace the wrong .130 tag `s_roadFine[56][113]=1` with the REAL gap cells -- `s_roadFine[56][112]=1` (the deep-coast cell between the causeway end and Dollet) and `s_roadFine[57][112]=1` (the Dollet town cell, the catalog tri#38414). That turns the 2-cell jump into two 1-cell hops (c112,r55 <-> c112,r56 <-> c112,r57) the radius bridge CAN span, so the gate exemption keeps them, the .127 clamp shallows them, and the .85 override forces them walkable -- completing an all-road path into Dollet that A* should prefer over the deep-coast dive. Unlike c113,r56, these cells have many small in-cell triangles, so the centroid-binning that defeated .130 should not bite. This keeps the navmesh doing the routing -- the road overlay is only the validation that the path is right, NOT a steering crutch. Keeps .134's terr-12 overlay inclusion (correct for other coastal-town bridges, helps #67), .133's dense radius bridge, and the read-only `[DOLLETBRIDGE]` map (to confirm c112,r56/r57 now read road=1 and join the road body).
+
+BAT .135: REBUILD via deploy.vbs, confirm Version 0.18.3.135, then drive on foot from a Galbadia save toward Dollet. Send Logs/ff8_world.log. KEY reads: `[ROADCON] SEVERANCE SUMMARY` (should now be 0 of ~14 -- the road navmesh-connects into Dollet); `[ROADV:DRIVE]` SUMMARY (the route should stop diving to -1414 and stay on the road, most waypoints ROAD); the `[DOLLETBRIDGE]` corridor dump (c112,r56 and c112,r57 should now read road=1); and the live drive (`[YAWDRIVE]` -- does it follow the causeway into Dollet instead of wedging at ~4.7km?). If severance is still 1, the c112 hops didn't connect either (centroid-binning again) -> pivot to the road-overlay-following approach. Random battles interrupt + resume. LOCAL; NOT pushed.
+
+## v0.18.3.134
+
+World map (#70): **ROOT CAUSE FOUND -- the road overlay excluded the BRIDGE terrain type, so the short bridge deck that connects Dollet to the mainland road was never folded into the road network. Fix: add bridge (terrain 12) to the road overlay. Plus a read-only [DOLLETBRIDGE] map to confirm.**
+
+Aaron's insight cracked it: Dollet sits on the coast and you reach its town trigger across a short raised BRIDGE off the mainland road -- and that little bridge is the problem. The code confirms the mechanism exactly. The road overlay (`s_roadFine`) was built in `LoadTerrainGrid` from road/railroad polys ONLY (`terrain == 27 || terrain == 28`). FF8 has a distinct terrain type 12 for BRIDGES (the geometry comment names it: "type 28 road, type 12 bridge"). A bridge poly rasterizes into the fine grid as plain walkable land and is fed to the navmesh, but it was NEVER tagged into the road overlay. Since the overlay drives all four of our Dollet-connection mechanisms -- the navmesh road-bridge (step 3.6), the gate's road-road exemption (.128), the .85 walkable override, and the .127 floor clamp -- the actual bridge deck got none of them. It sat in the navmesh sharing edges only with the deep water beside it; the height step where it meets the mainland road was severed by the gate with no exemption to save it. A* then refused the severed bridge and dived the coast -- the #70 4km wedge. (It also explains why the hand-tagged gap cell c113,r56 was never the right object: it's terrain 29, mountain, sitting BESIDE the bridge, not the bridge itself.)
+
+The fix (one behavioural change, `LoadTerrainGrid` in `world_map_segments.inl`): include terrain 12 in the road-overlay rasterize condition, exactly the way 27/28 are. The bridge deck is now tagged road, so the navmesh road-bridge stitches it to the adjacent road triangles, the gate exemption KEEPS the bridge<->road and bridge<->Dollet steps even though they're tall, the .85 override forces the bridge cells walkable, and the .127 clamp shallows them -- completing an all-road path across the bridge into Dollet that A* prefers over the coast dive. Low-risk and general: if a stretch has no bridge terrain it's a no-op, and other coastal-town bridges get the same treatment (helps #67). Keeps .133's dense radius road bridge (the smooth-to-4km drive) and the .130 gap tag for now; both retire once #70 is confirmed.
+
+Also adds a READ-ONLY `[DOLLETBRIDGE]` diagnostic (in `LoadTerrainGrid`, after the navmesh build): (1) the global terrain-type histogram (confirms terr 12 is present and its poly count), (2) every terr-12 bridge triangle map-wide with its fine cell, floor and road-status, and (3) every navmesh triangle in the Dollet road-end -> town corridor (fine rows 54..61, cols 107..114) with terrain type, floor and road-status. After the fix, the bridge cells should read road=1. Pure logging; adds no connections.
+
+BAT .134: REBUILD via deploy.vbs, confirm Version 0.18.3.134, then ENTER the world map (the `[DOLLETBRIDGE]` map is logged at load) and drive on foot from a Galbadia save toward Dollet. Send Logs/ff8_world.log. KEY reads: `[DOLLETBRIDGE]` histogram (is terr 12 present? how many?), the terr-12 bridge locator (are there bridge triangles next to Dollet, ~c109-113 r56-57?), and the corridor dump (what terrain types tile the road-end -> Dollet gap, and do they now read road=1?); `[ROADCON] SEVERANCE SUMMARY` (now 0 of ~14?); `[ROADV:DRIVE]` (route stop diving to -1414, stay on road?); and the live drive (`[YAWDRIVE]` -- does it cross the bridge into Dollet?). If terr 12 is present but NOT near Dollet, the corridor dump shows the real bridge type to add next. Random battles interrupt + resume. LOCAL; NOT pushed.
+
+## v0.18.3.133
+
+World map (#70): **revert .132's nearest-pair road bridge (it froze the on-foot drive at spawn) back to .131's dense radius bridge, and add a read-only [GAPDIAG] probe to find why the gap cell still won't connect.**
+
+.132 replaced the dense radius road bridge with a nearest-pair rule (one bridge per pair of 8-adjacent road cells). That was a mistake: it connected the road far too loosely. `[ROADCON]` navA* between road samples jumped back to the pre-bridge .130 values (17-20 triangles between samples vs .131's 4), and the sparse corridor froze the drive ~1-2 cells from spawn (the route's funnel threaded a path the executor immediately wedged on; idx stuck at 0/28, no movement). It also still failed to connect the synthetic gap cell c113,r56 (road[0] still SEVERED even with a 3072 cap), confirming that cell's triangle is geometrically isolated -- farther than 3072u from any road triangle in an 8-adjacent cell.
+
+This build (one change, `Navmesh_Build` step 3.6 in `world_map_navmesh.inl`): restore .131's dense radius bridge verbatim (`ROAD_BRIDGE` back to 1536; bridge every road-cell triangle pair whose fine cells are 8-adjacent and centroids within the radius). That gave the best result so far -- smooth, quick drive to ~4km from Dollet -- so we're back on it. Added a read-only `[GAPDIAG]` block (step 3.6b): it logs the gap cell c113,r56's 8 neighbours' road status, and for each triangle whose centroid lands in that cell, its globally-nearest OTHER road triangle (cell + floorZ + distance). No pairs added, no behavioural change beyond the revert. Keeps the .130 gap tag. LOCAL; NOT pushed.
+
+BAT .133: REBUILD via deploy.vbs, confirm Version 0.18.3.133, ENTER the world map (the `[GAPDIAG]` data is logged at load -- driving is optional but confirms the revert restored the smooth-to-4km drive). Send Logs/ff8_world.log. KEY reads: the `[GAPDIAG]` lines (neighbour road status + the gap cell triangle's nearest-road-triangle cell/distance), `[ROADCON] SEVERANCE` (should be back to 1, road body navA* back to ~4 tris), and the drive (smooth to ~4km again?). The GAPDIAG output decides the next, data-driven fix for the gap cell.
+
+## v0.18.3.132
+
+World map (#70): **switch the road bridge from a radius-all-pairs to a NEAREST-PAIR rule so the final hop into the synthetic gap cell (the last severed road segment) connects, and A* takes the road that curves AROUND the coastal cliff instead of diving into it.**
+
+The .131 radius-1536 road bridge worked well for the body: the Timber->Dollet oracle collapsed 208->62 tris (38 on road) and the on-foot drive ran smooth and quick to ~4km out. But `[ROADCON]` severance stayed at 1 of ~14 -- the last segment, road[3] fine(c110,r55) -> road[0] fine(c113,r56), was still SEVERED (navA* 53260 over 19 tris, minZ -1429). The synthetic gap cell c113,r56's triangle sits farther than 1536u from the nearest road triangle, so the fixed-radius bridge never reached it. With that one hop missing, A* still couldn't complete the road loop and dived the coast at c108,r60 (-1414); the F11 screenshot shows Squall wedged at the base of the cliff while the road curves around its foot. The radius bridge also added 798k candidate pairs (268k kept by the gate exemption) -- a lot of redundant, partly steep road-road edges.
+
+The fix (one change, `Navmesh_Build` step 3.6 in `world_map_navmesh.inl`): replace the radius-all-pairs bridge with a nearest-pair bridge. Road-cell triangles are grouped by fine cell; for every pair of 8-adjacent road cells, only their single closest triangle pair is bridged (within the `ROAD_BRIDGE` sanity cap, now 3072u). This guarantees every adjacent road cell pair connects regardless of distance -- so the gap cell connects to both the road body and Dollet's road cell -- while keeping each bridge as short as possible, which both keeps the gate's height extrapolation accurate (short gaps) and keeps the bridge on the flat road rather than across the cliff. It also collapses ~798k pairs down to roughly one per cell-pair (~thousands), cutting the over-connection. Candidates still pass the engine gate; the .128 exemption keeps the road-road moves. Keeps the .130 gap tag. Hardcoded one-off; retires with the .81/.85/.130 patches once #70 ships. LOCAL; NOT pushed.
+
+BAT .132: REBUILD via deploy.vbs, confirm Version 0.18.3.132, drive on foot from a Galbadia save toward Dollet. Send Logs/ff8_world.log. KEY reads: `[NMROADBRIDGE]` (bridge count -- should now be ~thousands, not 798k), `[ROADCON] SEVERANCE SUMMARY` (should now be 0 of ~14), `[ROADV:DRIVE]` SUMMARY (route should stop diving to -1414 and stay on road), and the live drive (`[YAWDRIVE]` -- does it follow the road around the cliff into Dollet?). If severance is still 1, the gap cell's nearest road cell is more than one cell away -- tag the in-between cell, or also tag the catalog Dollet cell c112,r57. Random battles interrupt + resume.
+
+## v0.18.3.131
+
+World map (#70): **road-cell navmesh proximity bridge — repair the one severed road segment (the coastal approach to Dollet) by connecting cell-adjacent road triangles the 400u proximity links miss, so A* finally takes the all-road loop into Dollet instead of diving the cliff.**
+
+The .130 gap tag fixed the OVERLAY ribbon (`[ROADCON]` flipped to "REACHES Dollet road cell, 0 cells short") but NOT the navmesh routing: the `[ROADV:DRIVE]` route stayed byte-identical to .129 (dives `c108,r60 -500` -> `c109,r60 -1414` at idx 8), and the live drive jammed at the same ~4.6km cliff. The `[ROADCON]` severance walk pinpointed why — exactly ONE of ~14 road segments is severed: the final coastal approach, road[3] fine(c110,r55) -> road[0] fine(c113,r56), whose navmesh A* detours to floorZ -1429 over 21 tris. The other 13 segments are navmesh-connected; only this coastal pinch resists. Tagging a CELL can't fix it — it can't create triangle EDGE-adjacency where the mesh has none. The road's triangles there share no edge and sit >400u apart, so the .105 proximity links (which only reach NM_STEP_LINK=400u) never create a candidate pair, and the .128 exemption (which only KEEPS edge-adjacent road connections) has no edge to keep.
+
+The fix (one change, `Navmesh_Build` step 3.6 in `world_map_navmesh.inl`): a road-cell proximity bridge. After the .105 links and before the engine gate, for every pair of road-cell triangles whose fine cells are 8-ADJACENT and whose centroids are within `ROAD_BRIDGE` (1536u, ~1.5 fine cells), add a candidate connection. This is the natural extension of the .128 edge-adjacent road exemption to NEAR-adjacent road cells. Cell-adjacency plus the tight radius keep every bridge short and ON the shallow road surface, so it stays engine-walkable and never spans the deep coast trench; the candidates still pass through the gate, where the .128 exemption keeps the road-road moves. Road-only = safe (non-road triangles are untouched). A new `[NMROADBRIDGE]` line reports how many bridge pairs were added.
+
+Expected: `[ROADCON]` severance drops from 1 to 0 (the road navmesh-connects all the way into Dollet), the `[ROADV:DRIVE]` route stops diving to -1414 and stays on road (the all-road loop is now cheaper than the coast cut's ~18000 vertical penalty), and the drive follows the road past the ~4.6km cliff into Dollet. Keeps the .130 gap tag (the bridge needs the gap cell tagged road). Hardcoded one-off like the .81/.85/.130 Dollet patches; retires with them once #70 ships. LOCAL; NOT pushed.
+
+BAT .131: REBUILD via deploy.vbs, confirm Version 0.18.3.131, drive on foot from a Galbadia save toward Dollet. Send Logs/ff8_world.log. KEY reads: `[NMROADBRIDGE]` (how many pairs added), `[ROADCON] SEVERANCE SUMMARY` (now 0 of ~14?), `[ROADV:DRIVE]` SUMMARY (route stop diving -1414, more ROAD waypoints?), and the live drive (`[YAWDRIVE]` — does it follow the road past the old 4.6km cliff into Dollet?). If severance is still 1, RAISE ROAD_BRIDGE; if A* takes an off-road shortcut, LOWER it. Random battles interrupt + resume.
+
+## v0.18.3.130
+
+World map (#70): **bridge the road->Dollet rasterization gap so A* follows the all-road loop into Dollet instead of diving off a cliff onto the deep coast -- the wall-jam the .129 fix surfaced 4.6km out.**
+
+The .129 LOS-clamp floor worked exactly as intended: the coincident-waypoint oscillation is gone. On the .129 BAT the mid-drive re-plan's `[YAWDRIVE]` idx climbed cleanly 0->1->2->3->4 with a real cell ahead in the steer target (not pinned ~12u at the player), and the drive physically walked the route down to ~4.6km from Dollet -- closer than .128's 5.3km, and the third straight improvement (20.5km -> 5.3km -> 4.6km).
+
+But it surfaced the real final-approach blocker, and corrected a wrong .128 assumption. The route dives straight off the shallow road onto the deep Dollet coast: route waypoint 7->8 is `c108,r60 floorZ=-500 ROAD` then `c109,r60 floorZ=-1414 off` -- a **914-unit drop in one step**, far past the engine's 200-unit on-foot limit. So the engine physically refuses it and the player jams at the cliff edge (`U--- JAM`, d+4; the reverse-burst backs him WSW off the wall, then UP walks him right back into it). He never enters the coast -- he can't. The .128 conclusion that "the coast is walkable because the gate allowed it" was wrong: the gate's interpolated corner-height sampling let a cliff connection through that the engine blocks (the same mean-of-corners unreliability, in the opposite direction from the severance the .128 exemption fixed).
+
+Why A* dives the cliff at all: the road is supposed to LOOP west-then-north-then-east to approach Dollet from the north on shallow ground the whole way, but the .128 [ROADCON] gap profile showed the road ribbon reaches the road-end at fine(c112,r55) and stops 2 cells short of Dollet's road cell fine(c113,r57). The lone untagged cell between them is fine(c113,r56) (terrain 29, road=0 -- walkable land, not ocean). With that gap open the road loop never connects to Dollet in the navmesh, so A* -- forced to reach the coastal town somehow -- takes the only path it has: the cliff dive onto the coast, despite its ~18000-unit vertical penalty.
+
+The fix (one change, in `world_map_segments.inl`): tag the gap cell `s_roadFine[56][113] = 1` right before `Navmesh_Build()`, so the road-cell gate exemption keeps the road-end<->gap<->Dollet connections (8-connected), the .127 floor clamp shallows the cell, and the .85 [ROADMAP] override forces it walkable -- completing an all-road path into Dollet. A* then prefers the shallow road loop over the cliff dive (the loop's horizontal cost beats the coast cut's huge vertical penalty), and the loop is engine-walkable the whole way so the executor can follow it in. Hardcoded one-off like the .81/.85 Dollet patches; retires with them once #70 is confirmed. LOCAL; NOT pushed.
+
+BAT .130: REBUILD via deploy.vbs, confirm Version 0.18.3.130, then drive on foot from a Galbadia save toward Dollet. Send Logs/ff8_world.log. KEY reads: `[ROADCON]` -- does the road ribbon now REACH Dollet (no longer "2 cells short")? `[ROADV:DRIVE]` SUMMARY -- does the route stop diving to -1414 and stay on road (more `ROAD` waypoints, floorZ no longer bottoming at -1414)? And the drive itself -- does it follow the road loop past the 4.6km cliff into Dollet? If [ROADCON] still says 2 short or the route still dives, the gap cell's navmesh triangle isn't edge-adjacent to both road-end and Dollet -> widen the tag to the adjacent c112,r56. Random battles interrupt + resume.
+
+## v0.18.3.129
+
+World map (#70): **floor the executor's LOS-clamp walkback at idx+1 so the steer target can never collapse onto the player's own cell -- the oscillation that stalled the .128 breakthrough drive 5km from Dollet.**
+
+The .128 road-cell gate exemption was the breakthrough. The road came back FULLY navmesh-connected (SEVERANCE 0 of 13, down from 2; the gate dropped 243442 connections but the exemption kept 24154; components 746 -> 731), road[11] reconnected in 17 triangles staying above -657 (was a 78-triangle dive to -1567), the Timber->Dollet oracle improved to 109/208 on road and the live drive to 63/89, both topping out at -1414 instead of -1567 -- and most importantly the drive PHYSICALLY followed the road ~15km, from 20.5km down to ~5km from Dollet (crossing the old road[11] canyon rim at fine c105,r63 cleanly), versus every prior build wedging at the canonical start. The core routing problem is solved.
+
+Where it stalled, at ~5km, was the EXECUTOR, not the route. As the player entered Dollet's region a mid-drive re-plan dropped a fresh navmesh route, and the steer target immediately collapsed onto the player's own cell (steer ~12u away, idx pinned 0/8): targetBearing went to noise and the 8-way sector flipped (-D-R / --L- / -DL- / ---R) in place until a random battle (MODE_SWIRL) paused the drive. Root cause is the exact problem the .110 revert comment flagged as "a separate, narrower final-approach problem": `s_driveNavmeshPath` is deliberately FALSE (the .110 revert kept the LOS clamp active because the funnel corners at 15km need it), so `FineLineClearFootCar` runs on the navmesh path -- and on the final approach every forward straight-line crosses the .81 Dollet false-coast box (fine cols 104-111 rows 59-69, forced steep-mountain), so every line reads blocked and the clamp walked `wi` all the way back to `s_drivePathIdx`, the player's current cell. Steering at your own cell steers nowhere.
+
+The fix (one line of behavior in `world_map_drive.inl`): floor the clamp's walkback at `s_drivePathIdx + 1` instead of `s_drivePathIdx`, so the steer target can never land on the player himself. The NEXT path cell is navmesh-adjacent by construction (A* connected idx -> idx+1), so steering at it is always walkable even when the COARSE grid marks the straight line blocked -- the navmesh already validated that step. The drive now staircases forward through the false-coast cells into Dollet instead of oscillating in place. The .110 funnel-corner protection is fully intact for every cell beyond idx+1: the clamp still walks far targets back to the nearest clear cell, it just never collapses onto the player. No other change; the routing, cursor advance, stuck/replan, reverse-burst, and final-approach logic are all unchanged. LOCAL; NOT pushed.
+
+BAT .129: REBUILD via deploy.vbs, confirm Version 0.18.3.129, then drive on foot from a Galbadia world-map save toward Dollet. Send Logs/ff8_world.log. KEY reads: at the ~5km Dollet-region re-plan, does `[YAWDRIVE]` idx now CLIMB past 0/N (steer target a real cell ahead, not pinned ~12u away at the player), do the keys stop flipping in place, and does the drive push past 5km toward Dollet? Note random battles will interrupt and resume -- a clean run to arrival may need clearing or avoiding encounters on the final approach.
+
+## v0.18.3.128
+
+World map (#70): **road-cell gate exemption -- stop the .120 connection gate severing the walkable road, so A* can finally follow it across the canyon rim.** Keeps the .127 floorZ clamp.
+
+The .127 BAT was decisive. The clamp ran (737 road-cell triangles corrected) and helped at the margin -- road[8] reconnected (its detour dive dropped from -1341 to -595) and the SEVERANCE count fell from 2 to 1 -- but both actual routes were byte-identical to the pre-fix .123 baseline: the Timber->Dollet oracle stayed 80/232 on road diving to -1567, and the live drive stayed 36/115 diving to -1567, wedging at the same canonical start. Cost-correction alone did NOT redirect A*. The reason is exactly the .127 caveat: road[11] (fine c105,r63) was still severed -- even with its floorZ now correctly -500, the path from the rim (road[14]) to the crossing still detoured 78 triangles through the -1567 canyon, because the GATE cut the direct rim->crossing connection on corner-height grounds and the canyon detour it forces A* onto isn't a road cell (so the clamp never touched it). The gate, not the cost, is the binding constraint at that crossing.
+
+The fix: exempt road-cell connections from the gate. `s_roadFine` DECLARATION moved from world_map_segments.inl to world_map_state.inl (still populated by RasterizeTriRoad exactly as before) so the navmesh can read it. In `NmEngineStepBlocked` (the .120 engine-replica gate), compute each triangle's centroid fine cell (game = mesh - NM_W/2, then WorldXToFineCol/Row); when the gate WOULD block a move (height step >= 200) but BOTH centroids sit at road cells, keep the connection instead and count it (`s_nmRoadExempt`). The road is ground-truth walkable, so the gate has no business cutting a move between two road cells -- this corrects the walkability model with ground truth, it is not steering. The exemption only ever KEEPS a road-to-road connection; it never adds a road-to-cliff one. The `[NAVMESH] built ...` log now also reports `gate dropped N connections, road-cell exemption kept M`.
+
+Scope note: the exemption reconnects adjacent road-cell triangle pairs, so its reach at the crossing depends on the road ribbon's triangles being edge-adjacent (or proximity-linked) there; if a non-road triangle sits between two road cells, the gate could still pinch at that spot. The [ROADCON] severance walk re-runs at load, so this BAT shows directly whether road[11] connects and whether the route stops diving. LOCAL; NOT pushed.
+
+BAT .128: REBUILD via deploy.vbs, confirm Version 0.18.3.128, then LOAD a Galbadia world-map save AND drive on foot toward Dollet. Send Logs/ff8_world.log. KEY reads: the `[NAVMESH] ... road-cell exemption kept M` count (did the exemption fire?); `[ROADCON] SEVERANCE SUMMARY` (did road[11] reconnect -- severed -> 0?); `[ROADV:TIMBER-DOLLET]` + `[ROADV:DRIVE]` SUMMARY (does A*'s route finally stop diving to -1567 and track the road?); and the drive outcome itself.
+
+## v0.18.3.127
+
+World map (#70): **FIRST FIX in the sequence -- correct the mean-of-corners floorZ artifact at road cells so A* can tell the shallow walkable road from the deep canyon beside it.** This is the first behavior change after .123-.126's read-only diagnostics.
+
+The .126 SEVERANCE walk pinpointed the entire #70 blocker to ONE cell. The road from Timber is 11 of 13 segments navmesh-connected and shallow the whole way (floorZ profile: -541, -435, -580, -689, -844, -845, -750, -804, -292, -231, then a spike, then -552, -527, -638). The lone outlier is road[11] at fine(c105,r63), which reads floorZ **-1341** while its immediate road neighbors are -231 and -552 -- an isolated artifact, not a real dip. That cell sits on the eastern rim of the western canyon; its navmesh triangle (terrain 14) straddles the rim with two corners down in the canyon and one on top, so s_nmFloor (the MEAN of the three corner heights -- the .118 artifact) reads -1341 even though the walkable road surface there is shallow. That one bad cell does double damage: it severs the two road segments around it (the .126 SEVERANCE SUMMARY = 2 of ~13), and it is exactly why A* dives -- at row 63 the navmesh thinks the road's crossing point is -1341, essentially as deep as the real canyon bottom at -1567 right next to it, so A* has no shallow way across and takes the canyon. Fix that one crossing and A* has a shallow road to follow.
+
+The fix (in `LoadTerrainGrid`, right after `Navmesh_Build()`, behind NAVMESH_DIAG): iterate every navmesh triangle, and where its centroid's fine cell is a road cell (`s_roadFine`) AND its s_nmFloor is anomalously deep (< ROAD_FLOOR_DEEP = -1000), clamp s_nmFloor up to ROAD_FLOOR_CLAMP = -500. The road is ground-truth walkable -- s_roadFine exists precisely to route through the mountains past cliff-vs-land misclassification -- so correcting the model at road cells is a model fix, not steering. Logs `[ROADFLOOR] clamped N road-cell triangles...`.
+
+IMPORTANT CAVEAT: this corrects A*'s **cost** only (s_nmFloor). The .120 connection gate runs on per-corner heights during the build, before s_nmFloor is consulted, so a post-build clamp does NOT re-link a gate-severed crossing. The [ROADCON] severance walk re-runs at world-load using the clamped s_nmFloor, so this BAT reveals whether cost-correction ALONE redirects A* off the canyon, or whether we also need to stop the gate severing the road (next fallback: exempt road-cell connections from the gate). LOCAL; NOT pushed.
+
+BAT .127: REBUILD via deploy.vbs, confirm Version 0.18.3.127, then LOAD a Galbadia world-map save AND drive on foot toward Dollet (the drive is now the real test). Send Logs/ff8_world.log. KEY reads: `[ROADFLOOR] clamped N` (confirms the clamp ran and how many cells it touched); `[ROADV:TIMBER-DOLLET] SUMMARY` and `[ROADV:DRIVE] SUMMARY` (does A*'s route stop diving to -1567 and stay on the road more?); the drive outcome itself; and `[ROADCON] SEVERANCE SUMMARY` (did the severed count drop from 2?).
+
+## v0.18.3.126
+
+World map (#70): **read-only ROAD SEVERANCE diagnostic -- with a continuous road now traceable, test whether the navmesh severs the walkable road corridor or A* diverges for a cost reason.** No behavior change.
+
+The .125 BAT overturned the .125 hypothesis (in a good way). The road overlay is NOT broadly fragmented at the mountains: it reaches within **2 cells** of Dollet via a continuous 42-cell ribbon, and the mountain road (terrain 29) DOES get tagged as road -- the road's 27/28 polygons overlay the same fine cells as the terrain-29 mountain geometry, so those cells get road=1 even though their center triangle reads terrain 29 (gap[0] fine(c112,r55) road=1 terrain=29). The ENTIRE break is a single untagged terrain-29 cell (c113,r56) in a 2-cell gap right next to Dollet -- a trivial rasterization miss, not a systematic mountain-pass failure. Aaron's ground truth (the road connects Timber->Dollet) is correct. The road near Dollet is shallow (floorZ -42 to -172) and stays in the eastern corridor (~col 112), nowhere near the western canyon at col 100-102 (floorZ -1567) that A* dives into -- so a continuous shallow walkable road provably exists exactly where A* should go, and A* ignores it.
+
+That finally lets the SEVERANCE test (which dead-ended in .124 on the unreachable Dollet road cell) run on a real road. The diagnostic (`RoadConnectivityDiag`, fires once at world-load, behind NAVMESH_DIAG/NAVMESH_ROUTING) keeps the .125 component + gap dump, then reconstructs the road ribbon Timber->road-end (parent chain of the BFS) and walks it decimated to ~16 checkpoints: each logs its navmesh floorZ + terrain + a short-range A* to the previous checkpoint, flagging SEVERED on no-path or a sub-path diving below floorZ -1000 (`[ROADCON] road[i] ... navA*=... minZ=...`, headline `[ROADCON] SEVERANCE SUMMARY N of ~M road segments SEVERED`). If segments come back SEVERED, the gate cut the walkable road (the fixable root cause -- recalibrate the gate or exempt road-cell connections); if 0 and the road's floorZ stays shallow, A* is diverging for a cost reason instead (a different fix). The road is only probed, never used to steer. LOCAL; NOT pushed.
+
+BAT .126: REBUILD via deploy.vbs, confirm Version 0.18.3.126, then LOAD a Galbadia world-map save -- the `[ROADCON]` lines fire at load. Send Logs/ff8_world.log. KEY reads: the `[ROADCON] SEVERANCE SUMMARY` severed count, and the per-checkpoint floorZ/terrain profile (does the road's own navmesh stay shallow along its length, or go deep?).
+
+## v0.18.3.125
+
+World map (#70): **read-only ROAD-OVERLAY GAP diagnostic -- confirm that the s_roadFine road overlay misses the terrain-29 mountain-pass portion of the Timber->Dollet road.** No behavior change.
+
+The .124 BAT returned a surprise: the s_roadFine road overlay does NOT form a continuous ribbon from Timber to Dollet. The 8-connected BFS started on Timber's road cell, reached 450 road cells, and never reached Dollet's nearest road cell -- so the diagnostic dead-ended before the navmesh-severance walk could run.
+
+Reading the overlay-construction code (`world_map_segments.inl`) explains it. `s_roadFine` is populated by `RasterizeTriRoad`, which is called ONLY for wmx terrain types 27 and 28 (Road/Railroad). Right above it, the same loop classifies **terrain 29 as SEG_MOUNTAIN**. So where the Timber->Dollet road climbs through the mountains, those polygons are terrain 29 and are never tagged as road -- the overlay fragments exactly at the mountain pass. This is the same terrain-29 "mountain road vs cliff face" ambiguity that has blocked #70 all along (terrain 29 holds both the walkable mountain-road pass and impassable cliff faces). Aaron confirms as ground truth that the road DOES connect Timber to Dollet through the mountains, so the 27/28-only overlay is simply incomplete.
+
+The diagnostic (`RoadConnectivityDiag`, reworked, fires once at world-load, behind NAVMESH_DIAG/NAVMESH_ROUTING): instead of dead-ending when the road BFS cannot reach Dollet, it finds the reached road cell CLOSEST to Dollet (the far end of Timber's main road component), reports how many cells short of Dollet it stops (`[ROADCON] Timber road component = N cells ... road-end fine(c,r) is D cells short of Dollet`), and dumps the terrain types in a straight line across the gap toward Dollet (`[ROADCON] gap[i] ... terrain=T`). The navmesh keeps the raw ground-type per triangle (`s_nmTerr`), so this reads the actual terrain code per cell. If the gap reads terrain 29, that confirms the mountain-pass road the 27/28 overlay misses -- and tells us the fix is to extend the road overlay (or the routing) to recognize the terrain-29 mountain-road corridor, the same corridor #70 needs. LOCAL; NOT pushed.
+
+BAT .125: REBUILD via deploy.vbs, confirm Version 0.18.3.125, then LOAD a Galbadia world-map save -- the `[ROADCON]` lines fire at load. Send Logs/ff8_world.log. KEY reads: how far short of Dollet the road component stops, and the terrain types in the gap (is it 29?).
+
+## v0.18.3.124
+
+World map (#70): **read-only ROAD-CONNECTIVITY diagnostic -- pinpoint whether the .120 200-step gate severed the walkable Timber->Dollet road in the navmesh.** No behavior change.
+
+The .123 road-verification BAT was decisive and negative: A\* does NOT track the road. The Timber->Dollet oracle (A\* between the road's OWN endpoints) came back 80/232 waypoints on road, diving to floorZ -1567 -- it starts on the road at Timber, then swings ~6km WEST off the direct line into the deep canyon (fine col 100-102, X~-27k), then climbs back to Dollet. The actual drive route did the same (36/115 on road, same -1567 dive). So the walkmesh model is routing through canyon terrain the real walkable road avoids -- the spurious-walkability failure, meaning the routing (not the executor) is the blocker.
+
+The numbers point to a specific root cause worth confirming before any fix. A\* is optimal, and with NM_VERT_WEIGHT=20 that -1567 dive is expensive (~2,600u of up-and-down x20). For A\* to still choose it over a shallow road, the road corridor must be DISCONNECTED in the navmesh -- the gate reads the real road's elevation changes as cliffs and cuts its connections, forcing the canyon detour. That fits the standing lesson that the centroid 200-step sample mis-judges ramped terrain, and the road through mountains is ramped terrain. But it is a hypothesis, and the fix differs depending on the answer, so this build confirms it cheaply rather than guessing.
+
+The diagnostic (`RoadConnectivityDiag`, fired once at world-load, all behind NAVMESH_DIAG / NAVMESH_ROUTING): (1) an 8-connected BFS over the fine-grid road cells (`s_roadFine`) from Timber toward Dollet, giving the ordered road ribbon and a fine-grid continuity check (`[ROADCON] fine-grid road ribbon = N cells`); (2) it walks the ribbon (decimated to ~16 checkpoints) and logs each checkpoint's navmesh floorZ -- does the ROAD itself stay shallow, or is the navmesh deep under it? -- and runs a short-range A\* to the previous checkpoint, flagging SEVERED when there is no path or the sub-path dives below floorZ -1000 (A\* had to leave the road to get between two adjacent road cells). The `[ROADCON] SUMMARY N of ~M road segments SEVERED` line is the headline. The road is never used to steer -- only to probe the mesh -- so this stays inside the verify-not-crutch line.
+
+What it decides: if segments come back SEVERED (A\* detours or dives between adjacent road cells), the gate cut the walkable road and the fix is the gate -- recalibrate the 200 threshold / ~190u step distance, or exempt road-cell connections from the gate since the road is ground-truth walkable. If 0 segments are SEVERED (the road IS navmesh-connected and shallow), the divergence is instead a cost/floorZ problem in A\*, a different fix. Either way the per-checkpoint floorZ profile shows whether the road's own navmesh elevation is shallow or deep. LOCAL; NOT pushed.
+
+BAT .124: REBUILD via deploy.vbs, confirm Version 0.18.3.124, then just LOAD a Galbadia world-map save -- the `[ROADCON]` lines fire at load, no drive needed (driving still re-emits the `[ROADV:DRIVE]` divergence if you want it). Send Logs/ff8_world.log. KEY reads: the ribbon length, the per-checkpoint floorZ profile (shallow road vs deep navmesh), and the `[ROADCON] SUMMARY` severed count. NAVMESH_ROUTING 0 reverts to the .99 fine-grid drive.
+
+## v0.18.3.123
+
+World map (#70): **read-only ROAD-VERIFICATION diagnostic -- check whether A\* maps a correct route through the mountains by comparing it to the player-walkable Timber->Dollet road.** No behavior change.
+
+The .122 BAT (NM_VERT_WEIGHT=20) settled the routing question and exposed the real blocker. The vertical penalty WORKS: the route from the canonical start now stays SHALLOW (floorZ -615..-816) for waypoints [0]-[25] instead of diving immediately like the weaker penalties did -- but the deep canyon is UNAVOIDABLE: at [26] it drops to -952 and bottoms near -1,400 through the canyon floor, then climbs to coastal Dollet (-264). So no fully-shallow route to Dollet exists (Dollet is coastal; its own approach dips deep), confirming the .114 finding. And the drive now wedges AT the canonical start (-30339,-24983, ~20.6km out, idx 0/35): the route curves W/NW to stay shallow, but the #68 executor steers straight SW at a far lookahead target and cuts the corner into a wall on the GENTLE shallow stretch (floorZ ~-720) -- nowhere near the canyon. So the executor cutting corners is proven on gentle terrain, not just the canyon.
+
+That leaves one open doubt: the route must cross the deep canyon, and our model says that crossing is walkable -- but deep/steep terrain is exactly where the walkmesh model is least reliable (the retracted switchback lived there). Aaron's check settles it: the Timber->Dollet road is player-walkable, so use it as a GROUND-TRUTH oracle (not a navigational crutch) to verify A\* maps a correct mountain route to Dollet. This is pointed because **the navmesh A\* does not consult the road overlay at all** -- the road (`s_roadFine`, 623 force-walkable fine cells) only feeds the old fine-grid fallback; A\* routes purely on the triangle mesh + the .120 200-step engine gate. So A\*'s route is an independent product of the walkability model, and laying it next to the road tests whether that model matches the real walkable terrain.
+
+This build adds three read-only logs (all behind NAVMESH_DIAG / NAVMESH_ROUTING, no behavior change): (1) the `[ROADV:DRIVE]` dump replaces the .112 40-cap `[NAVPATH]` dump with the FULL route, each waypoint flagged ROAD/off (via the planner's own game->fine-cell mapping) plus an on-road tally and the floorZ range; (2) the `[ROADV] road extent` line logs the road's bounding box (fine col/row + game X/Y) so we can confirm where the road runs; (3) a one-shot `[ROADV:TIMBER-DOLLET]` that runs A\* between the road's OWN endpoints (Timber -22564,-4867 -> Dollet -15639,-39437) at world-load and dumps it the same way -- the cleanest oracle.
+
+What it decides: if A\* (especially Timber->Dollet) TRACKS the road -- mostly ROAD waypoints at the road's moderate elevation -- the walkability model is validated and the #68 executor is the sole remaining problem, so the next step is the executor fix (feed the navmesh centroids directly, follow them with a short lookahead, drop the coarse-grid LOS clamp / #83 fwd-guard via s_driveNavmeshPath, safe because the .120 gate guarantees the route is engine-walkable). If A\* DIVERGES -- wandering off the road and diving into the -1,400 canyon the road never goes near -- the 200-step model is passing terrain the real road avoids (the canyon may be FALSELY walkable, same failure family as the retracted switchback), and the ROUTING, not the executor, is still the problem (fixing the executor would be wasted effort). LOCAL; NOT pushed.
+
+BAT .123: REBUILD via deploy.vbs, confirm Version 0.18.3.123, LOAD a Galbadia world-map save (the `[ROADV] road extent` line + the one-shot `[ROADV:TIMBER-DOLLET]` route dump + SUMMARY fire at load), then on foot auto-drive to Dollet (the `[ROADV:DRIVE]` route dump + SUMMARY fire at plan time); send Logs/ff8_world.log. KEY reads: the `[ROADV:TIMBER-DOLLET] SUMMARY N/M waypoints on road` (high N/M + moderate floorZ = model tracks the road) and the `[ROADV:DRIVE]` route vs the road extent. NAVMESH_ROUTING 0 reverts to the .99 fine-grid drive.
+
+## v0.18.3.122
+
+World map (#70): **vertical-travel penalty raised 5 -> 20 (decisive test for a shallower route to Dollet).** The .121 BAT (NM_VERT_WEIGHT=5) confirmed the penalty is active and helping but too weak: the `[NAVMESH]` line was unchanged (Dollet still REACHABLE -- cost-shaping doesn't touch connectivity), the connectivity A*->Dollet cost rose from ~30,259 to 57,748, the drive route shifted from 85 to 90 tris with different early waypoints, and Squall got ~1,000u further (wedge at dist ~16,450 vs 17,443). But the `[NAVPATH]` still dives into the box canyon -- floorZ -574 at the start, plunging to -1,567 at the bottom, then climbing out to Dollet -- so A* still finds the canyon cheaper than going around, and the executor wedges at the same sheer canyon wall (F11).
+
+Why not a hard depth gate instead: that was tried in .114 (`s_nmAStarFloorMin` = -1050, forbid A* from descending below a floor) and it FAILED -- Dollet is coastal and its own approach dips below that floor too, so blocking the deep canyon disconnected Dollet entirely and the drive fell back to the fine grid. So a hard floor is out; the soft penalty (which cannot disconnect) is the only safe lever, and it can prefer a *less-deep* route where a hard cutoff cannot.
+
+**This build raises `NM_VERT_WEIGHT` 5 -> 20.** This is a decisive test, not a blind tweak: a 4x penalty will surface any less-deep route to Dollet that exists in the mesh (the `[NAVPATH]` would get shallower). If the route stays pinned at floorZ -1,567 even at 20, that PROVES no shallow alternative exists -- the deep route is the only way to Dollet -- and since .120 already proved that route is engine-WALKABLE (every step a legal sub-200 move), the remaining blocker is purely the #68 EXECUTOR cutting corners (the 90-centroid winding descent is flattened to 29 coarse 1024u cells and the LOS clamp, blind to sub-1024u cliffs, steers Squall into the wall). Cost-shaping only; cannot disconnect Dollet. LOCAL behind NAVMESH_DIAG / NAVMESH_ROUTING; NOT pushed.
+
+BAT .122: REBUILD via deploy.vbs, confirm Version 0.18.3.122, LOAD a Galbadia world-map save (the `[NAVMESH]` line stays UNCHANGED -- Dollet REACHABLE -- since connectivity is unchanged), then on foot auto-drive to Dollet; send Logs/ff8_world.log. KEY read = the `[NAVPATH]` dump: if it now stays SHALLOW (no -1,567 dive; floorZ holds nearer the -264/-574 band) the penalty won -> the drive should follow the flatter route and get further. If it STILL dives to -1,567, the deep route is unavoidable -> next step is the EXECUTOR fix: feed the 90 navmesh centroids directly instead of the 29 coarse cells and follow them closely WITHOUT the coarse-grid LOS clamp / #83 fwd-guard (set s_driveNavmeshPath TRUE), relying on the .120 gate's guarantee that the route is engine-walkable. Regression-check Timber still routes. NAVMESH_ROUTING 0 reverts to the .99 fine-grid drive.
+
+## v0.18.3.121
+
+World map (#70): **vertical-travel penalty on A* -- stop the planner diving into the engine-walkable-but-deep box canyon; plus a correction to the .120 rationale.** The .120 BAT confirmed the engine gate works and is faithful: at load it blocked 267,596 connections (real cliffs/seam walls) across the full 157,416-triangle mesh, kept the Galbadia landmass intact (largest component 73,707), reached 35,236 triangles from the start -- matching the known-good .107 numbers -- and **Dollet + all Galbadia destinations are REACHABLE**, Balamb/other continents correctly not. But the `[NAVPATH]` dump showed A* still routes **down into the box canyon** (floor -679 -> -1601 -> back out to Dollet -264). Every step is under the engine's 200-over-~190u limit (steepest is the +312 climb-out, ~180 per step), so the gate correctly PASSED the canyon. The F11 shows Squall wedged at the foot of a sheer canyon wall -- the executor cuts straight across the gentle winding descent into the rock face (the 85-centroid winding path is collapsed to 24 coarse 1024u cells, and the executor's LOS clamp runs on that same coarse grid, blind to a sub-1024u cliff).
+
+**Correction to the .120 notes:** the .120 CHANGELOG and some code comments claimed the engine "lets the player traverse a steep face at an angle (a switchback)," used to justify gating connections rather than triangles. That switchback claim was an unverified inference (extrapolated from the 200-step rule depending on move direction; the candidate-builder vector math at `0x56CD50` was never decoded) and is **WRONG** -- the game does not let the player switchback up world-map mountains. It was never in the code logic, only the explanation. The true reason connection-gating beats triangle-removal: it drops only the individual steep MOVES while keeping a triangle's gentle edges, so the mesh stays connected, whereas .119's per-triangle removal deleted whole triangles (29%, including gentle edges) and disconnected Dollet. The comments are corrected this build. The real lesson from the F11: the 200-step centroid sample can PASS a steep stretch the player cannot actually traverse in the needed direction -- steep terrain is where the walkmesh model is least reliable.
+
+**The fix:** `Navmesh_AStar`'s edge cost was HORIZONTAL only (`NmCentroidDist`), so vertical travel was free and A* dived into a ~900u-deep ravine because it was the shortest horizontal line. This adds `NM_VERT_WEIGHT` (=5.0) times the per-step `|floorZ[u]-floorZ[v]|` to each edge, so a deep up-and-down route (the canyon wiggles, summing thousands of units of |dz|) is expensive and A* prefers the flatter .107 corridor (176u bottleneck, validated to physically walk ~8km), which the coarse executor can follow. Cost-shaping ONLY -- connectivity is unchanged, so it cannot disconnect Dollet; only the preferred route shifts. The horizontal heuristic stays admissible (lower bound on remaining horizontal cost), so A* stays correct. Tunable: RAISE if A* still dives, LOWER if the route takes an over-long flat detour. LOCAL behind NAVMESH_DIAG / NAVMESH_ROUTING; NOT pushed.
+
+BAT .121: REBUILD via deploy.vbs, confirm Version 0.18.3.121, LOAD a Galbadia world-map save (the `[NAVMESH]` line should be UNCHANGED -- Dollet still REACHABLE, same blocked count, since connectivity didn't change), then on foot auto-drive to Dollet; send Logs/ff8_world.log. The key read is the `[NAVPATH]` dump: it should now stay **SHALLOW** (no dive to -1601 -- floorZ should hold near the start/Dollet band) and the route should head toward Dollet's bearing instead of diving SW into the canyon. EXPECTED outcome: the drive follows the flatter corridor and gets FURTHER than the 17km canyon wedge -- likely to around the .107 ~8km mark, where it may then wedge on the #68 EXECUTOR (a cleaner, separate problem on flat-ish terrain). If `[NAVPATH]` STILL dives to -1601, the canyon is still cheaper than the corridor -> RAISE NM_VERT_WEIGHT (try 10, then 20). Also regression-check a known-good destination (Timber) still routes. Flip NAVMESH_ROUTING 0 to revert to the .99 fine-grid drive.
+
+## v0.18.3.120
+
+World map (#70): **the engine's on-foot collision check replicated DIRECTLY, gating graph connections instead of triangles.** The .119 per-triangle slope gate built clean but **disconnected Dollet**: dropping every triangle steeper than ~45deg removed **45,512 of 157,416 triangles (29%)**, shattered the mesh into 953 components, and left Dollet unreachable -- the drive fell back to the fine grid and wedged at the false coast. Removing whole triangles is the wrong tool, because the engine lets the player traverse a steep face at an ANGLE (a switchback); triangle-removal cannot model that, so a 45deg gate over-excludes and a higher gate under-excludes.
+
+The fix stops using proxies for the engine rule and runs the rule itself. The move-validator at `0x53E7A0` interpolates the EXACT ground height under the player and under a candidate one move-step (~190u) away -- the barycentric interpolation at `0x402620` -- and refuses the move when the two heights differ by **200** (`0xC8`). Foot is exempt from the per-vehicle ground-type bits (`0x53E730`), so this 200-step is the only thing that stops Squall on the world map. `world_map_navmesh.inl` now keeps each triangle's three corner heights through Build and adds `NmInterpHeight` (the `0x402620` interp), `NmPointInTri`, and `NmEngineStepBlocked`. Every candidate connection -- shared-edge adjacency, T-junction bridge, AND proximity link -- is gated by `NmEngineStepBlocked`: it samples the exact interpolated height along the centroid-to-centroid move at ~190u intervals and drops the connection if any step's height change reaches 200.
+
+Why gate CONNECTIONS, not triangles: a steep face stays in the graph, so the planner can still route AROUND it or switchback along it -- exactly what the engine permits the player to do. This is the directional behavior the .119 slope gate (direction-blind) could not capture. Threshold 200 is exact (the engine's `0xC8`); the only un-pinned value is the ~190u sample distance (`NM_STEP_DIST`, the per-move step from the candidate-builder `0x53D8A0` -> `0x56CD50`), which is tunable. Reverts the .118 centroid-floor-step gate and the .117 `NM_BRIDGE_ZTOL` / `NM_LINK_ZSTEP` seam z-gates; all triangles are fed again (tri count back to ~157,416). LOCAL behind NAVMESH_DIAG / NAVMESH_ROUTING; NOT pushed.
+
+BAT .120: REBUILD via deploy.vbs, confirm Version 0.18.3.120, LOAD a Galbadia world-map save and send the `[NAVMESH]` connectivity line (it now reports the engine-gate-blocked CONNECTION count, the tri count back at ~157,416, and whether **Dollet is REACHABLE**), then on foot auto-drive to Dollet; send Logs/ff8_world.log. Two diagnostic outcomes, both progress: if Dollet is REACHABLE and the `[NAVPATH]` route stays shallow (no -1601 dip), the canyon walls were true cliffs and the gate fixed the routing -- then drive Timber + Galbadia Garden. If A\* still dives into the canyon, the canyon is engine-WALKABLE (the gate passed it) and the in-game wedge is the EXECUTOR steering straight into a walkable slope -- a different fix. If Dollet is "not reachable", the gate is too strict: raise NM_STEP_DIST (or reconsider the sample model).
+
+## v0.18.3.119
+
+World map (#70): **the engine's collision rule applied as a per-triangle SLOPE gate -- the .118 floor-step gate failed because the navmesh averages cliffs away.** The .118 A\* floor-step gate at 200 built clean and kept Dollet reachable, but the on-foot Dollet drive wedged at the **same** box canyon, and the `[NAVPATH]` dump showed why: the route **still dives in** (floor-height -566 -> -1601), only now via a *gentler* descent where **every step is <= 197** (-197, -179, -163, -158) -- all under the 200 gate. A\* simply found a shallower-stepping way down the same wall.
+
+Root cause, confirmed in the code: `s_nmFloor` is the **mean** of a triangle's three corner heights. On a cliff face that mean sits mid-drop, so consecutive triangle centroids read as a gentle staircase even though the real surface is a wall. No floor-step threshold can separate the canyon (descends in <=197 steps) from the gentle corridor (176 bottleneck) -- they overlap. This is exactly what .114 suspected from its 14-triangle dump; the full path now proves it. Gating centroid floor-steps is the wrong metric.
+
+The right metric is the quantity the engine actually tests. The validator `0x53E7A0` interpolates the **exact** ground height at each candidate step (plane interp `0x402620`) and refuses a move whose height changes **>= 200 (0xC8)** over one **~200-unit** step (the step distance the proximity-link design already encodes -- `NM_STEP_LINK` = 400 = "~2 engine steps"). That is a surface **gradient** of 200/200 = **1.0 (~45 degrees)**. A triangle steeper than that produces a >= 200 step somewhere on its face -- a collision face the engine blocks.
+
+Fix -- in `world_map_navmesh.inl`:
+
+- **`Navmesh_AddTriangle` now computes each triangle's true slope** from its three vertices (the gradient magnitude of the plane `0x402620` interpolates) and **drops the triangle** -- never adds it to the graph -- when the slope exceeds `NM_STEEP_SLOPE` (1.0), or when the triangle is vertical/degenerate (zero horizontal area = a wall). So the canyon walls are simply **gone** from the mesh and A\* cannot route across them; it must take the gentle corridor.
+- **Revert the .118 floor-step gate.** `NM_CLIMB_STEP` is replaced by `NM_STEEP_SLOPE`; `PlanDrivePathNavmesh`, the connectivity flood, and the `ref->Dollet` A\* check all pass **ungated** floor-step (`-1`) again, because the slope gate has already removed the cliffs.
+
+Safety property: with the threshold set to the engine's own value, the **only** triangles dropped are ones the engine **also** blocks -- so a route the engine would actually permit can't be severed (the failure mode that sank the .114 depth gate and the .116 blanket mountain exclusion). Worst case the threshold is slightly too low and a gentle stretch disconnects (raise it); or slightly too high and A\* still finds a cliff (lower it). The `.117` seam gates (`NM_BRIDGE_ZTOL`, `NM_LINK_ZSTEP` = 200) are kept -- they correctly handle the *between-block* discontinuities. LOCAL behind `NAVMESH_DIAG`/`NAVMESH_ROUTING`, NOT pushed.
+
+**Validation:** the `[NAVMESH]` connectivity line now reports the **steep-skipped count** and the slope threshold, plus whether **Dollet** is reachable on the slope-gated graph. The drive's `[NAVPATH]` route should **stay shallow** -- no -1601 canyon dip -- and bend through the corridor.
+
+BAT .119: **rebuild via `deploy.vbs`**, confirm `Version 0.18.3.119`, **load** a Galbadia world-map save and read the `[NAVMESH]` line first -- note the **steep-skipped** count (should be a large fraction -- the cliffs) and that **Dollet** reports `REACHABLE`. If Dollet reads `not reachable`, send the line and stop -- the slope threshold clipped the corridor and needs **raising** (e.g. 1.3). Then on foot auto-drive to Dollet (then Timber, then Galbadia Garden). Expect the `[NAVPATH]` route to stay shallow (no -1601 dip), `[YAWDRIVE]` idx to climb past 0, and ideally arrival; send `Logs/ff8_world.log`. If A\* still dives into the canyon, the threshold is too high -- **lower** it (e.g. 0.7). If it arrives, the .81 false-coast hardcode + .85 road override can retire next.
+
+## v0.18.3.118
+
+World map (#70): **A* gated on the engine's 200 floor-step -- the .117 BAT proved the search was diving into the box canyon.** The .117 mesh (mountains fed back + seam gates at 200) built correctly and made Dollet reachable, but the on-foot Dollet drive wedged ~16.5 km out, idx 0/25, on open grass at the foot of a sheer cliff (F11 confirmed). The `[NAVPATH]` dump showed why: the A\* route **descends into the box canyon and climbs back out** (floor-height -566 -> -1567 -> -264), and two transitions are near-vertical -- a **-300 drop** going in (triangle 6->7) and a **+250 climb** coming out (30->31). Those are exactly the canyon walls the engine's 200-step gate refuses, so Squall noses into the wall and oscillates.
+
+Root cause of the .117 miss: the seam gates I tuned (`NM_BRIDGE_ZTOL`, `NM_LINK_ZSTEP`) only gate T-junction **bridges** and **proximity links** -- they do **not** touch shared-edge adjacency, and the canyon descends via shared edges (continuous steep triangles). With A\* left **ungated** on floor-step, it dove straight in. The assumption that "continuous slopes are all walkable" was wrong: the engine also blocks steep continuous slopes, mid-slope, when the per-step rise crosses 200.
+
+Fix: **re-enable the A\* floor-step gate at 200** (the engine's 0xC8). `NM_CLIMB_STEP` (a dead 400-unit legacy constant) is repurposed to 200 and passed where `PlanDrivePathNavmesh` previously called `Navmesh_AStar(..., -1, ...)`. The `[NAVPATH]` data makes 200 a clean separator: the canyon's steep steps are 250-300, well above 200, while the gentle corridor .107 found has a 176 bottleneck, below it. So gating the search removes the -300 / +250 canyon edges and forces A\* onto the corridor. The connectivity diagnostic's flood **and** its `ref->Dollet` A\* check are gated to match, so the pre-drive `[NAVMESH]` line now reports whether Dollet is reachable **under the 200 gate** -- the one risk to confirm (if the corridor has a hidden >200 pinch it would read `not reachable` and the gate needs raising).
+
+History note: .114 rejected a floor-step gate from a 14-triangle dump that only showed steps up to 235 overlapping the corridor's 176 -- it never captured this -300 step; the full path is what makes 200 a clean cut. And unlike the .114 **depth** gate (-1050, which disconnected coastal Dollet), a **step** gate doesn't strand deep-but-gentle terrain. LOCAL behind `NAVMESH_DIAG`/`NAVMESH_ROUTING`, NOT pushed.
+
+BAT .118: **rebuild via `deploy.vbs`**, confirm `Version 0.18.3.118`, **load** a Galbadia world-map save and read the `[NAVMESH]` line first -- it should report **Dollet REACHABLE** under the 200 gate (if `not reachable`, send it and stop -- the gate is too tight). Then on foot auto-drive to Dollet (then Timber, then Galbadia Garden). Expect the `[NAVPATH]` route to **stay shallow** (no -1567 canyon dip) and bend through the gentle corridor, `[YAWDRIVE]` idx to climb past 0, and ideally arrival; send `Logs/ff8_world.log`. If it arrives, the .81 false-coast hardcode + .85 road override can retire next.
+
+## v0.18.3.117
+
+World map (#70): **the engine's actual on-foot walkability rule, applied to the navmesh.** Decoded from `FF8_EN.exe`: world-map on-foot walkability is **not** a terrain type or a data flag -- it is a **200-unit (0xC8) interpolated ground-height STEP gate** in the movement/collision validator `0x53E7A0`. It interpolates the exact ground height under each candidate step (via the point-in-triangle routine `0x402620`, fed by the per-block triangle lookup `0x53EB80`) and rejects the move when that height differs from the current height by **>= 200**. On **foot**, the per-vehicle ground-type bits (selector `0x53E730`) are **exempt** -- so the only thing that stops Squall is that 200 step. The Dollet "false coast" is simply a ledge >= 200 tall: byte-identical walkable ground, but the height jump trips the gate. Full trace in *Plan & Research Documents/WMX_OBJ_FORMAT.md* section 12. (This also confirms the .105 `poly[0x0E]` "bit7 collision flag" was a misread -- 0x0E bit7 is a per-vehicle ground bit, not foot collision.)
+
+This reframes every prior #70 attempt. The engine only blocks at **>= 200 discontinuities** (cliff seams / ledges); continuous slopes -- including walkable **mountain** terrain (type 29) -- are fine, because consecutive positions stay < 200 apart. So **mountains are walkable surface**, and the road-pass to Dollet **is** terr-29. The walls are the seams, not the mountains.
+
+Fix -- three changes in `world_map_navmesh.inl`, all aligning to the engine's 200:
+
+- **Revert the .116 mountain exclusion** (`if (terrain == 29) return;` deleted). Feeding mountains back restores the road-pass the exclusion deleted -- which is what made Dollet unreachable and dropped the drive back to the wedging fine-grid. This makes the failed .114 depth gate, the .115 steepness filter, and the wrong .105 bit7 filter all moot.
+- **`NM_BRIDGE_ZTOL` 100 -> 200.** The .107 z-aware T-junction bridge already interpolates the exact seam edge-z; at 200 it bridges the gentle road-pass seams the 100 cutoff was dropping, while the false-coast's >= 200 seam still won't bridge.
+- **`NM_LINK_ZSTEP` 300 -> 200.** Proximity links now thread only necks whose floor-step < 200, so they stop leaking the 200-300 false-coast neck the engine refuses.
+
+A\* stays **ungated** on floor-step (continuous slopes are walkable; only the two seam gates above and the dormant `s_nmAStarFloorMin` depth floor apply). This is a small delta on the already-offline-validated .107 feed-all approach, with engine-correct thresholds. LOCAL behind `NAVMESH_DIAG`/`NAVMESH_ROUTING`, NOT pushed.
+
+**Validation:** the `[NAVMESH]` connectivity diagnostic fires at world-map **load**. Expect the triangle count to **jump back up** (~157,416 -- mountains restored, vs the .116 drop) and **Dollet** to report `REACHABLE`. Then the `[PLAN] navmesh` route should bend through the gentle pass instead of wedging at the false-coast ~15km out, and ideally arrive. If it arrives, the **.81 false-coast hardcode** and the **.85 road override** can retire next. If the false-coast still leaks, the gate is right but the seam-edge sampling needs tuning; if it over-cuts the pass, the seam-edge pairing mismatches.
+
+BAT .117: **rebuild via `deploy.vbs`**, confirm `Version 0.18.3.117`, **load** a Galbadia world-map save (send the `[NAVMESH]` connectivity line -- the triangle count and the Dollet line), then on foot auto-drive to Dollet (then Timber, then Galbadia Garden); send `Logs/ff8_world.log`.
+
+## v0.18.3.116
+
+World map (#70): **mountain exclusion by terrain type replaces the .115 steepness filter** (and the .114 depth gate before it). Both geometry heuristics failed for the same reason, and the authoritative wmx analysis (*Plan & Research Documents/World Map Reachability Rework - offline wmx analysis findings.md*) says why: the walkable-vs-impassable boundary on the world map **can't be derived from geometry alone** -- it comes from the polygon **terrain-type byte** (offset 0x0D), already extracted per-triangle into `s_nmTerr`. Type **29 = MOUNTAINS** = impassable on foot (the steepest, most common land class, forming every continent's interior ranges). The navmesh was feeding mountains anyway (it excluded only ocean), so A\* routed straight through a mountain range and Squall wedged exactly where the engine blocks him -- the "box canyon" of the .113/.114/.115 BATs was that range.
+
+Root fix: `Navmesh_AddTriangle` now skips `terrain == 29` exactly as it skips ocean -- authoritative walkability, no geometry proxy. The .115 steepness filter (`NM_STEEP_SPREAD`) and the .114 depth gate (`s_nmAStarFloorMin`, already dormant) are both retired. The .105 `poly[0x0E]` "bit7 collision flag" was a misread (that byte is shading/normals, not walkability), which is why it was abandoned; the replacement (feed all non-ocean) overcorrected by including mountains.
+
+**Validation:** the `[NAVMESH]` connectivity diagnostic fires at world-map **load** (before driving). Expect the triangle count to **drop sharply** (~54k mountain polys removed from the ~157k navigable set). Then the key question: does **Dollet** still report `REACHABLE` with mountains out? If **yes**, the navmesh route is finally a truly-walkable one and the executor should follow it past the 15km wedge. If **not reachable**, the on-foot route to Dollet genuinely needs some gentle mountain ramps -> next step is the documented **passive terrain logger** (log the terrain type of every cell walked, calibrate which type-29 slopes are passable from real movement) rather than another guess. LOCAL behind `NAVMESH_DIAG`/`NAVMESH_ROUTING`, NOT pushed.
+
+BAT .116: **rebuild via `deploy.vbs`**, confirm `Version 0.18.3.116`, **load** the world map (send the `[NAVMESH]` connectivity line -- especially the Dollet line and the triangle count), then auto-drive to Dollet on foot; send `Logs/ff8_world.log`.
+
+## v0.18.3.115
+
+World map (#70): **steepness filter replaces the .114 depth gate.** The .114 floor-z gate (A\* refuses triangles below −1050) was too blunt -- Dollet is coastal and its approach dips below −1050 too, so blocking the box canyon also disconnected Dollet. The .114 BAT logged `navmesh A* NO path` on re-plan and fell back to the coarse fine-grid, wedging at 15km on a false-walkable cliff the 1024u grid can't see.
+
+Root fix: exclude cliff-**face** triangles from the navmesh at **feed time**. `floorZ` is the **mean** of a triangle's three corner z's, so a sheer wall reads as one steep triangle whose mean sits mid-drop (depth and floor-step are both blind to it); the within-triangle z-**spread** (max corner − min corner) reveals it. `Navmesh_AddTriangle` now skips any triangle with spread > `NM_STEEP_SPREAD` (**400**): box-canyon walls and false-coast cliffs go, gentle terr-29 ramps and the Dollet approach (small spread) stay. A\* is **ungated** again -- the depth gate is retired (`s_nmAStarFloorMin` left dormant at `INT32_MIN`).
+
+**Validation:** the `[NAVMESH]` connectivity diagnostic fires at world-map **load** (before driving) -- check that Dollet reports `REACHABLE` (the filter kept it) and the triangle count dropped from 157,416 (cliffs removed). If Dollet is `not reachable`, the threshold clipped the approach -> **raise** `NM_STEEP_SPREAD` (e.g. 550). Then the `[NAVPATH]` route should stay shallow (no −1665 dip) and the executor should follow it past 15km. LOCAL behind `NAVMESH_DIAG`/`NAVMESH_ROUTING`, NOT pushed.
+
+BAT .115: **rebuild via `deploy.vbs`**, confirm `Version 0.18.3.115`, **load** the world map (send the `[NAVMESH]` connectivity line), then auto-drive to Dollet on foot; send `Logs/ff8_world.log`.
+
+## v0.18.3.114
+
+World map (#70): **fix** -- block the deep ravine in the navmesh drive. The .113 `[NAVPATH]` dump proved the ungated A\* routes the on-foot Dollet drive **down into a box canyon** (floor −1087..−1665, ~900-1400u below the start −731 / Dollet −264 band) and climbs out the far side -- a route the engine refuses on foot, so Squall wedges on the canyon's east rim ~16km out.
+
+`floorZ` is the **mean** of a triangle's three corner z's, so a sheer wall reads as one steep triangle whose mean sits mid-drop: the descent steps look gentle (158..235u) and **overlap** the gentle corridor's validated 176u bottleneck, so a floor-*step* gate can't separate them. The canyon's **depth** is unambiguous, though.
+
+Add `s_nmAStarFloorMin` (navmesh.inl): A\* skips any triangle whose floor-z is below it. `PlanDrivePathNavmesh` sets it to **−1050** before the A\* call, so the search can't enter the ravine (floor ≤ −1087) and must take the gentle terr-29/road corridor (floor ≥ ~−731) to Dollet. **Search-time gate only** -- the validated .107 mesh construction is unchanged; the default `INT32_MIN` keeps the Initialize connectivity diagnostic ungated.
+
+The `[NAVPATH]` dump (40 tris + `dZ`) is **kept** to verify the new route stays above −1050; if the gate over-disconnects (logs `navmesh A* NO path`) lower toward −1300 (still blocks the −1665 canyon bottom). LOCAL behind `NAVMESH_DIAG`/`NAVMESH_ROUTING`, NOT pushed.
+
+BAT .114: **rebuild via `deploy.vbs`**, confirm `Version 0.18.3.114`, then on foot from the Galbadia save auto-drive to Dollet; send `Logs/ff8_world.log`.
+
+## v0.18.3.113
+
+World map (#70): **diagnostic build, no behavior change** -- extend the `[NAVPATH]` dump from 14 to 40 triangles and add a per-step `dZ` (floor-z delta) column. LOCAL behind `NAVMESH_DIAG`/`NAVMESH_ROUTING`, NOT pushed.
+
+The .112 dump only captured the **gentle approach** (centroids 0-13, floorZ -731..-937, biggest single step ~235u -- the part Squall drives successfully) and stopped short of the box-canyon **cliff** where he wedges, at centroid ~16-20 (game ~(-29201,-30115), past the dumped Y=-28841). The extended dump + `dZ` column makes the cliff step obvious and decides the fix: **one** big `dZ` (e.g. a +700u canyon-floor-to-plateau jump) -> gate A\* on floor-step at a value below the cliff but above 235u; **many** small `dZ` (<=235u up a tessellated face) -> floor-step gating can't separate cliff from corridor, so exclude high-steepness triangles at feed time instead. Remove the `[NAVPATH]` block after diagnosis.
+
+BAT .113: **rebuild via `deploy.vbs`** (the .112 build at 19:19 predates this dump-extension), then on foot from the Galbadia save auto-drive to Dollet; the `[NAVPATH]` block (now 40 triangles + `dZ`) logs at each plan -- triangles ~13-22 are what matters.
+
+## v0.18.3.112
+
+World map (#70): **diagnostic build, no behavior change** -- add a `[NAVPATH]` dump in `PlanDrivePathNavmesh` logging the A\* triangle path's centroid game-coords + floor-z (first 14 triangles + goal). LOCAL behind `NAVMESH_DIAG`/`NAVMESH_ROUTING`, NOT pushed.
+
+The .111 (centroids) BAT wedged in the SAME box canyon as .110 (funnel), confirming the smoother was never the cause. The full drive log shows the centroid path leads the player **south** for 6 waypoints (19.5 km -> 16 km, idx 0->6) and then turns **northwest into the cliff** (`steer (-30208,-31232)`/`(-31232,-31232)`), while Dollet is to the northeast/southeast -- so the A\* triangle path itself routes into the canyon. The ungated A\* (gate=-1 since .107) can climb a cliff via steep *shared-edge* triangles (the z-aware construction only excludes cliff bridge/proximity links, not the cliff-face mesh). The dump's floor-z profile decides the fix: gate A\* on floor-step, or exclude high-steepness triangles at feed time, with the gate informed by the actual cliff-step magnitude. Remove the `[NAVPATH]` block after diagnosis.
+
+BAT .112: rebuild (the prior BAT ran the pre-`[NAVPATH]` .111 DLL -- no `[NAVPATH]` lines in the log), then on foot from the Galbadia save auto-drive to Dollet; the `[NAVPATH]` block logs at each plan, right before `[PLAN] navmesh centroids`.
+
+## v0.18.3.111
+
+World map (#70 / routing swap): **revert the .108 funnel string-pull; feed the raw A\* triangle CENTROIDS as drive waypoints.** LOCAL behind `NAVMESH_DIAG`/`NAVMESH_ROUTING`, NOT pushed; `NAVMESH_ROUTING 0` reverts to .99.
+
+The .110 BAT (clamp restored) wedged at the SAME spot as .109, steer target byte-identical (`steer(-31232,-31232)`, `idx 0/25`) — proving the LOS clamp is irrelevant here. The 146 KB F11 at the wedge was readable and decisive: Squall on a narrow strip of grass at the FLOOR OF A BOX CANYON, pressing UP straight into a vertical CLIFF FACE, ocean off to the NW, the only open ground continuing to his lower-left and lower-right. The funnel sent his steer target NW — into the rock — while Dollet is NE.
+
+Root (confirmed in `world_map_navmesh.inl` `Navmesh_FunnelPath`): the SSF builds a DEGENERATE portal (`left == right ==` the next triangle's centroid) at every bridge / proximity link that shares no edge. With no real left/right walls there, the string-pull pulls taut THROUGH non-walkable cliff terrain, producing a corner on the far side of the canyon wall. The coarse 1024u clamp can't catch it (it reads the cliff as walkable land — hence .109 == .110). The A\* TRIANGLE path is correct (validated .107 to the digit); only the string-pull layered on top is unsound.
+
+FIX: `PlanDrivePathNavmesh` now feeds the raw A\* centroids (`Navmesh_AStar` + `Navmesh_TriangleCentroidGame`, the .106/.107 primitive) as the waypoint list, rasterized dense as before. Every centroid is strictly inside a walkable triangle, and consecutive centroids are a shared edge or a short (≤400u, z-gated ≤300u) neck apart, so the chords are too short to span a cliff. Keeps the .110 LOS clamp ACTIVE + the .109 (A) reorder (navmesh before the `IsGoalSegment` shortcut). `Navmesh_FunnelPath` is left in place but unused.
+
+BAT .111: on foot from the Galbadia save, auto-drive Dollet, then Timber, then Galbadia Garden. Expect a `[PLAN] navmesh centroids` line (replaces `navmesh funnel`) and the drive to get PAST the 17 km cliff-cut — ideally back to the .107 ~8-12 km range or closer, with no steer target locked WEST/NW across a cliff. If it then wedges ~8-12 km at a cliff, that is the executor far-lookahead cutting a corner the coarse clamp can't see → next step a navmesh-resolution walkability clamp.
+
+## v0.18.3.110
+
+World map (#70 / routing swap): **revert the .109 executor coarse-grid bypass — it regressed.** LOCAL behind `NAVMESH_DIAG`/`NAVMESH_ROUTING`, NOT pushed.
+
+The .109 BAT wedged at 15-17 km WEST / wrong-way: the steer target locked at `(-31232,-31232)` (west of the player) while Dollet is east. Bypassing the executor's LOS clamp on the navmesh path removed the only thing keeping the steer target on a clear line, so it locked onto a wrong-way funnel corner. So `s_driveNavmeshPath` now stays FALSE — `FineLineClearFootCar` + the #83 fwd-guard RUN again on the navmesh path. Kept the .109 (A) reorder.
+
+BAT .110 result: STILL wedged at 17 km, steer target byte-identical to .109 — which proved the clamp was never the cause and pointed at the funnel itself (see .111).
+
+## v0.18.3.109
+
+World map (#68 / #70 / routing swap, stage 4): **bypass the executor's coarse-grid checks on a navmesh-funnel path.** The navmesh routing swap is only complete once the EXECUTOR stops consulting the coarse fine grid it was meant to replace. LOCAL-only behind `NAVMESH_DIAG`/`NAVMESH_ROUTING`; `NAVMESH_ROUTING 0` still instant-reverts to the proven .99 fine-grid chain. NOT pushed.
+
+The .108 funnel BAT was the decisive isolation. The funnel RAN cleanly: `[PLAN] navmesh funnel: start tri#50629 -> goal tri#38414 = 87 tris -> 30 corners -> 30 fine cells` (no crash, real corridor path). But it STILL wedged 12 km from Dollet, and the F11 was unambiguous: Squall standing on **open green grass** in the road-and-railroad canyon corridor (paved road north, railroad ties south, cliff face safely to the north) — the real gentle Dollet approach, walkable in every direction, NO wall in front of him. Not routing, not a collision.
+
+The trace named the cause. The steer target was PINNED at (−24064,−30208) — about one cell ahead — for the entire wedge, `idx` frozen at 0/30, and the player oscillated around it (`U--R` into it, `DOWN` reverse-burst frees him NE, walks back). He reaches the pinned point but the cursor never advances. Root (reading the executor steer block in `world_map_drive.inl`): the executor's LOS clamp `FineLineClearFootCar` probes the COARSE 1024u `s_walkClassFine`/`s_steepFine`, which still has the .81 Dollet-coast box (cols 104-111, rows 59-69) forced steep-mountain. The player is at fine(104,66), INSIDE that box, and the navmesh route runs SE through more box cells toward Dollet. So the clamp walked the steer target all the way back to the player's own cell, and the cursor can't advance because cell[1] sits across the coarse-blocked box and the player never actually reaches it. The navmesh said walkable; the coarse grid said blocked; the executor trusted the coarse grid. This is exactly the ".106 stage 2": the funnel fixed the WAYPOINTS, but the executor was still consulting the coarse grid.
+
+FIX: a new `s_driveNavmeshPath` flag (`world_map_state.inl`) marks when the active `s_drivePath` came from `PlanDrivePathNavmesh` (set true there on success, cleared at the top of `PlanDrivePath`). On a navmesh path, the executor gates OFF both coarse-grid steering interventions in `world_map_drive.inl`:
+
+1. the `FineLineClearFootCar` LOS clamp on the lookahead steer target, and
+2. the #83 forward-collision guard (the 1-cell-ahead `s_walkClassFine` probe in the vehicle branch).
+
+The funnel corridor is navmesh-walkable by construction, and the corner-cap above already keeps the aim inside it, so the clamp is both redundant AND harmful there. With it bypassed, the steer target follows the validated corridor (the corner-capped ~2400u lookahead lands on a real path cell), the player walks the .81-box cells the engine actually allows, the cursor advances, and the drive progresses. The fine-grid path keeps the clamp + guard (flag stays false), so there is ZERO change off the navmesh; `NAVMESH_ROUTING 0` reverts the whole stack to .99.
+
+**Second .108 BAT — the 4 km wedge, a coupled planner fix.** A re-run drove the WHOLE corridor beautifully to ~4 km from Dollet (versus the 12 km wedge above — the funnel works), then wedged differently: `[PLAN] Player already in goal segment seg(13,7) region=0x01 — empty path`. Dollet's region 0x01 fills a large chunk of the coarse 32×24 segment grid, so once the player re-enters ~4 km out he is already "in the goal segment"; the planner's `IsGoalSegment` early-return handed back an EMPTY path BEFORE it ever tried the navmesh (`idx 0/0`), and the executor fell back to steering straight at the raw Dollet coordinate THROUGH the false coast (JAM at dist 4681, reverse-bursts shuttling him NW then walking back SE). The navmesh never ran on the final leg. Fix: run `PlanDrivePathNavmesh` BEFORE the `IsGoalSegment` shortcut in `PlanDrivePath`, so the navmesh routes start-tri -> Dollet's actual triangle that last 4 km instead of giving up at the region; `IsGoalSegment` stays just below as the fallback for when the navmesh has no path (mesh not built, or start == goal tri at the destination itself -> empty path -> arrival). Same root cause as the executor bypass — the coarse grid was preempting the navmesh — so both ship together as the stage-4 completion. On the final leg EXPECT the `[PLAN] navmesh funnel: ... -> K fine cells` line to now appear (no more `Player already in goal segment — empty path`) and the drive to thread the last stretch into Dollet.
+
+BAT .109: on foot from the Galbadia save, auto-drive to Dollet, then Timber, then Galbadia Garden — all three ARRIVE = #70 acceptance and close. EXPECT `[YAWDRIVE]` to show the steer target ADVANCING along the route (not pinned at (−24064,−30208)) and `idx` to climb 0 -> 30, with no wedge. If he now PROGRESSES but crawls or wiggles, the next refinement is the funnel's string-pulling: 30 corners for an 87-triangle / 12.5 km route means the corners are densely spaced (~430u apart), the signature of the degenerate centroid portals at bridge / proximity links pinning the string at every neck — computing real bridge-overlap / proximity portals would let the string pull taut to a few far corners (a smoothness fix, separate from this wedge).
+
+Files: `world_map_state.inl` (`s_driveNavmeshPath`), `world_map_planner.inl` (set / clear the flag; run the navmesh before the `IsGoalSegment` shortcut), `world_map_drive.inl` (gate the LOS clamp + forward guard on `!s_driveNavmeshPath`).
+
+## v0.18.3.108
+
+World map (#68 / #70 / routing swap, stage 3): **replace the navmesh centroid waypoints with a string-pulled FUNNEL path** so the #68 executor stops cutting corners into walls. LOCAL-only behind `NAVMESH_DIAG`/`NAVMESH_ROUTING`; `NAVMESH_ROUTING 0` still instant-reverts to the proven .99 fine-grid chain. NOT pushed.
+
+BAT .107 was the decisive win on the NAVMESH: the z-aware navmesh validated in-game TO THE DIGIT. `Logs/ff8_world.log` at terrain load showed `[NAVMESH] built 157416 triangles` (up from .105's bit-7-filtered 77,447 — proof the filter is gone) and `flood from (-29270,-24056) tri#64590 -> 35531 reachable`, EXACTLY the offline 35,531; Dollet, Timber, Galbadia Garden, Deling City, Winhill, and Tomb of the Unknown King all REACHABLE, Balamb and every other continent correctly NOT. And the gentle corridor PHYSICALLY WALKS — the Dollet drive followed the route ~8 km south before wedging and the Timber drive reached 1–2 km — so the one open risk from .107 (whether the engine lets the character walk the gentle terr-29 ramps) is RESOLVED YES. The .105 bit-7 overturn + z-aware bridging is correct and final.
+
+Both remaining failures are the **#68 EXECUTOR, not routing**. Mechanism (traced in `world_map_drive.inl`, the `s_drivePathPlanned` steer block): the planner emitted one fine cell per A* triangle CENTROID; the executor's steer-target lookahead picks the first route cell ≥ `DRIVE_PLAN_LOOKAHEAD_DIST` (~2400u) ahead and LOS-clamps it back via `FineLineClearFootCar`, which probes only the COARSE 1024u fine grid (`s_walkClassFine`). That grid reads "clear" while the engine has a finer wall the winding route goes AROUND, so the executor aimed the steer target straight across the wall (wedge at (−24150,−13185), idx pinned 0/46, oscillating `U--R` into the wall, the `DOWN` reverse-burst frees him NE, `U--R` walks him back). Centroids don't hug the corridor — the centroid polyline cuts across the inside of bends, through walls.
+
+FIX = **FUNNEL** (string-pulling). New `Navmesh_FunnelPath` (`world_map_navmesh.inl`):
+
+1. Runs the same ungated A* to get the triangle path.
+2. Builds a PORTAL per consecutive triangle pair: the shared EDGE where the two triangles share 2 vertices (`NmSharedVerts`), oriented left/right by the sign of the centroid-travel cross-product (`NmTriArea2`). For T-junction-bridge / proximity links that share no edge, it emits a DEGENERATE portal at the entered triangle's centroid (a point strictly inside walkable geometry), pinning the string through that neck.
+3. Runs the Simple Stupid Funnel Algorithm (Mononen / recastnavigation) to string-pull the minimal set of turning points.
+4. Returns the corner points in game coords (the SSF only ever copies portal points, so the corners are exact mesh vertices — no interpolation error).
+
+`PlanDrivePathNavmesh` (`world_map_planner.inl`) then RASTERIZES the corner polyline into DENSE fine cells (~512u steps, shortest-torus delta, dedup consecutive) into `s_drivePath`. A funnel path stays INSIDE the walkable corridor by construction, so consecutive corners have clear line of sight and the steer target can never aim across a wall; the executor's staircase-aware corner-cap reads each rasterized leg as a sustained run and turns at each funnel corner. **The #68 executor consumes `s_drivePath` UNCHANGED.**
+
+The funnel was traced offline on a straight corridor and produces `[start, goal]` with no spurious corners (port + orientation confirmed). One orientation assumption is documented with a one-line flip in `Navmesh_FunnelPath`: the shared vertex LEFT of travel is the funnel's left; if a BAT shows the path hugging the WRONG wall (consistently cutting one side of corners), flip the single `> 0` comparison. All three new functions are host-compilable under `NAVMESH_DIAG` (std::vector / double / basic math only).
+
+DELIBERATELY MINIMAL AND REVERSIBLE. The #68 executor, the .81 Dollet-coast AABB, the .85 road override, and the #69 height-step guard are ALL UNTOUCHED; `NAVMESH_ROUTING 0` restores the .99 drive instantly. Files: `world_map_navmesh.inl` (`NmTriArea2`, `NmSharedVerts`, `Navmesh_FunnelPath`), `world_map_planner.inl` (`PlanDrivePathNavmesh` funnel call + dense rasterizer).
+
+BAT .108: on foot from the Galbadia save, auto-drive to Dollet, then Timber, then Galbadia Garden — all three ARRIVE = #70 acceptance and close. EXPECT a `[PLAN] navmesh funnel: start tri#.. -> goal tri#.. = N tris -> M corners -> K fine cells` line (REPLACING the old `navmesh route` line) and `[YAWDRIVE]` idx to climb steadily along the legs with NO wedge at (−24150,−13185). If Timber still doesn't ENTER once the wedge is fixed, that is a separate field-entry/arrival item (the auto-drive may get adjacent but not onto the entry region). Flip `NAVMESH_ROUTING 0` to revert to .99.
+
+## v0.18.3.107
+
+World map (#70 / routing swap, stage 2): **overturn the .105 `poly[0x0E]` bit-7 walkability filter** and model on-foot walkability by ELEVATION STEP instead. LOCAL-only behind `NAVMESH_DIAG`/`NAVMESH_ROUTING`; `NAVMESH_ROUTING 0` still instant-reverts to the proven .99 fine-grid chain. NOT pushed.
+
+BAT .106 confirmed the routing swap WORKS — the in-game log showed `[PLAN] navmesh route: A* start tri#20660 -> goal tri#17045 = 64 tris -> 24 fine-cell waypoints`, the #68 executor followed it unchanged, and Squall got ~1.7 km closer than the old .99 chain (wedge at 13.3 km vs 15.1 km) — but he wedged at a sheer cliff (F11 confirmed: at the base of a vertical rock face, route heading up it).
+
+Offline root-cause (the in-game navmesh reproduced to the digit against the real `wmx.obj` — NT 77447, start→tri#20660 exact, A* path 64 tris): the .105 navmesh reaches Dollet ONLY by climbing cliffs. The A* path crosses floor steps of 502–1018 units (terrain 14/15 cliff↔ledge), via both the z-ignoring axis bridge (leg 6, an 890u step) and the elevation-blind proximity links. A floor-step gate cannot fix it: the bottleneck (minimum-possible max-step) to Dollet is **1018u**, so any gate below that disconnects Dollet entirely. The genuine shared-edge mesh is shattered (the start's island is 110 triangles, Dollet's 15, different components), and ANY elevation-consistency requirement (z-aware bridge OR z-gated links) isolates Dollet — so .105's "Dollet reachable" was an artifact of bridging *across cliffs*, never a walkable route.
+
+The bit-7 filter was the WRONG discriminator. The cliff/ledge faces (terrain 14/15) are bit-7-SET, so the filter KEEPS them; the gentle terr-27 (railroad) and terr-29 (mountain) ramps that connect elevations along the real canyon approach are bit-7-CLEAR, so the filter DELETES every one of them — severing the corridor and forcing the route onto the cliffs. In the UNFILTERED mesh a gentle corridor to Dollet exists (bottleneck **176u**), using grass, cliff-ledges, road, railroad, and 13 gentle terr-29 mountain ramps: near Dollet it descends through terr-29 ramps onto a long flat ledge at floor −1400, traverses it, and climbs back through terr-29 to Dollet. The cliff triangles are themselves nearly flat (z-spread mostly 3–160u, overlapping grass) — they are flat ledges stacked up a cliff, joined by big *inter-triangle* steps — so neither steepness nor `poly[0x0F]` separates them (Dollet's own triangle shares `F4=0xD4` with the cliffs). The operative discriminator is elevation step, exactly the fine grid's proven `WM_MTN_STEEP_BLOCK` rule (gentle ramps walkable, steep faces blocked).
+
+Three coupled changes, all offline-validated:
+
+1. **Feed all non-ocean triangles** (`LoadTerrainGrid`, segments.inl): drop the `poly[WMX_TERRAIN_OFFSET+1] & 0x80` skip, back to the .104 feed (~157,416 triangles).
+2. **Z-aware T-junction bridging** (`Navmesh_Build`, navmesh.inl): store each boundary edge's z at its lo/hi endpoints (new `vidZ`), interpolate z across the overlap interval, and bridge two collinear edges ONLY when both ends match within `NM_BRIDGE_ZTOL` (100u). A legitimate seam is at the same elevation; a cliff's top and base share an (x,y) footprint but not z, so the .105 z-ignoring bridge falsely stitched them and let A* climb cliffs.
+3. **Z-gated proximity links** (`Navmesh_Build`, navmesh.inl): connect centroids only within `NM_STEP_LINK` (400u) horizontally AND `NM_LINK_ZSTEP` (300u) floor step, so a link threads a gentle sub-edge neck, not a cliff hop.
+
+The A* stays ungated (`-1`): the z-aware construction's maximum edge step is ~374u (genuine shared edges), so cliffs are already excluded by construction.
+
+Offline final-validation (unfiltered + z-aware bridge 100 + z-gated prox 300): the start component is 35,531 / 157,416 triangles (23%, one continent); Dollet reach bottleneck 176u, Timber 115u, Galbadia Garden 115u, Deling City 115u — all gentle, no cliffs — and Balamb Town + Balamb Garden correctly NOT reachable (across ocean).
+
+DELIBERATELY MINIMAL AND REVERSIBLE. The #68 executor, the .81 Dollet-coast AABB, the .85 road override, and the #69 height-step guard are ALL UNTOUCHED. `NAVMESH_ROUTING 0` restores the .99 drive instantly. Files: `world_map_segments.inl` (feed all non-ocean), `world_map_navmesh.inl` (NM_BRIDGE_ZTOL/NM_LINK_ZSTEP, vidZ, z-aware bridge, z-gated proximity).
+
+ONE risk to confirm in-BAT: whether the engine physically lets the character walk the gentle terr-29/terr-27 ramps. Strong prior YES — the .99 fine-grid chain (steepness-based) walked most of this same corridor, and the fine grid relies on gentle-mountain being walkable on other continents.
+
+BAT .107: on foot from the Galbadia save, auto-drive to Dollet, then Timber, then Galbadia Garden (all three arriving is the acceptance test). Expect in `Logs/ff8_world.log` `[NAVMESH] ~157416 triangles` (UP from 77447 — proof the bit-7 filter is gone) plus a much larger reachable count; Dollet/Timber/Galbadia Garden/Deling REACHABLE and Balamb NOT; then a `[PLAN] navmesh route` line whose route follows the gentle canyon (no cliff climb) and ARRIVES. If it still wedges, send `Logs/ff8_world.log` + an F11: the wedge terrain tells whether a gentle ramp is engine-blocked (→ incorporate `poly[0x0F]` or lower the ramp gate) or it is the #68 executor end-game. Flip `NAVMESH_ROUTING 0` to restore .99. LOCAL-only, never pushed.
+
+## v0.18.3.106
+
+World map (#70 / routing swap, stage 1): route drives on the walkability-filtered navmesh. LOCAL-only behind a new `NAVMESH_ROUTING` toggle (state.inl); set `NAVMESH_ROUTING 0` for an instant revert to the proven .99 fine-grid chain. NOT pushed.
+
+BAT .105 proved the walkability-filtered navmesh's connectivity in-game to the digit (77447 triangles, 20620 reachable from the Galbadia save; Dollet/Timber/Galbadia Garden/Deling/Winhill REACHABLE, Balamb and all other continents NOT). This wires that navmesh into the planner so the character actually follows an all-walkable route instead of the heuristic fine-grid path that climbed the false coast.
+
+`PlanDrivePath` now tries the navmesh FIRST: `Navmesh_FindTriangleGame(start)` and `(dest)` give the start/goal triangles, `Navmesh_AStar(start, goal, -1)` runs the A* ungated (the `poly[0x0E]` bit-7 walkability filter IS the passability test, so no height-step gate is needed), and each triangle CENTROID on the path is converted back to engine coords (new `Navmesh_TriangleCentroidGame`, the inverse of `NmGameToMeshX/Y`) and then to a fine cell (`WorldXToFineCol/Row` + `PackSeg`, consecutive duplicates dropped). The result is written into `s_drivePath` in the EXACT packed-fine-cell format the #68 yaw executor already consumes, so the executor, its lookahead/monotonic cursor, and its final-approach sweep are UNCHANGED. If the navmesh has no path (e.g. the mesh isn't built yet) it falls through to the fine-grid clearance Dijkstra, so a transient pre-build drive still routes.
+
+DELIBERATELY MINIMAL AND REVERSIBLE. The #68 executor, the .81 Dollet-coast AABB, the .85 road-walkable override, and the #69 height-step guard are ALL UNTOUCHED this stage. The navmesh route is all-walkable so it inherently avoids the false coast and the mountains, but the executor's #83 forward-collision guard still probes the coarse fine grid (`s_walkClassFine`/`s_steepFine`): if a walkable navmesh-route cell happens to read as steep-mountain or .81-blocked there (e.g. the Dollet cliff approach, terrain 14/15 — walkable per `poly[0x0E]` but steep), the guard may balk. That is the EXPECTED stage-1 SIGNAL. If the drive follows the navmesh route to arrival, the swap is done; if it wedges, the `[YAWDRIVE]`/guard trace names WHERE, and stage 2 retires the fine-grid stack so the fine grid agrees with the navmesh.
+
+Files: `world_map_navmesh.inl` (Navmesh_TriangleCentroidGame), `world_map_state.inl` (NAVMESH_ROUTING toggle), `world_map_planner.inl` (PlanDrivePathNavmesh + the branch in PlanDrivePath).
+
+BAT .106: on foot from the Galbadia save, auto-drive to Dollet, then Timber, then Galbadia Garden (all three arriving with zero per-location patches is the acceptance test). Expect a `[PLAN] navmesh route: A* start tri#.. -> goal tri#.. = N tris -> M fine-cell waypoints` line (NOT `[PLAN] Fine path`), `[YAWDRIVE]` idx climbing the waypoints, and — if the forward-guard doesn't fight a cliff cell — arrival with NO false-coast wedge. If it wedges, send `Logs/ff8_world.log`: the wedge location names the fine-grid blocker to retire in stage 2. Flip `NAVMESH_ROUTING 0` to restore the .99 drive instantly. LOCAL-only, never pushed.
+
+## v0.18.3.105
+
+World map (#70 / navmesh): walkability-filtered navmesh + step-distance proximity links + ungated reachability. LOCAL-only diagnostic behind `NAVMESH_DIAG`; nothing routes on the navmesh yet (the .99 chain still drives), so this BAT only RE-VERIFIES connectivity in-game.
+
+Recovered the engine's on-foot walkability rule from `FF8_EN.exe` by disassembly: move-validator `0x54B860` (called from the input/movement routine `0x54A7F0`) rejects a step unless the destination polygon passes selector `sub_53E730`. That selector packs `(poly[0x0F]<<16)|(poly[0x0E]<<8)|poly[0x0D]` and, for the constant type `0x32` the validator always passes, tests `poly[0x0E] bit 7`. A global toggle `[0x00C75CF4]` can disable the whole test, but it initializes to 1 and its only writer (`0x542C0C`, in world-map init) also sets 1 -- it is never cleared -- so the check is ALWAYS active on the world map. So `poly[0x0E] bit 7` is the per-polygon on-foot passability flag.
+
+Offline against the real `world.fs` the flag tracks terrain almost perfectly: mountain (29), railroad (27), forest-edge/rough (0-5, 10, 31) read the bit CLEAR (not foot-walkable); grass/plain (6-9), cliff/ledge (14/15), and road (28) read it SET. This IS the Dollet "false coast": the old navmesh filtered only ocean, so the planner routed the character UP mountain polygons the engine refuses on foot and they wedged at the base. **Finding 4 is overturned** -- the collision was never "absent from the mesh"; it was in the mesh as `E.bit7`-clear mountain triangles the navmesh failed to exclude.
+
+Three coupled changes, all validated offline against `world.fs` (and confirmed against Aaron's in-game observation that a real road runs Timber->Dollet):
+
+1. **Walkability filter** (`LoadTerrainGrid`, segments.inl): skip feeding non-walkable polys -- `(poly[WMX_TERRAIN_OFFSET + 1] & 0x80) == 0`, i.e. `poly[0x0E]` bit 7 clear -- into the navmesh, mirroring the existing ocean skip. Drops the navmesh from 157,416 to ~77,447 triangles.
+2. **Step-distance proximity links** (`Navmesh_Build`, navmesh.inl): the engine validates the DESTINATION polygon of each ~190-unit step, so the character hops between nearby walkable triangles across sub-edge-width necks that share no edge and no vertex. At the Dollet approach the walkable corridor pinches through mountain slivers -- the choke at mesh ~(114700, 57300) holds 4 walkable + 11 mountain triangles, so exact-edge adjacency strands Dollet as a 15-triangle island, and general any-orientation collinear bridging adds only 12 bridges and does NOT reconnect it. New `NM_STEP_LINK` (400 units ~= 2 steps): connect walkable triangles whose centroids are within that distance, via a 512-unit bucket grid (>= the link radius, so the 3x3 neighbourhood covers it).
+3. **Ungated reachability** (`Navmesh_LogConnectivity`): flood and A* now run with no height-step gate. The ground-truth walkability filter replaces the `NM_CLIMB_STEP` heuristic, which wrongly blocked the genuinely-walkable Dollet cliff approach (terr14/15, vertex-z spread ~440 > the 400 gate).
+
+Why this is the right diagnosis, not just a tuning: a 4-connected flood over walkable FINE CELLS reaches Dollet from the Galbadia save in 29 cells and from Timber in 48 cells along the real road corridor (grass + cliff, mountains/railroad correctly excluded), proving the route exists; the triangle navmesh missed it only because edge-only adjacency severs the narrow neck. Offline result with all three changes -- ungated flood from the Galbadia save: Dollet REACHABLE, Timber REACHABLE, 20,620 of 77,447 walkable triangles reached (27%, one continent's worth), and Balamb correctly NOT reachable (the 400-unit links do not bridge the ocean).
+
+BAT .105: load a Galbadia world-map save (the build fires at terrain load, the connectivity diagnostic at Initialize). Expect in `Logs/ff8_world.log`:
+
+- `[NAVMESH] built ~77447 triangles` (DOWN from 157416 -- proof the walkability filter took effect at the right byte)
+- the flood line ending `-> ~20620 reachable (walkability-filtered, ungated)`
+- Dollet / Timber / Galbadia Garden / Deling City REACHABLE; Balamb Garden / Balamb Town NOT reachable
+- `[NAVMESH] A* ref->Dollet: ... (path found)`
+
+Failure-mode reads: if the triangle count does NOT drop from 157416, the `poly[0x0E]` offset is wrong; if Dollet is still not reachable, raise `NM_STEP_LINK`; if Balamb becomes reachable, the proximity radius is bridging water -- lower it. If the connectivity matches offline, the next BAT swaps routing onto the navmesh and retires the coarse-grid + .81/.85 compensating stack. LOCAL-ONLY diagnostic, never pushed.
+
 ## v0.18.3.104
 
 World map (#70 / navmesh): port the container-validated triangle navmesh into the build as a NON-INVASIVE diagnostic -- build + connectivity probe only, with zero change to the working planner or executor (the .99 chain still drives). Everything is gated behind `NAVMESH_DIAG` (LOCAL-only, like `WM_RUNTIME_WALK_DIAG`).

@@ -22,6 +22,7 @@
 #include <cstdarg>
 #include <ctime>
 #include <cstring>
+#include <share.h>  // v0.18.3.212: _fsopen share modes for live log tailing
 
 namespace NavLog {
 
@@ -86,8 +87,9 @@ static void WriteF(const char* fmt, ...)
 void Init()
 {
     // Append mode — never truncates
-    fopen_s(&s_gameLog, GAME_NAV_FILENAME, "a");
-    fopen_s(&s_devLog, DEV_NAV_PATH, "a");
+    // v0.18.3.212: _fsopen(_SH_DENYWR) — allow concurrent readers (live telemetry)
+    s_gameLog = _fsopen(GAME_NAV_FILENAME, "a", _SH_DENYWR);
+    s_devLog = _fsopen(DEV_NAV_PATH, "a", _SH_DENYWR);
 }
 
 void Close()

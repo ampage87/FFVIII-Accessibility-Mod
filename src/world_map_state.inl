@@ -33,6 +33,22 @@
 // in world_map.cpp all see the same value. LOCAL-ONLY while the navmesh is
 // diagnostic-only (no routing depends on it yet -- the .99 chain still drives).
 #define NAVMESH_DIAG 1
+// v0.18.3.186: per-frame motion-fidelity capture ([MFRAME]) so the offline sim can learn the
+// engine's exact wall-slide and its true ground height vs our oracle. Set to 0 to silence.
+#define WM_MOTION_DIAG 1
+
+// ============================================================================
+// v0.18.3.106: Navmesh routing toggle (#70 routing swap, stage 1)
+// ============================================================================
+// When 1, PlanDrivePath routes drives on the walkability-filtered triangle
+// navmesh (A* ungated -> triangle path -> fine-cell waypoints the #68 executor
+// consumes UNCHANGED) instead of the fine-grid clearance Dijkstra. When 0, the
+// proven .99 fine-grid chain runs (instant revert). Requires NAVMESH_DIAG (the
+// navmesh is built in LoadTerrainGrid under that gate). LOCAL-only this stage;
+// the executor + .81/.85/#69 fine-grid stack are UNTOUCHED -- the BAT shows
+// whether the executor follows the navmesh route or the old forward-guard
+// fights it (the latter -> stage 2 retires the fine-grid stack).
+#define NAVMESH_ROUTING 1
 
 // ============================================================================
 // Sizing upper bound for state arrays (v0.16.0)
@@ -51,7 +67,18 @@ static const int MAX_LOCATIONS = 64;
 static const uint32_t WM_POS_X      = 0x0203EE80;  // DWORD - player X
 static const uint32_t WM_POS_Y      = 0x0203EE84;  // DWORD - player Y
 static const uint32_t WM_POS_Z      = 0x0203EE88;  // DWORD - player Z
-static const uint32_t WM_HEADING    = 0x0203ED02;   // WORD  - 0=North, 0-4095 CW
+static const uint32_t WM_HEADING    = 0x0203FE52;   // WORD  - 0=North, 0-4095 CW
+// v0.18.3.201: world-map camera system (exe-verified; offline/CAMERA_EXE_ANALYSIS.md).
+// The camera struct is 0x0203ECF8 (angles pitch/yaw/roll at +8/+0xA/+0xC); on foot the
+// engine derives the move heading from the camera yaw inside 0x557A90 every tick:
+// heading = camYaw + key*512 + triBias/2. So the camera yaw is the true steering lever.
+static const uint32_t WM_CAM_YAW        = 0x0203ED02;  // WORD  - camera yaw (logic AND render yaw)
+static const uint32_t WM_CAM_PITCH      = 0x0203ED00;  // WORD  - camera pitch (cosmetic)
+static const uint32_t WM_CAM_VEL        = 0x0204DAE8;  // WORD  - camera yaw follow velocity (int16, clamp +-0x80; yaw += vel>>3)
+static const uint32_t WM_TRI_BIAS       = 0x020409EC;  // WORD  - per-triangle heading bias (engine adds bias/2 on foot)
+static const uint32_t WM_CAM_LOCK       = 0x020409E4;  // DWORD - region camera lock flag (1 = controller forces yaw toward WM_CAM_FORCED at +-0x20/frame)
+static const uint32_t WM_CAM_FORCED     = 0x00C76D22;  // WORD  - forced camera yaw target used when WM_CAM_LOCK==1
+static const uint32_t WM_SCRIPT_CAM_PTR = 0x0203FD5C;  // DWORD - nonzero = scripted keyframe camera owns the view (cinematics)
 static const uint32_t WM_LOCOMOTION = 0x02040A5E;   // BYTE  - locomotion / vehicle mode. v0.14.83 whitelisted to canonical {0..4}; per `Plan & Research Documents/World Map Terrain and Locomotion Reference.md` legitimate values include 0=Squall foot, 6=Selphie foot, 10=train, 31=Chocobo, 32=invisible-car — our GetVehicleName uses 0/1/2/3/4 for foot/Car/Chocobo/Ship/Ragnarok which DISAGREES with the research-doc enum (research says Chocobo=31, we say 2). Empirical reconciliation needed; see v0.14.84 changelog.
 static const uint32_t WM_SCENE_FLAG = 0x0203ED2C;   // WORD  - 0=worldmap, 1=field
 
@@ -346,7 +373,12 @@ static const double DRIVE_PLAN_LOOKAHEAD_DIST   = 2400.0;
 // where he actually is) rather than giving up. Bounded per drive so a true
 // hard-jam still terminates instead of looping.
 static const int    DRIVE_REPLAN_TRIGGER        = 2;       // stuck windows before a recovery re-plan
-static const int    DRIVE_MAX_REPLANS           = 8;       // recovery re-plans per drive before give-up
+static const int    DRIVE_MAX_REPLANS           = 24;      // v0.18.3.202: 8 -> 24. With the learned
+                                                           // engine-block overlay each re-plan now routes
+                                                           // AROUND discovered obstacles (genuinely different
+                                                           // routes, not the .201 sterile identical loop), so
+                                                           // re-plans are productive; offline the worst
+                                                           // recovery case needed well over 8.
 
 // #70 v0.18.3.97: departure bridge-out. A planned route that starts inside a
 // tiny disconnected pocket (the Dollet shelf -- the #69 height-step guard seals
@@ -475,15 +507,31 @@ static const int    DRIVE_PROBE_MAX_FAILS    = 8;     // this many non-progressi
 // collision (UP pressed but position frozen). Per-session diagnostic -- set
 // false (or remove this block + the trace) before the #67 push.
 static const bool   DRIVE_STEER_DIAG            = true;   // #70 v0.18.3.98: re-enabled to watch the bridge-out steer toward the road cell (set false before push)
-static const int    DRIVE_STEER_DIAG_INTERVAL_MS = 200;    // throttle (~5 lines/sec)
+static const int    DRIVE_STEER_DIAG_INTERVAL_MS = 50;    // v0.18.3.179: 200->50ms, denser movement-physics data
+
+// #70 v0.18.3.201: CAMERA-WRITE steering. true = the on-foot executor steers by writing
+// the camera yaw each frame and holding UP (the engine derives heading = camYaw + bias/2
+// itself; exe-verified in offline/CAMERA_EXE_ANALYSIS.md, 24/24 sim pairs in
+// offline/SIM_CAMERA_RESULTS.md). false = the .200 8-way key steering (kept as fallback).
+static const bool   DRIVE_CAMWRITE              = true;
 
 // v0.14.87 — sweep search constants. Activated when on-foot drive is stuck
 // inside the final-approach zone (target within 1000 units but no entrance
 // trigger has fired). Past chats v0.11.10 validated 6-phase alternating
 // turn-then-walk as effective for narrow entrances like Balamb Town.
-static const int    SWEEP_MAX_PHASES        = 6;     // give up after 6 attempts
+static const int    SWEEP_MAX_PHASES        = 16;    // v0.18.3.194: 6->16. Bounded local ENTRY SEARCH.
+                                                    // Open towns whose icon is offset from the real
+                                                    // field trigger (Galbadia Garden: the icon sits on
+                                                    // the ring, the entry is the center) need the sweep
+                                                    // to COVER the area around the icon, not walk off in
+                                                    // one direction. More phases + shorter walks (below)
+                                                    // make a tight rotating search that crosses the
+                                                    // center trigger; capture-on-success then pins it.
 static const DWORD  SWEEP_TURN_BASE_MS      = 800;   // phase 1 turn duration; +200ms per phase
-static const DWORD  SWEEP_WALK_DURATION_MS  = 3000;  // walk forward 3s per phase
+static const DWORD  SWEEP_WALK_DURATION_MS  = 800;   // v0.18.3.194: 3000->800. Short probes keep the search
+                                                    // local (the 3s walk drifted ~3000u and bounced);
+                                                    // ~800u per probe crosses a nearby offset trigger
+                                                    // while staying within the final-approach zone.
 static const DWORD  FINAL_APPROACH_TIMEOUT_MS = 6000;// in final approach >6s without exit → sweep
 
 #if WM_RUNTIME_WALK_DIAG
@@ -496,11 +544,68 @@ static int  s_rtWalkSettleTicks  = -1;     // -1 until player position valid; th
 static int  s_rtWalkPollTicks    = 0;      // total ticks polled since armed (fire-anyway safety budget)
 #endif
 
+// v0.18.3.203: LEARNED FIELD-TRIGGER footprints. Locations' field triggers are REGIONS,
+// not points -- the .202 BAT proved 'ggview1' (Galbadia Garden) fires ~1815u from its
+// entrance coordinate (the whole plateau is the trigger), so a through-route that clips a
+// non-target region yanks the player into that field. Region extents aren't stored anywhere
+// we can read, so we LEARN them: every off-target field entry during a drive records
+// (location center, observed entry distance + margin) here; the grid planner then
+// soft-penalizes cells inside a non-target circle, routing around it when terrain allows.
+// Circles containing the drive's START are exempt -- the engine DISARMS a trigger you spawn
+// inside until you leave it (which is exactly why drives *leaving* G-Garden never re-enter
+// it). Session-scope for now (re-learned after a restart; persistence is a follow-up).
+static const int TRIG_AVOID_MAX = 24;
+static int32_t s_trigAvoidX[TRIG_AVOID_MAX];
+static int32_t s_trigAvoidY[TRIG_AVOID_MAX];
+static int     s_trigAvoidR[TRIG_AVOID_MAX];
+static int     s_trigAvoidN = 0;
+
 static bool s_driveActive            = false;
+// v0.18.3.203: PAUSED-IN-FIELD drive. An off-target field entry no longer kills the drive:
+// it pauses (drive stays active, keys released, UpdateAutoDrive idle off-map) and the
+// existing world-map re-entry resume path replans and continues -- with the trigger circle
+// learned above, and the start now INSIDE it (disarmed), the resumed route walks out
+// cleanly. Stale pauses (player stayed in the field > 5 min) cancel on re-entry.
+static bool     s_drivePausedInField     = false;
+static DWORD    s_drivePauseTick         = 0;
 static int32_t  s_driveTargetX           = 0;
 static int32_t  s_driveTargetY           = 0;
 static char     s_driveTargetName[64]    = {};
 static DWORD    s_driveStartTime         = 0;
+// v0.18.3.216: bumped on every battle/field pause-resume. The .202 route-
+// progress watchdog and .204 give-up keyed their reseed to s_driveStartTime
+// alone, so after a battle their clocks were STALE by the battle's length:
+// a >4s battle instantly fired "route-progress stalled" and a >40s battle
+// instantly fired StopAutoDrive("Cannot reach...") on the first resumed
+// frame (BAT .215, 21:24:14). Watchdogs key on startTime + this generation.
+static DWORD    s_driveWatchdogGen       = 0;
+// v0.18.3.220: world-map re-entry resume replan is DEFERRED this many ticks.
+// The .219 BAT showed the immediate replan races the engine: on the first
+// re-entry frame GetWorldMapPosition_Active still returns the PRE-pause
+// position (24380,-29748 vs actual spawn 24576,-29406), so the hop-on point
+// landed inside Balamb Garden's firing area and steering re-entered the
+// field. Steering is held (keys stay released) until the deferred replan
+// runs with a settled position.
+static int      s_driveResumeReplanTicks = 0;
+// v0.18.3.221: FIRING-AREA ESCAPE. When a drive starts or resumes with the
+// character standing INSIDE a decoded firing-area bbox that is not the drive
+// target (the B-Garden front-gate spawn sits ~4u inside BG's north edge, so
+// every BG->Fire Cavern drive re-entered BG within ~560ms before it could
+// steer clear), the executor first steers straight OUT of that bbox by its
+// nearest edge + margin, suppressing normal path steering, then skips any
+// leading path waypoints still inside the bbox and resumes. Self-clearing
+// once the character is outside every non-target firing area.
+static bool     s_driveEscapeActive      = false;
+static int32_t  s_driveEscapeX           = 0;
+static int32_t  s_driveEscapeY           = 0;
+static int      s_driveEscapeAreaIdx     = -1;   // s_entryAims index being escaped
+// v0.18.3.223: the escape now routes AROUND the area's padded box toward the
+// first on-route waypoint outside the area (captured here at arm time), not the
+// final destination -- Timber->Dollet spawns N of Timber but the route goes SW,
+// so steering at the destination (S) crossed Timber and broke the network plan.
+static int32_t  s_driveEscapeTgtX        = 0;
+static int32_t  s_driveEscapeTgtY        = 0;
+static int      s_driveEscapeTgtIdx      = -1;   // path index of the on-route escape target
 static DWORD    s_driveLastAnnounce      = 0;
 static double   s_driveLastDist          = 0.0;
 static int32_t  s_driveLastPosX          = 0;     // v0.14.89: last known player X (for refined-entry capture on MODE_FIELD)
@@ -512,6 +617,7 @@ static int      s_driveStuckCount        = 0;
 static int      s_driveReplanCount       = 0;      // #67 v0.18.3.59: mid-route recovery re-plans used this drive
 static int      s_drivePlanExpanded      = 0;      // #70 v0.18.3.97: node count from the last PlanPathFine
 static int      s_drivePlanDist          = 0;      // #70: cells from the route end to the target (0 = reached)
+static bool     s_driveNavmeshPath       = false;  // #70 v0.18.3.109: the active s_drivePath came from PlanDrivePathNavmesh (funnel). The executor BYPASSES its coarse-grid LOS clamp + forward-guard on it -- the funnel corridor is navmesh-walkable by construction but legitimately crosses fine cells the coarse 1024u grid marks blocked (.81 coast box / false-coast steep-mtn).
 static bool     s_driveBridgeActive      = false;  // #70: bridging out of a start pocket toward the nearest road cell
 static int32_t  s_driveBridgeX           = 0;      // #70: bridge target (nearest road cell, world coords)
 static int32_t  s_driveBridgeY           = 0;
@@ -653,6 +759,7 @@ static const int WM_FINE_COLS = 256;                         // 262144 / 1024
 static const int WM_FINE_ROWS = 192;                         // 196608 / 1024
 static uint8_t s_walkClassFine[WM_FINE_ROWS][WM_FINE_COLS];  // SegTerrainClass per fine cell
 static uint8_t s_reachFine     [WM_FINE_ROWS][WM_FINE_COLS]; // flood-fill visited (0/1)
+static uint8_t s_roadFine      [WM_FINE_ROWS][WM_FINE_COLS]; // v0.18.3.128 (#70): road overlay (wmx terrain 27/28), populated by RasterizeTriRoad in segments.inl; declared here so the navmesh connection gate (NmEngineStepBlocked) can read it
 static bool    s_walkGridLoaded = false;
 
 // ============================================================================
@@ -829,7 +936,14 @@ static bool    s_segmentRegionLoaded = false;
 // failed' (catalog-center steering, distance-based arrival fallback).
 static const int DRIVE_PATH_MAX = WMX_PLAYABLE_SEGS;   // 768
 
-static uint16_t s_drivePath[DRIVE_PATH_MAX];           // packed (row<<8)|col waypoints
+static uint16_t s_drivePath[DRIVE_PATH_MAX];           // packed (row<<8)|col FINE-cell (1024u) waypoints
+// v0.18.3.163: precise path in WORLD coords at the planner's native 128u resolution. The
+// executor follows these so it threads canyons exactly instead of cutting corners across the
+// cliffs the fine (1024u) route detoured around. Filled by PlanPathGrid; s_drivePathWorld says
+// it's valid (other planners leave it false -> executor falls back to the 1024u fine cells).
+static int32_t  s_drivePathWX[DRIVE_PATH_MAX];
+static int32_t  s_drivePathWY[DRIVE_PATH_MAX];
+static bool     s_drivePathWorld    = false;
 static int      s_drivePathLen      = 0;
 static int      s_drivePathIdx      = 0;
 static bool     s_drivePathPlanned  = false;

@@ -39,6 +39,10 @@
 #include "game_audio.h"
 #include "world_map.h"
 
+// v0.18.3.213: file-polled remote key-injection channel for automated BATs
+// (#72 test automation). Textual include per project .inl convention.
+#include "autotest_cmd.inl"
+
 // Forward declarations for TitleScreen (no title_screen.h exists; defined in title_screen.cpp).
 namespace TitleScreen {
     void Initialize();
@@ -615,6 +619,10 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
         ChaseKaniFreeze::Update();
         ChaseDiag::Update();
         DialogInject::Update();
+
+        // v0.18.3.213: automated-BAT remote key injection (inert unless
+        // Logs/autotest_cmd.txt exists; see autotest_cmd.inl).
+        AutotestCmd::Update();
 
         // v0.15.12.0: Mission countdown timer accessibility. Reads field
         // var 724 (0x01CFECCC, uint16) each frame and fires scheduled TTS

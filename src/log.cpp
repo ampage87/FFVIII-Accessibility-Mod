@@ -23,6 +23,7 @@
 #include <ctime>
 #include <sys/stat.h>
 #include <direct.h>
+#include <share.h>  // v0.18.3.212: _fsopen share modes for live log tailing
 
 namespace Log {
 
@@ -198,10 +199,13 @@ void Init(const char* gameLogFilename)
         ArchiveOldLog(devPath, DEV_ARCHIVE_DIR, fn);
 
         // Open game directory log (simple filename = current working dir = game dir)
-        fopen_s(&s_gameLogs[i], fn, "w");
+        // v0.18.3.212: _fsopen(_SH_DENYWR) instead of fopen_s — fopen_s denies ALL
+        // sharing, which blocked external tools (live BAT telemetry) from reading
+        // the logs while the game runs. _SH_DENYWR permits concurrent readers.
+        s_gameLogs[i] = _fsopen(fn, "w", _SH_DENYWR);
 
         // Open dev directory log
-        fopen_s(&s_devLogs[i], devPath, "w");
+        s_devLogs[i] = _fsopen(devPath, "w", _SH_DENYWR);
     }
 
     // Write init header to MOD channel

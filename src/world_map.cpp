@@ -42,6 +42,8 @@
 // ============================================================================
 
 #include <windows.h>
+#include <mmsystem.h>          // v0.18.3.172: PlaySound for the teleport audio cue
+#pragma comment(lib, "winmm.lib")
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -50,6 +52,7 @@
 #include <vector>
 #include "ff8_accessibility.h"
 #include "ff8_addresses.h"
+#include "resources.h"        // v0.18.3.172: IDR_WAV_TELEPORT
 #include "world_map.h"
 
 // Forward declarations for namespaces used by the .inl files below.
@@ -82,7 +85,10 @@ namespace WorldMap {
 #include "world_map_catalog.inl"
 #include "world_map_announce.inl"
 #include "world_map_planner.inl"
-#include "world_map_drive.inl"
+#include "world_map_planner2.inl"   // v0.18.3.225: planner part 2 (grid A* + PlanDrivePath), split from planner.inl for the 80 KB CI guard
+#include "world_map_routenet.inl"   // v0.18.3.209 (#70): validated route network -- data + RouteNetPlan (uses planner helpers; PlanDrivePath calls in via forward decl)
+#include "world_map_drive_helpers.inl"   // v0.18.3.225: AD lifecycle helpers (split from drive.inl for the 80 KB CI guard)
+#include "world_map_drive.inl"           // UpdateAutoDrive (textually includes world_map_drive_exec.inl mid-body)
 #include "world_map_heading_scan.inl"
 #include "world_map_camera_scan.inl"
 #include "world_map_arrival.inl"
@@ -121,31 +127,32 @@ void Poll()
         CamScanResume(); // #67: resume a camera diagnostic an encounter interrupted
 #endif
 
+        if (s_driveActive && s_drivePausedInField &&
+            (GetTickCount() - s_drivePauseTick) > 300000) {
+            // v0.18.3.203: the off-target field pause went stale (player stayed off the
+            // world map > 5 minutes -- they've moved on to something else). Cancel quietly.
+            s_drivePausedInField = false;
+            StopAutoDrive("Auto-drive cancelled.");
+        }
         if (s_driveActive) {
-            // v0.14.88: drive paused during a random encounter, now resuming.
+            // v0.14.88: drive paused during a random encounter OR paused in an off-target
+            // field (v0.18.3.203), now resuming. The replan below already consults the
+            // learned trigger circles, and a circle we spawned inside is exempt (disarmed).
+            s_drivePausedInField = false;
             DWORD now = GetTickCount();
             s_driveLastAnnounce      = now;
             s_driveStuckCheckTime    = now;
             s_driveStuckCount        = 0;
             s_finalApproachEnterTick = 0;
-            int32_t rx, ry, rz;
-            GetWorldMapPosition_Active(&rx, &ry, &rz);
-            if (rx != 0 || ry != 0) {
-                s_driveStuckX = rx;
-                s_driveStuckY = ry;
-                Log::World("WorldMap: [DRIVE] Replanning after world-map re-entry from (%d,%d)", rx, ry);
-                // v0.16.0.2: gate replan on planner-eligibility. Without this, the resume
-                // path runs PlanDrivePath unconditionally and the closest-active-region
-                // fallback converts a planner-ineligible drive (planned=0) into a
-                // misrouted planner drive (planned=1). Observed in Fire Cavern BAT
-                // 14:39:00 where resume after random-encounter swirl turned a simple-
-                // coord drive into a planner walk toward a different region.
-                if (s_drivePlannerEligible) {
-                    PlanDrivePath(rx, ry);
-                } else {
-                    Log::World("WorldMap: [DRIVE] Planner-ineligible destination -- keeping simple-coord steering, not replanning");
-                }
-            }
+            s_driveWatchdogGen++;    // v0.18.3.216: reseed route-progress + give-up clocks
+            // v0.18.3.220: DEFER the replan ~20 world ticks. The immediate replan
+            // read a stale position on the first re-entry frame (engine hadn't
+            // updated the foot DWORDs yet), planted the hop-on point inside the
+            // just-exited location's firing area, and steering re-entered the
+            // field (BG->Fire Cavern BAT 23:54). Steering holds until the
+            // deferred replan runs below with a settled position.
+            s_driveResumeReplanTicks = 20;
+            Log::World("WorldMap: [DRIVE] Resume replan deferred 20 ticks (position settle)");
             char buf[160];
             snprintf(buf, sizeof(buf), "Resuming drive to %s.", s_driveTargetName);
             ScreenReader::Speak(buf, true);
@@ -190,6 +197,16 @@ void Poll()
                        s_driveTargetName, s_driveLastDist,
                        s_driveLastPosX, s_driveLastPosY,
                        s_drivePathPlanned ? 1 : 0);
+        } else {
+            // v0.18.3.198: no auto-drive, but the player still left the world map --
+            // arm manual-entry capture so a plain walk-in pins the location. Resolved
+            // by ResolveManualArrival() once the game mode settles to a field.
+            s_manualArrivalPending = true;
+            s_manualArrivalTick    = GetTickCount();
+            s_manualArrivalPosX    = s_lastWorldPosX;
+            s_manualArrivalPosY    = s_lastWorldPosY;
+            Log::World("WorldMap: [DRIVE] Manual world-map exit -- arming entry capture (lastPos=(%d,%d))",
+                       s_lastWorldPosX, s_lastWorldPosY);
         }
     }
 
@@ -200,10 +217,43 @@ void Poll()
         ResolveDeferredArrival();
     }
 
+    // v0.18.3.198: resolve a manual (non-drive) field entry the same way.
+    if (!s_onWorldMap && s_manualArrivalPending) {
+        ResolveManualArrival();
+    }
+
     if (!s_onWorldMap) return;
 
     if (!s_catalogBuilt) {
         BuildDistanceCatalog();
+    }
+
+    // v0.18.3.220: deferred resume replan (see the re-entry block above).
+    // Hold ALL drive processing until the engine position has settled, then
+    // replan from the live position. Keys were released at pause; nothing
+    // steers during the hold.
+    if (s_driveActive && s_driveResumeReplanTicks > 0) {
+        if (--s_driveResumeReplanTicks > 0) return;
+        int32_t rx, ry, rz;
+        GetWorldMapPosition_Active(&rx, &ry, &rz);
+        if (rx != 0 || ry != 0) {
+            s_driveStuckX = rx;
+            s_driveStuckY = ry;
+            Log::World("WorldMap: [DRIVE] Replanning after world-map re-entry from (%d,%d) [deferred]", rx, ry);
+            // v0.16.0.2: gate replan on planner-eligibility. Without this, the resume
+            // path runs PlanDrivePath unconditionally and the closest-active-region
+            // fallback converts a planner-ineligible drive (planned=0) into a
+            // misrouted planner drive (planned=1).
+            if (s_drivePlannerEligible) {
+                PlanDrivePath(rx, ry);
+            } else {
+                Log::World("WorldMap: [DRIVE] Planner-ineligible destination -- keeping simple-coord steering, not replanning");
+            }
+            // v0.18.3.221: re-arm the firing-area escape from the settled
+            // resume position (the resume spawn can land inside a non-target
+            // area exactly like the initial start).
+            ArmFiringAreaEscape(rx, ry);
+        }
     }
 
     CheckVehicleChange();
@@ -275,6 +325,26 @@ void Poll()
                        ready ? "mesh-ready" : "FIRE-ANYWAY budget hit -- data may be incomplete",
                        descBase, s_rtWalkSettleTicks, s_rtWalkPollTicks, adj0, adj0ok ? 1 : 0, adj1, adj1ok ? 1 : 0);
             DumpRuntimeWalkability();
+            // v0.18.3.177: RAW HEX dump of the runtime walkmesh region. The structured interpretation
+            // above has never been solved (adjacency reads fault), so dump the raw bytes at descBase and
+            // re-derive the real layout OFFLINE by cross-referencing wmx.obj -- this is what will let me
+            // fix the ~15% height-model errors at overhang cells (engine surfaces our mesh lacks). Once.
+            {
+                static bool s_rtRawDone = false;
+                if (!s_rtRawDone && descBase >= 0x00010000u && descBase < 0x7FFF0000u) {
+                    s_rtRawDone = true;
+                    Log::World("WorldMap: [RTRAW] descBase=0x%08X dumping 8192 bytes (32/line)", descBase);
+                    for (int off = 0; off < 8192; off += 32) {
+                        char hex[80]; int p = 0; bool fault = false;
+                        __try {
+                            for (int b = 0; b < 32; b++)
+                                p += sprintf(hex + p, "%02X", *(const unsigned char*)(descBase + off + b));
+                        } __except (EXCEPTION_EXECUTE_HANDLER) { fault = true; }
+                        if (fault) { Log::World("WorldMap: [RTRAW] +%04X FAULT", off); break; }
+                        Log::World("WorldMap: [RTRAW] +%04X %s", off, hex);
+                    }
+                }
+            }
         }
     }
 #endif
@@ -282,6 +352,55 @@ void Poll()
     // Track significant position changes (placeholder for future features).
     int32_t px, py, pz;
     GetWorldMapPosition(&px, &py, &pz);
+
+    // v0.18.3.198: remember the latest valid world-map position every frame so
+    // that when the map exits (Poll returns early that frame, before this read)
+    // ResolveManualArrival has the on-foot entry point to attribute a capture.
+    if (px != 0 || py != 0) { s_lastWorldPosX = px; s_lastWorldPosY = py; }
+
+#if NAVMESH_DIAG && GROUNDH_VALIDATE
+    // #70 v0.18.3.140 (Stage 1): validate WorldGroundHeight vs the engine's live
+    // ground height at 0x0203FE30, on EVERY world-map frame -- so it logs while the
+    // player walks MANUALLY (Galbadia + the Balamb save), not only during a wedged
+    // auto-drive. Logs the chosen triangle + 3 corner heights + barycentric weights:
+    // does the engine's height sit WITHIN our triangle (right surface?), and is the
+    // ~92u offset constant across terrain/continents (constant -> cancels in the
+    // Stage 2 step gate)? Throttled to 250ms; read-only.
+    {
+        static DWORD s_ghPollLast = 0;
+        DWORD ghNow = GetTickCount();
+        if (ghNow - s_ghPollLast >= 60) {   // v0.18.3.177: 250->60ms, 4x denser engine-truth height samples for sim fidelity
+            int tri = -1, h0 = 0, h1 = 0, h2 = 0;
+            double ba = 0.0, bb = 0.0, bc = 0.0;
+            int ourH = WorldGroundHeight(px, py, &tri, &h0, &h1, &h2, &ba, &bb, &bc);
+            int engH = (int)(*(volatile int32_t*)0x0203FE30);
+            if (ourH == WGH_NO_GROUND)
+                Log::World("WorldMap: [GROUNDH] pos(%d,%d) fine(c%d,r%d) tri=NONE engineH=%d",
+                           px, py, WorldXToFineCol(px), WorldYToFineRow(py), engH);
+            else
+                Log::World("WorldMap: [GROUNDH] pos(%d,%d) fine(c%d,r%d) tri=%d corners(%d,%d,%d) bary(%.2f,%.2f,%.2f) ourH=%d engineH=%d diff=%d",
+                           px, py, WorldXToFineCol(px), WorldYToFineRow(py),
+                           tri, h0, h1, h2, ba, bb, bc, ourH, engH, ourH - engH);
+
+            // v0.18.3.141 (#70 Stage 1): BLOCK-LOCAL query beside the global [GROUNDH].
+            // Does replicating the engine's per-block search fix the overhang mispick
+            // (Balamb Garden ourH -201 vs engine -545) and stop the beach extrapolation?
+            // 'contain' shows how many triangles cover the point (overlap visibility).
+            {
+                int ltri = -1, lh0 = 0, lh1 = 0, lh2 = 0, lcnt = 0;
+                double la = 0.0, lb = 0.0, lc = 0.0;
+                int ourHL = WorldGroundHeightLocal(px, py, &ltri, &lh0, &lh1, &lh2, &la, &lb, &lc, &lcnt);
+                if (ourHL == WGH_NO_GROUND)
+                    Log::World("WorldMap: [GROUNDHL] pos(%d,%d) tri=NONE contain=%d engineH=%d", px, py, lcnt, engH);
+                else
+                    Log::World("WorldMap: [GROUNDHL] pos(%d,%d) tri=%d contain=%d corners(%d,%d,%d) bary(%.2f,%.2f,%.2f) ourHL=%d engineH=%d diff=%d",
+                               px, py, ltri, lcnt, lh0, lh1, lh2, la, lb, lc, ourHL, engH, ourHL - engH);
+            }
+            s_ghPollLast = ghNow;
+        }
+    }
+#endif
+
     static int32_t lastX = 0, lastY = 0;
 
     double movement = CalculateWrappedDistance(px, py, lastX, lastY);
@@ -346,6 +465,10 @@ void Initialize()
     s_driveAwaitingArrivalDecision = false;
     s_driveExitTick                = 0;
 
+    s_manualArrivalPending = false;   // v0.18.3.198
+    s_lastWorldPosX        = 0;
+    s_lastWorldPosY        = 0;
+
     memset(s_refinedX, 0, sizeof(s_refinedX));
     memset(s_refinedY, 0, sizeof(s_refinedY));
     memset(s_refinedHas, 0, sizeof(s_refinedHas));
@@ -371,7 +494,65 @@ void Initialize()
             Log::World("WorldMap: [INIT] Refined entry default: %s (%d,%d)",
                        s_locations[i].name, s_refinedX[i], s_refinedY[i]);
         }
+        else if (strcmp(s_locations[i].name, "Timber") == 0) {
+            // v0.18.3.192: Timber is a WALLED town -- its icon (-22564,-4867) is ~640u SOUTH of the
+            // entrance, outside the wall, so reaching the icon never loads the town. Aim at the gate
+            // MOUTH instead. The .190 attempt aimed at the gate THROAT (-22532,-5603, 7/8 wall-
+            // enclosed); that cell is so boxed in that the clearance-weighted planner built a 55km
+            // detour to reach it and looped back into Dollet. This time we target the LAST OPEN road
+            // cell on the straight approach, right where the terrain-28 road dead-ends at the town wall
+            // (computed from the .189 walkmesh: the road runs north from the icon at zero wall-
+            // adjacency, then closes to a gate and ends at the wall at y=-5539; the last walkable road
+            // cell is (-22564,-5507), only 4/8 enclosed). The approach is a straight open road, so the
+            // route stays sensible (~35km, heading away from Dollet -> no re-entry loop), and the
+            // character ends right at the town threshold where the field trigger sits. Open towns keep
+            // their icon -- their entry is on open road by the icon already.
+            s_refinedX[i]   = -22564;
+            s_refinedY[i]   = -5507;
+            s_refinedHas[i] = true;
+            Log::World("WorldMap: [INIT] Refined entry default: %s (%d,%d) [walled-town gate mouth]",
+                       s_locations[i].name, s_refinedX[i], s_refinedY[i]);
+        }
     }
+
+    // v0.18.3.195: load persisted refined entry coordinates AFTER the hard-coded
+    // seeds, so a real captured entrance overrides its estimate. This file grows
+    // as the player visits locations and can ship with the mod as a complete table.
+    LoadRefinedEntries();
+
+    // v0.18.3.200: hard-seed Galbadia Garden's REAL entrance. The .199 BAT log
+    // caught it on a manual walk-in: field 'ggview1' (fieldId 0x02C8) at
+    // (-37475,-26232), ~1170u south of the icon and clearly distinct from the
+    // station (-38394,-24803). We FORCE it here -- AFTER LoadRefinedEntries -- so
+    // that a stale persisted value (e.g. the .198 station mis-capture on an
+    // install that skipped .199's one-time migration) can never override it.
+    // G-Garden remains capture-exempt (see IsCaptureExempt) so a drive that
+    // wanders into the adjacent station can't re-poison this seed. The .199
+    // migration block is gone: it did its one-time job on Aaron's machine
+    // (Galbadia Garden -> Galbadia Station), the station's real coord is now the
+    // hard-coded catalog base, and keeping the migration would fight this seed.
+    for (int i = 0; i < LOCATION_COUNT; i++) {
+        if (strcmp(s_locations[i].name, "Galbadia Garden") == 0) {
+            s_refinedX[i]   = -37475;
+            s_refinedY[i]   = -26232;
+            s_refinedHas[i] = true;
+            Log::World("WorldMap: [INIT] Refined entry (forced): Galbadia Garden (%d,%d) [field 'ggview1' entrance]",
+                       s_refinedX[i], s_refinedY[i]);
+        }
+    }
+
+    // v0.18.3.203: seed the two field-trigger circles the .202 BAT demonstrated, so the
+    // first drive of a session already routes around them instead of re-learning by
+    // walking in. Galbadia Garden's 'ggview1' trigger fired 1815u from its entrance
+    // (observed entry (-35939,-27200)); the station trigger caught the second drive.
+    // Radii = observed distance + margin; further off-target entries keep refining these
+    // (and add new locations) at runtime via [TRIGAVOID] learning in the arrival code.
+    s_trigAvoidN = 0;
+    s_trigAvoidX[s_trigAvoidN] = -37475; s_trigAvoidY[s_trigAvoidN] = -26232;
+    s_trigAvoidR[s_trigAvoidN] = 2048; s_trigAvoidN++;   // Galbadia Garden plateau ('ggview1')
+    s_trigAvoidX[s_trigAvoidN] = -38394; s_trigAvoidY[s_trigAvoidN] = -24803;
+    s_trigAvoidR[s_trigAvoidN] = 1536; s_trigAvoidN++;   // Galbadia Station
+    Log::World("WorldMap: [INIT] Seeded %d learned trigger circles (G-Garden 2048, Station 1536)", s_trigAvoidN);
 
     memset(s_segmentRegionMap, 0xFF, sizeof(s_segmentRegionMap));
     s_segmentRegionLoaded = false;
@@ -390,9 +571,21 @@ void Initialize()
     // catalog destinations are reachable + an A* route to Dollet, to confirm
     // the in-game build matches the offline numbers (157416 tris / 253 comps /
     // largest 74308; Dollet/Timber/Galbadia Garden/Deling City reachable;
-    // A* ref->Dollet ~30259 / 126 tris). s_locations + LOCATION_COUNT +
-    // NM_CLIMB_STEP are all visible here (after the full .inl chain).
-    Navmesh_LogConnectivity(s_locations, LOCATION_COUNT, -29270, -24056, NM_CLIMB_STEP);
+    // A* ref->Dollet ~30259 / 126 tris). s_locations + LOCATION_COUNT are visible
+    // here; the gate arg is ignored (v0.18.3.119: the slope gate in
+    // Navmesh_AddTriangle already excluded cliffs, so flood/A* run ungated).
+    Navmesh_LogConnectivity(s_locations, LOCATION_COUNT, -29270, -24056, -1);
+#endif
+
+#if NAVMESH_DIAG && NAVMESH_ROUTING
+    // v0.18.3.123: road-verification oracle -- road bbox + a Timber->Dollet A*
+    // dumped & road-flagged, to check whether A* tracks the known-walkable road
+    // (model validated -> executor is the sole problem) or diverges into the
+    // deep canyon (model still passing spurious terrain). Read-only; runs once.
+    RoadVerifyTimberDollet();
+    // v0.18.3.124: trace the walkable Timber->Dollet road ribbon vs the navmesh
+    // -- is the road corridor navmesh-connected, or did the gate sever it?
+    RoadConnectivityDiag();
 #endif
 
     if (LoadTriggerZones()) {

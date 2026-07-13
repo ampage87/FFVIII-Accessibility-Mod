@@ -22,3 +22,6 @@
 
 // NVDA controller client DLL (embedded for single-file distribution)
 #define IDR_NVDA_CLIENT_DLL     301
+
+// v0.18.3.172: world-map auto-drive teleport SFX (rising shimmer), embedded as RCDATA
+#define IDR_WAV_TELEPORT        7000

@@ -66,6 +66,18 @@ static bool s_hookInstalled = false;
 // DI_OK -- the real DirectInput device is NOT polled (for what FF8 sees).
 // Outside chase Auto (or for any size other than 256, which would be a
 // non-keyboard buffer type), we forward to the original.
+// v0.18.3.215: autotest overlay -- OR-ed into every keyboard read the game
+// makes (chase active or not). See chase_keyboard.h for rationale.
+static BYTE          s_overlayBuf[256] = {};
+static volatile LONG s_overlayHeld     = 0;
+
+static void ApplyOverlay(LPVOID lpvData)
+{
+    BYTE* dst = static_cast<BYTE*>(lpvData);
+    for (int i = 0; i < 256; i++)
+        if (s_overlayBuf[i]) dst[i] |= s_overlayBuf[i];
+}
+
 static HRESULT __stdcall HookedGetDeviceState(IDirectInputDevice8A* dev,
                                               DWORD cbData,
                                               LPVOID lpvData)
@@ -78,10 +90,15 @@ static HRESULT __stdcall HookedGetDeviceState(IDirectInputDevice8A* dev,
         // FFNx uses for FF8 field input, so the substitution here is the
         // complete and sufficient delivery path.)
         std::memcpy(lpvData, s_keyBuf, 256);
+        if (s_overlayHeld > 0) ApplyOverlay(lpvData);
         return DI_OK;
     }
     // Pass-through. The original was captured by MinHook during install.
-    return s_origGetDeviceState(dev, cbData, lpvData);
+    HRESULT hr = s_origGetDeviceState(dev, cbData, lpvData);
+    if (SUCCEEDED(hr) && cbData == 256 && lpvData != nullptr &&
+        s_overlayHeld > 0)
+        ApplyOverlay(lpvData);
+    return hr;
 }
 
 // ============================================================================
@@ -229,6 +246,28 @@ void SetKeyUp(uint8_t dikCode)
 void ClearAllKeys()
 {
     std::memset(s_keyBuf, 0, sizeof(s_keyBuf));
+}
+
+// v0.18.3.215: autotest overlay writes (see header).
+void SetOverlayKey(uint8_t dikCode, bool down)
+{
+    if (down) {
+        if (!s_overlayBuf[dikCode]) {
+            s_overlayBuf[dikCode] = 0x80;
+            InterlockedIncrement(&s_overlayHeld);
+        }
+    } else {
+        if (s_overlayBuf[dikCode]) {
+            s_overlayBuf[dikCode] = 0x00;
+            InterlockedDecrement(&s_overlayHeld);
+        }
+    }
+}
+
+void ClearOverlay()
+{
+    for (int i = 0; i < 256; i++) s_overlayBuf[i] = 0;
+    s_overlayHeld = 0;
 }
 
 }  // namespace ChaseKeyboard
