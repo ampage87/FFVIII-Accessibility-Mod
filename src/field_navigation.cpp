@@ -612,6 +612,14 @@ static bool      s_entDiagDumped   = true;   // true = skip old ENTDIAG dump
 // the party-member filter.
 static uint16_t  s_entTalkRadius[MAX_ENTITIES] = {};
 
+// v0.18.3.235: STICKY talkability. The runtime talkonoff flag is not merely set
+// late — it is TRANSIENT. On ggroom1 (G-Garden reception) Quistis reads
+// talk=1/push=1 on the first catalog build and 0 on every build after, so she was
+// kept and named on entry and then silently party-filtered a second later. Once an
+// entity has been observed talkable on a field, remember it for the rest of that
+// field. Cleared on field load by HookedFieldScriptsInit.
+static bool      s_entSeenTalkable[MAX_ENTITIES] = {};
+
 // v0.18.3.231: one-shot extended entity scan (reads past the engine's reported
 // entity count). Retired — kept for re-arming if the entity array ever needs
 // re-triage on a new field (this is what located the G-Garden train staff).

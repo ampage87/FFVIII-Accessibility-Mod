@@ -86,11 +86,18 @@ static void RefreshCatalog()
                     if (jsmT && jsmT->hasTalkSetup) jsmTalk = true;
                 }
             }
+            // v0.18.3.235: talkability is STICKY per field. The talkonoff flag is
+            // not just set late, it is TRANSIENT — on ggroom1 Quistis reads talk=1
+            // on the first catalog build and 0 on every build after, so she was
+            // kept on entry and then party-filtered a second later (a party member
+            // WITH a talk radius must stay). Latch the observation instead.
+            if (i < MAX_ENTITIES && talkonoff > 0) s_entSeenTalkable[i] = true;
             // Runtime capture (v0.18.3.227) is kept as a secondary signal: it
             // catches entities whose talk radius is enabled dynamically at
             // runtime rather than declared in the static script.
             bool talkable = (talkonoff > 0) || jsmTalk ||
-                            (i < MAX_ENTITIES && s_entTalkRadius[i] > 0);
+                            (i < MAX_ENTITIES && (s_entSeenTalkable[i] ||
+                                                  s_entTalkRadius[i] > 0));
 
             // v0.18.3.228: per-entity scan trace (see field_nav_catalog_diag.inl).
             // v0.18.3.234: once per field load, not on every rebuild.
@@ -265,106 +272,12 @@ static void RefreshCatalog()
                 ei_info.type       = etype;
                 ei_info.gatewayIdx = -1;
                 ei_info.name[0]    = '\0';
-                // v0.07.73: Look up JSM classification by SYM name.
-                // Overrides generic "NPC" with specific type (Save Point, Draw Point, etc.)
-                const char* entName = "NPC";
-                int symIdx = s_symOthersOffset + i;
-                if (symIdx >= 0 && symIdx < s_symNameCount) {
-                    const FieldArchive::JSMEntityInfo* jsm = FindJSMBySym(s_symNames[symIdx]);
-                    if (jsm) {
-                        EntityType jsmType = JSMTypeToCatalogType(jsm->type);
-                        if (jsmType != ENT_UNKNOWN) {
-                            ei_info.type = jsmType;
-                            entName = EntityTypeName(jsmType);
-                        }
-                    }
-                }
-                // v0.12.10: Comprehensive SYM-name entity type classification.
-                // Uses ENTITY_TYPE_TABLE from survey data, with pattern fallbacks.
-                if (ei_info.type == ENT_NPC || ei_info.type == ENT_OBJECT || ei_info.type == ENT_UNKNOWN) {
-                    if (symIdx >= 0 && symIdx < s_symNameCount) {
-                        const char* sym = s_symNames[symIdx];
-                        // First: check comprehensive type table from entity_classifications.h
-                        EntityClassificationType ecType = LookupEntityType(sym);
-                        if (ecType == EC_DRAW_POINT) {
-                            ei_info.type = ENT_DRAW_POINT;
-                            entName = "Draw Point";
-                            Log::Field("FieldNavigation: [catalog] ent%d '%s' classified as Draw Point by type table", i, sym);
-                        } else if (ecType == EC_SAVE_POINT) {
-                            ei_info.type = ENT_SAVE_POINT;
-                            entName = "Save Point";
-                            Log::Field("FieldNavigation: [catalog] ent%d '%s' classified as Save Point by type table", i, sym);
-                        } else if (ecType == EC_SHOP) {
-                            ei_info.type = ENT_SHOP;
-                            entName = "Shop";
-                            Log::Field("FieldNavigation: [catalog] ent%d '%s' classified as Shop by type table", i, sym);
-                        } else if (ecType == EC_CARD_GAME) {
-                            ei_info.type = ENT_CARD_GAME;
-                            entName = "Card Player";
-                            Log::Field("FieldNavigation: [catalog] ent%d '%s' classified as Card Game by type table", i, sym);
-                        } else {
-                            // Pattern-based fallback for names not in the table
-                            if ((sym[0] == 'd' || sym[0] == 'D') && (sym[1] == 'p' || sym[1] == 'P') &&
-                                sym[2] >= '0' && sym[2] <= '9') {
-                                ei_info.type = ENT_DRAW_POINT;
-                                entName = "Draw Point";
-                            } else if (_strnicmp(sym, "drpoint", 7) == 0 ||
-                                       _strnicmp(sym, "drawpoint", 9) == 0 ||
-                                       _strnicmp(sym, "draw_point", 10) == 0) {
-                                ei_info.type = ENT_DRAW_POINT;
-                                entName = "Draw Point";
-                            } else if (_strnicmp(sym, "save", 4) == 0 || _strnicmp(sym, "svpt", 4) == 0) {
-                                ei_info.type = ENT_SAVE_POINT;
-                                entName = "Save Point";
-                            }
-                        }
-                    }
-                }
-                // v0.12.09: Cross-entity draw point trigger detection.
-                // If this entity's JSM info shows it calls REQSW/REQEW to a
-                // draw point entity, classify it as Draw Point. This is
-                // deterministic — no proximity heuristics needed.
-                if (ei_info.type == ENT_NPC || ei_info.type == ENT_OBJECT || ei_info.type == ENT_UNKNOWN) {
-                    if (symIdx >= 0 && symIdx < s_symNameCount) {
-                        const FieldArchive::JSMEntityInfo* jsmDP = FindJSMBySym(s_symNames[symIdx]);
-                        if (jsmDP && jsmDP->drawPointTriggerOf >= 0) {
-                            ei_info.type = ENT_DRAW_POINT;
-                            entName = "Draw Point";
-                            Log::Field("FieldNavigation: [catalog] ent%d '%s' reclassified as Draw Point "
-                                       "(triggers JSM draw point ent%d)",
-                                       i, s_symNames[symIdx], jsmDP->drawPointTriggerOf);
-                        }
-                    }
-                }
-                // v0.07.79: Model-based save point detection.
-                // Model 24 is the save point crystal across all FF8 fields.
-                // The visible save point entity often has a different SYM index
-                // than the save point script entity (e.g. bghall_1 ent6 vs JSM ent27),
-                // so SYM-based lookup misses it. Model ID is authoritative.
-                if (modelId == 24 && ei_info.type != ENT_SAVE_POINT) {
-                    ei_info.type = ENT_SAVE_POINT;
-                    entName = "Save Point";
-                }
-                // v0.18.3.227: Label interactable party members by proper name.
-                // v0.18.3.232: name party characters from setpc, NOT the SYM.
-                //
-                // A party character only reaches here if the party filter KEPT it —
-                // i.e. it is talkable — so announcing "Squall"/"Quistis" instead of a
-                // generic "NPC" is accurate and more useful. Deriving the name from
-                // setpc (the character ID) rather than the SYM is what makes it SAFE:
-                // the SYM list is shifted relative to the runtime slots, so a
-                // SYM-based label would happily announce the G-Garden train guard as
-                // "Rinoa". setpc is 0xFE on every genuine NPC, so no NPC, draw point
-                // or save point can be mislabeled as a party member.
-                if (ei_info.type == ENT_NPC) {
-                    const char* partyName = PartyCharacterNameById(setpc);
-                    if (partyName) {
-                        entName = partyName;
-                        Log::Field("FieldNavigation: [catalog] ent%d setpc=%d labeled as party "
-                                   "member '%s' (sym='%s' talkable=%d)",
-                                   i, (int)setpc, partyName, symName, talkable ? 1 : 0);
-                    }
-                }
+                // v0.18.3.235: entity type refinement + display naming.
+                // Extracted to field_nav_catalog_naming.inl — a statement fragment
+                // included inline (same pattern as field_nav_catalog_dedupe.inl) to
+                // hold this file under the 80 KB source-size CI guard. It declares
+                // `entName`, which is consumed immediately below.
+                #include "field_nav_catalog_naming.inl"
                 strncpy(ei_info.name, entName, sizeof(ei_info.name) - 1);
                 ei_info.name[sizeof(ei_info.name) - 1] = '\0';
                 fresh[i] = ei_info;

@@ -6,6 +6,26 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.235
+
+**NPC catalog: sticky talkability + a misaligned SYM must not mistype a character.** Fixes the G-Garden reception room (`ggroom1`), a scene with five party members where the catalog listed only 2 NPCs and 1 Object. The screenshot shows five characters; the catalog should list four NPCs (the four non-player party members).
+
+**1. Talkability is TRANSIENT, not merely late.** Quistis (`ent6`) reads `talk=1 push=1` on the first catalog build and `0` on every build afterwards:
+
+```
+[SCAN]      ent6 sym='selphie' model=5 talk=1 push=1 thru=1 talkable=1
+[SCAN-KEEP] ent6 type=NPC name='Quistis'          <- kept + correctly named on entry
+[party-filter] ent6 setpc=3 (Quistis) filtered    <- dropped on every rebuild after
+```
+
+So she was announced on entry and then vanished a second later. She is a party member *with* a talk radius, so she must stay. Talkability is now **latched per field** (`s_entSeenTalkable[]`, cleared on field load): once an entity has been observed talkable on a field, it stays talkable for that field. This also hardens the earlier fixes, which all read a flag that can be zero at the instant the catalog happens to rebuild.
+
+**2. A misaligned SYM must not override an entity's TYPE.** `ent3` is a visible character (model 1) that the flag-based classification correctly defaults to NPC — but the JSM lookup overrode it to `Object` via the SYM `zell`. The SYM->slot map is unreliable on any field that instantiates only a subset of its SYMs, so that lookup was answering about a different entity entirely, and a *person* was announced to the player as "Object". (The misalignment is provable on this field: `ent6` carries SYM `selphie` but `setpc=3` = Quistis.)
+
+A wrong name is survivable; a wrong type is not. The JSM lookup may now only override the type of a **model-less** entity (a script object) or supply a specific, meaningful type (Save/Draw/Shop/Card) — it can no longer downgrade a visible character to a generic Object/Interaction. Those specific types are what the lookup exists for, and the position-based dedupe from .233 cross-checks the save point independently.
+
+**Source-size:** `field_nav_catalog.inl` had reached 81 KB with ~700 bytes of headroom under the 80 KB hard-fail guard, and these fixes pushed it over. The type-refinement and display-naming block is extracted to `field_nav_catalog_naming.inl` (a statement fragment included inline, the same pattern as `field_nav_catalog_dedupe.inl`), bringing the file to 75.6 KB with ~6 KB of headroom.
+
 ## v0.18.3.234
 
 **Release prep for the NPC-catalog fixes (.229 - .233). No behavior change to shipped features.**
