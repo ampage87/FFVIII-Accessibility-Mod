@@ -133,14 +133,20 @@ static const char* FIELD_DISPLAY_NAMES[] = {
     "Balamb Harbor 6",  // 126: bcsaka1a (Balamb Harbor)
     "Balamb - Town Square 6",  // 127: bcsta_1 (Balamb - Town Square)
     "Balamb - Town Square 7",  // 128: bcsta1a (Balamb - Town Square)
-    "Fire Cavern 1",  // 129: bdenter1 (Fire Cavern)
-    "Fire Cavern 2",  // 130: bdifrit1 (Fire Cavern)
-    "Fire Cavern 3",  // 131: bdin1 (Fire Cavern)
-    "Fire Cavern 4",  // 132: bdin2 (Fire Cavern)
-    "Fire Cavern 5",  // 133: bdin3 (Fire Cavern)
-    "Fire Cavern 6",  // 134: bdin4 (Fire Cavern)
-    "Fire Cavern 7",  // 135: bdin5 (Fire Cavern)
-    "Fire Cavern 8",  // 136: bdview1 (Fire Cavern)
+    // v0.18.3.236 (#76): Fire Cavern renumbered to follow the walk path so the
+    // first dungeon reads 1..7 from the interior entrance to Ifrit's chamber.
+    // Old numbering followed field-ID order, which put Ifrit's room (bdifrit1,
+    // id 130) at "Fire Cavern 2" and made the walk announce 1-3-4-5-6-7-2.
+    // Path confirmed in Aaron's 2026-07-12 run: bdview1 (outdoor approach) ->
+    // bdenter1 -> bdin1..bdin5 -> bdifrit1.
+    "Fire Cavern 1",         // 129: bdenter1 (interior entrance)
+    "Fire Cavern 7",         // 130: bdifrit1 (Ifrit's chamber, end of path)
+    "Fire Cavern 2",         // 131: bdin1
+    "Fire Cavern 3",         // 132: bdin2
+    "Fire Cavern 4",         // 133: bdin3
+    "Fire Cavern 5",         // 134: bdin4
+    "Fire Cavern 6",         // 135: bdin5
+    "Fire Cavern Approach",  // 136: bdview1 (outdoor approach, world-map trigger drop-in)
     "B-Garden - 2F Hallway 1",  // 137: bg2f_1
     "B-Garden - 2F Hallway 2",  // 138: bg2f_11
     "B-Garden - 2F Hallway 3",  // 139: bg2f_2

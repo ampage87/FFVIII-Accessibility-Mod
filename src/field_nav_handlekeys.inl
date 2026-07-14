@@ -85,7 +85,15 @@ static void HandleKeys()
             }
         }
     }
-    if (drive && !s_driveWasDown) {
+    // v0.18.3.236 (#72): consume a one-shot post-battle resume request as a
+    // synthetic backslash press. PollBattlePauseResume (field_navigation.cpp)
+    // arms it only after the field is back, the player position has settled,
+    // and the paused catalog target was re-located, so the normal start path
+    // below (validation included) runs unchanged.
+    bool driveResume = s_driveResumeRequest;
+    s_driveResumeRequest = false;
+
+    if ((drive && !s_driveWasDown) || driveResume) {
         if (s_driveActive) {
             // v0.15.9.2: If chase-drive owns the drive, refuse the toggle
             // -- the player can't cancel chase auto-pilot via backslash.

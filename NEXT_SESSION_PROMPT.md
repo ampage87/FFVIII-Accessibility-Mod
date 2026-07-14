@@ -1,5 +1,64 @@
 # NEXT SESSION — FF8 Accessibility Mod
 
+## ▶ STATUS: v0.18.3.238 LOCAL — BAT PASS, PUSH-READY. Playtest chapter #71–#76 COMPLETE.
+**.238 BAT (21:34–21:42, Ifrit beaten 21:42:31): PASS.** Exactly ONE "Timer detected" (21:35:40, 40-min pick); zero re-announcements across the random battles (21:36:20, 21:37:10); dismissal at 21:42:40 "0x01D2B813=0 sustained" (9 s post-victory); INACTIVE held through quit while the raw global kept counting; gate log fired once (rate-limited). Known trade-off (by design, commented in #75): T pressed inside the 4 s debounce window right after the victory still speaks the last remaining time; a second later it's "No timer active." **Issues: #72/#73/#74/#75/#76 CLOSED with BAT evidence; #71 open LOW-PRIORITY** (only the hypothetical invisible non-formation scene actor / entity SHOW-HIDE flag discovery — no known field exhibits it). **Chapter push-ready: version==CHANGELOG top (0.18.3.238), no oversized files (field_navigation.cpp 80.0 KB — closest to the 81,920 cap; battle-pause split into `field_nav_battlepause.inl`). Aaron runs `Utilities/push_to_github.ps1`.** Next arcs when ready: #70 world-map walking umbrella, DEVNOTES still ~1 KB over its 10,240 cap (trim the .211 routenet block when that arc resumes).
+
+---
+
+_(Superseded pre-final-BAT status below.)_
+
+## ▶ STATUS: v0.18.3.238 LOCAL — #75 core fix BAT-CONFIRMED on .237; .238 adds the dismissal DEBOUNCE (kills the per-battle "Timer detected" re-announcement), awaiting final BAT
+**.237 BAT (21:02–21:10, Ifrit beaten 21:09:29):** timer went INACTIVE at 21:09:38 ("HUD timer dismissed") and STAYED inactive for the walk-out while the raw global kept counting — the phantom is dead. Two rough edges fixed in **.238 (countdown_timer.cpp only):** (1) the engine blanks 0x01D2B813 ~2 s on every battle→field return, so each random battle caused a dismiss + fresh "Timer detected. X remaining." (21:04:21/23, 21:04:54/56) — dismissal now requires the flag to read 0 for 4 s continuously on-field (`HudDismissedDebounced`, shared ACTIVE/FROZEN; off-field/visible/fault resets the clock); (2) the "staying INACTIVE" activation-gate log line spammed every ~2 s post-Ifrit — rate-limited to 30 s. **BAT .238:** one "Timer detected" per session only; T in-trial and in-battle unchanged; after the Ifrit victory T says "No timer active." with `ENTER INACTIVE ... 0x01D2B813=0 sustained`. Then #75 can close and the chapter is push-ready pending Aaron's push.
+
+---
+
+_(Superseded .237 status below — its BAT is done; results above.)_
+
+## ▶ STATUS: v0.18.3.237 LOCAL — #75 TIMER-DISMISSAL FIX APPLIED (flag = engine byte 0x01D2B813), awaiting BAT; #72/#73/#74/#76 CLOSED on the .236 BAT
+**CORRECTION to the block below:** the .236 BAT DID reach and beat Ifrit (fight 20:37:41–20:42:31, "GF Ifrit acquired" 20:42:39; the game was closed at 20:46 during the walk-out battles). #73/#74 are therefore verified against the original boss case, and the timer dismissal data WAS captured: nothing in the 96-byte window flips at dismissal — 0x01CFE934 (which ticks 4→5 at the victory) is a BATTLE COUNTER (1 at cavern entry, +1 per victory, 7 after the exit battles), and 0x01CFE950 stays 1 throughout, so neither is the flag.
+
+**The real flag, from a disasm xref sweep on 0x01CFE92C:** engine fn 0x004A6CC0 = set-timer-visible(arg) → writes byte **0x01D2B813**; the MM:SS HUD renderer 0x004A6D40 tests that byte FIRST and skips drawing when 0 (then reads 0x01CFE92C, clamps 0x1797, /60, draws). Display-pipeline truth, per the standing rule. **.237 changes (countdown_timer.cpp):** ACTIVE/FROZEN → EnterInactive("HUD timer dismissed") when ON FIELD and 0x01D2B813==0 (field-gated; SEH fault ignored); activation additionally requires the flag nonzero; TIMER_DISMISS_DIAG back to 0. Carries the [SPELL-MISS-SKIP] "not 0x9" wording fix.
+
+**BAT .237:** rebuild via deploy.vbs, confirm 0.18.3.237. Replay the cavern: (1) timer detected on entry as usual; (2) T during the trial announces remaining; (3) after the Ifrit victory, T must say **"No timer active."** and the log must show `ENTER INACTIVE ... HUD timer dismissed (0x01D2B813=0)`; (4) watch-item: any spurious re-"Timer detected" after mid-trial dialogs (would mean the engine clears the flag during dialogs — then the check needs a dialog gate). Issues: #72/#73/#74/#76 closed with BAT evidence; #71 open low-priority (invisible non-formation scene actor / SHOW-HIDE flag); #75 open pending this BAT.
+
+---
+
+_(The block below predates the correction — its "run ended before Ifrit" claim and the 0x01CFE950 candidate are WRONG; kept for the audit trail.)_
+
+## ▶ STATUS: v0.18.3.236 LOCAL — BAT PASS on 5 of 6 (run ended before Ifrit); #75 flag candidate FOUND at 0x01CFE950
+**BAT 2026-07-13 20:17–20:46 (run ended mid-battle before reaching Ifrit — finish-to-Ifrit still wanted):**
+- **#72 PASS:** two mid-drive battles paused cleanly (20:44:45, 20:46:06 — "battle entered mid-drive -> pausing", fake gamepad removed at the edge); first resume completed end-to-end at 20:45:48 (target ent=-401 gw=1 re-found at catIdx=2, drive re-issued, Arrived at 20:45:57). Second resume was pending when the game was closed.
+- **#73/#74 PASS:** ZERO phantom recovers/no-effect lines all session. Deferral worked (verdicts held 6–10 s while animating, then "had effect … no announce"); a3=0x8 now lands in [SPELL-MISS-SKIP]. Cosmetic fix applied post-BAT: that skip line said "bit3 clear" — reworded to "not 0x9" (log-text only, no behavior change; ships with the next build).
+- **#71 PASS both phases:** pre-scene bg2f_2 Selphie filtered (inParty=1 — she is already in the formation before the run-in scene on this field, so the roster rule covered the pre-scene case too); post-join filtered on bg2f_2/bg2f_1; Fire Cavern escort Quistis filtered throughout.
+- **#76 PASS:** "Exit to Fire Cavern 7" labels observed along the path.
+- **#75 DATA:** [TIMERDIAG] capturing. While the timer is LIVE: dword at **0x01CFE950 = 01 00 00 00** (prime dismissed-flag candidate), 0x01CFE928 = up-counting elapsed-seconds dword, 0x01CFE92C = the known remaining-seconds timer, 0x01CFE934 = 7 (constant so far), 0x01CFE95C = 41 00 10 00. NEEDED: the dump ACROSS the Ifrit victory — if 0x01CFE950 flips to 0 when the HUD timer is dismissed, that's the gate; then wire EnterInactive("timer dismissed") on it and set TIMER_DISMISS_DIAG back to 0.
+
+**NEXT BAT: finish the cavern — beat Ifrit, press T a few times after Victory, walk out, then send ff8_mod.log** (the [TIMERDIAG] lines through the victory are the deliverable; Blizzard-on-Ifrit also re-verifies #73 against the original boss case).
+
+---
+
+_(Superseded pre-BAT .236 status below.)_
+
+## ▶ STATUS: v0.18.3.236 LOCAL — SIX PLAYTEST FIXES APPLIED, awaiting BAT (GitHub issues #71–#76)
+**Session 2026-07-13 (Cowork).** Aaron played start→Ifrit on .235 and reported six bugs; all were confirmed in Logs/ff8_field.log, ff8_battle.log, ff8_mod.log, filed as GitHub **#71–#76**, and fixed/instrumented in **v0.18.3.236**. Full detail: CHANGELOG `## v0.18.3.236` + the issues.
+
+**⚠ ISSUE-NUMBER CORRECTION:** older notes used "#71/#72" as labels for the world-map walking arc — those numbers were never created on GitHub. GitHub has now assigned **#71–#76 to the 2026-07-12 playtest bugs**; the world-map arc remains **#70**.
+
+What changed (one BAT — a Fire Cavern replay — exercises everything):
+- **#72 keyboard-dead-in-battle:** root cause = battles entered mid-F9-drive left the fake gamepad installed all battle (Update() early-returns off-field), so the held steer state masked real arrows. NEW `src/field_nav_battlepause.inl` (included from field_navigation.cpp before Update): stops the drive on the battle edge ("Auto-drive paused for battle."), saves the catalog target (entityIdx+gatewayIdx+fieldId), and ~1 s after the field returns re-selects the target and re-issues the drive through the normal HandleKeys start path (`s_driveResumeRequest`, synthetic backslash). Field-change across battle drops the resume; chase-drive exempt.
+- **#73/#74 phantom "Ifrit recovers N HP" / "No effect":** battle_tts_noeffect.inl — watchdog verdict now DEFERRED while the damage anim flag is up (cap `NOEFFECT_WATCHDOG_MAX_MS`=20 s); queued verdicts are DROPPED at flush time if a real HP flush landed after queue (`[NOEFFECT-DROP]`); flush-side dedup blocks identical re-queues within 4 s (`[NOEFFECT-DEDUP]`). battle_tts_sprite.inl — kind=4 resist filter tightened to exact `a3==0x09` (Ifrit BAT proved 0x08 fires on ordinary elemental damage; other bit3 values now [SPELL-MISS-SKIP] + screenshot only).
+- **#71 Selphie in catalog:** field_nav_catalog.inl party filter adds the IN-PARTY rule — setpc char in the active formation (savemap +0xAF0, `IsCharacterInActiveParty`) → excluded even when talkable. Verified against the .235 ggroom1 keep (recep log formation=[4,0,5]; kept-Quistis setpc=3 not in formation). REMAINING on #71: pre-scene INVISIBLE actor (bg2f_2 Selphie before the run-in, talk=1 thru=1, not in formation) still lists — needs the entity SHOW/HIDE flag (v05.69 VISDIAG never found it); next step is a per-session byte-flip diagnostic on bg2f_2 across the scene trigger.
+- **#75 phantom timer after Ifrit:** engine global 0x01CFE92C keeps decrementing after the game dismisses the HUD timer (523→516 across Victory) — stall-deactivation never fires. `TIMER_DISMISS_DIAG=1` in countdown_timer.cpp dumps 0x01CFE900..0x5F once/sec as `[TIMERDIAG]` while a timer is live (+60 s tail). **BAT deliverable: the [TIMERDIAG] lines through the Ifrit victory** — find the byte that flips at dismissal, gate ACTIVE on it, then set the diag back to 0.
+- **#76 Fire Cavern numbering:** field_display_names.h — bdenter1=1, bdin1..5=2..6, bdifrit1=7, bdview1="Fire Cavern Approach" (Aaron's choice).
+
+**BAT .236:** rebuild via deploy.vbs, confirm 0.18.3.236. Load the pre-Fire-Cavern save. (1) F9-drive between rooms until a random battle interrupts — expect "Auto-drive paused for battle.", normal arrow keys IN battle, then "Driving." shortly after the battle ends; if the resume misfires, log reads `[drive] battle resume ...`. (2) Field names along the walk should read Fire Cavern Approach, then 1→7 ending at Ifrit. (3) Blizzard on Ifrit repeatedly: damage lines ONLY — no recovers/no-effect; `[NOEFFECT-DROP]`/`verdict deferred` lines in ff8_battle.log are the guards working. (4) After Victory, T will STILL announce a countdown (expected until the #75 flag lands) — collect the `[TIMERDIAG]` lines. (5) On the 2F walkway after Selphie joins, `-`/`=` through the catalog: she must be absent. Send Logs/ff8_battle.log + ff8_mod.log + ff8_field.log.
+
+**Housekeeping:** DEVNOTES updated to .236 and trimmed (the .212–.225 chapter paragraphs moved to DEVNOTES_HISTORY.md) but still ~1 KB over the 10,240 cap — next session should trim the .211 routenet block once the world-map arc resumes. Note the .229–.235 NPC-catalog session did NOT update DEVNOTES/NEXT_SESSION_PROMPT (both were stale at .225/.217 at session open) — this file's older ▶ STATUS blocks below are from the .217 era.
+
+---
+
+_(Superseded .217 status below.)_
+
 ## ▶ STATUS: v0.18.3.217 LOCAL — AUTOMATED BAT LOOP LIVE (Claude drives the game); .211 east reroute VALIDATING; 2 nav bugs found+fixed mid-session
 **Session 2026-07-11 evening (Cowork, fully automated BATs — Claude launches/plays/closes the game itself).** Infra shipped: **.212** logs open `_fsopen(_SH_DENYWR)` → live tailing while game runs (fopen_s denied all sharing). **.213–.215 autotest command channel** (`src/autotest_cmd.inl`, included from dinput8.cpp): mod polls `Logs/autotest_cmd.txt` for `KEY <NAME>[+N] [ms]` / `WAIT` / `SHOT` commands, acks as `[AUTOTEST]` in ff8_mod.log; **delivery = ChaseKeyboard DIK OVERLAY** (`SetOverlayKey`, OR-ed into every GetDeviceState read — OS SendInput NEVER reaches FF8's DirectInput buffer for direction keys, letters do; JAWS also eats arrows when resident). Screenshot vision = `SHOT` command / F11 (`Logs/screenshots/`). TTS lines in ff8_mod.log are the "ears".
 **Nav bugs found by the loop, both fixed:** **.216** stale watchdog clocks across battle pause-resume (route-progress 4s stall + 40s give-up fired instantly on resume after any long battle → "Cannot reach the destination from here"; fix = `s_driveWatchdogGen` bumped on resume, keyed into both reseeds; VERIFIED live — resume after 107s battle continued cleanly). **.217** `GetWorldMapPosition_Active` foot-motion override (walking out of Dollet committed locomotion=33 VEH_CAR → all position reads returned stale savemap car_pos on the Balamb continent → 55km distances, ROUTENET declines, ocean-routing A* budget burn, bogus learned circle, "Balamb Garden" misidentification; fix = foot DWORDs moving ⇒ player IS the foot character, override stale vehicle byte, `[VEH-POS-OVERRIDE]`).

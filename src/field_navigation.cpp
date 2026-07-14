@@ -255,6 +255,23 @@ static int s_selectedCatalogIdx = 0;
 static bool    s_driveActive = false;
 static uint8_t s_driveHeld   = 0;   // bitmask: DIR_UP/DOWN/LEFT/RIGHT
 
+// v0.18.3.236 (#72): battle pause/resume for F9 auto-drive.
+// Aaron's 2026-07-12 Fire Cavern run: battles that started mid-drive left the
+// fake gamepad installed for the whole battle (Update() early-returns off-field,
+// so nothing ever tore it down). The held steer state masked real arrow input in
+// the battle menus — only the direction being held appeared to work. These
+// statics let PollBattlePauseResume() (defined above Update()) stop the drive on
+// the battle-entry edge and re-issue it to the same catalog target once the
+// field is back and the player position has settled. Consumed as a synthetic
+// backslash press in HandleKeys (field_nav_handlekeys.inl).
+static bool     s_battlePausePending     = false;   // drive paused, resume armed
+static bool     s_driveResumeRequest     = false;   // one-shot: HandleKeys restarts drive
+static uint16_t s_battlePauseFieldId     = 0xFFFF;  // field the drive was paused on
+static int      s_battlePauseEntityIdx   = 0;       // catalog target identity...
+static int      s_battlePauseGatewayIdx  = -1;      // ...(entityIdx + gatewayIdx pair)
+static bool     s_battlePauseTargetValid = false;
+static int      s_battleResumeReadyTicks = 0;       // consecutive ready ticks post-battle
+
 // Stuck detection: if the player's triId hasn't changed for DRIVE_STUCK_THRESH
 // ticks, briefly inject a perpendicular direction to break free of walls.
 // We track triId directly (not centroid) because centroid is constant within a
@@ -1187,9 +1204,17 @@ static bool WouldCrossTriggerLine(float px, float py, float dx, float dy, int sk
 // --- v0.17.3: Passive arrow-key response observer (diagnostic only) ---
 #include "field_nav_observe.inl"
 
+// v0.18.3.236 (#72): battle pause/resume poll for F9 auto-drive. Split into
+// its own .inl at creation time (this block pushed field_navigation.cpp over
+// the 80 KB CI hard cap). See the .inl header for the full contract.
+#include "field_nav_battlepause.inl"
+
 void Update()
 {
     if (!s_initialized) return;
+    // v0.18.3.236 (#72): must run before the off-field early-returns so the
+    // battle-entry pause fires while the game mode is battle.
+    PollBattlePauseResume();
     if (!FF8Addresses::HasFieldStateArrays()) return;
     if (!FF8Addresses::IsOnField()) return;
 

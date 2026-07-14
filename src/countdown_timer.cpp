@@ -28,6 +28,7 @@
 #include "countdown_timer.h"
 #include "ff8_accessibility.h"
 #include "mod_forward_decls.h"
+#include "ff8_addresses.h"   // v0.18.3.237 (#75): IsOnField gate for the dismissal check
 
 #include <windows.h>
 #include <cstdint>
@@ -62,6 +63,23 @@ namespace CountdownTimer {
 
 static constexpr uintptr_t LIVE_TIMER_ADDR        = 0x01CFE92C;  // v0.15.13.2 — scanner-discovered
 static constexpr uintptr_t VAR724_SNAPSHOT_ADDR   = 0x01CFEC8C;  // legacy — script-side, unused
+
+// v0.18.3.237 (#75) — TIMER_VISIBLE_FLAG_ADDR (0x01D2B813): the engine's own
+// HUD-timer visibility flag, found via disassembly xref on LIVE_TIMER_ADDR
+// after the .236 TIMERDIAG BAT proved no dismissal signal lives in the 96
+// bytes around the counter (the raw global keeps decrementing after the
+// Ifrit victory dismisses the display; the only nearby change was a battle
+// counter at 0x01CFE934).
+//   * 0x004A6CC0 = the engine's set-timer-visible(arg) — writes arg to
+//     0x01D2B813 (and on enable snapshots the current timer byte).
+//   * 0x004A6D40 = the MM:SS HUD renderer — FIRST instruction tests
+//     0x01D2B813 and returns without drawing when 0; otherwise it reads
+//     0x01CFE92C, clamps to 0x1797, divides by 60 and draws.
+// So this byte IS "the timer is on screen" — the display-pipeline truth,
+// per the project rule (hook/read the display state, never infer from
+// upstream memory). ACTIVE is gated on it below; the check is applied only
+// while on the field so any battle-HUD handoff can't false-dismiss.
+static constexpr uintptr_t TIMER_VISIBLE_FLAG_ADDR = 0x01D2B813;
 
 // ============================================================================
 // State
@@ -108,6 +126,20 @@ static uint32_t s_announcedMask = 0;
 // Edge-detection state for T and Shift+T hotkeys.
 static bool s_tWas = false;
 
+// v0.18.3.238 (#75): HUD-dismissal DEBOUNCE. The .237 BAT showed the engine
+// blanks 0x01D2B813 for ~2 s on every battle->field return (dismiss at
+// 21:04:21, flag back and re-announced 21:04:23 — one spurious "Timer
+// detected" per random battle). Only a SUSTAINED zero means the sequence is
+// over (post-Ifrit the flag stayed 0 permanently). Dismiss only after the
+// flag has read 0 continuously for this long while on the field.
+static DWORD s_visZeroSinceMs = 0;
+static const DWORD HUD_DISMISS_DEBOUNCE_MS = 4000;
+
+// v0.18.3.238 (#75): rate-limit for the activation-gate log line (the .237
+// BAT logged "staying INACTIVE" every ~2 s for the whole post-Ifrit walk-out).
+static DWORD s_actVisLogTick = 0;
+static const DWORD ACT_VIS_LOG_INTERVAL_MS = 30000;
+
 // v0.18.3.29 (#59): decrement-gated activation. While INACTIVE we watch the
 // timer global and only ENTER ACTIVE once we've seen it cleanly step DOWN a
 // couple of times -- the signature of a live 1/sec countdown. A static
@@ -123,6 +155,46 @@ static const int ACT_DECREMENTS_NEEDED = 2;  // ~2 seconds of confirmed countdow
 static DWORD s_sessionStartTickMs = 0;
 static DWORD s_lastLogTickMs      = 0;
 static int   s_lastLoggedRaw      = -1;  // -1 = no log yet; suppresses repeat logs
+
+// v0.18.3.236 (#75): timer-dismissal flag discovery diagnostic.
+// The 2026-07-12 Ifrit run proved the engine global at 0x01CFE92C KEEPS
+// DECREMENTING after the game dismisses the on-screen timer post-victory
+// (raw 523 -> 516 across the victory screen), so neither the stall detector
+// nor the zero check ever deactivates — T reports a phantom timer (#75).
+// The dismissal state must live in a separate flag. This diagnostic dumps
+// the 96 bytes around the timer global once per second while a timer is
+// active (and for 60 s after activation ends) so one Fire Cavern BAT
+// captures the byte that flips when the HUD timer is dismissed.
+// Gate to 0 once the flag is identified.
+// v0.18.3.237: FLAG FOUND (0x01D2B813, via disasm xref — the .236 BAT dump
+// window contained no dismissal signal, only the battle counter at
+// 0x01CFE934). Diagnostic gated OFF; code retained per the gating pattern.
+#define TIMER_DISMISS_DIAG 0
+#if TIMER_DISMISS_DIAG
+static DWORD s_dismissDiagLastDumpMs = 0;
+static DWORD s_dismissDiagTailUntil  = 0;   // keep dumping 60s past ACTIVE
+static void DismissDiagDump(DWORD now)
+{
+    (void)now;
+    static constexpr uintptr_t DIAG_BASE = 0x01CFE900;
+    static constexpr int       DIAG_LEN  = 0x60;
+    uint8_t buf[DIAG_LEN];
+    __try {
+        memcpy(buf, (const void*)DIAG_BASE, DIAG_LEN);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    for (int row = 0; row < DIAG_LEN; row += 32) {
+        char line[3 * 32 + 16];
+        int pos = 0;
+        for (int i = 0; i < 32; i++) {
+            pos += snprintf(line + pos, sizeof(line) - pos, "%02X ", buf[row + i]);
+        }
+        Log::Mod("[TIMERDIAG] 0x%08X: %s",
+                 (uint32_t)(DIAG_BASE + row), line);
+    }
+}
+#endif
 
 // v0.18.3.30 (#59): stall-based deactivation. A running countdown changes
 // ~1/sec; if the ACTIVE value stops changing for STALL_TIMEOUT_MS, the timed
@@ -170,6 +242,32 @@ static int ReadLiveTimerRaw()
     __except (EXCEPTION_EXECUTE_HANDLER) {
         return -1;
     }
+}
+
+// v0.18.3.237 (#75): reads the engine HUD-timer visibility byte at
+// 0x01D2B813. Returns -1 on access fault (treated as "unknown" — callers
+// must not deactivate on a fault).
+static int ReadTimerVisibleFlag()
+{
+    __try {
+        return *reinterpret_cast<volatile uint8_t*>(TIMER_VISIBLE_FLAG_ADDR);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+// v0.18.3.238 (#75): debounced dismissal test shared by ACTIVE and FROZEN.
+// Returns true only when the HUD flag has read 0 continuously for
+// HUD_DISMISS_DEBOUNCE_MS while on the field. Off-field ticks, visible
+// reads, and read faults (-1) all reset the zero-clock, so the ~2 s
+// battle-return blank never dismisses.
+static bool HudDismissedDebounced(DWORD now)
+{
+    if (!FF8Addresses::IsOnField()) { s_visZeroSinceMs = 0; return false; }
+    if (ReadTimerVisibleFlag() != 0) { s_visZeroSinceMs = 0; return false; }
+    if (s_visZeroSinceMs == 0) { s_visZeroSinceMs = now; return false; }
+    return (now - s_visZeroSinceMs) >= HUD_DISMISS_DEBOUNCE_MS;
 }
 
 // Writes a uint16 to LIVE_TIMER_ADDR. SEH-wrapped. Used by the freeze
@@ -301,6 +399,8 @@ static void EnterActive(uint16_t firstRaw)
     s_announcedMask = 0;
     s_sessionStartTickMs = GetTickCount();
     s_lastDecrementTickMs = GetTickCount();
+    s_visZeroSinceMs = 0;   // v0.18.3.238: fresh debounce clock per session
+    s_actVisLogTick  = 0;
     s_state = State::ACTIVE;
 
     // Pre-flag boundaries already past the session start.
@@ -397,6 +497,8 @@ void Initialize()
     s_actPrevRaw = -1;
     s_actDecrements = 0;
     s_lastDecrementTickMs = 0;
+    s_visZeroSinceMs = 0;   // v0.18.3.238
+    s_actVisLogTick  = 0;
     s_sessionStartTickMs = 0;
     s_lastLogTickMs = 0;
     s_lastLoggedRaw = -1;
@@ -426,6 +528,21 @@ void Update()
     int rawSigned = ReadLiveTimerRaw();
     if (rawSigned >= 0) {
         uint16_t raw = (uint16_t)rawSigned;
+
+#if TIMER_DISMISS_DIAG
+        // v0.18.3.236 (#75): while a timer session is live (and for 60 s
+        // after it ends) dump the surrounding globals once per second to
+        // find the HUD-dismissal flag.
+        if (s_state != State::INACTIVE) {
+            s_dismissDiagTailUntil = now + 60000;
+        }
+        if ((s_state != State::INACTIVE ||
+             (s_dismissDiagTailUntil != 0 && now < s_dismissDiagTailUntil)) &&
+            (now - s_dismissDiagLastDumpMs) >= 1000) {
+            s_dismissDiagLastDumpMs = now;
+            DismissDiagDump(now);
+        }
+#endif
 
         // Log any change in raw value, rate-limited to 50ms.
         bool changed = ((int)raw != s_lastLoggedRaw);
@@ -465,6 +582,29 @@ void Update()
                     s_actPrevRaw = (int)raw;
                     s_actDecrements++;
                     if (s_actDecrements >= ACT_DECREMENTS_NEEDED) {
+                        // v0.18.3.237 (#75): also require the engine's HUD
+                        // visibility flag — the global keeps decrementing
+                        // after a dismissed trial (Ifrit), and a save/reload
+                        // could otherwise re-activate on that phantom count.
+                        // vis==-1 (read fault) is treated as unknown and
+                        // does NOT block activation.
+                        int vis = ReadTimerVisibleFlag();
+                        if (vis == 0) {
+                            // v0.18.3.238: rate-limited — this fired every
+                            // ~2 s for the whole post-Ifrit walk-out in the
+                            // .237 BAT log.
+                            if (s_actVisLogTick == 0 ||
+                                (now - s_actVisLogTick) >= ACT_VIS_LOG_INTERVAL_MS) {
+                                s_actVisLogTick = now;
+                                Log::Mod("[CountdownTimer] decrement signature met "
+                                         "but HUD flag 0x%08X=0 (timer not displayed) "
+                                         "-- staying INACTIVE (log rate-limited to %us)",
+                                         (uint32_t)TIMER_VISIBLE_FLAG_ADDR,
+                                         (unsigned)(ACT_VIS_LOG_INTERVAL_MS / 1000));
+                            }
+                            s_actDecrements = 0;
+                            break;
+                        }
                         EnterActive(raw);
                         s_actPrevRaw = -1;
                         s_actDecrements = 0;
@@ -482,6 +622,20 @@ void Update()
             case State::ACTIVE: {
                 if (raw == 0) {
                     EnterInactive("live timer=0");
+                    break;
+                }
+                // v0.18.3.237 (#75): the engine dismisses the HUD timer when
+                // the timed sequence ends (Ifrit victory) but keeps
+                // decrementing the raw global, so neither the zero check nor
+                // the stall detector ever fires and T reports a phantom
+                // timer. The renderer's own gate byte (0x01D2B813, see the
+                // address block comment) is the truth: 0 = not on screen.
+                // v0.18.3.238: DEBOUNCED — the .237 BAT showed a ~2 s flag
+                // blank on every battle->field return, which caused a
+                // dismiss + "Timer detected" re-announce per random battle.
+                // Only a sustained (4 s on-field) zero dismisses now.
+                if (HudDismissedDebounced(now)) {
+                    EnterInactive("HUD timer dismissed (0x01D2B813=0 sustained)");
                     break;
                 }
                 int newRemaining = RawToSeconds(raw, s_units);
@@ -504,6 +658,15 @@ void Update()
             }
 
             case State::FROZEN: {
+                // v0.18.3.237 (#75): if the engine dismisses the HUD while
+                // frozen, stop pinning its memory and release the freeze —
+                // the sequence is over; rewriting the global forever would
+                // fight the engine for no visible timer.
+                // v0.18.3.238: debounced, same as ACTIVE.
+                if (HudDismissedDebounced(now)) {
+                    EnterInactive("HUD timer dismissed while frozen (0x01D2B813=0 sustained)");
+                    break;
+                }
                 // Rewrite each frame to hold the displayed timer. The
                 // engine is also writing to 0x01CFE92C every second to
                 // decrement; our writes (on the faster mod-thread tick)

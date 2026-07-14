@@ -108,6 +108,14 @@
 // announcement still feels timely.
 static const DWORD NOEFFECT_WATCHDOG_MS = 6000;
 
+// v0.18.3.236 (#73/#74): hard cap on watchdog deferral. The 2026-07-12 Ifrit
+// BAT proved the 6 s watchdog can expire while the action is still animating
+// (Blizzard-vs-Ifrit cast-to-impact exceeds 6 s), so the verdict was rendered
+// from a pre-written displayValue and misread as heal-on-cap / no-effect.
+// While the damage anim flag is up at expiry time we now DEFER the verdict
+// until the animation ends, but never beyond this cap.
+static const DWORD NOEFFECT_WATCHDOG_MAX_MS = 20000;
+
 // Cross-coordination window with the kind=4 path. The kind=4 hook can
 // fire before OR after our watchdog timer expires depending on the spell.
 // 8 seconds covers either ordering.
@@ -176,6 +184,16 @@ struct PendingNoEffectAnnounce {
 
 static PendingNoEffectAnnounce s_pendingNoEffectAnnounce = {};
 
+// v0.18.3.236 (#74): flush-side dedup. The 2026-07-12 Ifrit BAT showed the
+// same "No effect on Ifrit." spoken twice back-to-back (watchdog verdict
+// flushed at 19:20:21, kind=4 a3=0x8 re-queued the identical text the same
+// second). Remember what was last flushed so an identical re-queue for the
+// same slot within the window is silently dropped.
+static int   s_lastNoEffectFlushSlot = -1;
+static DWORD s_lastNoEffectFlushTick = 0;
+static char  s_lastNoEffectFlushText[128] = {};
+static const DWORD NOEFFECT_REPEAT_DEDUP_MS = 4000;
+
 // 500ms grace lets the kind=4 path's expected 0->1 transition show up
 // (typically within 1-2 frames). If the flag never goes up by then, the
 // announcement was for a case with no animation (e.g. late watchdog
@@ -201,6 +219,21 @@ static void NoEffect_QueueAnnouncement(int slot, int value,
     if (slot < 0 || slot >= BATTLE_TOTAL_SLOTS) return;
     if (!text || !text[0]) return;
     if (!validateKind || !validateKind[0]) validateKind = "no-effect";
+
+    // v0.18.3.236 (#74): drop an identical re-queue for the same slot right
+    // after the same text was flushed (double-source race: watchdog verdict
+    // + late kind=4 fire for one cast).
+    if (slot == s_lastNoEffectFlushSlot &&
+        s_lastNoEffectFlushTick != 0 &&
+        (GetTickCount() - s_lastNoEffectFlushTick) < NOEFFECT_REPEAT_DEDUP_MS &&
+        strncmp(text, s_lastNoEffectFlushText,
+                sizeof(s_lastNoEffectFlushText)) == 0) {
+        Log::Battle("BattleTTS: [NOEFFECT-DEDUP] identical text for slot=%d "
+                    "flushed %ums ago, queue skipped: %s",
+                    slot, (unsigned)(GetTickCount() - s_lastNoEffectFlushTick),
+                    text);
+        return;
+    }
 
     s_pendingNoEffectAnnounce.active        = true;
     s_pendingNoEffectAnnounce.slot          = slot;
@@ -256,6 +289,32 @@ static void PollPendingNoEffectAnnouncements()
 
     if (!flushNow) return;
 
+    // v0.18.3.236 (#73/#74): supersede check. If a REAL damage/heal flush
+    // spoke for this slot after this announcement was queued, the engine
+    // resolved the action with an observable effect — the queued no-effect /
+    // heal-on-cap verdict is stale and wrong. The 2026-07-12 Ifrit BAT is the
+    // canonical case: "Ifrit takes 62 damage." flushed milliseconds after the
+    // spurious "Ifrit recovers 62 HP." was queued; the queued line then spoke
+    // 1.5 s later anyway. Legitimate heal-on-cap (Cure on full-HP target)
+    // is unaffected: no HP change means no flush, so the tick stays older
+    // than queuedTick.
+    {
+        int dslot = s_pendingNoEffectAnnounce.slot;
+        if (dslot >= 0 && dslot < BATTLE_TOTAL_SLOTS) {
+            DWORD lastFlush = s_lastFlushAnnounceTick[dslot];
+            if (lastFlush != 0 &&
+                (int32_t)(lastFlush - s_pendingNoEffectAnnounce.queuedTick) >= 0) {
+                Log::Battle("BattleTTS: [NOEFFECT-DROP] '%s' (slot=%d, kind=%s) "
+                            "superseded by real HP flush %ums after queue -- dropped",
+                            s_pendingNoEffectAnnounce.text, dslot,
+                            s_pendingNoEffectAnnounce.validateKind,
+                            (unsigned)(lastFlush - s_pendingNoEffectAnnounce.queuedTick));
+                s_pendingNoEffectAnnounce.active = false;
+                return;
+            }
+        }
+    }
+
     // Validate breadcrumb fires at flush time so the [VALIDATE] log line
     // sits right next to the actual TTS call.
     Validate_AnnounceEvent(s_pendingNoEffectAnnounce.validateKind,
@@ -269,6 +328,13 @@ static void PollPendingNoEffectAnnouncements()
                 s_pendingNoEffectAnnounce.slot,
                 s_pendingNoEffectAnnounce.validateKind,
                 trigger, (unsigned)elapsed);
+
+    // v0.18.3.236 (#74): record what was flushed for the re-queue dedup.
+    s_lastNoEffectFlushSlot = s_pendingNoEffectAnnounce.slot;
+    s_lastNoEffectFlushTick = GetTickCount();
+    strncpy(s_lastNoEffectFlushText, s_pendingNoEffectAnnounce.text,
+            sizeof(s_lastNoEffectFlushText) - 1);
+    s_lastNoEffectFlushText[sizeof(s_lastNoEffectFlushText) - 1] = '\0';
 
     s_pendingNoEffectAnnounce.active = false;
 }
@@ -463,6 +529,29 @@ static void PollPendingSpellNoEffect()
     DWORD elapsed = now - s_pendingSpellNoEffect.castTick;
     if (elapsed < NOEFFECT_WATCHDOG_MS) return;
 
+    // v0.18.3.236 (#73/#74): action-in-flight deferral. If the damage anim
+    // flag is up when the watchdog expires, the engine is still playing the
+    // action out — any verdict now would read a pre-written displayValue and
+    // misclassify (the 2026-07-12 Ifrit BAT: every Blizzard verdict rendered
+    // mid-animation as a phantom "recovers N HP" or "No effect"). Defer the
+    // verdict until the animation ends, up to NOEFFECT_WATCHDOG_MAX_MS.
+    if (elapsed < NOEFFECT_WATCHDOG_MAX_MS) {
+        uint8_t inFlightAnim = 0;
+        __try { inFlightAnim = *(uint8_t*)BATTLE_DAMAGE_ANIM_FLAG; }
+        __except(EXCEPTION_EXECUTE_HANDLER) {}
+        if (inFlightAnim != 0) {
+            // Log once per second at most (the poll runs every frame).
+            static DWORD s_lastDeferLogTick = 0;
+            if ((now - s_lastDeferLogTick) >= 1000) {
+                s_lastDeferLogTick = now;
+                Log::Battle("BattleTTS: [NOEFFECT-WATCH] slot=%d verdict deferred "
+                            "(action still animating, %ums elapsed)",
+                            slot, (unsigned)elapsed);
+            }
+            return;
+        }
+    }
+
     // Consume the pending entry regardless of outcome.
     s_pendingSpellNoEffect.active = false;
 
@@ -634,4 +723,9 @@ static void ResetNoEffectState()
     s_pendingNoEffectAnnounce.animSawActive    = false;
     s_pendingNoEffectAnnounce.text[0]          = '\0';
     s_pendingNoEffectAnnounce.validateKind[0]  = '\0';
+
+    // v0.18.3.236 (#74): flush-side dedup state
+    s_lastNoEffectFlushSlot    = -1;
+    s_lastNoEffectFlushTick    = 0;
+    s_lastNoEffectFlushText[0] = '\0';
 }

@@ -150,12 +150,35 @@ static void RefreshCatalog()
                 // proper name, per the interactable-party-member requirement.
                 bool noInteract  = (talkonoff == 0 && pushonoff == 0 && !talkable);
                 bool isPartyChar = IsPartyCharacterSetpc(setpc);
-                if (i != s_playerEntityIdx && isPartyChar && noInteract) {
+                // v0.18.3.236 (#71): IN-PARTY rule, from the bg2f_2/bg2f_1
+                // Selphie evidence (2026-07-12 run). An entity whose setpc
+                // character is currently in the ACTIVE party formation is the
+                // follow entity (or a scene double of a recruited member) —
+                // never a catalog target, even when talkable. Post-join
+                // Selphie on bg2f_2 was talk=1 thru=0, so only the roster
+                // identifies her.
+                //
+                // Deliberately NOT a walk-through (thru>0) rule: the .235
+                // ggroom1 fix keeps Quistis (talk=1 push=1 thru=1, NOT in the
+                // active party during that scene) as a named catalog entry —
+                // flags alone cannot separate her from a follower. The roster
+                // is the discriminator that preserves both behaviors.
+                //
+                // Known remaining gap (#71): a NOT-yet-recruited scene actor
+                // parked invisible pre-scene (bg2f_2 Selphie before her run-in)
+                // still lists — the entity SHOW/HIDE flag was never located
+                // (v05.69 VISDIAG investigation closed without a result).
+                // Needs a per-session flag-discovery diagnostic on bg2f_2.
+                bool inActiveParty = isPartyChar &&
+                                     IsCharacterInActiveParty(setpc);
+                if (i != s_playerEntityIdx && isPartyChar &&
+                    (noInteract || inActiveParty)) {
                     const char* pn = PartyCharacterNameById(setpc);
                     Log::Field("FieldNavigation: [party-filter] ent%d model=%d setpc=%d (%s) "
-                               "sym='%s' filtered (party member; thru=%d)",
+                               "sym='%s' filtered (party member; thru=%d inParty=%d noInteract=%d)",
                                i, (int)modelId, (int)setpc, pn ? pn : "?",
-                               symName, (int)throughonoff);
+                               symName, (int)throughonoff, inActiveParty ? 1 : 0,
+                               noInteract ? 1 : 0);
                     continue;
                 }
             }

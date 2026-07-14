@@ -327,11 +327,20 @@ static uint32_t __cdecl HookedSpellResultDispatch(uint32_t slot, uint32_t result
         //   a3=0x09 — Silence-immune / Sleep-on-sleeping (ANNOUNCE: real miss)
         //   a3=0xFD — Strike Raid / limit break damage hit (SKIP: upper nibble set)
         //
+        //   v0.18.3.236 (#74) — a3=0x08 observed in Aaron's 2026-07-12 Ifrit
+        //   fight firing for ordinary Blizzard DAMAGE hits (engine rendered a
+        //   damage number, HP dropped, damage TTS spoke). The old
+        //   upper-nibble-zero + bit3 filter accepted 0x08 and announced a
+        //   false "No effect on Ifrit". a3=0x09 remains the ONLY value ever
+        //   BAT-confirmed as a genuine resist/no-effect, so the filter is now
+        //   exact-match. Any new bit3-set value logs via [SPELL-MISS-SKIP] +
+        //   screenshot capture for review instead of announcing.
+        //
         // Keep the screenshot diagnostic enabled so any new a3 pattern is
         // captured for review. Also keep [SPELL-MISS-SKIP] logging for any
         // SKIP branch cases so we can spot new patterns in the log.
         if (result_kind == 4 && slot < BATTLE_TOTAL_SLOTS) {
-            bool isResist = ((a3 & 0xF0) == 0) && ((a3 & 0x8) != 0);
+            bool isResist = (a3 == 0x9);  // v0.18.3.236 (#74): exact-match, was upper-nibble-zero + bit3
 
             // v0.13.69: schedule an auto-screenshot for BOTH branches so we
             // can visually confirm what the engine renders. Filename encodes
@@ -357,8 +366,11 @@ static uint32_t __cdecl HookedSpellResultDispatch(uint32_t slot, uint32_t result
                     s_skipLogDedup[s_skipLogDedupCount].slot = slot;
                     s_skipLogDedup[s_skipLogDedupCount].a3 = a3;
                     s_skipLogDedupCount++;
+                    // v0.18.3.236 (#74): wording updated — the filter is now
+                    // exact a3==0x9, so skipped values include bit3-set ones
+                    // like 0x8 (ordinary elemental damage).
                     Log::Battle("BattleTTS: [SPELL-MISS-SKIP] slot=%u kind=4 a3=0x%X "
-                                "(bit3 clear — not a miss; normal sprite path)",
+                                "(not 0x9 — not a miss; normal sprite path)",
                                 slot, a3);
                 }
             } else {
