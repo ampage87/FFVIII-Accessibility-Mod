@@ -128,7 +128,7 @@ static char __cdecl Hook_show_dialog(int32_t window_id, uint32_t state, int16_t 
     s_sdLastTextPtr[window_id] = textPtr;
     s_sdLastHash[window_id] = hash;
 
-    std::string decoded = TrimDecoded(FF8TextDecode::Decode((const uint8_t*)textPtr, 512));
+    std::string decoded = DecodeDialogWithExpansion(textPtr, 512);  // v0.18.3.239 (#77)
     if (decoded.empty() || (int)decoded.length() < MIN_TEXT_LENGTH) return result;
 
     // Dedup against last decoded for this window in show_dialog

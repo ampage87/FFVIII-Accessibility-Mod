@@ -6,6 +6,113 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.243
+
+**#77 VERIFIED + cleanup.** The .242 BAT passed and was confirmed against the display: TTS spoke "Student ID No. 135", the log read `[VAR-EXPAND] 1 insert(s): "Student ID No. ." -> "Student ID No. 135"`, and the F11 screenshot shows the game drawing exactly `"Student ID No. 135"`. Spoken text == rendered text.
+
+Two cleanups, no behavior change:
+
+- **`[VAR-EXPAND]` log de-duplicated.** The window scanner re-decodes the live text about once a second while a dialog is open, which wrote ~30 identical `[VAR-EXPAND]` lines for the one Tomb message. Speech was never affected (the speak-dedup is on the decoded string, which is why you heard the ID exactly once) — it was log noise only. Now logged once per distinct expansion.
+- **`GETSTR_HEX_DIAG` gated off.** It did its job — the hex dump is what identified control code 0x04 + param after two wrong theories. Retained behind the gate per the diagnostic-gating pattern.
+
+**Known scope note (follow-up):** this decoder gap affected EVERY field message with a numeric insert, not just the Tomb — any `0x04 + param` in field dialog was silently dropped and rendered as a phantom ". ". Those messages now speak their numbers. Worth a sweep for other numeric-insert dialogs during normal play; report any that still read oddly.
+
+## v0.18.3.242
+
+**#77 SOLVED: the placeholder is control code 0x04, not 0x0A. The Tomb student ID number now speaks.**
+
+The .241 `[GETSTR-HEX]` dump ended three builds of guessing. The Tomb message is 19 bytes:
+
+```
+3F  57 72 73 62 63 6C 72  20  4D 48  20  52 6D 3B  20  04  20  3E
+ "   S  t  u  d  e  n  t   _   I  D   _   N  o  .   _  ^^^^^^^   "
+```
+
+**There is no 0x0A anywhere.** The placeholder is `0x04` + param `0x20`. Our decoder maps 0x04 to "page break", emits ". " for it, and does NOT consume the param — which is exactly why the line read "Student ID No. .  ": **the phantom "." IS the missing number**, and the orphaned 0x20 decoded as a trailing space. Both earlier expander theories (`sub_4A3260`, `sub_4D4A80`) were the wrong tree — neither hook ever fired, in either BAT.
+
+**The real chain** (window text processor):
+
+- `sub_4B9170` @ 0x004B9216 — control codes 0x02–0x0F each **consume a param byte**.
+- `sub_4B8B30` @ 0x004B8BFB — `cmp ecx, 4`: the code-4 case reads the param and calls the resolver with `(4<<8 | param)`.
+- `sub_4B8E40` — **the resolver**: param must be in `[0x20..0x27]` (8 slots), then
+  `mov ecx, dword ptr [eax*4 + 0x1D2B4B0]` — **the value**. A divide-by-powers-of-ten loop turns it into digit glyphs (base glyph from `[0x1D76610]`), stripping leading zeros at 0x004B8EB6.
+
+So the value is `*(uint32_t*)(0x1D2B4B0 + param*4)`; for the Tomb ID (param 0x20) that is the dword at **0x1D2B530**.
+
+**Fix:** `FieldExpandRawVars()` (field_dialog_expand.inl) now rewrites `0x04 + param` into the value's decimal digits as FF8 font codes (`'0'..'9'` = 0x21..0x2A), consuming the param exactly as the engine's reader does; params outside 0x20–0x27 render nothing (matching the engine). This runs BEFORE `FF8TextDecode::Decode`, so the decoder never sees the 0x04 and never emits its bogus ". " — **the shared decoder is left untouched**, keeping menu/battle text (whose 0x04 semantics are not verified) byte-identical to today.
+
+**Retired:** both engine-expander hooks (`sub_4A3260` / `sub_4D4A80`) are gated off (`FIELD_EXPAND_HOOKS_ENABLED 0`) — they are not on the field path and never fired. No engine hook is needed for this fix at all; the value is read directly from the table the resolver itself reads. `[GETSTR-HEX]` stays on for one more BAT as verification.
+
+**BAT .242:** re-read the Tomb ID — expect "Student ID No. \<number\>." and, in ff8_dialog.log, `[VAR-EXPAND] 1 insert(s): "Student ID No. ." -> "Student ID No. <number>."`. The `[GETSTR-HEX]` line should still show the raw `... 3B 20 04 20 3E`, proving we expanded the same bytes the engine did. Regression check: ordinary dialogs elsewhere read exactly as before (no `[VAR-EXPAND]` lines, no double-speaking).
+
+## v0.18.3.241
+
+**#77: STOP GUESSING — read the bytes. (Diagnostic build.)**
+
+The .240 BAT ruled out everything the disassembly suggested, and it ruled it out cleanly:
+
+- both engine expanders are hooked and BOTH stayed silent (`Hooked text expander (sub_4A3260)` + `Hooked FIELD text expander (sub_4D4A80)` at init, zero `[TEXTEXPAND]` lines all session), and
+- our own resolver found **no 0x0A byte at all** in the raw message (zero `[VAR-EXPAND]` lines),
+
+yet the Tomb ID still spoke as "Student ID No. .". Conclusion: in this message the number is **not** carried by control code 0x0A, so both the `sub_4A3260` and `sub_4D4A80` expander theories were the wrong tree. Per the project rule (three identical outcomes = wrong diagnosis; two is already enough here), this build stops theorising and captures ground truth.
+
+**`[GETSTR-HEX]` diagnostic** (field_dialog_opcodes.inl, `GETSTR_HEX_DIAG 1`, first 12 messages): logs the raw FF8-encoded bytes of each fetched message alongside its decode, so the next BAT shows exactly which control code sits between "No." and the trailing period — and therefore where the number actually comes from. Possibilities the hex will separate: a different control code (0x05/0x0B/0x0C/0x0E, all of which the decoder currently consumes silently), or no placeholder at all in the message — meaning the ID is drawn as a separate sprite/window, like the Dollet timer, and needs a different capture entirely.
+
+The .239/.240 machinery (both expander hooks, `FieldExpandRawVars`, the expansion cache) is left in place and inert: it costs nothing, and if the hex shows a var code the wiring is already there to resolve it.
+
+**BAT .241:** re-read the Tomb ID (no fix expected — this build is for data). Send `ff8_dialog.log`; the `[GETSTR-HEX]` line for "Student ID No." is the deliverable.
+
+## v0.18.3.240
+
+**#77 continued: the FIELD expander, and resolving {Var} inserts at decode time (fixes the .239 miss).**
+
+**.239 BAT result:** the `sub_4A3260` hook installed cleanly (`Hooked text expander ... trampoline=0x02BF0D60`) and then **never fired once** — the Tomb ID still spoke as "Student ID No. .". So `sub_4A3260` is the MENU/other-path expander; the field-dialog path has its own.
+
+**Second sweep — the field expander is `sub_4D4A80(src, dst)`:** same logic, different values source.
+
+```
+0x004D4AFA  mov al,[esi] / inc esi     ; walk src   (esi = arg0 [esp+0x6C])
+0x004D4B19  cmp eax, 0xA / jne ...     ; var-insert control code
+0x004D4B28  mov al,[esi]               ; param byte
+0x004D4B2B  add eax, -0x20             ; param-0x20 = case index
+0x004D4B33  jmp [eax*4 + 0x4D4D08]     ; 7-entry dispatch table
+0x004D4BCE  mov [ebx], al / inc ebx    ; write expanded byte (ebx = arg1 [esp+0x70])
+```
+
+Its dispatch table (read straight out of FF8_EN.exe at 0x4D4D08) resolves to:
+
+| index (param-0x20) | engine case | source |
+|---|---|---|
+| 0 | 0x4D4B60 | dword `[0x1D7DAA8]` — number |
+| 1 | 0x4D4B3A | dword `[0x1D7DAB0]` — number |
+| 2 | 0x4D4B49 | dword `[0x1D7DAAC]` — number |
+| 3,4,5 | 0x4D4B76 | no value loaded — emits nothing |
+| 6 | 0x4D4B59 | FF8 string at `[0x1D7EABC]` — name |
+
+**Why a hook alone can't fix this — TIMING.** The mod speaks from the dialog OPCODE hook, which runs BEFORE the renderer ever expands the text (the .239 log ordering is `[GETSTR]` → `[AMESW] Speaking` → `[SHOW_DIALOG]`). A capture-the-output hook would therefore always miss the FIRST speak and only help on a later repeat. Since the engine's expander has no source for these values other than those fixed globals, the mod now resolves them itself at decode time and is immune to the ordering.
+
+**Fix:** `FieldExpandRawVars()` (field_dialog_expand.inl) rewrites the raw message before decoding — each `0x0A + param` becomes the current value's digits, emitted as FF8 font codes (`'0'..'9'` = 0x21..0x2A) so the existing decoder renders them normally; index 6 copies the engine's name string through; 3/4/5 emit nothing (matching the engine). `DecodeDialogWithExpansion()` prefers this expansion (`[VAR-EXPAND]` log), falls back to the hook's captured engine output, and finally to the plain decode — so a message with no `0x0A` code still decodes byte-identically to .238.
+
+**Scope guard:** the resolution lives in the FIELD-DIALOG path only, deliberately NOT in the shared `FF8TextDecode::DecodeByte` — the menu/battle expander (`sub_4A3260`) takes its values from stack ARGUMENTS with a different case table, so resolving 0x0A against the field globals there would splice wrong numbers into menu and battle text.
+
+**Both engine expanders are still hooked** (`sub_4A3260` "menu" + `sub_4D4A80` "field"), now purely as a cross-check: their `[TEXTEXPAND]` lines log the engine's own expansion, so the BAT log proves whether our resolved number matches what the game drew.
+
+**BAT .240:** re-read the Tomb ID. Expect TTS "Student ID No. \<number\>." and, in ff8_dialog.log, `[VAR-EXPAND] 1 insert(s): "Student ID No. ." -> "Student ID No. 4869."` plus a `[TEXTEXPAND] field ...` line from the renderer showing the SAME number. Regression check: ordinary dialogs must read exactly as before, with no `[VAR-EXPAND]` lines and no double-speaking.
+
+## v0.18.3.239
+
+**#77: dialog {Var} numeric inserts are now spoken — the Tomb of the Unknown King student ID number.** Aaron's 2026-07-13 late-game run: picking up the ID on `gnroad2` spoke "Student ID No. ." with no number. The ID is randomly generated per playthrough and is required to complete the tomb quest, so the omission was quest-blocking for a blind player.
+
+**Root cause.** The raw field message stores the number as text control code `0x0A + param`; the engine substitutes the digits at RENDER time. The mod decodes the RAW message (`FF8TextDecode::DecodeByte`'s "Special value" branch consumes the two bytes and emits nothing), so the number never existed in the string we spoke. This affects every `{Var}`-style numeric insert in field dialog, not only the Tomb.
+
+**Disassembly sweep (the engine's expander).** `sub_4A3260(src, dst, a2..a6)` walks the source message and copies it into `dst`; on `0x0A` it reads the param byte, computes `param - 0x20` as a case index, and dispatches through the 7-entry table at `0x4A33D8`. The numeric case (`0x4A334E`) formats the value's digits (`sub_4B87F0` / `sub_4B8840`) and `0x4A338A` converts the ASCII digits into FF8 font codes before they are copied into `dst` at `0x4A33A7`. So `dst` is the fully expanded, FF8-encoded string the engine is about to draw — the display-pipeline truth, exactly what TTS should read (standing rule: hook the display pipeline, never infer from upstream memory).
+
+**Fix (new `src/field_dialog_expand.inl`).** Hook `sub_4A3260`; after the original runs, decode both `src` and `dst`, and when they differ cache `src-pointer + decoded-src -> decoded-dst` (8-entry ring, 60 s TTL, `[TEXTEXPAND]` log). Every field-dialog decode site now calls `DecodeDialogWithExpansion()`, which decodes as before and substitutes the cached expanded text on a pointer match (or an exact decoded-source match as fallback), logging `[TEXTEXPAND-USE]`. Sites updated: `field_dialog_opcodes.inl` (GETSTR), `field_dialog_scan.inl` (window scan + `lastRawText`), `field_dialog_show_dialog.inl`, and the two post-FMV snapshot sites in `field_dialog_lifecycle.inl` (they must match what the scanner produces or the already-spoken dedup misses).
+
+**No-regression property:** the substitution is opt-in per text. If the hook fails to install, or a message has no `0x0A` code (`src` decodes identically to `dst`, nothing cached), `DecodeDialogWithExpansion` returns exactly what the old `TrimDecoded(Decode(...))` returned. Worst case the bug persists and the log says the hook never fired; it cannot break dialogs that work today. Hook install/teardown is in `Initialize`/`Shutdown` and is deliberately NOT gated on `anySuccess`.
+
+**BAT .239:** the Tomb pickup should speak "Student ID No. <number>." Log check (ff8_dialog.log): `Hooked text expander (sub_4A3260)` at init, then `[TEXTEXPAND] src=... "Student ID No. ." -> "Student ID No. 4869."` and `[TEXTEXPAND-USE]` at speak time. Regression check: ordinary dialogs elsewhere (no numeric inserts) must read exactly as before, with no `[TEXTEXPAND]` lines and no double-speaking.
+
 ## v0.18.3.238
 
 **#75 polish from the .237 BAT: debounced HUD-dismissal + rate-limited gate log.** The .237 BAT (21:02-21:10, full cavern, Ifrit beaten 21:09:29) confirmed the core fix — the timer went INACTIVE 9 s after the Ifrit victory ("HUD timer dismissed") and the activation gate held for the entire walk-out (raw still decrementing, no phantom). Two rough edges:

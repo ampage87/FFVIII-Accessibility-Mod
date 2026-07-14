@@ -213,6 +213,9 @@ namespace FieldDialog {
 //     hook function declared in earlier .inls.
 #include "field_dialog_state.inl"
 #include "field_dialog_helpers.inl"
+// v0.18.3.239 (#77): must sit AFTER helpers.inl (needs TrimDecoded + s_cs) and
+// BEFORE scan/show_dialog/opcodes (they call DecodeDialogWithExpansion).
+#include "field_dialog_expand.inl"
 #include "field_dialog_scan.inl"
 #include "field_dialog_show_dialog.inl"
 #include "field_dialog_opcodes.inl"

@@ -71,7 +71,44 @@ static char* __cdecl Hook_field_get_dialog_string(char* msgBase, int dialogId)
 
     if (!ProbeGetstrResult(result)) return result;
 
-    std::string decoded = TrimDecoded(FF8TextDecode::Decode((const uint8_t*)result, 512));
+    // v0.18.3.241 (#77) DIAGNOSTIC — GETSTR-HEX.
+    //
+    // The .240 BAT ruled out both engine expanders AND our own 0x0A resolver:
+    // neither [TEXTEXPAND] (hooks never fired) nor [VAR-EXPAND] (no 0x0A byte
+    // found in the raw message) appeared, yet the Tomb ID still spoke as
+    // "Student ID No. .". So the number is NOT carried by control code 0x0A in
+    // this message — the two-guesses-in-a-row rule says stop guessing and read
+    // the bytes.
+    //
+    // This dumps the raw FF8-encoded message so the next BAT tells us exactly
+    // which control code sits between "No." and the period. Gated to messages
+    // that decode with a suspicious gap so it can't flood the log; retire
+    // (set GETSTR_HEX_DIAG 0) once #77 is closed.
+    // v0.18.3.243: RETIRED — it did its job (it is what identified control code
+    // 0x04 + param). Kept behind the gate per the diagnostic-gating pattern;
+    // flip to 1 if another message ever decodes with a suspicious gap.
+    #define GETSTR_HEX_DIAG 0
+    #if GETSTR_HEX_DIAG
+    {
+        static int s_hexDumps = 0;
+        if (s_hexDumps < 12) {
+            uint8_t hexBuf[96];
+            if (SafeCopyEngineText(result, hexBuf, sizeof(hexBuf))) {
+                size_t n = 0;
+                while (n < sizeof(hexBuf) && hexBuf[n] != 0x00) n++;
+                std::string hex = FF8TextDecode::HexDump(hexBuf, n);
+                std::string plain = TrimDecoded(FF8TextDecode::Decode(hexBuf, n));
+                s_hexDumps++;
+                Log::Dialog("FieldDialog: [GETSTR-HEX] dialogId=%d len=%u text=\"%s\" bytes=%s",
+                            dialogId, (unsigned)n, plain.c_str(), hex.c_str());
+            }
+        }
+    }
+    #endif
+
+    // v0.18.3.239 (#77): substitutes the engine's expanded text when the
+    // message carries a {Var} numeric insert (e.g. the Tomb student ID).
+    std::string decoded = DecodeDialogWithExpansion(result, 512);
     if (decoded.empty() || (int)decoded.length() < MIN_TEXT_LENGTH) return result;
 
     // Skip if identical to last fetch (opcodes call this multiple times)

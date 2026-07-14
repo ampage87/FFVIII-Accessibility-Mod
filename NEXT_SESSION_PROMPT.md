@@ -1,7 +1,37 @@
 # NEXT SESSION — FF8 Accessibility Mod
 
-## ▶ STATUS: v0.18.3.238 LOCAL — BAT PASS, PUSH-READY. Playtest chapter #71–#76 COMPLETE.
-**.238 BAT (21:34–21:42, Ifrit beaten 21:42:31): PASS.** Exactly ONE "Timer detected" (21:35:40, 40-min pick); zero re-announcements across the random battles (21:36:20, 21:37:10); dismissal at 21:42:40 "0x01D2B813=0 sustained" (9 s post-victory); INACTIVE held through quit while the raw global kept counting; gate log fired once (rate-limited). Known trade-off (by design, commented in #75): T pressed inside the 4 s debounce window right after the victory still speaks the last remaining time; a second later it's "No timer active." **Issues: #72/#73/#74/#75/#76 CLOSED with BAT evidence; #71 open LOW-PRIORITY** (only the hypothetical invisible non-formation scene actor / entity SHOW-HIDE flag discovery — no known field exhibits it). **Chapter push-ready: version==CHANGELOG top (0.18.3.238), no oversized files (field_navigation.cpp 80.0 KB — closest to the 81,920 cap; battle-pause split into `field_nav_battlepause.inl`). Aaron runs `Utilities/push_to_github.ps1`.** Next arcs when ready: #70 world-map walking umbrella, DEVNOTES still ~1 KB over its 10,240 cap (trim the .211 routenet block when that arc resumes).
+## ▶ STATUS: v0.18.3.243 LOCAL — #77 FIXED, VERIFIED vs the display, and CLOSED. Push-ready. (.238 pushed; #71–#77 all resolved.)
+**#77 DONE.** TTS spoke "Student ID No. 135"; F11 screenshot shows the game drawing `"Student ID No. 135"` — spoken == rendered.
+
+**The mechanism (worth remembering — it cost three wrong builds):** the field numeric placeholder is **control code `0x04` + param**, NOT 0x0A. `FF8TextDecode::DecodeByte` maps 0x04 to "page break", emits `". "`, and does not consume the param — so the phantom "." in "Student ID No. ." WAS the number. Chain: `sub_4B9170` @0x004B9216 (codes 0x02-0x0F each consume a param byte) → `sub_4B8B30` @0x004B8BFB (`cmp ecx,4`) → **`sub_4B8E40`**: param must be 0x20-0x27, and **value = `*(uint32_t*)(0x1D2B4B0 + param*4)`** (digits via divide-by-powers-of-ten, leading zeros stripped). Two earlier expander theories (`sub_4A3260`, `sub_4D4A80`) were WRONG TREES — hooks installed, never fired, both now gated off (`FIELD_EXPAND_HOOKS_ENABLED 0`).
+
+**Process lesson (the rule worked):** two failed theories in a row → stop guessing, dump the bytes. The one-BAT `[GETSTR-HEX]` diagnostic (now gated off, `GETSTR_HEX_DIAG 0`) solved in one shot what two disassembly theories could not.
+
+**Fix location:** `FieldExpandRawVars()` in the new `src/field_dialog_expand.inl` rewrites `0x04+param` → decimal digits as FF8 font codes BEFORE `Decode()`. The shared decoder is untouched, so menu/battle text (0x04 semantics there NOT verified) is byte-identical. All field-dialog decode sites route through `DecodeDialogWithExpansion()`.
+
+**OPEN FOLLOW-UP:** this gap affected **every** field message with a numeric insert, not just the Tomb. Those all speak their numbers now — listen during normal play and report any that still read oddly. Also unverified: control codes `0x0C`/`0x0D` (the engine resolves them to NAME strings at 0x4B8C74/0x4B8C8A); our decoder consumes them silently, so a field message using them would drop a name the same way. Worth a look if a dialog ever sounds like it's missing a person's name.
+
+**Push state:** GitHub HEAD = v0.18.3.238; local = **v0.18.3.243** (.239-.243 unpushed — Aaron runs `Utilities/push_to_github.ps1`; version == CHANGELOG top heading).
+
+---
+
+_(Superseded .239 status below — its 0x0A theory was WRONG; kept for the audit trail.)_
+
+## ▶ STATUS: v0.18.3.239 LOCAL — #77 {Var} numeric-insert fix APPLIED (Tomb student ID), awaiting BAT. (.238 pushed; #71–#76 chapter closed.)
+**#77 (new, from Aaron's late-game Tomb run):** "Student ID No. ." — the quest-critical ID number was never spoken. Raw field messages store numbers as text control code `0x0A + param`; the engine substitutes the digits at RENDER time, and the mod decodes the RAW message, so the number never existed in the spoken string. Affects every `{Var}` numeric insert in field dialog.
+
+**Disasm sweep:** `sub_4A3260(src, dst, a2..a6)` is the expander — walks src, and on `0x0A` reads the param, uses `param-0x20` as an index into the 7-entry table at `0x4A33D8`; the numeric case (`0x4A334E`) formats the digits (`sub_4B87F0`/`sub_4B8840`), converts them to FF8 font codes (`0x4A338A`), and copies them into `dst` (`0x4A33A7`). `dst` = the fully expanded string the engine draws.
+
+**Fix (new `src/field_dialog_expand.inl`):** hook `sub_4A3260`, decode `src` + `dst` after the original runs, cache `src -> expanded` when they differ (`[TEXTEXPAND]`, 8-entry ring / 60 s TTL). All field-dialog decode sites now call `DecodeDialogWithExpansion()` (opcodes/GETSTR, scan + lastRawText, show_dialog, both post-FMV snapshots in lifecycle — the snapshots MUST match the scanner or the already-spoken dedup misses). Opt-in per text: no hook, or no 0x0A code, = byte-identical to .238, so working dialogs cannot regress.
+
+**BAT .239:** re-read the Tomb ID — expect "Student ID No. \<number\>." In ff8_dialog.log: `Hooked text expander (sub_4A3260)` at init, `[TEXTEXPAND] ... -> "Student ID No. 4869."`, `[TEXTEXPAND-USE]` at speak time. **Regression check: ordinary dialogs elsewhere must read exactly as before — no `[TEXTEXPAND]` lines, no double-speaking.** If the hook installs but never fires on the Tomb text, the field path uses a different expander — pull the other three callers (`0x4A3B2D`, `0x4A4D85`, `0x4EFB17`, `0x4F6A6A` call it) and check which one the field renderer reaches.
+
+---
+
+_(Superseded .238 status below — that chapter is pushed and closed.)_
+
+## ▶ STATUS: v0.18.3.238 LOCAL — BAT PASS, PUSHED. Playtest chapter #71–#76 COMPLETE.
+**.238 BAT (21:34–21:42, Ifrit beaten 21:42:31): PASS.** Exactly ONE "Timer detected" (21:35:40, 40-min pick); zero re-announcements across the random battles (21:36:20, 21:37:10); dismissal at 21:42:40 "0x01D2B813=0 sustained" (9 s post-victory); INACTIVE held through quit while the raw global kept counting; gate log fired once (rate-limited). Known trade-off (by design, commented in #75): T pressed inside the 4 s debounce window right after the victory still speaks the last remaining time; a second later it's "No timer active." **Issues: #72/#73/#74/#75/#76 CLOSED with BAT evidence; #71 open LOW-PRIORITY** (only the hypothetical invisible non-formation scene actor / entity SHOW-HIDE flag discovery — no known field exhibits it). **PUSHED 2026-07-13: GitHub HEAD = v0.18.3.238 (verified via `github:list_commits`) — first full sync since v0.18.3.104; the whole world-map + NPC-catalog + playtest backlog is now on GitHub. No oversized files (field_navigation.cpp 80.0 KB — closest to the 81,920 cap; battle-pause split into `field_nav_battlepause.inl`).** Next arcs when ready: #70 world-map walking umbrella, DEVNOTES still ~1 KB over its 10,240 cap (trim the .211 routenet block when that arc resumes).
 
 ---
 

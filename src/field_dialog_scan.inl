@@ -185,7 +185,8 @@ static void ScanAndSpeakAllWindows(const char* opcodeLabel)
             continue;
         }
 
-        std::string decoded = TrimDecoded(FF8TextDecode::Decode((const uint8_t*)text1, 512));
+        // v0.18.3.239 (#77): expanded text ({Var} numeric inserts) when available.
+        std::string decoded = DecodeDialogWithExpansion(text1, 512);
         if (decoded.empty()) continue;
 
         // v04.16: Skip very short text fragments (stale data, control codes)
@@ -358,7 +359,7 @@ static void ScanAndSpeakChoiceWindows(const char* opcodeLabel)
 
         ws.lastSpokenText = fullText;
         // Also store raw text so the all-windows scanner won't re-speak it
-        ws.lastRawText = TrimDecoded(FF8TextDecode::Decode((const uint8_t*)text1, 512));
+        ws.lastRawText = DecodeDialogWithExpansion(text1, 512);  // v0.18.3.239 (#77)
 
         // v04.16: Mark both versions as spoken in pending queue
         MarkPendingAsSpoken(fullText);

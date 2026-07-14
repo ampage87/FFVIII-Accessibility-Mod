@@ -136,6 +136,44 @@ bool Initialize()
         Log::Dialog("FieldDialog: WARNING - get_character_width not resolved");
     }
 
+    // v0.18.3.239 (#77): Hook the engine's message expander (sub_4A3260) so we
+    // can read the FULLY EXPANDED text — the one with {Var} numeric inserts
+    // already substituted (Tomb "Student ID No. <number>"). See
+    // field_dialog_expand.inl for the disassembly that identified it. If this
+    // hook fails to install, dialog TTS behaves exactly as before (the
+    // expansion cache simply stays empty), so it is not gated on anySuccess.
+    // v0.18.3.242 (#77): the two expander hooks (sub_4A3260 / sub_4D4A80) are
+    // RETIRED. The .241 hex dump proved the field placeholder is control code
+    // 0x04 + param, resolved by sub_4B8E40 from the table at 0x1D2B4B0 — those
+    // two expanders are not on the field-dialog path at all and never fired in
+    // either BAT. FieldExpandRawVars now resolves the value directly, so no
+    // engine hook is needed. Code kept behind this gate (diagnostic pattern);
+    // flip to 1 only if a future message type needs the engine's own output.
+#if FIELD_EXPAND_HOOKS_ENABLED
+    {
+        MH_STATUS st = MH_CreateHook(
+            (LPVOID)FF8_TEXT_EXPAND_ADDR,
+            (LPVOID)Hook_expand_text,
+            (LPVOID*)&s_origExpandText);
+        if (st == MH_OK) {
+            MH_EnableHook((LPVOID)FF8_TEXT_EXPAND_ADDR);
+            Log::Dialog("FieldDialog: Hooked text expander (sub_4A3260): target=0x%08X",
+                        (uint32_t)FF8_TEXT_EXPAND_ADDR);
+        }
+    }
+    {
+        MH_STATUS st = MH_CreateHook(
+            (LPVOID)FF8_FIELD_TEXT_EXPAND_ADDR,
+            (LPVOID)Hook_field_expand_text,
+            (LPVOID*)&s_origFieldExpandText);
+        if (st == MH_OK) {
+            MH_EnableHook((LPVOID)FF8_FIELD_TEXT_EXPAND_ADDR);
+            Log::Dialog("FieldDialog: Hooked FIELD text expander (sub_4D4A80): target=0x%08X",
+                        (uint32_t)FF8_FIELD_TEXT_EXPAND_ADDR);
+        }
+    }
+#endif
+
     // v0.09.08: DISABLED update_field_entities hook for infirmary glitch diagnosis.
     // This naked hook intercepts the script interpreter entry point.
     Log::Dialog("FieldDialog: [DIAG] update_field_entities hook DISABLED for infirmary glitch test");
@@ -445,7 +483,10 @@ void PollWindows()
             uint8_t* winObj = GetWindowObj(i);
             char* text1 = GetWinText1(winObj);
             if (text1 && IsValidTextPointer(text1) && ProbePointer(text1) && *(const uint8_t*)text1 != 0x00) {
-                std::string decoded = TrimDecoded(FF8TextDecode::Decode((const uint8_t*)text1, 512));
+                // v0.18.3.239 (#77): must match what the scanner produces, or
+                // the "already spoken" dedup misses and the text re-speaks.
+                // (s_cs is recursive; the lookup re-entering it here is safe.)
+                std::string decoded = DecodeDialogWithExpansion(text1, 512);
                 if (!decoded.empty()) {
                     s_winState[i].lastSpokenText = decoded;
                     s_winState[i].lastRawText = decoded;
@@ -538,6 +579,16 @@ void Shutdown()
     if (s_origMenuDrawText_raw) MH_DisableHook((LPVOID)FF8Addresses::menu_draw_text_addr);
     if (s_origGetCharWidth) MH_DisableHook((LPVOID)FF8Addresses::get_character_width_addr);
     if (s_origUpdateFieldEntities_raw) MH_DisableHook((LPVOID)FF8Addresses::update_field_entities_addr);
+    if (s_origExpandText) {   // v0.18.3.239 (#77)
+        MH_DisableHook((LPVOID)FF8_TEXT_EXPAND_ADDR);
+        MH_RemoveHook((LPVOID)FF8_TEXT_EXPAND_ADDR);
+        s_origExpandText = nullptr;
+    }
+    if (s_origFieldExpandText) {   // v0.18.3.240 (#77)
+        MH_DisableHook((LPVOID)FF8_FIELD_TEXT_EXPAND_ADDR);
+        MH_RemoveHook((LPVOID)FF8_FIELD_TEXT_EXPAND_ADDR);
+        s_origFieldExpandText = nullptr;
+    }
     UnpatchDispatchSite();
 
     s_origMesw = s_origMes = s_origAsk = s_origAmes = s_origAask = s_origAmesw = nullptr;
