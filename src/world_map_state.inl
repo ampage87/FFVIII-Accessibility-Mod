@@ -80,6 +80,10 @@ static const uint32_t WM_CAM_LOCK       = 0x020409E4;  // DWORD - region camera 
 static const uint32_t WM_CAM_FORCED     = 0x00C76D22;  // WORD  - forced camera yaw target used when WM_CAM_LOCK==1
 static const uint32_t WM_SCRIPT_CAM_PTR = 0x0203FD5C;  // DWORD - nonzero = scripted keyframe camera owns the view (cinematics)
 static const uint32_t WM_LOCOMOTION = 0x02040A5E;   // BYTE  - locomotion / vehicle mode. v0.14.83 whitelisted to canonical {0..4}; per `Plan & Research Documents/World Map Terrain and Locomotion Reference.md` legitimate values include 0=Squall foot, 6=Selphie foot, 10=train, 31=Chocobo, 32=invisible-car — our GetVehicleName uses 0/1/2/3/4 for foot/Car/Chocobo/Ship/Ragnarok which DISAGREES with the research-doc enum (research says Chocobo=31, we say 2). Empirical reconciliation needed; see v0.14.84 changelog.
+// v0.18.3.256 (#79): the byte above is an ANIMATION-STATE byte (cycles 0->3->7->10->14
+// while walking; read 0 in the exam car) -- never authoritative for vehicle detection.
+// The .255 [VEHDUMP] BAT (states F11-screenshot-verified) found the ENGINE-TRUTH flag:
+static const uint32_t WM_INVEHICLE_FLAG = 0x02040A68;  // BYTE - 0 = on foot, 1 = player entity is a vehicle (exam car: 1 at world-map ENTRY and throughout driving; foot: 0). Same engine struct as the animation byte. Reader: GetInVehicleFlag() in segments.inl (defer-guarded).
 static const uint32_t WM_SCENE_FLAG = 0x0203ED2C;   // WORD  - 0=worldmap, 1=field
 
 // ============================================================================
@@ -351,6 +355,15 @@ static const double DRIVE_ARRIVE_DIST           = 600.0;   // vehicle arrival pr
 static const double DRIVE_APPROACH_DIST         = 3000.0;  // one-shot "Approaching X" threshold
 static const double DRIVE_FINAL_APPROACH_DIST   = 1000.0;  // walk-forward (no steering) below this
 static const double FINAL_APPROACH_FORWARD_DIST = 200.0;   // v0.14.100: below this, walk forward; 200..1000 uses bearing
+// v0.18.3.259 (#68): VEHICLE final-approach circle. The car's turning radius
+// at speed is ~1000u (MFRAME telemetry: ~64u/frame forward, ~40/4096-turn
+// slew/frame -> v/omega ~ 1043u), so inside ~1200u of the aim a stop-and-pivot
+// cycle can only ORBIT the target -- exactly the .258 Balamb approach (dist
+// swung 402->561 while circling, reverse bursts, ~5s lost). Inside this circle
+// the vehicle law NEVER pivots: hold forward and arc-steer toward the aim,
+// sweeping across the (broad) entry trigger instead of circling it. Foot paths
+// don't read this constant.
+static const double VEH_FINAL_APPROACH_DIST     = 1200.0;
 static const double DRIVE_ARRIVED_ON_EXIT_DIST  = 1500.0;  // v0.14.87: world-map exit while closer than this counts as arrival
 static const double DRIVE_NEAR_LOCATION_DIST    = 1500.0;  // v0.14.103: bounce-detection radius for non-car-friendly arrivals
 static const DWORD  DRIVE_ANNOUNCE_INTERVAL_MS  = 5000;    // periodic distance announce
@@ -561,6 +574,19 @@ static int     s_trigAvoidR[TRIG_AVOID_MAX];
 static int     s_trigAvoidN = 0;
 
 static bool s_driveActive            = false;
+// v0.18.3.257 (#79): physics-detector state. s_driveVehicleSig latches TRUE for
+// the CURRENT drive when the offline-validated motion discriminator reaches
+// verdict (>=20 of last 24 clean disagreement frames side with mh) while
+// steering as foot -- UpdateAutoDrive then treats the drive as a VEHICLE (the
+// turn-then-go law). All fields reset in StartAutoDrive so a stale ring from a
+// car drive can never latch a following foot drive. Foot controls measured 0%
+// mh-sided across 153 disagreement frames -- the verdict is unreachable on foot.
+static bool     s_driveVehicleSig = false;
+static int32_t  s_vsPx = 0, s_vsPy = 0;
+static bool     s_vsHad = false;
+static uint32_t s_vsRing = 0;     // last 24 disagreement verdicts (bit 1 = motion sided with mh)
+static int      s_vsCount = 0;    // disagreement frames collected (saturates at 24)
+static DWORD    s_vsLastLog = 0;
 // v0.18.3.203: PAUSED-IN-FIELD drive. An off-target field entry no longer kills the drive:
 // it pauses (drive stays active, keys released, UpdateAutoDrive idle off-map) and the
 // existing world-map re-entry resume path replans and continues -- with the trigger circle

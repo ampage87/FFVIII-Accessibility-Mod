@@ -53,8 +53,43 @@ static void UpdateAutoDrive()
         s_driveWedgeProgressDist = dist;
     }
 
-    bool isOnFoot = (s_lastVehicle < 0) ||
-                    (GetVehicleType((uint8_t)s_lastVehicle) == VEH_ON_FOOT);
+    // v0.18.3.257 (#79): REVERTED the .256 in-vehicle-flag steering. The .256
+    // BAT proved 0x02040A68 correlates with world-map LOAD ORDINAL in the game
+    // session (first load 0, second load 1), NOT with the vehicle -- on a
+    // second-load foot walk it would have misrouted the working on-foot law
+    // into the vehicle law. Steering-law selection is back to the legacy byte
+    // path PLUS the per-drive physics latch: s_driveVehicleSig is set by the
+    // offline-validated motion discriminator in drive_exec (foot: 0% of
+    // disagreement frames side with mh across all controls; car: 94-97%,
+    // fired live 24/24 in the .256 BAT one second into the drive). The TRUE
+    // entry-time vehicle id was found by exe disassembly at DWORD 0x020409E0
+    // (community enum: 33=exam car, 48=Garden, 50=Ragnarok); it is DUMPED in
+    // .257 ([VEHDUMP]) and will be wired here once one live BAT confirms it.
+    bool isOnFoot = !s_driveVehicleSig &&
+                    ((s_lastVehicle < 0) ||
+                     (GetVehicleType((uint8_t)s_lastVehicle) == VEH_ON_FOOT));
+
+    // v0.18.3.258 Part D (#79): engine vehicle id, VEHICLE-POSITIVE ONLY. When
+    // the DWORD at 0x020409E0 names a known vehicle (car family 32-40, chocobo
+    // 31, Garden 48, Ragnarok 50 -- via the same GetVehicleType mapping), steer
+    // as a vehicle from the FIRST tick of the drive, no physics warm-up needed.
+    // Foot values (0/6), unknown values, and unreadable/-1 make NO claim: the
+    // legacy verdict above (plus the physics latch) keeps deciding, so a wrong
+    // or early read can never misroute the on-foot law -- worst case is exactly
+    // the physics-latch behavior. Transition-only log.
+    if (isOnFoot) {
+        int vehId = GetActiveVehicleId();
+        if (vehId > 0 && vehId != 6 &&
+            GetVehicleType((uint8_t)vehId) != VEH_ON_FOOT) {
+            isOnFoot = false;
+            static int s_vidLastLogged = -999;
+            if (vehId != s_vidLastLogged) {
+                Log::World("WorldMap: [VEHID] engine vehicleId=%d -> steering as VEHICLE from drive start (#79)",
+                           vehId);
+                s_vidLastLogged = vehId;
+            }
+        }
+    }
 
     // One-shot approach announcement (suppressed during sweep).
     if (!s_driveApproachAnnounced && dist < DRIVE_APPROACH_DIST && !s_sweepActive) {

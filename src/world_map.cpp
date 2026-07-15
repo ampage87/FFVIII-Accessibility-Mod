@@ -107,6 +107,10 @@ void Poll()
         s_wmEntryTick = GetTickCount();   // v0.14.90.3: arm locomotion-byte suppression
         s_catalogBuilt = false;
         Log::World("WorldMap: Entered world map");
+        // v0.18.3.255 (#79): capture the vehicle-state candidates the instant
+        // the world map loads (scenes can spawn the player ALREADY aboard the
+        // exam car / mobile Garden / Ragnarok). Diagnostic only.
+        DumpVehicleState("entry");
 
 #if WM_RUNTIME_WALK_DIAG
         // v0.18.3.102: arm the one-shot runtime-walkmesh dump and reset its

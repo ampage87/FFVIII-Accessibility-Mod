@@ -24,9 +24,16 @@ void Shutdown();
 void TriggerHeadingScan();
 
 // #67: F12 world-map camera-control discovery diagnostic (defined in
-// world_map_camera_scan.inl). Triggered from dinput8.cpp's F12 handler.
-// Injects the real G/H camera-rotate keys, finds the camera-angle memory
-// field, and measures whether on-foot walking is camera-relative.
+// world_map_camera_scan.inl). RETIRED (CAMERA_SCAN_DIAG 0) -- kept declared
+// so the gated-off file still links; no longer the F12 handler.
 void TriggerCameraScan();
+
+// #79 v0.18.3.255: F12 vehicle-state dump (defined in world_map_segments.inl).
+// Current F12 handler (per-session diagnostic key). Logs [VEHDUMP]: player
+// position, savemap per-vehicle position mirrors (char/rag/bgu/car), the
+// animation byte at 0x02040A5E, car_rent, and a hex window -- so a
+// car-state vs foot-state diff identifies the authoritative vehicle signal
+// at world-map entry. Also fired automatically on every world-map entry.
+void TriggerVehicleDump();
 
 }  // namespace WorldMap

@@ -487,6 +487,14 @@ static void ArmFiringAreaEscape(int32_t px, int32_t py)
 static void StartAutoDrive(int catIdx)
 {
     if (s_driveActive) return;
+    // v0.18.3.257 (#79): reset the physics vehicle-detector per drive, so a
+    // stale ring from a car drive can never latch a following foot drive.
+    s_driveVehicleSig = false;
+    s_vsHad = false; s_vsRing = 0; s_vsCount = 0; s_vsPx = 0; s_vsPy = 0;
+    // v0.18.3.258 Part D (#79): sample the engine vehicle id at every drive
+    // start -- the post-init confirmation record the .257 entry dumps couldn't
+    // provide (they fire before the setup writers run).
+    Log::World("WorldMap: [DRIVE] engine vehicleId=%d at drive start", GetActiveVehicleId());
     if (!s_catalogBuilt || s_catalogCount == 0) {
         ScreenReader::Speak("No locations available.", true);
         return;

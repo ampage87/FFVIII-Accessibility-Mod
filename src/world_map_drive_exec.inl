@@ -739,6 +739,45 @@
                 s_navPx = px; s_navPy = py; s_navHadPrev = true;
             }
         }
+        // v0.18.3.257 (#79): physics vehicle-detector, PROMOTED from log-only.
+        // Offline-validated discriminator (foot: motion sides with camYaw in 100%
+        // of disagreement frames across all controls; car: with mh in 94-97%;
+        // fired live 24/24 one second into the .256 car BAT). On verdict while
+        // steering as foot: latch s_driveVehicleSig -> UpdateAutoDrive treats the
+        // REST of this drive as a VEHICLE (turn-then-go law), announce once.
+        // State lives in state.inl and resets in StartAutoDrive, so a stale ring
+        // can never latch a following foot drive. The verdict is unreachable on
+        // foot (0/153 disagreement frames sided with mh in the control data).
+        {
+            int vsCam = GetWorldMapCameraYaw();
+            if (s_vsHad && vsCam >= 0) {
+                int32_t vdx = px - s_vsPx, vdy = py - s_vsPy;
+                WrapWorldDelta(vdx, vdy);
+                if ((double)vdx * vdx + (double)vdy * vdy >= 64.0) {
+                    int vsGap = ((((int)heading - vsCam + 2048) % 4096 + 4096) % 4096) - 2048;
+                    if (vsGap < 0) vsGap = -vsGap;
+                    if (vsGap > 300) {
+                        double vr = atan2((double)vdx, -(double)vdy);
+                        int mb = ((((int)(vr / 6.283185307179586 * 4096.0)) % 4096) + 4096) % 4096;
+                        int em = ((((mb - (int)heading + 2048) % 4096 + 4096) % 4096)) - 2048; if (em < 0) em = -em;
+                        int ec = ((((mb - vsCam + 2048) % 4096 + 4096) % 4096)) - 2048;        if (ec < 0) ec = -ec;
+                        s_vsRing = ((s_vsRing << 1) | (em < ec ? 1u : 0u)) & 0x00FFFFFFu;
+                        if (s_vsCount < 24) s_vsCount++;
+                        if (s_vsCount >= 24) {
+                            int mhSided = 0;
+                            for (int vb = 0; vb < 24; vb++) mhSided += (int)((s_vsRing >> vb) & 1u);
+                            if (mhSided >= 20 && !s_driveVehicleSig) {
+                                s_driveVehicleSig = true;
+                                Log::World("WorldMap: [VEHSIG] VEHICLE DETECTED: motion sided with mh in %d of last 24 disagreement frames -- switching this drive to the vehicle steering law (#79)", mhSided);
+                                ScreenReader::Speak("Vehicle detected.", true);
+                                s_vsLastLog = now;
+                            }
+                        }
+                    }
+                }
+            }
+            s_vsPx = px; s_vsPy = py; s_vsHad = true;
+        }
         if (DRIVE_STEER_DIAG) {
             static DWORD   s_yawLast  = 0;
             static int32_t s_yawLastX = 0, s_yawLastY = 0;
@@ -794,12 +833,27 @@
         wantDown = true;
         Log::World("WorldMap: [DRIVE] Hard wedge -> reverse un-wedge burst %d/%d (off=%d, dist=%.0f)",
                    s_driveWedgeReverseCount, MAX_WEDGE_REVERSE, off, dist);
-    } else if (dist < FINAL_APPROACH_FORWARD_DIST) {
-        wantUp = true;                       // very close: walk straight onto the trigger
-    } else if (off > STEER_DEADZONE) {
-        // PIVOT, turn-only. RIGHT raises the heading (clockwise) toward a target
+    } else if (dist < VEH_FINAL_APPROACH_DIST) {
+        // v0.18.3.259 (#68): VEHICLE FINAL APPROACH -- inside the car's turning
+        // circle (~1200u > measured turn radius ~1043u), never stop to pivot: a
+        // stationary rotate-and-launch cycle at this range can only ORBIT the
+        // aim (the .258 Balamb approach). Keep the gas down and arc-steer
+        // toward the aim when misaimed; the moving sweep crosses the broad
+        // entry trigger instead of circling it. Subsumes the old <200u pure-
+        // forward band (within the deadzone this is pure forward anyway).
+        wantUp = true;
+        if (off > STEER_DEADZONE) {
+            if (err >= 0) wantRight = true;
+            else          wantLeft  = true;
+        }
+    } else if (off > STEER_FWD_CONE) {
+        // PIVOT, turn-only -- v0.18.3.258 (#79): only beyond the forward cone
+        // (~50deg) now. RIGHT raises the heading (clockwise) toward a target
         // clockwise of us (err>=0); LEFT lowers it. NO forward -- holding UP into
-        // terrain locks the rotation.
+        // terrain locks the rotation. Errors inside the cone use the ARC band
+        // below (drive AND turn), which is what removes the stop-start feel the
+        // .257 car BAT reported: the old law pivoted for everything past the
+        // deadzone, so every route bend braked the car.
         if (err >= 0) wantRight = true;
         else          wantLeft  = true;
     } else {
@@ -839,6 +893,18 @@
         if (fwdGuard) {
             if (err >= 0) wantRight = true;      // toward the target / open route side
             else          wantLeft  = true;
+        } else if (off > STEER_DEADZONE) {
+            // v0.18.3.258 (#79): ARC band restored -- the state.inl constants
+            // (STEER_DEADZONE 320 / STEER_FWD_CONE 576) always described this
+            // three-band law but the executor lost the middle gear in the .80
+            // rewrite. Between ~28deg and ~50deg of error: hold forward AND
+            // turn, exactly how a player drives the car manually -- the vehicle
+            // keeps momentum and corrects on the move instead of braking to
+            // rotate at every bend. The forward-collision guard above still
+            // vetoes forward when the cell ahead is blocked.
+            wantUp = true;
+            if (err >= 0) wantRight = true;
+            else          wantLeft  = true;
         } else {
             wantUp = true;                       // aligned and clear -> drive straight
         }
@@ -854,7 +920,8 @@
         if (now - s_diagLast >= (DWORD)DRIVE_STEER_DIAG_INTERVAL_MS) {
             double dmoved = CalculateWrappedDistance(s_diagLastX, s_diagLastY, px, py);
             const char* band = wantDown ? "REVERSE"
-                             : (dist < FINAL_APPROACH_FORWARD_DIST) ? "FINAL"
+                             : (wantUp && (wantLeft || wantRight)) ? "ARC"
+                             : (dist < VEH_FINAL_APPROACH_DIST) ? "FINAL"
                              : wantUp  ? "STRAIGHT"
                              : "PIVOT";
             Log::World("WorldMap: [HDG-DIAG] pos(%d,%d) d+%.0f | hdg=%u tgtBrg=%d err=%+d off=%d | steer(%d,%d) dist=%.0f idx=%d/%d | keys=%s%s%s%s %s%s%s",

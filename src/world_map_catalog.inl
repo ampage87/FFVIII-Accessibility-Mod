@@ -156,6 +156,22 @@ static void BuildDistanceCatalog()
                    s_catalogCount);
     } else {
         VehicleType veh = GetVehicleType(GetLocomotionMode());
+        // v0.18.3.258 Part D (#79): the engine vehicle id (0x020409E0) upgrades
+        // the BFS class when it names a known vehicle -- so Garden/Ragnarok
+        // boardings get the right reachability filter AT catalog time, and the
+        // exam car is labeled correctly (car shares the foot land-only class,
+        // so its filtering is unchanged). VEHICLE-POSITIVE ONLY: foot (0/6),
+        // unknown, or unreadable ids leave the legacy byte-derived class as-is.
+        // The raw id is logged every build for the #79 confirmation record.
+        {
+            int vid = GetActiveVehicleId();
+            if (vid > 0 && vid != 6) {
+                VehicleType vt = GetVehicleType((uint8_t)vid);
+                if (vt != VEH_ON_FOOT) veh = vt;
+            }
+            Log::World("WorldMap: [BFS] engine vehicleId=%d -> catalog vehicle type %d (class %d)",
+                       vid, (int)veh, GetBfsRuleClass(veh));
+        }
         int         pfc = WorldXToFineCol(px);
         int         pfr = WorldYToFineRow(py);
         Log::World("WorldMap: [BFS] Player at (%d,%d) -> fine(col=%d,row=%d), vehicle type %d",

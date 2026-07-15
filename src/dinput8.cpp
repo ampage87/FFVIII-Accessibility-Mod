@@ -640,7 +640,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
         // F3/F4 = Speech rate -/+ | Shift+F3/F4 = Speech volume -/+
         // F5/F6 = SFX vol -/+ | F7/F8 = BGM vol -/+
         // F11 = On-demand screenshot
-        // F12 = #67 world-map camera-control discovery diagnostic (per-session)
+        // F12 = #79 world-map vehicle-state dump [VEHDUMP] (per-session)
         // Navigation (-/+/Backspace) handled inside FieldNavigation::Update()
         // T / Shift+T handled inside CountdownTimer::Update() (v0.15.12.0)
         {
@@ -739,13 +739,13 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
                 ScreenReader::Speak(L"Screenshot captured.", true);
             }
             if (f12 && !s_f12was && !alt) {
-                // #67: world-map camera-control discovery diagnostic
-                // (TriggerCameraScan checks on-world-map / not-driving itself
-                // and announces why if it can't run). Injects the real G/H
-                // camera-rotate keys to find the camera-angle field and test
-                // whether on-foot walking is camera-relative. Gated on !alt
-                // like every other F-key. (Superseded the .65 heading scan.)
-                WorldMap::TriggerCameraScan();
+                // #79 v0.18.3.255: world-map vehicle-state dump ([VEHDUMP]).
+                // Repointed from the retired #67 camera scan per the
+                // per-session F12 rule. TriggerVehicleDump checks on-world-map
+                // itself and announces why if it can't run; on success it logs
+                // the savemap vehicle position mirrors + animation-byte hex
+                // window and speaks "Vehicle state dumped."
+                WorldMap::TriggerVehicleDump();
             }
             if (vkey && !s_vWas) {
                 wchar_t verMsg[128];

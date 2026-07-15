@@ -184,6 +184,147 @@ static void GetWorldMapPosition_Active(int32_t* x, int32_t* y, int32_t* z)
     }
 }
 
+// ============================================================================
+// v0.18.3.255 (#79): [VEHDUMP] vehicle-state diagnostic
+// ============================================================================
+// The "locomotion byte" 0x02040A5E is an ANIMATION-STATE byte (research doc:
+// cycles 0->3->7->10->14 while walking; read 0 in the exam car, 33 once on a
+// foot-only save) -- never authoritative. This dump captures every candidate
+// authoritative signal in one shot so a car-state vs foot-state diff picks the
+// real one: (a) the savemap WORLDMAP per-vehicle position mirrors (v0.14.103.3
+// BAT proved car_pos == foot DWORDs EXACTLY, 1:1 scale, while driving the exam
+// car -- so "which vehicle array equals the live player position" identifies
+// the ridden vehicle at world-map ENTRY, covering car / mobile Garden /
+// Ragnarok alike); (b) a hex window around the animation byte to expose any
+// adjacent stable vehicle/model id. Fired on every world-map entry and from
+// F12 (repointed from the retired #67 camera scan). Diagnostic only -- reads
+// memory, writes log lines, changes no behavior.
+static bool WmSafeReadBytes(uintptr_t addr, void* out, size_t n)
+{
+    __try {
+        memcpy(out, (const void*)addr, n);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// v0.18.3.257 (#79): GetInVehicleFlag RETIRED from steering. The .256 BAT
+// proved 0x02040A68 tracks the world-map LOAD ORDINAL within a game session
+// (first load 0, second load 1), NOT the vehicle. Kept as a [VEHDUMP] readout
+// only, for continued evidence accumulation. Returns 1/0/-1 as before.
+static int GetInVehicleFlag()
+{
+    int32_t fx = 0, fy = 0, fz = 0;
+    GetWorldMapPosition(&fx, &fy, &fz);
+    if (fx == 0 && fy == 0) return -1;          // module not initialized yet
+    uint8_t f = 0;
+    if (!WmSafeReadBytes(WM_INVEHICLE_FLAG, &f, 1)) return -1;
+    if (f == 0) return 0;
+    if (f == 1) return 1;
+    return -1;
+}
+
+// ============================================================================
+// v0.18.3.258 Part D (#79): GetActiveVehicleId -- the engine's vehicle id
+// ============================================================================
+// Reads the exe-disassembly-proven current-player-vehicle DWORD at 0x020409E0
+// (per-vehicle dispatcher 0x546307-0x5463A2 compares it vs 0x21 = 33 exam car,
+// 0x20..0x28 car family, 0x30 = 48 Garden, 0x32 = 50 Ragnarok; loaded at
+// world-map setup from the handoff latch 0x02043D90). Returns the raw id, or
+// -1 when the world-map module isn't initialized yet (foot DWORDs (0,0) --
+// entry-tick reads happen BEFORE the setup writers run, .257 finding) or on a
+// read fault. Callers must treat foot (0/6), unknown, and -1 as "no vehicle
+// claim" -- the id is used VEHICLE-POSITIVE ONLY, so a wrong or early read can
+// never misroute the on-foot law.
+static int GetActiveVehicleId()
+{
+    int32_t fx = 0, fy = 0, fz = 0;
+    GetWorldMapPosition(&fx, &fy, &fz);
+    if (fx == 0 && fy == 0) return -1;          // module not initialized yet
+    uint32_t v = 0;
+    if (!WmSafeReadBytes(0x020409E0u, &v, 4)) return -1;
+    if (v > 255) return -1;                      // corrupt / not yet meaningful
+    return (int)v;
+}
+
+static void DumpVehicleState(const char* why)
+{
+    int32_t px = 0, py = 0, pz = 0;
+    GetWorldMapPosition(&px, &py, &pz);          // RAW foot DWORDs on purpose
+    uint8_t anim = GetLocomotionMode();
+
+    uint8_t carRent = 0xEE;
+    WmSafeReadBytes(WM_CAR_RENT_ADDR, &carRent, 1);
+
+    static const char* const VD_NAME[4] = { "char", "rag", "bgu", "car" };
+    const uintptr_t VD_ADDR[4] = { WM_CHAR_POS_ADDR, WM_RAGNAROK_POS_ADDR,
+                                   WM_BGU_POS_ADDR,  WM_CAR_POS_ADDR };
+    int16_t arr[4][6];
+    bool    ok[4];
+    double  dist[4];
+    for (int a = 0; a < 4; a++) {
+        memset(arr[a], 0, sizeof(arr[a]));
+        ok[a] = WmSafeReadBytes(VD_ADDR[a], arr[a], sizeof(arr[a]));
+        // Savemap layout [0]=X, [1]=Z, [2]=Y; scale 1:1 with foot DWORDs
+        // (v0.14.103.3). Distance in the XY plane the bearing math runs on.
+        dist[a] = ok[a] ? CalculateWrappedDistance(px, py,
+                                                   (int32_t)arr[a][0],
+                                                   (int32_t)arr[a][2])
+                        : -1.0;
+    }
+
+    Log::World("WorldMap: [VEHDUMP] (%s) P=(%d,%d,%d) anim=0x%02X(%u) s_lastVehicle=%d carRent=%u",
+               why, px, py, pz, anim, (unsigned)anim, s_lastVehicle, (unsigned)carRent);
+    // v0.18.3.257 (#79): the exe-disassembly-confirmed vehicle id. DWORD
+    // 0x020409E0 is compared by the engine against 0x21 (33 = exam car), the
+    // 0x20..0x28 car range, 0x30 (48 Garden), 0x31, 0x32 (50 Ragnarok); 5
+    // writers incl. world-map init (zeroes it), the scene-parameter setter
+    // (movsx from param+1), the rent-a-car handler (3000-gil check), and two
+    // world-map-setup loads from the handoff latch DWORD 0x02043D90.
+    // PREDICTION on record: foot -> 0, exam car -> 33 (0x21).
+    {
+        uint32_t vehId = 0xEEEEEEEE, latch = 0xEEEEEEEE;
+        WmSafeReadBytes(0x020409E0u, &vehId, 4);
+        WmSafeReadBytes(0x02043D90u, &latch, 4);
+        Log::World("WorldMap: [VEHDUMP] vehicleId[020409E0]=%d (0x%08X) latch[02043D90]=%d (0x%08X) retiredFlag=%d",
+                   (int)vehId, vehId, (int)latch, latch, GetInVehicleFlag());
+    }
+    for (int a = 0; a < 4; a++) {
+        if (ok[a]) {
+            Log::World("WorldMap: [VEHDUMP] %s_pos=(%d,%d,%d,%d,%d,%d) |P-%s|=%.0f",
+                       VD_NAME[a],
+                       arr[a][0], arr[a][1], arr[a][2],
+                       arr[a][3], arr[a][4], arr[a][5],
+                       VD_NAME[a], dist[a]);
+        } else {
+            Log::World("WorldMap: [VEHDUMP] %s_pos=READ-FAULT at 0x%08X",
+                       VD_NAME[a], (uint32_t)VD_ADDR[a]);
+        }
+    }
+
+    // Hex window 0x020409D0..0x02040ACF: covers the vehicle id + camera-lock +
+    // tri-bias block BELOW the animation byte (the .255 window started at
+    // 0x02040A00 and missed the vehicle id by 0x20 bytes) plus the original
+    // window. 16 rows of 16.
+    for (uint32_t row = 0; row < 16; row++) {
+        uintptr_t base = 0x020409D0u + row * 16;
+        uint8_t   b[16];
+        if (!WmSafeReadBytes(base, b, sizeof(b))) {
+            Log::World("WorldMap: [VEHDUMP] %08X: READ-FAULT", (uint32_t)base);
+            continue;
+        }
+        char line[64];
+        int  bp = 0;
+        for (int i = 0; i < 16; i++)
+            bp += snprintf(line + bp, sizeof(line) - bp, "%02X ", b[i]);
+        Log::World("WorldMap: [VEHDUMP] %08X: %s", (uint32_t)base, line);
+    }
+}
+
+// Public F12 entry point: relocated below IsOnWorldMap (definition order).
+// GetInVehicleFlag: relocated above DumpVehicleState (definition order).
+
 // v0.14.94: read the savemap story-flag word at WM_STORY_FLAG. Used by the
 // AD path planner's clause-evaluation logic to filter which s_triggerPrograms[]
 // entries are currently satisfiable (each clause carries an optional
@@ -237,6 +378,21 @@ static bool IsOnWorldMap()
         scene = 1;
     }
     return (scene == 0);
+}
+
+// v0.18.3.255 (#79): public F12 entry point for the [VEHDUMP] diagnostic
+// (declared in world_map.h; wired in dinput8.cpp, repointed from the retired
+// TriggerCameraScan per the per-session F12 rule). Placed after IsOnWorldMap
+// for definition order.
+void TriggerVehicleDump()
+{
+    if (!IsOnWorldMap()) {
+        ScreenReader::Speak("Not on the world map.", true);
+        Log::World("WorldMap: [VEHDUMP] F12 pressed off world map -- no dump");
+        return;
+    }
+    DumpVehicleState("F12");
+    ScreenReader::Speak("Vehicle state dumped.", true);
 }
 
 // CalculateWrappedDistance moved to world_map_geometry.inl (#67 test seam).

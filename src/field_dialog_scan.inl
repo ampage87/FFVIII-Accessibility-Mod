@@ -292,7 +292,7 @@ static void ScanAndSpeakChoiceWindows(const char* opcodeLabel)
         // hardcoded draw-point dialog populates 0x29/0x2A/0x2B like script
         // ASKs do -- if they read 0xFF here, the cursor lives elsewhere and
         // #81 needs a different source. Gate off once #81 closes.
-#define POLL_CHOICE_DIAG 1
+#define POLL_CHOICE_DIAG 0
 #if POLL_CHOICE_DIAG
         {
             static uint32_t s_lastChoiceQ[MAX_WINDOWS] = {
