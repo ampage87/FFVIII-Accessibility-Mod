@@ -135,6 +135,7 @@
 #include "field_archive.h"    // v0.18.3.2: DumpTrainCodeScripts() for the #56 JSM dump diagnostic
 #include "minhook/include/MinHook.h"
 #include <vector>
+#include <set>   // v0.18.3.247 (#78): [VE-HEX] diagnostic dedup set
 
 // Forward declarations for cross-module namespaces (restored in v0.14.28 build recovery).
 namespace Log {

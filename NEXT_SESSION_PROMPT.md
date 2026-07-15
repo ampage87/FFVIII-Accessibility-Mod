@@ -1,5 +1,22 @@
 # NEXT SESSION — FF8 Accessibility Mod
 
+## ▶ STATUS: v0.18.3.254 BAT PASSED — draw-point chapter COMPLETE (#78, #80, #81 all CLOSED). .244–.254 chain PUSH-READY: Aaron runs `Utilities/push_to_github.ps1`. (GitHub HEAD believed .243 — verify via `github:list_commits` before quoting push state.)
+**Draw-point chapter outcome (2026-07-14):** draw points speak fully and correctly — spell name resolved (#78's 0x0E fix), each message exactly once (#80), and choice navigation announced (#81). Knowledge banked: draw points are engine-HARDCODED dialogs (msgBase `0x00B921E4` in `.data`, no opcodes; GETSTR + show_dialog paths only); their windows populate the STANDARD cursor fields 0x29/0x2A/0x2B; the message bytes never mutate; insert source values are RENDER-TRANSIENT (decode populated only inside the render pass — never at script-fetch time or on the poll thread). #80's drain stack: live re-read (`rawPtr`), reverse containment, insert-wildcard structural match (`PendingMatchesSpokenWithInserts`, TrimDecoded edge chunks). #81: `PollWindows` → `ScanAndSpeakChoiceWindows("POLL")` with QUIET-INIT.
+
+**Next session start:** (1) verify push landed (.254 on GitHub HEAD); (2) gate `POLL_CHOICE_DIAG` (`[CHOICEQ]`, field_dialog_scan.inl) to 0 in whatever real build comes next — no dedicated build; (3) review open issues via `github:list_issues` — notable standing items: #70 world-map walking rebuild (Cowork offline arc, kickoff brief in `Plan & Research Documents/2026-06-27_worldmap_walking_rebuild_cowork_brief.md`), #61 dialog decoder spoken "L" control code (self-contained, confirmable via ff8_dialog.log), #71 SHOW/HIDE scene-actor follow-up (low priority), #21 — possibly resolved by the #78 0x0E table fix; confirm during normal play and close if location names now speak.
+
+**Watch-item during normal play (post-#78):** the 0x0E table is chapter-loaded shared text — other proper-noun inserts game-wide should now speak (possibly resolves #21). If a name comes out WRONG (not missing), flip `VAR_EXPAND_HEX_DIAG` to 1 and capture.
+
+_(Superseded pre-BAT .248 detail below — kept for the audit trail.)_
+
+**Engine handler (disassembled from FF8_EN_.text_0x00401000.asm):** tail case of `sub_4B8B30` at `0x004B8CB8` — for codes >= 0x0E: `entry = (code-0x0E)*224 + (uint8)(param-0x20)`; table pointer at global **`0x01D2B80C`**; blob layout `uint16 count; uint16 offsets[count]; packed FF8 strings` (offsets relative to blob start); null table or `entry >= count` ⇒ the engine emits NOTHING; otherwise it splices the string via 0x49A740/0x49A790. "Dollet" = group 0 entry 3 during this chapter (the table is runtime-loaded shared text, so the same fix should cover other proper-noun inserts game-wide).
+
+**Fix (field_dialog_expand.inl):** new SEH-guarded `ResolveDeferredText` + a `0x0E/0x0F` case in `FieldExpandRawVars` — replicates the table read byte for byte, including both silent-skip cases, and splices the FF8 bytes before `Decode()`. Shared decoder untouched; all field decode sites already route through `DecodeDialogWithExpansion` so no dedup split.
+
+---
+
+_(Superseded .243 status below — #77 chapter, closed.)_
+
 ## ▶ STATUS: v0.18.3.243 LOCAL — #77 FIXED, VERIFIED vs the display, and CLOSED. Push-ready. (.238 pushed; #71–#77 all resolved.)
 **#77 DONE.** TTS spoke "Student ID No. 135"; F11 screenshot shows the game drawing `"Student ID No. 135"` — spoken == rendered.
 
@@ -11,7 +28,7 @@
 
 **OPEN FOLLOW-UP:** this gap affected **every** field message with a numeric insert, not just the Tomb. Those all speak their numbers now — listen during normal play and report any that still read oddly. Also unverified: control codes `0x0C`/`0x0D` (the engine resolves them to NAME strings at 0x4B8C74/0x4B8C8A); our decoder consumes them silently, so a field message using them would drop a name the same way. Worth a look if a dialog ever sounds like it's missing a person's name.
 
-**Push state:** GitHub HEAD = v0.18.3.238; local = **v0.18.3.243** (.239-.243 unpushed — Aaron runs `Utilities/push_to_github.ps1`; version == CHANGELOG top heading).
+**Push state:** PUSHED 2026-07-13 — **GitHub HEAD = v0.18.3.243** (verified via `github:list_commits`). Tree fully synced; nothing unpushed.
 
 ---
 

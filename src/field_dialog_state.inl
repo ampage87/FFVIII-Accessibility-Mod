@@ -151,10 +151,21 @@ static const int MIN_TEXT_LENGTH = 3;  // Skip junk like "'," or "C0"
 static std::string s_lastDialogSpoken;
 
 struct PendingText {
-    std::string decoded;   // Decoded text
+    std::string decoded;   // Decoded text (as of FETCH time -- inserts may be stale)
     DWORD fetchTime;       // GetTickCount() when fetched
     bool spoken;           // Set true when spoken by opcode hook or poll
     int messageId;         // FF8 message ID for logging
+    // v0.18.3.250 (#80): raw FF8 bytes of the message, captured at fetch time.
+    // v0.18.3.251 (#80): the .250 BAT proved the snapshot is NOT enough — the
+    // drain re-decode of the frozen copy STILL resolved the insert empty while
+    // live decodes the same tick resolved "Cure": the engine MUTATES the
+    // message buffer in place between script-fetch and render (pokes the
+    // insert param). So the drain now re-reads the LIVE buffer via rawPtr
+    // (SEH-guarded) and uses this snapshot only as the fallback when the live
+    // read faults. raw[0]==0x00 => no capture; rawPtr may dangle after a
+    // field transition, which the SEH copy absorbs.
+    uint8_t raw[512];
+    const char* rawPtr;    // v0.18.3.251 (#80): live message pointer at fetch
 };
 
 static const int MAX_PENDING = 8;

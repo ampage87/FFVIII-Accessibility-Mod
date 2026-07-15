@@ -322,6 +322,107 @@ static const uintptr_t FIELD_VAR_TABLE_BASE = 0x01D2B4B0;  // dword[param]
 static const uint8_t   FIELD_VAR_PARAM_MIN  = 0x20;
 static const uint8_t   FIELD_VAR_PARAM_MAX  = 0x27;
 
+// ============================================================================
+// v0.18.3.245 (#78): NAME / LOCATION inserts — control codes 0x0C and 0x0D.
+// ============================================================================
+//
+// The .244 BAT reproduced the bug in Xu's Dollet briefing — e.g. the line the
+// mod spoke as:  "  has been under attack by the G-Army since about 72 hours
+// ago."  The subject noun "Dollet" is cleanly gone (its trailing space kept),
+// which is the exact fingerprint of a silently-dropped INLINE INSERT, the
+// name/location sibling of the #77 number bug.
+//
+// In the same field text processor sub_4B8B30 that handles the 0x04 number
+// case, the two adjacent cases are the name inserts:
+//   0x004B8C74  code 0x0C: param -> call sub_47E970(param-0x20) -> FF8 string
+//   0x004B8C8A  code 0x0D: param -> call sub_47EA30(param-0x20) -> FF8 string
+// Each resolver just indexes a static table and returns a pointer to an
+// FF8-encoded string (location names for 0x0C, other names for 0x0D). Our
+// decoder currently drops both (0x0C consumes its param + emits nothing;
+// 0x0D-0x1F emit nothing) -> the name vanishes.
+//
+// We resolve by calling the ENGINE'S OWN resolver via a function pointer,
+// rather than re-deriving the table math. This is the #77 lesson applied: the
+// three failed builds all came from reimplementing engine logic from the
+// disassembly; calling the game's own function cannot get the table math wrong,
+// and it automatically tracks whatever the engine currently has loaded. The
+// resolvers are pure table lookups (read-only, no locks, no side effects), so
+// calling them from the mod's decode path is safe; the call is SEH-guarded.
+typedef char* (__cdecl *NameResolverFn)(int index);
+static const uintptr_t FIELD_NAME_RESOLVER_0C = 0x0047E970;  // location names
+static const uintptr_t FIELD_NAME_RESOLVER_0D = 0x0047EA30;  // other names
+
+// ============================================================================
+// v0.18.3.248 (#78): THE ACTUAL DOLLET MECHANISM — control code 0x0E.
+// ============================================================================
+//
+// The .247 [VE-HEX] dump settled it (third time this pattern has paid off).
+// Every dropped word in Xu's briefing is the SAME two bytes, e.g.:
+//
+//   "Xu " [0E 23] has been under attack by the G-Army ..."   -> "Dollet"
+//   "...battle, [0E 23] abandoned their position..."          -> "Dollet"
+//   "...is the [0E 23] Dukedom Parliament."                   -> "Dollet"
+//   "...mopping up the [0E 23] troops..."                     -> "Dollet"
+//
+// NOT 0x04 (numbers, #77) and NOT 0x0C/0x0D (the .245 resolvers, which stay
+// in but simply never match this code). The engine handler is the tail case
+// of the same window text processor sub_4B8B30:
+//
+//   0x004B8CB8  cmp ecx, 0xE / jl ...        ; codes >= 0x0E land here
+//   0x004B8CBD  mov dl, [ebp] / inc ebp      ; read + consume the param byte
+//   0x004B8CC0  add ecx, -0xE                ; group = code - 0x0E
+//   0x004B8CC3  sub dl, 0x20                 ; idx = (uint8)(param - 0x20)
+//   0x004B8CC7+ eax = group*8 - group        ; group*7
+//   0x004B8CDC  shl eax, 5                   ; group*224
+//   0x004B8CDF  add eax, edx                 ; entry = group*224 + idx
+//   0x004B8CD6  mov ecx, [0x1D2B80C]         ; TABLE pointer (runtime-loaded)
+//   0x004B8CE4  test ecx, ecx / je -> skip   ; null table: emit NOTHING
+//   0x004B8CF1  movzx edx, word [ecx]        ; entry count (first word)
+//   0x004B8CF4  cmp edx, eax / jle -> skip   ; out of range: emit NOTHING
+//   0x004B8D01  movzx esi, word [ecx+eax*2+2]; offset word (rel. table start)
+//   0x004B8D06  add esi, ecx                 ; -> FF8-encoded string
+//   0x004B8D0A  call 0x49a740 (copy) / 0x49a790 (strlen) ; splice into dst
+//
+// So the blob at [0x01D2B80C] is:  uint16 count; uint16 offsets[count]; then
+// packed FF8 strings — a runtime-loaded shared-text table ("Dollet" is group 0
+// entry 3 during the SeeD-exam chapter). Unlike 0x0C/0x0D there is NO
+// standalone engine resolver to call — the lookup is inlined — but unlike #77
+// there is also no math to re-derive from theory: the layout above is read
+// straight off the executable, and the read below replicates it byte for byte,
+// including the two silent-skip cases (null table / entry >= count), so a
+// failed lookup emits exactly what the engine emits: nothing.
+static const uintptr_t FIELD_DEFERRED_TABLE_PTR = 0x01D2B80C;
+
+// Look up a 0x0E-family deferred-text entry and copy its FF8 bytes into out.
+// Fully SEH-guarded, no C++ objects (C2712). Returns bytes written; 0 means
+// "emit nothing", which is also the engine's behavior for a missing entry.
+static size_t ResolveDeferredText(uint8_t code, uint8_t param,
+                                  uint8_t* out, size_t outSize)
+{
+    size_t written = 0;
+    __try {
+        uintptr_t table = *(volatile uintptr_t*)FIELD_DEFERRED_TABLE_PTR;
+        if (table != 0) {
+            uint32_t entry = (uint32_t)(code - 0x0E) * 224u
+                           + (uint32_t)(uint8_t)(param - 0x20);
+            uint16_t count = *(volatile uint16_t*)table;
+            if (entry < count) {
+                uint16_t off = *(volatile uint16_t*)(table + 2 + entry * 2);
+                const uint8_t* s = (const uint8_t*)(table + off);
+                for (; written < outSize - 1; written++) {
+                    uint8_t sb = s[written];
+                    if (sb == 0x00) break;
+                    out[written] = sb;
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        written = 0;
+    }
+    if (written < outSize) out[written] = 0x00;
+    return written;
+}
+
 // SEH-guarded dword read. No C++ objects (C2712).
 static bool SafeReadDword(uintptr_t addr, uint32_t* out)
 {
@@ -333,6 +434,31 @@ static bool SafeReadDword(uintptr_t addr, uint32_t* out)
         ok = false;
     }
     return ok;
+}
+
+// Call the engine's name resolver and copy the returned FF8 string into out.
+// SEH-guarded (no C++ objects here — C2712). Returns bytes written, 0 on any
+// fault or empty result.
+static size_t ResolveEngineName(uintptr_t resolverAddr, int index,
+                                uint8_t* out, size_t outSize)
+{
+    size_t written = 0;
+    __try {
+        NameResolverFn fn = (NameResolverFn)resolverAddr;
+        const char* s = fn(index);
+        if (s != nullptr) {
+            const uint8_t* p = (const uint8_t*)s;
+            for (; written < outSize - 1; written++) {
+                uint8_t b = p[written];
+                if (b == 0x00) break;
+                out[written] = b;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        written = 0;
+    }
+    if (written < outSize) out[written] = 0x00;
+    return written;
 }
 
 // Rewrite a raw FF8 field message, replacing each 0x04+param numeric insert
@@ -352,32 +478,64 @@ static int FieldExpandRawVars(const uint8_t* src, size_t srcLen,
         uint8_t b = src[i];
         if (b == 0x00) break;
 
-        if (b != 0x04 || i + 1 >= srcLen) {
-            out[o++] = b;
+        // --- 0x04 + param: numeric insert (sub_4B8E40, #77) ---
+        if (b == 0x04 && i + 1 < srcLen) {
+            uint8_t param = src[++i];
+            if (param < FIELD_VAR_PARAM_MIN || param > FIELD_VAR_PARAM_MAX) {
+                continue;  // out of range: engine renders nothing, param consumed
+            }
+            uint32_t value = 0;
+            if (!SafeReadDword(FIELD_VAR_TABLE_BASE + (uintptr_t)param * 4, &value)) {
+                continue;
+            }
+            char digits[16];
+            int n = snprintf(digits, sizeof(digits), "%u", (unsigned)value);
+            for (int k = 0; k < n && o + 1 < outSize; k++) {
+                out[o++] = (uint8_t)(0x21 + (digits[k] - '0'));  // FF8 '0'..'9'
+            }
+            subs++;
             continue;
         }
 
-        // 0x04 + param: the engine's numeric insert (sub_4B8E40).
-        uint8_t param = src[++i];
-        if (param < FIELD_VAR_PARAM_MIN || param > FIELD_VAR_PARAM_MAX) {
-            // Out of the engine's accepted range — it renders nothing, so do
-            // the same (and the param stays consumed, exactly as the engine's
-            // reader consumes it).
+        // --- 0x0C / 0x0D + param: name / location insert (#78) ---
+        // The engine's reader (sub_4B9170 @0x004B9216) consumes a param byte
+        // for every code 0x02-0x0F, and sub_4B8B30 resolves 0x0C via sub_47E970
+        // and 0x0D via sub_47EA30 with (param - 0x20). We call those directly.
+        if ((b == 0x0C || b == 0x0D) && i + 1 < srcLen) {
+            uint8_t param = src[++i];
+            uintptr_t resolver = (b == 0x0C) ? FIELD_NAME_RESOLVER_0C
+                                             : FIELD_NAME_RESOLVER_0D;
+            uint8_t nameBuf[128];
+            size_t n = ResolveEngineName(resolver, (int)param - 0x20,
+                                         nameBuf, sizeof(nameBuf));
+            for (size_t k = 0; k < n && o + 1 < outSize; k++) {
+                out[o++] = nameBuf[k];   // already FF8-encoded; copy through
+            }
+            // n==0 -> engine had no string for this slot; emit nothing (the
+            // param is still consumed, matching the engine's reader).
+            subs++;
             continue;
         }
 
-        uint32_t value = 0;
-        if (!SafeReadDword(FIELD_VAR_TABLE_BASE + (uintptr_t)param * 4, &value)) {
+        // --- 0x0E (+ any higher code) + param: deferred shared-text insert ---
+        // (#78, v0.18.3.248 — the Dollet mechanism; disassembly block above.)
+        // The engine's tail case at 0x4B8CB8 handles every code >= 0x0E with a
+        // group stride of 224 entries, so 0x0F etc. resolve through the same
+        // table read. Codes 0x10+ never reach sub_4B8B30's chain in practice,
+        // but if one did, the bounds check makes it a silent no-op — identical
+        // to the engine.
+        if (b >= 0x0E && b <= 0x0F && i + 1 < srcLen) {
+            uint8_t param = src[++i];
+            uint8_t nameBuf[128];
+            size_t n = ResolveDeferredText(b, param, nameBuf, sizeof(nameBuf));
+            for (size_t k = 0; k < n && o + 1 < outSize; k++) {
+                out[o++] = nameBuf[k];   // already FF8-encoded; copy through
+            }
+            subs++;
             continue;
         }
 
-        char digits[16];
-        int n = snprintf(digits, sizeof(digits), "%u", (unsigned)value);
-        for (int k = 0; k < n && o + 1 < outSize; k++) {
-            // FF8 font codes: '0'..'9' == 0x21..0x2A
-            out[o++] = (uint8_t)(0x21 + (digits[k] - '0'));
-        }
-        subs++;
+        out[o++] = b;
     }
     out[o] = 0x00;
     return subs;
@@ -401,6 +559,46 @@ static std::string DecodeDialogWithExpansion(const void* raw,
     uint8_t buf[512];
     size_t cap = (maxBytes < sizeof(buf)) ? maxBytes : sizeof(buf);
     if (!SafeCopyEngineText(raw, buf, cap)) return std::string();
+
+    // v0.18.3.245 (#78): raw-byte capture ON THE SCAN PATH. The .244 hex diag
+    // lived in the GETSTR hook, but Xu's briefing comes through the AMESW
+    // window-scan path, so it never fired. This dumps the raw bytes of any
+    // message that contains an insert control code (0x04/0x0C/0x0D) here, where
+    // the briefing actually flows — so this BAT confirms the exact code+param
+    // even if the 0x0C/0x0D fix below already made it speak. Gate off once #78
+    // is verified.
+    // v0.18.3.246 (#78): UNCONDITIONAL raw-byte dump. The .245 build only
+    // logged when a 0x04/0x0C/0x0D byte was present — and it fired for NEITHER
+    // Dollet line, so the placeholder is none of those. Two wrong code guesses
+    // in a row (#77 rule) => stop guessing, dump EVERY message's bytes and read
+    // the code sitting where "Dollet" belongs. Capped so it can't flood; load a
+    // save at/just before Xu's briefing so its lines fall in the first N.
+    // v0.18.3.249: #78 VERIFIED on the .248 BAT (all four Dollet lines spoke;
+    // [VE-HEX] showed 0E 23 beside each) -- diagnostic gated back off per the
+    // project pattern. Flip to 1 if another silently-dropped insert appears.
+#define VAR_EXPAND_HEX_DIAG 0
+#if VAR_EXPAND_HEX_DIAG
+    {
+        size_t nlen = 0;
+        while (nlen < cap && buf[nlen] != 0x00) nlen++;
+        // v0.18.3.247: dedup by a SET of already-logged texts, not just the
+        // last one. The .246 build kept only the previous text, so the two
+        // windows the scanner alternates between (Xu / Quistis) each looked
+        // "new" every tick and burned the whole 40-cap before the briefing
+        // reached the Dollet lines. A set logs each DISTINCT message exactly
+        // once, so the cap counts distinct messages as intended.
+        static std::set<std::string> s_veHexSeen;
+        if (nlen >= 4 && s_veHexSeen.size() < 80) {
+            std::string plain = TrimDecoded(FF8TextDecode::Decode(buf, nlen));
+            if (s_veHexSeen.find(plain) == s_veHexSeen.end()) {
+                s_veHexSeen.insert(plain);
+                std::string hex = FF8TextDecode::HexDump(buf, nlen);
+                Log::Dialog("FieldDialog: [VE-HEX] len=%u text=\"%s\" bytes=%s",
+                            (unsigned)nlen, plain.c_str(), hex.c_str());
+            }
+        }
+    }
+#endif
 
     uint8_t expBuf[640];
     int subs = FieldExpandRawVars(buf, cap, expBuf, sizeof(expBuf));

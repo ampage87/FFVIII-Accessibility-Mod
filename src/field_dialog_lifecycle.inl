@@ -552,7 +552,14 @@ void PollWindows()
     GuardFreezePin();     // v0.18.3.14: Freeze mode -- pin guard var 1040=0 to freeze guards (#58)
 
     EnterCriticalSection(&s_cs);
-    ScanAndSpeakAllWindows("POLL");
+    // v0.18.3.254 (#81): poll the CHOICE scanner, not just the plain-text
+    // scanner. Engine-hardcoded ASK dialogs (draw points) never execute a
+    // script opcode, so Hook_opcode_ask/aask -- previously the ONLY callers
+    // of ScanAndSpeakChoiceWindows -- never fire for them, and cursor moves
+    // were silent. The choice scanner's firstQ/lastQ sentinels (0/0, 0xFF,
+    // inverted) skip non-choice windows, and it falls through to
+    // ScanAndSpeakAllWindows internally, so plain-text polling is preserved.
+    ScanAndSpeakChoiceWindows("POLL");
     CheckPendingTexts();  // v04.16: Speak deferred getstr texts
     // v04.24: Disabled GCW speak -- was diagnostic from v04.20, now causes
     // garbled "-G'" speech from character naming screen menu glyphs.

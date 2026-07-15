@@ -84,9 +84,10 @@ static char* __cdecl Hook_field_get_dialog_string(char* msgBase, int dialogId)
     // which control code sits between "No." and the period. Gated to messages
     // that decode with a suspicious gap so it can't flood the log; retire
     // (set GETSTR_HEX_DIAG 0) once #77 is closed.
-    // v0.18.3.243: RETIRED — it did its job (it is what identified control code
-    // 0x04 + param). Kept behind the gate per the diagnostic-gating pattern;
-    // flip to 1 if another message ever decodes with a suspicious gap.
+    // v0.18.3.245 (#78): back OFF. The .244 attempt put the hex dump here in the
+    // GETSTR hook, but Xu's briefing flows through the AMESW window-scan path,
+    // so it never fired. The byte capture now lives in DecodeDialogWithExpansion
+    // (VAR_EXPAND_HEX_DIAG), which is on the scan path. Kept behind the gate.
     #define GETSTR_HEX_DIAG 0
     #if GETSTR_HEX_DIAG
     {
@@ -140,6 +141,19 @@ static char* __cdecl Hook_field_get_dialog_string(char* msgBase, int dialogId)
         s_pending[s_pendingCount].fetchTime = GetTickCount();
         s_pending[s_pendingCount].spoken = false;
         s_pending[s_pendingCount].messageId = dialogId;
+        // v0.18.3.250 (#80): snapshot the raw FF8 bytes so CheckPendingTexts
+        // can re-decode at drain time with insert values the engine populates
+        // after this fetch. SafeCopyEngineText is SEH-guarded; on any failure
+        // force raw[0]=0 so the drain falls back to the fetch-time decode
+        // (a partial copy after a fault could otherwise be unterminated).
+        // v0.18.3.251 (#80): also store the LIVE pointer -- the .250 BAT proved
+        // the engine mutates the message buffer after this fetch, so the drain
+        // must re-read the live bytes; the snapshot is now only the fallback.
+        s_pending[s_pendingCount].rawPtr = result;
+        if (!SafeCopyEngineText(result, s_pending[s_pendingCount].raw,
+                                sizeof(s_pending[s_pendingCount].raw))) {
+            s_pending[s_pendingCount].raw[0] = 0x00;
+        }
         s_pendingCount++;
     }
 

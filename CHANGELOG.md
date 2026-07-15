@@ -6,6 +6,134 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.254
+
+**#81: draw-point choice navigation — the choice-cursor tracker now runs from the poll loop. Also retires the #80 WILDCARD_TRACE diag (.253 BAT PASSED; #80 CLOSED).**
+
+**#80 closure recap:** the .253 BAT passed — `[GETSTR-WILDCARD] msgId=2 matched win[6]`, zero deferred double-speaks; the .252→.253 TrimDecoded chunk alignment was the matcher bug. Final #80 stack in the drain: live re-read (`rawPtr`), reverse containment (fixed msgId=4/6), insert-wildcard structural match (fixed msgId=2). `WILDCARD_TRACE` gated to 0 here.
+
+**#81 problem:** `ScanAndSpeakChoiceWindows` — the only code that reads the choice-cursor fields (win offsets 0x29/0x2A/0x2B) and announces "Choice changed" — was invoked ONLY from Hook_opcode_ask/aask. Script ASKs work because the blocking opcode re-executes every frame; engine-hardcoded ASKs (the draw-point "Who will draw?") never execute an opcode, so cursor movement was silent.
+
+**Fix (three pieces):** (1) `PollWindows` now calls `ScanAndSpeakChoiceWindows("POLL")` instead of `ScanAndSpeakAllWindows` — the choice scanner falls through to the all-windows scanner internally, so plain-text polling is unchanged; its firstQ/lastQ sentinels (0/0, 0xFF, inverted) keep non-choice windows out. (2) QUIET INIT in the new-choice-dialog branch: when the window's plain text was already spoken by another path (show_dialog speaks hardcoded dialogs before the poll sees them), initialize choice state silently and announce only "Selected: <option>" instead of re-speaking the full prompt+choices; subsequent cursor moves hit the existing "Choice changed" interrupt branch. Script ASKs are unaffected — their opcode hook sees the window before the engine renders, so they keep the full structured announce. F5 still repeats the full dialog. (3) Gated `POLL_CHOICE_DIAG` logs `[CHOICEQ] win[N] firstQ/lastQ/curChoice` on change — verifies the hardcoded dialog populates the same cursor fields (expected; if `[CHOICEQ]` shows 0xFF on the draw window, the cursor lives elsewhere and #81 pivots).
+
+**BAT .254:** rebuild via deploy.vbs, confirm 0.18.3.254, open a draw point's "Who will draw?" dialog and arrow between "Don't draw" and "Squall" a few times, then pick one. Expect to HEAR: the prompt once, "Selected: <current option>" shortly after it opens, then each option as the cursor moves. Log: `[CHOICEQ]` lines with sane values (firstQ/lastQ small, curChoice moving), `[POLL] win[6] Choice quiet-init`, `[POLL] win[6] Choice changed -> N` per move, and no double-speak anywhere. Regression: a scripted ASK if convenient (any yes/no NPC prompt) — should announce exactly as before.
+
+## v0.18.3.253
+
+**#80 fourth build: TrimDecoded-aligned wildcard chunks + a self-describing failure trace. The .252 wildcard ran and returned FALSE.**
+
+**The .252 BAT:** still double-spoke msgId=2, and the log shows the .252 build WAS deployed (no `[PENDING-HEX]`) yet NO `[GETSTR-WILDCARD]` line — the matcher executed and failed to match text it should match. One real discrepancy found on audit: the window's spoken text is `TrimDecoded`'d, but the .252 matcher's edge chunks got only a hand-rolled whitespace trim. If the message's first/last chunk decodes with any artifact `TrimDecoded` strips (page-break rendering, markers), `find()` hunts for characters the spoken string never had → guaranteed mismatch. Plausible — but STILL unverified, because this message's raw bytes have never actually been seen: it lives in `.data` (0x00B92246), outside the on-disk disassembly dumps, and `[VE-HEX]` was retired before draw points came up. Three fix attempts without the bytes is the exact anti-pattern the process rule exists for.
+
+**This build:** (1) the matcher's first/last chunks now go through the SAME `TrimDecoded` as the spoken side (inner chunks stay verbatim — the spoken text contains identical decoder output for them); strictly more correct regardless of the outcome. (2) Gated `WILDCARD_TRACE`: whenever an insert-bearing pending entry is about to deferred-speak (all dedup incl. the wildcard failed), dump the raw hex + every window's spoken string — so if this build still fails, the log is fully self-describing and the next fix is derived from bytes, not theory.
+
+**BAT .253:** rebuild via deploy.vbs, confirm 0.18.3.253, one draw-point interaction. PASS = found message spoken ONCE + `[GETSTR-WILDCARD] msgId=2` in the log. FAIL = double-speak again, but with `[WILDCARD-FAIL]` raw-hex + spoken lines — send the log either way; the fail case is the byte dump that ends the guessing.
+
+## v0.18.3.252
+
+**#80 third build: insert-WILDCARD dedup. The .251 diag ANSWERED the mechanism — the message is never mutated; the insert source is render-transient.**
+
+**The .251 BAT (17:28):** the reverse-containment half WORKED — "Who will draw?" (msgId=4) and "unable to stock" (msgId=6) each spoke exactly once, no `[GETSTR-DEFERRED]` for either. But msgId=2 still double-spoke, and `[PENDING-HEX]` was decisive: **fetch==live on every message** — the .251 poke-in-place theory is OVERTURNED. The same unchanged bytes decode to "Cure" inside the show_dialog hook and to an EMPTY insert at script-fetch time and on the poll thread, consistently across two BATs ⇒ the insert's source value is **TRANSIENT**: the engine exposes it only during the render pass (game thread), and no decode from the fetch or the drain can ever see it populated. Re-decoding was therefore a dead end for msgId=2 by construction.
+
+**Fix (this build — the fallback the .251 CHANGELOG pre-declared):** new `PendingMatchesSpokenWithInserts` (scan.inl) matches STRUCTURALLY — split the pending raw message into literal chunks around each insert code (0x04/0x0C–0x0F, the FieldExpandRawVars set, one param byte each) and require the chunks to appear in order within a window's spoken/raw text; "Found a draw point! " + gap + " found" matches "Found a draw point! Cure found". Runs ONLY when the raw contains an insert code; total-literal >= 8 and spoken >= 8 guards; first chunk leading-trimmed / last chunk trailing-trimmed to mirror TrimDecoded. Wired as the final check in the drain dedup, logging `[GETSTR-WILDCARD] msgId=N matched win[W]`. `PENDING_LIVE_DIAG` gated to 0 (question answered; code kept). The .251 live re-read + reverse containment stay (both load-bearing: live read is correct-by-construction belt-and-braces, reverse containment fixed msgId=4).
+
+**BAT .252:** rebuild via deploy.vbs, confirm 0.18.3.252, one draw-point interaction (found message, Who-will-draw, cancel). Expect: EVERY message spoken exactly once; a `[GETSTR-WILDCARD] msgId=2` line; NO `[GETSTR-DEFERRED] Speaking` lines at all; no `[PENDING-HEX]` lines (diag off). Regression: ordinary dialog once; the Tomb student-ID line and Xu's briefing remain the canonical insert regressions if visited later — both flow through the same drain.
+
+## v0.18.3.251
+
+**#80 second attempt: drain re-decodes from the LIVE buffer + reverse-containment dedup. The .250 snapshot approach was disproven by its own BAT.**
+
+**What the .250 BAT revealed (17:16:44):** the drain re-decode ran, but decoding the frozen fetch-time snapshot STILL resolved the insert empty — at the same tick that decodes of the live text resolved "Cure". Same decode function and globals, different result ⇒ the BYTES differ: the engine mutates the message buffer in place between script-fetch and render (working theory: pokes the insert's param byte to select the current spell). The snapshot faithfully froze the pre-poke bytes, so the stale text spoke again. Second independent failure: msgId=4 ("Who will draw?") double-spoke because the raw message carries all three party-member slots ("…Squall Squall Squall") while the window spoke a party-size-trimmed copy ("…Don't draw Squall") — the spoken text is CONTAINED IN the pending text, a direction the drain dedup never checked.
+
+**Fix (this build, both in CheckPendingTexts + one field):** (1) `PendingText` gains `rawPtr` (the live message pointer); the drain SEH-copies the LIVE bytes and re-decodes those, with the .250 snapshot as fallback when the live read faults (buffer gone on a field transition). (2) Reverse containment added to the drain dedup: if any window's lastSpokenText/lastRawText (length >= 8, so short lines can't false-match) is contained within the pending text, the message counts as handled. (3) Gated `PENDING_LIVE_DIAG` hex compare: when live differs from snapshot it dumps both (documents the poked byte); when IDENTICAL it logs "fetch==live — message NOT mutated" — which would disprove the poke-in-place theory (engine pokes a window-side copy instead) and tell us the live re-read can't work for msgId=2, pointing the next build at insert-tolerant dedup instead.
+
+**BAT .251:** rebuild via deploy.vbs, confirm 0.18.3.251, interact with the same draw point once (open the found message, open the Who-will-draw dialog, cancel). Expect: each message spoken exactly ONCE; `[PENDING-HEX]` lines for msgId=2 showing fetch vs live (differing = theory confirmed) or the identical line (theory overturned — send the log either way); `[GETSTR-REDECODE]` for msgId=2 with the Cure version; NO `[GETSTR-DEFERRED] Speaking` for msgId=2 or 4. Regression: ordinary dialog once; a Squall thought line if convenient.
+
+## v0.18.3.250
+
+**#80: draw-point double-speak — the GETSTR pending queue now re-decodes at drain time.**
+
+**The bug (root-caused from the 16:53:55 draw-point log on .249):** draw points are engine-hardcoded dialogs (msgBase `0x00B921E4`, in the exe's `.data`) — no MES/ASK opcode fires. `Hook_field_get_dialog_string` decodes the message at script-fetch time, when the 0x0E spell-name insert is still EMPTY, and queues the stale `"Found a draw point!  found"` into `s_pending`. Milliseconds later `Hook_show_dialog` decodes the same raw pointer with the insert now populated and speaks `"Found a draw point! Cure found"`. At drain (500 ms), `CheckPendingTexts` dedups the stale string against the windows — exact + `IsSuffixOrSubstring` — and the stale text is NOT a substring of the Cure version, so the dedup misses and the stale version speaks: the second utterance Aaron heard. (`"Squall is unable to stock"` escaped only because the stale form happens to be a prefix of `"...stock Cure"`.)
+
+**Fix (three edits):** `PendingText` gains `uint8_t raw[512]` (state.inl; 4 KB total at MAX_PENDING=8); the GETSTR hook snapshots the raw FF8 bytes via SEH-guarded `SafeCopyEngineText`, forcing `raw[0]=0` on any failure (opcodes.inl); `CheckPendingTexts` re-decodes from the snapshot with `DecodeDialogWithExpansion` at drain time and uses the FRESH string for both the window dedup and the deferred speak, logging `[GETSTR-REDECODE] stale -> fresh` when they differ (scan.inl). By drain time the inserts are populated, the fresh decode matches what show_dialog spoke, dedup hits, nothing double-speaks. Side benefit: text for which the deferred path IS the speaker (off-screen thoughts) now speaks populated insert values instead of blanks. Fetch-time `decoded` is kept for the queueing dedup keys and as the fallback when the snapshot failed.
+
+**BAT .250:** rebuild via deploy.vbs, confirm 0.18.3.250, interact with the same draw point. Expect: "Found a draw point! Cure found" spoken exactly ONCE; a `[GETSTR-REDECODE]` line for msgId=2 (and 4) showing stale → fresh; NO `[GETSTR-DEFERRED] Speaking` line for those messages. Regression: ordinary scripted dialog speaks once as before, and if convenient a Squall internal-thought line (the deferred path's real customer) still speaks exactly once. Choice navigation is NOT expected to work yet — that is #81, next build.
+
+## v0.18.3.249
+
+**#78 CLOSED on the .248 BAT — diagnostic retirement build (VAR_EXPAND_HEX_DIAG off). Push-ready.**
+
+**The .248 BAT (16:44, bvboat briefing replay) PASSED on all counts.** All four Dollet lines expanded and spoke: "the **Dollet** Dukedom Parliament" (16:44:23), "**Dollet** has been under attack by the G-Army" (16:44:29), "49 hours into the battle, **Dollet** abandoned their position" (16:44:31), "mopping up the **Dollet** troops in the mountain region" (16:44:44) — each with the `[VE-HEX]`/`[VAR-EXPAND]` pair proving `0E 23` sat exactly where the word now appears. Regression clean: every non-insert message decoded byte-identical to the .247 run, no spurious `[VAR-EXPAND]`, the known "Xu ........." garble still rejected as before.
+
+**This build:** `VAR_EXPAND_HEX_DIAG` 1→0 in field_dialog_expand.inl (gated, not deleted, per the diagnostic pattern) + version bump. No behavior change beyond silencing the `[VE-HEX]` dump.
+
+**BAT .249 (light):** rebuild via deploy.vbs, confirm 0.18.3.249, load any field and hear one dialog line speak normally with no `[VE-HEX]` lines in ff8_dialog.log. Then the .244–.249 chain (#78 end to end) is ready for `Utilities/push_to_github.ps1`.
+
+## v0.18.3.248
+
+**#78: the real Dollet mechanism — control code 0x0E deferred-text inserts now resolve. "Dollet" restored throughout Xu's SeeD-exam briefing.**
+
+**The .247 [VE-HEX] dump settled it — third time the byte-dump-first rule has paid off.** Every dropped word in the briefing is the same two bytes, `0E 23`, in four sentences: "[0E 23] has been under attack", "battle, [0E 23] abandoned their position", "the [0E 23] Dukedom Parliament", and "the [0E 23] troops" — each rendering as "Dollet" on screen. NOT 0x04 (the #77 number code) and NOT 0x0C/0x0D (the .245 name resolvers, which stay in but never match this code).
+
+**The engine handler (disassembled this session)** is the tail case of the same window text processor `sub_4B8B30`, at `0x004B8CB8`: for codes >= 0x0E it computes `entry = (code - 0x0E)*224 + (uint8)(param - 0x20)`, reads the table pointer at global **`0x01D2B80C`**, and — if the pointer is non-null and `entry < *(uint16*)table` — splices in the FF8 string at `table + *(uint16*)(table + 2 + entry*2)` via the shared copy/strlen helpers (0x49A740/0x49A790). Null table or out-of-range entry emits NOTHING. So the blob is `uint16 count; uint16 offsets[]; packed FF8 strings` — a runtime-loaded shared-text table; "Dollet" is group 0 entry 3 during this chapter. Our decoder consumed the two bytes and emitted nothing, the same disease as #77.
+
+**Fix (field_dialog_expand.inl):** `FieldExpandRawVars` gains a 0x0E/0x0F case; new SEH-guarded `ResolveDeferredText` replicates the table read byte for byte (including both silent-skip cases, so a failed lookup emits exactly what the engine emits: nothing) and splices the FF8 bytes into the rewrite buffer BEFORE `Decode()`. Unlike 0x0C/0x0D there is no standalone engine resolver to call (the lookup is inlined), but unlike #77 there is no math re-derived from theory — the layout is read straight off the executable. Shared decoder untouched; all field decode sites already route through `DecodeDialogWithExpansion`, so the scanner, opcode hooks, show_dialog, and the post-FMV snapshots all expand identically and the already-spoken dedup cannot split. `[VE-HEX]` (VAR_EXPAND_HEX_DIAG) deliberately stays ON one more BAT so the log shows the raw code beside the now-spoken text; gate it off once #78 is verified.
+
+**BAT .248:** rebuild via deploy.vbs, confirm 0.18.3.248, replay Xu's briefing from the same save. Expect "Dollet" SPOKEN in all four sentences ("Dollet has been under attack…", "49 hours into the battle, Dollet abandoned…", "the Dollet Dukedom Parliament", "the Dollet troops"), a `[VAR-EXPAND]` line per affected message showing the rewrite, and ordinary dialog byte-identical. Since the table is chapter-loaded shared text, other proper-noun inserts across the game should be fixed by the same change — listen during normal play. If a name comes out WRONG (not missing), send the `[VE-HEX]` + `[VAR-EXPAND]` pair — that would mean the table at 0x01D2B80C was swapped between render and speak time.
+
+## v0.18.3.247
+
+**#78: fix the diagnostic's dedup — the .246 cap was eaten before the Dollet lines. (Diagnostic build.)**
+
+The .246 `[VE-HEX]` dump worked but never reached Xu's Dollet sentences: its dedup remembered only the PREVIOUS decoded text, and the window scanner alternates between two live windows every tick ("Xu …" / "Quistis …"), so each looked new on every pass and the 40-entry cap was spent on those two messages before the briefing advanced. (The two captured samples were both plain text with no insert code — confirming the encoding decodes correctly, e.g. `5C 73` = "Xu", `02` = line-break→space, but not the line we need.)
+
+Fix: dedup by a `std::set` of already-logged decoded texts (cap 80 distinct), so each DISTINCT message logs exactly once and the alternating windows can't exhaust the budget. Added `#include <set>` to field_dialog.cpp. No behavior change beyond the diagnostic.
+
+**BAT .247:** same as .246 — load at/just before Xu's Dollet briefing, let the "…has been under attack…" and "49 hours into the battle…" lines play, send `ff8_dialog.log`. This time the `[VE-HEX]` lines for those two sentences WILL be present; the byte before the surviving space is the insert code we finally resolve.
+
+## v0.18.3.246
+
+**#78: the placeholder is NOT 0x0C/0x0D either — unconditional byte dump. (Diagnostic build.)**
+
+The .245 BAT: Xu's briefing still dropped "Dollet", and crucially **neither `[VE-HEX]` nor `[VAR-EXPAND]` fired** on those lines — so the message contains none of 0x04/0x0C/0x0D. My name-insert theory was wrong, the same way the 0x0A number theory was wrong before the hex dump settled #77. Two wrong code guesses in a row → stop guessing.
+
+The `[GETSTR]` lines confirm these flow through the decode path (dialogId=3/4), so `DecodeDialogWithExpansion` runs on them. This build makes `[VE-HEX]` **unconditional** — it dumps the raw bytes + decode of every distinct field message (deduped by decoded text, capped at 40) regardless of which control codes it contains. The 0x0C/0x0D resolver from .245 stays in (harmless; will simply not match these), and the mis-placed `GETSTR_HEX_DIAG` stays off.
+
+**BAT .246 (data, no fix expected):** load a save at/just before Xu's Dollet briefing, let the "…has been under attack…" and "49 hours into the battle…" lines play, send `ff8_dialog.log`. The `[VE-HEX]` lines for those two sentences are the deliverable — the byte sitting where "Dollet" belongs (right before the `20`/space that survived) is the actual insert code, and that finally tells us what to resolve.
+
+## v0.18.3.245
+
+**#78: field name/location inserts (codes 0x0C/0x0D) now resolve — "Dollet" restored to Xu's briefing.**
+
+**.244 BAT reproduced it.** Xu's briefing spoke, e.g., `"  has been under attack by the G-Army  since about 72 hours ago."` and `"49 hours into the battle,  abandoned their position in the inner city."` — the subject noun "Dollet" cleanly gone (trailing space kept), the exact fingerprint of a silently-dropped inline insert. **The .244 `[GETSTR-HEX]` diagnostic did NOT fire** because it lived in the `field_get_dialog_string` hook, but the briefing flows through the AMESW/RAMESW window-scan path — my miss. Fixed two ways below so this build both confirms and fixes.
+
+**Mechanism (same field text processor as #77, adjacent cases):**
+- `sub_4B9170` @0x004B9216 — codes 0x02–0x0F each consume a param byte.
+- `sub_4B8B30` @0x004B8C74 — code **0x0C**: `sub_47E970(param-0x20)` → location-name FF8 string.
+- `sub_4B8B30` @0x004B8C8A — code **0x0D**: `sub_47EA30(param-0x20)` → other-name FF8 string.
+
+`FF8TextDecode::DecodeByte` drops both, so the name vanished.
+
+**Fix:** `FieldExpandRawVars` (field_dialog_expand.inl) now also rewrites `0x0C`/`0x0D` + param, resolving the string by **calling the engine's own resolver** (`sub_47E970` / `sub_47EA30`) via function pointer and copying the returned FF8 bytes through — NOT re-deriving the table math (the exact thing that burned three builds on #77; calling the game's own pure-lookup function can't get it wrong). SEH-guarded; runs before `FF8TextDecode::Decode`, so the shared decoder is untouched (menu/battle unaffected). Covers both codes so it doesn't matter which one the briefing uses.
+
+**Byte capture relocated:** `[VE-HEX]` in `DecodeDialogWithExpansion` (VAR_EXPAND_HEX_DIAG, on the scan path, first 16 insert-bearing messages) dumps the raw bytes of any 0x04/0x0C/0x0D message where the briefing actually flows — so the log still proves the exact code+param. `GETSTR_HEX_DIAG` (wrong path) gated back off.
+
+**BAT .245:** replay Xu's Dollet briefing. Expect the location name spoken in every line that shows it. Log: `[VAR-EXPAND] ... "  has been under attack..." -> "Dollet has been under attack..."` and a `[VE-HEX]` line showing the raw bytes (the code between the words is the confirmation — expected 0x0C or 0x0D + param). Regression: ordinary dialog unchanged. If the name appears but is WRONG, the resolver index (param-0x20) is off — send the `[VE-HEX]`.
+
+## v0.18.3.244
+
+**#78 (new): field location/name inserts dropped — "Dollet" missing from Xu's SeeD-mission briefing. Diagnostic build.**
+
+Aaron reports "Dollet" is not announced several times in Xu's briefing. Strong hypothesis: the same decoder gap as #77 but for the NAME/LOCATION insert codes rather than the number code. In the field text processor `sub_4B8B30`, the cases immediately after the 0x04 numeric case are name inserts:
+
+- `0x004B8C74` — code `0x0C`: reads a param, calls `sub_47E970` (location-name table: `[0x1CF4064]` for id<0x40, else `[0x1CFDCA8]`), returns an FF8 string, splices it in.
+- `0x004B8C8A` — code `0x0D`: reads a param, calls `sub_47EA30` (name table `[0x1CF7778]`), same splice.
+
+`FF8TextDecode::DecodeByte` handles neither: 0x0C consumes its param but emits nothing, 0x0D–0x1F emit nothing. So a location name inserted via these codes vanishes — exactly like the Tomb number did.
+
+Per the #77 lesson (two wrong disassembly theories → the byte dump solved it in one BAT), this build does NOT yet implement a fix. It **re-enables `[GETSTR-HEX]`** (`GETSTR_HEX_DIAG 1`, field_dialog_opcodes.inl, first 12 messages) so the next visit to Xu's briefing captures the raw bytes and proves which control code actually carries "Dollet". Once confirmed, the fix is a small extension of `FieldExpandRawVars` (#77's mechanism) — most robustly by calling the engine's own `sub_47E970` / `sub_47EA30` via function pointer to resolve the string, rather than re-deriving the table math.
+
+**BAT .244:** reach Xu's Dollet SeeD-mission briefing (a save at/just before it is ideal), let the lines play, and send `ff8_dialog.log`. The `[GETSTR-HEX]` line for a briefing sentence that should contain "Dollet" is the deliverable — its bytes tell us the code and param.
+
 ## v0.18.3.243
 
 **#77 VERIFIED + cleanup.** The .242 BAT passed and was confirmed against the display: TTS spoke "Student ID No. 135", the log read `[VAR-EXPAND] 1 insert(s): "Student ID No. ." -> "Student ID No. 135"`, and the F11 screenshot shows the game drawing exactly `"Student ID No. 135"`. Spoken text == rendered text.
