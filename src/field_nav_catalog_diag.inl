@@ -195,9 +195,17 @@ static void DumpPartyStateOnce()
 {
     if (s_partyDiagDumped) return;
     __try {
-        const uint8_t* f = (const uint8_t*)0x01CFE74C;
-        Log::Field("FieldNavigation: [party-state] formation = [%u, %u, %u, %u]",
-                   (unsigned)f[0], (unsigned)f[1], (unsigned)f[2], (unsigned)f[3]);
+        // v0.18.3.263 (#83): log BOTH the savemap party array (0x01CFE74C) and the
+        // FIELD controlled-party array the engine uses (0x01CFE990). In single-
+        // party play they match; in split-party scenes (Caraway) they diverge and
+        // the FIELD array is the team that follows you. This confirms which array
+        // holds the controlled/leader team (Quistis-led party 2 per Aaron).
+        const uint8_t* fSave  = (const uint8_t*)0x01CFE74C;
+        const uint8_t* fField = (const uint8_t*)0x01CFE990;
+        Log::Field("FieldNavigation: [party-state] savemap[0x1CFE74C] = [%u, %u, %u, %u]  "
+                   "FIELD[0x1CFE990] = [%u, %u, %u]",
+                   (unsigned)fSave[0], (unsigned)fSave[1], (unsigned)fSave[2], (unsigned)fSave[3],
+                   (unsigned)fField[0], (unsigned)fField[1], (unsigned)fField[2]);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         Log::Field("FieldNavigation: [party-state] exception reading formation array");
     }

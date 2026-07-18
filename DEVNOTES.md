@@ -11,7 +11,9 @@ Per-chapter history lives in `CHANGELOG.md` (authoritative, one entry per versio
 
 ## Where we are at session open
 
-**★ LATEST (v0.18.3.259 BAT PASSED, Aaron: "Much better!" — PUSH CANDIDATE. B-Garden→Balamb 11.3km/23s first attempt; inside the 1200u vehicle final circle: 53 ARC/6 FINAL/0 PIVOT/0 REVERSE — entry-aim orbit GONE (#68 comment posted). Engine vehicleId=33 first-tick again; last wedge burst 3km out. #79 CLOSED at .258. .254 = pushed HEAD c6e758d; .255–.259 local).** Remaining #68 vehicle item: mid-route terrain scrapes on pass legs (6 bursts, dist 3000–3900 corridor) — route clearance at car scale, likely offline work. Banked: 0x020409E0 = TRUE vehicle id (populated by catalog time; entry-tick reads 0); 0x02040A5E = footstep anim counter; 0x02040A68 = module-reload state.
+**★ LATEST (v0.18.3.260 LOCAL, NOT pushed — #82/#83 Caraway's Mansion `glfurin4` diagnostic, logging-only).** 2026-07-17 arrival = phantom "Exit to Dollet - Mountain Hideout 4" (#82: cat=3 Others MAP_EXIT, runtime-var dest; static scan left fabricated literal 325; VARBLOCK resolver only fixes SCREEN_BOUND lines) + party mis-filtered non-interactive though talkable (#83: talk-enable NOT in polled talkonoff 0x24B; Quistis spoke, dialog-log 19:02:28). New `field_nav_caraway_diag.inl` = per-frame CHANGE-ONLY `[CARAWAY-DIAG]` watcher on flag window 0x244..0x257. BAT: enter mansion, talk to each standing member, send ff8_field.log + ff8_dialog.log; align CHANGE lines to `[AMESW] Speaking`. No CHANGE = structural-fix path.
+
+**Prior (v0.18.3.259 PUSHED, HEAD 49f9d8b):** #79 exam-car auto-drive CLOSED (vehicleId 0x020409E0); #68 final-approach circle (=1200) killed the entry orbit. Next: #68 mid-route scrapes, offline first.
 
 **Previous (#77 closed at .243, #78 closed at .249):** field insert family fully mapped, all resolved in `FieldExpandRawVars` before `Decode()` — **0x04** numbers (value at `0x1D2B4B0+param*4`), **0x0C/0x0D** names (engine resolvers 0x47E970/0x47EA30 via fn ptr), **0x0E+** deferred shared-text table (ptr **0x01D2B80C** = `u16 count; u16 offsets[]; FF8 strings`). **Process rule:** two wrong theories → dump the bytes.
 

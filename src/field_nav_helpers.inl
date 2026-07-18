@@ -104,6 +104,46 @@ static bool IsCharacterInActiveParty(uint8_t charId)
     return false;
 }
 
+// v0.18.3.263 (#83 follow-up): FIELD controlled-party formation.
+//
+// 0x01CFE74C (above) is the SAVEMAP party formation -- also used by battle/menu/
+// junction TTS. But the FIELD engine decides which characters are the CONTROLLED
+// party (the leader + followers that make up the "party train") using a DIFFERENT
+// formation array at 0x01CFE990. Reverse-engineered from FF8_EN.exe: the SETPC /
+// party-entity setup opcode handler at 0x0051EC30 configures a field entity as a
+// party member iff its setpc byte matches one of the 3 slots of 0x01CFE990
+// (`cmp byte ptr [edi + 0x1cfe990], al; ... cmp edi, 3; jl`). Same array is used
+// by the sibling handlers at 0x0051ECF0 / 0x0051E8xx. In split-party scenes (the
+// Deling assassination arc: Caraway's Mansion) the two arrays diverge -- one team
+// follows you, the other stands in the room and is talkable. Reading the savemap
+// array (0x01CFE74C) there identifies the wrong team as "your party."
+//
+// Char ids: 0=Squall 1=Zell 2=Irvine 3=Quistis 4=Rinoa 5=Selphie ... 0xFF=empty.
+static bool IsInFieldControlledParty(uint8_t charId)
+{
+    if (charId == 0xFF) return false;
+    __try {
+        const uint8_t* formation = (const uint8_t*)0x01CFE990;
+        for (int i = 0; i < 3; i++)
+            if (formation[i] == charId) return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return false;
+}
+
+// v0.18.3.263 (#83 follow-up): character id of the FIELD party leader (the
+// on-field controlled character) = first non-empty slot of 0x01CFE990. Returns
+// 0xFF if the field party is unreadable / disbanded (e.g. a full-cutscene scene
+// where nobody follows), letting the caller fall back to setpc==0.
+static uint8_t GetFieldPartyLeaderChar()
+{
+    __try {
+        const uint8_t* formation = (const uint8_t*)0x01CFE990;
+        for (int i = 0; i < 3; i++)
+            if (formation[i] != 0xFF) return formation[i];
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return 0xFF;
+}
+
 // v0.14.107: Map a field-entity model ID to its FF8 character ID, or -1 if
 // the model isn't a party-character model.
 //

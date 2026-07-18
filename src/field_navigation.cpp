@@ -1209,6 +1209,10 @@ static bool WouldCrossTriggerLine(float px, float py, float dx, float dy, int sk
 // the 80 KB CI hard cap). See the .inl header for the full contract.
 #include "field_nav_battlepause.inl"
 
+// v0.18.3.260 (#83 diagnostic, LOCAL): per-frame talk-enable byte watcher for
+// Caraway's Mansion scene actors. Logging only. See the .inl header.
+#include "field_nav_caraway_diag.inl"
+
 void Update()
 {
     if (!s_initialized) return;
@@ -1217,6 +1221,11 @@ void Update()
     PollBattlePauseResume();
     if (!FF8Addresses::HasFieldStateArrays()) return;
     if (!FF8Addresses::IsOnField()) return;
+
+    // v0.18.3.260 (#83 diagnostic): per-frame, change-only entity-flag watcher
+    // on glfurin4. Must run BEFORE the 500ms throttle below so a transient
+    // talk-enable byte cannot slip between samples. No-op off glfurin4.
+    CarawaySceneDiagTick();
 
     // Key handling and auto-drive are unthrottled: runs every ~16ms.
     HandleKeys();

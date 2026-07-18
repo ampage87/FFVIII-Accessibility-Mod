@@ -604,14 +604,45 @@ static void Run(const char* fieldName,
         } else if (anyResolved) {
             resolved++;
             int32_t newParam = (bestLiteral != -1) ? bestLiteral : bestMarker;
-            Log::Field("FieldArchive: [MAPJUMP-RES] %s ent%d '%s' (%s): "
-                       "would-be param 0x%08X%s -- not a SCREEN_BOUND line, "
-                       "diagnostic only",
-                       fieldName, ei, info.symName,
-                       JSMEntityTypeName(info.type),
-                       (unsigned)newParam,
-                       (bestLiteral != -1) ? " [LITERAL]" :
-                       (bestMarker  != -1) ? " [VARBLOCK]" : "");
+            // v0.18.3.265 (#82): adopt the VARBLOCK marker for an UNPOSITIONED
+            // cat=3 Others MAP_EXIT whose destination is runtime-supplied.
+            //
+            // The per-opcode scanner takes mapjumpDestField from a push-stack slot,
+            // so for a runtime-variable destination it fabricates a bogus LITERAL
+            // (glfurin4 ent4 'rinoa' -> 325 = "Dollet - Mountain Hideout 4"). The
+            // resolver already knows better -- it derived VARBLOCK marker
+            // 0x800002D6 -- but only rewrote info.param for SCREEN_BOUND lines, so
+            // the garbage literal survived. Because 325 is a VALID in-range field
+            // id, the catalog's dead-exit suppression (param < 0 || param >=
+            // FIELD_DISPLAY_NAMES_COUNT) never fired and a phantom exit to an
+            // unrelated map was the only entry in the room.
+            //
+            // Adopting the marker (bit31 set => negative param) lets that existing
+            // suppression drop it. Deliberately narrow -- MAP_EXIT + marker-only
+            // (no literal was truly resolved) + !hasPosition -- so no positioned
+            // real exit can regress. A positioned runtime-var exit keeps its
+            // position and simply degrades to a generic "Exit" label instead of a
+            // fabricated destination name, which is also the correct outcome.
+            if (info.type == JSM_ENT_MAP_EXIT &&
+                bestLiteral == -1 && bestMarker != -1 && !info.hasPosition) {
+                int32_t oldParam = info.param;
+                info.param = bestMarker;
+                paramUpdates++;
+                Log::Field("FieldArchive: [MAPJUMP-RES] %s ent%d '%s' (Map Exit): "
+                           "param 0x%08X -> 0x%08X [VARBLOCK adopted -- unpositioned "
+                           "runtime-var dest, fabricated literal discarded]",
+                           fieldName, ei, info.symName,
+                           (unsigned)oldParam, (unsigned)bestMarker);
+            } else {
+                Log::Field("FieldArchive: [MAPJUMP-RES] %s ent%d '%s' (%s): "
+                           "would-be param 0x%08X%s -- not a SCREEN_BOUND line, "
+                           "diagnostic only",
+                           fieldName, ei, info.symName,
+                           JSMEntityTypeName(info.type),
+                           (unsigned)newParam,
+                           (bestLiteral != -1) ? " [LITERAL]" :
+                           (bestMarker  != -1) ? " [VARBLOCK]" : "");
+            }
         } else {
             unresolved++;
         }

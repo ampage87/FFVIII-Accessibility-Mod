@@ -33,10 +33,61 @@ static void RefreshCatalog()
         uint8_t lim = (entCount < MAX_ENTITIES) ? entCount : (uint8_t)MAX_ENTITIES;
 
         // Re-detect player.
+        // v0.18.3.262 (#83 follow-up): the player controls the party LEADER, which
+        // is formation[0] -- NOT necessarily Squall (setpc 0). The old setpc==0
+        // rule mis-identified the player whenever Squall was not the leader (e.g.
+        // Caraway's Mansion party led by Irvine, formation [2,0,3]): it pointed
+        // s_playerEntityIdx at Squall's follower entity, so the real controlled
+        // character (Irvine) was treated as a catalog NPC and player-relative
+        // navigation used the wrong entity's position. Match the leader's setpc;
+        // fall back to setpc==0, then entity 0, if the formation is unreadable.
+        {
+            // v0.18.3.263: leader = first slot of the FIELD controlled-party array
+            // (0x01CFE990, the one the engine uses), NOT the savemap array. In the
+            // split-party Caraway arc these differ, so the old read pointed at the
+            // wrong team's leader. Fall back to setpc==0, then entity 0.
+            uint8_t leaderChar = GetFieldPartyLeaderChar();
+            int found = -1, foundSquall = -1;
+            for (int i = 0; i < (int)lim; i++) {
+                uint8_t setpc = *(base + ENTITY_STRIDE * i + 0x255);
+                if (leaderChar != 0xFF && setpc == leaderChar) { found = i; break; }
+                if (setpc == 0 && foundSquall < 0) foundSquall = i;
+            }
+            if (found < 0) found = (foundSquall >= 0) ? foundSquall : 0;
+            s_playerEntityIdx = found;
+        }
+
+        // v0.18.3.264 (#83 follow-up): detect an ASSEMBLY scene.
+        //
+        // The field controlled-party roster (0x01CFE990) tells us who the "party
+        // train" is, but NOT whether they are currently FOLLOWING (walking field)
+        // or STANDING as interactable scene actors (gather scene). In Caraway's
+        // Mansion the roster [Squall,Irvine,Rinoa] is placed at distinct scripted
+        // positions and every member is talkable; filtering them by roster hid the
+        // interactable ones. Their per-entity flags are identical to a follower's
+        // (talk=0 push=0 thru=0), so nothing on the entity distinguishes the two
+        // modes.
+        //
+        // What DOES distinguish them: a walking field instantiates ONLY the
+        // controlled party; an assembly scene also places party characters that
+        // are NOT in the controlled roster (the other team / extra members). So if
+        // any placed party-character entity's setpc is NOT in the field roster, the
+        // party is assembled/standing, and the roster members are talkable too.
+        // (glfurin4: Zell/Quistis/Selphie are placed and not in [0,2,4] -> assembly.
+        //  glfury1: only the roster [2,0,3] is present -> following, filter them.)
+        bool sceneAssembly = false;
         for (int i = 0; i < (int)lim; i++) {
             uint8_t setpc = *(base + ENTITY_STRIDE * i + 0x255);
-            if (setpc == 0) { s_playerEntityIdx = i; break; }
+            if (!IsPartyCharacterSetpc(setpc)) continue;
+            if (IsInFieldControlledParty(setpc)) continue;   // in the roster
+            uint16_t tri = *(uint16_t*)(base + ENTITY_STRIDE * i + 0x1FA);
+            int32_t  fx  = *(int32_t*)(base + ENTITY_STRIDE * i + 0x190);
+            int32_t  fy  = *(int32_t*)(base + ENTITY_STRIDE * i + 0x194);
+            if (tri > 0 || fx != 0 || fy != 0) { sceneAssembly = true; break; }
         }
+        if (!s_scanTraced)
+            Log::Field("FieldNavigation: [party-state] sceneAssembly=%d (placed non-roster party char present)",
+                       sceneAssembly ? 1 : 0);
 
         // One-shot diagnostic dumps (extracted v0.17.7.0).
         // See field_nav_catalog_diag.inl. Each helper no-ops on subsequent calls.
@@ -169,10 +220,55 @@ static void RefreshCatalog()
                 // still lists — the entity SHOW/HIDE flag was never located
                 // (v05.69 VISDIAG investigation closed without a result).
                 // Needs a per-session flag-discovery diagnostic on bg2f_2.
+                // v0.18.3.263 (#83 follow-up): use the FIELD controlled-party
+                // array (0x01CFE990), not the savemap array. This is how the game
+                // itself distinguishes a following party member from an
+                // interactable one: the controlled team's setpc values are in
+                // 0x01CFE990; the OTHER team standing in the room is not, so its
+                // members fall through to the talkable-scene-actor path. Fixes both
+                // the whole-party over-listing (the walking train is the field
+                // party) and the split-party leader confusion.
                 bool inActiveParty = isPartyChar &&
-                                     IsCharacterInActiveParty(setpc);
-                if (i != s_playerEntityIdx && isPartyChar &&
-                    (noInteract || inActiveParty)) {
+                                     IsInFieldControlledParty(setpc);
+                // v0.18.3.261 (#83): CORRECTED talk-suppress polarity, scoped to
+                // the party-filter keep decision. Disassembly of FF8_EN.exe proved
+                // the talk-selection routine (0x004796E0) SKIPS an entity whose
+                // 0x24B byte is nonzero and considers it only when 0x24B==0 --
+                // TALKON writes 0, TALKOFF writes 1. So 0x24B==0 is TALK-ENABLED,
+                // the opposite of the mod's historic `talkonoff>0` reading.
+                //
+                // v0.18.3.262 (#83 follow-up): a talkable scene actor must be a
+                // NON-active-party member. The active-party entities are the field
+                // "party train" -- the controlled leader plus its followers -- and
+                // they read talkonoff==0 too (the untouched default), so an earlier
+                // `talkonoff==0`-only rule listed the whole walking party as NPCs in
+                // every normal field (glfury1: Irvine/Squall/Quistis all kept). The
+                // talk byte cannot separate a following active member from an
+                // interactable one, so we gate on roster membership instead:
+                //   - NON-active party char, placed, not suppressed (talkonoff==0)
+                //     -> talkable SCENE ACTOR, keep and name (glfurin4 Quistis/Zell/
+                //     Selphie -- the #83 case).
+                //   - Active-party char (leader or follower) -> filtered as the
+                //     party train (fixes the glfurin4-fix regression on glfury1).
+                // Tradeoff: active members that happen to be talkable in a gather
+                // scene (glfurin4 Irvine/Rinoa) are not surfaced -- acceptable vs.
+                // listing the whole party in every walk-around field.
+                // "Placed" (tri or fp nonzero) guards against unplaced ghost slots.
+                //
+                // v0.18.3.264 (#83 follow-up): in an ASSEMBLY scene (sceneAssembly),
+                // the roster members are STANDING and interactable, so keep them
+                // too -- only the player (controlled character) is excluded, since
+                // you cannot talk to yourself. In a walking field (not assembly) the
+                // roster is the follow train and is filtered. A non-roster placed
+                // party char is always a talkable scene actor.
+                bool isPlayer = (i == s_playerEntityIdx);
+                bool placed = (triId > 0) || (fpX != 0 || fpY != 0);
+                bool talkableActor = !isPlayer && placed && (talkonoff == 0) &&
+                                     (modelId >= 0) &&
+                                     (!inActiveParty || sceneAssembly);
+                // The player (leader) is always filtered: never a catalog target.
+                if (isPartyChar && !talkableActor &&
+                    (noInteract || inActiveParty || isPlayer)) {
                     const char* pn = PartyCharacterNameById(setpc);
                     Log::Field("FieldNavigation: [party-filter] ent%d model=%d setpc=%d (%s) "
                                "sym='%s' filtered (party member; thru=%d inParty=%d noInteract=%d)",
@@ -949,145 +1045,13 @@ static void RefreshCatalog()
                        jtName, (int)je.posX, (int)je.posY, je.symName);
         }
 
-        // v0.07.83: Entity-based exits from JSM_ENT_MAP_EXIT "Other" entities.
-        // These are interactive objects (elevators, doors, trigger zones) whose
-        // scripts contain MAPJUMP. They have destination field IDs in param.
-        // Position from SET3 extraction or runtime entity, or captured SETLINE.
-        for (int j = 0; j < s_jsmEntityCount && newCount < MAX_CATALOG; j++) {
-            const FieldArchive::JSMEntityInfo& je = s_jsmEntities[j];
-            if (je.type != FieldArchive::JSM_ENT_MAP_EXIT) continue;
-            // Skip if already in catalog as a runtime entity or trigger line exit.
-            bool alreadyInCatalog = false;
-            for (int c = 0; c < newCount; c++) {
-                if (newCatalog[c].type == ENT_EXIT) { 
-                    // Check if this JSM entity's destination matches an existing exit.
-                    // Also check if the SYM name matches a runtime entity already added.
-                    if (newCatalog[c].entityIdx <= -200) {
-                        // Trigger line exit — check destination.
-                        int ti = -(newCatalog[c].entityIdx + 200);
-                        if (ti >= 0 && ti < s_capturedLineCount &&
-                            s_capturedLines[ti].destFieldId == je.param) {
-                            alreadyInCatalog = true; break;
-                        }
-                    }
-                }
-            }
-            if (alreadyInCatalog) continue;
-            // Resolve destination name.
-            char exitName[48];
-            int destId = je.param;
-            if (destId >= 0 && destId < FIELD_DISPLAY_NAMES_COUNT) {
-                snprintf(exitName, sizeof(exitName), "Exit to %s", FIELD_DISPLAY_NAMES[destId]);
-            } else if (destId == -2) {
-                strncpy(exitName, "Exit to World Map", sizeof(exitName) - 1);
-            } else {
-                strncpy(exitName, "Exit", sizeof(exitName) - 1);
-            }
-            exitName[sizeof(exitName) - 1] = '\0';
-            // Find position: try matching captured SETLINE by entity address range,
-            // or use SET3 position from JSM scan.
-            float exitX = 0, exitY = 0;
-            bool hasPos = false;
-            if (je.hasPosition) {
-                exitX = (float)je.posX;
-                exitY = (float)je.posY;
-                hasPos = true;
-            }
-            // v0.07.84: If no SET3 position, try matching SYM name to a captured
-            // SETLINE entity. "Other" entities that call SETLINE (e.g. saveline0
-            // elevator trigger) have their SETLINE coordinates captured at runtime
-            // with accurate positions, even when SET3 extraction fails.
-            if (!hasPos && je.symName[0] != '\0' && base) {
-                uint32_t baseAddr = (uint32_t)(uintptr_t)base;
-                for (int t = 0; t < s_capturedLineCount; t++) {
-                    uint32_t lineEntAddr = s_capturedLines[t].entityAddr;
-                    // Check if this captured line belongs to an Others entity.
-                    if (lineEntAddr >= baseAddr &&
-                        lineEntAddr < baseAddr + ENTITY_STRIDE * lim) {
-                        int entIdx = (int)((lineEntAddr - baseAddr) / ENTITY_STRIDE);
-                        int symIdx = s_symOthersOffset + entIdx;
-                        if (symIdx >= 0 && symIdx < s_symNameCount &&
-                            _stricmp(s_symNames[symIdx], je.symName) == 0) {
-                            exitX = (float)(s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2.0f;
-                            exitY = (float)(s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2.0f;
-                            hasPos = true;
-                            // v0.07.87: Write position back to JSM entity so
-                            // AnnounceDirections can read it for compass.
-                            s_jsmEntities[j].posX = (int16_t)exitX;
-                            s_jsmEntities[j].posY = (int16_t)exitY;
-                            s_jsmEntities[j].hasPosition = true;
-                            Log::Field("FieldNavigation: [refresh] MAP_EXIT '%s' position from SETLINE center (%.0f,%.0f)",
-                                       je.symName, exitX, exitY);
-                            break;
-                        }
-                    }
-                }
-            }
-            // Screen filter: skip exits on the other side of trigger lines.
-            if (hasPos && s_capturedLineCount > 0 && s_playerEntityIdx >= 0) {
-                float plX = 0, plY = 0;
-                if (GetEntityPos(s_playerEntityIdx, plX, plY)) {
-                    if (IsSeparatedByTriggerLine(plX, plY, exitX, exitY))
-                        continue;
-                }
-            }
-            // v0.17.8.6: Suppress dead positionless exits with unresolved
-            // destinations. bgryo2_1 ent15 'l1' is a JSM_ENT_MAP_EXIT with no
-            // SET3/SETLINE position and param=INT_MIN (0x80000000 -- a runtime-var
-            // destination the static scan could not resolve). On a field with no
-            // INF gateways the gateway-suppression check below never fires, so
-            // without this the entity injects a bare second "Exit" with no
-            // position -- the duplicate, useless exit Aaron reported. An exit that
-            // has neither a navigable position nor a resolvable/world-map
-            // destination cannot be driven to or named; drop it. (param==-2 is the
-            // world-map sentinel and is kept.)
-            if (!hasPos && je.param != -2 &&
-                (je.param < 0 || je.param >= FIELD_DISPLAY_NAMES_COUNT)) {
-                Log::Field("FieldNavigation: [refresh] MAP_EXIT '%s' dropped: "
-                           "no position, unresolved dest (param=%d)",
-                           je.symName, je.param);
-                continue;
-            }
-            EntityInfo mapExit = {};
-            // v0.07.95: Suppress JSM exits with runtime-resolved destinations
-            // when INF gateways exist on this field. The INF gateway system
-            // handles those same physical exits with proper static destinations.
-            // v0.08.01: Bit31 marker check. PSHM_W-sourced MAPJUMP destinations
-            // have bit31 set (negative values). Also check param > 982 for
-            // the 0x00FFxx markers that survived before the bit31 change.
-            if (s_gatewayCount > 0 && (je.param < 0 || je.param > 982))
-                continue;
-
-            // v0.12.08 Fix A: Filter JSM exit destinations against INF gateways.
-            // When a field has INF gateways, they define the known valid exits.
-            // If a JSM MAP_EXIT destination doesn't match any INF gateway destination,
-            // it's likely a stale runtime variable value (PSHM_W) and should be skipped.
-            // (e.g., "Exit to Dollet Comms Tower" appearing in B-Garden hallways)
-            if (s_gatewayCount > 0) {
-                bool destMatchesGateway = false;
-                for (int gi = 0; gi < s_gatewayCount; gi++) {
-                    if (s_gateways[gi].destFieldId == (uint16_t)je.param) {
-                        destMatchesGateway = true;
-                        break;
-                    }
-                }
-                if (!destMatchesGateway) {
-                    Log::Field("FieldNavigation: [catalog] JSM exit '%s' dest=%d filtered "
-                               "(no matching INF gateway on this field)",
-                               je.symName, je.param);
-                    continue;
-                }
-            }
-
-            mapExit.entityIdx  = -300 - j;  // JSM-injected sentinel
-            mapExit.modelId    = -1;
-            mapExit.triangleId = je.posTriangle;
-            mapExit.type       = ENT_EXIT;
-            mapExit.gatewayIdx = -1;
-            strncpy(mapExit.name, exitName, sizeof(mapExit.name) - 1);
-            mapExit.name[sizeof(mapExit.name) - 1] = '\0';
-            newCatalog[newCount++] = mapExit;
-        }
+        // v0.07.83 JSM_ENT_MAP_EXIT catalog injection. Extracted to
+        // field_nav_catalog_mapexits.inl (v0.18.3.266) to keep this file under
+        // the CI source-file size ceiling (hard fail > 80 KB); the fragment runs
+        // inline here (own braces) and operates on the local newCatalog[]/
+        // newCount and the surrounding scan state. Pure textual move — no logic
+        // change. See that file for the full logic.
+        #include "field_nav_catalog_mapexits.inl"
 
         // v0.07.94: Add deduplicated INF gateway exits to catalog.
         // Group gateways by destFieldId, average their centers, create one

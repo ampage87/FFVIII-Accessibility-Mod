@@ -6,6 +6,131 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.266
+
+**Push blocker: `field_nav_catalog.inl` exceeded the 80 KB CI hard-fail ceiling. Split the JSM Map Exit injection block into its own `.inl` chunk.**
+
+**What happened.** The push utility's local mirror of the CI safety-checks refused the push:
+
+```
+The following source file(s) exceed the 80 KB CI hard-fail limit and must be split
+into .inl chunks before pushing:
+  field_nav_catalog.inl (82 KB)
+```
+
+`.github/workflows/safety-checks.yml` enforces a source-file size budget over `src/*.{cpp,inl}` — soft warning above 60 KB, hard fail above 80 KB, allowlist empty since v0.16.5. The v0.18.3.261–.265 work (#83 party-actor detection and #82 Map Exit suppression) added a substantial amount of commented rationale to `field_nav_catalog.inl` and pushed it from ~74 KB to 82 KB.
+
+**Change.** Extracted the `JSM_ENT_MAP_EXIT` catalog-injection block (the `for` loop that turns MAPJUMP-bearing "Others" entities into `ENT_EXIT` entries, resolves destination names, derives position from SET3/SETLINE, and filters dead/duplicate/off-screen exits) **verbatim** into new `src/field_nav_catalog_mapexits.inl`.
+
+This follows the established pattern already used twice in this same file — `field_nav_catalog_naming.inl` and `field_nav_catalog_dedupe.inl` (v0.17.8.9, extracted for exactly this reason). The fragment is **not** a standalone function: it is `#include`d inline at the point the block used to occupy, so it continues to operate directly on `RefreshCatalog()`'s locals (`newCatalog[]`/`newCount`, `base`/`lim`, `s_jsmEntities[]`, `s_capturedLines[]`, `s_gateways[]`, `s_symNames[]`, `s_playerEntityIdx`). **Pure textual move — zero logic change**; the boundaries were verified brace-balanced (the extracted region sat between two sibling loops at the same nesting level).
+
+**Result:** `field_nav_catalog.inl` 1376 → 1244 lines, ~82 KB → ~74 KB, back under the hard-fail ceiling. It remains above the 60 KB soft warning, which the project already tolerates for `field_archive_jsm_scan.inl` (documented accepted exception); a further split can clear that later if desired.
+
+**BAT .266:** this is a refactor with no behavioural change, so the check is that it still **builds** and that the #82/#83 results from .265 are unchanged — re-enter Caraway's Mansion (`glfurin4`): five party members list as named talkable NPCs, Squall does not, and there is no "Exit to Dollet - Mountain Hideout" entry. Then the push should pass the size guard.
+
+## v0.18.3.265
+
+**#82: phantom "Exit to Dollet - Mountain Hideout 4" on Caraway's Mansion (`glfurin4`) — the mapjump resolver now propagates its VARBLOCK knowledge to cat=3 Others Map Exits. Also disables the #83 Caraway diagnostic.**
+
+**Root cause (as diagnosed in #82).** JSM entity 4 (`rinoa`) on `glfurin4` is a cat=3 "Others" `JSM_ENT_MAP_EXIT` whose MAPJUMP destination is supplied at runtime from a field variable (varblock `0x02D6`). Two things collided: (1) the per-opcode scanner takes `mapjumpDestField` from a push-stack slot, so for a runtime-variable destination it fabricated a **bogus literal, 325** — a valid in-range field id that `FIELD_DISPLAY_NAMES` renders as "Dollet - Mountain Hideout 4"; (2) the authoritative resolver correctly derived the VARBLOCK marker `0x800002D6`, but only rewrote `info.param` for `JSM_ENT_LINE_SCREEN_BOUND` entities, logging "diagnostic only" and leaving the garbage literal in place. Because 325 is in range, the catalog's dead-exit suppression (`param < 0 || param >= FIELD_DISPLAY_NAMES_COUNT`, v0.17.8.6) never fired — so a phantom exit to an unrelated map was the only entry in the room.
+
+**Change (`field_archive_jsm_mapjump_resolver.inl`).** In the non-SCREEN_BOUND branch, when the entity is a `JSM_ENT_MAP_EXIT` that resolved to a **marker only** (`bestLiteral == -1 && bestMarker != -1`) **and is unpositioned** (`!hasPosition`), adopt the marker into `info.param` instead of leaving the fabricated literal. The marker has bit31 set, so `param` goes negative and the existing v0.17.8.6 suppression drops it. Deliberately narrow — MAP_EXIT + marker-only + unpositioned — so no positioned real exit can regress; a *positioned* runtime-var exit keeps its position and simply degrades to a generic "Exit" label instead of a fabricated destination name, which is also correct.
+
+**Cleanup.** `CARAWAY_SCENE_DIAG` set to 0 (`field_nav_caraway_diag.inl`). The per-frame glfurin4 flag watcher did its job for #83 — establishing that NO byte in the `0x244..0x257` window flips when a scene actor becomes talkable, which redirected the work to the engine (talk-selection routine `0x004796E0` and the inverted `0x24B` polarity). The file keeps its `#else` no-op stub, so the call site is unaffected.
+
+**Still open (latent, from #82's secondary note):** the two field-name tables disagree for id 325 — the scan log printed `dest=bgkote1a` (`GetFieldNameById`) while the catalog announced "Dollet - Mountain Hideout 4" (`FIELD_DISPLAY_NAMES`). Harmless now that the phantom is suppressed, but the mapping inconsistency is worth reconciling separately.
+
+**BAT .265:**
+- Re-enter Caraway's Mansion (`glfurin4`): the catalog must have **no** "Exit to Dollet - Mountain Hideout" entry. Expect `[MAPJUMP-RES] glfurin4 ent4 'rinoa' (Map Exit): param 0x00000145 -> 0x800002D6 [VARBLOCK adopted ...]` followed by `[refresh] MAP_EXIT 'rinoa' dropped: no position, unresolved dest`.
+- Confirm the #83 party behaviour still holds on this field (the five talkable members list; Squall does not).
+- Regression: a field with a real positioned JSM Map Exit still lists it with the correct destination name (e.g. the dormitory/hallway exits used for the v0.17.9.6 interpreter validation, `bgryo2_1`→228 / `bgroad_5`→245).
+- `[CARAWAY-DIAG]` lines should no longer appear anywhere.
+
+## v0.18.3.264
+
+**#83 follow-up: assembly-scene detection so interactable roster members are kept in gather scenes while the follow train stays filtered in normal fields.**
+
+**Why .263 wasn't enough.** The `[party-state]` log confirmed the two arrays: in Caraway's Mansion (`glfurin4`) `savemap[0x1CFE74C]=[2,0,4]` and `FIELD[0x1CFE990]=[0,2,4]` — same three characters (Squall/Irvine/Rinoa), just reordered. So the field roster gate correctly identified the controlled party, but in this scene those three are STANDING at distinct scripted positions and every one is talkable. Filtering by roster hid the interactable Irvine/Rinoa. Every entity reads identical flags (`talk=0 push=0 thru=0`, all placed), so nothing on the entity separates a standing member from a following one — the difference is a runtime follow-vs-placed mode.
+
+**The discriminator.** A walking field instantiates ONLY the controlled party; an assembly/gather scene ALSO places party characters that are NOT in the controlled roster (the other team / extra members). So: if any placed party-character entity's setpc is NOT in the field roster (`0x01CFE990`), the party is assembled and standing — keep the roster members too (they're talkable), excluding only the player (you can't talk to yourself). If only the roster is present, they're the follow train and are filtered.
+- `glfurin4`: Zell/Quistis/Selphie are placed and not in `[0,2,4]` → assembly → keep Irvine/Rinoa/Zell/Selphie/Quistis; exclude Squall (player).
+- `glfury1`: only the roster `[2,0,3]` present → following → filter all.
+
+**Change (`field_nav_catalog.inl`):** a one-pass `sceneAssembly` check before the main scan; `talkableActor` now keeps a placed, non-suppressed, non-player party char when it's outside the roster OR the scene is an assembly. `[party-state]` logs `sceneAssembly=N`.
+
+**Known edge:** a normal walking field that also places a party-character NPC not in your party would read as an assembly and could list your two followers. Rare; the runtime dialog-confirmation layer prunes silent entries. If it bites, the follow-vs-placed state would need a dedicated engine flag (not yet located).
+
+**BAT .264:**
+- `glfurin4`: Irvine, Rinoa, Zell, Selphie, Quistis all list as named talkable NPCs; Squall (player) does not. Check `[party-state] sceneAssembly=1`.
+- `glfury1` / normal fields: no walking party members list; `sceneAssembly=0`.
+- Player-relative navigation still reads from the controlled character.
+
+## v0.18.3.263
+
+**#83 follow-up: the catalog was reading the wrong party formation array. Use the FIELD controlled-party array the engine actually follows — fixes split-party leader detection and is the real "how the game distinguishes an interactable party member."**
+
+**The insight (reverse-engineered from `FF8_EN.exe`).** There are two party formation arrays 0x244 bytes apart: `0x01CFE74C` (the SAVEMAP party — what battle/menu/junction TTS read) and `0x01CFE990` (the FIELD controlled party). The field engine decides which characters are the on-field "party train" (leader + followers) using **`0x01CFE990`**: the SETPC / party-entity setup handler at `0x0051EC30` configures a field entity as a party member iff its setpc matches one of the 3 slots of `0x01CFE990` (`cmp byte ptr [edi + 0x1cfe990], al; ... cmp edi,3; jl`), and the sibling handlers at `0x0051ECF0` / `0x0051E8xx` use the same array. In single-party play the two arrays match; in the split-party Deling assassination arc (Caraway's Mansion) they diverge — one team follows you, the other stands in the room. The mod read the savemap array, so it identified the wrong team as "your party" (reporting Irvine as leader when the field team is Quistis-led).
+
+**This is the engine's own answer to "which party members are interactable":** an entity is a following member (not a catalog target) exactly when its setpc is in `0x01CFE990`; a party character present in the field whose setpc is NOT in `0x01CFE990` is the other team standing around, i.e. a talkable scene actor. No geometry/heuristics needed.
+
+**Change (`field_nav_helpers.inl`, `field_nav_catalog.inl`):** added `IsInFieldControlledParty()` and `GetFieldPartyLeaderChar()` reading `0x01CFE990`; the catalog's player/leader detection and party-filter roster gate now use them. `IsCharacterInActiveParty()` (savemap `0x01CFE74C`) is left untouched for battle/menu. Expected effect: the walking party train filters out in normal fields (over-listing gone); the field leader is correct when Squall isn't leading; and in a gather scene where the party is disbanded (`0x01CFE990` doesn't list them) all present members fall through as talkable — which should restore glfurin4 Irvine/Rinoa alongside Quistis/Zell/Selphie.
+
+**Diagnostic:** `[party-state]` now logs BOTH arrays: `savemap[0x1CFE74C] = [...]  FIELD[0x1CFE990] = [...]`. This confirms which array holds the controlled/leader team.
+
+**BAT .263:**
+- `glfury1` / normal fields: the walking party (leader + followers) must NOT list as NPCs.
+- Read the `[party-state]` line in `ff8_field.log`: confirm `FIELD[0x1CFE990]` holds the team that follows you (Quistis-led per Aaron) and differs from `savemap[0x1CFE74C]` in the split scene.
+- `glfurin4`: confirm which members list (ideally all present talkable members).
+- Confirm player-relative navigation reads from the actual controlled character.
+- Sanity: a normal single-party field elsewhere still filters your 2 followers and doesn't drop real NPCs (both arrays should match there).
+
+## v0.18.3.262
+
+**#83 follow-up: fix two regressions from the .261 talkable-scene-actor change — whole-party over-listing in normal fields, and catalog confusion when Squall is not the party leader.**
+
+**Bug 1 — over-listing.** The .261 rule kept any placed party character with `talkonoff==0`. But active-party field entities (the controlled leader plus its followers — the "party train") also read `talkonoff==0` (the untouched default), so in normal walk-around fields the whole party listed as talkable NPCs. Log evidence (`glfury1`, formation `[2,0,3]` = Irvine/Squall/Quistis): all three kept via `[SCAN-KEEP] ... type=NPC`. The talk byte cannot separate a following active member from an interactable one, so talkability is now gated on **roster membership**: only a **non-active-party** party character (placed, `talkonoff==0`) is kept as a scene actor. Active members (leader + followers) filter out as the party train. This preserves the #83 primary case (`glfurin4` Quistis/Zell/Selphie are non-active) and drops the over-listing. Tradeoff: active members that are talkable in a specific gather scene (`glfurin4` Irvine/Rinoa) are no longer surfaced — acceptable versus listing the party in every field; surfacing them would need a scene-context signal the engine doesn't expose per-entity.
+
+**Bug 2 — non-Squall leader.** Player-entity detection used `setpc == 0` (Squall). The player actually controls the party **leader = `formation[0]`** (`0x01CFE74C`). When Squall wasn't the leader (Caraway's arc: Irvine leads, `formation[0]=2`), `s_playerEntityIdx` pointed at Squall's follower entity — so the real controlled character (Irvine, entity 1, matching the `[MAPJUMP-HOOK] player entity=1` oracle) was treated as a catalog NPC, and player-relative navigation (exit distances, walkmesh origin) used the wrong entity's position. Now matches the leader's setpc, falling back to `setpc==0` then entity 0 if the formation is unreadable.
+
+**Files:** `src/field_nav_catalog.inl` (player detection + talkableActor gate), `src/ff8_accessibility.h` (version).
+
+**BAT .262:**
+- `glfury1` / any normal field: the walking party (leader + 2 followers) must **not** list as NPCs; `[SCAN-KEEP]` should no longer show Squall/Irvine/Quistis as party NPCs. Navigation (exit distances) should read from the controlled character.
+- `glfurin4` (Caraway's Mansion): Quistis/Zell/Selphie still list as named talkable NPCs. (Irvine/Rinoa no longer listed — known tradeoff.)
+- Confirm player-relative announcements are correct while Irvine leads (not Squall).
+- `bgryo2_1` dorm / `bg2f_2`: party doubles/followers stay filtered.
+
+## v0.18.3.261
+
+**#83 (Caraway's Mansion `glfurin4`): fix — corrected `talkonoff` (0x24B) polarity in the party-filter. Playable-character scene actors now surface as named talkable NPCs.**
+
+**Root cause (reverse-engineered from `FF8_EN.exe`, imagebase 0x400000):** the engine's talk-target selection routine at **0x004796E0** (runs on confirm-press; walks the entity array at `[0x1D9CF88]`, stride 0x264) gates each entity on **`0x24B == 0`** — `0x00479798: mov al,[edi+ebp+0x24b]; test al,al; jne <next>` **skips** any entity whose 0x24B is nonzero. The opcode handlers confirm the polarity: **TALKON writes `0x24B = 0`** (0x0051EBB0), **TALKOFF writes `0x24B = 1`** (0x0051EBD0). So `0x24B == 0` is TALK-ENABLED — the exact opposite of the mod's historic `talkonoff > 0 == talkable` reading. The pulse the diagnostic saw at `0x24A` is the routine's OUTPUT (the chosen target: `0x00479913: mov [edi+eax*4+0x24a], cl`), not an enable flag. Quistis read `talk=0` and was filtered precisely because she was talkable.
+
+**Also established (so we don't chase dead ends again):** `glfurin4.jsm` contains **zero** dialogue opcodes and **zero** TALK-family opcodes — extracted and parsed directly from `field.fs`. Every actor's line is dispatched by the scene director via a runtime `0x1C` extended call (Quistis's talk method is literally `OP05 | OP1C | OP06`), so static dialogue-opcode detection and "non-empty method 1" both fail to identify these actors (method 1 is the universal main-loop; every entity in every field ends it with `0x1C`). The only per-entity discriminator with evidence is the corrected-polarity `0x24B` byte itself (Quistis `talk=0` = talkable; bg2f_2 follower Selphie `talk=1` = engine-suppressed).
+
+**Change (`src/field_nav_catalog.inl`, party-filter only — classification/walkmesh untouched):** a party character (setpc 0-7) that is **placed** (`tri>0` or `fp!=0`), has a model, and is **not talk-suppressed (`talkonoff == 0`)** is kept and named as a talkable scene actor — even if its setpc is in the active formation (glfurin4's active party is Irvine/Squall/Rinoa, and both Irvine and Rinoa are talkable in the wait scene alongside non-active Quistis/Zell/Selphie). A follower is engine-suppressed (`talkonoff != 0`) and still filters out via the existing `noInteract`/in-active-party paths.
+
+**BAT .261 (regression-sensitive — the fix trusts followers/doubles read `talk!=0` at scan time):**
+- `glfurin4` (target): all present party members — Squall, Zell, Irvine, Selphie, Quistis, Rinoa — should list as named talkable NPCs; talking to each still works.
+- `bgryo2_1` (pre-SeeD dorm — KEY regression): the Zell/Selphie scene doubles must **stay filtered**. If they now list, they read `talk=0` and need an added discriminator.
+- Normal town with 2 active followers: followers must **not** list (should read `talk!=0`).
+- `bg2f_2` post-join Selphie follower: stays filtered (`talk=1`).
+- `ggroom1` Quistis: still listed once control returns (she is `talk=0` when interactive).
+
+Watch the `[party-filter]` log lines: any actor wrongly kept/dropped shows there.
+
+## v0.18.3.260
+
+**#82 / #83 (Caraway's Mansion `glfurin4`): diagnostic build — locate the scene talk-enable byte. LOCAL, logging-only, zero behavior change.**
+
+**Context (2026-07-17 playtest):** arriving inside Caraway's Mansion, the field catalog listed only a phantom "Exit to Dollet - Mountain Hideout 4" and none of the party members appeared as interactive. Investigation (#82, #83): (a) the phantom exit is JSM ent4 'rinoa', a cat=3 Others MAP_EXIT whose destination is a runtime variable (VARBLOCK 0x02D6) — the static scanner left a fabricated in-range literal (325) and the VARBLOCK-aware resolver only corrects SCREEN_BOUND lines, so the garbage survived; (b) the party members ARE talkable (ff8_dialog.log 19:02:28 — Aaron talked to Quistis), but every catalog scan reads talk=0 and the runtime seen-talkable latch never caught them, so the party-filter deleted them. The engine's talk-enable state for these scene actors is not in the polled talkonoff byte (0x24B).
+
+**Change (new `src/field_nav_caraway_diag.inl`, included from field_navigation.cpp before Update):** `CarawaySceneDiagTick()` runs every frame while on `glfurin4` (before the 500ms throttle, so a transient flag cannot slip between samples) and logs, CHANGE-ONLY, a 20-byte interaction-flag window (0x244..0x257, bracketing push@0x249 / talk@0x24B / thru@0x24C / setpc@0x255) for every "others" entity slot, plus a one-time baseline per slot. `[CARAWAY-DIAG]` lines. `#define CARAWAY_SCENE_DIAG 1` gates the whole file; no info.*/catalog mutation, no other field touched.
+
+**Decisive either way:** if a window byte flips at the instant an actor becomes talkable → that is the signal the catalog must read (fix #83 by monitoring it beside talkonoff); if NOTHING flips → the engine allows confirm-talk unconditionally for non-active-party playable-character scene actors → structural fix (keep them as named talkable NPCs, prune via the runtime dialog layer).
+
+**BAT .260:** rebuild via deploy.vbs, confirm 0.18.3.260. Load the save just before Caraway's Mansion (or re-enter it). On entry the log prints `[CARAWAY-DIAG] armed on 'glfurin4' ...` and one `baseline slot..` per entity. Then walk up to Quistis (and Zell/Selphie) and talk to each; if the game opens the two room exits later in the scene, keep playing through those beats. Send `Logs/ff8_field.log` + `Logs/ff8_dialog.log`. Read the `[CARAWAY-DIAG] CHANGE` lines whose timestamps line up with each `[AMESW] Speaking: "<name> ..."` in the dialog log — the changed offset(s) are the talk-enable candidate. If there are NO CHANGE lines around the talk, that confirms the structural-fix path.
+
 ## v0.18.3.259
 
 **#68: vehicle final-approach circle — inside ~1200u of the aim the car never stops to pivot; it keeps moving and arc-steers across the entry trigger.**
