@@ -1,3 +1,4 @@
+#pragma once
 // Field ID -> disambiguated display name.
 // Generated from ff8-speedruns/ff8-memory mapId.md.
 // Names shared by multiple field IDs have sequential numbers appended (ascending field ID order).

@@ -95,6 +95,7 @@ static void RefreshCatalog()
         DumpExtendedEntityScanOnce(base, entCount);   // v0.18.3.231 DIAG
         DumpBgDiagOnce(lim);
         DumpPartyStateOnce();
+        DumpPuzzleDiagOnce();      // v0.18.3.267: glass/statue puzzle objects
         DumpCoordDiagOnce(base, lim);
 
         // Build set of currently-qualifying entity indices.
@@ -286,6 +287,30 @@ static void RefreshCatalog()
             // zero misses, navigation intact). Draw-point safety holds by
             // construction: 'drpoint' is not a character name and has thru=0, so
             // neither the follower nor the named-party branch touches it.
+
+            // v0.18.3.269 (#71): HIDDEN-ENTITY filter. The SHOW/HIDE flag is
+            // entity flags dword @0x160, bit 3 (0x08): HIDE sets it, SHOW clears
+            // it. Found by resolving the engine's opcode table (base 0x00B8DE94,
+            // validated against [0x57]=TALKON/[0x58]=TALKOFF): SHOW (opcode 0x60)
+            // @0x0051EAD0 does `and ecx,0xFFFFFFF7`, HIDE (opcode 0x61)
+            // @0x0051EB40 does `or ecx,8`, both on [entity+0x160].
+            //
+            // This is the flag the v05.69 VISDIAG investigation failed to locate.
+            // Without it the catalog announces actors that are scripted into the
+            // scene but not yet drawn -- e.g. Zell and Selphie listed on the
+            // Caraway statue screen (glfurin3) before they appear, which only
+            // happens once the glass is placed. Same root cause as the #71
+            // "not-yet-recruited scene actor parked invisible pre-scene" gap.
+            {
+                uint32_t entFlags = *(uint32_t*)(block + 0x160);
+                if ((entFlags & 0x08) != 0 && i != s_playerEntityIdx) {
+                    if (!s_scanTraced)
+                        Log::Field("FieldNavigation: [SCAN-DROP] ent%d sym='%s' hidden "
+                                   "(flags@0x160=0x%08X bit3 set by HIDE) -- skipped",
+                                   i, symName, (unsigned)entFlags);
+                    continue;
+                }
+            }
 
             // v0.17.7.1: Walkmesh exclusion rule.
             //
@@ -765,10 +790,41 @@ static void RefreshCatalog()
         // ordering. fepic1's three exit Lines (MAPJUMP only, no dialog, no
         // talk setup) stay LINE_SCREEN_BOUND and are added as Exits above
         // rather than mislabeled here.
-        if (s_capturedLineCount > 0 && s_playerEntityIdx >= 0) {
+        // v0.18.3.268 BUG A: GetEntityPos() returns false when the player's tri
+        // id is 0 ("not yet placed") -- normal on close-up screens where coords
+        // are still valid. glfurin3 (statue) reads tri=0, so the old
+        // `if (GetEntityPos(...))` wrapper skipped EVERY interaction there.
+        // Position is only needed for the screen-side filter below, so degrade
+        // to "no filtering" rather than dropping everything.
+        if (s_capturedLineCount > 0) {
             float intPlayerX = 0, intPlayerY = 0;
-            if (GetEntityPos(s_playerEntityIdx, intPlayerX, intPlayerY)) {
+            const bool gotIntPlayer = (s_playerEntityIdx >= 0) &&
+                                      GetEntityPos(s_playerEntityIdx, intPlayerX, intPlayerY);
+            {
                 int interactionNum = 0;
+                // v0.18.3.268: solo-interaction naming. With exactly ONE active
+                // interactive line, that line IS the field's puzzle object, so
+                // name it rather than "Interaction 1". 'megami' outranks 'cup':
+                // the statue screen holds both, but the interaction is the
+                // statue. With 2+ lines the pairing is ambiguous -- keep generic.
+                const char* soloName = nullptr;
+                {
+                    int nInter = 0;
+                    for (int t2 = 0; t2 < s_capturedLineCount; t2++)
+                        if (s_capturedLines[t2].active &&
+                            s_capturedLines[t2].lineType == FieldArchive::JSM_ENT_LINE_INTERACTIVE)
+                            nInter++;
+                    if (nInter == 1) {
+                        bool hasStatue = false, hasGlass = false;
+                        for (int j2 = 0; j2 < s_jsmEntityCount; j2++) {
+                            if (s_jsmEntities[j2].type != FieldArchive::JSM_ENT_INTERACTIVE_OBJECT) continue;
+                            if (_stricmp(s_jsmEntities[j2].symName, "megami") == 0) hasStatue = true;
+                            else if (_stricmp(s_jsmEntities[j2].symName, "cup") == 0) hasGlass = true;
+                        }
+                        if (hasStatue)      soloName = "Statue";
+                        else if (hasGlass)  soloName = "Glass";
+                    }
+                }
                 for (int t = 0; t < s_capturedLineCount && newCount < MAX_CATALOG; t++) {
                     if (!s_capturedLines[t].active) continue;
                     // v0.17.7.1.2 / v0.17.7.5.4 / v0.17.7.5.5: Accept
@@ -808,8 +864,32 @@ static void RefreshCatalog()
                     // Reachability: must be on same side of screen-boundary trigger lines.
                     float tcx = (float)(s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2.0f;
                     float tcy = (float)(s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2.0f;
-                    if (IsSeparatedByTriggerLine(intPlayerX, intPlayerY, tcx, tcy))
-                        continue;
+                    // v0.18.3.268 BUG B: BOUNDED segment-crossing test, not the
+                    // infinite-line side test. IsSeparatedByTriggerLine extends
+                    // every screen-bound line to infinity, so a short doorway
+                    // line elsewhere can falsely "separate" an interaction on the
+                    // far side -- the same over-reach fixed for INF gateways in
+                    // v0.17.8.10 via SegmentsCross, which this block never got.
+                    // glfurin1: line0's infinite extension filtered the glass
+                    // shelf's line1 while line2 (same side as player) survived.
+                    if (gotIntPlayer) {
+                        bool intCrossed = false;
+                        for (int dt = 0; dt < s_capturedLineCount && !intCrossed; dt++) {
+                            if (!s_capturedLines[dt].active) continue;
+                            if (dt == t) continue;   // never test a line against itself
+                            if (s_capturedLines[dt].lineType != FieldArchive::JSM_ENT_LINE_SCREEN_BOUND &&
+                                s_capturedLines[dt].lineType != FieldArchive::JSM_ENT_UNKNOWN)
+                                continue;
+                            if (SegmentsCross(intPlayerX, intPlayerY, tcx, tcy,
+                                              (float)s_capturedLines[dt].x1, (float)s_capturedLines[dt].y1,
+                                              (float)s_capturedLines[dt].x2, (float)s_capturedLines[dt].y2)) {
+                                intCrossed = true;
+                                Log::Field("FieldNavigation: [refresh] interaction line%d center=(%.0f,%.0f) "
+                                           "filtered: path crosses screen-bound line%d", t, tcx, tcy, dt);
+                            }
+                        }
+                        if (intCrossed) continue;
+                    }
                     // v0.17.8.8: If the scanner flagged this line's owning
                     // entity as a save line (own MENUSAVE, or REQ to a save
                     // point), surface it as "Save Point" not "Interaction N".
@@ -828,6 +908,24 @@ static void RefreshCatalog()
                             }
                         }
                     }
+                    // v0.18.3.272: never add a SECOND Save Point. The v0.17.8.8
+                    // trigger-line fallback was added because bghall_1's
+                    // 'savePoint' has PSHM-only X/Y and "never injects
+                    // standalone". It does now (it appears as runtime entity
+                    // ent6), so both paths fired and Hall 1 announced
+                    // "Save Point 1 of 2" / "2 of 2" for one physical save point.
+                    // Keep the fallback for fields where the entity genuinely
+                    // doesn't inject; skip it once one is already catalogued.
+                    if (lineIsSave) {
+                        bool haveSave = false;
+                        for (int c = 0; c < newCount; c++)
+                            if (newCatalog[c].type == ENT_SAVE_POINT) { haveSave = true; break; }
+                        if (haveSave) {
+                            Log::Field("FieldNavigation: [refresh] line%d save-line skipped: "
+                                       "Save Point already in catalog", t);
+                            continue;
+                        }
+                    }
                     EntityInfo intEntry = {};
                     intEntry.entityIdx  = -200 - t;  // same sentinel as exits -- position lookup works identically
                     intEntry.modelId    = -1;
@@ -842,7 +940,10 @@ static void RefreshCatalog()
                     } else {
                         interactionNum++;
                         intEntry.type = ENT_INTERACTION;
-                        snprintf(intEntry.name, sizeof(intEntry.name), "Interaction %d", interactionNum);
+                        if (soloName)
+                            snprintf(intEntry.name, sizeof(intEntry.name), "%s", soloName);
+                        else
+                            snprintf(intEntry.name, sizeof(intEntry.name), "Interaction %d", interactionNum);
                     }
                     newCatalog[newCount++] = intEntry;
                 }
@@ -1053,115 +1154,14 @@ static void RefreshCatalog()
         // change. See that file for the full logic.
         #include "field_nav_catalog_mapexits.inl"
 
-        // v0.07.94: Add deduplicated INF gateway exits to catalog.
-        // Group gateways by destFieldId, average their centers, create one
-        // catalog entry per unique destination. Skip gateways whose center is
-        // on the other side of a screen-boundary trigger line from the player.
-        // Also skip gateways whose destination already has a JSM-detected exit.
-        s_dedupGatewayCount = 0;
-        memset(s_dedupGateways, 0, sizeof(s_dedupGateways));
-        for (int g = 0; g < s_gatewayCount && s_dedupGatewayCount < MAX_DEDUP_GATEWAYS; g++) {
-            uint16_t destId = s_gateways[g].destFieldId;
-            // Find existing dedup group for this destination.
-            int groupIdx = -1;
-            for (int d = 0; d < s_dedupGatewayCount; d++) {
-                if (s_dedupGateways[d].destFieldId == destId) { groupIdx = d; break; }
-            }
-            if (groupIdx < 0) {
-                // New group.
-                groupIdx = s_dedupGatewayCount++;
-                s_dedupGateways[groupIdx].destFieldId = destId;
-                s_dedupGateways[groupIdx].centerX = 0;
-                s_dedupGateways[groupIdx].centerY = 0;
-                s_dedupGateways[groupIdx].count = 0;
-                // Resolve display name. Static INF destinations may be placeholders
-                // (overwritten at runtime by MAPJUMPO), so show generic "Exit" if
-                // the destination doesn't look like it belongs to this field's area.
-                // v0.07.95: World map fields (IDs 0-71) all say "World Map" instead of "wm00" etc.
-                const char* dispName = GetFieldDisplayName(destId);
-                if (destId <= 71) {
-                    strncpy(s_dedupGateways[groupIdx].displayName, "Exit to World Map", 47);
-                } else if (dispName) {
-                    snprintf(s_dedupGateways[groupIdx].displayName, 48, "Exit to %s", dispName);
-                } else {
-                    strncpy(s_dedupGateways[groupIdx].displayName, "Exit", 47);
-                }
-                s_dedupGateways[groupIdx].displayName[47] = '\0';
-            }
-            // Accumulate center (will average after all gateways processed).
-            s_dedupGateways[groupIdx].centerX += s_gateways[g].centerX;
-            s_dedupGateways[groupIdx].centerY += s_gateways[g].centerZ;  // centerZ = Y in our coords
-            s_dedupGateways[groupIdx].count++;
-        }
-        // Average the centers.
-        for (int d = 0; d < s_dedupGatewayCount; d++) {
-            if (s_dedupGateways[d].count > 0) {
-                s_dedupGateways[d].centerX /= (float)s_dedupGateways[d].count;
-                s_dedupGateways[d].centerY /= (float)s_dedupGateways[d].count;
-            }
-        }
-        // Add to catalog.
-        if (s_dedupGatewayCount > 0 && s_playerEntityIdx >= 0) {
-            float gwPlayerX = 0, gwPlayerY = 0;
-            bool gotPlayer = GetEntityPos(s_playerEntityIdx, gwPlayerX, gwPlayerY);
-            for (int d = 0; d < s_dedupGatewayCount && newCount < MAX_CATALOG; d++) {
-                // Screen filter: skip the gateway only if the player->gateway
-                // SEGMENT actually crosses a screen-boundary line SEGMENT.
-                // v0.17.8.10: replaced IsSeparatedByTriggerLine() here -- that
-                // does an INFINITE-line side test, so a short SCREEN_BOUND line
-                // on a far edge (bghall_5's Hall 6 doorway, x in [4206,5042])
-                // wrongly "separated" the Hall 4 INF gateway on the opposite
-                // (west) edge because the gateway's Y lay almost on that line's
-                // infinite extension. A gateway is a real exit you walk to; it
-                // is on another screen only if the path to it actually crosses a
-                // boundary segment. Entity screen-filtering still uses the
-                // infinite-line helper; only the gateway test changed.
-                if (gotPlayer && s_capturedLineCount > 0) {
-                    bool crossed = false;
-                    for (int dt = 0; dt < s_capturedLineCount && !crossed; dt++) {
-                        if (!s_capturedLines[dt].active) continue;
-                        if (s_capturedLines[dt].lineType != FieldArchive::JSM_ENT_LINE_SCREEN_BOUND &&
-                            s_capturedLines[dt].lineType != FieldArchive::JSM_ENT_UNKNOWN)
-                            continue;
-                        if (SegmentsCross(gwPlayerX, gwPlayerY,
-                                          s_dedupGateways[d].centerX, s_dedupGateways[d].centerY,
-                                          (float)s_capturedLines[dt].x1, (float)s_capturedLines[dt].y1,
-                                          (float)s_capturedLines[dt].x2, (float)s_capturedLines[dt].y2)) {
-                            crossed = true;
-                            Log::Field("FieldNavigation: [refresh] INF-GW group %d '%s' "
-                                       "center=(%.0f,%.0f) filtered: path crosses screen-bound line%d",
-                                       d, s_dedupGateways[d].displayName,
-                                       s_dedupGateways[d].centerX, s_dedupGateways[d].centerY, dt);
-                        }
-                    }
-                    if (crossed) continue;
-                }
-                // Dedup against JSM exits already in catalog with same destination.
-                bool dupExit = false;
-                for (int c = 0; c < newCount; c++) {
-                    if (newCatalog[c].type != ENT_EXIT) continue;
-                    // Check if any existing exit names match this gateway's display name.
-                    if (strstr(newCatalog[c].name, s_gateways[0].destFieldName) != nullptr ||
-                        strcmp(newCatalog[c].name, s_dedupGateways[d].displayName) == 0) {
-                        dupExit = true; break;
-                    }
-                }
-                if (dupExit) continue;
-                EntityInfo gwExit = {};
-                gwExit.entityIdx  = -400 - d;  // sentinel for INF gateway exits
-                gwExit.modelId    = -1;
-                gwExit.triangleId = 0;
-                gwExit.type       = ENT_EXIT;
-                gwExit.gatewayIdx = d;  // index into s_dedupGateways
-                strncpy(gwExit.name, s_dedupGateways[d].displayName, sizeof(gwExit.name) - 1);
-                gwExit.name[sizeof(gwExit.name) - 1] = '\0';
-                newCatalog[newCount++] = gwExit;
-                Log::Field("FieldNavigation: [refresh] INF-GW group %d: '%s' center=(%.0f,%.0f) %d gateways merged",
-                           d, s_dedupGateways[d].displayName,
-                           s_dedupGateways[d].centerX, s_dedupGateways[d].centerY,
-                           s_dedupGateways[d].count);
-            }
-        }
+        // v0.07.94 INF gateway exit injection. Extracted to
+        // field_nav_catalog_gateways.inl (v0.18.3.276) to bring this file back
+        // under the CI size ceiling (hard fail > 80 KB; it had reached 82.2 KB
+        // and the push was refused). The fragment runs inline here (own braces)
+        // and operates on the local newCatalog[]/newCount plus the gateway and
+        // captured-line state. Pure textual move — no logic change. Same pattern
+        // as _mapexits / _dedupe / _naming. See that file for the full logic.
+        #include "field_nav_catalog_gateways.inl"
 
         // v0.17.8.8 object/line dedupe + raw-SYM relabel. Extracted to
         // field_nav_catalog_dedupe.inl (v0.17.8.9) to keep this file under the

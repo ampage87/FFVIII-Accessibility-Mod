@@ -6,6 +6,294 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.276
+
+**Size-guard split: `field_nav_catalog.inl` was 82.2 KB and the push was refused. Extracted the INF gateway block.**
+
+The push utility's local mirror of the CI check refused v0.18.3.272 (now visible in `git_latest.log` thanks to the .266 logging change):
+
+```
+=== PUSH REFUSED: local CI safety checks failed. ===
+FAILURES -- must be split into .inl chunks before pushing:
+  FAIL  field_nav_catalog.inl (82.2 KB)
+```
+
+The file had grown across the #83 / #82 / #71 work (hidden-entity filter, save-point de-duplication, solo-interaction naming, and the accompanying rationale comments).
+
+**Change.** Extracted the INF gateway exit-injection block — gateway grouping by destination, centre averaging, the bounded screen-crossing filter and the exit de-duplication — verbatim into new `src/field_nav_catalog_gateways.inl`. Same inline-`#include` pattern already used three times in this file (`_mapexits`, `_dedupe`, `_naming`): it remains a fragment of `RefreshCatalog()`'s body operating on that function's locals, **not** a standalone function. Pure textual move, no logic change; boundaries verified brace-balanced (125 lines removed, 8 added). Parent is now ~75 KB.
+
+**Note on the watch zone.** Three files remain close to the ceiling and will trip it next: `world_map_segments.inl` (79 KB), `field_navigation.cpp` (78.7 KB), `battle_tts_victory.inl` (77.4 KB). Tracked in #37.
+
+**BAT .276:** this is a refactor with no behavioural change, so the check is that it still builds and that exits/save points behave as they did in .275 — B-Garden Hall 1's four exits, the Quad → Hall exit, and the Hall 1 save point. Then the push should clear the size guard.
+
+## v0.18.3.275
+
+**Removed the inert v0.18.3.273/.274 line-mapping change, kept the genuine fix underneath it, and added the diagnostic that will actually settle the Caraway misassignment.**
+
+**Why it's removed.** The "SETLINE-owner" mapping keyed off `JSMEntityInfo::hasSetline`. Publishing that field in .274 was itself a real bug fix — it had never been assigned since being declared in v0.12.16 — but it changed nothing, because the scanner's **static SETLINE detection never fires**: a full session produced zero `[JSMScan] ... SETLINE:` lines on any field. Every field logged `0 SETLINE owners` and fell back to the legacy rule. Dead code that looks active is worse than no code — it already cost two build/test cycles — so it's gone rather than left in.
+
+**Kept:** `info.hasSetline` / `info.setlineX1..Z2` are still published. Those fields were reading zero for every consumer, so this may quietly improve interaction positioning elsewhere.
+
+**Engine facts established while chasing it** (recorded so they aren't re-derived):
+
+- The SETLINE opcode handler is at **`0x0051DC30`** (opcode table `0x00B8DE94`, entry `[0x39]`). It pops six values off the script stack into its object at **`+0x188..+0x193`** and sets **`+0x194 = 1`** as a "has line" flag.
+- That layout **collides** with the field-entity struct, which stores 32-bit position at `+0x190`/`+0x194`. Combined with the captured-line addresses being `0x1A0` apart rather than the `0x264` entity stride, this establishes that **line objects live in their own ~416-byte-stride array**, separate from the "others" entity array.
+
+**Which corrects my earlier diagnosis.** If line objects are their own array, captured line `t` genuinely corresponds to line-array index `t`, hence to JSM Line entity `doors + t` — so the legacy rule is structurally right and the "wrong entity block" theory in .273 was wrong. The glfurin1 misassignment must therefore originate in the JSM header's category counts, or in destination resolution for those Line entities, **not** in line indexing.
+
+**New `[LINE-PAIR]` diagnostic.** At field load, logs the JSM header counts and, per captured line, the entity it paired with plus what that pairing produced:
+
+```
+[LINE-PAIR] jsmDoors=1 jsmLines=3 jsmEntities=17 captured=3
+[LINE-PAIR] line0 center=(-592,247) -> jsm1 'squall' cat=1 type=11 param=724 | assigned lineType=11 dest=724
+[LINE-PAIR] exit-bearing jsm11 'eventline1' cat=3 type=6 param=... hasPos=1 pos=(97,229)
+```
+
+It also lists every exit-bearing entity on the field, so we can see which entity really owns destination 725 and whether it sits inside the Line block at all. That distinguishes "header counts wrong" from "destination resolved onto the wrong Line entity" in a single run.
+
+**BAT .275:**
+- **B-Garden regression check first** — the legacy mapping is restored, so Hall 1's four exits, the Quad → Hall exit and the Hall 1 save point should behave exactly as they did in .272. Nothing should have changed.
+- Then one Caraway run, and send the log. The `[LINE-PAIR]` lines for `glfurin1` are the payload; the catalog behaviour there is still expected to be wrong (exit mislabelled, glass generic) — this build diagnoses, it does not fix.
+
+## v0.18.3.274
+
+**The v0.18.3.273 line-mapping fix was inert. `JSMEntityInfo::hasSetline` was never populated, so the new mapping silently never engaged.**
+
+**Caught before a wasted playthrough.** The .273 BAT around B-Garden came back clean — but the log showed the reason:
+
+```
+[fieldload] line-owner map: 0 SETLINE owners vs 6 captured lines -> using legacy doors+t mapping
+[fieldload] line-owner map: 0 SETLINE owners vs 5 captured lines -> using legacy doors+t mapping
+...
+```
+
+**Zero SETLINE owners on every field.** B-Garden was fine because nothing had changed there, and Caraway would have behaved exactly as before — the .273 fix never ran.
+
+**Root cause.** `field_archive_jsm_scan.inl` has always detected SETLINE, captured its literal coordinates, and *logged* them (`[JSMScan] entN 'sym' SETLINE: (x,y,z)->(x,y,z) center=(x,y)`), but it never wrote any of it back to the entity. `JSMEntityInfo::hasSetline` and `setlineX1..setlineZ2` — declared since v0.12.16 — were assigned nowhere, so they stayed false/zero for every entity on every field. Dead fields that looked populated: the log output made it appear the data was being captured, when only a local was.
+
+**Fix.** Publish the values onto the entity (`info.hasSetline`, `info.setlineX1..Z2`). Any other consumer of these fields was equally reading zeros, so this may quietly improve interaction positioning elsewhere too.
+
+**Added diagnostic.** The `[fieldload]` block now names each SETLINE owner:
+
+```
+[fieldload]   setlineOwner[0] = jsm11 'eventline1' cat=3 type=6 line=(x,y)->(x,y)
+```
+
+so if the owner count still doesn't match the captured-line count, the log shows whether SETLINE detection missed entities or some lines genuinely have no owner — without needing another run to find out.
+
+**BAT .274 — Caraway is now worth re-testing, but check the log line first:**
+- On `glfurin1`, expect `3 SETLINE owners vs 3 captured lines -> using SETLINE-owner mapping`. If it still says `0 SETLINE owners` or falls back to legacy, the mapping is still not engaging and the `setlineOwner[...]` lines will say why — no need to play further.
+- If it engages: the exit should read **"Exit to Deling City - Caraway's Mansion 5"** and go there, a second **Mansion 4** exit should appear, and the remaining interaction should be the glass.
+- Regression: B-Garden Hall 1's four exits, the Quad → Hall exit and the Hall 1 save point must stay correct — this build can genuinely change line classification on fields where owners are now found, unlike .273.
+
+## v0.18.3.273
+
+**Root cause of the Caraway exit mislabel found: captured trigger lines were mapped to the wrong JSM entities. Mapping now derives from SETLINE ownership.**
+
+**The bug.** `field_nav_fieldscripts.inl` mapped captured line `t` to a JSM entity by position in the *category-1 "Line"* block:
+
+```c
+int jsmIdx = s_jsmDoors + t;
+if (jsmIdx < s_jsmEntityCount && s_jsmEntities[jsmIdx].jsmCategory == 1)
+```
+
+That assumes the field's trigger lines are the category-1 entities, in capture order. On Caraway's Mansion 1 (`glfurin1`) they are not: the entities that actually own the triggers are the **cat=3 "Other"** entities `eventline1/2/3`, while the category-1 slots carry the shifted SYMs `squall`/`zell`/`irvine`. So every line received another entity's classification and destination.
+
+Observed effect (BAT-confirmed in play):
+
+| line | centre | actually goes to | mod said |
+|---|---|---|---|
+| line0 | (−592,247) | **Mansion 5** (725) | "Exit to Mansion 4" (dest=724) |
+| line1 | (146,500) | **Mansion 4** (724) | "Interaction 1" (dest=−1) |
+| line2 | (−694,−254) | **the Glass** | "Interaction 2" |
+
+line0 was handed the destination belonging to another line, and the line that really goes to 724 got none and fell through to the generic interaction path. One misassignment, two visible symptoms — the wrong exit label *and* the glass showing as a generic interaction.
+
+**Evidence the owners are consecutive entities.** The DIAG-B dump added in v0.18.3.269 shows the SETLINE hook's per-line addresses on that field as `0x0188B818` / `0x0188B9B8` / `0x0188BB58` — exactly `0x1A0` apart, i.e. three *neighbouring* entities. The category-1 block is not contiguous with them.
+
+**Fix.** Build the list of JSM entities that own a SETLINE (`hasSetline`, already recorded by the scanner), in JSM index order, and map captured line `t` to the `t`-th owner. This is static, needs no category assumption, and does not depend on the SYM ordering that is unreliable on these fields. When the owner count doesn't equal the captured-line count the legacy `doors + t` rule is used, so fields that were already correct are untouched. A `[fieldload] line-owner map: N SETLINE owners vs M captured lines -> using ... mapping` line records which rule was applied.
+
+**Approach note.** Hardcoding the three Caraway coordinates was rejected: the swap is a general ordering bug, and fixing the mapping corrects every field that has non-category-1 trigger owners rather than one room. The runtime "learn the destination when a MAPJUMP fires" idea was rejected earlier for a different reason — a label that changes between visits is worse for a blind player than one that is consistently wrong.
+
+**BAT .273 — this touches line classification on EVERY field, so exits need a broad check:**
+- `glfurin1`: the exit should now read **"Exit to Deling City - Caraway's Mansion 5"** and actually go there; a second exit to **Mansion 4** should appear; the remaining interaction should be the glass.
+- B-Garden Hall 1 (four exits), the Quad → Hall exit, and the Hall 1 save point must all still be correct — these are the regressions to watch.
+- A few ordinary multi-exit fields: exits present, correctly named, no duplicates.
+- Check the `line-owner map:` log line per field to see which mapping was chosen — `legacy doors+t` means nothing changed for that field.
+
+## v0.18.3.272
+
+**B-Garden Hall 1 listed its save point twice ("Save Point 1 of 2" / "2 of 2"). One physical save point was reaching the catalog by two independent paths.**
+
+**Cause.** Log evidence:
+
+```
+[nav] cat2 ent6    rank=3/9 'Save Point 1 of 2'      <- runtime entity (has a model)
+[nav] cat3 ent-205 rank=4/9 'Save Point 2 of 2'      <- trigger line 5
+[refresh] line5 surfaced as Save Point (isSaveLine) [v0.17.8.8]
+```
+
+The v0.17.8.8 trigger-line fallback was introduced specifically because bghall_1's `savePoint` entity "has PSHM-only X/Y, never injects standalone, and reaches the catalog only via this trigger line". That premise no longer holds — the entity now does inject standalone as `ent6` — so both the entity path and the line fallback fired for the same object.
+
+**Fix.** The save-line fallback is skipped when an `ENT_SAVE_POINT` is already in the catalog. The fallback is retained for fields where the entity genuinely doesn't inject (its original purpose), so this is a de-duplication rather than a removal. The runtime entity is the better entry of the two anyway — it carries a real model-derived position rather than a PSHM-only one.
+
+**Note:** this duplicate is not a regression from the recent exit work; it is a latent overlap between two paths that only became visible once attention returned to B-Garden. The gateway dedupe fixed in .271 is a separate code path and does not cover entity-vs-line duplicates.
+
+**BAT .272:**
+- B-Garden Hall 1: **one** Save Point in the catalog, and it should still be navigable.
+- The four Hall 1 exits and the Quad → Hall exit stay present (the .271 fix).
+- Spot-check a save point on another field (e.g. a Garden hallway or town) still appears — confirming the fallback wasn't over-suppressed.
+- Watch for `[refresh] line%d save-line skipped: Save Point already in catalog` to confirm which path was dropped.
+
+## v0.18.3.271
+
+**Fixes the v0.18.3.270 regression that hid exits. B-Garden Hall 1 listed 1 of 4 exits; the Quad → Hall exit disappeared.**
+
+**Cause.** The INF-gateway dedupe tested:
+
+```c
+if (strstr(newCatalog[c].name, s_gateways[0].destFieldName) != nullptr ||
+    strcmp(newCatalog[c].name, s_dedupGateways[d].displayName) == 0)
+```
+
+That first clause is wrong in two independent ways: it always consults **gateway 0** rather than the gateway being tested (`d`), and it matches a **substring** rather than a whole destination.
+
+It had been harmless only by accident. Before .270, `destFieldName` held an internal field name (`bghall_1`), which never appears inside a catalog entry name ("Exit to B-Garden - Hall 1"), so the clause never fired and the exact-name comparison did all the real work. v0.18.3.270 corrected `GetFieldNameById()` to return the display name — which made that substring start matching, so one gateway-0 destination name suppressed unrelated exits across the whole field.
+
+**Fix.** Removed the substring clause. The exact `displayName` comparison is the correct dedupe, and is precisely what was effectively running before .270. The .270 name-mapping fix is retained — it was correct, it merely exposed this latent bug.
+
+**Lesson recorded:** the pre-.270 dedupe was dead code that looked live. Comparing an internal name against a display name can never match, so the dedupe silently did nothing for a long time. Worth watching for genuine duplicate exits now that the exact comparison is the only rule.
+
+**BAT .271:**
+- **B-Garden Hall 1: all four exits listed again.** Quad → Hall exit present.
+- Spot-check two or three other multi-exit fields for a full exit list.
+- Exit destination names should still read correctly (the .270 fix stays).
+- Caraway's Mansion 1 still lists its exits including Mansion 6.
+- Known and still unfixed: "Exit to Mansion 4" actually goes to Mansion 5, and the Glass still reads "Interaction 2".
+
+## v0.18.3.270
+
+**Field-ID → name mapping was wrong. `GetFieldNameById()` now resolves through the curated table instead of FL ordering.**
+
+**The bug.** `BuildFieldNameMap()` assumed *"each field occupies 3 consecutive FL entries (.fi/.fl/.fs), field ID = entry_index / 3"*. Both halves are false:
+
+1. **`field.fl` is not uniformly interleaved.** Only the first 7 fields are stored as `(fs,fl,fi)` triplets (indices 0–20). From index 21 it switches to **grouped-by-extension**: 893 `.fi` entries, then 893 `.fl`, then 893 `.fs` (900 of each, 2700 lines total). Verified by extraction — e.g. `glfurin4.fi` = 648, `glfurin4.fl` = 1541, `glfurin4.fs` = 2434, exactly 893 apart.
+2. **Field IDs don't follow FL order at all.** `glfurin3`/`glfurin2`/`glfurin1` sit at `.fi` indices 686/687/688 but carry field IDs **725/724/721**, and `glfurin4` is at 648 with ID **722**.
+
+So the function returned confidently wrong names: `GetFieldNameById(721)` gave `edview2` when field 721 is `glfurin1`.
+
+**Why it mattered beyond logs.** The INF-gateway loader stores this into `GatewayInfo::destFieldName`, and the catalog dedupe pass does `strstr()` of that against catalog entry names (which are built from `FIELD_DISPLAY_NAMES`). A bogus internal name silently broke gateway/exit de-duplication — it was never going to match. It also made every diagnostic log misleading, including during this investigation.
+
+**Fix.** `GetFieldNameById()` now indexes `FIELD_DISPLAY_NAMES` directly by field ID. That table is verified correct — its own comments carry the internal names and they match the live engine IDs seen in `[MAPJUMP-HOOK]`/ChaseDetector:
+
+```
+"Deling City - Caraway's Mansion 1",  // 721: glfurin1
+"Deling City - Caraway's Mansion 2",  // 722: glfurin4
+"Deling City - Caraway's Mansion 3",  // 723: glfurin5
+"Deling City - Caraway's Mansion 4",  // 724: glfurin2
+"Deling City - Caraway's Mansion 5",  // 725: glfurin3
+"Deling City - Caraway's Mansion 6",  // 726: glfury1
+```
+
+Returning the display name also makes the dedupe `strstr()` compare like with like. Added `#pragma once` to `field_display_names.h` (it had no guard) and included it from `field_archive.cpp`.
+
+**Still open — the mislabeled glfurin1 exit (not a naming bug).** BAT of .269 confirmed the catalog's "Exit to Caraway's Mansion 4" actually lands the player in **Mansion 5**. With the ID table now verified, the name lookup is *correct* for the value it is given — the value itself is wrong: captured line0 carries `destFieldId=724` (glfurin2) when crossing it demonstrably goes to **725** (glfurin3). Aaron's in-game mapping of the three captured lines is:
+
+| line | centre | actually | mod currently says |
+|---|---|---|---|
+| line0 | (−592,247) | **Mansion 5** (725) | "Exit to Mansion 4" (dest=724) |
+| line1 | (146,500) | **Mansion 4** (724) | "Interaction 1" (dest=−1) |
+| line2 | (−694,−254) | **the Glass** | "Interaction 2" |
+
+line0 and line1 have effectively swapped destinations — line0 carries what is really line1's, and line1 got none and fell through to "interaction". One misassignment explains both the wrong exit label and the glass reading as a generic interaction. Root cause is the static MAPJUMP→line destination assignment, still to be pinned down. Deliberately **not** patched by hardcoding coordinates, and the runtime-learning approach was rejected (a label that changes between visits is worse than a consistently wrong one).
+
+**Also ruled out this round:** the VARBLOCK theory for the "missing" Mansion 5 exit — every Map Exit on the statue screen reported `param=0xFFFFFFFF`, so there was no variable destination to resolve. And `entityAddr` on captured lines can never map to a JSM entity: DIAG-B showed the line addresses sit *below* the entity array base (deltas −2952/−2536/−2120, non-zero remainders) in their own 416-byte-stride array.
+
+## v0.18.3.269
+
+**#71 SOLVED: located the entity SHOW/HIDE visibility flag. Hidden entities are no longer announced.**
+
+**The flag.** Entity flags dword at **+0x160, bit 3 (0x08)** — set = hidden. Found by resolving the engine's opcode dispatch table in `FF8_EN.exe`: table base **0x00B8DE94**, validated by checking `[0x57]` and `[0x58]` against the already-known TALKON/TALKOFF handlers. Then:
+
+```
+[0x60] SHOW -> 0x0051EAD0:  and ecx, 0xFFFFFFF7   ; clear bit 3
+[0x61] HIDE -> 0x0051EB40:  or  ecx, 8            ; set bit 3
+                            mov dword ptr [eax+0x160], ecx
+```
+
+This is the flag the v05.69 VISDIAG investigation looked for and closed without finding — #71 records it as "the entity SHOW/HIDE flag was never located".
+
+**Fix (`field_nav_catalog.inl`).** The entity scan now drops any non-player entity with bit 3 set, logging `[SCAN-DROP] ... hidden (flags@0x160=... bit3 set by HIDE)`. Motivating symptom: Zell and Selphie were announced on the Caraway statue screen (`glfurin3`) *before they appear* — they only walk in once the glass is placed. Same root cause as #71's "not-yet-recruited scene actor parked invisible pre-scene still lists" (bg2f_2 Selphie).
+
+**Also diagnosed this round (not yet fixed):**
+
+1. **Glass still reads "Interaction 1".** `glfurin1` line1 centre (146,500) is the wine-glass trigger (it is the line that appeared once v0.18.3.268 fixed the infinite-line filter; Aaron confirmed the pre-existing line2 at (-694,-254) is a screen transition). The solo-naming rule deliberately does not fire with 2+ interactive lines, and the captured-line → JSM-entity mapping is unreliable on these fields (the SYM list is shifted vs the Door/Line/Bg/Other ordering). **Proper fix:** the SETLINE hook already records an `entityAddr` per line (glfurin1: 0x0188B818 / 0x0188B9B8 / 0x0188BB58, spaced 0x1A0 — *not* the 0x264 field-entity stride, so it is some other per-line structure). Identifying that structure yields an exact line→entity mapping and makes interaction naming correct generally, rather than by heuristic.
+
+2. **No catalog entry for the Mansion 5 transition.** The engine oracle shows it fires from within `glfurin1`: `[MAPJUMP-HOOK] MAPJUMP fired on field=721 'glfurin1' inline_param=29, IP=1446, destField=725 (Deling City - Caraway's Mansion 5)`. Script extraction puts IP 1446 inside **ent13 `eventline3`, method m2** — an entity the scanner classifies `type=Unknown`, so it is never injected as a Map Exit. Its only position source is PSHM coords (addrX=392, addrY=445) that never resolve. Note `glfurin1` contains 5 MAPJUMP (0x29) opcodes owned by `director0`/`eventline1`/`eventline2`/`(door)`/`squall`, and **none at IP 1446** — so the one that actually fires is reached by a path the static scanner does not model, which is why `eventline3` looks inert. That, plus resolving its PSHM position, is what surfacing this exit requires.
+
+**Added diagnostics for the two remaining items** (logging only, same one-shot `[PUZZLE-DIAG]` block, so they land in this same build):
+
+- **DIAG-A — live VARBLOCK exit resolution.** For every Map Exit / negative-param entity, decodes `param = 0x80000000 | addr` and reads the field variable *now* (`EXIT_VARBLOCK_BASE 0x01CFE9B8 + addr`, word and byte). If `glfurin1` ent12 `eventline2` (marker `0x800002EB`) reads **725**, that entity is confirmed as the missing statue-alcove transition and can be named "Exit to Caraway's Mansion 5" instead of dropped as unresolved.
+- **DIAG-B — line→entity mapping.** Logs the live entity-array base and, per captured line, `entAddr`, `delta`, `delta / 0x264` and the remainder. If a line's delta lands on a whole entity index, interaction lines can be named from their owning entity's SYM (making `glfurin1` line1 at (146,500) read "Glass" properly, and fixing generic "Interaction N" labels everywhere). If the remainder is non-zero, `entAddr` points into some other per-line structure and a different hook is needed — either answer is decisive.
+- **DIAG-C — raw INF gateway inventory.** destField, name, centre and endpoints for every gateway, unfiltered. The alcove transition may be a gateway discarded by the destination-match or screen-side filters rather than a JSM Map Exit at all.
+
+**BAT .269:** on the statue screen (`glfurin3`), Zell and Selphie should no longer be listed until they actually walk in; "Statue" should still list. Regression: check a normal field still lists its NPCs (the filter should only drop genuinely hidden ones — watch for unexpected `[SCAN-DROP] ... hidden` lines). Then walk the glass room + statue alcove and send `ff8_field.log` — the DIAG-A/B/C lines should let both remaining items be fixed without another exploratory run.
+
+## v0.18.3.268
+
+**Caraway's Mansion glass/statue puzzle: root-caused and fixed. Two GENERAL interaction-block bugs, not field-specific quirks — both surfaced by the v0.18.3.267 `[PUZZLE-DIAG]` dump.**
+
+The `.267` diagnostic showed both trigger lines are captured, `active=1`, and correctly typed `LINE_INTERACTIVE` (type 13) — yet neither reached the catalog:
+
+```
+glfurin1: line1 active=1 type=13 center=(146,500)     <- glass shelf, dropped
+          line2 active=1 type=13 center=(-694,-254)   <- surfaced as "Interaction 1" (a screen transition)
+glfurin3: line0 active=1 type=13 center=(-679,224)    <- statue, dropped
+```
+
+**Bug A — `GetEntityPos()` aborts the entire interaction block when the player has `tri == 0`.** The helper returns `false` for `triId == 0` ("not yet placed"), which is the *normal* state on close-up/cinematic screens where the character still has perfectly valid fixed-point coordinates. On the statue screen the player reads `tri=0 fp=(-2629632,880640)`. Because the whole block was wrapped in `if (GetEntityPos(...))`, **every** interaction on such a screen was silently skipped. The position is only needed for the screen-side filter, so it now degrades to "no filtering" instead of dropping everything.
+
+**Bug B — the block used the infinite-line separation test.** `IsSeparatedByTriggerLine()` extends every screen-bound line to infinity, so a short doorway line elsewhere on the field can falsely "separate" an interaction on the far side. This is the identical over-reach fixed for INF gateways in v0.17.8.10 via bounded `SegmentsCross` — the interaction block never received that fix. Verified numerically on `glfurin1`: screen-bound line0 runs (-604,272)→(-581,222); its infinite extension puts line1 (146,500) at cross ≈ **+42744** while the player (-643,-54) sits at ≈ **-9448** — opposite signs, so the glass shelf's trigger was filtered, while line2 (≈ -16598, same side) survived. The two are only "separated" by a segment that does not lie between them. Now uses bounded `SegmentsCross` and skips testing a line against itself, with a `[refresh] interaction line%d ... filtered: path crosses screen-bound line%d` log line when it does fire.
+
+Both fixes are general: any close-up screen and any field with a short screen-bound line benefits.
+
+**Naming.** Added `{ "cup", "Glass" }` and `{ "megami", "Statue" }` to `ENTITY_DISPLAY_NAMES` (v0.18.3.267), plus **solo-interaction naming**: when a field has exactly ONE active interactive line, that line *is* the field's puzzle object, so it is named directly rather than "Interaction 1". `megami` outranks `cup` because the statue screen contains both objects but the interaction is the statue. With 2+ interactive lines the association is ambiguous and the generic label is kept — deliberately conservative.
+
+**Objects** (identified by extracting the field scripts from `field.fs`): `cup` = wine glass, `megami` ("goddess") = statue, `te` ("hand") = the hands receiving the glass. `te` is intentionally left unmapped — a two-letter SYM is too collision-prone to label globally.
+
+**Expected result:** `glfurin3` gains a **"Statue"** entry (one interactive line + `megami`). `glfurin1` gains a **second** interaction — the glass shelf at (146,500) — alongside the existing transition; with two lines present the solo rule does not fire, so they will read "Interaction 1"/"Interaction 2". Confirming which index is the glass pins its label in a one-line follow-up.
+
+**BAT .268:**
+- `glfurin3` (statue screen): catalog should now list **"Statue"**, navigable, alongside the two exits.
+- `glfurin1` (glass room): catalog should now list **two** interactions rather than one. Note which one reaches the wine-glass shelf (the new one should be at centre (146,500)) so its label can be pinned to "Glass".
+- Regression: fields with real screen transitions still filter correctly — the new `interaction line ... filtered: path crosses screen-bound` line shows when the bounded test actually fires.
+
+## v0.18.3.267
+
+**Caraway's Mansion wine-glass puzzle: added "Glass"/"Statue" labels, plus a one-shot `[PUZZLE-DIAG]` dump to settle why neither object reaches the catalog. Labels are live; surfacing needs the diagnostic data.**
+
+**The puzzle.** After the Rinoa/Edea scenes, Quistis takes a wine glass from a shelf and places it in a statue's hands to open a secret passage. Neither object is currently catalogued, so a blind player has nothing to navigate to.
+
+**Objects identified (from `field.fs` script extraction, not guesswork).** The entities use Japanese SYM names:
+- `glfurin1` (glass room): ent15 **`cup`** = the wine glass. Also `kakusi` ("hidden") and `door`.
+- `glfurin3` (statue close-up): ent9 **`megami`** ("goddess") = the statue, ent10 **`te`** ("hand") = the hands that receive the glass, ent11 `cup`.
+
+Both `cup` and `megami` are JSM Interactive Objects and both carry a talk method (`m1: EXT` — the same director-dispatch shape as the Caraway party actors in #83), so they are genuinely interactable.
+
+**Why they're dropped: no resolvable position.** `glfurin3` `megami` has no SET/SET3 anywhere (`pos=no(0,0,0 tri=0)`), and `glfurin1` `cup` has only PSHM coordinates *inherited* down a paired-entity chain (`eventline3` → `kakusi` → `cup` → `door`, all sharing addrX=392/addrY=445), which are not trustworthy. The catalog drops unpositioned interactive objects, so both fall out. Neither name appears in `ENTITY_SKIP_NAMES`, so name-filtering is not the cause.
+
+**Change 1 — labels (`entity_classifications.h`).** Added `{ "cup", "Glass" }` and `{ "megami", "Statue" }` to `ENTITY_DISPLAY_NAMES`, matching the existing Japanese-SYM convention (`majo` → Sorceress). `te` is deliberately **not** mapped: a two-letter SYM is too collision-prone to label globally. These make the labels correct via `ResolveFriendlyName()` however the objects end up surfacing.
+
+**Change 2 — `[PUZZLE-DIAG]` one-shot dump (`field_nav_catalog_diag.inl`).** Logging only. On any field containing a watched puzzle SYM, dumps once per field load: the full captured-line inventory (index, `active`, lineType, destFieldId, extDispatch, centre, endpoints, entityAddr, name) and every watched JSM entity (type, category, hasPosition, pos, tri, hasPshmCoords, pshmAddr, param).
+
+**Why a diagnostic rather than a blind fix.** The 2026-07-18 log's only `glfurin3` catalog scan happened *after* the puzzle was solved (passage dialog at 12:56:49, scan at 12:56:58), by which point the trigger line is switched off — so it cannot show whether the statue's line is listed beforehand. Two open questions the dump answers in a single run:
+1. Is the `glfurin3` interact line active/listed **before** the puzzle is solved? (It was classified `interact=1` at field load, so it should be — that line, centre `(-679,224)`, is the statue's only positional anchor.)
+2. `glfurin1` captured **two** interact lines but surfaced only one, and Aaron confirmed the surfaced one (`Interaction 1`, centre `(-694,-254)`) is a screen transition, **not** the glass. What is the second line and why is it dropped?
+
+Also noted for later: on these fields the SYM list is shifted relative to the JSM Door/Line/Bg/Other ordering (the entities the scanner calls "Lines" carry SYMs `squall`/`zell`/`irvine`, while the real trigger lines are the `eventlineN` "Other" entities). That makes the catalog's `captured line t → JSM entity doors+t` mapping unreliable here, which is why interaction lines fall back to the generic "Interaction N" label.
+
+**BAT .267:** play to the puzzle once and send `ff8_field.log`. No behaviour change is expected beyond labels; the `[PUZZLE-DIAG]` lines for `glfurin1` and `glfurin3` are the payload. If a catalog entry does appear for either object, it should now read "Glass" / "Statue" rather than "Interaction N".
+
 ## v0.18.3.266
 
 **Push blocker: `field_nav_catalog.inl` exceeded the 80 KB CI hard-fail ceiling. Split the JSM Map Exit injection block into its own `.inl` chunk.**

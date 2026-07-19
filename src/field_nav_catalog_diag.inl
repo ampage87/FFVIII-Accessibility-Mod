@@ -191,6 +191,141 @@ static void DumpBgDiagOnce(uint8_t lim)
 // the main scan loop) is reading the correct savemap state. Resets via
 // HookedFieldScriptsInit setting s_partyDiagDumped = false on each
 // field load.
+// v0.18.3.267: one-shot PUZZLE-OBJECT diagnostic (Caraway's Mansion glass/statue).
+//
+// Why: on glfurin1 the wine glass ('cup') and on glfurin3 the statue ('megami')
+// never reach the catalog. Both are JSM Interactive Objects with NO resolvable
+// position (glfurin3 'megami' has no SET3 at all; glfurin1 'cup' only has PSHM
+// coords inherited down a paired-entity chain, so they are not trustworthy), and
+// the catalog drops unpositioned interactive objects. Their only real positional
+// anchor is the captured SETLINE trigger zone.
+//
+// The 2026-07-18 log could not settle two things, because its only glfurin3
+// catalog scan happened AFTER the puzzle was solved (the trigger line is
+// switched off once the passage opens):
+//   1. Is the glfurin3 interact line present/active BEFORE the puzzle is solved?
+//      (It was classified interact=1 at field load, so it should be.)
+//   2. glfurin1 captured TWO interact lines but surfaced only one, and Aaron
+//      confirmed the surfaced one is a screen transition, not the glass. What is
+//      the second line, and why is it dropped?
+//
+// So: dump the full captured-line inventory plus every JSM entity carrying a
+// puzzle SYM, once per field load. Logging only — no behaviour change.
+static void DumpPuzzleDiagOnce()
+{
+    if (s_puzzleDiagDumped) return;
+    s_puzzleDiagDumped = true;
+    __try {
+        // Only fields that actually contain a watched puzzle object, to keep
+        // this quiet everywhere else.
+        static const char* kWatch[] = { "cup", "megami", "te", "kakusi", "kidou" };
+        bool relevant = false;
+        for (int j = 0; j < s_jsmEntityCount && !relevant; j++)
+            for (int w = 0; w < (int)(sizeof(kWatch)/sizeof(kWatch[0])); w++)
+                if (_stricmp(s_jsmEntities[j].symName, kWatch[w]) == 0) { relevant = true; break; }
+        if (!relevant) return;
+
+        Log::Field("FieldNavigation: [PUZZLE-DIAG] === captured lines: %d ===", s_capturedLineCount);
+        for (int t = 0; t < s_capturedLineCount; t++) {
+            const CapturedTriggerLine& L = s_capturedLines[t];
+            Log::Field("FieldNavigation: [PUZZLE-DIAG] line%d active=%d type=%d dest=%d "
+                       "extDisp=%d center=(%d,%d) (%d,%d)->(%d,%d) entAddr=0x%08X name='%s'",
+                       t, L.active ? 1 : 0, (int)L.lineType, L.destFieldId,
+                       L.hasExtDispatch ? 1 : 0,
+                       (int)((L.x1 + L.x2) / 2), (int)((L.y1 + L.y2) / 2),
+                       (int)L.x1, (int)L.y1, (int)L.x2, (int)L.y2,
+                       (unsigned)L.entityAddr, L.name);
+        }
+        Log::Field("FieldNavigation: [PUZZLE-DIAG] === puzzle JSM entities ===");
+        for (int j = 0; j < s_jsmEntityCount; j++) {
+            const FieldArchive::JSMEntityInfo& E = s_jsmEntities[j];
+            bool watched = false;
+            for (int w = 0; w < (int)(sizeof(kWatch)/sizeof(kWatch[0])); w++)
+                if (_stricmp(E.symName, kWatch[w]) == 0) { watched = true; break; }
+            if (!watched) continue;
+            Log::Field("FieldNavigation: [PUZZLE-DIAG] jsm%d sym='%s' type=%d cat=%d "
+                       "hasPos=%d pos=(%d,%d) tri=%u pshm=%d pshmAddr=(%d,%d) param=%d",
+                       E.jsmIndex, E.symName, (int)E.type, E.jsmCategory,
+                       E.hasPosition ? 1 : 0, (int)E.posX, (int)E.posY,
+                       (unsigned)E.posTriangle, E.hasPshmCoords ? 1 : 0,
+                       (int)E.pshmAddrX, (int)E.pshmAddrY, E.param);
+        }
+        // v0.18.3.269 DIAG-A (missing Mansion 5 exit): resolve VARBLOCK exit
+        // destinations LIVE. A cat=3 Map Exit whose destination comes from a
+        // field variable carries param = 0x80000000 | addr (see
+        // field_archive_jsm_mapjump_resolver.inl: EXIT_VARBLOCK_BASE / marker
+        // encoding, duplicated here because that .inl belongs to field_archive).
+        // glfurin1 ent12 'eventline2' resolves to marker 0x800002EB, and the
+        // engine oracle shows a MAPJUMP on this field landing on destField=725
+        // ("Caraway's Mansion 5") -- so if varblock[0x02EB] reads 725 at catalog
+        // time, that entity IS the missing statue-alcove transition and we can
+        // both name and surface it instead of dropping it as unresolved.
+        {
+            static const uintptr_t VB_BASE = 0x01CFE9B8;  // EXIT_VARBLOCK_BASE
+            for (int j = 0; j < s_jsmEntityCount; j++) {
+                const FieldArchive::JSMEntityInfo& E = s_jsmEntities[j];
+                if (E.type != FieldArchive::JSM_ENT_MAP_EXIT && E.param >= 0) continue;
+                unsigned addr = (unsigned)(E.param & 0xFFFF);
+                int vbW = -1, vbB = -1;
+                if ((E.param & 0x80000000) != 0 && addr < 0x2000) {
+                    vbW = (int)*(const uint16_t*)(VB_BASE + addr);
+                    vbB = (int)*(const uint8_t*)(VB_BASE + addr);
+                }
+                Log::Field("FieldNavigation: [PUZZLE-DIAG] exit jsm%d sym='%s' type=%d "
+                           "param=0x%08X hasPos=%d pos=(%d,%d) vbAddr=0x%04X vbWord=%d vbByte=%d",
+                           E.jsmIndex, E.symName, (int)E.type, (unsigned)E.param,
+                           E.hasPosition ? 1 : 0, (int)E.posX, (int)E.posY,
+                           addr, vbW, vbB);
+            }
+        }
+
+        // v0.18.3.269 DIAG-C: raw INF gateway inventory. The statue-alcove
+        // transition might be an INF gateway that the destination-match or
+        // screen-side filters discard before it reaches the catalog, rather than
+        // a JSM Map Exit at all. Dump them unfiltered so we can tell.
+        {
+            Log::Field("FieldNavigation: [PUZZLE-DIAG] === INF gateways: %d ===", s_gatewayCount);
+            for (int g = 0; g < s_gatewayCount; g++) {
+                Log::Field("FieldNavigation: [PUZZLE-DIAG] gw%d destField=%u '%s' "
+                           "center=(%.0f,%.0f) line=(%d,%d)->(%d,%d)",
+                           g, (unsigned)s_gateways[g].destFieldId,
+                           s_gateways[g].destFieldName,
+                           s_gateways[g].centerX, s_gateways[g].centerZ,
+                           (int)s_gateways[g].lineX1, (int)s_gateways[g].lineY1,
+                           (int)s_gateways[g].lineX2, (int)s_gateways[g].lineY2);
+            }
+        }
+
+        // v0.18.3.269 DIAG-B (glass label / line naming): the SETLINE hook records
+        // an entityAddr per captured line, but on these fields the spacing (0x1A0)
+        // does not match the 0x264 field-entity stride, so the existing
+        // "captured line t -> JSM entity doors+t" mapping is unreliable and
+        // interactions fall back to "Interaction N". Dump each line's addr
+        // relative to the live entity-array base: if delta/0x264 lands on a whole
+        // entity index we can name lines by their owning entity's SYM (and label
+        // glfurin1's line1 at (146,500) "Glass"); if not, the addr belongs to some
+        // other per-line structure and we need a different hook.
+        {
+            uint8_t* entBase = nullptr;
+            if (FF8Addresses::pFieldStateOthers)
+                entBase = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+            Log::Field("FieldNavigation: [PUZZLE-DIAG] entityArrayBase=0x%08X stride=0x%X",
+                       (unsigned)(uintptr_t)entBase, (unsigned)ENTITY_STRIDE);
+            for (int t = 0; t < s_capturedLineCount; t++) {
+                uint32_t a = s_capturedLines[t].entityAddr;
+                long d = entBase ? (long)((uintptr_t)a - (uintptr_t)entBase) : 0;
+                Log::Field("FieldNavigation: [PUZZLE-DIAG] line%d entAddr=0x%08X "
+                           "delta=%ld idx=%ld rem=%ld",
+                           t, (unsigned)a, d,
+                           entBase ? d / (long)ENTITY_STRIDE : -1,
+                           entBase ? d % (long)ENTITY_STRIDE : -1);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log::Field("FieldNavigation: [PUZZLE-DIAG] exception during dump");
+    }
+}
+
 static void DumpPartyStateOnce()
 {
     if (s_partyDiagDumped) return;

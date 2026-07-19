@@ -14,6 +14,10 @@
 #include "field_archive.h"
 #include "ff8_accessibility.h"
 #include "ff8_addresses.h"
+// v0.18.3.270: GetFieldNameById() now resolves through the curated field-ID ->
+// name table instead of the (incorrectly derived) FL ordering. See the comment
+// on GetFieldNameById below.
+#include "field_display_names.h"
 
 // Forward declarations for cross-module namespaces (restored in v0.14.28 build recovery).
 namespace Log { void Field(const char* format, ...); }
@@ -711,8 +715,34 @@ bool LoadINFTriggers(const char* fieldName, TriggerInfo* triggers, int maxTrigge
 
 const char* GetFieldNameById(uint16_t fieldId)
 {
-    if (fieldId < s_fieldNames.size())
-        return s_fieldNames[fieldId].c_str();
+    // v0.18.3.270: use the curated FIELD_DISPLAY_NAMES table, NOT the FL-derived
+    // s_fieldNames list.
+    //
+    // BuildFieldNameMap() assumed "each field occupies 3 consecutive FL entries
+    // (.fi/.fl/.fs), field ID = entry_index / 3". That is wrong twice over:
+    //
+    //  1. field.fl is not uniformly interleaved. Only the first 7 fields are
+    //     stored as (fs,fl,fi) triplets (indices 0-20); from index 21 the file
+    //     switches to GROUPED-by-extension -- 893 .fi entries, then 893 .fl,
+    //     then 893 .fs (900 of each in total, 2700 lines).
+    //  2. Field IDs do not follow FL order at all. glfurin3/glfurin2/glfurin1
+    //     sit at .fi indices 686/687/688 but carry field IDs 725/724/721, and
+    //     glfurin4 is at 648 with ID 722.
+    //
+    // So the old mapping returned confidently wrong names -- GetFieldNameById(721)
+    // gave 'edview2' when field 721 is glfurin1. That is not merely cosmetic: the
+    // INF-gateway loader stores this into GatewayInfo::destFieldName, and the
+    // catalog dedupe pass does a strstr() of that against catalog entry names
+    // (which are built from FIELD_DISPLAY_NAMES), so a bogus name silently broke
+    // gateway/exit de-duplication. It also made every diagnostic log misleading.
+    //
+    // FIELD_DISPLAY_NAMES is indexed directly by field ID and is verified correct
+    // (its own comments carry the internal names: "// 721: glfurin1",
+    // "// 724: glfurin2", "// 725: glfurin3" -- matching the live engine field
+    // ids seen in [MAPJUMP-HOOK]/ChaseDetector). Returning it also makes the
+    // dedupe strstr() compare like with like.
+    if (fieldId < FIELD_DISPLAY_NAMES_COUNT)
+        return FIELD_DISPLAY_NAMES[fieldId];
     return nullptr;
 }
 

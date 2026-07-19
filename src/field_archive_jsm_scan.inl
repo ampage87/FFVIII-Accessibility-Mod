@@ -893,6 +893,23 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         // can interact via confirm-press (vs. crossing a Line trigger).
         info.hasTalkSetup = foundTalkradius || foundTalkon;
 
+        // v0.18.3.274: publish the SETLINE data onto the entity.
+        //
+        // The scanner has always detected SETLINE, captured its literal
+        // coordinates, and LOGGED them ("[JSMScan] entN 'sym' SETLINE: ..."),
+        // but never wrote any of it back to JSMEntityInfo. So
+        // JSMEntityInfo::hasSetline / setlineX1..Z2 -- declared since v0.12.16 --
+        // were permanently false/zero: dead fields that looked populated.
+        //
+        // Found while debugging the v0.18.3.273 captured-line -> JSM-entity
+        // mapping, which keys off hasSetline: every field reported
+        // "0 SETLINE owners", so that mapping silently never engaged and always
+        // fell back to the legacy doors+t rule. Any other consumer of these
+        // fields was equally reading zeros.
+        info.hasSetline = foundSetline;
+        info.setlineX1  = setlineX1;  info.setlineY1 = setlineY1;  info.setlineZ1 = setlineZ1;
+        info.setlineX2  = setlineX2;  info.setlineY2 = setlineY2;  info.setlineZ2 = setlineZ2;
+
         // v0.17.8.15: Export the behavior signal the catalog dedupe pass uses
         // to distinguish raw-SYM Others-with-models (NPCs) from raw-SYM
         // walk-across Lines (Interactions). Replaces v0.17.8.11's setmodelSlot

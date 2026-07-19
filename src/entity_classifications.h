@@ -254,6 +254,10 @@ static const EntityDisplayName ENTITY_DISPLAY_NAMES[] = {
     { "Cat2", "Cat" },
     { "celone", "Ellone" },
     { "cid", "Headmaster Cid" },
+    // v0.18.3.267: Caraway's Mansion wine-glass puzzle (glfurin1/glfurin3).
+    // 'cup' is the wine glass Quistis takes from the shelf and places in the
+    // statue's hands to open the secret passage.
+    { "cup", "Glass" },
     { "Daitouryo", "President" },
     { "dic", "Directory" },
     { "igyous1", "Directory" },  // v0.12.16: paired dialog entity for dic
@@ -312,6 +316,11 @@ static const EntityDisplayName ENTITY_DISPLAY_NAMES[] = {
     { "Man", "Man" },
     { "manhole", "Manhole" },
     { "maniadoor", "Door" },
+    // v0.18.3.267: Caraway's Mansion wine-glass puzzle. 'megami' = goddess —
+    // the statue whose hands receive the glass. (Same Japanese-SYM convention
+    // as 'majo' -> Sorceress above.) Its companion 'te' (= hand) is deliberately
+    // NOT mapped: a two-letter SYM is too collision-prone to label globally.
+    { "megami", "Statue" },
     { "memo", "Memo" },
     { "meskun", "Student" },
     { "mess", "Desk" },

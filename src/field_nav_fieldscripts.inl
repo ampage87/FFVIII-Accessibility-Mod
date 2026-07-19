@@ -74,6 +74,7 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
     // rebuild would flood the log. Once per field is enough to diagnose.
     s_scanTraced         = false;
     s_coordDiagDumped    = true;   // v0.12.11: DISABLED — coordinate diagnostic served its purpose
+    s_puzzleDiagDumped   = false;  // v0.18.3.267: re-arm the [PUZZLE-DIAG] dump per field
     s_partyDiagDumped    = false;  // v0.14.107: re-arm the [party-state] dump for this field load
     s_coordPrevPlayerTri = 0;       // v06.13: reset for shared-edge CoordSample
     // v06.14: Reset heading calibration for new field.
@@ -658,6 +659,35 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                         }
                     }
                 }
+                // v0.18.3.275: the v0.18.3.273/.274 "SETLINE-owner" mapping is
+                // REMOVED -- it never ran. It keyed off JSMEntityInfo::hasSetline,
+                // but the scanner's static SETLINE detection does not fire on any
+                // field (zero "[JSMScan] ... SETLINE:" lines across a full session),
+                // so every field logged "0 SETLINE owners" and silently fell back
+                // to the legacy rule. Dead code that looks active is worse than no
+                // code, so it's gone rather than left in place.
+                //
+                // Engine facts established while chasing it (kept so this isn't
+                // re-derived): the SETLINE opcode handler is at 0x0051DC30
+                // (opcode table 0x00B8DE94, entry [0x39]). It pops six values off
+                // the script stack and writes them to its object at +0x188..+0x193,
+                // then sets +0x194 = 1 as a "has line" flag. That layout collides
+                // with the field-entity struct (which stores 32-bit position at
+                // +0x190/+0x194), and the captured-line addresses are 0x1A0 apart
+                // rather than the 0x264 entity stride -- so LINE objects live in
+                // their own ~416-byte-stride array, separate from the "others"
+                // entity array.
+                //
+                // Which means captured line t really does correspond to line-array
+                // index t, and therefore to JSM Line entity doors+t: the legacy
+                // rule below is structurally right, and the earlier "wrong entity
+                // block" theory was wrong. The glfurin1 misassignment (line0 given
+                // dest=724 while it actually goes to 725) must therefore originate
+                // in the JSM header's category counts or in destination resolution
+                // for those Line entities -- not in line indexing.
+                //
+                // The pairing dump below exists to settle exactly that in one run.
+
                 int linesMapped = 0;
                 for (int t = 0; t < s_capturedLineCount; t++) {
                     s_capturedLines[t].lineType = FieldArchive::JSM_ENT_UNKNOWN;
@@ -776,6 +806,51 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                         linesMapped++;
                     }
                 }
+                // v0.18.3.275 [LINE-PAIR]: dump what each captured line was paired
+                // with, and what that pairing produced. This is the decisive data
+                // for the glfurin1 misassignment (line0 labelled "Mansion 4"/724
+                // but actually going to 725/"Mansion 5"): it shows the JSM header
+                // counts, which JSM entity each line resolved to, that entity's
+                // category/type/param, and the destination that landed on the line.
+                // If doors/lines counts are wrong, or a Line entity carries a
+                // destination that belongs to its neighbour, it is visible here
+                // without another playthrough.
+                Log::Field("FieldNavigation: [LINE-PAIR] jsmDoors=%d jsmLines=%d jsmEntities=%d "
+                           "captured=%d", s_jsmDoors, s_jsmLines, s_jsmEntityCount,
+                           s_capturedLineCount);
+                for (int t = 0; t < s_capturedLineCount; t++) {
+                    int ji = s_jsmDoors + t;
+                    if (ji >= 0 && ji < s_jsmEntityCount) {
+                        const FieldArchive::JSMEntityInfo& LE = s_jsmEntities[ji];
+                        Log::Field("FieldNavigation: [LINE-PAIR] line%d center=(%d,%d) -> jsm%d "
+                                   "'%s' cat=%d type=%d param=%d | assigned lineType=%d dest=%d",
+                                   t,
+                                   (int)((s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2),
+                                   (int)((s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2),
+                                   ji, LE.symName, LE.jsmCategory, (int)LE.type, LE.param,
+                                   (int)s_capturedLines[t].lineType,
+                                   s_capturedLines[t].destFieldId);
+                    } else {
+                        Log::Field("FieldNavigation: [LINE-PAIR] line%d center=(%d,%d) -> jsm%d "
+                                   "OUT OF RANGE (no pairing)",
+                                   t,
+                                   (int)((s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2),
+                                   (int)((s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2), ji);
+                    }
+                }
+                // Additionally list every JSM entity that carries a MAPJUMP-style
+                // destination, so we can see which entity really owns 725 on
+                // glfurin1 and whether it is inside the Line block at all.
+                for (int j = 0; j < s_jsmEntityCount; j++) {
+                    const FieldArchive::JSMEntityInfo& E = s_jsmEntities[j];
+                    if (E.type != FieldArchive::JSM_ENT_MAP_EXIT &&
+                        E.type != FieldArchive::JSM_ENT_LINE_SCREEN_BOUND) continue;
+                    Log::Field("FieldNavigation: [LINE-PAIR] exit-bearing jsm%d '%s' cat=%d "
+                               "type=%d param=%d hasPos=%d pos=(%d,%d)",
+                               j, E.symName, E.jsmCategory, (int)E.type, E.param,
+                               E.hasPosition ? 1 : 0, (int)E.posX, (int)E.posY);
+                }
+
                 // Log the mapping results.
                 int cameraPans = 0, screenBounds = 0, lineEvents = 0, lineUnknown = 0, lineInteractive = 0;
                 for (int t = 0; t < s_capturedLineCount; t++) {

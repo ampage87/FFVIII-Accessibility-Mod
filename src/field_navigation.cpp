@@ -659,6 +659,7 @@ static bool      s_coordDiagDumped = false;
 // (HookedFieldScriptsInit will reset to false right before the engine
 // populates the savemap for the new field).
 static bool      s_partyDiagDumped = true;
+static bool      s_puzzleDiagDumped = true;  // v0.18.3.267: [PUZZLE-DIAG] one-shot per field
 
 // v06.13: CoordSample Approach B — track player's previous triangle for
 // shared-edge midpoint computation. Separate from s_hookPrevTri[] because
