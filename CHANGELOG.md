@@ -6,6 +6,106 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.280
+
+**Split `field_nav_fieldscripts.inl` (81.7 KB) — CI hard-fails over 80 KB.** No behaviour change; a pure textual move.
+
+Extracted the captured-line classification block (the v0.07.82 lineType assignment through the end of the MAPJUMP-resolver diagnostics) into **`field_nav_fieldscripts_linetypes.inl`**, following the established in-function fragment pattern from `field_nav_catalog_mapexits.inl` (.266) and `field_nav_catalog_gateways.inl` (.276). The fragment is `#include`d at exactly the point the block used to sit, so it still executes in the same scope with the same locals — the include is a textual splice, not a function call.
+
+The moved block is the #84 work: the v0.18.3.277 `t`-not-`jsmDoors + t` mapping fix, screen-bound destination resolution, and the `[LINE-PAIR]` / `[LINEDIAG]` diagnostics.
+
+| File | Before | After |
+|---|---|---|
+| `field_nav_fieldscripts.inl` | 81.7 KB (FAIL) | **54.9 KB** |
+| `field_nav_fieldscripts_linetypes.inl` | — | **30.5 KB** |
+
+Both now clear the 60 KB soft warning, not just the hard fail.
+
+**Note on how this was done — shell reads of recently-written files are unreliable.** The shell was serving a truncated copy of this file: 1141 of 1282 lines, 76,016 of ~83,700 bytes, cut mid-identifier. Splitting it with shell tools alone would have silently discarded the last 141 lines — the dead-end scanner, the `[fieldload]` summary, and the function's `__except` handler — and it would have looked like a clean success.
+
+This is **not** OneDrive; sync was paused for hours when it happened. The editor tools and the shell are separate filesystem views, and the shell does not reliably see recent writes made through the editor. Every file truncated this session was one that had just been edited: `field_nav_catalog.inl` (1251/1376 lines), `field_nav_catalog_gateways.inl` (154/215), and this one — each cut at roughly 90%, always mid-line rather than at a stale-but-complete older revision.
+
+The distinction matters for diagnosis: a stale copy would be internally consistent and compile; a truncated one is a clean *prefix* of current content. That's what made the move safe here — the shell copy contained the v0.18.3.277 `#84` edits, both extraction boundaries matched the editor byte-for-byte, and the extracted block was independently brace- and paren-balanced. The file was then rebuilt from that verified prefix plus the tail read through the editor, and both splice points were re-read afterward to confirm continuity. 1282 → 877 lines, braces net 0.
+
+**Practical rule:** treat `wc`, `sed`, `head`/`tail` and any shell-based rewrite of a just-edited file as untrusted. Verify length through the editor first, or do the edit entirely with the editor tools.
+
+**BAT .280:** this should be functionally invisible. Confirm the build picks up the new file, then a short field pass — Caraway's Mansion 1 (exits + Glass) and B-Garden Hall 1 (four exits, save point) — is enough to prove the spliced block still runs where it used to.
+
+## v0.18.3.279
+
+**The phantom "Mansion 6" exit was static INF map data describing a doorway from a different story state.** Aaron's theory — that Mansion 6 is the extra exit this room gains later in the game — is what the data shows.
+
+`glfurin1` resolves its live exits through script trigger lines (SETLINE + MAPJUMP): 725 (Mansion 5) and 724 (Mansion 4). Its INF gateway table separately carries `gw[0] line=(-862,-360)->(-862,-497) destId=726` — a real doorway that the engine's own gateway check never fires on in this story state. The mod catalogued it, the player walked to it, and nothing happened. The destination-name dedupe couldn't help: 726 duplicates nothing, so it wasn't a duplicate — it was a ghost.
+
+**Fix.** On a field that resolves any exit through a live trigger line, an INF gateway is kept only if some live line agrees on its destination; otherwise it's suppressed and logged as stale INF data.
+
+**Why this is targeted rather than blunt** — from the full Deling + B-Garden sweep in the 2026-07-18 log, every other field carrying INF gateways resolves *zero* line exits, so the rule never fires there:
+
+| Field | INF gateways | Line exits |
+|---|---|---|
+| glpreo1 | 1 | 7 lines, all dest=-1 |
+| glpreo2 | 3 | 4 lines, all dest=-1 |
+| glprefr2 | 1 | none |
+| glstage1 | 3 | none |
+| glpreo3 | 8 | none |
+| glwitch1 | 1 (dest 746) | 1 line, dest **746** — agrees, kept |
+
+`glwitch1` is the useful control: it has both, and its gateway survives because a live line targets the same destination. `glfurin1` is the only field in the sweep with a gateway no line agrees with.
+
+**BAT .279:** Caraway's Mansion 1 should list exactly Mansion 5, Mansion 4, and Glass — no Mansion 6. Worth a pass through the Presidential Residence and stage fields, since those depend entirely on INF gateways and must be unaffected; a suppressed gateway logs a `SUPPRESSED:` line, so any real exit lost this way will say so in the log.
+
+## v0.18.3.278
+
+**Exits flickered in and out as the player moved. The SETLINE-exit block was the last user of the infinite-line separation test.**
+
+After v0.18.3.277 fixed the line indexing, `glfurin1` produced the correct three entries — but the Mansion 4 exit was intermittent:
+
+```
+19:01:26  cat0 'Exit to ... Mansion 5' | cat1 'Exit to ... Mansion 4' | cat2 'Glass'
+19:01:33  cat0 'Exit to ... Mansion 5' | cat1 'Glass'                  <- Mansion 4 gone
+```
+
+**Cause.** `IsSeparatedByTriggerLine()` extends every screen-bound line to infinity, so an exit can be judged "separated" by a short line that does not lie between it and the player — and the verdict flips as the player walks, because their side of the infinite extension changes. line1 (centre 146,500) kept crossing to the far side of line0's extension.
+
+This is the third and final instance of the same bug class: fixed for INF gateways in v0.17.8.10 (bounded `SegmentsCross`), for interactions in v0.18.3.268, and now for exits. The remaining infinite-line use is the entity screen-filter, which v0.17.8.10 explicitly kept.
+
+**Fix.** The exit block now uses the bounded segment-crossing test and skips comparing a line against itself, logging `[refresh] exit line%d ... filtered: path crosses screen-bound line%d` when it does fire.
+
+**Still open — the "Mansion 6" entry does nothing.** `glfurin1` carries an INF gateway `destId=726` at centre (−862,−428) which is catalogued as "Exit to Deling City - Caraway's Mansion 6", but navigating to it produces no transition. INF data is described elsewhere in this codebase as vestigial PS1 data, and now that the field resolves real line-based exits (725 and 724) this gateway looks spurious. The existing "skip gateways whose destination already has a JSM-detected exit" rule doesn't catch it because 726 matches neither. Needs its own investigation — either suppress INF gateways on fields that resolve real trigger-line exits, or establish whether 726 is reachable from somewhere on this field.
+
+**BAT .278:**
+- `glfurin1`: all three entries — Mansion 5, Mansion 4, Glass — should now be **stable while walking around**, not appearing and disappearing.
+- B-Garden regression: Hall 1's four exits, Quad → Hall, Hall 1 save point. The bounded test is less aggressive than the infinite one, so the risk here is *extra* exits appearing rather than missing ones — watch for exits that shouldn't be reachable from where you stand.
+
+## v0.18.3.277
+
+**#84 fixed: captured trigger lines are indexed from JSM entity 0 — doors participate in the sequence. `jsmDoors + t` over-shifted by the door count.**
+
+**The insight.** Re-reading the `[LINE-PAIR]` dump from v0.18.3.275, mapping captured line `t` to JSM entity `t` (rather than `jsmDoors + t`) predicts every observed behaviour on `glfurin1` (`jsmDoors=1`):
+
+| line | actually goes to | `jsm[t]` | that entity's destination |
+|---|---|---|---|
+| line0 (−592,247) | Mansion 5 (725) | jsm**0** = DOOR | varblock `0x2D5` = **725** ✓ |
+| line1 (146,500) | Mansion 4 (724) | jsm**1** | param **724** ✓ |
+| line2 (−694,−254) | the Glass | jsm**2** | type 13 interactive ✓ |
+
+Under the old `jsmDoors + t`, line0 received jsm1's 724 ("Mansion 4") while actually going to 725, and the line that genuinely goes to 724 got no destination and fell through to a generic "Interaction". One off-by-door-count shift, three visible symptoms.
+
+**Why it hid for so long.** Every field exercised during the exit work — all of B-Garden — logs `jsmDoors=0`, where `t` and `jsmDoors + t` are identical. `glfurin1` is the first door-bearing field examined, so only it exposed the shift. That also explains why the B-Garden regression passes were genuinely clean rather than accidentally so.
+
+**Supersedes the #84 diagnosis.** The earlier conclusion — "the door owns the destination and the co-located line supplies the label" — described the *symptom* correctly but attributed it to co-location. It is simply an indexing shift: the door **is** line0's owner, not a separate entity that happens to sit on top of it. No door-vs-line arbitration is needed.
+
+**Change (`field_nav_fieldscripts.inl`):**
+- `jsmIdx = t` instead of `s_jsmDoors + t`; the category gate accepts Door (0) as well as Line (1).
+- A Door carrying a MAPJUMP is normalised from `JSM_ENT_MAP_EXIT` to `JSM_ENT_LINE_SCREEN_BOUND`, because the catalog's line-exit path keys off SCREEN_BOUND and would otherwise skip it.
+- The destination-capture gate now tests that **normalised** type, so the door's destination is actually resolved (glfurin1 jsm0 → 725).
+- `[LINE-PAIR]` updated to the same index so the diagnostic stays truthful.
+
+**BAT .277 — door-bearing fields are the new risk surface:**
+- `glfurin1`: exit should read **"Exit to Deling City - Caraway's Mansion 5"** and go there; a second exit to **Mansion 4** should appear; the third interaction is the glass.
+- **B-Garden regression** (Hall 1's four exits, Quad → Hall, Hall 1 save point): all `jsmDoors=0`, so behaviour must be *identical* to .276. Any change there means the shift assumption is wrong.
+- Any other field with `jsmDoors > 0` — check the `[LINE-PAIR] jsmDoors=` value in the log and confirm its exits still name correctly.
+
 ## v0.18.3.276
 
 **Size-guard split: `field_nav_catalog.inl` was 82.2 KB and the push was refused. Extracted the INF gateway block.**

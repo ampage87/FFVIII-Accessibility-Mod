@@ -597,8 +597,35 @@ static void RefreshCatalog()
 
                     // Reachability: trigger center must not be separated from player
                     // by any other active screen-boundary trigger line.
-                    if (IsSeparatedByTriggerLine(scrPlayerX, scrPlayerY, tcx, tcy))
-                        continue;
+                    //
+                    // v0.18.3.278: BOUNDED segment test, matching the v0.17.8.10
+                    // gateway fix and the v0.18.3.268 interaction fix. This block
+                    // was the last user of the infinite-line side test, which
+                    // extends every screen-bound line forever, so an exit could be
+                    // "separated" by a short line that does not lie between it and
+                    // the player. On glfurin1 that made the Mansion 4 exit
+                    // (line1, centre 146,500) appear and vanish as the player moved
+                    // -- present at 19:01:26, gone at 19:01:33 -- because line0's
+                    // infinite extension flipped sides. Also skips testing a line
+                    // against itself.
+                    {
+                        bool exitCrossed = false;
+                        for (int dt = 0; dt < s_capturedLineCount && !exitCrossed; dt++) {
+                            if (!s_capturedLines[dt].active) continue;
+                            if (dt == t) continue;
+                            if (s_capturedLines[dt].lineType != FieldArchive::JSM_ENT_LINE_SCREEN_BOUND &&
+                                s_capturedLines[dt].lineType != FieldArchive::JSM_ENT_UNKNOWN)
+                                continue;
+                            if (SegmentsCross(scrPlayerX, scrPlayerY, tcx, tcy,
+                                              (float)s_capturedLines[dt].x1, (float)s_capturedLines[dt].y1,
+                                              (float)s_capturedLines[dt].x2, (float)s_capturedLines[dt].y2)) {
+                                exitCrossed = true;
+                                Log::Field("FieldNavigation: [refresh] exit line%d center=(%.0f,%.0f) "
+                                           "filtered: path crosses screen-bound line%d", t, tcx, tcy, dt);
+                            }
+                        }
+                        if (exitCrossed) continue;
+                    }
 
                     // v0.17.7.1.1: Robust destination recovery for PSHM_W-sourced
                     // MAPJUMPs. When the JSM static scan couldn't extract a usable

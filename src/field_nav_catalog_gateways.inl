@@ -74,11 +74,65 @@
                 s_dedupGateways[d].centerY /= (float)s_dedupGateways[d].count;
             }
         }
+        // v0.18.3.279: does this field resolve its exits through script trigger
+        // lines (SETLINE + MAPJUMP) rather than through static INF gateways?
+        //
+        // When it does, the INF gateway table is not the field's live exit list --
+        // it is static map data that can describe exits belonging to a DIFFERENT
+        // story state of the same room. glfurin1 (Caraway's Mansion 1) is the case
+        // that exposed this: its script resolves two real line exits (725 Mansion 5,
+        // 724 Mansion 4) while INF also carries gw[0] line=(-862,-360)->(-862,-497)
+        // destId=726 "Mansion 6" -- a doorway that only opens on a later visit.
+        // The mod catalogued it, the player walked to it, and nothing happened,
+        // because the engine's own gateway check never fires in this story state.
+        //
+        // The destination-name dedupe below cannot catch it: 726 matches neither
+        // 725 nor 724, so it is not a duplicate of anything -- it is a ghost.
+        //
+        // Evidence this is safe rather than a blunt instrument (2026-07-18 log,
+        // full Deling + B-Garden sweep): every other field carrying INF gateways
+        // resolves ZERO line exits, so the rule never fires there --
+        //   glpreo1  1 gw, 7 lines all dest=-1      glpreo2  3 gw, 4 lines all dest=-1
+        //   glprefr2 1 gw, 0 lines                  glstage1 3 gw, 0 lines
+        //   glpreo3  8 gw, 0 lines
+        // and glwitch1, the one field with both, has gateway destId=746 EQUAL to
+        // its line exit dest=746, so the gateway is kept by the match below. Only
+        // glfurin1 has a gateway whose destination no line agrees with.
+        bool fieldHasLineExits = false;
+        for (int lc = 0; lc < s_capturedLineCount; lc++) {
+            if (!s_capturedLines[lc].active) continue;
+            if (s_capturedLines[lc].lineType == FieldArchive::JSM_ENT_LINE_SCREEN_BOUND &&
+                s_capturedLines[lc].destFieldId > 0) {
+                fieldHasLineExits = true;
+                break;
+            }
+        }
+
         // Add to catalog.
         if (s_dedupGatewayCount > 0 && s_playerEntityIdx >= 0) {
             float gwPlayerX = 0, gwPlayerY = 0;
             bool gotPlayer = GetEntityPos(s_playerEntityIdx, gwPlayerX, gwPlayerY);
             for (int d = 0; d < s_dedupGatewayCount && newCount < MAX_CATALOG; d++) {
+                // Stale-gateway filter (see fieldHasLineExits above): on a
+                // script-exit field, keep a gateway only if some live trigger line
+                // agrees on its destination.
+                if (fieldHasLineExits) {
+                    bool lineAgrees = false;
+                    for (int lc = 0; lc < s_capturedLineCount && !lineAgrees; lc++) {
+                        if (!s_capturedLines[lc].active) continue;
+                        if (s_capturedLines[lc].lineType == FieldArchive::JSM_ENT_LINE_SCREEN_BOUND &&
+                            s_capturedLines[lc].destFieldId == (int)s_dedupGateways[d].destFieldId)
+                            lineAgrees = true;
+                    }
+                    if (!lineAgrees) {
+                        Log::Field("FieldNavigation: [refresh] INF-GW group %d '%s' (destId=%u) "
+                                   "SUPPRESSED: field resolves exits via trigger lines and no live "
+                                   "line targets this destination -- stale INF data for another story state",
+                                   d, s_dedupGateways[d].displayName,
+                                   (unsigned)s_dedupGateways[d].destFieldId);
+                        continue;
+                    }
+                }
                 // Screen filter: skip the gateway only if the player->gateway
                 // SEGMENT actually crosses a screen-boundary line SEGMENT.
                 // v0.17.8.10: replaced IsSeparatedByTriggerLine() here -- that
