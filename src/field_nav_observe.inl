@@ -99,6 +99,19 @@ static const int   EMPIRICAL_MIN_SAMPLES   = 2;
 static const float EMPIRICAL_AGREEMENT_RAD = 10.0f * (float)NAV_PI / 180.0f;
 static const float OBS_EMPIRICAL_MIN_MAG   = 100.0f;
 
+// v0.18.3.304 (#108): divergence at or above which a CA-quantized field's
+// axes are considered CONTRADICTED BY THE ENGINE, unlocking the empirical
+// correction on a field that would previously have been left alone forever.
+//
+// 45 degrees is not a tuned number -- it is the cardinal sector boundary.
+// Below 45 degrees the prediction still lands in the correct cardinal, so
+// the spoken direction is right and there is nothing to fix. At or above
+// 45 degrees the announced cardinal is PROVABLY the wrong one. That makes
+// this gate self-validating: on a field whose axes are correct the
+// consensus agrees with the prediction, the gate never opens, and
+// behaviour is byte-for-byte what it was before.
+static const float EMPIRICAL_CONTRADICTION_DEG = 45.0f;
+
 // Map an arrow bitmask to a buffer index 0..3. Returns -1 for non-single-
 // arrow inputs. The caller in ObsLogSample has already gated on single-
 // arrow, but this defense lets us reuse the helper safely.
@@ -224,6 +237,15 @@ static void ObsApplyEmpirical(uint8_t arrow, float wx, float wy) {
     s_driveCamDownX  = dx; s_driveCamDownY  = dy;
     s_camAxesSource = "empirical-corrected";
     s_camAxesEmpiricalApplied = true;
+    // v0.18.3.305 (#109): remember it for this fieldId so the next load of the
+    // same field starts calibrated instead of relearning. The shaft reloads on
+    // every floor change, which is why relearning is not good enough.
+    s_camAxesCorrectionCount++;
+    {
+        uint16_t cacheFid = FF8Addresses::pCurrentFieldId
+                            ? *FF8Addresses::pCurrentFieldId : 0xFFFF;
+        CamAxesCacheStore(cacheFid, rx, ry, dx, dy);
+    }
 
     const char* fieldName = FF8Addresses::pCurrentFieldName
                             ? FF8Addresses::pCurrentFieldName : "(unknown)";
@@ -247,6 +269,40 @@ static void ObsApplyEmpirical(uint8_t arrow, float wx, float wy) {
     // but rare enough overall (degenerate CA is uncommon) that the
     // confirmation doesn't add log noise during normal play.
     ScreenReader::Speak("Camera calibrated.");
+
+    // v0.18.3.305 (#110): THE VERDICT LINE. LOG-ONLY.
+    //
+    // We have just measured what the engine actually does on this field.
+    // Compare that against the two candidates the CA file offered: the one
+    // the 45-degree quantizer chose, and the one it rejected. Every field
+    // that calibrates anywhere in the game becomes a data point on the
+    // threshold question -- not just the handful the offline survey singled
+    // out -- so the answer accumulates during ordinary play.
+    //
+    // Prediction on record, from offline/CAMERA_ANGLES.csv: gpgmn3 (+38.80)
+    // and gpbrdg1 (+129.10) should report ALTERNATIVE, exactly as gpbig1a
+    // (+38.32) does; gppark1 (-46.80) and gpbig2a (-24.76) should report
+    // QUANTIZER. If that holds the threshold moves and 93 fields stop needing
+    // calibration at all. If gppark1 or gpbig2a ALSO reports ALTERNATIVE the
+    // model is wrong and no threshold change should ship -- which is the
+    // point of measuring instead of shipping the fix on one data point.
+    if (s_caRawAngleDeg < 900.0f) {
+        float nearDeg = 0.0f, altDeg = 0.0f;
+        CamSnapCandidates(s_caRawAngleDeg, nearDeg, altDeg);
+        float measDeg = atan2f(s_camRightY, s_camRightX) * 180.0f / (float)NAV_PI;
+        float dNear = fabsf(CamAngleDelta(measDeg, nearDeg));
+        float dAlt  = fabsf(CamAngleDelta(measDeg, altDeg));
+        const char* verdict;
+        if (dNear <= 1.0f)     verdict = "QUANTIZER CORRECT (45deg threshold held here)";
+        else if (dAlt <= 1.0f) verdict = "ALTERNATIVE CORRECT -- threshold is BELOW 45deg";
+        else                   verdict = "NEITHER -- engine matches no CA-derived candidate";
+        float mod90 = fabsf(s_caRawAngleDeg);
+        while (mod90 >= 90.0f) mod90 -= 90.0f;
+        Log::Field("FieldNavigation: [CAM-SNAP-VERDICT] field='%s' rawCA=%+.2fdeg |mod90|=%.2f "
+                   "quantizerChose=%+.0f alternative=%+.0f measured=%+.0f -> %s "
+                   "[v0.18.3.305 #110]",
+                   fieldName, s_caRawAngleDeg, mod90, nearDeg, altDeg, measDeg, verdict);
+    }
 }
 
 // Log one observation sample. Compares the empirically-measured world-space
@@ -319,13 +375,91 @@ static void ObsLogSample(uint8_t arrow, float dx, float dy, int heldTicks) {
     // "empirical-corrected" after a prior correction), this entire block is
     // skipped. Auto-drive behavior on those fields is byte-for-byte
     // identical to v0.17.7.5.5.
-    if (strcmp(s_camAxesSource, "identity") == 0 && !s_camAxesEmpiricalApplied) {
+    //
+    // v0.18.3.304 (#108): GATE 1 RELAXED. The rule above meant a
+    // "ca-quantized" field could never be corrected no matter how badly or
+    // how often the engine contradicted it. The D-District Prison shaft is
+    // exactly that case and it is not marginal: on gpbig1a the observer
+    // logged 20+ samples diverging 48-84 degrees, watched every one of
+    // them, and was forbidden to act. The consequence is that every spoken
+    // direction and every auto-drive on that field is wrong -- Aaron drove
+    // to the stairs and did not arrive at them.
+    //
+    // Root cause is upstream, in the 90-degree CA quantizer: gpbig1a's
+    // camera angle is +38.3 degrees, only 6.7 degrees from the 45-degree
+    // coin-flip boundary, and it snapped to 0 -- discarding 38 degrees.
+    // (gpbig2a: -24.8 -> 0.) I am NOT changing the quantizer. The raw CA
+    // angle does not match the engine either (measured screen-up is ~145
+    // degrees, raw CA predicts ~128, quantized predicts 90), so "use the
+    // raw value" would trade one wrong answer for a less wrong one. The
+    // engine's own measured response is the only ground truth available,
+    // and this file already knows how to read it.
+    //
+    // So: a ca-quantized field now becomes eligible ONLY once the engine
+    // has contradicted it -- this sample AND the consensus of samples must
+    // both diverge by at least a full cardinal sector. Two independent
+    // conditions, because a single divergent sample is cheap (a wall slide
+    // will produce one) whereas EMPIRICAL_MIN_SAMPLES agreeing within
+    // EMPIRICAL_AGREEMENT_RAD *and* landing in the wrong cardinal is the
+    // engine telling us plainly that our axes are wrong.
+    //
+    // REGRESSION SAFETY -- this is the part that matters, because unlike
+    // the v0.17.7.6 original this code path can now touch fields that work
+    // today. The gate is not a heuristic about which fields look risky; it
+    // is a direct measurement of whether THIS field's axes are producing
+    // the wrong cardinal. A field with correct axes produces consensus
+    // agreeing with the prediction, cdiv lands near 0, the gate stays shut
+    // and nothing is written. I deliberately did NOT gate on "the
+    // quantizer discarded a lot of angle", which was my first idea: the
+    // logs show bgryo1_4 discards 43.4 degrees and navigates correctly, so
+    // that test would have fired on a healthy field. Discarded angle
+    // predicts risk; divergence measures harm.
+    //
+    // v0.18.3.305 (#109): the eligible-source list now also covers
+    // "empirical-cached" (axes restored from a previous visit) and
+    // "empirical-corrected" (a correction already applied this load), and the
+    // one-shot bool is replaced by a per-load CAP. Both changes exist for the
+    // same reason: the .304 BAT produced one correct correction and one that
+    // was 180 degrees wrong, so "the first answer is final" is not safe. A
+    // 180-degree error diverges far past the 45-degree threshold, so it is
+    // caught on the next clean sample; the cap bounds any oscillation at
+    // CAM_AXES_MAX_CORRECTIONS_PER_LOAD.
+    const bool axesUnproven = (strcmp(s_camAxesSource, "identity") == 0);
+    const bool axesContradicted =
+        (strcmp(s_camAxesSource, "ca-quantized")        == 0 ||
+         strcmp(s_camAxesSource, "empirical-cached")    == 0 ||
+         strcmp(s_camAxesSource, "empirical-corrected") == 0) &&
+        (divDeg >= EMPIRICAL_CONTRADICTION_DEG);
+    if ((axesUnproven || axesContradicted) &&
+        s_camAxesCorrectionCount < CAM_AXES_MAX_CORRECTIONS_PER_LOAD &&
+        !(axesUnproven && s_camAxesEmpiricalApplied)) {
         int arrowIdx = ObsArrowToIdx(arrow);
         if (arrowIdx >= 0 && measLen >= OBS_EMPIRICAL_MIN_MAG) {
             ObsPushSample(arrowIdx, mnx, mny);
             float cx = 0.0f, cy = 0.0f;
             if (ObsCheckConsensus(arrowIdx, cx, cy)) {
-                ObsApplyEmpirical(arrow, cx, cy);
+                // Re-measure divergence against the CONSENSUS, not the one
+                // sample that opened the gate. An "identity" field skips
+                // this -- its axes are placeholders, not a claim, so there
+                // is nothing to contradict and the v0.17.7.6 behaviour is
+                // preserved exactly.
+                float cdot = cx * pnx + cy * pny;
+                if (cdot >  1.0f) cdot =  1.0f;
+                if (cdot < -1.0f) cdot = -1.0f;
+                float cdiv = acosf(cdot) * 180.0f / (float)NAV_PI;
+                if (axesUnproven || cdiv >= EMPIRICAL_CONTRADICTION_DEG) {
+                    Log::Field("FieldNavigation: [NAV-CAL] field='%s' unlocking correction: "
+                               "source=%s sampleDiverge=%.0fdeg consensusDiverge=%.0fdeg "
+                               "(threshold %.0fdeg = cardinal sector) [v0.18.3.304 #108]",
+                               fieldName, s_camAxesSource, divDeg, cdiv,
+                               EMPIRICAL_CONTRADICTION_DEG);
+                    ObsApplyEmpirical(arrow, cx, cy);
+                } else {
+                    Log::Field("FieldNavigation: [NAV-CAL] field='%s' consensus reached but "
+                               "agrees with axes (consensusDiverge=%.0fdeg < %.0fdeg) -- "
+                               "NO correction applied, axes left untouched [v0.18.3.304 #108]",
+                               fieldName, cdiv, EMPIRICAL_CONTRADICTION_DEG);
+                }
             }
         }
     }
@@ -621,7 +755,163 @@ static void GuardManualCue()
 // optionally writes a log line. If it returns early (any of the gates), no
 // effect; if it logs, the only side-effect is the log line and an update to
 // the observer's own private statics.
+// v0.18.3.309 (#110 investigation): RAW field-camera movement capture.
+// Purpose: determine the EXACT screen->world movement transform the ENGINE
+// applies on a field, and compare it to the .ca camera matrix the mod parsed,
+// so we can compute the axes correctly at field load and eliminate the
+// walk-to-calibrate. The old empirical path quantized to cardinals and took
+// only 2 samples, so it could not answer "does .ca camera-0 actually predict
+// the motion?" This logs, per FRAME while exactly one arrow is held: the raw
+// player position (full 1/4096 precision), the per-frame delta (= true motion
+// direction on open ground; per-frame granularity lets me discard wall-slide
+// frames offline by |delta| dropout), the walkmesh triangle, and candidate
+// facing/heading words from the entity struct (+0x08/0x0A/0x0C -- the engine's
+// PRE-collision intended direction, immune to wall slide). Once per field it
+// dumps the full .ca matrix + the mod's computed axes. Passive: no behaviour
+// change. Set to 0 to compile it out. BAT: on gpbig1a then gpbig2a, walk to
+// OPEN ground and tap UP, DOWN, LEFT, RIGHT ~1s each; send ff8_field.log.
+// v0.18.3.316: #110 investigation complete -- the [RAWCAM]/[ZONEROT] probes did
+// their job (confirmed the engine-offset mechanism, formula, and sign) and are
+// switched OFF for the GitHub build. The production fix (ApplyEngineOffsetAxes,
+// below, outside this guard) stays active. Flip to 1 to re-enable the probes.
+#define FIELD_CAM_DIAG 0
+#if FIELD_CAM_DIAG
+static uint16_t s_rcdLastField   = 0xFFFF;
+static float    s_rcdPrevX = 0.0f, s_rcdPrevY = 0.0f;
+static bool     s_rcdHavePrev    = false;
+static int      s_rcdLineCount   = 0;      // per-field cap so a long hold can't flood
+static int      s_rcdLastCam     = -1;     // #110 v4: last camera-zone index (0x1CE4906)
+// #110 CAMPROBE: safe absolute reads of engine .data globals. FF8_EN.exe loads
+// at its preferred base 0x400000, so these globals are directly addressable;
+// guard with SEH anyway so a bad read can never fault the game.
+static unsigned RcdRB(uint32_t a){ __try { return *(volatile uint8_t*)(uintptr_t)a; } __except(EXCEPTION_EXECUTE_HANDLER){ return 0xFEu; } }
+static int      RcdRW(uint32_t a){ __try { return *(volatile int16_t*)(uintptr_t)a; } __except(EXCEPTION_EXECUTE_HANDLER){ return 0x7FFF; } }
+static uint32_t RcdRD(uint32_t a){ __try { return *(volatile uint32_t*)(uintptr_t)a; } __except(EXCEPTION_EXECUTE_HANDLER){ return 0u; } }
+// #110 v4: log the per-camera-zone movement-rotation offset and its field-data
+// source. off4908 is the byte the engine adds to every input heading (the
+// rotation); fd[9+cam] is where it was loaded from on zone entry. 90deg = 64.
+static void RcdZoneRot(const char* why, uint16_t fid) {
+    unsigned off4908 = RcdRB(0x1CE4908);          // live movement-rotation offset (THE answer)
+    int      off4860 = RcdRW(0x1CE4860);          // start offset (settles == off4908)
+    int      off4864 = RcdRW(0x1CE4864);          // script target (0 unless a turn script ran)
+    unsigned cam     = RcdRB(0x1CE4906);          // active camera-zone index
+    uint32_t fdat    = RcdRD(0x1CDC744);          // field-data heap pointer
+    unsigned fdRot   = fdat ? RcdRB(fdat + 9 + cam)   : 0;   // per-zone rotation byte (source)
+    unsigned fdAna   = fdat ? RcdRB(fdat + 0xB + cam) : 0;   // analog-only per-zone byte
+    // signed degrees for readability: off in (128,255] is a negative angle
+    int deg = (int)((off4908 <= 128 ? (int)off4908 : (int)off4908 - 256) * 360 / 256);
+    Log::Field("FieldNavigation: [ZONEROT] %s id=0x%04X cam=%u off4908=%u(=%ddeg) "
+               "off4860=%d off4864=%d fdat=%08X fd[9+cam]=%u fd[0xB+cam]=%u",
+               why, fid, cam, off4908, deg, off4860, off4864, fdat, fdRot, fdAna);
+    if (fdat) {   // raw per-zone rotation table: FDAT+8 .. +8+15 (cam indexes into +9)
+        Log::Field("FieldNavigation: [ZONEROT] table FDAT+8: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+            RcdRB(fdat+8),RcdRB(fdat+9),RcdRB(fdat+10),RcdRB(fdat+11),RcdRB(fdat+12),RcdRB(fdat+13),RcdRB(fdat+14),RcdRB(fdat+15),
+            RcdRB(fdat+16),RcdRB(fdat+17),RcdRB(fdat+18),RcdRB(fdat+19),RcdRB(fdat+20),RcdRB(fdat+21),RcdRB(fdat+22),RcdRB(fdat+23));
+    }
+}
+static void RawCamDiag() {
+    if (!FF8Addresses::IsOnField() || s_playerEntityIdx < 0 ||
+        !FF8Addresses::pFieldStateOthers) { s_rcdHavePrev = false; return; }
+    uint16_t fid = FF8Addresses::pCurrentFieldId ? *FF8Addresses::pCurrentFieldId : 0xFFFF;
+    const char* fname = FF8Addresses::pCurrentFieldName ? FF8Addresses::pCurrentFieldName : "?";
+    if (fid != s_rcdLastField) {
+        s_rcdLastField = fid; s_rcdHavePrev = false; s_rcdLineCount = 0;
+        const FieldArchive::CameraAxes& c = s_cameraAxes;
+        Log::Field("FieldNavigation: [RAWCAM] === field='%s' id=0x%04X caValid=%d src=%s === "
+                   "ZONEROT confirm: off4908 = movement rotation [v0.18.3.314 #110]", fname, fid, (int)c.valid, s_camAxesSource);
+        Log::Field("FieldNavigation: [RAWCAM] axis0=(%d,%d,%d) axis1=(%d,%d,%d) axis2=(%d,%d,%d) (raw /4096)",
+                   c.axis0[0],c.axis0[1],c.axis0[2], c.axis1[0],c.axis1[1],c.axis1[2], c.axis2[0],c.axis2[1],c.axis2[2]);
+        Log::Field("FieldNavigation: [RAWCAM] modCamRight=(%.4f,%.4f) modCamDown=(%.4f,%.4f)",
+                   s_camRightX, s_camRightY, s_camDownX, s_camDownY);
+        // #110 CAMPROBE v4 (SOLVED): field movement heading = input + [0x1CE4908].
+        // [0x1CE4908] (byte) is the LIVE movement-rotation offset in 256-units
+        // (90deg=64). On camera-zone entry, handler @0x476B8D loads it from the
+        // field data: rot = FDAT[9 + zoneIndex], FDAT=[0x1CDC744], zone=[0x1CE4906].
+        // This line proves value->angle & sign: expect identity zones off4908=0,
+        // 008B(+90)=>0x40 or 0xC0, 00E8(-90)=>the opposite. Also dumps the raw
+        // per-zone rotation table (FDAT+8..) so we can read every zone's byte.
+        s_rcdLastCam = RcdRB(0x1CE4906);
+        RcdZoneRot("field-load", fid);
+    }
+    // #110 v4: also fire when the camera-zone index changes WITHOUT a field-id
+    // change -- captures intra-field camera-zone crossings (the "walk into a
+    // different camera zone" case) so we see every zone's offset.
+    {
+        int camNow = RcdRB(0x1CE4906);
+        if (camNow != s_rcdLastCam) {
+            s_rcdLastCam = camNow;
+            RcdZoneRot("cam-change", fid);
+        }
+    }
+    uint8_t arrows = ObsReadArrows();
+    if (ObsBitCount(arrows) != 1 || FieldDialog::IsDialogOpen()) { s_rcdHavePrev = false; return; }
+    uint8_t* base = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+    if (!base) { s_rcdHavePrev = false; return; }
+    uint8_t* pb = base + ENTITY_STRIDE * s_playerEntityIdx;
+    float px = (float)(*(int32_t*)(pb + 0x190)) / 4096.0f;
+    float py = (float)(*(int32_t*)(pb + 0x194)) / 4096.0f;
+    uint16_t tri  = *(uint16_t*)(pb + 0x1FA);
+    // #110 CAMPROBE v2: the free-walk sets a proposed TARGET (+0x1B4/+0x1B8) =
+    // current + step(heading), then a walkmesh validator commits it. Log the raw
+    // target, current pos, and prev pos so the intended step (target-current) can
+    // be computed correctly offline -- it carries the per-field rotation, pre-clamp.
+    int t4x = *(int32_t*)(pb + 0x1B4), t4y = *(int32_t*)(pb + 0x1B8);
+    int cx  = *(int32_t*)(pb + 0x190), cy  = *(int32_t*)(pb + 0x194);
+    int pvx = *(int32_t*)(pb + 0x19C), pvy = *(int32_t*)(pb + 0x1A0);
+    if (s_rcdHavePrev && s_rcdLineCount < 700) {
+        float dx = px - s_rcdPrevX, dy = py - s_rcdPrevY;
+        Log::Field("FieldNavigation: [RAWCAM] arrow=%s pp=(%.2f,%.2f) d=(%.2f,%.2f) tri=%u "
+                   "tgt=(%d,%d) cur=(%d,%d) prev=(%d,%d) step=(%d,%d)",
+                   ObsArrowName(arrows), px, py, dx, dy, tri,
+                   t4x/4096, t4y/4096, cx/4096, cy/4096, pvx/4096, pvy/4096,
+                   (t4x-cx)/4096, (t4y-cy)/4096);
+        s_rcdLineCount++;
+    }
+    s_rcdPrevX = px; s_rcdPrevY = py; s_rcdHavePrev = true;
+}
+#endif
+
+// v0.18.3.315 (#110 SOLVED): apply the engine's own per-camera-zone movement
+// rotation as the AUTHORITATIVE screen->world basis. Runs every on-field tick,
+// so it supersedes the load-time ca-quantized guess and tracks camera-zone
+// crossings automatically the instant [0x1CE4908] changes. Because the axes are
+// now the engine's exact ground truth, the empirical calibrator downstream sees
+// predicted==actual (zero divergence) and never fires -- no per-field learning,
+// no cache, no cardinal snapping. Mirrors to the auto-drive pair so F9/F10
+// driving steers on the same ground-truth axes (the core of #100). See
+// ReadEngineMoveOffset/EngineOffsetToAxes in field_nav_helpers.inl for the RE.
+static unsigned s_engOffLast = 0xFFFFu;   // last applied off4908 (change-logging only)
+static bool ApplyEngineOffsetAxes() {
+    if (!FF8Addresses::IsOnField()) { s_engOffLast = 0xFFFFu; return false; }
+    unsigned off;
+    if (!ReadEngineMoveOffset(off)) return false;   // unreadable -> leave axes as-is
+    float crx, cry, cdx, cdy;
+    EngineOffsetToAxes(off, crx, cry, cdx, cdy);
+    s_camRightX = crx; s_camRightY = cry;
+    s_camDownX  = cdx; s_camDownY  = cdy;
+    s_driveCamRightX = crx; s_driveCamRightY = cry;
+    s_driveCamDownX  = cdx; s_driveCamDownY  = cdy;
+    s_camAxesSource  = "engine-offset";
+    if (off != s_engOffLast) {
+        s_engOffLast = off;
+        int u = (int)off - 128;                     // rotation from screen-identity, 256-units
+        if (u > 128) u -= 256; else if (u <= -128) u += 256;   // wrap to (-128,128]
+        float deg = (float)u * 360.0f / 256.0f;     // + = CCW from identity
+        Log::Field("FieldNavigation: [NAV-ENGOFF] off4908=%u (rotFromId=%+.1fdeg) -> "
+                   "camRight=(%.3f,%.3f) camDown=(%.3f,%.3f) source=engine-offset "
+                   "[v0.18.3.316 #110]", off, deg, crx, cry, cdx, cdy);
+    }
+    return true;
+}
+
 static void ObserveArrowResponse() {
+#if FIELD_CAM_DIAG
+    RawCamDiag();
+#endif
+    // v0.18.3.315 (#110): authoritative movement basis from the engine's own
+    // per-zone rotation offset. First thing each tick, before the auto-drive
+    // gates below, so manual nav AND auto-drive both steer on ground truth.
+    ApplyEngineOffsetAxes();
     // v0.18.3.7: guard-patrol recon (#58) -- runs every tick BEFORE the
     // observer's own auto-drive/dialog gates so the guards are captured
     // regardless of player input or game state. Self-gates to tilink1.

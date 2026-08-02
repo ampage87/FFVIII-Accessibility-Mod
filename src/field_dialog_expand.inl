@@ -436,6 +436,185 @@ static bool SafeReadDword(uintptr_t addr, uint32_t* out)
     return ok;
 }
 
+// ============================================================================
+// v0.18.3.298 (#89): [VAR-DROP] out-of-range numeric-insert probe. LOGGING ONLY.
+// ============================================================================
+//
+// The 2026-07-31 BAT found two places where a 0x04 numeric insert is silently
+// discarded because its param falls outside the [0x20..0x27] window that
+// sub_4B8E40's bounds check at 0x004B8E56 appeared to enforce:
+//
+//   D-District Prison floor indicator, window 4, byte-identical on all six
+//   occurrences:   hex = 4A 6A 6D 6D 70 20 04 30
+//                      = "Floor " + numeric insert, param 0x30
+//     -> spoken as a bare "Floor" on every floor of the shaft. 0x30 > 0x27,
+//        so the branch below takes `continue` and the number is gone.
+//
+//   Field draw points:  "Laguna stocked . " s" -> "Laguna stocked  Curagas"
+//     -> the quantity is gone. (Battle draws are unaffected -- they do not go
+//        through this expander, which is why "Laguna received 5 Curas!" works.)
+//
+// Widening FIELD_VAR_PARAM_MAX blind is NOT safe. If params >= 0x28 resolve
+// through a different table, we would splice an unrelated number into the
+// sentence, and a confidently wrong floor number is worse for Aaron than no
+// number at all. So this build only OBSERVES: log every dropped param, the
+// dword the engine WOULD have read at that slot, and the surrounding table.
+//
+// BAT: ride the prison lift and stop on 3-4 different floors, taking an F11
+// screenshot at each so the on-screen floor is recorded. Then compare the
+// "would read" value against the screenshots. If they match, the next cycle
+// widens the accepted range; if they do not, the resolver for params >= 0x28
+// lives elsewhere and we chase that instead of guessing.
+//
+// Read-only. No behaviour change: the drop still happens exactly as before.
+#define FIELD_VAR_PROBE 1
+
+#if FIELD_VAR_PROBE
+static void FieldVarProbeDrop(uint8_t param)
+{
+    // Throttle: this runs from the window text path, which re-processes the
+    // same buffer while a window is open. Log a param the first time it is
+    // seen and then at most once every 2 s, so a chatty field cannot swamp
+    // the log the way the ungated diagnostics already do (see #96).
+    static DWORD s_lastMs    = 0;
+    static int   s_lastParam = -1;
+    DWORD now = GetTickCount();
+    if ((int)param == s_lastParam && s_lastMs != 0 && (now - s_lastMs) < 2000) return;
+    s_lastParam = (int)param;
+    s_lastMs    = now;
+
+    uintptr_t addr = FIELD_VAR_TABLE_BASE + (uintptr_t)param * 4;
+    uint32_t  wouldBe = 0;
+    bool      ok = SafeReadDword(addr, &wouldBe);
+    Log::Dialog("FieldDialog: [VAR-DROP] code=0x04 param=0x%02X OUT OF RANGE "
+                "(accepted 0x%02X..0x%02X) addr=0x%08X would read %s%u",
+                (unsigned)param,
+                (unsigned)FIELD_VAR_PARAM_MIN, (unsigned)FIELD_VAR_PARAM_MAX,
+                (unsigned)addr,
+                ok ? "" : "<unreadable> ", (unsigned)wouldBe);
+
+    // The dropped slot alone is ambiguous if the value actually lives at a
+    // neighbouring index, so sweep 0x20..0x3F -- the accepted window plus the
+    // three following groups, which is where 0x30 sits.
+    for (unsigned lo = 0x20; lo < 0x40; lo += 8) {
+        char   row[256];
+        size_t used = 0;
+        row[0] = '\0';
+        for (unsigned k = lo; k < lo + 8; k++) {
+            char     cell[24];
+            uint32_t v = 0;
+            if (SafeReadDword(FIELD_VAR_TABLE_BASE + (uintptr_t)k * 4, &v))
+                snprintf(cell, sizeof(cell), " %u", (unsigned)v);
+            else
+                snprintf(cell, sizeof(cell), " ??");
+            size_t cl = strlen(cell);
+            if (used + cl + 1 >= sizeof(row)) break;
+            memcpy(row + used, cell, cl);
+            used += cl;
+            row[used] = '\0';
+        }
+        Log::Dialog("FieldDialog: [VAR-DROP]   table[0x%02X..0x%02X] =%s",
+                    lo, lo + 7, row);
+    }
+}
+#endif  // FIELD_VAR_PROBE
+
+// ============================================================================
+// v0.18.3.299 (#89/#90): [FLOOR-SHOT] auto-capture of the prison floor
+// indicator. LOGGING + SCREENSHOT ONLY, no behaviour change.
+// ============================================================================
+//
+// The `.298` BAT found the floor number in two places that disagree by one:
+//
+//   engine display slot  FIELD_VAR_TABLE_BASE[0x20]   read 6 -> 5 -> 4
+//   field varblock       0x01B5 (437)                 read 4 -> 3 -> 2
+//
+// Only one of them is the number actually printed on screen, and getting it
+// wrong means every floor announcement is off by one. The obvious way to
+// settle it -- "press F11 while the Floor window is up" -- is exactly the
+// thing this bug makes impossible: the window is spoken ONCE for an entire
+// descent (the decoded text is the bare string "Floor" every time, so the
+// dedup below eats every repeat), so Aaron cannot hear when it is on screen
+// and cannot time a keypress to it.
+//
+// So the mod takes the shot itself. This fires from the show_dialog text
+// path, which the engine calls every frame a window renders (190+ times per
+// floor in the `.298` log) -- deliberately placed BEFORE the hash/decoded
+// dedup, because the RAW buffer is byte-identical on every floor (the number
+// is substituted by the engine at render time, not stored in the text) so
+// every dedup downstream of here returns early.
+//
+// Rate limiting is on the VALUE, not the frame: a shot is taken only when the
+// (slot, varblock) pair changes, i.e. exactly once per floor. Both values go
+// in the FILENAME, so the correlation can be read off the directory listing
+// without opening anything -- floor_204316_412_s20-5_vb-4.png next to an
+// image showing "Floor 5" settles it immediately.
+//
+// Gated to the prison shaft so it is inert everywhere else in the game.
+#define FLOOR_SHOT_PROBE 1
+
+#if FLOOR_SHOT_PROBE
+// SEH-guarded byte read, sibling of SafeReadDword above. No C++ objects (C2712).
+static bool SafeReadByte(uintptr_t addr, uint8_t* out)
+{
+    bool ok = false;
+    __try {
+        *out = *(volatile uint8_t*)addr;
+        ok = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = false;
+    }
+    return ok;
+}
+
+// FF8-encoded "Floor " -- straight off the #89 RAWDUMP (4A6A6D6D70200430).
+// Matching the raw bytes avoids a decode on every frame of every window.
+static const uint8_t kFloorPrefix[6] = { 0x4A, 0x6A, 0x6D, 0x6D, 0x70, 0x20 };
+static const uintptr_t FLOOR_VB_BASE  = 0x01CFE9B8;  // EXIT_VARBLOCK_BASE
+static const unsigned  FLOOR_VB_ADDR  = 0x01B5;      // the counter found in .298
+static const int       FLOOR_SHOT_DELAY_FRAMES = 30; // ~0.5 s at 60 fps
+
+static void FloorShotProbe(const uint8_t* raw)
+{
+    if (!raw) return;
+    for (int i = 0; i < 6; i++)
+        if (raw[i] != kFloorPrefix[i]) return;
+
+    uint16_t fid = FF8Addresses::pCurrentFieldId ? *FF8Addresses::pCurrentFieldId : 0xFFFF;
+    if (!((fid >= 0x0319 && fid <= 0x032E) || fid == 0x03C5)) return;
+
+    uint32_t s20 = 0;
+    if (!SafeReadDword(FIELD_VAR_TABLE_BASE + 0x20u * 4u, &s20)) return;
+    uint8_t vbRaw = 0;
+    int vb = SafeReadByte(FLOOR_VB_BASE + FLOOR_VB_ADDR, &vbRaw) ? (int)vbRaw : -1;
+
+    // One capture per distinct floor value, not per frame.
+    static int s_lastS20 = -1;
+    static int s_lastVb  = -1;
+    if ((int)s20 == s_lastS20 && vb == s_lastVb) return;
+    s_lastS20 = (int)s20;
+    s_lastVb  = vb;
+
+    SYSTEMTIME wt;
+    GetLocalTime(&wt);
+    char base[512];
+    snprintf(base, sizeof(base), "%s\\floor_%02d%02d%02d_%03d_s20-%u_vb-%d",
+             BattleTTS::GetScreenshotDir(),
+             wt.wHour, wt.wMinute, wt.wSecond, wt.wMilliseconds,
+             (unsigned)s20, vb);
+    // Async: this runs on the game thread inside a MinHook callback, so the
+    // blocking CaptureScreenshot() variant would stall the render thread.
+    // The frame delay lets the engine finish drawing the digits before the
+    // framebuffer is read -- same mechanism the Scan UI capture uses.
+    BattleTTS::RequestScreenshotAsync(base, FLOOR_SHOT_DELAY_FRAMES);
+    Log::Dialog("FieldDialog: [FLOOR-SHOT] field=%u slot0x20=%u varblock[0x01B5]=%d "
+                "-> floor_%02d%02d%02d_%03d_s20-%u_vb-%d.png",
+                (unsigned)fid, (unsigned)s20, vb,
+                wt.wHour, wt.wMinute, wt.wSecond, wt.wMilliseconds,
+                (unsigned)s20, vb);
+}
+#endif  // FLOOR_SHOT_PROBE
+
 // Call the engine's name resolver and copy the returned FF8 string into out.
 // SEH-guarded (no C++ objects here — C2712). Returns bytes written, 0 on any
 // fault or empty result.
@@ -482,6 +661,9 @@ static int FieldExpandRawVars(const uint8_t* src, size_t srcLen,
         if (b == 0x04 && i + 1 < srcLen) {
             uint8_t param = src[++i];
             if (param < FIELD_VAR_PARAM_MIN || param > FIELD_VAR_PARAM_MAX) {
+#if FIELD_VAR_PROBE
+                FieldVarProbeDrop(param);  // v0.18.3.298 (#89): observe, don't act
+#endif
                 continue;  // out of range: engine renders nothing, param consumed
             }
             uint32_t value = 0;

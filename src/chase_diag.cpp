@@ -34,7 +34,7 @@ static const uintptr_t ADDR_VAR_530 = 0x01CFEB7E;  // byte: Dollet state bitmap
 
 // Field entity layout (mirrors field_navigation.cpp; redeclared here to keep
 // the diag self-contained — no inter-module coupling).
-static const int      MAX_ENTITIES         = 16;
+static const int      MAX_ENTITIES         = 32;  // v0.18.3.283: mirrors field_navigation.cpp's widening (#85)
 static const int      MAX_SYM_NAMES        = 64;
 static const uint32_t ENTITY_STRIDE_OTHER  = 0x264;
 static const uint32_t ENTITY_STRIDE_BG     = 0x1B4;  // v0.15.1: Backgrounds

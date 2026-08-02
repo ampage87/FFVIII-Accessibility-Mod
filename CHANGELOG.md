@@ -6,6 +6,1085 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.316
+
+**#110 SOLVED — the field/zone movement rotation is now read straight from the engine's own per-camera-zone offset, replacing the `.ca` camera derivation, the 90° cardinal quantizer, and the walk-to-calibrate for both manual navigation and auto-drive. Supersedes the local-only diagnostic arc v0.18.3.310–.315.**
+
+### The answer
+
+Disassembly of `FF8_EN.exe` established that field character movement does **zero** camera math — every frame the walk code takes the input heading and **adds a rotation offset** held at `0x1CE4908` (one byte, a 256-unit angle where 64 = 90°) before stepping (keyboard path `0x478DE1`). That offset is the entire rotation. It is loaded per camera zone by the handler at `0x476B8D`: on a zone change it reads `fielddata[9 + zoneIndex]` (`FDAT = *0x1CDC744`, zone index = `0x1CE4906`) into `0x1CE4908`. So every field embeds a compact per-camera-zone rotation table — identity zones store the screen-aligned baseline, rotated zones store the angle — and the engine applies it the instant the player crosses into the zone. This is why some fields are rotated and most aren't, and why the rotation can change *within* a single field as you move between its camera zones.
+
+### Formula and validation
+
+`φ = (off − 128)·2π/256`, `camRight = (cos φ, sin φ)`, `camDown = (sin φ, −cos φ)`. A runtime probe confirmed `0x1CE4908 == fielddata[9+zone]` in every settled zone (and that it varies per camera zone — bg2f_2's two zones read 56 and 64), and validated the mapping on three independent anchors: identity rooms (`off=128` → camRight (1,0), camDown (0,-1)), the mod's own empirical measurement on bgroad_5 (`off=64` → (0,-1)/(-1,0)), and disassembly-proven bg2f_1 (`off=192` → (0,1)/(1,0)). The same data showed the true rotations are **not** cardinals — the dormitory is +79°, bghall_2 is +17°, bg2f_2's zones are ±101° — which is exactly why the old 90° quantizer (v0.17.5) was wrong on those fields.
+
+### Implementation
+
+`ReadEngineMoveOffset()` / `EngineOffsetToAxes()` (`field_nav_helpers.inl`, SEH-guarded) read the offset and build the axes; `ApplyEngineOffsetAxes()` (`field_nav_observe.inl`) runs at the top of the per-tick observer and sets **both** the manual-nav axes (`s_camRight/Down…`) and the auto-drive pair (`s_driveCam…`), so Backspace direction announcements and `\` / F9 auto-drive both steer on the engine's ground truth. It supersedes the load-time `.ca` guess within one tick, tracks camera-zone crossings automatically, and self-silences the empirical calibrator — predicted now equals actual, so its 45° correction gate never trips (no per-field learning, no cache, no cardinal snapping). Identity fields are mathematically unchanged, so there is no regression there; rotated fields get their exact angle instead of a cardinal snap.
+
+Hardening: the applier requires the field-data pointer to be plausible (which skips the pre-field startup state) and, when the live global reads a transient 0 during the field-entry window, falls back to the per-zone source byte `fielddata[9+cam]` — correct the instant the zone loads — so a fast field entry can't briefly announce reversed directions. In steady state the live byte equals the source byte, so this is byte-identical to the confirmed-good behaviour for every non-zero case.
+
+BAT confirmed both manual and auto-drive correct on identity and non-cardinal rotated fields alike, with `source=engine-offset` applied at the exact angles and the empirical calibrator fully silent. The `FIELD_CAM_DIAG` investigation probes (`[RAWCAM]`/`[ZONEROT]`) are switched off for this build.
+
+## v0.18.3.309
+
+**Two items: #114 pin-escape (recovery stops repeating a dead nudge) + a passive #110 RAWCAM diagnostic to crack the field camera transform.**
+
+### #114 — pin-escape (the residual "still gets hung up")
+
+The .308 descent reached floor 3 and was clearly better at the stairs, but still wedged intermittently. The log showed why: after .308 aimed the nudge at the *correct* edge, the player still pins at `moveDist=0` on some corners, and the recovery repeated the **same** nudge every cycle (`tri 9->8 dir=(-0.25,-0.97)` at recoveries 2/4/6). Offline geometry proved the walkmesh path there is clear — the obstacle is **collision the walkmesh doesn't contain** (the stair rails and the knee-wall around the central hole). A fixed nudge that presses into an invisible rail fails every time.
+
+Fix: when the player hasn't moved since the last nudge, the recovery now **rotates its escape direction** — opposite perpendicular, then toward the current triangle centroid (off an edge rail into open interior), then back along the corridor — and **lengthens the nudge 8→32 ticks** so a real escape has time to register. Resets the instant the player moves. New pin-state statics live in `field_nav_autodrive_helpers.inl`, cleared at drive start. The log line now shows `escapeMode` and `pinned` count.
+
+### #110 — RAWCAM diagnostic (passive, log-only)
+
+To eliminate the walk-to-calibrate we need the engine's exact screen→world field transform. This session's disassembly dig established that the field movement is integer/table math (no FPU trig) and — critically — that the parsed camera-0 `.ca` matrix does **not** reproduce the measured motion on gpbig1a/gpbig2a, both of which are `num_cameras=1` (so it is NOT the multi-camera bug; either the parse or our transform is wrong). `FIELD_CAM_DIAG` logs, per frame while one arrow is held, the raw player position + per-frame delta + walkmesh triangle + candidate facing words (+0x08/0x0A/0x0C, the engine's pre-collision intended direction, immune to the wall-slide that poisoned the old 2-sample measurements), plus a one-time dump of the `.ca` matrix and the mod's computed axes.
+
+**BAT the diagnostic:** on `gpbig1a`, then `gpbig2a`, walk to OPEN ground and tap UP, DOWN, LEFT, RIGHT ~1 s each; send `ff8_field.log` (grep `[RAWCAM]`). The pin-escape fix can be exercised in the same session — the diagnostic is passive and doesn't touch driving.
+
+---
+
+## v0.18.3.308
+
+**#113 — the recovery nudge was perpendicular to the WRONG EDGE. The v0.17.9.14 FindPortal convention fix never reached autodrive's nudge. One change.**
+
+*(Authored in the same session as .307, before any machine BAT of .307 — Claude is running the build-and-test loop on Aaron's machine this session, so .308 is the build that actually gets tested. Attribution stays clean: goal lines, `NOT reset` lines, and nudge-direction lines are independently visible in the log.)*
+
+### The bug
+
+`neighbor[e]` pairs with edge **`(vertex[e], vertex[(e+1)%3])`** — the convention v0.17.9.14 already fixed in `FindPortal` after the Track A investigation. The even-phase recovery nudge in `field_nav_autodrive.inl` still derived the shared edge from the old `(e+1, e+2)` pair, so its "perpendicular to the shared edge with the next corridor triangle" was perpendicular to a segment that is *not* that border — frequently a wall. A nudge aimed by the wrong edge cannot free the player; repeating it 20 times cannot either. This closes the third and last part of #100's "wedges silently" (part 1: #110 axes; part 2: #112 goal instability, fixed in .307).
+
+### Direct proof from the .306 BAT log — no inference
+
+The 27-second wedge at gpbig1a tri 72 logged **twenty identical** `nudge perpendicular tri 72->71 dir=(0.90,-0.44)` lines. Recomputing both rules offline against the committed walkmesh extract (`Plan & Research Documents/ff8_walkmeshes.json`):
+
+```
+old (e+1,e+2) pair:  edge (-781,-1402)-(-1026,-1909)  -> perp (0.90,-0.44)   == the logged direction
+true shared edge:    edge (-1433,-1590)-(-781,-1402)  -> perp (-0.28, 0.96)  -> points at tri 71, as intended
+```
+
+Convention validated mechanically: across gpbig1a + gpbig2a the old pair fails the shared-vertex test on **184 of 186** neighbor links; the fixed pair fails **0 of 370**.
+
+### Also corrected, inert by construction
+
+- The same wrong-edge derivation in the two **disabled** blocks (corridor steering, wall-avoidance bias), so re-enabling them cannot resurrect the bug.
+- `field_nav_settriangle.inl` COORD diagnostic — logged the wrong crossed-edge midpoint into `ff8_nav_data.log`. Log-only consumer; zero behavior change.
+
+### Offline validation (new this session)
+
+A host harness (`g++`) compiles the **real** `src/field_nav_pathfinding.inl` against the real gpbig1a walkmesh and simulates the drive loop with a wall-sliding kinematic player:
+
+- Reproduces .306's recovery-goal flip-flop exactly (goals 20/1/22 across re-paths vs the stable 48).
+- Under the .307+.308 recovery model, **all 84 triangle-center starts reach the Stairs down to Floor 5 line**.
+- A point-player sim cannot model the engine's collision radius at rail corners, so the machine BAT remains ground truth for any remaining wedges.
+
+### BAT
+
+Same walk as .307's: calibrate with a couple of steps ("Camera calibrated."), then drive to the stairs from a few spots. In any wedge, expect the recovery nudge log lines to show **different, corridor-pointing directions** instead of one direction repeated twenty times — and the .307 expectations (same goal on every `[A*]` re-path, `NOT reset` lines, honest "Stuck." bound) still hold.
+
+---
+
+## v0.18.3.307
+
+**#112 — recovery must converge: every recovery re-path aims at the drive's original goal, and revisiting a recently-stuck triangle no longer refills the recovery budget. One change (two inseparable halves of "recovery stops undoing itself").**
+
+### What the .306 BAT said
+
+Aaron: *"No more position lost, but navigation really struggled to actually get around. I think it keeps getting stuck on objects, like the rails around the stairs and the short wall around the hole in the middle of the floor."*
+
+**#111 CONFIRMED** — zero `Player position lost` in the whole session; the drive survived every triangle crossing. With the drive surviving, the log finally shows what "getting around" actually fails on, and it is **two distinct faults**.
+
+### Fault 1 — pre-calibration axes, 90° wrong on gpbig1a (#110 territory, NOT touched by this build)
+
+Every gpbig1a drive before the 15:11:44 calibration ran on the ca-quantized axes, and the calibration that then fired proves those axes were a quarter-turn wrong on this field:
+
+```
+15:11:44  [NAV-CAL] gpbig1a unlocking correction: source=ca-quantized sampleDiverge=46deg
+15:11:44  [NAV-CAL] EMPIRICAL CORRECTION APPLIED: camRight (1.000,0.000)->(-0.000,1.000)
+15:11:44  [CAM-SNAP-VERDICT] gpbig1a rawCA=+38.32 quantizerChose=+0 alternative=+90 measured=+90 -> ALTERNATIVE CORRECT
+```
+
+So the "stuck on objects" feel is mostly the steering pressing keys rotated 90°, driving the player **into** the rails and the shaft's knee wall, where FF8's wall-slide pins:
+
+- Drive 1: player ran **east** (+733 X in 2 s) while the stairs were south-west; distance-to-target *grew* 1705 → 1948 while "driving".
+- Drive 4: pressed UL into the same geometry at (-1292,-1638) for **27 seconds**, moveDist=0, with **20 recoveries** — and the even-phase nudge was *identical* all 20 times (`tri 72->71 dir=(0.90,-0.44)`), the exact #100 signature.
+- The control group: the **same build** drove `gpbig2a` (flipBand=0, axes correct at load) flawlessly through 6 waypoints to the Bottom crossing exit on the second attempt — same code, adjacent field. The difference is the axes.
+
+The .305 per-field cache can't help the *first* load of a session (it dies with the process), and the real fix — the quantizer threshold — stays gated on #110's independent data: **gpgmn3 / gpbrdg1 / gppark1 are still unvisited.** This session produced a *second* gpbig1a verdict (consistency again, not independence).
+
+### Fault 2 — NEW, #112: recovery re-paths to a moving goal
+
+The two post-calibration drives had **correct axes and still failed**. The final drive ping-ponged between tri 8/9/10 for 40 seconds, and the goal alternation in the log is the mechanism:
+
+```
+drive start:               [A*] start=58 goal=48    (raw line center)
+recovery from tri 4:       [A*] goal=20
+recovery from tri 10:      [A*] goal=1   -> wp (-2361,-503)  pulls WEST
+recovery from tri 9 or 8:  [A*] goal=22  -> wp (-1683, 69)   pulls NORTH-EAST
+wiggle-completion re-path: [A*] goal=48   (raw center — already correct)
+```
+
+For trigger-line targets, `UpdateAutoDrive()` offsets `tx/tz` **300 units past the line center along the direction from the player's current position** ("aim through the line" — correct for steering). The odd-phase and nudge-fallback recovery re-paths seeded `FindNearestTriangle()` with that **moving** point, so the A* goal was a function of where the player happened to be standing. From the west cluster the goal-1 route pulls east of it; from the east cluster the goal-22 route pulls west — each recovery routed the player toward the *opposite* cluster, forever. Drive start and the wiggle-completion re-path both use the raw center and agree on goal 48; the recovery block was the odd site out — the "when a fix targets one of several passes writing the same field, check ALL of them" rule, caught again.
+
+**Fix A:** capture `rawTx/rawTz` immediately after target resolution, before the offset; every recovery re-path now seeds A* and the funnel with it. All re-path sites now share the drive's original goal.
+
+### The inseparable second half — #100's "Stuck." becomes reachable
+
+Each ping-pong hop changed the walkmesh triangle, and the v0.17.6.1 tri-advance reset treated every hop as corridor progress and refilled the whole `MAX_RECOVERY_PHASES` budget — so the final drive ran at `phase=1` on **every single recovery** and "Stuck." was structurally unreachable. That is precisely #100's "wedges silently, Stuck. never fired once".
+
+**Fix B:** a 4-entry ring of recently-stuck triangles (`field_nav_autodrive_helpers.inl`, cleared at drive start in `field_nav_handlekeys.inl`). A triangle change only resets the phase when the new triangle is **not** in the ring; revisits log `recovery counter NOT reset ... revisits a recent stuck triangle` and let the phase climb to the cap, so a bouncing drive now says **"Stuck. Distance remaining: N"** within ~30 recovery windows instead of dancing silently for the full 40 s timeout. Genuine corridor traversal is unaffected: fresh triangles still reset, and waypoint advances keep their own independent phase reset.
+
+Caching is safe because the ring is per-drive state (cleared on every start) and gates only the *bookkeeping* reset — recovery itself still fires and re-paths on every stuck window.
+
+Nothing lands in `field_navigation.cpp` (81,792 / 81,920 — still the next file to split, #37). New statics live in `field_nav_autodrive_helpers.inl`, which is included ahead of both consumers.
+
+### BAT
+
+1. On `gpbig1a`, **walk a few steps first** (turn or two in different directions) until you hear **"Camera calibrated."** — today that took about two manual steps. This keeps the test on Fault 2's fix rather than re-measuring Fault 1.
+2. Then F9 → Stairs down to Floor 5, from a couple of different starting spots. Expect every recovery `[A*]` line to show the **same goal triangle**, `NOT reset` lines where the old build ping-ponged, and either genuine arrival at the stairs or an honest **"Stuck. Distance remaining: N"** within ~40 s — no more silent east-west bouncing.
+3. If it says Stuck, that log (consistent goal + pin location) is exactly the evidence the next change needs — likely the stair-mouth approach geometry itself.
+4. If you get a chance, a few steps on `gpgmn3`, `gpbrdg1` or `gppark1` finally gives #110 its independent verdict.
+
+---
+
+## v0.18.3.306
+
+**#111 — auto-drive no longer dies on a one-frame position dropout. One change.**
+
+### What the .305 BAT said
+
+Aaron: *"It attempted to auto-drive to the stairs but kept saying 'Player Position Lost'. I have noticed this happening more and more it seems like, and I suspect it has something to do with the player crossing some kind of underlying line on the field."*
+
+**11 stops in ~4 minutes.** Of 15 drive terminations: 11 `Player position lost`, 2 `Arrived`, 2 `Cancelled`. It made the stairs untestable.
+
+### It is a single-frame dropout, and the log proves it
+
+The position is readable on the tick **before** and the tick **after** every one:
+
+```
+14:51:39  [drive-vec] t=150 tri=3 pp=(-2386,-372)      <- fine
+14:51:39  [drive] stopped: Player position lost.       <- next tick
+14:51:42  [A*] Path found ... start=2                  <- fine again
+
+14:49:21  [drive-vec] t=270 tri=55 pp=(1627,275)       <- fine
+14:49:21  [drive] stopped: Player position lost.       <- next tick
+```
+
+### Aaron's guess was right
+
+`GetEntityPos()` only fails in-range when the triangle id at `0x1FA` reads **0** ("not yet placed") or the Others base pointer is momentarily null — both things the engine does *while re-resolving the player's walkmesh placement*, i.e. exactly when crossing into a new triangle or when a line fires. At 14:51:39 the drive had just advanced three waypoints in one second (`tri 56 → 6 → 3`), crossing triangles fast. It is a race between our per-frame poll and the engine's placement update, which is why it gets more likely the more auto-drive is used and the faster the player moves.
+
+### Fix
+
+**Does not depend on knowing which of the two reads dips.** One failed sample is not evidence the player is gone, and the log proves that directly.
+
+A dropout now pauses the drive exactly as an open dialog already does — release held keys, freeze the stuck counter, keep the drive alive — and gives up only after **30 consecutive bad ticks (~0.5 s)**. Far longer than any observed dropout (all were a single tick); far shorter than a player would wait wondering what happened. If the position really is gone, `IsOnField()` and the field-transition handler stop the drive on their own paths.
+
+Also **split the message**: `s_playerEntityIdx < 0` now says **"Player entity unknown."** Both branches previously said the same thing, so the .305 log couldn't tell me which fired.
+
+`ReadPlayerPlacementRaw()` lives in `field_nav_autodrive_helpers.inl` with its own SEH — MSVC C2712 forbids `__try` in a function needing C++ object unwinding, and `UpdateAutoDrive()` has none today.
+
+### .305 results — all three confirmed
+
+- **#109 CONFIRMED.** One calibration on `gpbig1a`, then `cached axes re-applied on field load` on **four** later loads with no relearn.
+- **#110 first verdict, matching the prediction:** `gpbig1a rawCA=+38.32 quantizerChose=+0 alternative=+90 measured=+90 → ALTERNATIVE CORRECT`. That is the field the hypothesis came from, so it is consistency, not independent confirmation — the threshold change stays unshipped.
+- #107 / #108 unchanged.
+
+### BAT
+
+Drive to the stairs on several floors. Expect **no** `Player position lost` in normal movement, and `[drive] player position unreadable — PAUSING` / `recovered after N tick(s)` pairs in the log where the stops used to be. Now that the drive survives, we should finally see whether it can actually walk you down the stairs.
+
+If you pass through `gpgmn3`, `gpbrdg1` or `gppark1`, a few steps on each gives #110 its independent data point.
+
+---
+
+## v0.18.3.305
+
+**#109 — the calibration was right; it just didn't survive the next floor. One change (plus the guard that makes it safe).**
+
+### What the .304 BAT said
+
+Aaron: *"That seems to be working! However, you have to approach the downward stairs in a particular direction, and it seems like the mod was perhaps getting a bit hung up on that."*
+
+### The log settles it without inference
+
+In one 4.5-minute walk, `gpbig1a` loaded **eight times** and `gpbig2a` three times. The #108 calibration fired **twice** — `ResetFieldNavState` clears it on every load. The two lists correlate exactly:
+
+| | outcome |
+|---|---|
+| 12:27:14 load → **12:27:22 calibrated** | drives at 12:27:28 / :29 / :45 / :51 — the ones Aaron said were working |
+| 12:28:10 load → never recalibrated | 12:28:44 drive → 20 recovery attempts → **"Gave up. Distance remaining: 999."** |
+| 12:29:07 load (floor 4) → never recalibrated | 12:29:08 drive → **wedged at the stairs**, 56 identical position samples |
+
+### Why it feels like an approach-direction problem
+
+With the axes wrong the drive presses the **wrong arrow keys**, so whether the player makes progress depends on how the axis error happens to line up with the approach. The staircase isn't fussy — the steering is rotated. Caught in the act at 12:29:09:
+
+```
+t=30  pp=(-2179,-97)   trigRedir=1  finalDelta=( 19.3,-104.5)  kb=DR   -> moved east, onto the line
+t=60  pp=(-2154,-100)  trigRedir=0  finalDelta=(-53.4,-110.3)  kb=DL   -> frozen
+t=90..150  pp=(-2154,-100) unchanged
+```
+
+The drive wanted world (−53,−110) — west-south. With the true mapping (screen-up = world −X, screen-right = world +Y) that is **up-left**. On stale `ca-quantized` axes it pressed **down-left**, which moves world (+X,−Y) — the opposite in X. The player froze **12 units short of crossing `line1`** and stayed there.
+
+### Fix
+
+Cache the corrected axes **per fieldId** and re-apply them at field load — `CamAxesCacheStore` / `CamAxesCacheLookup`, 24 entries, round-robin.
+
+Placed in `field_nav_helpers.inl`, **not** `field_navigation.cpp`: that file is at 81,792 of its 81,920-byte hard limit, and DEVNOTES says split it before landing anything there rather than shaving comments to fit. `helpers.inl` is included ahead of both `fieldscripts.inl` (applies the cache) and `observe.inl` (fills it).
+
+### The inseparable second part: one-shot lock → cap of 3
+
+This is what makes caching safe, not scope creep. **The .304 BAT applied one correction that was 180° wrong:**
+
+```
+12:25:38  arrow=DOWN  consensus=(-0.872,0.490)  world 151deg  -> camRight=(0,-1)
+12:27:22  arrow=UP    consensus=(-0.995,0.100)  world 174deg  -> camRight=(0,+1)
+```
+
+Opposite keys cannot both move the player the same way — one sample was a wall slide, and the DOWN answer was the bad one. Under a hard one-shot lock that stood for the rest of the visit; caching it unchanged would have made it stand for the rest of the **session**. So `empirical-cached` and `empirical-corrected` join `ca-quantized` as contradictable sources. A 180° error diverges far past the 45° threshold, so it self-repairs on the next clean sample; the cap bounds oscillation.
+
+### Seen, not fixed — filed against #100
+
+The wedge recovery repeats an **identical** nudge (same triangle pair, same direction vector, same 8 ticks) up to 20 times: `tri 10->54 dir=(0.96,0.28)` ten times, `tri 75->74 dir=(-1.00,0.02)` ten times. A deterministic action that failed cannot succeed by repetition; it burned 38 seconds before giving up. Fixing the axes should remove most wedges — varying the nudge is the remaining work.
+
+### BAT
+
+Walk the shaft across several floors and drive to the stairs on more than one of them.
+
+- Expect `[NAV-CAL] ... cached axes re-applied on field load` from the **second** entry to each shaft field onward — no relearn wait.
+- The drive should behave on arrival the way it did inside .304's calibrated window, on every floor rather than occasionally.
+- If a field ever calibrates *wrongly*, you should see a second `[NAV-CAL] ... unlocking correction` overwrite it rather than it sticking.
+
+---
+
+### Also folded in: #110 — the CA snap-threshold probe (LOG-ONLY, zero behaviour change)
+
+Aaron asked whether the field data itself could give us the orientation at load, rather than a diagnostic needing many sessions. It can. I extracted the `.ca` camera record for **all 894 fields** straight out of `field.fs` — `offline/CAMERA_ANGLES.csv` and `offline/CAMERA_ANGLE_SURVEY.md`. The parser is validated against the mod's own `[CA]` log lines (`gpbig1a` 38.32, `bgryo1_4` 46.60, `bghall_1` 7.73, `bg2f_1` 65.38, `bgroom_1` −62.49, `bghall_4` 23.80 — all exact).
+
+**FF8 cameras are not near-axis-aligned.** The v0.17.5 quantizer was justified on four fields that "each round cleanly to a world cardinal". Across all 894 only **35%** sit within 5° of a cardinal and **44%** discard more than 20°. The snap is making a large correction across most of the game.
+
+**The threshold is below 45°.** `gpbig1a`'s measured response (RIGHT → world 84°, DOWN → world −5.7°, two independent arrows) gives `camRight ≈ 90°` — matching neither the quantizer's 0° nor the raw 38.32°. So the engine does quantize, with a lower threshold. Against the known-good fields (`bghall_1` 7.73, `ggroom1` 17.55, `ggsta1` 19.80, `bghall_4` 23.80 → 0° correctly; `bgryo1_4` 46.60, `bg2f_1` 65.38, `bgroom_1` −62.49 → snap up correctly) the bracket is **(23.8°, 38.32°]**.
+
+**Not shipping the threshold change.** It would flip 93 fields. Every field known to work today is outside that band and `gpbig1a` is inside it — the strongest evidence it is safe — and 93 fields is still far too large a blast radius for one confirmed data point.
+
+**Shipping the measurement instead.** `[CAM-SNAP]` logs the raw angle, both candidates and a `flipBand` flag at every field load; `[CAM-SNAP-VERDICT]` fires when a calibration lands and says whether the engine agreed with the quantizer's pick, the one it rejected, or neither. Every field that calibrates anywhere in the game is now a data point.
+
+Predictions on record: `gpgmn3` (+38.80) and `gpbrdg1` (+129.10) should report **ALTERNATIVE** exactly as `gpbig1a` does; `gppark1` (−46.80) and `gpbig2a` (−24.76) should report **QUANTIZER**. If `gppark1` or `gpbig2a` also reports ALTERNATIVE the model is wrong and no threshold change ships.
+
+**Separate bug found by the same survey, filed not fixed:** 45 fields carry more than one camera and `LoadCameraAxes` reads camera 0 only; **18** have cameras that snap to different cardinals, so a script-driven camera switch puts the axes a full cardinal out silently. `glwitch1`, `glstage1` and `ggroom1` are on that list and all three appear in the sewer/gate work.
+
+### BAT additions for #110
+
+Nothing to do beyond playing normally — but if the route passes through `gpgmn3`, `gpbrdg1`, `gppark1` or `gpbig2a`, walk a few steps on each so they calibrate and the verdict lines land.
+
+---
+
+
+---
+
+## v0.18.3.304
+
+**#107 + #108 — the stairs list correctly, but Aaron could not get to them. Two unrelated causes, neither of them the catalog.**
+
+### What the .303 BAT said
+
+Aaron: *"So I did see stairs down in the catalog now, but driving to them did not actually take me down the stairs. I am not entirely sure if their location in the catalog is correct either… I believe the stairs down should be down and right from my current location."*
+
+The catalog entry is right. The **position** `(-2150,-197)` is corroborated — every floor change in the .301 BAT fired from `(-2400,-470)`, immediately beside it. Both remaining problems are downstream of it.
+
+### Deviation from one-change-per-cycle, flagged
+
+Two changes ship together. Neither is testable without the other: with the false arrival fixed the drive still steers on 50°-wrong axes and wanders; with the axes fixed it still stops short and announces arrival. They ride the same walk, live in different files, and carry different log tags, so the BAT attributes each independently.
+
+---
+
+## #107 — auto-drive announced "Arrived" ~960 units short
+
+The trigger-line arrival test was the **infinite-line** side test:
+
+```cpp
+float crossNow = tdx * (pz - tly1) - tdy * (px - tlx1);
+if (s_driveTrigCrossStart != 0.0f && crossNow * s_driveTrigCrossStart < 0.0f)
+    StopAutoDrive("Arrived.");
+```
+
+`gpbig1a` `line1` runs `(-2141,-89) → (-2158,-305)` — 217 units long, almost exactly parallel to the Y axis — so its infinite extension is a wall across the entire map at X ≈ −2150. Walking to *any* point past that X flips the sign.
+
+| player | crossNow | distance to the line |
+|---|---|---|
+| `(-2221,-1089)` drive start | −280 | — |
+| `(-2162,-1161)` | **+13688** → "Arrived." | ~960 units |
+
+The drive then released the keys, so Aaron stopped in open floor having been told he had got there.
+
+This is the **fifth** site of this bug and the first outside a catalog filter — gateways (v0.17.8.10), interactions (v0.18.3.268), exits (v0.18.3.278) and events (#94) were all bounded; this one was missed. In a catalog filter it makes a row flicker. Here it is a confident spoken claim that the destination has been reached, with nothing for a blind player to catch it by.
+
+**Fix:** keep the sign flip, and additionally require the player to be **alongside the segment** — project onto the line, require the foot of the projection to lie within it, 15% margin at each end. Failing the bound is the safe failure: the drive keeps walking, and the engine's own MAPJUMP ends it.
+
+---
+
+## #108 — camera axes 48–84° wrong, and the calibrator was forbidden to fix it
+
+`[NAV-OBSERVE]` measures where the player actually moves per arrow key. On `gpbig1a` in one two-minute walk:
+
+```
+DIVERGE:  48°×3  52°  53°  61°  62°  64°  72°  84°×8  100°  129°  138°×2  140°  153°
+```
+
+Twenty-plus samples, never converging. `gpbig2a` the same. That is why the stairs were announced as `north`.
+
+**Root cause** is the 90° CA quantizer:
+
+```
+gpbig1a: camRight angle=+38.3deg -> snap=+0deg     (6.7° from the 45° coin-flip boundary)
+gpbig2a: camRight angle=-24.8deg -> snap=-0deg
+```
+
+I am **not** changing the quantizer. The raw CA does not match the engine either — measured screen-up is ≈145°, raw predicts ≈128°, quantized predicts 90° — so "use the raw value" would trade one wrong answer for a less wrong one.
+
+**The real defect** is that the closed-loop empirical calibrator built for exactly this was hard-gated:
+
+```cpp
+if (strcmp(s_camAxesSource, "identity") == 0 && !s_camAxesEmpiricalApplied) {
+```
+
+`gpbig1a` is `ca-quantized`. The calibrator watched all twenty-plus divergent samples and was forbidden to act on any of them.
+
+**Fix:** a `ca-quantized` field becomes eligible once the engine has *contradicted* it — the triggering sample **and** the consensus must both diverge by ≥ 45°. 45° is not tuned; it is the cardinal sector boundary. Below it the spoken cardinal is still correct and there is nothing to fix; at or above it the cardinal is provably wrong.
+
+**Regression safety.** Unlike the v0.17.7.6 original this path can now touch fields that work today, so the gate *measures harm on this field* rather than guessing which fields look risky: correct axes produce consensus agreeing with the prediction, the gate stays shut, nothing is written. I first tried gating on "the quantizer discarded a lot of angle" and rejected it — `bgryo1_4` discards 43.4° and navigates correctly, so that test would have fired on a healthy field.
+
+**Expected:** consensus UP ≈146° → `camDown` snaps to `(1,0)`, `camRight` to `(0,1)`, and the stairs read **right and slightly down** from Aaron's position — what he said they should be, and 90° from the "north" he was given.
+
+---
+
+### BAT
+
+On a shaft floor, walk a few steps with the arrow keys, then open the catalog and drive to the down stairs.
+
+- `[NAV-CAL] … unlocking correction` followed by `Camera calibrated.` spoken — then directions should match what you'd expect from the screen.
+- Driving should either reach the staircase and change floor, or keep walking — it should **not** say "Arrived" in open floor. Watch for `[drive] side flipped on the trigger line's INFINITE extension…`.
+- Say if any *other* field starts giving wrong directions — that's the regression this gate is designed to prevent, and `[NAV-CAL] … NO correction applied` lines show it staying shut where it should.
+
+---
+
+## v0.18.3.303
+
+**#91 R1 completion — the DOWN staircase lists too. One change.**
+
+### What the .302 BAT said
+
+Aaron: *"Stairs up were in the catalog and seemed to be at the correct location. The stairs down were not listed in the catalog."*
+
+### The log named the culprit — I did not have to guess
+
+The `[refresh] STAIRS` line for `line2` read **`higher=0 lower=1`**. That count comes from my own comparison loop walking `s_capturedLines`, so it had **found `line1`, read its Z, and counted it**. `line1` was therefore present, active, `SCREEN_BOUND`, and sharing the destination — and yet it never produced a STAIRS line of its own, and still came out as `Interaction 1`.
+
+One filter fits all three facts, and the log states it outright:
+
+```
+[JSMScan] REQ-interact: Line ent1 'squall' REQs interactive entity -> hasDialogReqTarget=1
+[LINE-PAIR] line1 center=(-2149,-197) -> jsm1 'squall'
+            line2 center=(-2275, 269) -> jsm2 'zell'    (no REQ target)
+```
+
+That is the entire asymmetry between the two staircases. The **up** stairs are a plain walk-across line. The **down** stairs run a scripted descent **with dialogue** — the same script that answers *"(No sense going back up.)"* — so the down line genuinely REQs a dialog-bearing entity and was classified dual-purpose.
+
+The dual-purpose rule is *"if it talks, it is an Interaction, not an Exit"*. That is correct for a dormitory bed. It is wrong for a staircase, which is the only way off the floor.
+
+### Two edits, both narrowly scoped
+
+| file | change |
+|---|---|
+| `field_nav_catalog_triglines.inl` | Hoist the shaft-staircase test **above** the `hasDialogReqTarget` `continue`, and exempt shaft stairs from it. Logs when the exemption fires. |
+| `field_nav_catalog.inl` | The Interaction block has **two** branches that set `isInteractive`; .302 guarded only the second (self-loop). The down stairs took the **first** (`hasDialogReqTarget`) and kept emitting `Interaction 1`. Now guarded before both. |
+
+Both are gated on *prison-shaft self-destination line*, so the dormitory bed and every other dual-purpose line behave exactly as before.
+
+The second edit is DEVNOTES' own rule — *when a fix targets one of several passes writing the same field, check ALL of them*. I wrote that rule and then broke it in .302; that is why this took a second cycle.
+
+### BAT
+
+On a prison shaft floor, **open the catalog**. Expect **both** `Stairs down to Floor N-1` and `Stairs up to Floor N+1`, **no** `Interaction 1`, and two `[refresh] STAIRS` log lines — `line1` with `higher=1 lower=0` → down, `line2` with `higher=0 lower=1` → up.
+
+---
+
+## v0.18.3.302
+
+**#91 R1 — the prison stairs are in the catalog, named by direction and destination floor. One change.**
+
+### What closed it
+
+Aaron remembered the game answering **"(No sense going back up.)"** when he crossed a line trying to go back upstairs. That line, plus the full SETLINE geometry, identifies both staircases.
+
+`gpbig1a` carries **two** self-destination SCREEN_BOUND lines and **both were lost** — `line1` surfaced as the meaningless "Interaction 1", `line2` did not surface at all. Between them, the way up and the way down were invisible.
+
+| line | centre | Z | direction |
+|---|---|---|---|
+| `line1` | (-2150,-197) | −68 / −55 | **down** |
+| `line2` | (-2276, 269) | +352 / +391 | **up** |
+
+Two independent confirmations:
+
+- All three floor changes in the `.301` BAT fired from **(-2400,-470)** — south of and just past `line1` — with the floor decreasing each time.
+- The `"(No sense going back up.)"` refusal came from the **north** line. So north is up, and it is story-gated at that point in the plot.
+
+### The rule
+
+**Of the self-destination lines on a field, the higher-Z one goes up.**
+
+That is exactly the discriminator I tried on INF gateways in `.298` and had to withdraw when their `lineZ` came back `(0,0)` everywhere. SETLINE data is the opposite: the heights are real, and the two staircases here sit ~430 units apart vertically — about one floor. Same idea, correct data source.
+
+Deliberately **not** keyed on line index or SYM (`squall` / `zell` here, which mean nothing), so it carries to the other shaft screens on its own.
+
+Direction is only claimed when a counterpart **exists** to be higher or lower than. A lone self-destination line, or a tie, gets the unqualified `"Stairs"` rather than a coin-flip — announcing "Stairs up" at the down stairs would be worse than saying nothing about direction.
+
+### Also: stairs are exempt from the separation test (R4)
+
+`gpbig1a`'s west wall carries **five lines within ~500 units of each other**, so whichever one the player is not standing next to reads as "separated" by its neighbours. That is precisely how `line2` vanished while `line1` survived.
+
+This bounded separation test has now produced a false positive in **four** blocks — `.17.8.10` gateways, `.268` interactions, `.278` exits, #94 events — and a cluster of parallel lines on one wall is its worst case. Losing the only way off a floor is far worse than listing a staircase you have to walk around to.
+
+### No duplicates
+
+The Interaction block no longer promotes shaft self-loops, so nothing appears twice. The dormitory bed and every other self-loop field are untouched — the change is gated on the shaft.
+
+`ReadShaftFloor()` added to `field_nav_helpers.inl`, reading varblock `0x01B5 + 1` — same source as the `.301` announcement.
+
+### BAT
+
+On any shaft floor, open the catalog. Expect **"Stairs up to Floor N+1"** and **"Stairs down to Floor N−1"** as two separate entries, plus a `[refresh] STAIRS` line per staircase showing `meanZ` and the higher/lower counts.
+
+Walk to each and confirm the direction is right. **If they are swapped, the Z sign convention is inverted and it is a one-line flip.**
+
+Note the up stairs may refuse with "(No sense going back up.)" depending on story state — that is the game talking, not the label being wrong.
+
+### Notes
+
+- **NOT MSVC-compiled, NOT BAT'd.**
+- `field_navigation.cpp` untouched — still 81,792/81,920 (#37).
+
+## v0.18.3.301
+
+**Three separable units.** They all serve the same walk, so one BAT exercises all three, and each carries its own log tag so a regression stays attributable. Flagging the deviation from one-change-per-cycle deliberately rather than quietly.
+
+### The geometry, which reframed everything
+
+Aaron described the room:
+
+> *"District 3 is the left side of the floor and district 5 is the right side. There is a big hole through the middle so half the screen on each is a hole you walk around. There are two exits between 3 and 5 — one at the top of the circle and one at the bottom."*
+
+The INF data corroborates it exactly — each half carries two gateways at mirrored heights (`y ≈ +1800` and `y ≈ -1850`), the top and bottom of the ring. That is why ten crossings produced zero floor changes: they are lateral moves around a walkway, not stairs.
+
+### 1. #90 — floor announcement (the headline)
+
+The shaft changes floor **without changing fieldId**, so `FieldAnnounce`'s fieldId-change trigger never fired and 23 floor changes announced nothing at all.
+
+- The announce key is now **`(fieldId, floor)`**, so a floor change on an unchanged fieldId speaks.
+- The floor comes from varblock `0x01B5 + 1` — the `+1` pinned by the `.299` auto-capture ("Floor 6" while the varblock held 5, "Floor 4" while it held 3).
+- The ring halves **drop their archive ordinal entirely**: `"Floor 4, left side"` / `"Floor 4, right side"`. "Galbadia D-District Prison 3" is neither a floor nor a place, and Aaron heard it alternating with "...5" thirteen times during a three-floor descent.
+- Other shaft fields (cells, corridors) keep their name and gain `", Floor N"`.
+
+### 2. #91 R3 — gateway split + ring crossing names
+
+Grouping on `destFieldId` alone collapsed two exits **3,644 units apart** into one entry at their midpoint — open floor belonging to neither, which auto-drive then walked to.
+
+A candidate now joins a group only if it is also within **800 units** of it. Genuine duplicates (the case the dedupe exists for) sit under 200 apart; the ring pair is 18× that.
+
+Once split, both would carry the same display name and the `.270` exact-name dedupe would drop one — so they become **"Top crossing"** and **"Bottom crossing"**. Position on the ring is the only thing that distinguishes them: both land on the **same floor**, so a floor label would be actively wrong here. The destination is dropped because both go to the same place; the only useful fact is which way round the hole.
+
+Derived from the gateway's own Y, not the camera, so the label is stable wherever the player stands and on either half.
+
+> ⚠️ **Assumption flagged for the BAT: larger Y = "top".** The codebase says "Y = screen-vertical" but never documents the sign, and I am not repeating the `.298` gateway-Z mistake of assuming one. Both centres are logged; if they read swapped in play it is a one-line flip.
+
+### 3. #91 R1 groundwork — diagnostic only
+
+`[MAPJUMP-HOOK]` now logs **player XY at fire time**.
+
+`gpbig1a` carries two self-destination lines only ~470 units apart on the west wall — `line1` at `(-2150,-197)` and `line2` at `(-2275,269)` — and one is up while the other is down. Nothing static separates them: gateway Z is `(0,0)` everywhere, and `ff8_nav_data.log` records only *triangle* changes, so it went quiet 13–49 s before each jump and never caught the crossing. Position at the fire, next to the floor the jump produces, pins it in one ordinary descent.
+
+### Deliberately NOT in this build: naming the stairs
+
+Surfacing them needs R1 **plus** the reachability drop that swallowed `line2` (R4) — and until the diagnostic says which is which, both would read "Stairs" with no way to choose between them. They ship next cycle as **"Stairs to Floor N"**, which is what Aaron actually asked for and is worth getting right rather than fast.
+
+### BAT
+
+Walk the shaft with `-`/`=` pressed on **both** halves. Expect:
+
+- **"Floor N, left side" / "Floor N, right side"** on every floor change, *including* the same-fieldId ones that were silent
+- **two crossings** instead of one merged phantom, named top and bottom
+- `[refresh] INF-GW gw SPLIT` and `ring crossings named` lines
+- the **first-ever `GATEWAY grp` rows** in the catalog dump (#92 — still never executed)
+
+**Please say if top and bottom come out swapped.** One word is enough.
+
+### Notes
+
+- **NOT MSVC-compiled, NOT BAT'd.**
+- `field_navigation.cpp` untouched — still 81,792/81,920 (#37).
+
+## v0.18.3.300
+
+**First behaviour change of this arc. One change: #91 R2 — the stale-gateway rule is scoped back to its evidence base.**
+
+### What the `.299` BAT caught
+
+The rule was deleting a **real** exit. On `gpbig2a` (Prison 5) the catalog held exactly two entries on all five visits:
+
+```
+[21:08:18] [LINE-PAIR] jsmDoors=1 jsmLines=1 jsmEntities=21 captured=1
+             line0 center=(1459,2509) type=6 param=965 | lineType=11 dest=965
+[21:08:19] [refresh] INF-GW group 0 'Exit to Prison 3' (destId=795) SUPPRESSED:
+             field resolves exits via trigger lines and no live line targets this
+             destination -- stale INF data for another story state
+[21:08:19] [refresh] catalog: 2 entries (2 navigable, 0 new entities)
+             cat0 TRIGGER line0 name='Exit to Galbadia D-District Prison 25'
+             cat1 JSM ent8 type=Object name='Directory'
+```
+
+A cell door and the Directory. **No listed way back to the rest of the floor** — which Aaron then walked through anyway, 30 seconds later, proving it live.
+
+The premise is inverted here. `gpbig2a` has **one** screen-bound line and it points at a **cell** (965). That single unrelated line arms `fieldHasLineExits`, which then deletes the only real exit off the screen. "The field resolves exits via trigger lines" is true only in the most literal and least useful sense: the shaft screens use **both** mechanisms, for **different** exits — a shape the rule never contemplated.
+
+### The fix
+
+The rule now also requires `s_gatewayCount <= 1`.
+
+This is scoping a heuristic back to the evidence it was actually established on — the same move `.291` made when it rescoped the addr-as-literal exit heuristic to `bg*` fields after it fabricated a Centra Ruins exit.
+
+Reading the rule's own evidence block:
+
+| field | gateways | line exits | with the gate |
+|---|---|---|---|
+| `glfurin1` — **the only field the rule was ever needed for** | 1 | 2 | rule still applies, ghost still suppressed ✅ |
+| `glpreo1` / `glpreo2` / `glpreo3` / `glprefr2` / `glstage1` | 1–8 | 0, or all `dest=-1` | `fieldHasLineExits` false — rule never fired here anyway |
+| `glwitch1` | — | gateway dest **equals** line dest | kept by the agreement test either way |
+| `gpbig1a` / `gpbig2a` | **2** | — | rule no longer fires — **fixed** |
+
+So the change is **provably inert on every field in the documented evidence base**, preserves `glfurin1`, and fixes both prison shaft screens.
+
+It must test `s_gatewayCount` (raw INF entries), **not** `s_dedupGatewayCount` — the prison's two gateways share a destination and merge into one group, so the dedup count is 1 there and would gate nothing.
+
+A `[refresh] stale-gateway rule NOT applied` line logs when the gate engages, so the BAT can see it fire.
+
+### Direction of risk
+
+This is a **pure narrowing**. It can only ever *add* exits back to the catalog, never remove one.
+
+Worst case is a ghost gateway reappearing on some multi-gateway field we haven't visited — an exit that does nothing when you walk to it. Annoying. Losing a real exit is this project's worst failure mode (#88, `ladline7` hidden for three BAT cycles, and now `gpbig2a`). Showing too much is the correct side to be wrong on.
+
+### Also settled by the `.299` auto-capture
+
+The displayed prison floor is the **dialog slot** `FIELD_VAR_TABLE_BASE[0x20]`, read straight off two auto-captured screenshots: "Floor 6" with `slot=6, vb=5`, and "Floor 4" with `slot=4, vb=3`. So varblock `0x01B5` is **floor − 1** and the announcement needs `vb + 1`. #89 and #90 both have their answer; the announcement itself is a separate change and is not in this build.
+
+### BAT
+
+Walk the shaft with `-`/`=` pressed on **both** screens. Expect:
+
+- `gpbig2a` to gain **"Exit to Galbadia D-District Prison 3"** (2 entries → 3)
+- `gpbig1a` to gain **"Exit to Prison 5"**
+- a `stale-gateway rule NOT applied` line on each
+- the **first-ever `GATEWAY grp` row** in the catalog dump — #92 has still never executed that line, because this rule was deleting every gateway before the dump could print it. It should read `merged=2`, which is simultaneously the first direct evidence of R3 (two exits 3,644 units apart collapsed to a midpoint belonging to neither).
+
+### Notes
+
+- **NOT MSVC-compiled, NOT BAT'd.**
+- `field_navigation.cpp` untouched — still 81,792/81,920 (#37).
+
+## v0.18.3.299
+
+**DIAGNOSTIC-ONLY. One addition on top of `.298`: the mod takes the screenshot itself.**
+
+### The problem `.298` left behind
+
+The `.298` BAT found the prison floor number in **two** places that disagree by exactly one:
+
+| source | descending |
+|---|---|
+| engine display slot `FIELD_VAR_TABLE_BASE[0x20]` | 6 → 5 → 4 |
+| field varblock `0x01B5` (437) | 4 → 3 → 2 |
+
+Both step together on every `MAPJUMP3` self-jump. Only one is the number actually printed on screen, and picking wrong makes every future floor announcement off by one.
+
+### Why the obvious test was impossible
+
+I asked Aaron to press F11 while the Floor window was up. He can't — **and the reason is this exact bug.** The window renders 190+ times per floor but decodes to the bare string `"Floor"` every time, so the dedup eats every repeat: he heard it **once** for a three-floor descent. He cannot hear when it is on screen, so he cannot time a keypress to it. Asking him to was my mistake.
+
+### So the mod captures it
+
+`FloorShotProbe()` fires from the show_dialog text path and matches the **raw** FF8 bytes `4A 6A 6D 6D 70 20` (`"Floor "`), so no decode is needed on the hot path.
+
+It is placed **before** the hash and decoded dedups, deliberately: the raw buffer is byte-identical on every floor — the engine substitutes the digits at render time and they are never in the text — so every dedup downstream returns early and a probe placed after them would fire once per session.
+
+Rate limiting is on the **value**, not the frame: one capture per distinct `(slot, varblock)` pair, i.e. exactly once per floor. **Both candidate values go in the filename:**
+
+```
+floor_204316_412_s20-5_vb-4.png
+```
+
+So the correlation is readable straight off the directory listing — an image showing "Floor 5" next to that name settles it immediately, with no cross-referencing.
+
+Capture is async with a 30-frame delay (the same mechanism the Scan UI capture uses) because this runs on the game thread inside a MinHook callback, where the blocking `CaptureScreenshot()` would stall the renderer.
+
+Gated to prison fieldIds (`0x0319`–`0x032E`, `0x03C5`) and behind `FLOOR_SHOT_PROBE`, so it is inert everywhere else in the game. Also adds `SafeReadByte()` alongside the existing `SafeReadDword()`.
+
+### BAT
+
+Walk any prison shaft floors. Expect one `floor_*.png` per floor plus a `[FLOOR-SHOT]` line naming both candidates.
+
+**Also still needed from `.298`:** press `-` or `=` once on a shaft screen. The catalog was never opened last run, so #92's dump fix and #91's R1/R2/R3 are all still untested.
+
+### Notes
+
+- g++ compile-clean **and behaviour-tested** on the extracted function: fires on a Floor window, dedupes repeats, ignores non-Floor windows, re-fires when the value changes, ignores non-prison fields.
+- **NOT MSVC-compiled, NOT BAT'd.**
+- `field_navigation.cpp` untouched — still 81,792/81,920 (#37).
+
+## v0.18.3.298
+
+**DIAGNOSTIC-ONLY build. Zero behaviour change by design.**
+
+The 2026-07-31 Laguna/Winhill + D-District Prison session was reviewed in full (`ff8_field.log` 49,664 lines, plus mod/dialog/menu/nav_data). All four of Aaron's reported issues were confirmed, three of them worse than reported, and eleven further defects were found. The full review is in the project as `claude/BAT_REVIEW_2026-07-31.md` and the findings are filed as GitHub issues.
+
+This build ships **only the two read-only probes** at the top of that review's recommended order. They are combined because both are pure observation — neither can influence the other or anything else — so one BAT closes four open questions instead of two.
+
+### 1. `[VAR-DROP]` — the missing floor number and the missing draw quantity (#89)
+
+The prison floor indicator is field-dialog window 4, byte-identical on all six occurrences:
+
+```
+[RAWDUMP] [4 t1=15A7D798 st=7 hex=4A6A6D6D70200430]
+           4A 6A 6D 6D 70 20 = "Floor "
+           04 30             = numeric insert, param 0x30
+```
+
+`FieldExpandRawVars` (`field_dialog_expand.inl`) drops any `0x04` param outside `[0x20..0x27]`, so `0x30` takes `continue` and the number is gone — Aaron heard a bare **"Floor"** on every floor of the shaft. The same branch silently eats the quantity at field draw points (`"Laguna stocked  Curagas"`); battle draws are unaffected because they do not go through this expander.
+
+Widening `FIELD_VAR_PARAM_MAX` blind is **not** safe. If params ≥ `0x28` resolve through a different table we would splice an unrelated number into the sentence, and a confidently wrong floor number is worse for a blind player than no number at all. So this build only observes: the dropped param, the dword the engine *would* have read at `0x01D2B4B0 + param * 4`, and a sweep of `table[0x20..0x3F]`. Throttled to one line per param per 2 s so a chatty field cannot swamp the log.
+
+### 2. `[FLOOR-PROBE]` — the 23 floor changes that announced nothing (#90)
+
+The shaft changes floor **without changing fieldId**. The engine oracle is unambiguous:
+
+```
+[MAPJUMP-HOOK] MAPJUMP3 fired on field=795 'gpbig1a' inline_param=16
+[MAPJUMP-HOOK]   engine RESULT: transition_type=1 destField=795
+```
+
+23 of the session's shaft transitions were `795 -> 795`. `FieldAnnounce::Update()` bails on `curId == s_lastAnnouncedFieldId`, so those floor changes were **completely silent**. On top of that, the number in "Galbadia D-District Prison N" is an archive ordinal, not a floor — 28 announcements of "Prison 3" and 22 of "Prison 5".
+
+Nothing in the source reads a floor variable today. Added a prison-gated (`0x0319`–`0x032E`, `0x03C5`) **byte** dump of varblock `0x0190`–`0x01CF` at MAPJUMP fire time, covering the `0x01A5` SET3 anchor every shaft entity positions from and the `0x01B4`/`0x01B5` state pair. Bytes rather than words because the #85 state code compares the live byte and `0x01A5` is an odd address the existing word-stepped loops skip entirely. The existing `0x80`–`0xFE` window already covers `0x00C8`/`0x00D4` for diffing.
+
+### 3. `[INF-GW-Z]` — the height data we were throwing away (#91)
+
+`LoadINFGateways` read both exit-line Z values and left them commented out as *"Z = height, not used for 2D nav"*, and never parsed `destinationPoint` at `+12` at all. True for navigation, false for **identification**: on the shaft, up and down from `gpbig1a` both land in `gpbig2a`, so destination fieldId cannot separate them — and `field_nav_catalog_gateways.inl` groups by destination and averages the centres, collapsing two exits **3,644 units apart** into one entry at `(-560,78)`, open floor belonging to neither staircase. Auto-drive obeyed it.
+
+Trigger lines already keep their Z, and the two `gpbig1a` staircases read `z ≈ -61` and `z ≈ +371` there — a 432-unit separation stable across all 15 visits. Gateways now carry `lineZ1`/`lineZ2` and the full `destX`/`destY`/`destZ` arrival point, logged on a **separate** line so the existing `[INF-GW]` line stays byte-comparable against every prior BAT log.
+
+Nothing consumes it yet. Whether `+Z` means up in field walkmesh space is **not** established — DEVNOTES records `UP = neg-Y` for `wmx.obj` and that does not transfer. The BAT settles the sign; it is not assumed.
+
+### 4. Catalog dump fix — gateway exits were invisible (#92)
+
+`field_nav_catalog.inl`'s dump tested `entityIdx <= -300` before anything looked at the `-400` range, so every INF gateway exit fell into the JSM branch, computed slot `100 + d`, failed the `ji < s_jsmEntityCount` bounds check, and printed **nothing**. Silently.
+
+Every `[refresh] catalog: N entries` block this project has ever logged under-reports by the number of gateway exits — the prison blocks claim 6 entries and print 5, and the merged phantom staircase that walked Aaron off the floor was invisible in the dump that was supposed to show it.
+
+Gateways are now identified by `gatewayIdx`, not by sentinel arithmetic. That is exact — every non-gateway injection site sets it to `-1` and only the gateway block sets it `>= 0` — and it removes a real range collision: JSM uses `-300 - slot` with `MAX_JSM_ENTITIES` 128, so slot 100 also lands on `-400`. An entry matching no known range now prints as `UNKNOWN` rather than vanishing.
+
+### BAT
+
+Ride the prison lift and stop on 3–4 different floors, F11 at each so the on-screen floor is recorded. Then walk both staircases on one shaft screen.
+
+Expect: `[VAR-DROP]` "would read" matching the screenshots; `[FLOOR-PROBE]` moving between floors; `[INF-GW-Z]` showing opposite `dz` signs on the two same-destination gateways; and `GATEWAY` rows finally appearing in the catalog dump.
+
+If `[VAR-DROP]` does **not** match the screenshots, the resolver for params ≥ `0x28` lives elsewhere and we chase that instead of widening the range.
+
+### Notes
+
+- g++ compile-clean on the extracted probe; format strings and buffer bounds verified by actually running it.
+- **NOT MSVC-compiled, NOT BAT'd.**
+- `field_navigation.cpp` deliberately untouched — still 81,792/81,920 and must be split (#37) before anything lands there.
+- `field_nav_catalog.inl` 63,664 → 65,951 (soft warn only; hard fail is 81,920).
+
+## v0.18.3.297
+
+**#85 — state exclusion ENABLED. The catalog now lists only the world-state that actually exists.**
+
+Aaron ran the full maze on `.296`. The refined rule was correct on **every** entity in both observed `glwater3` states:
+
+```
+standing (live byte 0):  ladline5 cond=1 -> SUPPRESS      (fallen ladder, absent)
+                         ladline6 cond=0 -> KEEP
+                         saku3    cond=0 -> KEEP           (naive said SUPPRESS -- Gate 3)
+fallen   (live byte 9):  ladline5 cond=1 -> KEEP           (fallen ladder, present)
+                         ladline6 cond=0 -> KEEP
+                         saku3    cond=0 -> KEEP           (naive said SUPPRESS -- Gate 3)
+```
+
+The naive rule would have deleted Gate 3 in *both* states. The refined rule got all six verdicts right.
+
+**The `glwater2` gap, and why it's no longer blocking.** Sewer 3 was entered twice (21:56:28, 21:56:58) but produced no verdict — the catalog was never opened there, and the probe lives inside `RefreshCatalog()`. That's the **second** BAT this specific gap has cost, and it's a flaw in my diagnostic's placement, not in Aaron's testing.
+
+Rather than spend a third cycle on it, the risk is closed **structurally** with an **anchor guard**: a group is only acted on when at least one member's value equals the live byte. Every live read of varblock 340 across every BAT has been `0` or `9`; `glwater2`'s gates want 25/13/16. It can never anchor, so it is provably untouched — proof instead of another round-trip.
+
+**The rule now acting, in three parts:**
+
+1. Only a **conditional** entity (a `JPF` between the guard read and the `SET3`) may ever be suppressed.
+2. The group must be **anchored** — some member matches the live byte.
+3. Then suppress conditional members whose value ≠ the live byte.
+
+Suppression sets `s_jsmStateSuppressed[]` and skips **catalog injection only**. Position data is deliberately left intact so the resolver passes and any other consumer are unaffected — this is a visibility decision, not a data deletion.
+
+**Size note, and an honest one.** `field_navigation.cpp` went 63 bytes over the hard fail when I added the new flag. I trimmed **my own new comment** rather than gutting existing explanation — the failure mode `.294` was supposed to end. It now sits at 81,792/81,920 and is **the next file that must be split (#37) before anything else lands there**.
+
+g++ compile-clean. **Not MSVC-compiled, not BAT'd.**
+
+**BAT for `.297`:** the gate room in either ladder state. Expected: **one fewer "Object"** than before in the standing state (the fallen ladder no longer listed), all Gates still present, and `[STATE-GROUP]` lines showing `ANCHORED` plus `[SUPPRESSED]` on `ladline5` only. Then walk the rest of the maze and confirm **no gate has gone missing anywhere** — that's the failure this whole sequence has been guarding against. Sewer 3 should log `NO ANCHOR ... nothing suppressed` if you do open the catalog there.
+
+## v0.18.3.296
+
+**#85 — the dry run did its job: it refuted the naive rule on the very field the rule was designed for, and handed over the real discriminator.**
+
+Aaron's `.295` BAT, `glwater3` (Sewer 4) with the ladder **standing**, live byte `0`:
+
+```
+[STATE-GROUP] varblock[0x0154] (340) live byte=0 word=2304 -- 3 entities, 3 distinct values, 1 match
+[STATE-GROUP]   ent23 'ladline6' wants 0 -> WOULD KEEP       (pos=YES 817,669)
+[STATE-GROUP]   ent22 'ladline5' wants 9 -> WOULD SUPPRESS   (pos=YES 1260,631)
+[STATE-GROUP]   ent28 'saku3'    wants 3 -> WOULD SUPPRESS   (pos=YES -1006,666)
+```
+
+The ladder pair is right — standing kept, fallen dropped. **`saku3` is wrong: that's Gate 3, a real gate.** Had `.295` shipped as a fix rather than a dry run, it would have deleted a gate from the catalog on the first build.
+
+**The discriminator this exposed:** whether a `JPF` (jump-if-false, opcode `0x02`) sits between the guard read and the `SET3`. With a `JPF` the placement is genuinely conditional; without one the `SET3` executes every time and the guard read is feeding some *later* branch, not deciding whether the entity exists. Verified across the archive — and it is **not** a `ladline`/`saku` split, which is why the naming never hinted at it:
+
+```
+conditional (JPF present):   glwater3 ladline5      glwater2 saku2
+unconditional (no JPF):      glwater3 ladline6, saku3
+                             glwater2 saku3, saku4      glwater5 saku8
+```
+
+Note `glwater2 saku2` is conditional while `ladline6` is not — the opposite of what the earlier "ladline = state, saku = gate" intuition would have predicted. That intuition was wrong twice over now.
+
+**Shipped:** `JSMEntityInfo.stateGuardConditional`, captured in the scanner. The refined rule is *"only a conditional entity may ever be suppressed"* — which keeps `saku3` and both `glwater2` gates while still dropping the wrong ladder state, i.e. it fixes the exact case the dry run caught.
+
+**Still logging only.** `DiagnoseStateExclusionGroups()` now prints **both** verdicts per entity and flags every disagreement:
+
+```
+ent28 'saku3' wants 3 cond=0 -> naive=SUPPRESS refined=KEEP  <-- RULES DISAGREE
+```
+
+The refined rule has been reasoned from evidence, not observed working, and this issue has already burned several cycles on exactly that distinction. One more BAT confirms it before anything acts.
+
+g++ compile-clean; guard + conditional capture verified against the real archive. **Not MSVC-compiled, not BAT'd.**
+
+**BAT for `.296`:** the Sewer 3 pass Aaron already offered is now the important one — `glwater2` is the three-gate field where the naive rule does the most damage, and it contains the one conditional `saku`. Also worth re-checking the gate room in either ladder state. Grep `[STATE-GROUP]` and look for `RULES DISAGREE`. **Pass criteria:** every real gate shows `refined=KEEP`, and the only `refined=SUPPRESS` is a ladder state that genuinely isn't in the room. If that holds, `.297` enables suppression.
+
+## v0.18.3.295
+
+**#85 — state-guard capture + DRY-RUN diagnostic. I set out to ship the fix and stopped, because the data said it would hide three working gates.**
+
+The `.294` split BAT came back clean — catalog byte-identical to `.293` — so this build starts the actual state fix.
+
+**Shipped:** `JSMEntityInfo` gains `hasStateGuard` / `stateVarAddr` / `stateVarValue`, captured in the scanner from the **first** `PSHM_L <addr>` + `PSHM_W <value>` pair in whichever method calls `SET3`. First, not last, deliberately: `ladline5` tests `340 vs 9` and *then* `339 vs 64`, and that second test is true in the *other* world state — taking the most recent pair would have inverted the answer. Verified against the real archive: `ladline5` → `340 == 9`, `ladline6` → `340 == 0`, exactly matching the two-state BAT.
+
+**What stopped the fix.** The plan was to treat entities sharing a guard variable as mutually exclusive and inject only the one matching the live byte. Capturing guards across every sewer field showed variable 340 is not a state enum at all:
+
+```
+glwater3:  ladline5 == 9    ladline6 == 0    saku3 == 3
+glwater2:  saku2    == 25   saku3    == 13   saku4 == 16
+glwater5:  saku8    == 7
+```
+
+Those three `glwater2` entries are **three real gates the player has to find**. A live byte can equal only one of 25/13/16, so "keep only the match" would have silently suppressed two working gates — the precise failure mode that has already cost several BAT cycles on this issue. `glwater3`'s `saku3` (wants 3; live byte is 0 or 9) would have gone too.
+
+Script shape doesn't separate them either, which was my fallback idea. `ladline5` has a genuine conditional (`JPF`) between its guard and its `SET3`; `ladline6` — confirmed state-dependent, it physically disappears — and `saku3` — a gate — **both** run guard → `SET3` with no `JPF` at all. Structurally identical, opposite meanings.
+
+**Lead for next time:** the constants look like **bit masks**, not enum values — 25=`0b11001`, 13=`0b01101`, 16=`0b10000`, 9=`0b1001`, 7=`0b111`, 3=`0b11` — and the live word moved `0x0900` → `0x0909`, one nibble set. A `value & mask` test would let several entities be true simultaneously, which is exactly what a room full of independently-toggled gates needs. Unconfirmed: the operator is encoded in the `JMP`/`JMPB`/`JPF` opcodes this codebase does not decode.
+
+**So `DiagnoseStateExclusionGroups()` logs and suppresses nothing.** For each group it prints the live byte and the KEEP/SUPPRESS verdict every member *would* receive, and shouts loudly if a group has zero matches. Aaron BATs both ladder states, we check the verdicts against reality, and `.296` flips it from logging to acting only if they hold up.
+
+g++ compile-clean; guard capture verified on the real archive. **Not MSVC-compiled, not BAT'd.**
+
+**BAT for `.295`:** visit the gate room in **both** ladder states again (standing, then knocked down) with the catalog opened, and send both logs. Grep `[STATE-GROUP]`. Also worth a pass through **Sewer 3** (`glwater2`, the three-gate field) in whatever state it's in — that's the field where the naive rule would have done the most damage, and I want to see its verdicts before trusting anything.
+
+## v0.18.3.294
+
+**#37 / #85 — source-file split. ZERO behavior change by design. This exists so the #85 state-gating fix has somewhere to live.**
+
+Aaron picked split-first over squeezing the fix into files that were already at the ceiling. Two files had been sitting a few hundred bytes under the 80 KB CI hard fail, and the last several builds had each paid for themselves by deleting explanatory comments — a pattern that was going to lose real information. The #85 fix needs new fields on `JSMEntityInfo` plus scanner changes, and simply did not fit.
+
+Extracted **verbatim**, no logic touched:
+
+| file | before | after | extracted to |
+|---|---|---|---|
+| `field_nav_catalog.inl` | 81,309 | **63,017** | `field_nav_catalog_triglines.inl` (20,260) — trigger-line Exit/Event injection |
+| `field_archive_jsm_scan.inl` | 81,184 | **61,793** | `field_archive_jsm_classify.inl` (21,470) — per-entity classification + post-passes |
+
+Both follow the pattern already used throughout this codebase (`field_nav_catalog_mapexits.inl`, `field_nav_catalog_gateways.inl`, `field_nav_catalog_dedupe.inl`, `field_archive_jsm_director.inl`): a fragment of a function body, `#include`d inline at the point the block used to occupy, operating directly on the caller's locals rather than being a standalone function.
+
+**One thing worth recording:** the classify fragment sits *inside* `ScanJSMScripts()`'s per-entity `for` loop, but it is brace-balanced and does **not** close that loop — `outCount++;` and the loop's brace stay in the parent. My first draft of both the stub comment and the fragment header claimed it *did* close the loop. That was wrong, I caught it while verifying the brace counts, and corrected both. A future session reading a confidently-wrong comment about brace ownership would have had a bad time.
+
+**Verification.** Because "pure textual move" is exactly the claim that's easy to assert and hard to trust, I reconstructed the pre-split `field_archive_jsm_scan.inl` by splicing the fragment back in, built **both** versions against the real game archive with the offline tool, and diffed full entity-classification output:
+
+```
+glwater2: IDENTICAL pre-split vs post-split
+glwater3: IDENTICAL pre-split vs post-split
+glwater4: IDENTICAL pre-split vs post-split
+glwater5: IDENTICAL pre-split vs post-split
+glfuryb1: IDENTICAL pre-split vs post-split
+```
+
+An earlier diff *did* show an extra promoted entity on `glwater4`/`glwater5` — that turned out to be a stale baseline predating the `.289` Director-promotion fix, i.e. that fix legitimately doing its job, not the split. Worth noting because a stale baseline is a very convincing false alarm.
+
+Compile-clean under g++ (offline tool builds `field_archive.cpp` including both new fragments). **Still not compiled under MSVC and not BAT'd.**
+
+**BAT for `.294`:** this should be a *boring* build. Revisit the sewer gate room and confirm the catalog is byte-for-byte what `.293` gave you — same Gates, same two Objects, same Draw Point. Any difference at all means the split broke something and should be reported immediately rather than worked around. Once it's confirmed inert, `.295` implements the mutual-exclusion state gate.
+
+## v0.18.3.293
+
+**#85 — the screenshots explain the "duplicate objects": the room has two world states, and the catalog lists both at once. DIAGNOSTIC-ONLY build.**
+
+Aaron backtracked to the gate room (`glwater3`) on a later save and screenshotted it. Comparing against his earlier shots of the same room: **the tall vertical ladder that stood to the right of the raised block is gone, replaced by a diagonal plank.** That's the shortcut ladder, already knocked down — the same room in a different world state.
+
+**That matches what the init scripts do.** `ladline5` and `ladline6` guard their `SET3` on the *same* varblock (`0x0154` = 340), compared against *different* values:
+
+```
+ladline5:  PSHM_L 340 / PSHM_W 9  ... JPF ... SET3 tri=186   (pos (1260,631))
+ladline6:  PSHM_L 340 / PSHM_W 0  ...       SET3 tri=175   (pos  (817,669))
+```
+
+That's a state machine: one model is the standing ladder, the other the fallen one, and **only one of them exists in the world at a time**. The catalog is built from *static* script data, so it injects both unconditionally — which is precisely Aaron's "two or three of the objects were at the location where I believe the shortcut ladder is". The same varblock 340 (plus 337/339) is read by `ladline7` (the confirmed Gate) and by `saku1`/`saku2`, so this is the room's general state mechanism, not a one-off.
+
+**Corroborating detail:** `ladline7` and `saku1` both use `SETMODEL 5`, while `ladline5` uses model 6 and `ladline6` uses model 7. The confirmed gate and a known gate share a model id; the two suspected ladder states do not. That's independent support for the `.291` decision to name `ladline7` "Gate", and against `ladline5`/`ladline6` being gates.
+
+**This build changes no behavior.** It adds a read-only `[STATE-DIAG]` probe that logs live varblock 337/339/340 at catalog time, and adds `saku1`/`ladline5` to the `PUZZLE-DIAG` watch list — without which `DumpPuzzleDiagOnce()` early-returns on every `glwater*` field and the probe would never fire at all. The dump re-arms per field load, so entering the room in each state yields one line per state.
+
+**Why a diagnostic instead of the fix:** the mapping "value 9 = standing, value 0 = fallen" is *inferred* from the opcode dumps, and the mod's script simulator does not fully decode the `JMP`/`JMPB`/`JPF` compare semantics — so which value means which state is not proven. Gating catalog injection on a guessed mapping would risk hiding the *wrong* one of the pair, and after the `.288` "Ladder" episode a guess dressed up as a fix is exactly what this issue does not need. Aaron BATs the room in both states, the values settle it, and the injection gate lands in `.294`.
+
+**Not compiled or BAT-tested** — no Windows/MSVC toolchain. Purely additive logging.
+
+## v0.18.3.292
+
+**#85 — the missing exits are a battle-return bug, not a `.291` regression. Plus two catalog-cleanliness fixes Aaron asked for.**
+
+Aaron's `.291` BAT: "No exits were included in the catalog in this build. There was a listing for a Gate (approximate) which was at the correct location, so I think we can remove approximate from its label. There were several 'objects' included in the catalog, and they mostly seemed to be duplicative. Two or three of the objects were at the location where I believe the shortcut ladder is... and another object was at the same location as a gate."
+
+**The exits: `.291`'s fix worked, then a battle destroyed the data.** The timeline in `ff8_field.log` is unambiguous:
+
+| time | event | `[LINE-PAIR] captured=` |
+|---|---|---|
+| 14:55:08 | fresh entry to `glwater3` | **8** |
+| 14:55:53 | battle #1 entered | — |
+| 14:56:17 | field re-init after battle | **0** |
+| 14:56:27 | battle #2 entered | — |
+| 14:56:48 | field re-init after battle | **0** |
+| ~14:58 | Aaron walks the catalog | (no exits) |
+
+On that first clean load the `.291` fix is visibly working: `[PSHM-DEST] line2 addr=0x02FA (762) CORROBORATED by jsm4 'selphie' literal dest -- addr-as-literal accepted`, followed by `line2 ... -> field 762 (Deling City - Sewer 2)`, with `hasigomodel`'s bogus Centra Ruins still correctly rejected. Exits were present and correctly labeled. **Trigger-line geometry is captured once on field entry and is never rebuilt when returning from a battle**, so every trigger-line exit silently disappears for the remainder of the visit — and since all of `glwater3`'s exits are trigger lines (its MAP_EXITs are all unpositioned and dropped), the category empties completely. This is a pre-existing bug in a different subsystem, now isolated with timestamps; it gets its own cycle rather than being bolted onto this one.
+
+**1. `" (approx.)"` dropped from spoken labels** (still recorded in the log). It was added in `.286` to warn that a position came from a walkmesh-triangle centroid rather than a live read. In practice the centroid has been accurate — this BAT had Aaron standing at the gate with "Gate (approx.)" reporting 1 step and reaching "In range." — and he asked for it to go. It also cost a screen-reader user two extra spoken words on every announcement and every navigation update. If a centroid position is ever genuinely wrong, that's a bug to fix, not something to hedge with a label.
+
+**2. `ENTITY_SKIP_NAMES` is now honoured for JSM-injected objects.** That 213-name controller/effect list was only ever consulted by `IsBgControllerName()` for *Background* entities, so an Others-category entity carrying a controller name walked straight into the catalog. `glwater3`'s `water` is exactly that: it's in the skip list, yet surfaced as an "Object" sitting ~100 units from Gate 1 — Aaron's "another object was at the same location as a gate". Lighting, effect and water-surface controllers are never navigation targets.
+
+**Still open:** `ladline5`/`ladline6` remain two "Object" entries near what Aaron believes is the shortcut ladder. There's no behavioral evidence yet for what they actually are, and after the `.288` "Ladder" episode they are deliberately *not* being guessed at again.
+
+**Size:** `field_nav_catalog.inl` went 81,803 → 81,309 bytes (611 bytes of margin) by compressing three older comment blocks. It still needs a real `.inl` split (issue #37) — this was buying room, not solving it.
+
+**Not compiled or BAT-tested** — no Windows/MSVC toolchain; catalog-side code the offline tool can't exercise.
+
+## v0.18.3.291
+
+**#85 — the gate hypothesis is CONFIRMED, and three defects I introduced in `.290` are fixed.**
+
+Aaron's `.290` BAT: "Went through the whole catalog while standing in front of the gate and one said I was in the right spot except for the layline entity." The log corroborates it precisely — `ladline7` is the sole entry reaching `"In range."` at that spot (~1 step, northwest), while Gate 1/2/3 report 2, 5 and 3 steps away. Combined with its script REQ-dispatching like the `saku` gates, that is behavioral confirmation that **`ladline7` is a gate**. Named `"Gate"` in `entity_classifications.h` — deliberately unnumbered, since "Gate 1"–"Gate 3" are `saku1`–`saku3` and this is a 4th distinct mechanism, not `saku4` (that's the Director). This is an empirical identification, not a nominal one; the rule against naming from SYM spelling stands.
+
+**Also confirmed working from `.290`:** the reject guard fired correctly (`[LATE-RESOLVE] ent22 'ladline5' REJECTED: live tri=147 disagrees with own SET3 tri=186`), and object-category bloat dropped from 6 entries to 4.
+
+**Three defects I introduced in `.290`, all found in this BAT's logs:**
+
+**(a) My duplicate-slot guard was incomplete — the phantoms came straight back.** I only guarded `ResolveLatePositions()`. `ResolveStructPositions()` runs *after* it, reads the same aliased slot from the same base pointer, and re-applied the exact positions the guard had just rejected: `[STRUCT-POS] ent22 'ladline5' idx=6 struct=(268,671) old=(0,0)` — right back on top of Gate 1, with `ladline6` back on Gate 2. So the phantoms were still in the catalog, just via a different door. The same triangle-consistency test now runs there too (reading the struct's triangle at `0x1FA`).
+
+**(b) I misread the naming path and told Aaron to expect "Object".** Removing the bogus `ladline`→"Ladder" table rows did *not* fall through to the generic type name — `ResolveFriendlyName()` never returns empty; on a table miss it capitalizes and de-suffixes the SYM and returns *that*. So Aaron heard "Ladline5", "Ladline6", "Ladline7" read aloud verbatim: the raw developer symbols, and the very rule violation `.288`/`.290` were meant to end. The JSM-injection path now checks `ENTITY_DISPLAY_NAMES` explicitly and keeps the generic type name on a miss. Scoped to that path only, so runtime-entity naming elsewhere is untouched.
+
+**(c) My `bg*` scoping of addr-as-literal was too blunt and regressed a working label.** `glwater3` has two marker-bearing exit lines: `jsm2 'irvine'` (addr `0x02FA` = 762 = Deling City - Sewer 2, **correct**) and `jsm7 'hasigomodel'` (addr `0x011B` = 283 = Centra Ruins 8, absurd). Blocking both killed the bogus label but also stripped a correct "Exit to Deling City - Sewer 2" down to a bare "Exit". The discriminator was available statically all along: sibling lines on the same field that resolved to *literal* destinations (`jsm3`–`jsm6` give 762 and 763). `irvine`'s 762 is corroborated by a sibling literal; `hasigomodel`'s 283 matches nothing on the field. Rule is now: accept when the field is `bg*` (the original 8-BAT evidence base, preserved) **or** when a sibling line independently resolved to that same destination id. Corroboration scans `s_jsmEntities[]` rather than `s_capturedLines[]`, because this code runs inside the loop that populates `destFieldId` and every literal-bearing sibling on `glwater3` sits *after* `irvine` — a `s_capturedLines[]` scan would have silently found nothing.
+
+**Not compiled or BAT-tested** — no Windows/MSVC toolchain here; all three fixes are catalog-side code the offline archive tool cannot exercise, so they rest on log correlation and hand review. **Size warning:** `field_nav_catalog.inl` is now 81,803 / 81,920 bytes — **117 bytes of margin** on the CI hard-fail guard. Trimmed two older comment blocks to fit; the next edit to that file will need a real split (issue #37).
+
+**Expected after this build:** `ladline7` → "Gate (approx.)"; `ladline5`/`ladline6` → "Object (approx.)" at their *own* centroids ((1261,631) and (818,670)) instead of on top of the real gates; "Exit to Deling City - Sewer 2" label restored; "Centra Ruins 8" still gone.
+
+## v0.18.3.290
+
+**#85 `.289` BAT'd — the `saku1` promotion fix worked (Gate 1 appeared), but the blocking gate was a different entity that I had mislabeled myself. Three fixes, batched at Aaron's request.**
+
+Aaron: "Still no entry in the catalog for the gate we need to open to proceed... I am getting concerned as well at the catalog bloat that is happening. There is a ton of entries in the catalog on this field when I would really expect the entry ladder, the interaction to jump on the wheel, 3 gates, the ladder to knock down and create a shortcut, and the draw point."
+
+**1. `ladline7` is the blocking gate — and v0.18.3.288 mislabeled it "Ladder" (my error).** Measured every catalog entry's distance from Aaron's logged position (-238,706) / walkmesh triangle 76: the three Gates sit 506, 768 and 1300 units away, while "Ladder (approx.)" (`ladline7`, tri-83 centroid (-287,815)) is ~120 units — about one step — and is the *only* entry anywhere near him. This corroborates what Aaron reported two rounds earlier, that this same entry's coordinates put him "right in front of the gate to sewer 2." Its script also dispatches REQs to other entities the way the `saku` gates do, not like anything ladder-shaped. The `.288` mapping of `ladline0`-`ladline7` → "Ladder" was added purely because the SYM name reads like "ladder" — a direct violation of this project's standing rule that SYM names are unreliable identity hints (DEVNOTES.md; `kanban2` was Xu). That guess is what made the real gate look absent for three BAT cycles. **Mappings removed**; `ladline*` now fall through to the generic `"Object"` type name rather than asserting a wrong specific identity. `ladline5`/`ladline6` remain behaviorally unidentified and are deliberately left generic rather than guessed at again.
+
+**2. Duplicate-slot corruption guard (`ResolveLatePositions`) — the concrete bloat cause.** `ladline5` (own SET3 triangle 186) and `ladline6` (own triangle 175) were coming back from the live entity array with *byte-identical* fixed-point values and triangles to `saku1` (147) and `saku2` (181). This is the v0.18.3.285 out-of-window aliasing problem, but in its nastiest form: the read *succeeds* and returns plausible, in-range values belonging to a different entity, with nothing to flag it. Net effect: two phantom "Ladder" objects sitting exactly on top of Gate 1 and Gate 2. Fix: an entity's own statically-captured SET3 triangle is authoritative for identity, so a live read whose triangle disagrees with it is rejected and falls back to that entity's own triangle centroid (`ladline5` → (1261,631), `ladline6` → (818,670)). Entities whose live triangle *matches* their static triangle — including both real gates — are untouched and keep their exact live positions, so this costs precision only where the value was already wrong.
+
+**3. Fabricated "Exit to Centra Ruins 8" — the addr-as-literal heuristic's own documented caveat, now fired.** `glwater3` ent7 `hasigomodel` carries PSHM marker `0x8000011B`; address `0x011B` = 283, which happens to be a valid field id ("Centra Ruins 8"), so the catalog served a confident, entirely fabricated fourth exit to the other side of the world. Aaron confirmed this field has only three real exits (two north, one east) — and he's fine with the two "Sewer 2" entries, which are genuinely two separate paths. The addr-as-literal equivalence was derived from 8 BAT fires, *all* on B-Garden `bg*` fields, and was explicitly documented as a convention-guess that might not generalise. Now scoped to `bg*` fields: elsewhere the marker is kept and the exit shows as a bare, unlabeled "Exit" rather than inventing a destination. **Note:** this removes the false *label*, not the extra entry — `hasigomodel` still surfaces as a 4th "Exit". Its position (1178,104) is far south of every other exit and looks like the entry-ladder line rather than a real exit, but reclassifying it is a separate change and is left for the next cycle.
+
+**Not compiled or BAT-tested** — no Windows/MSVC toolchain here. Fixes (1) and (3) are catalog-side code the offline archive tool cannot exercise, so they rest on log correlation and hand review rather than tool verification; (2)'s inputs (each entity's static triangle and the resulting centroids) were confirmed against the real archive. **Needs a BAT.**
+
+## v0.18.3.289
+
+**#85 `.288` BAT'd — ladders left alone per Aaron; found and fixed the real blocker: `glwater3`'s `saku1` (the gate needed to proceed) was never classified as interactive at all.**
+
+Aaron: "Turn your attention back to the gates - the gate we need to open to proceed is not being included in the catalog... I took F11 screenshots earlier with the party right in front of the gate that is not being included in the catalog." Cross-referenced those screenshots against catalog position data (his position matched walkmesh triangle 76; the missing gate's resolved position sits further right in the same room, near the second visible gate).
+
+**Root cause, confirmed by dumping `saku1`'s actual script via the offline field-archive tool.** `saku1` has a real model, a literal SET3 position (triangle 147 — not PSHM-marker-derived, unaffected by the `.287` fix), and REQs the field's gate-coordinator entity (`saku4`) exactly the way the already-working gates (`saku2`, etc.) do. It's a fully genuine, working gate. But its own walk/interaction dispatch (opcode `0x1C`) pops a *statically resolvable* sub-opcode value (`0x63`), rather than firing with an empty/unresolvable stack the way `saku2`/`saku3`/the `ladline` family do. The scanner's `hasExtDispatch` flag is deliberately narrow — it only fires on that ambiguous, unresolvable-dispatch pattern (by design, to avoid the false-positive class fixed at v0.17.8.4 where background lights/cameras got mistaken for interactive objects). `saku1`, ironically, gives the scanner *more* information than the working gates, and that's exactly what makes it fail the existing `dialog || extDispatch` promotion check — it has neither.
+
+**The fix.** `field_archive_jsm_director.inl`'s Director-promotion pass now also promotes a target that has its own model (`setmodelInit`) and issues at least one raw `REQ` opcode (`s_reqOpcodeCount`, counted independent of whether the target entity ID successfully resolves — resolution fails for these gates due to unmodeled stack ops ahead of the `REQ`, so the existing `s_entityReqs`/"reqResolved" path can't be used here). This is scoped narrowly: it only runs inside fields where a Director was already detected, only considers entities with their own visible model, and requires an actual REQ call — not just any Unknown entity.
+
+**Verified via the offline tool:** `saku1` now promotes cleanly to Interactive Object with its existing tri=147 position intact. Re-ran the full `glwater2`–`glwater5` census: no other entity's classification changed as a side effect of this addition — the new signal is additive, not a loosening of the existing checks. `saku1` should now surface as "Gate 1" (or "Gate 1 (approx.)" if the live position resolvers can't place it more precisely than the walkmesh-triangle centroid).
+
+**Not compiled or BAT-tested this session** — no Windows/MSVC toolchain available; verified via the offline analysis tool + hand review of the code path. **Needs a fresh BAT**, ideally standing at the same gate from the screenshots this round, to confirm it now appears and that "the gate we need to open to proceed" is actually reachable.
+
+## v0.18.3.288
+
+**#85 `.287` BAT'd — positions fixed, but a new raw-SYM-name leak surfaced: "Ladline7 (approx.)" announced instead of a friendly name.**
+
+Aaron's BAT on `.287`: "This time there was an entry for something like 'layline' which was at the location of the gate that had previously been missing from the catalog." `ff8_field.log`/`ff8_mod.log` from the fresh BAT (13:05-13:07) confirmed it: `[TTS] "Ladline7 (approx.) 1 of 3"` and `"Navigating to Ladline7 (approx.)..."` — the raw SYM name `ladline7`, not a mishearing.
+
+**What `ladline` actually is.** `glwater3`'s JSM scan shows `ladline0`-`ladline4` classified `Map Exit` (a separate injection path, geometric trigger lines — not what Aaron saw) and `ladline5`-`ladline7` classified `Unknown` but Director-promoted to `Interactive Object` (`[DIRECTOR] promoted ent22/23/24 'ladline5/6/7' Unknown -> Interactive Object`) — the exact same `setmodelInit=1`/`extDispatch=1` profile the Director-promotion logic already uses for the `saku` gate valves. These are the physical sewer ladder-climb models, and `.287`'s SET3-marker fix let them resolve real positions (`ladline5`=tri186, `ladline6`=tri175, `ladline7`=tri83) for the first time — only `ladline7` currently clears the walkmesh/talk-setup filter to reach the catalog. None of `ladline0`-`ladline7` were in `ENTITY_DISPLAY_NAMES`, so `ResolveFriendlyName()` fell through to its raw-SYM-cleanup fallback (capitalize + strip suffixes) and exposed `"Ladline7"` verbatim — a direct violation of the project's "SYM names are unreliable/never expose them" rule (DEVNOTES.md).
+
+**The fix.** Added `ladline0`-`ladline7` → `"Ladder"` to `entity_classifications.h`, same precedent as the existing `ladder`/`hasigomodel` → `"Ladder"` entries. Table-only change, no scan/classification logic touched. Zero risk of regressing the `.287` position fix.
+
+**Not yet addressed:** `saku1`'s classification gap (still stuck `Unknown`, never Director-promoted despite a correct position) remains open, tracked on GitHub #85 — the gate Aaron originally reported missing may still not have its own catalog entry even after this fix. **Could not be compiled or BAT-tested this session** — no Windows/MSVC toolchain available; verified by direct log correlation only (this was a naming-table fix, not something the offline archive tool's classifier exercises independently of the catalog-injection code). **Needs a fresh BAT.**
+
+## v0.18.3.287
+
+**#85 BAT'd — gates appear in the catalog, but positions were wrong. Root cause found and fixed: a real, confirmed bug in the SET3 triangle capture, not an approximation-precision issue.**
+
+Aaron's BAT on `.286`: "I saw gates this time in the catalog! However, when I was standing right in front of the gate to open, the mod said it was three steps away. It doesn't seem to have the correct coordinates." Took F11 screenshots for reference.
+
+Read `ff8_field.log` and `ff8_mod.log` in full and cross-referenced against a fresh run of the offline field-archive analysis tool built for `.285`/`.286` (same real archive, same `DumpEntityScript` opcode dumper). Found the actual cause:
+
+**The bug.** In `field_archive_jsm_scan.inl`'s SET3 handler, the 4-stack-parameter path (X, Y, Z, triangle) extracts the triangle ID with `(uint16_t)pushStack[coordBase + 3]` — a straight cast, with no check for whether that 4th stack slot is *itself* a PSHM_W runtime marker rather than a literal triangle number. On `glwater3`, the `[SET3-DIAG]` log showed `ladline5`, `ladline6`, `saku2`, and `saku3` all reporting the exact same `tri=58` — verified via the offline tool that this is because all four scripts reference the identical runtime scratch address `0x3A` in that stack slot, and `0x3A` = 58 decimal happens to also be a *valid* walkmesh triangle index for that field, so the corruption was invisible: it looked like a plausible, in-range triangle, not a garbage value. All four entities silently received the identical wrong shared position — `saku2` (whose position happened to resolve correctly via a separate live-memory path) revealed the mismatch, since `saku3`'s catalog entry, resolved via the (corrupted) triangle-centroid fallback added in `.286`, pointed at a totally different spot in the room than where the real gate was. Confirmed the same corruption pattern across `glwater2`, `glwater4`, and `glwater5` — this bug affected every sewer gate that ever went through the 4-param SET3 path with a marker-sourced triangle, not just `glwater3`.
+
+**The fix.** When the triangle stack slot is a marker, fall back to `opcParam` — the SET3 instruction's own embedded 24-bit immediate, encoded directly in the instruction word rather than pushed onto the interpreter stack. This value is completely independent of the corrupted stack slot. Verified against the real archive: `glwater3`'s four affected entities now report distinct, sensibly-spread triangle IDs (`ladline5`=186, `ladline6`=175, `saku2`=181, `saku3`=54) instead of all sharing 58; `water`/`saku1` similarly separated (138/147, previously both landing on an out-of-range marker artifact of 294 that was silently and harmlessly dropped by the existing bounds check). The same pattern was verified fixed across every sewer field.
+
+**Scope note:** this changes the *correctness* of the captured triangle values, not how many entities get one — coverage stays at 22/26 `sakuN` entities. `glwater3`'s `saku1` remains a separate, earlier-stage gap: its position triangle is now correctly captured (147), but the entity never gets promoted out of `JSM_ENT_UNKNOWN` classification, so it's still excluded from catalog injection regardless of position. Tracked on GitHub #85 as the next thing to look at, since it and the still-unresolved `saku4`/`saku5`/`saku6` are likely why Aaron's screenshot (standing at a gate closest to walkmesh triangle 76) didn't match either catalog entry's reported distance even after this fix — the physical gate he was standing at may simply not be `saku2` or `saku3` at all.
+
+**Could not be compiled or BAT-tested this session** — same environment limitation as `.286`: no Windows/MSVC toolchain available. The fix was verified end-to-end against the real field archive via the offline tool (before/after triangle values for every affected entity in all 4 gate fields), and the code change itself was hand-reviewed. **Needs a fresh BAT**, ideally at the same gate from the `.286` screenshots so the "steps away" figure can be compared directly.
+
+## v0.18.3.286
+
+**#85 sewer gate maze fix — surfaces the gate entities in the catalog for the first time.**
+
+Follows the offline static survey (`Plan & Research Documents/2026-07-19_sewer_gates_offline_analysis.md`, posted to GitHub #85): all 6 sewer fields extracted and analyzed directly from the game's field archive, no live game process, by compiling the mod's own `field_archive.cpp`/JSM classifier for a scratch Linux tool. Aaron's follow-up question ("could you only extract 17 because only 17 CAN be opened?") caught a real bug in that survey: the classifier's SET3 position-capture only checked an entity's init method (method 0). Several gates set their own position in a *later* method instead — the toggle/open method, fired via `REQ` when the puzzle state changes, not at field load. Checking every method instead of just method 0 recovered 22 of 26 `sakuN` entities' walkmesh triangle IDs (was 15/26); one entity previously counted as a gate (`glwater2`'s `saku1`) turned out to be a `MAPJUMP3` exit reusing the naming convention, not a gate at all; only 3 (`glwater3`'s `saku4`/`saku5`/`saku6`) remain genuinely unresolved (`saku4` is a pure-logic dispatcher with no model at all, correctly positionless; `saku5`/`saku6` have real models but call no SET3 anywhere in their own script — still an open question).
+
+**Three changes, in dependency order:**
+
+1. **`field_archive_jsm_scan.inl`:** dropped the `m == 0` restriction on the SET3 and SET position-capture checks. The surrounding loop already walks every method (`for (int m = 0; m <= methodCount; m++)`) — the restriction was artificial. Purely additive: the `!hasPosition && !hasPshmCoords` guards already make this "first SET3 found wins, method 0 checked first," so any entity that already resolved from method 0 is completely unaffected; only entities that previously got zero position from method 0 can now pick one up from a later method. Verified against the offline tool: glwater4 went from 6/8 to 8/8 gates with a captured triangle, glwater5 from 3/8 to 8/8, exactly matching the manual per-entity opcode dump.
+
+2. **`field_nav_catalog_lateres.inl`:** new `ResolveTriangleCentroidPositions()`, added as a fourth and final pass after `ResolveLatePositions`/`MatchSet3LateCaptures`/`ResolveStructPositions`. Those three all require a live memory read of the entity's own struct, which only exists for entities within the engine's active-tracking window (root-caused and confirmed in `.285`'s EXTSCAN dump — that's *why* the sewer gates never resolved a position at all despite repeated catalog cycling). This pass instead uses the walkmesh triangle ID the JSM scanner captured statically from the entity's own SET3 call — pure parse-time data, independent of whether the entity is currently tracked — and looks up that triangle's precomputed centroid (`WalkmeshTriangle.centerX/centerY`, existing struct/loader) as an approximate position. Only fires for entities the three live-memory passes left unresolved; a real position is always preferred when one exists. A new `s_jsmTriangleApprox[]` flag (kept in `field_navigation.cpp`, not `JSMEntityInfo` itself since that struct is shared with the offline tooling) records which entries came from this approximation so the catalog can label them honestly.
+
+3. **`field_nav_catalog.inl`:** two fixes in the JSM-injection loop. First, wired in a call to `ResolveTriangleCentroidPositions()` in the resolver sequence. Second — and this turned out to be necessary for the whole fix to matter at all — found and fixed a **pre-existing bug**: the loop's "already have one of this type" dedup check (`runtimeEntityExists`/`alreadyInCatalog`) matched by bare `EntityType`, which is correct for genuinely singleton types (a field has at most one Save Point, one Shop, etc.) but was ALSO being applied to `ENT_OBJECT` — a category that is NOT singleton. Since every sewer gate classifies as `ENT_OBJECT`, only the *first* gate found each refresh was ever injected; every other gate of the same field was silently dropped by this check before the triangle-centroid fix could even matter. Scoped the two bare-type guards to skip `ENT_OBJECT`; the existing position-proximity dedupe pass (`field_nav_catalog_dedupe.inl`) still handles genuine duplicate removal for it downstream. Also: triangle-centroid-derived catalog entries get a `" (approx.)"` name suffix — accessibility-relevant, since a screen-reader user selecting "Gate 3 (approx.)" needs to know auto-drive will land them on the right walkmesh triangle, not necessarily flush against the exact gate model.
+
+**`entity_classifications.h`:** added `saku1`-`saku8` → `"Gate 1"`-`"Gate 8"` friendly-name mappings (Aaron's own term for these entities), replacing the raw-SYM fallback ("Saku1", not meaningful to a screen-reader user). The same sym numbering repeats across all 4 gate fields, which is fine — the catalog is per-field, so there's no cross-field collision.
+
+**Coverage:** 22 of 26 `sakuN` entities (all of `glwater2`/`glwater4`/`glwater5`'s real gates, 3 of `glwater3`'s 6) should now appear in the catalog as selectable, navigable "Gate N" entries — most tagged "(approx.)" since their exact model position is genuinely unrecoverable (PSHM_W runtime coordinates, entity beyond the active-tracking window), only their walkmesh triangle is known. `glwater3`'s `saku4`/`saku5`/`saku6` remain unresolved, tracked as a follow-up on GitHub #85.
+
+**Could not be compiled or BAT-tested this session** — no Windows/MSVC toolchain available in this environment. Changes were verified as far as possible: the SET3 all-methods fix was cross-checked end-to-end against the real field archive via the offline analysis tool (exact triangle IDs matched the manual per-entity opcode dump), and the remaining changes were reviewed by hand for correctness against the existing code patterns they extend. **This build needs a real BAT** before being considered confirmed: visit each of `glwater2`/`glwater3`/`glwater4`/`glwater5`, open the entity catalog, and check for "Gate N" entries (some tagged "(approx.)"), then confirm manual/auto-navigation can actually reach them.
+
+## v0.18.3.285
+
+**#85 field misidentification corrected, plus a deeper open question found while investigating.**
+
+Aaron ran a short, targeted BAT: walked to the sewer gate/valve room, opened the entity catalog there, and took F11 screenshots before and after opening a gate (two ornate iron gates, a large valve wheel, a ladder). He reported the gates still weren't listed, and pushed back when I'd said the catalog wasn't opened — he was right to push back.
+
+Re-reading the fresh log line-by-line (not just grepping) shows two things I'd gotten wrong:
+
+1. **Field identity.** The room in the screenshots is `glwater3`, not `glwater1`. `glwater1`'s `sakua`/`sakub`/`oku` (the entities the `.283`/`.284` `MAX_ENTITIES` work was chasing) are a different, unrelated set on a different field. `glwater3`'s actual gate/lever/valve entities are `saku1` through `saku6`, plus `water` (the water-level control) and `hasigo` (the ladder) — an easy mix-up given the near-identical naming, but a real one that means the `MAX_ENTITIES=32` widen from `.283` was never actually being tested against the right field.
+
+2. **The catalog genuinely was cycled.** The log shows `RefreshCatalog()` firing roughly once a second for the ~35 seconds Aaron was in `glwater3` (`[refresh]`/`[party-filter]`/`[nav]` lines throughout, matching `-`/`=`/GPS cycling through 8 catalog entries). None of the gate entities ever appear as their own catalog entry. `ward` and `ladline0`-`ladline4` (classified `JSM_ENT_MAP_EXIT`) get explicitly filtered every refresh (`unpositioned, and a trigger-line exit already covers this field` — the `.283` veto rule). `saku1`-`saku6`, `water`, and `hasigo` (classified `JSM_ENT_INTERACTIVE_OBJECT`) never resolve a position at all except `ladline5`, which sneaks in mislabeled as a generic `NPC 1`.
+
+**Deeper problem found while digging into why positions won't resolve:** the relationship between a JSM entity's scan index (`jsmIndex`, the flat Door+Line+Background+Other order) and its actual runtime "Others" array slot is not the single clean formula I'd been assuming in `.284`. Three existing, long-established functions (`ResolveLatePositions`, `MatchSet3LateCaptures`, `ResolveStructPositions`) all subtract `doors+lines+backgrounds` (`othStart`) to get the runtime index. My `.284` trapdoor fix used `jsmIndex` directly, with no subtraction. Testing both conventions against this session's actual log data gives contradictory results:
+
+- `glprein1`'s trapdoor (`.284`'s fix, using flat `jsmIndex=2`, no subtraction) reads a position of `(466,-14712)` — landing within about 20 units of `(486,-14712)`, an independently-computed, purely geometric walkmesh dead-end cluster from that same field's `[DEADEND]` diagnostic. That's a real coincidence-defying match in favor of the no-subtraction convention, at least for this one entity.
+- `glwater3`'s `ladline5` (`jsmIndex=22`, `othStart=16`, WITH-subtraction index 6) and the field's own `book` entity (a totally different, unrelated Line-category party-scene actor that the runtime scan independently reports living at index 6) read **byte-identical** struct data — same triangle, same fixed-point position, down to the last digit. Same story for `glclock1`'s `jumpline0` (WITH-subtraction index 6) and `rinoa` (index 3 per the live scan) — also byte-identical.
+
+That second pattern only makes sense if reads past some "active window" boundary (smaller than the JSM's full declared entity count) return stale or aliased memory rather than genuine per-entity data — for *both* index conventions, not just one. Chasing this with more one-off `GetEntityPos` fallbacks, the way `.284`'s trapdoor fix did, risks quietly reading the wrong entity's data and shipping a plausible-looking but wrong position (exactly the class of bug `.283`'s glclock1/Rinoa near-miss was).
+
+**No functional fix shipped this build.** Instead, `field_nav_catalog_diag.inl`'s `EXTSCAN` diagnostic now prints *two* candidate sym-name lookups per runtime slot (`sym0` = current flat/no-offset convention, `symC` = `othStart`-corrected convention) side by side, so the next raw dump settles which convention is right per field instead of me reasoning from indirect log evidence again. `field_nav_fieldscripts.inl`'s EXTSCAN re-arm gate now covers `glwater3` in addition to `glwater1`.
+
+**BAT for v0.18.3.285:** walk to the `glwater3` gate room and press `-`/`=` there (same as the last BAT) so `EXTSCAN` fires. Send `ff8_field.log` — I'll read the full `[EXTSCAN]` block and cross-reference `sym0`/`symC` against what's actually in each slot to figure out the real mapping before touching the gate-position code again. The `.284` trapdoor fix is left as-is for now (unconfirmed either way — the dead-end-cluster match is encouraging but not proof); worth a positioned re-check next time Aaron is at `glprein1`.
+
+## v0.18.3.284
+
+**.283 BAT results (2026-07-18 23:00–23:10).** glclock1 fix confirmed; trapdoor position gap found; sewer gates untested this round.
+
+**glclock1 false exit — CONFIRMED FIXED.** Aaron: "False positive exit in clocktower now removed." The trigger-line-precedence veto from .283 worked as designed.
+
+**glprein1 trapdoor — resolves correctly but has no coordinates, so it's still unreachable.** Aaron: "trapdoor to the clocktower still has no coordinates so manual and automatic navigation can't drive to it." Log confirms: `[MAPJUMP-RES] glprein1 ent2 'irvine' (Map Exit): param 0x80000151 -> 0x000002CC [INTERP]` (716, correct dest), catalog entry `cat0 JSM ent2 type=Exit name='Exit to Deling - Presidential Residence 1' pos=(0,0)` — the exit is in the catalog with the right name, but `pos=(0,0)` means no navigable target.
+
+Root cause: the two existing position sources for a MAP_EXIT entity both come up empty for this entity. It never calls SET3 (no `hasPosition`). It's a `TALKRADIUS`/interaction-triggered trapdoor, not a walk-across trigger line, so it never calls SETLINE either — there's no captured line to match by SYM name. But the entity genuinely IS placed on the walkmesh: `[SCAN] ent2 sym='irvine' model=6 tri=38 ... fp=(1908736,-60260352)` shows a live, sane position (~466, -14712, consistent with nearby walkmesh triangle centers in that room). It's simply excluded from the general NPC/interaction scan by a HIDE flag (`[SCAN-DROP] ent2 sym='irvine' hidden (flags@0x160=0x1008280A bit3 set by HIDE)`), which the position-resolution code in the MAP_EXIT injection path never had a fallback to bypass.
+
+**Fix (`field_nav_catalog_mapexits.inl`):** added a third position source, tried after SET3 and SETLINE both fail: read the entity's *live* position directly via `GetEntityPos()`, which only checks walkmesh placement (`triId != 0`), not the HIDE flag. The runtime index is the entity's flat `jsmIndex` (Door+Line+Background+Other scan order) — confirmed to map 1:1 onto the runtime "Others" array index with **no** subtraction of the doors+lines+backgrounds count, both by this entity (`jsmIndex=2`, `[SCAN]` independently reports the same entity as `ent2`) and by cross-checking `glwater1`'s `sakua`/`sakub`/`oku` (`jsmIndex` 17/18/19 — matches the earlier BAT finding that they sit past the *old* `MAX_ENTITIES=16` cap, which only holds if their runtime index is the unmodified `jsmIndex`, not `jsmIndex-9`). This fallback is gated on the destination already having resolved to a real field or the world map (`destResolved`), so it can't rescue an entity like `glprein1`'s `'tobi'` (ent9, an unresolved runtime-var marker) into a bogus positioned exit — only a MAP_EXIT the scanner/interpreter already trusts the *destination* of can get a fabricated position from this path.
+
+**Regression caught before shipping (not from a BAT — found while implementing the fix above):** the `jsmIndex`-as-runtime-index mapping isn't guaranteed to point at the exit entity's *own* slot — it can coincidentally land on a live party member's slot instead. `glclock1`'s `'irvine'` MAP_EXIT (the false exit `.283` just fixed) also has `jsmIndex=2`, and `glclock1`'s runtime slot 2 turns out to be Rinoa mid-scene (`[party-filter] ent2 model=3 setpc=4 (Rinoa) sym='irvine'`). Without a guard, this fallback would have read Rinoa's live position and handed it to the false "Exit to wm05" — silently un-doing `.283`'s fix by making the false exit `hasPos=true` (which skips `.283`'s unpositioned-exit veto entirely) and giving it a fabricated-but-plausible-looking position, arguably worse than the pre-`.283` state. Added `GetEntitySetpc()` (`field_nav_helpers.inl`) and gated the fallback on `!IsPartyCharacterSetpc(GetEntitySetpc(liveIdx))` — refuse to trust the live position whenever that runtime slot's `setpc` reads as a valid party character (0-7). Confirmed safe for `glprein1`'s trapdoor: its `[SCAN-DROP]` hidden-filter log line fires with no preceding `[party-filter]` line, proving the party-filter check (which runs first in the scan loop) already tested and rejected `isPartyChar` for that slot.
+
+**#85 (sewer gates) — NOT re-tested this round.** Aaron was only in `glwater1` for ~6 seconds this BAT (23:02:58–23:03:04) and didn't press `-`/`=` to open the catalog there, so `RefreshCatalog()` — and therefore `EXTSCAN` — never ran. The `MAX_ENTITIES=32` widen from .283 has not yet been exercised against this field. Needs a revisit: walk into the sewer gate room and press `-` or `=` at least once while there (ideally after interacting with a gate) so the catalog actually refreshes and EXTSCAN fires.
+
+**BAT for v0.18.3.284:**
+1. `glprein1` trapdoor: confirm the catalog now shows a real position for "Exit to Deling - Presidential Residence 1" (not `pos=(0,0)`), and that manual/auto navigation can actually reach and use it.
+2. `glclock1` and other already-fixed fields: no change expected, just confirm no regression.
+3. `glwater1`: walk to the sewer gate room and press `-`/`=` there (this step was missed last BAT) so `EXTSCAN` can actually report on slots 17-19 (`sakua`/`sakub`/`oku`) under the widened `MAX_ENTITIES=32`.
+
+## v0.18.3.283
+
+**.282 BAT results (2026-07-18 22:41–22:46).** Two independent things confirmed, one fixed, one still needs a decision on scope.
+
+**Trapdoor (#86) — CONFIRMED CORRECT a second time.** `glprein1` still resolves `[MAPJUMP-RES] ... (Map Exit): param 0x80000151 -> 0x000002CC [INTERP]` (716), catalog lists `Exit to Deling - Presidential Residence 1` (1/3), and the live `[MAPJUMP-HOOK]` oracle fired `destField=716` exactly matching when Aaron actually triggered it. Untouched by this build.
+
+**glclock1 false exit — taint-tracking (.282) did NOT fix it, and Aaron confirmed why.** `[MAPJUMP-RES] glclock1 ent2 'irvine' (Map Exit): param 0x00000176 -> 0x00000005 [INTERP]` still fired, and the catalog still listed `cat2 JSM ent2 type=Exit name='Exit to wm05'` alongside the real exit (`cat1 TRIGGER line0 ... name='Exit to Deling - Presidential Residence 7'`). Aaron: "There is just the one exit in the clocktower — the exit back to Residence 7. That other exit is some kind of false positive" — confirmed by the live oracle too (`[MAPJUMP-HOOK] MAPJUMP3 fired on field=716 ... destField=746`, matching only the trigger-line exit).
+
+The .282 taint theory was wrong for this case: the destination value 5 genuinely IS a hardcoded literal on whichever branch `InterpretExitMethod` reached (untainted, hence not caught) — the problem isn't a stale variable read, it's that the interpreter followed a branch that isn't the one active in the player's real context (an inactive/off-context script path on a SYM slot the codebase already knows is unreliable as identity — 'irvine' is a recycled dev-slot name here too). `glclock1` has 0 INF gateways, so neither existing gateway-cross-check (v0.12.08 Fix A, or the .281 `paramFromInterp` bypass) ever runs to catch it — the field genuinely has no independent data source to arbitrate between the real exit and the false one by destination alone.
+
+**Fix (`field_nav_catalog_mapexits.inl`):** added a rule ahead of the existing dead-exit suppression — an *unpositioned* MAP_EXIT is no longer trusted when the catalog already contains a trigger-line-sourced Exit (`entityIdx` in `[-299,-200]`) for this field. `glclock1`'s trigger-line exit is built earlier in `RefreshCatalog()` (before the `field_nav_catalog_mapexits.inl` include), so it's already in `newCatalog` by the time this check runs. Positioned MAP_EXITs are untouched by this rule (a real, independently-walkable second door stays trusted); `glprein1`'s trapdoor has no competing trigger-line exit on its field at all, so it's unaffected either way.
+
+**#85 (sewer gates) — EXTSCAN finally fired, and it changed the diagnosis.** Aaron pressed `-`/`=` in `glwater1` this time. Result: `[EXTSCAN] === reported otherCount=5, scanning 0..15 ===` — confirms `seigyo` sits at runtime slot 10 (visible, matches JSM), but `sakua`/`sakub`/`oku` never appear in the 0-15 dump at all. They're not just past the reported `otherCount` (5) — they're past `MAX_ENTITIES` itself (16), which is what bounds the diagnostic's own scan range. `glwater1` needs indices up to 19 (Lines=5 + Backgrounds=4 + Others=11 = 20 total non-door state-array entries). **Fix:** widened `MAX_ENTITIES` 16 → 32 (`field_navigation.cpp`, mirrored in `chase_diag.cpp`). Verified every use in the codebase is via the symbol (array sizing, bounds checks) — no raw `16` literal duplicates it, so this is a clean, low-risk widen. No other logic changed; this alone should let the runtime scan (and EXTSCAN) reach slots 17-19 next BAT.
+
+**BAT for v0.18.3.283:**
+1. `glclock1`: confirm the catalog now lists exactly ONE exit ("Exit to Deling - Presidential Residence 7"), no "Exit to wm05".
+2. `glprein1` trapdoor: confirm still resolves 716 (regression check — should be untouched, this build didn't touch the resolver).
+3. `glwater1`: open the catalog (`-`/`=`) again. `[EXTSCAN]` should now scan `0..31` and hopefully show real slot data for `sakua`/`sakub`/`oku` (slots 17-19) — that's the deciding data for whether #85 needs "wire up the extended scan into the real catalog" or "corridor-aware dead-end fallback" next.
+
+## v0.18.3.282
+
+**#86 follow-up — the interpreter broadening in .281 was too trusting for one case.** BAT results on .281 (2026-07-18 22:16–22:23):
+
+**Confirmed working:** `glprein1` ent2 `'irvine'` (the trapdoor) resolved `[MAPJUMP-RES] ... (Map Exit): param 0x80000151 -> 0x000002CC [INTERP]` (716). The catalog picked it up: `[refresh] cat0 JSM ent2 type=Exit name='Exit to Deling - Presidential Residence 1' pos=(0,0)`, listed as `1/3` exits. Auto-drive correctly refused with a clean reason (`target_pos_known=0`) rather than misbehaving — expected, position-sourcing is still open. And the **live engine oracle matched exactly**: `[MAPJUMP-HOOK] MAPJUMP fired on field=746 'glprein1' ... MAPJUMP engine RESULT: transition_type=1 destField=716` at the moment Aaron actually triggered it. The fix is validated against ground truth, not just plausible.
+
+**New problem found:** the same broadened interpreter also touched `glclock1` ent2 `'irvine'` (the trapdoor's continuation, presumably toward the sewer) and resolved `[MAPJUMP-RES] glclock1 ent2 'irvine' (Map Exit): param 0x00000176 -> 0x00000005 [INTERP]` — field 5, `FIELD_DISPLAY_NAMES[5]` = `"wm05"`, an internal unnamed placeholder. That contradicts the known-real destination for this same exit from an earlier session's live oracle capture (`destField=762`, "Deling City - Sewer 2"). Not confirmed wrong *in this BAT* (Aaron didn't continue through that exit this session), but "wm05" being a nonsense name is a strong signal, and the old fallback resolver had already flagged this specific destination as VARBLOCK-sourced (`VARBLOCK addr=0x02FA -> marker=0x800002FA`) before .281 started trusting the interpreter's read of it.
+
+**Root cause:** `glprein1`'s destination is a script literal reached via a correctly-followed conditional branch (the interpreter's designed use case — same shape as the validated bgryo2_1/bgroad_5 cases). `glclock1`'s destination is itself loaded from a variable at the final MAPJUMP argument slot, and the interpreter, since it reads the REAL live varblock, returns whatever that slot currently holds — which may not be its value at the moment the script actually fires later (set by other logic in between). This is architecturally different from "which branch to take" (always safe to resolve live) vs. "what value does the destination operand itself hold" (only safe when it's a literal, not a variable read).
+
+**Fix (`field_archive_jsm_mapjump_resolver.inl`, `InterpretExitMethod`):** added a parallel `bool taint[STK]` provenance tag alongside the value stack. Literal pushes (`0x00`/`0x07`) and arithmetic over untainted operands are untainted; varblock reads (`0x0A`/`0x0C`/`0x11`), local-frame reads (`0x08`, unknown at scan), and unmodeled opcodes are tainted; a CAL result is tainted if either operand was. At a MAPJUMP-family instruction, if the destination operand (`stack[sp-4]` or `stack[sp-5]`) is tainted, the interpreter now declines (`return -1`, new trace reason 6 `"dest-variable-sourced"`) instead of returning the live-but-possibly-stale value. A decline falls through to the existing fallback/marker-adoption path exactly as it did before .281 for that entity — restoring the old cautious behavior for variable-sourced destinations while keeping the .281 fix for literal-backed ones (branch conditions are still followed live; only the final destination value's provenance is checked).
+
+**Expect on the next BAT:** `glprein1`'s trapdoor should be unaffected (716, literal-backed) — this needs re-confirmation, since it's a real possibility (not yet ruled out) that its destination push is *also* variable-sourced and this change regresses it back to undropped-but-unresolved. `glclock1`'s `'irvine'` should now decline INTERP and fall back to the old marker-adoption/suppression path (silent again, as it was before .281 — a safe regression to "unknown" rather than a wrong confident label).
+
+**Also outstanding from .281's BAT:** the `#85` `[EXTSCAN]` diagnostic (armed, gated to `glwater1`) never fired — `RefreshCatalog()` only runs when the player opens the catalog (`-`/`=`), and Aaron passed through `glwater1` without cycling it this session. Needs a re-visit where the catalog is opened at least once while standing in the sewer.
+
+## v0.18.3.281
+
+**#85 diagnostic (glwater1-gated, zero behavior change elsewhere) + #86 fix.** Cowork investigation session, working from the existing `ff8_field.log` capture that filed #85 — no new BAT needed to diagnose either bug, only to validate the fix.
+
+**#85 (sewer gates sakua/sakub/seigyo missing from catalog) — diagnostic only, no fix yet.** Confirmed root cause: `glwater1`'s JSM declares `O=11` "others" entities but the live engine only reports `entities=5`, so the three gate/control entities (others-relative index 8/9/10) sit structurally outside the runtime scan loop's range — same failure class as the ggsta1 train-staff bug (v0.18.3.231). The `[EXTSCAN]` diagnostic built for that case (`field_nav_catalog_diag.inl`, reads past the reported count up to `MAX_ENTITIES`) has been permanently disabled since v0.18.3.234 (`s_extScanDumped = true`, "done — train staff found"). Re-armed it, gated to `glwater1` only (`field_nav_fieldscripts.inl`), so it doesn't flood every other field's log. This BAT will show whether real positions exist past the reported count once the field's gate-puzzle script logic runs — settling between "wire up the extended scan" and "corridor-aware dead-end fallback" before either is implemented.
+
+**#86 FIX (Presidential Residence trapdoor, glprein1→glclock1, "it's in your hands now" scene).** Root cause was two-layered:
+
+1. `field_archive_jsm_mapjump_resolver.inl`: the authoritative forward interpreter (`InterpretExitMethod` — the one that fixed the bgryo2_1/bgroad_5 exit-mislabeling bug in v0.17.9.6) only ran for `JSM_ENT_LINE_SCREEN_BOUND` entities. The trapdoor is `JSM_ENT_MAP_EXIT` (`ent2 'irvine'` on `glprein1`, a recycled SYM slot — not the character), so it never got the good resolver and fell to the older abstract fallback, which underflows on real branching (`stack underflow (sp=1 need 4)`). This exact gap was called out by name when the interpreter shipped ("Still open: the dropped real-door MAP_EXIT 'l1' in bgryo2_1") and was never picked up. Now the interpreter also runs for `JSM_ENT_MAP_EXIT`; a successful result writes `info.param` and sets the new `info.paramFromInterp` flag (`field_archive.h`).
+2. `field_nav_catalog_mapexits.inl`: even a correctly-resolved destination would still be dropped by the INF-gateway cross-check (v0.12.08 Fix A), which treats any MAP_EXIT destination not matching one of the field's known INF gateways as stale. `glprein1` has 2 real INF gateways (to Residence 13 and Residence 10) that don't include the trapdoor's destination (716) — it's a genuine third exit INF never registered, not a stale runtime variable. The cross-check now skips its "unmatched = stale" assumption when `paramFromInterp` is set, while keeping the original distrust for fallback-sourced (LITERAL/VARBLOCK) destinations — preserving the original bgryo2_1 `'l1'` fix, which legitimately relied on this filter to drop a true duplicate.
+
+**Not fixed yet (documented in #86):** the trapdoor still has no walkable position — `glprein1` has zero Line entities at all, so the usual SETLINE-capture fallback has nothing to match against, and the entity is HIDE-flagged until some story trigger. This BAT should surface it correctly named ("Exit to Deling - Presidential Residence 1") even without a walkable position — a real improvement over total silence, with position-sourcing to follow separately (likely alongside whatever approach #85 lands on, since both are Director/REQ-dispatched objects with no native coordinate).
+
+**BAT for this build:** reload a save before the Presidential Residence trapdoor scene (`glprein1`), interact with it, confirm the catalog now lists an exit (name TBD by BAT — expect something like "Exit to Deling - Presidential Residence 1"), and check `ff8_field.log` for `[MAPJUMP-RES] glprein1 ent2 'irvine' (Map Exit): param ... [INTERP]` resolving to `0x000002CC` (716) instead of the old stack-underflow line. Separately, reload/replay into the sewer (`glwater1`) and send `ff8_field.log` for the `[EXTSCAN]` block — that's the #85 diagnostic payload, no visible catalog change expected from it yet.
+
 ## v0.18.3.280
 
 **Split `field_nav_fieldscripts.inl` (81.7 KB) — CI hard-fails over 80 KB.** No behaviour change; a pure textual move.

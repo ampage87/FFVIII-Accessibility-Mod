@@ -154,7 +154,25 @@ static void RunDirectorDetection(const char* fieldName,
                 int tgt = outEntities[tc].jsmIndex;
                 if (tgt == dIdx || tgt < 0 || tgt >= 128) continue;
                 if (outEntities[tc].jsmCategory != 3) continue;
-                if (!s_hasDialogAny[tgt] && !s_hasExtDispatchArr[tgt]) continue;
+                // v0.18.3.289 (#85): glwater3's 'saku1' has a real model and
+                // REQs this field's Director ('saku4') exactly like the
+                // working gates ('saku2' etc.) -- but its own walk-dispatch
+                // opcode (0x1C) pops a STATICALLY RESOLVABLE sub-opcode value
+                // instead of firing with an empty/unresolved stack, so
+                // hasExtDispatchArr never gets set for it (that flag only
+                // fires on the ambiguous empty-stack/PSHM-marker cases --
+                // see field_archive_jsm_scan.inl). Confirmed via the offline
+                // archive tool: saku1's dispatch is functionally identical to
+                // saku2's, just more statically legible, which paradoxically
+                // made it fail this OR. Add a 3rd qualifying signal: a target
+                // with its own model that issues at least one raw REQ opcode
+                // (s_reqOpcodeCount, stack-independent -- s_entityReqs/
+                // "reqResolved" often fails to resolve the target entity ID
+                // for these gates and can't be relied on here). Requiring
+                // setmodelInit keeps this scoped to visible entities, so it
+                // shouldn't sweep in invisible controllers/lines.
+                bool hasReqSignal = s_hasSetmodelInit[tgt] && s_reqOpcodeCount[tgt] >= 1;
+                if (!s_hasDialogAny[tgt] && !s_hasExtDispatchArr[tgt] && !hasReqSignal) continue;
 
                 // Get target SYM name
                 int tgtSymIdx = tgt - countDoors;

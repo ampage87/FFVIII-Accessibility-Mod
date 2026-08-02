@@ -205,14 +205,104 @@
                                 //    addr=0x00AF (=175=Hall 11). After this fix
                                 //    they all label as "Exit to Hall 11". If that's
                                 //    wrong, we'll catch it in catalog testing.
-                                if (pshmAddr > 0 && pshmAddr < FIELD_DISPLAY_NAMES_COUNT) {
+                                // v0.18.3.290 (#85): the caveat documented above
+                                // ("If a future field uses PSHM_W with addr that
+                                // ISN'T the destField ... this will mislabel it")
+                                // has now actually fired. glwater3 (Deling sewer)
+                                // ent7 'hasigomodel' carries marker 0x8000011B;
+                                // addr 0x011B = 283 happens to be a valid field id
+                                // -- "Centra Ruins 8" -- so the catalog served
+                                // Aaron a confident, completely fabricated 4th exit
+                                // to a location on the other side of the world.
+                                // He confirmed this field has only 3 real exits
+                                // (two north, one east); the other three label
+                                // correctly and are unaffected by this change.
+                                //
+                                // The whole addr-as-literal equivalence was derived
+                                // from 8 BAT fires, ALL on B-Garden 'bg*' fields,
+                                // and is explicitly a best-guess about that
+                                // scripting convention -- there was never evidence
+                                // it generalises. Scope it to the evidence:
+                                // non-'bg' fields keep the marker and fall back to
+                                // a bare "Exit" (honest and unlabeled) instead of
+                                // inventing a destination. If a non-bg field later
+                                // turns out to need this, widen it deliberately
+                                // with its own BAT rather than by default.
+                                bool isBgField291 = (fieldName &&
+                                    (fieldName[0] == 'b' || fieldName[0] == 'B') &&
+                                    (fieldName[1] == 'g' || fieldName[1] == 'G'));
+                                // v0.18.3.291 (#85): the flat bg-only scoping above
+                                // was too blunt and caused a REGRESSION in the .290
+                                // BAT. glwater3 has TWO marker-bearing exit lines:
+                                //   jsm2 'irvine'      addr 0x02FA = 762 = Sewer 2  <- CORRECT
+                                //   jsm7 'hasigomodel' addr 0x011B = 283 = Centra Ruins 8 <- absurd
+                                // Blocking both killed the bogus Centra Ruins label
+                                // (the goal) but ALSO stripped a correct "Exit to
+                                // Deling City - Sewer 2" label Aaron had been relying
+                                // on, leaving him a bare "Exit".
+                                //
+                                // The discriminator is available statically: sibling
+                                // lines on the SAME field that resolved to a LITERAL
+                                // destination. On glwater3 those are 762 and 763
+                                // (jsm3/4/5/6 'rinoa'/'selphie'/'quistis'/'book').
+                                // irvine's 762 is corroborated by a sibling literal;
+                                // hasigomodel's 283 matches nothing on the field and
+                                // is the fabrication. So: accept addr-as-literal when
+                                // the field is 'bg*' (the original 8-BAT evidence base,
+                                // preserved as-is) OR when a sibling line independently
+                                // resolved to that same destination id.
+                                // NOTE: corroboration scans s_jsmEntities[], NOT
+                                // s_capturedLines[]. This block runs inside the
+                                // per-line loop that POPULATES destFieldId, so any
+                                // sibling with a higher line index hasn't been
+                                // assigned yet -- and on glwater3 every literal-
+                                // bearing sibling (jsm3-jsm6) sits after irvine
+                                // (jsm2), so a s_capturedLines[] scan would find
+                                // nothing and silently fail to corroborate.
+                                // s_jsmEntities[].param is fully populated by the
+                                // JSM scan before any of this runs, so it's order-
+                                // independent.
+                                bool corroborated291 = false;
+                                if (!isBgField291 && pshmAddr > 0) {
+                                    for (int sib = 0; sib < s_jsmEntityCount; sib++) {
+                                        if (sib == jsmIdx) continue;
+                                        int sd = s_jsmEntities[sib].param;
+                                        // positive literal only -- markers are negative
+                                        // (bit 31 set) and must not corroborate each other
+                                        if (sd > 0 && sd == (int)pshmAddr) {
+                                            corroborated291 = true;
+                                            Log::Field("FieldNavigation: [PSHM-DEST] line%d addr=0x%04X (%d) "
+                                                       "CORROBORATED by jsm%d '%s' literal dest "
+                                                       "-- addr-as-literal accepted [v0.18.3.291]",
+                                                       t, pshmAddr, (int)pshmAddr,
+                                                       sib, s_jsmEntities[sib].symName);
+                                            break;
+                                        }
+                                    }
+                                }
+                                bool addrAsLiteralOk = isBgField291 || corroborated291;
+                                if (!addrAsLiteralOk && pshmAddr > 0) {
+                                    Log::Field("FieldNavigation: [PSHM-DEST] line%d (jsm%d '%s') "
+                                               "marker=0x%08X addr=0x%04X: addr-as-literal NOT applied "
+                                               "on non-bg field '%s' (would have fabricated field %d '%s') "
+                                               "-- keeping marker, exit stays unlabeled [v0.18.3.290]",
+                                               t, jsmIdx, s_jsmEntities[jsmIdx].symName,
+                                               (unsigned)rawParam, pshmAddr, fieldName,
+                                               (int)pshmAddr,
+                                               (pshmAddr < FIELD_DISPLAY_NAMES_COUNT)
+                                                   ? FIELD_DISPLAY_NAMES[pshmAddr] : "?");
+                                }
+                                if (addrAsLiteralOk && pshmAddr > 0 && pshmAddr < FIELD_DISPLAY_NAMES_COUNT) {
                                     Log::Field("FieldNavigation: [PSHM-DEST] line%d (jsm%d '%s') "
                                                "marker=0x%08X addr=0x%04X -> field %d (%s) [addr-as-literal]",
                                                t, jsmIdx, s_jsmEntities[jsmIdx].symName,
                                                (unsigned)rawParam, pshmAddr,
                                                (int)pshmAddr, FIELD_DISPLAY_NAMES[pshmAddr]);
                                     rawParam = (int)pshmAddr;
-                                } else {
+                                } else if (addrAsLiteralOk) {
+                                    // v0.18.3.290: scoped to the bg-field case so the
+                                    // non-bg skip above isn't double-logged with a
+                                    // misleading "out of range" reason.
                                     Log::Field("FieldNavigation: [PSHM-DEST] line%d (jsm%d '%s') "
                                                "marker=0x%08X addr=0x%04X out of field-id range (0..%d), keeping marker",
                                                t, jsmIdx, s_jsmEntities[jsmIdx].symName,

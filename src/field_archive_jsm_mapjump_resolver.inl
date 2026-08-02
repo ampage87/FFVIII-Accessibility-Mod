@@ -323,6 +323,24 @@ static int32_t InterpretExitMethod(const uint32_t* scriptData, int scriptDataDwo
 {
     static const int STK = 64;
     int32_t stack[STK];
+    // v0.18.3.281 (#86 follow-up): parallel provenance tag per stack slot.
+    // true = this value was read from the live varblock (or is otherwise of
+    // unknown origin -- local-frame reads, unmodeled opcodes); false = it
+    // traces back only to script-literal pushes (0x00/0x07) and arithmetic
+    // over literals. The interpreter still LEGITIMATELY reads the varblock
+    // to pick the taken branch (that's its whole point, and it's proven
+    // correct doing so on bgryo2_1/bgroad_5 and now glprein1's trapdoor) --
+    // this only gates trust in the FINAL destField operand at a MAPJUMP-
+    // family instruction. A destField sourced from a variable read (as
+    // opposed to a hardcoded literal in the taken branch) can hold a
+    // different value at scan time than it will when the script actually
+    // fires (glclock1 'irvine' resolved a live-but-wrong field 5/"wm05"
+    // this way -- the true destination, confirmed by the earlier session's
+    // live MAPJUMP-HOOK oracle, is 762). Declining (returning -1) when the
+    // destination itself is tainted restores the old fallback resolver's
+    // LITERAL-vs-VARBLOCK caution for exactly this one operand, without
+    // weakening the interpreter's branch-following anywhere else.
+    bool taint[STK];
     int sp = 0;
     const uint8_t* vb = (const uint8_t*)EXIT_VARBLOCK_BASE;
     int ip = mStart;
@@ -333,27 +351,27 @@ static int32_t InterpretExitMethod(const uint32_t* scriptData, int scriptDataDwo
         uint32_t word = scriptData[ip];
         uint8_t hb = (uint8_t)(word >> 24);
         if (tr && tr->nrec < 48) { tr->rec[tr->nrec].ip = ip; tr->rec[tr->nrec].op = hb; tr->rec[tr->nrec].sp = sp; tr->nrec++; }  // v0.17.9.8 op trace
-        if (hb == 0x00) { if (sp < STK) stack[sp++] = (int32_t)word; ip++; continue; }
+        if (hb == 0x00) { if (sp < STK) { taint[sp] = false; stack[sp++] = (int32_t)word; } ip++; continue; }
 
         int32_t param = (int32_t)(word & 0x00FFFFFF);
         if (word & 0x00800000) param |= (int32_t)0xFF000000;  // sign-extend 24->32
         int off = param & 0xFFFF;  // varblock byte offset
 
         switch (hb) {
-            case 0x07: if (sp < STK) stack[sp++] = param; ip++; break;                       // push immediate
-            case 0x0A: if (sp < STK) stack[sp++] = *(const uint8_t*)(vb + off);  ip++; break;  // varblock byte (unsigned)
-            case 0x0C: if (sp < STK) stack[sp++] = *(const uint16_t*)(vb + off); ip++; break;  // varblock word (unsigned)
-            case 0x11: if (sp < STK) stack[sp++] = *(const int16_t*)(vb + off);  ip++; break;  // varblock word (signed)
-            case 0x08: if (sp < STK) stack[sp++] = 0; ip++; break;                            // local-frame read (unknown at scan)
+            case 0x07: if (sp < STK) { taint[sp] = false; stack[sp++] = param; } ip++; break;                       // push immediate
+            case 0x0A: if (sp < STK) { taint[sp] = true; stack[sp++] = *(const uint8_t*)(vb + off); }  ip++; break;  // varblock byte (unsigned)
+            case 0x0C: if (sp < STK) { taint[sp] = true; stack[sp++] = *(const uint16_t*)(vb + off); } ip++; break;  // varblock word (unsigned)
+            case 0x11: if (sp < STK) { taint[sp] = true; stack[sp++] = *(const int16_t*)(vb + off); }  ip++; break;  // varblock word (signed)
+            case 0x08: if (sp < STK) { taint[sp] = true; stack[sp++] = 0; } ip++; break;                            // local-frame read (unknown at scan)
             case 0x0B: case 0x0D: if (sp > 0) sp--; ip++; break;                              // pop->varblock (no write in interp)
             case 0x01: {                                                                      // CAL
                 uint8_t cop = (uint8_t)(param & 0xFF);
-                if (cop == 0x05) { if (sp < 1) return IT_ret(tr, ip, hb, sp, 5, steps, -1); int32_t a = stack[--sp]; if (sp < STK) stack[sp++] = -a; }
-                else if (cop == 0x0F) { if (sp < 1) return IT_ret(tr, ip, hb, sp, 5, steps, -1); int32_t a = stack[--sp]; if (sp < STK) stack[sp++] = ~a; }
+                if (cop == 0x05) { if (sp < 1) return IT_ret(tr, ip, hb, sp, 5, steps, -1); int32_t a = stack[--sp]; bool ta = taint[sp]; if (sp < STK) { taint[sp] = ta; stack[sp++] = -a; } }
+                else if (cop == 0x0F) { if (sp < 1) return IT_ret(tr, ip, hb, sp, 5, steps, -1); int32_t a = stack[--sp]; bool ta = taint[sp]; if (sp < STK) { taint[sp] = ta; stack[sp++] = ~a; } }
                 else {
                     if (sp < 2) return IT_ret(tr, ip, hb, sp, 5, steps, -1);
-                    int32_t b = stack[--sp];
-                    int32_t a = stack[--sp];
+                    int32_t b = stack[--sp]; bool tb = taint[sp];
+                    int32_t a = stack[--sp]; bool ta = taint[sp];
                     int32_t r = 0;
                     switch (cop) {
                         case 0x00: r = a + b; break;
@@ -374,7 +392,7 @@ static int32_t InterpretExitMethod(const uint32_t* scriptData, int scriptDataDwo
                         case 0x11: r = a << (b & 31); break;
                         default:   r = 0; break;
                     }
-                    if (sp < STK) stack[sp++] = r;
+                    if (sp < STK) { taint[sp] = (ta || tb); stack[sp++] = r; }
                 }
                 ip++;
                 break;
@@ -395,14 +413,16 @@ static int32_t InterpretExitMethod(const uint32_t* scriptData, int scriptDataDwo
             case 0x06: return IT_ret(tr, ip, hb, sp, 1, steps, -1);                           // RET (no dest)
             case 0x2A: case 0x38:                                                             // MAPJUMP3 / DISCJUMP
                 if (sp < 5) return IT_ret(tr, ip, hb, sp, 2, steps, -1);
+                if (taint[sp - 5]) return IT_ret(tr, ip, hb, sp, 6, steps, -1);  // dest variable-sourced -- don't trust it
                 return IT_ret(tr, ip, hb, sp, 0, steps, stack[sp - 5] & 0xFFFF);
             case 0x29: case 0x5C:                                                             // MAPJUMP / MAPJUMPO
                 if (sp < 4) return IT_ret(tr, ip, hb, sp, 2, steps, -1);
+                if (taint[sp - 4]) return IT_ret(tr, ip, hb, sp, 6, steps, -1);  // dest variable-sourced -- don't trust it
                 return IT_ret(tr, ip, hb, sp, 0, steps, stack[sp - 4] & 0xFFFF);
             default: {                                                                        // unknown: conservative stack delta
                 StackEffect eff = GetStackEffect(hb);
                 for (int i = 0; i < eff.pops && sp > 0; i++) sp--;
-                for (int i = 0; i < eff.pushes && sp < STK; i++) stack[sp++] = 0;
+                for (int i = 0; i < eff.pushes && sp < STK; i++) { taint[sp] = true; stack[sp++] = 0; }
                 ip++;
                 break;
             }
@@ -581,8 +601,18 @@ static void Run(const char* fieldName,
         // against the live [MAPJUMP-HOOK] oracle. The abstract resolver result
         // (bestLiteral/bestMarker) is kept only as a fallback for the rare
         // method the interpreter can't complete (RET/underflow/unmodeled).
+        // v0.18.3.281 (#86): also run the interpreter for JSM_ENT_MAP_EXIT.
+        // It was scoped to SCREEN_BOUND-only when it shipped (v0.17.9.6) --
+        // that changelog entry itself flagged "the dropped real-door MAP_EXIT
+        // 'l1' in bgryo2_1" as a still-open gap. glprein1 'irvine' (the
+        // Presidential Residence trapdoor, #86) hits the same wall: its
+        // script has real branching the abstract fallback can't follow, so
+        // it underflows (`stack underflow (sp=1 need 4)`) instead of
+        // resolving. The interpreter follows live control flow + the real
+        // varblock, so it succeeds where the fallback can't.
         int32_t interpDest = -1;
-        if (info.type == JSM_ENT_LINE_SCREEN_BOUND && mjMethodStart >= 0) {
+        if ((info.type == JSM_ENT_LINE_SCREEN_BOUND || info.type == JSM_ENT_MAP_EXIT) &&
+            mjMethodStart >= 0) {
             interpDest = SafeInterpretExitMethod(scriptData, scriptDataDwords,
                                                  mjMethodStart, mjMethodEnd);
         }
@@ -601,6 +631,23 @@ static void Run(const char* fieldName,
                        "param 0x%08X -> 0x%08X%s",
                        fieldName, ei, info.symName,
                        (unsigned)oldParam, (unsigned)newParam, src);
+        } else if (info.type == JSM_ENT_MAP_EXIT && interpDest >= 0) {
+            // v0.18.3.281 (#86): concrete INTERP result for a MAP_EXIT "Other"
+            // entity. Trusted the same way the SCREEN_BOUND branch trusts it --
+            // this is the destField the engine will actually use, not a guess --
+            // and marked paramFromInterp so the catalog's INF-gateway
+            // cross-check (field_nav_catalog_mapexits.inl) knows not to
+            // distrust it just because this field's INF gateways don't happen
+            // to list the same destination.
+            int32_t oldParam = info.param;
+            info.param = interpDest;
+            info.paramFromInterp = true;
+            paramUpdates++;
+            resolved++;
+            Log::Field("FieldArchive: [MAPJUMP-RES] %s ent%d '%s' (Map Exit): "
+                       "param 0x%08X -> 0x%08X [INTERP]",
+                       fieldName, ei, info.symName,
+                       (unsigned)oldParam, (unsigned)interpDest);
         } else if (anyResolved) {
             resolved++;
             int32_t newParam = (bestLiteral != -1) ? bestLiteral : bestMarker;
@@ -656,8 +703,9 @@ static void Run(const char* fieldName,
             int32_t d = SafeInterpretExitMethod(scriptData, scriptDataDwords,
                                                 mjMethodStart, mjMethodEnd, &tr);
             static const char* const RZ[] = { "reached-MAPJUMP", "RET", "MAPJUMP-arg-underflow",
-                                              "fell-off-range", "step-cap", "CAL/JPF-underflow" };
-            const char* rstr = (tr.reason >= 0 && tr.reason <= 5) ? RZ[tr.reason] : "SEH-fault/none";
+                                              "fell-off-range", "step-cap", "CAL/JPF-underflow",
+                                              "dest-variable-sourced" };  // v0.18.3.281
+            const char* rstr = (tr.reason >= 0 && tr.reason <= 6) ? RZ[tr.reason] : "SEH-fault/none";
             Log::Field("FieldArchive: [EXIT-TRACE] %s ent%d '%s' type=%s interp=%d reason=%s "
                        "bailIp=%d bailOp=0x%02X bailSp=%d steps=%d | abstract lit=%d marker=0x%08X",
                        fieldName, ei, info.symName, JSMEntityTypeName(info.type),

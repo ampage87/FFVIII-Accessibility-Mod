@@ -306,6 +306,34 @@ static const EntityDisplayName ENTITY_DISPLAY_NAMES[] = {
     { "kiros", "Kiros" },
     { "knob", "Knob" },
     { "ladder", "Ladder" },
+    // v0.18.3.290 (#85): the v0.18.3.288 'ladline0'-'ladline7' -> "Ladder"
+    // mappings were REMOVED here. They were added purely because the SYM name
+    // reads like "ladder", which directly violates this project's standing rule
+    // that SYM names are unreliable identity hints (see DEVNOTES.md; 'kanban2'
+    // was Xu). That guess was wrong and actively harmful: glwater3's 'ladline7'
+    // is the gate the player must open to proceed -- it sits ~1 step from where
+    // Aaron stood facing that gate (its tri-83 centroid (-287,815) vs his
+    // (-238,706)), it is the ONLY catalog entry anywhere near it, Aaron
+    // independently reported this entry's coords put him "right in front of the
+    // gate to sewer 2", and its script dispatches REQs like the 'saku' gates
+    // rather than doing anything ladder-like. Labeling it "Ladder" is what made
+    // the real gate look absent from the catalog for three BAT cycles.
+    // 'ladline5'/'ladline6' are likewise unconfirmed -- with no behavioral
+    // evidence for what they are, they now fall through to the generic
+    // "Object" type name rather than asserting a wrong specific identity.
+    // Do NOT re-add SYM-derived names here without behavioral evidence.
+    //
+    // v0.18.3.291: 'ladline7' now HAS that evidence, so it gets a name -- but
+    // note the evidence is empirical, not nominal. In the .290 BAT Aaron walked
+    // the entire catalog while standing at the blocking gate and reported that
+    // this was the ONLY entry that placed him at the right spot; the log agrees
+    // (it is the sole entry reaching "In range." there, at ~1 step, while every
+    // Gate is 500-1300 units away). Combined with its script REQ-dispatching
+    // like the 'saku' gates, that is behavioral confirmation it IS a gate.
+    // Deliberately unnumbered: "Gate 1"-"Gate 3" are saku1-saku3, and this is a
+    // 4th distinct mechanism, not saku4 (that's the Director). An unnumbered
+    // "Gate" avoids implying an ordering we haven't verified.
+    { "ladline7", "Gate" },
     { "Laguna", "Laguna" },
     { "laguna", "Laguna" },
     { "laguna02", "Laguna" },
@@ -347,6 +375,21 @@ static const EntityDisplayName ENTITY_DISPLAY_NAMES[] = {
     { "Rinoa2", "Rinoa" },
     { "Rinoau", "Rinoa" },
     { "rinoau", "Rinoa" },
+    // v0.18.3.286 (#85): Deling City sewer gate maze (glwater2-5). 'sakuN'
+    // entities are the movable gate/valve mechanisms the player toggles to
+    // route water through the maze. Mapped to "Gate N" (Aaron's own term for
+    // them) instead of the raw SYM-derived "SakuN" fallback -- plain "Saku"
+    // isn't meaningful to a screen-reader user. Same sym numbering repeats
+    // across the 4 fields (e.g. every field has its own 'saku1'), which is
+    // fine: the catalog is per-field, so there's no cross-field collision.
+    { "saku1", "Gate 1" },
+    { "saku2", "Gate 2" },
+    { "saku3", "Gate 3" },
+    { "saku4", "Gate 4" },
+    { "saku5", "Gate 5" },
+    { "saku6", "Gate 6" },
+    { "saku7", "Gate 7" },
+    { "saku8", "Gate 8" },
     { "savePoint", "Save Point" },
     { "scoaul", "Squall" },
     { "Seifer", "Seifer" },

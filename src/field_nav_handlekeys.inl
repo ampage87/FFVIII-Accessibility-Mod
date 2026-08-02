@@ -204,6 +204,10 @@ static void HandleKeys()
                 s_driveProgressDist    = 1e30f;  // v06.10: reset progress tracking
                 s_driveNoProgressCount = 0;
                 s_lastRecoveryTri      = 0xFFFF;  // v0.17.6.1: clear so first recovery doesn't see a stale tri from a prior drive
+                RecoveryRingClear();             // v0.18.3.307 (#100): forget the previous drive's stuck-triangle ring
+                s_drivePinnedCount = 0;          // v0.18.3.309 (#114): fresh pin-escape state per drive
+                s_drivePinnedPosX  = _px;
+                s_drivePinnedPosY  = _pz;
 
                 // v06.14: Start heading calibration if not yet calibrated for this field.
                 // v0.17.6.0: F9 path-finding auto-drive NEVER runs CALIB. It uses the

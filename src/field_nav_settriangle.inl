@@ -86,9 +86,14 @@ static void __cdecl HookedSetCurrentTriangle(int a1, int a2, int a3)
                             // Find which edge of prevTri is shared with newTriId.
                             for (int e = 0; e < 3; e++) {
                                 if (tOld.neighbor[e] == newTriId) {
-                                    // Shared edge: vertices (e+1)%3 and (e+2)%3 of prevTri.
-                                    int ea = tOld.vertexIdx[(e + 1) % 3];
-                                    int eb = tOld.vertexIdx[(e + 2) % 3];
+                                    // Shared edge: vertices e and (e+1)%3 of prevTri.
+                                    // v0.18.3.308 (#113): was the old (e+1, e+2) pair,
+                                    // i.e. the wrong segment (see v0.17.9.14 FindPortal
+                                    // fix). Diagnostic-only consumer: COORD samples in
+                                    // ff8_nav_data.log logged the wrong crossed-edge
+                                    // midpoint; behavior unchanged.
+                                    int ea = tOld.vertexIdx[e];
+                                    int eb = tOld.vertexIdx[(e + 1) % 3];
                                     if (ea < s_walkmesh.numVertices &&
                                         eb < s_walkmesh.numVertices) {
                                         wx = (s_walkmesh.vertices[ea].x +

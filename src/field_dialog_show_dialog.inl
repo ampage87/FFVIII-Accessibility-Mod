@@ -120,6 +120,10 @@ static char __cdecl Hook_show_dialog(int32_t window_id, uint32_t state, int16_t 
         textPtr = text2;
     if (!textPtr) return result;
 
+#if FLOOR_SHOT_PROBE
+    FloorShotProbe((const uint8_t*)textPtr);
+#endif
+
     // v04.23: Hash-based change detection instead of pointer-only.
     // Catches in-place buffer rewrites that the old pointer check missed.
     uint32_t hash = fnv1a_prefix((const uint8_t*)textPtr, 64);

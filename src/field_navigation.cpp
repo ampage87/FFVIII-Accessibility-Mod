@@ -107,7 +107,16 @@ namespace FieldNavigation {
 // Constants
 // ============================================================================
 
-static const int    MAX_ENTITIES  = 16;
+// v0.18.3.283 (#85): widened 16 -> 32. The [EXTSCAN] diagnostic (armed for
+// glwater1) proved sakua/sakub/seigyo's runtime "others" slots (17-19) sit
+// PAST this cap, not just past the reported otherCount -- even the
+// "scan past the reported count" diagnostic couldn't reach them, because it
+// was itself bounded by MAX_ENTITIES. glwater1 needs indices up to 19
+// (Lines=5 + Backgrounds=4 + Others=11 = 20 total non-door SYM/state
+// entries). 32 gives headroom for other fields without another bump; all
+// uses elsewhere in the codebase are via this symbol (arrays sized by it,
+// bounds checks against it) -- verified no raw "16" literal duplicates it.
+static const int    MAX_ENTITIES  = 32;
 static const int    MAX_BG_ENTITIES = 48;  // v05.50: background entities can be numerous
 static const int    MAX_CATALOG   = 64;    // v05.50: increased to hold both arrays + gateways
 static const DWORD  ENTITY_STRIDE = 0x264;   // bytes between "other" entity blocks
@@ -172,6 +181,14 @@ static int          s_triggerCount = 0;
 static const int MAX_JSM_ENTITIES = 128;
 static FieldArchive::JSMEntityInfo s_jsmEntities[MAX_JSM_ENTITIES] = {};
 static int s_jsmEntityCount = 0;
+// v0.18.3.286 (#85): set by ResolveTriangleCentroidPositions() when a
+// position is a walkmesh-triangle-centroid approximation, not a real
+// resolved one. Kept out of JSMEntityInfo (shared w/ offline tooling).
+static bool s_jsmTriangleApprox[MAX_JSM_ENTITIES] = {};
+// v0.18.3.297 (#85): entity is the WRONG world-state of a multi-state object
+// (fallen ladder while it still stands). Injection skips these; positions stay
+// intact. Rationale: field_nav_catalog_lateres.inl.
+static bool s_jsmStateSuppressed[MAX_JSM_ENTITIES] = {};
 
 // --- NPC catalog (rebuilt at each field load) ---
 enum EntityType { ENT_UNKNOWN = 0, ENT_NPC, ENT_OBJECT, ENT_EXIT, ENT_BG_NPC, ENT_BG_OBJECT,

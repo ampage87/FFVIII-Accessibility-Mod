@@ -68,8 +68,25 @@ static void DumpExtendedEntityScanOnce(uint8_t* base, uint8_t entCount)
 {
     if (s_extScanDumped) return;
     s_extScanDumped = true;
-    Log::Field("FieldNavigation: [EXTSCAN] === reported otherCount=%d, scanning 0..%d ===",
-               (int)entCount, MAX_ENTITIES - 1);
+    // v0.18.3.285 (#85): print TWO candidate sym-name lookups per slot, not
+    // just one. s_symOthersOffset is hardcoded to 0 everywhere in this
+    // codebase (never actually computed as doors+lines+backgrounds despite
+    // its own comment saying it should be) so `sym0` below is really "flat
+    // jsmIndex == this slot" -- i.e. the runtime Others array uses the SAME
+    // numbering as the JSM's combined Door+Line+Bg+Other scan order, no
+    // offset. `symC` is the OTHER candidate: "this slot is Other-entity-only
+    // compact, offset by doors+lines+backgrounds" (the convention 3 existing
+    // functions -- ResolveLatePositions, MatchSet3LateCaptures,
+    // ResolveStructPositions -- already assume). Cross-field evidence
+    // disagrees on which is right (glprein1's trapdoor position landed on a
+    // real dead-end walkmesh cluster using sym0's convention; glwater3's
+    // 'book'/'ladline5' and glclock1's 'rinoa'/'jumpline0' pairs read
+    // byte-identical struct data using symC's convention despite being
+    // different named entities) -- printing both side by side is how we
+    // settle it instead of guessing again.
+    int othStart = s_jsmDoors + s_jsmLines + s_jsmBackgrounds;
+    Log::Field("FieldNavigation: [EXTSCAN] === reported otherCount=%d, scanning 0..%d, othStart=%d ===",
+               (int)entCount, MAX_ENTITIES - 1, othStart);
     for (int i = 0; i < MAX_ENTITIES; i++) {
         uint8_t* block = base + ENTITY_STRIDE * i;
         int16_t  modelId = *(int16_t*)(block + 0x218);
@@ -80,11 +97,13 @@ static void DumpExtendedEntityScanOnce(uint8_t* base, uint8_t entCount)
         uint8_t  thru    = *(block + 0x24C);
         int32_t  fpX     = *(int32_t*)(block + 0x190);
         int32_t  fpY     = *(int32_t*)(block + 0x194);
-        int symIdx = s_symOthersOffset + i;
-        const char* sym = (symIdx >= 0 && symIdx < s_symNameCount) ? s_symNames[symIdx] : "(none)";
-        Log::Field("FieldNavigation: [EXTSCAN] slot%-2d %s sym='%s' model=%d tri=%u setpc=%d "
+        int symIdx0 = s_symOthersOffset + i;   // current (buggy offset=0) lookup, == flat jsmIndex==i
+        int symIdxC = othStart + i;            // corrected: Other-compact, WITH othStart offset
+        const char* sym0 = (symIdx0 >= 0 && symIdx0 < s_symNameCount) ? s_symNames[symIdx0] : "(none)";
+        const char* symC = (symIdxC >= 0 && symIdxC < s_symNameCount) ? s_symNames[symIdxC] : "(none)";
+        Log::Field("FieldNavigation: [EXTSCAN] slot%-2d %s sym0='%s' symC='%s' model=%d tri=%u setpc=%d "
                    "talk=%d push=%d thru=%d fp=(%d,%d)",
-                   i, (i < (int)entCount) ? "IN " : "OUT", sym,
+                   i, (i < (int)entCount) ? "IN " : "OUT", sym0, symC,
                    (int)modelId, (unsigned)triId, (int)setpc,
                    (int)talk, (int)push, (int)thru, fpX, fpY);
     }
@@ -218,7 +237,13 @@ static void DumpPuzzleDiagOnce()
     __try {
         // Only fields that actually contain a watched puzzle object, to keep
         // this quiet everywhere else.
-        static const char* kWatch[] = { "cup", "megami", "te", "kakusi", "kidou" };
+        // v0.18.3.293 (#85): 'saku1'/'ladline5' added so the Deling sewer rooms
+        // qualify -- without them this whole function early-returns on glwater*
+        // and the STATE-DIAG probe below would never fire. Re-armed per field
+        // load (field_nav_fieldscripts.inl), so entering the room in each state
+        // gives one log line per state, which is exactly the comparison needed.
+        static const char* kWatch[] = { "cup", "megami", "te", "kakusi", "kidou",
+                                        "saku1", "ladline5" };
         bool relevant = false;
         for (int j = 0; j < s_jsmEntityCount && !relevant; j++)
             for (int w = 0; w < (int)(sizeof(kWatch)/sizeof(kWatch[0])); w++)
@@ -276,6 +301,44 @@ static void DumpPuzzleDiagOnce()
                            E.jsmIndex, E.symName, (int)E.type, (unsigned)E.param,
                            E.hasPosition ? 1 : 0, (int)E.posX, (int)E.posY,
                            addr, vbW, vbB);
+            }
+        }
+
+        // v0.18.3.293 (#85) STATE-DIAG: sewer room state variables.
+        //
+        // Aaron backtracked to this room on a later save and screenshotted it:
+        // the tall vertical ladder that stood right of the raised block in the
+        // earlier shots is GONE, replaced by a diagonal plank -- the shortcut
+        // ladder, already knocked down. Same room, two different world states.
+        //
+        // The init scripts explain the "duplicate objects" he keeps hearing.
+        // glwater3's ladline5 and ladline6 both guard their SET3 on the SAME
+        // varblock (0x0154 = 340), compared against DIFFERENT values:
+        //     ladline5: PSHM_L 340 / PSHM_W 9  ... JPF ... SET3 tri=186
+        //     ladline6: PSHM_L 340 / PSHM_W 0  ... SET3 tri=175
+        // That is a state machine: one model is the standing ladder, the other
+        // the fallen one, and only ONE exists in the world at a time. The
+        // catalog is built from STATIC script data, so it injects both
+        // unconditionally -- which is exactly Aaron's "two or three objects at
+        // the location where I believe the shortcut ladder is". ladline7 (the
+        // confirmed Gate) and saku1/saku2 read the same 340 plus 337/339.
+        //
+        // Before gating injection on these values, PROVE the mapping: log the
+        // live varblock at catalog time, and have Aaron BAT the room in both
+        // states (ladder standing vs knocked down). Read-only, no behavior
+        // change -- deliberately a diagnostic first, because the opcode
+        // simulator does not fully decode the JMP/JMPB/JPF compare semantics,
+        // so the exact "which value means which state" is inferred, not proven.
+        {
+            static const uintptr_t VB_BASE293 = 0x01CFE9B8;  // EXIT_VARBLOCK_BASE
+            const unsigned addrs293[] = { 0x0151, 0x0153, 0x0154 };  // 337, 339, 340
+            for (int a = 0; a < 3; a++) {
+                unsigned ad = addrs293[a];
+                Log::Field("FieldNavigation: [STATE-DIAG] varblock[0x%04X] (%u) "
+                           "word=%d byte=%d [v0.18.3.293 #85 room-state probe]",
+                           ad, ad,
+                           (int)*(const uint16_t*)(VB_BASE293 + ad),
+                           (int)*(const uint8_t*)(VB_BASE293 + ad));
             }
         }
 

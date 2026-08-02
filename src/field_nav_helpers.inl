@@ -81,6 +81,103 @@ static bool IsPartyCharacterSetpc(uint8_t setpc)
     return PartyCharacterNameById(setpc) != nullptr;
 }
 
+// ============================================================================
+// v0.18.3.302 (#91 R1): D-District Prison floor, for the stairs labels.
+// ============================================================================
+//
+// Same source field_announce.cpp uses -- varblock 0x01B5 (437) holds floor - 1.
+// Duplicated here rather than shared because that one is a file-static in a
+// different translation unit and the value is two reads and an add; a header
+// for it would be more machinery than the thing it carries.
+//
+// Pinned by the .299 auto-capture: two screenshots read "Floor 6" while the
+// varblock held 5, and "Floor 4" while it held 3.
+static const uintptr_t SHAFT_VB_BASE  = 0x01CFE9B8;  // EXIT_VARBLOCK_BASE
+static const unsigned  SHAFT_VB_FLOOR = 0x01B5;      // holds floor - 1
+
+static bool IsPrisonShaftFieldId(uint16_t fid)
+{
+    return (fid >= 0x0319 && fid <= 0x032E) || fid == 0x03C5;
+}
+
+// Returns the 1-based floor, or -1 outside the shaft / on a bad read.
+// SEH-guarded, no C++ objects (C2712).
+static int ReadShaftFloor()
+{
+    uint16_t fid = FF8Addresses::pCurrentFieldId ? *FF8Addresses::pCurrentFieldId : 0xFFFF;
+    if (!IsPrisonShaftFieldId(fid)) return -1;
+    int v = -1;
+    __try {
+        v = (int)*(volatile uint8_t*)(SHAFT_VB_BASE + SHAFT_VB_FLOOR) + 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        v = -1;
+    }
+    return v;
+}
+
+// v0.18.3.315 (#110 SOLVED): the field/zone movement basis, straight from the
+// engine's OWN per-camera-zone movement-rotation offset. Static RE of
+// FF8_EN.exe proved field walk heading = input + [0x1CE4908] (byte, a 256-unit
+// angle, 90deg=64); the per-camera-zone handler @0x476B8D loads [0x1CE4908]
+// from fielddata[9 + [0x1CE4906]] the instant the player crosses into a camera
+// zone (identity zones store the screen-aligned baseline; rotated zones store
+// the angle). BAT v0.18.3.314 confirmed the mapping and its sign against three
+// independent anchors -- reference identity fields (off=128 -> camRight (1,0),
+// camDown (0,-1)), the mod's own empirical bgroad_5 (off=64 -> (0,-1)/(-1,0)),
+// and disassembly-proven bg2f_1 (off=192 -> (0,1)/(1,0)) -- and exposed the
+// true NON-cardinal rotations the old 90deg quantizer got wrong (bghall_2 +17,
+// dorm bgryo1_1 +79, bg2f_2 +101). Baseline 128 = screen identity; each unit is
+// 360/256 deg:
+//     phi      = (off4908 - 128) * 2*PI / 256
+//     camRight = ( cos phi,  sin phi )
+//     camDown  = ( sin phi, -cos phi )   [R(-90deg) of camRight; keeps det=-1]
+// SEH-guarded, no C++ objects (C2712). Returns false (axes untouched) if the
+// offset byte can't be read.
+// v0.18.3.316: hardened against the field-entry / session-startup window. BAT
+// .315 caught a startup [NAV-ENGOFF] off4908=0 -> +180deg, and the ZONEROT
+// probe on the first real field showed WHY: at bghall_1 load, live [0x1CE4908]
+// was still 0 while the source byte fielddata[9+cam] already held 128 (identity)
+// -- the engine had not yet copied the per-zone byte into the live global. So:
+// (1) require the field-data pointer to be plausible -- before the first field
+//     of a session it is null/garbage; skipping there leaves the identity
+//     default instead of applying a bogus 180deg basis; and
+// (2) when the live byte reads 0 (the stale-entry case), fall back to the
+//     per-zone SOURCE byte fielddata[9+[0x1CE4906]], which is correct the
+//     instant the zone loads. In steady state live == fd[9+cam] (BAT .314), so
+//     this is identical to before for every non-zero case that .315 confirmed
+//     working; it only repairs the transient/startup zero. The live global stays
+//     primary otherwise, so script-driven smooth basis rotations still register.
+static bool ReadEngineMoveOffset(unsigned& outOff /* 0..255 */)
+{
+    unsigned live = 0xFFFFFFFFu, src = 0xFFFFFFFFu;
+    uint32_t fdat = 0u;
+    unsigned cam  = 0u;
+    __try {
+        fdat = *(volatile uint32_t*)0x01CDC744u;         // field-data heap ptr (const per field)
+        live = *(volatile uint8_t*)0x01CE4908u;          // live applied offset
+        cam  = *(volatile uint8_t*)0x01CE4906u;          // active camera-zone index
+        if (fdat >= 0x00400000u && fdat < 0x40000000u && cam < 64u)
+            src = *(volatile uint8_t*)(uintptr_t)(fdat + 9u + cam);   // per-zone source byte
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        live = 0xFFFFFFFFu; src = 0xFFFFFFFFu;
+    }
+    if (!(fdat >= 0x00400000u && fdat < 0x40000000u)) return false;  // not in a live field yet
+    if (live > 255u) return false;
+    if (live == 0u && src <= 255u) live = src;           // stale-entry: trust the source byte
+    outOff = live;
+    return true;
+}
+static void EngineOffsetToAxes(unsigned off, float& crx, float& cry,
+                               float& cdx, float& cdy)
+{
+    float phi = ((float)off - 128.0f) * (2.0f * (float)NAV_PI / 256.0f);
+    float c = cosf(phi), s = sinf(phi);
+    if (fabsf(c) < 1e-6f) c = 0.0f;   // clean fp residue so logs/labels read clean
+    if (fabsf(s) < 1e-6f) s = 0.0f;
+    crx = c; cry = s;                 // camRight = ( cos phi,  sin phi )
+    cdx = s; cdy = -c;                // camDown  = ( sin phi, -cos phi )
+}
+
 // v0.14.107: Active party formation lookup.
 //
 // FF8 stores the active party as a 4-byte array at savemap+0xAF0 (= absolute
@@ -261,6 +358,28 @@ static uint16_t GetEntityPushRadius(int entityIdx)
     return 0;
 }
 
+// v0.18.3.284 (#86 follow-up): Read the setpc byte (0x255) for a runtime
+// "Others" slot. 0-7 = an actual party-character entity; 0xFE = not one.
+// Used by the MAP_EXIT live-position fallback to refuse trusting a runtime
+// slot that's coincidentally occupied by a party member rather than the
+// scripted exit entity itself (glclock1's 'irvine' MAP_EXIT shares jsmIndex=2
+// with Rinoa's live party slot in that field -- reading her position there
+// would silently reintroduce the false "Exit to wm05" with a fabricated-but-
+// plausible-looking position instead of correctly staying filtered).
+// Returns 0xFE (not-a-party-character) if the entity can't be read, matching
+// the engine's own "no character" sentinel so callers don't need a separate
+// error path.
+static uint8_t GetEntitySetpc(int entityIdx)
+{
+    if (entityIdx < 0 || entityIdx >= MAX_ENTITIES) return 0xFE;
+    if (!FF8Addresses::pFieldStateOthers) return 0xFE;
+    __try {
+        uint8_t* base = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+        if (base) return *(base + ENTITY_STRIDE * entityIdx + 0x255);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return 0xFE;
+}
+
 // v05.80: Check if a walkmesh triangle center is blocked by any NPC's push radius.
 // Used by A* to route around NPC collision bodies. Skips the player and the
 // target entity (we want to path TO the target, not avoid them).
@@ -384,3 +503,154 @@ static EntityType JSMTypeToCatalogType(FieldArchive::JSMEntityType jt)
     }
 }
 
+
+// ============================================================================
+// v0.18.3.305 (#109): per-fieldId camera-axes cache, surviving field loads.
+//
+// The .304 empirical correction works, but it is thrown away on every field
+// load -- and the D-District Prison shaft reloads its field on every floor
+// change. The .304 BAT log is unambiguous: gpbig1a loaded EIGHT times in four
+// and a half minutes (plus three gpbig2a loads) while the calibration fired
+// only TWICE. Correlating the two lists, every auto-drive that wedged in that
+// log was running on uncalibrated ca-quantized axes, and the drives Aaron
+// described as working ran inside a calibrated window:
+//
+//   12:27:14 load -> 12:27:22 calibrated -> 12:27:28/29/45/51 drives OK
+//   12:28:10 load -> never recalibrated  -> 12:28:44 drive -> "Gave up" 12:28:53
+//   12:29:07 load -> never recalibrated  -> 12:29:08 drive -> wedged on the stairs
+//
+// That is also the answer to "you have to approach the stairs from a
+// particular direction": with the axes wrong, the drive presses the wrong
+// arrow keys, so whether the player makes progress depends on how the axis
+// error happens to line up with the approach. It is not the geometry being
+// fussy, it is the steering being rotated.
+//
+// Relearning from scratch is not viable while walking a staircase, and it is
+// unnecessary -- the camera for a given fieldId does not change between visits.
+//
+// 24 entries comfortably exceeds any single dungeon's field count; the table is
+// ~600 bytes. On overflow the oldest entry is replaced round-robin, and a field
+// that falls out simply relearns, which is exactly the pre-.305 behaviour.
+//
+// Lives here rather than in field_navigation.cpp because that file is at
+// 81,792 of its 81,920-byte hard limit and DEVNOTES is explicit that it must be
+// split BEFORE anything new lands there, not shaved to fit. This file is
+// included ahead of both field_nav_fieldscripts.inl (which applies the cache on
+// field load) and field_nav_observe.inl (which fills it).
+// ============================================================================
+static const int CAM_AXES_CACHE_MAX = 24;
+struct CamAxesCacheEntry {
+    uint16_t fieldId;
+    float    rX, rY, dX, dY;
+};
+static CamAxesCacheEntry s_camAxesCache[CAM_AXES_CACHE_MAX] = {};
+static int  s_camAxesCacheCount = 0;
+static int  s_camAxesCacheNext  = 0;   // round-robin replacement cursor
+
+// v0.18.3.305 (#109): corrections applied during THIS field load. Replaces the
+// bare one-shot bool as the limiter.
+//
+// A cap rather than a lock, because the .304 BAT applied a correction that was
+// 180 degrees WRONG: at 12:25:38 an arrow=DOWN consensus of (-0.872,0.490) --
+// world angle 151 -- produced camRight=(0,-1), while at 12:27:22 an arrow=UP
+// consensus of (-0.995,0.100) -- world angle 174 -- produced camRight=(0,+1).
+// Opposite keys cannot both move the player the same way, so one sample was a
+// wall slide, and the DOWN-derived answer was the wrong one. Under a hard
+// one-shot lock that stood for the rest of the visit; caching it unchanged
+// would have made it stand for the rest of the session. The cap lets the >= 45
+// degree contradiction rule from .304 overwrite a bad correction (a 180-degree
+// error diverges far past the threshold, so it self-repairs on the next clean
+// sample) while still bounding oscillation.
+static const int CAM_AXES_MAX_CORRECTIONS_PER_LOAD = 3;
+static int  s_camAxesCorrectionCount = 0;
+
+// Store (or refresh) this field's corrected axes.
+static void CamAxesCacheStore(uint16_t fieldId, float rX, float rY, float dX, float dY)
+{
+    if (fieldId == 0xFFFF) return;
+    for (int i = 0; i < s_camAxesCacheCount; i++) {
+        if (s_camAxesCache[i].fieldId == fieldId) {
+            s_camAxesCache[i].rX = rX; s_camAxesCache[i].rY = rY;
+            s_camAxesCache[i].dX = dX; s_camAxesCache[i].dY = dY;
+            return;
+        }
+    }
+    int slot;
+    if (s_camAxesCacheCount < CAM_AXES_CACHE_MAX) {
+        slot = s_camAxesCacheCount++;
+    } else {
+        slot = s_camAxesCacheNext;
+        s_camAxesCacheNext = (s_camAxesCacheNext + 1) % CAM_AXES_CACHE_MAX;
+    }
+    s_camAxesCache[slot].fieldId = fieldId;
+    s_camAxesCache[slot].rX = rX; s_camAxesCache[slot].rY = rY;
+    s_camAxesCache[slot].dX = dX; s_camAxesCache[slot].dY = dY;
+}
+
+// Look up cached axes for a field. Returns false when this field has never
+// been calibrated, in which case the caller leaves the CA-derived axes alone.
+static bool CamAxesCacheLookup(uint16_t fieldId, float& rX, float& rY, float& dX, float& dY)
+{
+    if (fieldId == 0xFFFF) return false;
+    for (int i = 0; i < s_camAxesCacheCount; i++) {
+        if (s_camAxesCache[i].fieldId == fieldId) {
+            rX = s_camAxesCache[i].rX; rY = s_camAxesCache[i].rY;
+            dX = s_camAxesCache[i].dX; dY = s_camAxesCache[i].dY;
+            return true;
+        }
+    }
+    return false;
+}
+
+// ============================================================================
+// v0.18.3.305 (#110): CA snap-threshold probe. LOG-ONLY, no behaviour change.
+//
+// The offline survey of all 894 field .ca files (offline/CAMERA_ANGLES.csv,
+// extracted straight from field.fs) established two things the v0.17.5
+// quantizer was written without:
+//
+//   1. FF8 camera angles are NOT near-axis-aligned. Only 35% of fields sit
+//      within 5 degrees of a world cardinal and 44% discard more than 20
+//      degrees, so the 90-degree snap is making a large correction on most
+//      of the game rather than tidying a rounding error.
+//   2. The engine's snap threshold is NOT 45 degrees. gpbig1a's measured
+//      response gives camRight ~= 90 (arrow RIGHT -> world 84 deg, DOWN ->
+//      world -5.7 deg, two independent arrows agreeing), while its raw CA
+//      angle is 38.32 and roundf picks 0. Against the fields known to work
+//      (bghall_1 7.73, ggroom1 17.55, ggsta1 19.80, bghall_4 23.80 -> all
+//      snap to 0 correctly; bgryo1_4 46.60, bg2f_1 65.38, bgroom_1 -62.49 ->
+//      all snap up correctly) the true threshold is bracketed to
+//      (23.8, 38.32].
+//
+// Moving the threshold to ~30 would flip 93 fields. EVERY field known to
+// work today is outside that band and gpbig1a is inside it, which is the
+// strongest argument the change is safe -- and 93 fields is still far too
+// large a blast radius to bet on a single confirmed data point. So this
+// build ships the measurement, not the fix.
+//
+// The probe pairs, per field, the raw CA angle against what the quantizer
+// chose, what it rejected, and what the engine actually did once the
+// empirical calibration lands. Every field Aaron walks that calibrates
+// becomes a data point, not just the ones predicted in the survey.
+// ============================================================================
+static float s_caRawAngleDeg = 999.0f;   // raw CA camRight angle; 999 = no CA
+
+// Both 90-degree candidates for a raw angle: the nearest (what the quantizer
+// picks today) and the other neighbour (what a lower threshold would pick).
+static void CamSnapCandidates(float rawDeg, float& nearestDeg, float& altDeg)
+{
+    const float q = 90.0f;
+    float lo = floorf(rawDeg / q) * q;
+    float hi = lo + q;
+    if ((rawDeg - lo) <= (hi - rawDeg)) { nearestDeg = lo; altDeg = hi; }
+    else                                { nearestDeg = hi; altDeg = lo; }
+}
+
+// Signed angular difference a-b folded into [-180,180].
+static float CamAngleDelta(float a, float b)
+{
+    float d = a - b;
+    while (d >  180.0f) d -= 360.0f;
+    while (d < -180.0f) d += 360.0f;
+    return d;
+}

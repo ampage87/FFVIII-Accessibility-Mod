@@ -577,10 +577,23 @@ bool LoadINFGateways(const char* fieldName, GatewayInfo* gateways, int maxGatewa
         // Exit line: two 3D vertices (trigger line the player crosses)
         int16_t  x1 = *(const int16_t*)(gw + 0);
         int16_t  y1 = *(const int16_t*)(gw + 2);
-        // int16_t  z1 = *(const int16_t*)(gw + 4);  // Z = height, not used for 2D nav
+        // v0.18.3.298 (#91): Z is no longer discarded. It was read and
+        // commented out here as "not used for 2D nav", which was true for
+        // navigation and false for IDENTIFICATION -- on the D-District Prison
+        // shaft both the up and the down exit share a destination fieldId, and
+        // height is the only thing that tells them apart. Read-only for now:
+        // stored and logged, nothing consumes it yet.
+        int16_t  z1 = *(const int16_t*)(gw + 4);
         int16_t  x2 = *(const int16_t*)(gw + 6);
         int16_t  y2 = *(const int16_t*)(gw + 8);
-        // int16_t  z2 = *(const int16_t*)(gw + 10);
+        int16_t  z2 = *(const int16_t*)(gw + 10);
+        // destinationPoint at +12 (int16 x,y,z) -- where the player ARRIVES in
+        // the destination field. Never parsed before this build. (destZ - lineZ)
+        // is the height change of the transition, independent of the player's
+        // own Z, which is the cleanest "is this up or down" signal available.
+        int16_t  dx = *(const int16_t*)(gw + 12);
+        int16_t  dy = *(const int16_t*)(gw + 14);
+        int16_t  dz = *(const int16_t*)(gw + 16);
         // Destination field ID at offset +18 within the 32-byte gateway.
         uint16_t destId = *(const uint16_t*)(gw + 18);
 
@@ -598,6 +611,9 @@ bool LoadINFGateways(const char* fieldName, GatewayInfo* gateways, int maxGatewa
         // v0.15.9.2.15: store endpoints for crossing detection.
         info.lineX1 = x1; info.lineY1 = y1;
         info.lineX2 = x2; info.lineY2 = y2;
+        // v0.18.3.298 (#91): heights + arrival point, diagnostic only for now.
+        info.lineZ1 = z1; info.lineZ2 = z2;
+        info.destX  = dx; info.destY  = dy; info.destZ = dz;
         info.destFieldId = destId;
 
         // Look up destination field name.
@@ -614,6 +630,18 @@ bool LoadINFGateways(const char* fieldName, GatewayInfo* gateways, int maxGatewa
                    i, (int)x1, (int)y1, (int)x2, (int)y2,
                    info.centerX, info.centerZ,
                    (unsigned)destId, info.destFieldName);
+        // v0.18.3.298 (#91): the height signal, on its own line so the existing
+        // [INF-GW] line stays byte-comparable against every prior BAT log.
+        // lineZ = height of the exit line itself; arrive = the destinationPoint
+        // in the target field; dz = arriveZ - lineZ, i.e. how far the transition
+        // moves the player vertically. On the prison shaft the two same-
+        // destination gateways should show opposite dz signs -- that is what
+        // this BAT is looking for.
+        Log::Field("FieldArchive: [INF-GW-Z] gw[%d] lineZ=(%d,%d) midZ=%d "
+                   "arrive=(%d,%d,%d) dz=%d destId=%u",
+                   i, (int)z1, (int)z2, (int)((z1 + z2) / 2),
+                   (int)dx, (int)dy, (int)dz,
+                   (int)(dz - (z1 + z2) / 2), (unsigned)destId);
         outCount++;
     }
 

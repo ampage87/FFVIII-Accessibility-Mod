@@ -48,6 +48,31 @@ struct GatewayInfo {
     // them to StartChaseDrive.
     int16_t lineX1, lineY1;   // first endpoint (screen X, Y)
     int16_t lineX2, lineY2;   // second endpoint (screen X, Y)
+    // v0.18.3.298 (#91): height data, previously parsed and thrown away.
+    //
+    // The INF gateway record has always carried a Z on each exit-line vertex
+    // and a full destinationPoint at +12; the loader read the Zs into locals
+    // and left them commented out as "not used for 2D nav", and never touched
+    // +12 at all. That cost us the only signal that distinguishes the two
+    // exits of the D-District Prison shaft: going up and going down from
+    // gpbig1a BOTH land in gpbig2a, so destination fieldId cannot tell them
+    // apart, and the catalog merges them into one entry at a midpoint that
+    // belongs to neither staircase.
+    //
+    // Trigger lines already keep their Z (CapturedTriggerLine.z1/z2) and the
+    // two gpbig1a staircases read z ~= -61 and z ~= +371 there -- a 432-unit
+    // separation that is stable across all 15 visits. Carrying the same data
+    // on gateways is what lets a later cycle label them "Stairs up" /
+    // "Stairs down" instead of two identically-named exits.
+    //
+    // destZ - lineZ is the strongest form of the signal: it gives the height
+    // CHANGE of the transition directly, with no need to read the player's Z.
+    // Whether +Z means up in field walkmesh space is NOT yet established --
+    // DEVNOTES records UP = neg-Y for wmx.obj (world map) and that does not
+    // transfer. This build only records the values; the sign convention is
+    // settled by the BAT, not assumed.
+    int16_t lineZ1, lineZ2;   // exit-line vertex heights (INF +4, +10)
+    int16_t destX, destY, destZ;  // destinationPoint (INF +12) -- arrival point
     uint16_t destFieldId;     // destination field ID (0xFFFF = unused)
     char    destFieldName[64]; // looked up from field.fl if possible
 };
@@ -199,6 +224,18 @@ struct JSMEntityInfo {
     // position to inject as a standalone Save Point -- it only surfaces via its
     // co-located trigger line.
     bool           isSaveLine;
+    // v0.18.3.281 (#86): True if `param` (the destField for a JSM_ENT_MAP_EXIT)
+    // was set by the authoritative forward interpreter (InterpretExitMethod),
+    // not the abstract fallback resolver. An INTERP result follows the real
+    // script control flow and reads the live varblock, so it's the concrete
+    // destination the engine will actually use -- trustworthy even when it
+    // doesn't match any of the field's INF gateways (a scripted/hidden exit,
+    // e.g. a trapdoor, is real but was simply never registered as an INF
+    // trigger). The catalog's INF-gateway cross-check uses this flag to skip
+    // its "unmatched destination = stale" assumption for INTERP-sourced exits
+    // only, preserving that check's original job of dropping genuinely stale
+    // fallback-resolved destinations (bgryo2_1 'l1').
+    bool           paramFromInterp;
     // v0.17.8.15: True if this entity's init script (method 0) contains a
     // SETMODEL opcode -- i.e. the entity loads a 3D model at field load and
     // stands in the world (rather than being a script-only Background, an
@@ -212,6 +249,45 @@ struct JSMEntityInfo {
     // IS Xu standing in the world; her chara.one slot p048 was misclassified
     // as a prop but that doesn't matter -- the behavior signal is enough).
     bool           hasSetmodelInit;
+    // v0.18.3.295 (#85): state-guard capture. Many field objects exist in more
+    // than one world state, modelled as SEPARATE entities that each gate their
+    // own SET3 on a shared field variable compared against a different value.
+    // glwater3's shortcut ladder is the confirmed case:
+    //     ladline6:  PSHM_L 340 / PSHM_W 0  ... SET3   (ladder STANDING)
+    //     ladline5:  PSHM_L 340 / PSHM_W 9  ... SET3   (ladder FALLEN)
+    // Only one of them exists in the world at a time, but the catalog is built
+    // from STATIC script data, so before this it injected both and the player
+    // heard the same ladder twice. Aaron's two-state BAT proved the mapping:
+    // varblock 340 read as a BYTE is 0 while standing and 9 once knocked down.
+    //
+    // These record the FIRST `PSHM_L <addr>` + `PSHM_W <value>` pair seen in the
+    // method that goes on to call SET3 -- first, not last, because a compound
+    // guard tests several variables and it's the leading one that discriminates
+    // (ladline5's second test, 339 vs 64, is true in the OTHER state and would
+    // inverted the answer if we took the most recent pair).
+    //
+    // Capture only. Nothing acts on these unless the catalog's mutual-exclusion
+    // pass finds 2+ entities on a field sharing stateVarAddr with DIFFERENT
+    // stateVarValue -- see field_nav_catalog_lateres.inl.
+    bool           hasStateGuard;
+    int16_t        stateVarAddr;
+    int16_t        stateVarValue;
+    // v0.18.3.296 (#85): true only if a JPF (jump-if-false) sits between the
+    // guard and the SET3 -- i.e. the placement is genuinely CONDITIONAL.
+    //
+    // This is the discriminator the .295 dry run forced out into the open. On
+    // glwater3 with the ladder standing (live byte 0) the naive equality rule
+    // returned: ladline6 KEEP (right), ladline5 SUPPRESS (right), and
+    // saku3 SUPPRESS -- WRONG, saku3 is Gate 3, a real gate. Checking the
+    // script shapes across fields shows why, and that it is NOT a ladline/saku
+    // split:
+    //     JPF present (conditional):   glwater3 ladline5, glwater2 saku2
+    //     JPF absent  (unconditional): glwater3 ladline6 + saku3,
+    //                                  glwater2 saku3 + saku4
+    // An entity with no JPF runs its SET3 every time; the guard read before it
+    // is feeding some later branch, not deciding whether the entity exists.
+    // Only `stateGuardConditional` entities may ever be suppressed.
+    bool           stateGuardConditional;
 };
 
 const char* JSMEntityTypeName(JSMEntityType t);

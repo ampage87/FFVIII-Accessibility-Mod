@@ -34,12 +34,53 @@
         // Also skip gateways whose destination already has a JSM-detected exit.
         s_dedupGatewayCount = 0;
         memset(s_dedupGateways, 0, sizeof(s_dedupGateways));
+        // v0.18.3.301 (#91 R3): two gateways sharing a destination are the SAME
+        // exit only if they are also in the same place. Observed separations:
+        // genuine duplicates < 200 units; the prison ring's two crossings 3,644.
+        const float GATEWAY_CLUSTER_RADIUS = 800.0f;
         for (int g = 0; g < s_gatewayCount && s_dedupGatewayCount < MAX_DEDUP_GATEWAYS; g++) {
             uint16_t destId = s_gateways[g].destFieldId;
             // Find existing dedup group for this destination.
+            //
+            // v0.18.3.301 (#91 R3): matching the destination is NOT enough.
+            // The D-District Prison shaft is a circular walkway around a
+            // central hole, split across two screens -- gpbig1a is the left
+            // half, gpbig2a the right -- with a crossing at the TOP of the
+            // circle and another at the BOTTOM. Both crossings lead to the
+            // other half, so both gateways carry the same destFieldId, and
+            // grouping on that alone collapsed two exits **3,644 units apart**
+            // into a single entry at their midpoint -- open floor belonging to
+            // neither crossing, which auto-drive then obediently walked to.
+            //
+            // So a candidate only joins a group if it is also spatially near
+            // it. Genuine duplicates (the case this dedupe exists for) sit
+            // within ~200 units of each other; the shaft pair is 18x that.
+            // 800 leaves a wide margin on both sides.
+            //
+            // centerX/centerY hold running SUMS at this point (they are
+            // averaged after the loop), hence the divide by count.
             int groupIdx = -1;
             for (int d = 0; d < s_dedupGatewayCount; d++) {
-                if (s_dedupGateways[d].destFieldId == destId) { groupIdx = d; break; }
+                if (s_dedupGateways[d].destFieldId != destId) continue;
+                if (s_dedupGateways[d].count > 0) {
+                    float avgX = s_dedupGateways[d].centerX / (float)s_dedupGateways[d].count;
+                    float avgY = s_dedupGateways[d].centerY / (float)s_dedupGateways[d].count;
+                    float ddx  = s_gateways[g].centerX - avgX;
+                    float ddy  = s_gateways[g].centerZ - avgY;  // centerZ = Y in our coords
+                    if ((ddx * ddx + ddy * ddy) >
+                        (GATEWAY_CLUSTER_RADIUS * GATEWAY_CLUSTER_RADIUS)) {
+                        Log::Field("FieldNavigation: [refresh] INF-GW gw%d dest=%u at (%.0f,%.0f) "
+                                   "SPLIT from group %d at (%.0f,%.0f) -- %.0f units apart "
+                                   "[v0.18.3.301 #91 R3]",
+                                   g, (unsigned)destId,
+                                   s_gateways[g].centerX, s_gateways[g].centerZ,
+                                   d, avgX, avgY,
+                                   sqrtf(ddx * ddx + ddy * ddy));
+                        continue;  // same destination, different place -- new group
+                    }
+                }
+                groupIdx = d;
+                break;
             }
             if (groupIdx < 0) {
                 // New group.
@@ -72,6 +113,63 @@
             if (s_dedupGateways[d].count > 0) {
                 s_dedupGateways[d].centerX /= (float)s_dedupGateways[d].count;
                 s_dedupGateways[d].centerY /= (float)s_dedupGateways[d].count;
+            }
+        }
+
+        // v0.18.3.301 (#91 R3): name the two ring crossings.
+        //
+        // Once R3 splits them, the shaft halves carry TWO exits with the same
+        // destination and therefore the same display name -- and the exact-name
+        // dedupe further down (v0.18.3.270) would drop the second one. They
+        // need distinct names to survive, and "Exit to Galbadia D-District
+        // Prison 5" twice would in any case tell the player nothing about
+        // which way round the hole they are being sent.
+        //
+        // Both crossings land on the same floor (10 crossings, 0 floor changes
+        // in the .299 BAT), so a floor label would be actively wrong here --
+        // the floor belongs on the stairs, not on these. What distinguishes
+        // them is position on the ring, which is exactly how Aaron describes
+        // the room: "you can go from district 3 to district 5 across the top of
+        // the circle or across the bottom of the circle." The destination is
+        // dropped because both go to the same place; the only useful fact is
+        // WHICH WAY ROUND.
+        //
+        // Derived from the gateway's own Y, not from the camera, so the label
+        // is stable wherever the player is standing and on either half.
+        //
+        // ASSUMPTION, flagged for the BAT: larger Y = "top". This codebase's
+        // convention is "X = screen-horizontal, Y = screen-vertical" but the
+        // SIGN is not documented anywhere and I refuse to pretend I verified
+        // it (the .298 gateway-Z hypothesis died of exactly this). Both centres
+        // are logged below; if the two read swapped in play it is a one-line
+        // flip and costs nothing but the rename.
+        {
+            uint16_t ringFid = FF8Addresses::pCurrentFieldId
+                               ? *FF8Addresses::pCurrentFieldId : 0xFFFF;
+            bool onRingHalf = (ringFid == 0x031A || ringFid == 0x031B ||
+                               ringFid == 0x031C || ringFid == 0x031D);
+            if (onRingHalf) {
+                for (int a = 0; a < s_dedupGatewayCount; a++) {
+                    for (int b = a + 1; b < s_dedupGatewayCount; b++) {
+                        if (s_dedupGateways[a].destFieldId !=
+                            s_dedupGateways[b].destFieldId) continue;
+                        int topIdx = (s_dedupGateways[a].centerY >=
+                                      s_dedupGateways[b].centerY) ? a : b;
+                        int botIdx = (topIdx == a) ? b : a;
+                        strncpy(s_dedupGateways[topIdx].displayName, "Top crossing", 47);
+                        s_dedupGateways[topIdx].displayName[47] = '\0';
+                        strncpy(s_dedupGateways[botIdx].displayName, "Bottom crossing", 47);
+                        s_dedupGateways[botIdx].displayName[47] = '\0';
+                        Log::Field("FieldNavigation: [refresh] ring crossings named: "
+                                   "group %d (%.0f,%.0f) = 'Top crossing', "
+                                   "group %d (%.0f,%.0f) = 'Bottom crossing' "
+                                   "[v0.18.3.301 #91 R3 -- larger Y assumed to be top]",
+                                   topIdx, s_dedupGateways[topIdx].centerX,
+                                   s_dedupGateways[topIdx].centerY,
+                                   botIdx, s_dedupGateways[botIdx].centerX,
+                                   s_dedupGateways[botIdx].centerY);
+                    }
+                }
             }
         }
         // v0.18.3.279: does this field resolve its exits through script trigger
@@ -108,6 +206,63 @@
             }
         }
 
+        // v0.18.3.300 (#91 R2): SCOPE THE RULE ABOVE TO ITS EVIDENCE BASE.
+        //
+        // The 2026-07-31 BAT caught this rule deleting a REAL exit and leaving
+        // Aaron with no listed way off the screen. On gpbig2a (D-District
+        // Prison, Prison 5) the catalog held exactly two entries -- a cell door
+        // and the Directory -- on all five visits:
+        //
+        //   [LINE-PAIR] jsmDoors=1 jsmLines=1 jsmEntities=21 captured=1
+        //     line0 center=(1459,2509) type=6 param=965 | lineType=11 dest=965
+        //   [refresh] INF-GW group 0 'Exit to Prison 3' (destId=795) SUPPRESSED:
+        //     field resolves exits via trigger lines and no live line targets
+        //     this destination -- stale INF data for another story state
+        //   [refresh] catalog: 2 entries (2 navigable, 0 new entities)
+        //
+        // The premise is inverted here. gpbig2a has ONE screen-bound line and it
+        // points at a CELL (965). That single unrelated line arms
+        // fieldHasLineExits, which then deletes the only real exit off the
+        // screen -- the walkway back to gpbig1a, which Aaron then walked through
+        // anyway, 30 seconds later, proving it live. "The field resolves exits
+        // via trigger lines" is true only in the most literal and least useful
+        // sense: the shaft screens use BOTH mechanisms, for DIFFERENT exits.
+        //
+        // The fix is to scope the heuristic back to the evidence it was actually
+        // established on, exactly as .291 rescoped the addr-as-literal exit
+        // heuristic to bg* fields after it fabricated a Centra Ruins exit.
+        // Re-reading the evidence block above: the rule was derived from, and
+        // has only ever been needed by, ONE field -- glfurin1 -- and glfurin1
+        // carries a SINGLE gateway. Every other field listed there resolves zero
+        // line exits (glpreo1/2/3, glprefr2, glstage1), so fieldHasLineExits is
+        // false and the rule never fires on them at all; glwitch1 has both but
+        // its gateway destination EQUALS its line destination, so it is kept by
+        // the agreement test whether or not this gate exists. The change is
+        // therefore provably inert on every field in the documented evidence
+        // base, preserves glfurin1, and fixes both prison shaft screens
+        // (INF parsed: 2 active gateways on gpbig1a AND gpbig2a).
+        //
+        // Note this MUST test s_gatewayCount (raw INF entries), not
+        // s_dedupGatewayCount: the prison's two gateways share a destination and
+        // merge into ONE group, so the dedup count is 1 there and would gate
+        // nothing.
+        //
+        // DIRECTION OF RISK: this is a pure narrowing. It can only ever ADD
+        // exits back to the catalog, never remove one. The worst case is a ghost
+        // gateway reappearing on some multi-gateway field we have not visited --
+        // an exit that does nothing when you walk to it. That is annoying.
+        // Losing a real exit is this project's worst failure mode (#88,
+        // ladline7 hidden for three BAT cycles, and now gpbig2a). Erring toward
+        // showing too much is the correct side to be wrong on.
+        bool staleGatewayRuleActive = fieldHasLineExits && (s_gatewayCount <= 1);
+        if (fieldHasLineExits && !staleGatewayRuleActive) {
+            Log::Field("FieldNavigation: [refresh] stale-gateway rule NOT applied: "
+                       "%d raw INF gateways (> 1) -- rule is scoped to its single-gateway "
+                       "evidence base (glfurin1); this field uses lines AND gateways for "
+                       "different exits [v0.18.3.300 #91]",
+                       s_gatewayCount);
+        }
+
         // Add to catalog.
         if (s_dedupGatewayCount > 0 && s_playerEntityIdx >= 0) {
             float gwPlayerX = 0, gwPlayerY = 0;
@@ -116,7 +271,9 @@
                 // Stale-gateway filter (see fieldHasLineExits above): on a
                 // script-exit field, keep a gateway only if some live trigger line
                 // agrees on its destination.
-                if (fieldHasLineExits) {
+                // v0.18.3.300 (#91 R2): gated on staleGatewayRuleActive so the rule
+                // only fires on the single-gateway shape it was validated against.
+                if (staleGatewayRuleActive) {
                     bool lineAgrees = false;
                     for (int lc = 0; lc < s_capturedLineCount && !lineAgrees; lc++) {
                         if (!s_capturedLines[lc].active) continue;

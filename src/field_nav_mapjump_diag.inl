@@ -129,8 +129,30 @@ static void LogMapjumpFired(const char* opcodeName, int inlineParam)
         int playerIdx = FF8Addresses::GetPlayerEntityIndex();
         if (playerIdx >= 0) {
             uint16_t tri = FF8Addresses::GetEntityTriangleId(playerIdx);
-            Log::Field("FieldNavigation: [MAPJUMP-HOOK]   player entity=%d tri=%u",
-                       playerIdx, (unsigned)tri);
+            // v0.18.3.301 (#91 R1): player XY at fire time. The triangle alone
+            // needs a walkmesh lookup to interpret; the coordinate can be
+            // compared directly against the captured line centres.
+            //
+            // This is the missing bit for labelling the prison stairs. gpbig1a
+            // carries TWO self-destination lines -- line1 at (-2150,-197) and
+            // line2 at (-2275,269), only ~470 units apart on the west wall --
+            // and one is up while the other is down. Which is which cannot be
+            // read out of the static data: gateway Z is (0,0) everywhere
+            // (.298), and the nav_data trail only records TRIANGLE changes, so
+            // it went quiet 13-49 s before each jump and never captured the
+            // crossing itself. Logging the position AT the fire, next to the
+            // floor the jump produces, pins it in one ordinary descent.
+            float pjx = 0.0f, pjy = 0.0f;
+            bool gotPj = GetEntityPos(playerIdx, pjx, pjy);
+            if (gotPj) {
+                Log::Field("FieldNavigation: [MAPJUMP-HOOK]   player entity=%d tri=%u "
+                           "pos=(%.0f,%.0f)",
+                           playerIdx, (unsigned)tri, pjx, pjy);
+            } else {
+                Log::Field("FieldNavigation: [MAPJUMP-HOOK]   player entity=%d tri=%u "
+                           "pos=unresolved",
+                           playerIdx, (unsigned)tri);
+            }
         } else {
             Log::Field("FieldNavigation: [MAPJUMP-HOOK]   player entity unresolved");
         }
@@ -183,6 +205,64 @@ static void LogMapjumpFired(const char* opcodeName, int inlineParam)
             if (woff > 0) {
                 Log::Field("FieldNavigation: [MAPJUMP-HOOK]   varblock(0x%04X-0x%04X) %s",
                            (unsigned)base, (unsigned)(base + 30), wide);
+            }
+        }
+
+        // v0.18.3.298 (#90): D-District Prison floor-variable hunt. LOGGING ONLY.
+        //
+        // The prison shaft re-uses two archives for many floors: 23 of the
+        // transitions in the 2026-07-31 BAT were 795 -> 795, i.e. the lift
+        // changed floor without changing fieldId, so FieldAnnounce::Update()
+        // bailed on `curId == s_lastAnnouncedFieldId` and Aaron heard nothing
+        // at all. Before anything can announce "Floor N" we need to know which
+        // variable N lives in.
+        //
+        // Candidates carried over from the log analysis:
+        //   0x01A5 (421) -- the SET3 anchor every shaft entity positions from
+        //                   (saveline0 / s_light / door all PSHM it)
+        //   0x01B4 (436) -- the prison-wide state var the #85 [STATE-GUARD]
+        //                   captures use; observed 1 / 13 / 29, so probably a
+        //                   bitmask rather than a floor index, but sample it
+        //   0x01B5 (437) -- its neighbour, never sampled
+        // The existing 0x80-0xFE window above already covers 0x00C8 / 0x00D4,
+        // which correlated loosely with inline_param and then broke after
+        // 15:07 -- included here only so the two windows can be diffed.
+        //
+        // BYTE values, not words: the #85 state code compares the live BYTE
+        // ("[STATE-GROUP] ... live byte=1"), and 0x01A5 is an odd address the
+        // word-stepped loops above would skip entirely.
+        //
+        // Gated to the prison so this is silent everywhere else in the game.
+        if ((fieldId >= 0x0319 && fieldId <= 0x032E) || fieldId == 0x03C5) {
+            Log::Field("FieldNavigation: [FLOOR-PROBE] field=%u '%s' "
+                       "[0x01A5]=%u [0x01B4]=%u [0x01B5]=%u (bytes) "
+                       "[0x01A4]w=%u [0x01B4]w=%u",
+                       (unsigned)fieldId, fieldName,
+                       (unsigned)*(const uint8_t*)(vb + 0x01A5),
+                       (unsigned)*(const uint8_t*)(vb + 0x01B4),
+                       (unsigned)*(const uint8_t*)(vb + 0x01B5),
+                       (unsigned)*(const uint16_t*)(vb + 0x01A4),
+                       (unsigned)*(const uint16_t*)(vb + 0x01B4));
+
+            // Contiguous byte sweep either side of the candidates, non-zero
+            // only, so a floor counter sitting at an address we did not guess
+            // still shows up. Two lines of 32 bytes.
+            for (int chunk = 0; chunk < 2; chunk++) {
+                uint16_t fbase = (uint16_t)(0x0190 + chunk * 32);
+                char pbuf[300] = {};
+                int  poff = 0;
+                for (int i = 0; i < 32 && poff < 280; i++) {
+                    uint16_t addr = (uint16_t)(fbase + i);
+                    uint8_t  val  = *(const uint8_t*)(vb + addr);
+                    if (val != 0) {
+                        poff += snprintf(pbuf + poff, 300 - poff,
+                                         "[0x%04X]=%u ", (unsigned)addr, (unsigned)val);
+                    }
+                }
+                if (poff > 0) {
+                    Log::Field("FieldNavigation: [FLOOR-PROBE]   bytes(0x%04X-0x%04X) %s",
+                               (unsigned)fbase, (unsigned)(fbase + 31), pbuf);
+                }
             }
         }
     }

@@ -19,7 +19,13 @@ static void UpdateAutoDrive()
     // Safety: must be on field and not in a menu/FMV.
     if (!FF8Addresses::IsOnField()) { StopAutoDrive("Left field."); return; }
 
-    if (s_playerEntityIdx < 0) { StopAutoDrive("Player position lost."); return; }
+    // v0.18.3.306 (#111): distinct message. This branch and the
+    // GetEntityPos() failure below both used to say "Player position lost.",
+    // so the .305 log could not say which had fired and I had to reason it
+    // out from surrounding lines. They are different faults: this one means
+    // we never identified the player entity, the other means we momentarily
+    // could not read a known entity.
+    if (s_playerEntityIdx < 0) { StopAutoDrive("Player entity unknown."); return; }
 
     // v0.17.8.20: CALIB phase 1/2 state machine extracted to
     // field_nav_autodrive_calib.inl. RunCalibration() returns true while a
@@ -62,8 +68,37 @@ static void UpdateAutoDrive()
 
     float px = 0, pz = 0, tx = 0, tz = 0;
     if (!GetEntityPos(s_playerEntityIdx, px, pz)) {
-        StopAutoDrive("Player position lost.");
+        // v0.18.3.306 (#111): a single failed read is a transient, not a loss.
+        // See the rationale on DRIVE_POS_LOST_TOLERANCE_TICKS in
+        // field_nav_autodrive_helpers.inl -- the .305 log has the position
+        // readable on the tick either side of every one of these.
+        s_drivePosLostTicks++;
+        if (s_drivePosLostTicks == 1) {
+            // Log WHY once per dropout so the next BAT confirms the mechanism
+            // rather than leaving it inferred. Reads the same fields
+            // GetEntityPos() rejects on.
+            unsigned triId = 0xFFFF; bool gotBase = false;
+            ReadPlayerPlacementRaw(s_playerEntityIdx, gotBase, triId);
+            Log::Field("FieldNavigation: [drive] player position unreadable — PAUSING, not stopping "
+                       "(ent%d, othersBase=%s, tri=%u; tri==0 means the engine has the player "
+                       "temporarily off the walkmesh). Tolerance %d ticks. [v0.18.3.306 #111]",
+                       s_playerEntityIdx, gotBase ? "ok" : "NULL", triId,
+                       DRIVE_POS_LOST_TOLERANCE_TICKS);
+        }
+        if (s_drivePosLostTicks >= DRIVE_POS_LOST_TOLERANCE_TICKS) {
+            StopAutoDrive("Player position lost.");
+            return;
+        }
+        // Same treatment as an open dialog: drop the held keys so the game does
+        // not see stuck input, and do not let the gap count as being stuck.
+        ReleaseAllDirections();
+        s_driveStuckTicks = 0;
         return;
+    }
+    if (s_drivePosLostTicks > 0) {
+        Log::Field("FieldNavigation: [drive] player position recovered after %d tick(s) — "
+                   "drive continues [v0.18.3.306 #111]", s_drivePosLostTicks);
+        s_drivePosLostTicks = 0;
     }
     // v0.07.74: JSM-injected entities use SET3 extraction positions.
     // v0.07.83: Trigger line exits use SETLINE center positions.
@@ -102,6 +137,21 @@ static void UpdateAutoDrive()
         StopAutoDrive("Target lost.");
         return;
     }
+    // v0.18.3.307 (#112): capture the target BEFORE the trigger-line branch
+    // below offsets tx/tz 300 units "past the line". That offset is applied
+    // along the direction from the player's CURRENT position, so it moves as
+    // the player moves. The odd-phase/nudge-fallback recovery re-paths were
+    // seeding FindNearestTriangle() with the offset point, which made the A*
+    // goal triangle a function of where the player happened to be standing:
+    // the .306 BAT log shows FOUR different goals inside single drives
+    // (48/20/1/22 -- drive start and the wiggle-completion re-path use the
+    // raw center and correctly agree on 48), with the goal-1 route pulling
+    // the player west and the goal-22 route pulling him back north-east.
+    // Successive recoveries steered in opposite directions and the final
+    // gpbig1a stairs drive ping-ponged between tri 8/9/10 for 40 seconds.
+    // Every recovery re-path now aims at THIS stable point, the same goal
+    // the drive started with.
+    float rawTx = tx, rawTz = tz;
     float dx   = tx - px;
     float dz   = tz - pz;
     float dist = sqrtf(dx*dx + dz*dz);
@@ -167,9 +217,58 @@ static void UpdateAutoDrive()
         float tdy = tly2 - tly1;
         float crossNow = tdx * (pz - tly1) - tdy * (px - tlx1);
         // Player has crossed if the sign flipped from start.
-        if (s_driveTrigCrossStart != 0.0f && crossNow * s_driveTrigCrossStart < 0.0f) {
-            StopAutoDrive("Arrived.");
-            return;
+        //
+        // v0.18.3.304 (#107): ...AND the player must be ALONGSIDE the
+        // segment when it flips. This test was the INFINITE-LINE side test,
+        // the fifth site of that bug and the first one outside a catalog
+        // filter (v0.17.8.10 gateways, v0.18.3.268 interactions,
+        // v0.18.3.278 exits, #94 events -- all bounded, this one missed).
+        //
+        // Caught by the .303 BAT, and this is the direct answer to "driving
+        // to the stairs did not take me down the stairs": the drive
+        // announced "Arrived" while the player was ~960 units from the
+        // staircase and then released the keys, so he stopped in open floor
+        // having heard that he had got there. gpbig1a line1 runs
+        // (-2141,-89)->(-2158,-305): 217 units long and almost exactly
+        // parallel to the Y axis, so its infinite extension is a wall
+        // across the entire map at X = -2150. Walking to ANY point past
+        // that X flipped the sign. Player start (-2221,-1089) gave
+        // crossNow=-280; at (-2162,-1161), still nearly 1,000 units south
+        // of the line, crossNow=+13688 -> "Arrived".
+        //
+        // The bound: project the player onto the line and require the foot
+        // of that projection to lie within the segment, with a 15% margin
+        // at each end so a diagonal crossing right at an endpoint still
+        // counts. Failing this is the SAFE failure -- the drive simply
+        // keeps walking, and when the player really does cross, the engine
+        // fires the MAPJUMP and the field-transition handler stops the
+        // drive anyway. A false "Arrived" is unrecoverable for a blind
+        // player: it is a confident statement that the destination has been
+        // reached, and there is nothing to notice that it is wrong.
+        bool sideFlipped = (s_driveTrigCrossStart != 0.0f &&
+                            crossNow * s_driveTrigCrossStart < 0.0f);
+        if (sideFlipped) {
+            float segLen2 = tdx * tdx + tdy * tdy;
+            float tParam  = 0.5f;
+            if (segLen2 > 1.0f)
+                tParam = ((px - tlx1) * tdx + (pz - tly1) * tdy) / segLen2;
+            const float TRIG_CROSS_END_MARGIN = 0.15f;
+            if (tParam >= -TRIG_CROSS_END_MARGIN &&
+                tParam <= 1.0f + TRIG_CROSS_END_MARGIN) {
+                StopAutoDrive("Arrived.");
+                return;
+            }
+            static int s_boundedRejectLogged = 0;
+            if (s_boundedRejectLogged < 8) {
+                s_boundedRejectLogged++;
+                Log::Field("FieldNavigation: [drive] side flipped on the trigger line's "
+                           "INFINITE extension but player is not alongside the segment "
+                           "(t=%.2f, allowed %.2f..%.2f) -- NOT arrived, continuing. "
+                           "player=(%.0f,%.0f) line=(%.0f,%.0f)->(%.0f,%.0f) "
+                           "[v0.18.3.304 #107]",
+                           tParam, -TRIG_CROSS_END_MARGIN, 1.0f + TRIG_CROSS_END_MARGIN,
+                           px, pz, tlx1, tly1, tlx2, tly2);
+            }
         }
         // Also offset the target 300 units past the line center
         // so the heading aims through the line, not just to its center.
@@ -349,8 +448,11 @@ static void UpdateAutoDrive()
                     if (tCur.neighbor[e] == nextTri) { sharedEdge = e; break; }
                 }
                 if (sharedEdge >= 0) {
-                    int vi1 = tCur.vertexIdx[(sharedEdge + 1) % 3];
-                    int vi2 = tCur.vertexIdx[(sharedEdge + 2) % 3];
+                    // v0.18.3.308 (#113): corrected to the v0.17.9.14 edge convention
+                    // (neighbor[e] <-> vertices e, e+1) while this block was DISABLED,
+                    // so re-enabling it doesn't resurrect the wrong-edge bug.
+                    int vi1 = tCur.vertexIdx[sharedEdge];
+                    int vi2 = tCur.vertexIdx[(sharedEdge + 1) % 3];
                     if (vi1 < s_walkmesh.numVertices && vi2 < s_walkmesh.numVertices) {
                         float emx = ((float)s_walkmesh.vertices[vi1].x + (float)s_walkmesh.vertices[vi2].x) / 2.0f;
                         float emy = ((float)s_walkmesh.vertices[vi1].y + (float)s_walkmesh.vertices[vi2].y) / 2.0f;
@@ -413,9 +515,11 @@ static void UpdateAutoDrive()
             if (wallEdgeCount >= 2) effectiveStrength *= 0.3f; // very narrow, minimal bias
             for (int e = 0; e < 3; e++) {
                 if (tri.neighbor[e] != 0xFFFF) continue; // not a wall edge
-                // Wall edge: vertices (e+1)%3 and (e+2)%3
-                int wvi1 = tri.vertexIdx[(e + 1) % 3];
-                int wvi2 = tri.vertexIdx[(e + 2) % 3];
+                // Wall edge e spans vertices e and (e+1)%3.
+                // v0.18.3.308 (#113): corrected to the v0.17.9.14 convention while
+                // this block was DISABLED, so re-enabling doesn't resurrect the bug.
+                int wvi1 = tri.vertexIdx[e];
+                int wvi2 = tri.vertexIdx[(e + 1) % 3];
                 if (wvi1 >= s_walkmesh.numVertices || wvi2 >= s_walkmesh.numVertices) continue;
                 float wx1 = (float)s_walkmesh.vertices[wvi1].x;
                 float wy1 = (float)s_walkmesh.vertices[wvi1].y;
@@ -906,12 +1010,29 @@ static void UpdateAutoDrive()
                 curRecoveryTri = *(uint16_t*)(baseRT + ENTITY_STRIDE * s_playerEntityIdx + 0x1FA);
             if (curRecoveryTri != 0xFFFF && s_lastRecoveryTri != 0xFFFF &&
                 curRecoveryTri != s_lastRecoveryTri) {
-                Log::Field("FieldNavigation: [drive] recovery counter reset: tri %u -> %u "
-                           "(player advanced along corridor; phase was %d)",
-                           (unsigned)s_lastRecoveryTri, (unsigned)curRecoveryTri,
-                           s_driveWigglePhase);
-                s_driveWigglePhase = 0;
+                // v0.18.3.307 (#100): a triangle CHANGE only refills the
+                // recovery budget when it is genuinely new territory. The
+                // .306 final drive reset the phase on every hop of a
+                // tri 8 <-> 9 <-> 10 ping-pong, so MAX_RECOVERY_PHASES was
+                // unreachable and "Stuck." could never fire -- exactly the
+                // #100 "wedges silently" report. Real corridor progress
+                // still resets (a fresh triangle is not in the ring), and
+                // waypoint advances reset the phase independently above.
+                if (!RecoveryRingContains(curRecoveryTri)) {
+                    Log::Field("FieldNavigation: [drive] recovery counter reset: tri %u -> %u "
+                               "(player advanced along corridor; phase was %d)",
+                               (unsigned)s_lastRecoveryTri, (unsigned)curRecoveryTri,
+                               s_driveWigglePhase);
+                    s_driveWigglePhase = 0;
+                } else {
+                    Log::Field("FieldNavigation: [drive] recovery counter NOT reset: tri %u -> %u "
+                               "revisits a recent stuck triangle (phase stays %d) [v0.18.3.307 #100]",
+                               (unsigned)s_lastRecoveryTri, (unsigned)curRecoveryTri,
+                               s_driveWigglePhase);
+                }
             }
+            if (curRecoveryTri != 0xFFFF)
+                RecoveryRingPush(curRecoveryTri);
             s_lastRecoveryTri = curRecoveryTri;
         }
 
@@ -962,7 +1083,11 @@ static void UpdateAutoDrive()
                     nowTri = *(uint16_t*)(base2 + ENTITY_STRIDE * s_playerEntityIdx + 0x1FA);
             }
             if (nowTri != 0xFFFF && nowTri < (uint16_t)s_walkmesh.numTriangles) {
-                float rpTx = tx, rpTz = tz;
+                // v0.18.3.307 (#112): use the raw (pre-offset) target so every
+                // recovery re-path shares the drive's original goal triangle.
+                // Was `tx, tz`, which carries the per-tick "+300 past the
+                // line" offset -- see the rawTx capture comment above.
+                float rpTx = rawTx, rpTz = rawTz;
                 int rpGoal = FindNearestTriangle(rpTx, rpTz);
 
                 if ((s_driveWigglePhase % 2) == 0) {
@@ -989,8 +1114,22 @@ static void UpdateAutoDrive()
                                 if (tCur.neighbor[e] == nextTri) { sharedEdge = e; break; }
                             }
                             if (sharedEdge >= 0) {
-                                int vi1 = tCur.vertexIdx[(sharedEdge + 1) % 3];
-                                int vi2 = tCur.vertexIdx[(sharedEdge + 2) % 3];
+                                // v0.18.3.308 (#113): neighbor[e] is across edge
+                                // (vertex[e], vertex[(e+1)%3]) -- the SAME convention
+                                // v0.17.9.14 already fixed in FindPortal. This nudge
+                                // still used the old (e+1, e+2) pair, so its
+                                // "perpendicular to the shared edge" was perpendicular
+                                // to the WRONG SEGMENT. Proof from the .306 BAT log:
+                                // the wedged drive's 20 identical nudges logged
+                                // dir=(0.90,-0.44), which is exactly the old-rule
+                                // output for tri 72->71 on gpbig1a; the true shared
+                                // edge (-1433,-1590)-(-781,-1402) gives (-0.28,0.96)
+                                // -- pointing at tri 71 instead of along the wall.
+                                // Verified against the extract: the old pair mismatches
+                                // the neighbor's vertex set on 184/186 links across
+                                // gpbig1a/gpbig2a; the fixed pair mismatches 0.
+                                int vi1 = tCur.vertexIdx[sharedEdge];
+                                int vi2 = tCur.vertexIdx[(sharedEdge + 1) % 3];
                                 if (vi1 < s_walkmesh.numVertices && vi2 < s_walkmesh.numVertices) {
                                     float ex1 = (float)s_walkmesh.vertices[vi1].x;
                                     float ey1 = (float)s_walkmesh.vertices[vi1].y;
@@ -1011,6 +1150,51 @@ static void UpdateAutoDrive()
                                         float ndy = (dot1 >= dot2) ? perp1y : perp2y;
                                         float altdx = (dot1 >= dot2) ? perp2x : perp1x;
                                         float altdy = (dot1 >= dot2) ? perp2y : perp1y;
+
+                                        // v0.18.3.309 (#114): if the player has NOT
+                                        // moved since the last nudge, the default
+                                        // perpendicular is pressing into an invisible
+                                        // rail (see the pin-state comment in
+                                        // field_nav_autodrive_helpers.inl). Rotate the
+                                        // escape direction so we stop repeating a nudge
+                                        // that provably does nothing, and lengthen it so
+                                        // a real escape has time to register. The walkmesh
+                                        // can't tell us which way is clear, so we probe:
+                                        //   mode 0: perpendicular toward the next tri (default)
+                                        //   mode 1: opposite perpendicular (rail may be on the near side)
+                                        //   mode 2: toward this triangle's centroid (retreat off an edge rail into open interior)
+                                        //   mode 3: back along the corridor (un-wedge, then the odd-phase re-path re-approaches)
+                                        {
+                                            float pinDx = px - s_drivePinnedPosX;
+                                            float pinDy = pz - s_drivePinnedPosY;
+                                            float pinMoved = sqrtf(pinDx*pinDx + pinDy*pinDy);
+                                            if (pinMoved > DRIVE_PIN_MOVE_EPS) s_drivePinnedCount = 0;
+                                            else                               s_drivePinnedCount++;
+                                            s_drivePinnedPosX = px; s_drivePinnedPosY = pz;
+
+                                            int escapeMode = s_drivePinnedCount & 3;   // 0..3
+                                            if (escapeMode == 1) {
+                                                ndx = altdx; ndy = altdy;
+                                            } else if (escapeMode == 2) {
+                                                float toCX = tCur.centerX - px, toCY = tCur.centerY - pz;
+                                                float l = sqrtf(toCX*toCX + toCY*toCY);
+                                                if (l > 1.0f) { ndx = toCX / l; ndy = toCY / l; }
+                                            } else if (escapeMode == 3) {
+                                                int backIdx = (corridorPos > 0) ? corridorPos - 1 : corridorPos;
+                                                uint16_t backTri = s_corridor[backIdx];
+                                                if (backTri < (uint16_t)s_walkmesh.numTriangles) {
+                                                    float bX = s_walkmesh.triangles[backTri].centerX - px;
+                                                    float bY = s_walkmesh.triangles[backTri].centerY - pz;
+                                                    float l = sqrtf(bX*bX + bY*bY);
+                                                    if (l > 1.0f) { ndx = bX / l; ndy = bY / l; }
+                                                }
+                                            }
+                                        }
+                                        // Escalate the nudge duration with the pin count
+                                        // (8 -> 32 ticks) so a longer press can break contact.
+                                        int escNudgeTicks = NUDGE_TICKS +
+                                            (s_drivePinnedCount > 4 ? 4 : s_drivePinnedCount) * 6;
+
                                         bool crossesTrig = (s_capturedLineCount > 0 &&
                                             WouldCrossTriggerLine(px, pz, ndx * 100.0f, ndy * 100.0f, s_driveSkipTrigIdx));
                                         if (crossesTrig) {
@@ -1019,7 +1203,7 @@ static void UpdateAutoDrive()
                                                 WouldCrossTriggerLine(px, pz, ndx * 100.0f, ndy * 100.0f, s_driveSkipTrigIdx));
                                         }
                                         if (!crossesTrig) {
-                                            s_driveWiggleTicks = NUDGE_TICKS;
+                                            s_driveWiggleTicks = escNudgeTicks;
                                             uint8_t nudgeDir = 0;
                                             if (ndy >  0.3f) nudgeDir |= DIR_UP;
                                             if (ndy < -0.3f) nudgeDir |= DIR_DOWN;
@@ -1030,10 +1214,11 @@ static void UpdateAutoDrive()
                                             SetAnalogFromVector(ndx * 1000.0f, ndy * 1000.0f);
                                             SetHeldDirections(nudgeDir);
                                             nudged = true;
-                                            Log::Field("FieldNavigation: [drive] recovery %d — nudge perpendicular "
-                                                       "tri %d->%d dir=(%.2f,%.2f) %d ticks",
+                                            Log::Field("FieldNavigation: [drive] recovery %d — nudge tri %d->%d "
+                                                       "dir=(%.2f,%.2f) %d ticks escapeMode=%d pinned=%d [v0.18.3.309 #114]",
                                                        s_driveWigglePhase, (int)nowTri, (int)nextTri,
-                                                       ndx, ndy, NUDGE_TICKS);
+                                                       ndx, ndy, escNudgeTicks,
+                                                       s_drivePinnedCount & 3, s_drivePinnedCount);
                                         }
                                     }
                                 }

@@ -96,6 +96,8 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
     memset(s_navObsBuffer, 0, sizeof(s_navObsBuffer));
     memset(s_navObsSampleCount, 0, sizeof(s_navObsSampleCount));
     s_camAxesEmpiricalApplied = false;
+    s_camAxesCorrectionCount  = 0;   // v0.18.3.305 (#109): re-arm the corrector
+    s_caRawAngleDeg           = 999.0f;  // v0.18.3.305 (#110): no CA read yet
     s_camCalibrated = false;
     s_calibPhase = 0;
     s_calibPending = true;  // calibrate on first drive
@@ -149,6 +151,27 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
 
         Log::Field("FieldNavigation: [fieldload] id=%u name='%s' entities=%u",
                    (unsigned)fieldId, fieldName, (unsigned)entCount);
+
+        // v0.18.3.281 (#85): field-gated re-arm of EXTSCAN. Permanently
+        // disabled since v0.18.3.234 ("done -- train staff found" on ggsta1),
+        // but glwater1's sewer gates (sakua/sakub/seigyo) are suspected to sit
+        // past the reported otherCount the same way (JSM declares O=11
+        // "others", engine reports entities=5). Scoped to glwater1 only so it
+        // doesn't flood every other field's log; remove this gate once #85 is
+        // characterized either way.
+        //
+        // v0.18.3.285 (#85 correction): the 2026-07-19 short BAT (F11
+        // screenshots of the two-gate/valve-wheel/ladder room) proves the
+        // actual sewer gate puzzle Aaron plays is 'glwater3' (JSM entities
+        // 'saku1'..'saku6', 'water', 'hasigo' -- not glwater1's
+        // 'sakua'/'sakub'/'oku', a different, unrelated set of similarly-
+        // named entities on a different field). Added glwater3 to the re-arm
+        // gate. Kept glwater1 too since its own similarly-shaped gap is still
+        // uncharacterized and costs nothing extra to keep watching.
+        if (fieldName && (_stricmp(fieldName, "glwater1") == 0 ||
+                           _stricmp(fieldName, "glwater3") == 0)) {
+            s_extScanDumped = false;
+        }
 
         // v05.41: Detect player entity only. Catalog is built on-demand
         // when the user presses -/= to cycle, via RefreshCatalog().
@@ -340,6 +363,25 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                         s_camDownY  = -s_camRightX;
                         float snappedDeg = snappedR * 180.0f / (float)NAV_PI;
                         float origAngleDeg = angleR * 180.0f / (float)NAV_PI;
+                        // v0.18.3.305 (#110): record the raw CA angle and log both
+                        // snap candidates. LOG-ONLY -- the quantizer's choice below
+                        // is unchanged. See field_nav_helpers.inl for why the 45
+                        // degree threshold is under suspicion and what the offline
+                        // survey of all 894 .ca files established.
+                        s_caRawAngleDeg = origAngleDeg;
+                        {
+                            float nearDeg = 0.0f, altDeg = 0.0f;
+                            CamSnapCandidates(origAngleDeg, nearDeg, altDeg);
+                            float mod90 = fabsf(origAngleDeg);
+                            while (mod90 >= 90.0f) mod90 -= 90.0f;
+                            bool flipBand = (mod90 > 30.0f && mod90 < 45.0f);
+                            Log::Field("FieldNavigation: [CAM-SNAP] field='%s' rawCA=%+.2fdeg "
+                                       "|mod90|=%.2f quantizerChose=%+.0f alternative=%+.0f "
+                                       "flipBand=%d (30..45 = would change under a lower "
+                                       "threshold) [v0.18.3.305 #110]",
+                                       fieldName, origAngleDeg, mod90, nearDeg, altDeg,
+                                       flipBand ? 1 : 0);
+                        }
                         Log::Field("FieldNavigation: [NAV-PROJ-INIT] field='%s' quantization: "
                                    "camRight pre=(%.3f,%.3f) angle=%+.1fdeg -> snap=%+.0fdeg -> "
                                    "camRight=(%.3f,%.3f) camDown=(%.3f,%.3f) (was camDown=(%.3f,%.3f))",
@@ -396,11 +438,42 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                            fieldName);
             }
 
+            // v0.18.3.305 (#109): re-apply this field's previously LEARNED axes,
+            // if it has any. Runs last so it overrides whatever the CA file just
+            // produced -- a measurement of the engine's actual response beats a
+            // derivation from the camera matrix, which is the whole premise of
+            // the .304 correction.
+            //
+            // The observer stays armed afterwards (s_camAxesCorrectionCount is
+            // reset to 0 by ResetFieldNavState, and "empirical-cached" is an
+            // eligible source), so a cached value that turns out to be wrong is
+            // overwritten by the same >= 45 degree contradiction rule that
+            // produced it. That self-repair is load-bearing, not decorative:
+            // the .304 BAT produced one correct correction and one 180-degree
+            // wrong one, and without it the cache would preserve whichever
+            // arrived first.
+            {
+                float cRx, cRy, cDx, cDy;
+                if (CamAxesCacheLookup(fieldId, cRx, cRy, cDx, cDy)) {
+                    s_camRightX = cRx; s_camRightY = cRy;
+                    s_camDownX  = cDx; s_camDownY  = cDy;
+                    s_driveCamRightX = cRx; s_driveCamRightY = cRy;
+                    s_driveCamDownX  = cDx; s_driveCamDownY  = cDy;
+                    s_camAxesSource = "empirical-cached";
+                    Log::Field("FieldNavigation: [NAV-CAL] field='%s' (id=%u) cached axes re-applied "
+                               "on field load: camRight=(%.3f,%.3f) camDown=(%.3f,%.3f) -- no relearn "
+                               "needed, observer stays armed [v0.18.3.305 #109]",
+                               fieldName, (unsigned)fieldId, cRx, cRy, cDx, cDy);
+                }
+            }
+
             // v0.07.68: JSM script scan — classify all entities by opcode signatures.
             // Detects draw points, save points, shops, card games, ladders, and map exits.
             // v0.07.73: Results wired into catalog for TTS announcements.
             s_jsmEntityCount = 0;
             memset(s_jsmEntities, 0, sizeof(s_jsmEntities));
+            memset(s_jsmTriangleApprox, 0, sizeof(s_jsmTriangleApprox));  // v0.18.3.286 (#85)
+            memset(s_jsmStateSuppressed, 0, sizeof(s_jsmStateSuppressed));  // v0.18.3.297 (#85)
             FieldArchive::ScanJSMScripts(fieldName, s_jsmEntities, MAX_JSM_ENTITIES, s_jsmEntityCount);
 
             // v0.08.03: Match SET3 hook captures to JSM entities with hasPshmCoords.

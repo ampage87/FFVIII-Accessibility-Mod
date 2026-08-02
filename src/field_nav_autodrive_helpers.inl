@@ -189,6 +189,125 @@ static void SetAnalogFromVector(float dx, float dy)
 }
 
 // Stop auto-drive cleanly: release keys, clear state, optionally speak reason.
+// ============================================================================
+// v0.18.3.306 (#111): transient player-position dropout tolerance.
+//
+// Aaron, .305 BAT: "It attempted to auto-drive to the stairs but kept saying
+// 'Player Position Lost'. I have noticed this happening more and more."
+//
+// His guess -- that it is tied to crossing some underlying line on the field --
+// is essentially right, and the log shows the shape of it precisely. The
+// position is readable on the tick BEFORE and the tick AFTER; only the one
+// sample in between fails:
+//
+//   14:51:39  [drive-vec] t=150 tri=3 pp=(-2386,-372)   <- fine
+//   14:51:39  [drive] stopped: Player position lost.    <- next tick
+//   14:51:42  [A*] Path found ... start=2               <- fine again
+//
+//   14:49:21  [drive-vec] t=270 tri=55 pp=(1627,275)    <- fine
+//   14:49:21  [drive] stopped: Player position lost.    <- next tick
+//
+// GetEntityPos() only fails in-range when the entity's triangle id at 0x1FA
+// reads 0 ("not yet placed") or the Others base pointer is momentarily null.
+// Both are things the engine does WHILE re-resolving the player's walkmesh
+// placement -- which is exactly what happens as you cross into a new triangle
+// or a line fires. At 14:51:39 the drive had just advanced three waypoints in
+// one second (tri 56 -> 6 -> 3), i.e. it was crossing triangles rapidly. This
+// is a race between our per-frame poll and the engine's placement update, so
+// it gets MORE likely the more auto-drive is used and the faster the player is
+// moving -- which matches "happening more and more".
+//
+// The fix does not depend on knowing which of the two reads dips. One failed
+// sample is simply not evidence that the player is gone, and this log proves
+// that directly. So a dropout now pauses the drive the same way an open dialog
+// does -- release the keys, freeze the stuck counter, keep the drive alive --
+// and only gives up if the position stays unreadable for a bounded run of
+// ticks. 30 ticks is ~0.5 s: far longer than any observed dropout (all were a
+// single tick), far shorter than a player would wait wondering what happened.
+//
+// If the position really has gone for good -- left the field, entity destroyed
+// -- IsOnField() and the field-transition handler stop the drive on their own
+// paths, so nothing depends on this one being trigger-happy.
+static const int DRIVE_POS_LOST_TOLERANCE_TICKS = 30;
+static int s_drivePosLostTicks = 0;
+
+// Read the raw fields GetEntityPos() rejects on, for the dropout diagnostic.
+// Deliberately its OWN function: MSVC C2712 forbids __try in a function that
+// needs C++ object unwinding, and UpdateAutoDrive() is large and has none
+// today -- putting the SEH here keeps it that way. Same pattern as
+// GetEntityPos() in field_nav_helpers.inl.
+static void ReadPlayerPlacementRaw(int entityIdx, bool& baseOk, unsigned& triOut)
+{
+    baseOk = false; triOut = 0xFFFF;
+    if (entityIdx < 0 || entityIdx >= MAX_ENTITIES) return;
+    if (!FF8Addresses::pFieldStateOthers) return;
+    __try {
+        uint8_t* b = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+        if (b) {
+            baseOk = true;
+            triOut = *(uint16_t*)(b + ENTITY_STRIDE * entityIdx + 0x1FA);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+// v0.18.3.307 (#100): ring of the last few triangles a recovery cycle has
+// fired in during the current drive. The v0.17.6.1 tri-advance reset treats
+// ANY triangle change at a recovery cycle as corridor progress and refills
+// the whole MAX_RECOVERY_PHASES budget. When steering oscillates between two
+// or three triangles -- the .306 gpbig1a stairs drive ping-ponged across
+// tri 8 <-> 9 <-> 10 for 40 seconds -- every hop re-earned a full budget, so
+// the "Stuck." announcement was unreachable and the drive bounced silently
+// until the global timeout. Revisiting a triangle we were recently stuck in
+// is NOT progress; only genuinely new territory resets the counter now.
+// Genuine corridor traversal is unaffected: each fresh triangle is absent
+// from the ring (so it still resets), and waypoint advances reset the phase
+// through their own independent path in UpdateAutoDrive(). Ring size 4
+// covers the observed 2- and 3-triangle oscillations; a corridor longer
+// than 4 triangles keeps earning resets as entries age out.
+// Cleared at drive start (field_nav_handlekeys.inl).
+static const int RECOVERY_TRI_RING_SIZE = 4;
+static uint16_t s_recoveryTriRing[RECOVERY_TRI_RING_SIZE] =
+    { 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF };
+static int s_recoveryTriRingPos = 0;
+
+static void RecoveryRingClear()
+{
+    for (int i = 0; i < RECOVERY_TRI_RING_SIZE; i++)
+        s_recoveryTriRing[i] = 0xFFFF;
+    s_recoveryTriRingPos = 0;
+}
+
+static bool RecoveryRingContains(uint16_t tri)
+{
+    for (int i = 0; i < RECOVERY_TRI_RING_SIZE; i++)
+        if (s_recoveryTriRing[i] == tri) return true;
+    return false;
+}
+
+static void RecoveryRingPush(uint16_t tri)
+{
+    if (tri == 0xFFFF || RecoveryRingContains(tri)) return;
+    s_recoveryTriRing[s_recoveryTriRingPos] = tri;
+    s_recoveryTriRingPos = (s_recoveryTriRingPos + 1) % RECOVERY_TRI_RING_SIZE;
+}
+
+// v0.18.3.309 (#114): pinned-nudge escape variation state.
+// The even-phase recovery nudge (field_nav_autodrive.inl) presses perpendicular
+// to the shared edge with the next corridor triangle. .308 fixed WHICH edge it
+// uses, but on the D-District shaft the player still pins at moveDist=0 because
+// the stair rails and the knee-wall around the central hole are COLLISION
+// geometry the walkmesh does not contain (verified offline: the player->waypoint
+// segment crosses no walkmesh wall, yet the engine refuses the move). A fixed
+// nudge that happens to press into an invisible rail fails every time, and
+// repeating it cannot succeed. These track how many consecutive nudges have
+// left the player essentially stationary; the recovery rotates its escape
+// direction and lengthens the nudge as the count climbs, then resets the
+// instant the player actually moves. Cleared at drive start.
+static int   s_drivePinnedCount = 0;
+static float s_drivePinnedPosX  = 0.0f;
+static float s_drivePinnedPosY  = 0.0f;
+static const float DRIVE_PIN_MOVE_EPS = 12.0f;   // moved less than this since last nudge == still pinned
+
 static void StopAutoDrive(const char* reason)
 {
     if (!s_driveActive) return;
@@ -223,6 +342,7 @@ static void StopAutoDrive(const char* reason)
                      s_driveWigglePhase, s_driveStartDist);
 
     s_driveActive = false;
+    s_drivePosLostTicks = 0;   // v0.18.3.306 (#111)
     s_driveTrigTarget = false;
     s_driveTrigCrossStart = 0.0f;
     s_driveSkipTrigIdx = -1;

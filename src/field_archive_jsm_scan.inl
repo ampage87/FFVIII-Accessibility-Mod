@@ -295,6 +295,28 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
             int32_t methodPshmAddrs[MAX_PSHM_PER_METHOD] = {};
             int methodPshmCount = 0;
 
+            // v0.18.3.295 (#85): state-guard capture, per method.
+            // Look for the leading `PSHM_L <addr>` + `PSHM_W <value>` pair -- the
+            // shape a script uses to test a field variable before deciding whether
+            // to place itself. Recorded onto the entity only if this method goes on
+            // to call SET3, so it describes the condition under which the entity
+            // actually exists in the world.
+            //
+            // FIRST pair wins, not the most recent: a compound guard tests several
+            // variables and the leading one is the discriminator. glwater3's
+            // ladline5 reads `340 vs 9` then `339 vs 64`; the second is true in the
+            // OTHER world state, so taking the last pair would invert the answer.
+            bool    guardSeen = false;
+            int16_t guardAddr = 0, guardVal = 0;
+            bool    prevWasPshmL = false;
+            int32_t prevPshmLAddr = 0;
+            // v0.18.3.296 (#85): did a JPF (jump-if-false, opcode 0x02) execute
+            // between the guard and the SET3? That is what makes the placement
+            // genuinely CONDITIONAL. See the state-guard comment in field_archive.h
+            // -- an unconditional SET3 preceded by a guard read is a state QUERY
+            // used for something else, not a precondition for existing.
+            bool    guardHadJpf = false;
+
             for (int ip = (int)scriptStart; ip < (int)scriptEnd && ip < scriptDataDwords; ip++) {
                 uint32_t word = scriptData[ip];  // native LE read of raw file bytes
                 uint8_t highByte = (uint8_t)(word >> 24);
@@ -474,9 +496,27 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                     }
                 }
 
+                // v0.18.3.295 (#85): track the PSHM_L -> PSHM_W adjacency that forms
+                // a state guard. 0x0A = PSHM_L (push long from field varblock),
+                // 0x07 = PSHM_W (here supplying the literal compare value).
+                if (highByte == 0x02 && guardSeen) guardHadJpf = true;   // v0.18.3.296: JPF
+                if (highByte == 0x0A) {
+                    prevWasPshmL  = true;
+                    prevPshmLAddr = opcParam;
+                } else {
+                    if (prevWasPshmL && highByte == 0x07 && !guardSeen &&
+                        prevPshmLAddr >= 0 && prevPshmLAddr < 0x2000) {
+                        guardSeen = true;
+                        guardAddr = (int16_t)prevPshmLAddr;
+                        guardVal  = (int16_t)opcParam;
+                    }
+                    prevWasPshmL = false;
+                }
+
                 // --- Check for signature opcodes ---
 
-                // SET3: position from init script (method 0).
+                // SET3: position from init script (method 0), or from any later
+                // method if init has none.
                 // Primary: 4 stack params (X, Y, Z, triangleId) — works for literal pushes.
                 // Fallback: 3 stack params (X, Y, Z) + triangle from opcParam.
                 // The fallback handles entities that use PSHM_W for coordinates
@@ -484,7 +524,20 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                 // v0.07.75: Added 3-param fallback for draw point position extraction.
                 // v0.07.99: PSHM_W marker detection — when coordinates come from runtime
                 // memory, store the memory addresses instead of garbage position values.
-                if (opcode == JSM_OP_SET3 && m == 0 && !info.hasPosition && !info.hasPshmCoords) {
+                // v0.18.3.286 (#85): dropped the `m == 0` restriction. Offline sewer-field
+                // survey found several gate entities (glwater4/glwater5 sakuN) call SET3
+                // in a later, REQ-triggered toggle method instead of init -- their own
+                // init script never places them at all. The `!info.hasPosition &&
+                // !info.hasPshmCoords` guards already make this "first SET3 found wins,
+                // method 0 first" (the loop walks m=0,1,2... in order), so this is purely
+                // additive: entities that already resolved from method 0 are unaffected;
+                // only entities that previously got NO position from method 0 can now
+                // pick one up from a later method. Risk: a later method's SET3 could be a
+                // transient/cutscene reposition rather than the entity's "home" position,
+                // for some entity elsewhere in the game that happens to have no init-method
+                // SET3 today -- watch for a newly-appearing but implausible position on
+                // BAT if this surfaces something unexpected outside the sewer fields.
+                if (opcode == JSM_OP_SET3 && !info.hasPosition && !info.hasPshmCoords) {
                     // Check which stack values (if any) are PSHM_W markers.
                     // v0.08.00: Markers use bit 31 (0x8000xxxx). Literal pushes max at 0x00FFFFFF.
                     int coordBase = -1;  // index of X in pushStack
@@ -519,15 +572,40 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                             int bp = 0;
                             for (int si = 0; si < pushCount && bp < 240; si++)
                                 bp += snprintf(stkBuf + bp, 256 - bp, "0x%08X ", (unsigned)pushStack[si]);
-                            uint16_t tri = (paramCount == 4) ? (uint16_t)pushStack[coordBase + 3] : (uint16_t)opcParam;
+                            // v0.18.3.287 (#85): the 4-param case's triangle slot
+                            // (pushStack[coordBase+3]) can ITSELF be a PSHM_W marker,
+                            // not a literal -- casting straight to uint16_t silently
+                            // extracts the marker's runtime memory ADDRESS as if it
+                            // were a walkmesh triangle number. Confirmed on glwater3:
+                            // ladline5/ladline6/saku2/saku3 all share PSHM address
+                            // 0x3A (58 decimal) in that slot -- coincidentally a VALID
+                            // triangle index for that field, so all four silently got
+                            // the SAME wrong shared position (Aaron's BAT: "three steps
+                            // away" while standing at the actual gate). The real,
+                            // per-entity triangle is available from opcParam (the SET3
+                            // instruction's own embedded immediate, independent of the
+                            // stack) whenever it's in a plausible walkmesh range --
+                            // verified against the real field archive: ladline5=186,
+                            // ladline6=175, saku2=181, saku3=54, all distinct and each
+                            // landing in a sensible, spread-out position instead of the
+                            // one shared bogus spot.
+                            bool triSlotIsMarker = (paramCount == 4) &&
+                                (((uint32_t)pushStack[coordBase + 3] & 0xFFFF0000u) == 0x80000000u);
+                            uint16_t tri;
+                            if (triSlotIsMarker) {
+                                tri = (opcParam >= 0 && opcParam < 4096) ? (uint16_t)opcParam : 0;
+                            } else {
+                                tri = (paramCount == 4) ? (uint16_t)pushStack[coordBase + 3] : (uint16_t)opcParam;
+                            }
                             Log::Field("FieldArchive: [SET3-DIAG] ent%d '%s' PSHM_W coords: "
-                                       "X=%s(addr=%d) Y=%s(addr=%d) Z=%s(addr=%d) tri=%u "
+                                       "X=%s(addr=%d) Y=%s(addr=%d) Z=%s(addr=%d) tri=%u%s "
                                        "stack[%d]=[%s]",
                                        e, info.symName,
                                        xIsPshm ? "PSHM" : "lit", (int)info.pshmAddrX,
                                        yIsPshm ? "PSHM" : "lit", (int)info.pshmAddrY,
                                        zIsPshm ? "PSHM" : "lit", (int)info.pshmAddrZ,
-                                       (unsigned)tri, pushCount, stkBuf);
+                                       (unsigned)tri, triSlotIsMarker ? " [tri-slot was PSHM marker, used opcParam]" : "",
+                                       pushCount, stkBuf);
                             // Also store the triangle even though position is runtime.
                             info.posTriangle = tri;
                             // Store literal values for any non-PSHM coordinates.
@@ -566,13 +644,33 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                                 : (uint16_t)opcParam;
                             info.hasPosition = true;
                         }
+
+                        // v0.18.3.295 (#85): this method placed the entity, so any
+                        // state guard leading it is the condition under which the
+                        // entity exists. Record it (capture only -- acting on it is
+                        // the catalog's mutual-exclusion pass, which fires only when
+                        // 2+ entities on the field share an address with DIFFERENT
+                        // values, so a lone unrelated guard changes nothing).
+                        if (guardSeen && !info.hasStateGuard) {
+                            info.hasStateGuard = true;
+                            info.stateVarAddr  = guardAddr;
+                            info.stateVarValue = guardVal;
+                            info.stateGuardConditional = guardHadJpf;
+                            Log::Field("FieldArchive: [STATE-GUARD] ent%d '%s' SET3 gated on "
+                                       "varblock[0x%04X] (%d) == %d, conditional=%d (JPF %s) [v0.18.3.296]",
+                                       e, info.symName, (unsigned)(uint16_t)guardAddr,
+                                       (int)guardAddr, (int)guardVal, guardHadJpf ? 1 : 0,
+                                       guardHadJpf ? "present -- placement is state-dependent"
+                                                   : "ABSENT -- SET3 is unconditional, entity always exists");
+                        }
                     }
                 }
 
-                // SET: 2D position from init script (method 0).
+                // SET: 2D position from init script (method 0), or from any later
+                // method if init has none (v0.18.3.286 (#85), same reasoning as SET3 above).
                 // Primary: 3 stack params (X, Y, triangleId).
                 // Fallback: 2 stack params (X, Y) + triangle from opcParam.
-                if (opcode == JSM_OP_SET && m == 0 && !info.hasPosition) {
+                if (opcode == JSM_OP_SET && !info.hasPosition) {
                     if (pushCount >= 3) {
                         info.posX = (int16_t)pushStack[pushCount - 3];
                         info.posY = (int16_t)pushStack[pushCount - 2];
@@ -758,340 +856,13 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
             }
         }
 
-        // --- Classify entity type based on found opcodes ---
-        // Priority: most specific first.
-        if (foundSetDrawpoint || foundDrawpoint) {
-            info.type = JSM_ENT_DRAW_POINT;
-            info.param = drawpointId;
-        } else if (foundMenusave || foundSaveenable) {
-            info.type = JSM_ENT_SAVE_POINT;
-        } else if (foundMenushop) {
-            info.type = JSM_ENT_SHOP;
-            info.param = shopId;
-        } else if (foundCardgame) {
-            info.type = JSM_ENT_CARD_GAME;
-        } else if (foundLadder) {
-            info.type = JSM_ENT_LADDER;
-        } else if (foundMapjump) {
-            info.type = JSM_ENT_MAP_EXIT;
-            info.param = mapjumpDestField;
-        } else if (foundSetmodel && foundTalkon) {
-            info.type = JSM_ENT_NPC;
-        } else if (foundDoorline && info.jsmCategory == 0) {
-            info.type = JSM_ENT_DOOR;  // keep as door
-        }
-        // Otherwise, keep the default from JSM category assignment above.
-
-        // v0.07.82 / v0.17.7.1 / v0.17.7.1.1: Classify Line entities by opcode signatures.
-        //
-        // v0.17.7.1.1 reverts the v0.17.7.1 TALK-setup gating that regressed
-        // dorm bed Interactions. Background: dormitory beds use SETLINE + dialog
-        // opcodes; the engine fires the "Sleep?" prompt when the player crosses
-        // the line. They do NOT use TALKRADIUS/TALKON, so the v0.17.7.1 rule
-        // "INTERACTIVE only if dialog + TALK setup" demoted them to EVENT or
-        // SCREEN_BOUND. The actual fepic1 fix (which v0.17.7.1 was supposed to
-        // ship) was the catalog's field-wide `fieldHasInteractiveObjects`
-        // demote removal -- that's preserved here, so fepic1 still works.
-        //
-        // Priority restored to v0.12.24-era rule: dialog wins first.
-        //   1. dialog opcodes  -> INTERACTIVE  (covers SETLINE+MES walk-through beds AND TALKRADIUS-press signs)
-        //   2. MAPJUMP w/o dialog -> SCREEN_BOUND (pure screen exits like fepic1's three)
-        //   3. battle/event w/o dialog -> EVENT
-        //   4. BGDRAW/SCROLL only -> CAMERA_PAN
-        //   5. nothing recognisable -> CAMERA_PAN  (silent default)
-        //
-        // The `hasTalkSetup` field on JSMEntityInfo is still populated below
-        // and remains available for future fixes that need to distinguish
-        // confirm-press interactions from walk-across triggers; we just don't
-        // gate the LINE_INTERACTIVE classification on it any more.
-        if (info.jsmCategory == 1) {
-            if (foundDialogOp) {
-                info.type = JSM_ENT_LINE_INTERACTIVE;
-            } else if (foundMapjump) {
-                info.type = JSM_ENT_LINE_SCREEN_BOUND;
-            } else if (foundBattle) {
-                info.type = JSM_ENT_LINE_EVENT;
-            } else if (foundBgdraw || foundScroll) {
-                info.type = JSM_ENT_LINE_CAMERA_PAN;
-            } else if (foundExtDispatch) {
-                // v0.17.8.6: Runtime-0x1C-dispatched interactive line.
-                // The B-Garden dorm bed (bgryo2_1 ent0 'squall') reaches its
-                // "I should get some rest" AASK prompt through a runtime-supplied
-                // 0x1C dispatch (a bare EXT_DISPATCH whose sub-opcode index is
-                // provided at runtime, logged "0x1C EMPTY STACK: ent=0 method=1").
-                // The static scan provably cannot resolve that to a dialog opcode,
-                // so foundDialogOp is false and the line would otherwise fall to
-                // LINE_EVENT, which the catalog hides -- making the bed impossible
-                // for a blind player to FIND before crossing it.
-                //
-                // extDisp (the entity's own 0x1C usage) is the SAME interactivity
-                // proxy the cat2/3 JSM_ENT_INTERACTIVE_OBJECT promotion already
-                // relies on (it surfaces the B-Garden Directory before you touch
-                // it). Treating Line entities symmetrically pre-detects the bed at
-                // field load. Surfaced at its SETLINE center by catalog Block 3.
-                //
-                // Ordering matters: this sits AFTER mapjump (screen exits),
-                // battle (battle triggers), and bgdraw/scroll (camera-pan lines
-                // whose 0x1C drives the scroll, not a dialog), so those keep
-                // their existing classification. Only a Line whose 0x1C is NOT
-                // any of those reaches here.
-                //
-                // Over-surfacing tradeoff: a Line whose 0x1C only fires a sound
-                // or particle effect (no dialog) surfaces as a phantom
-                // "Interaction". That is the unavoidable cost of pre-detecting
-                // without being able to read the dialog statically; the runtime
-                // dialog-confirmation + disk-persistence layer (v0.17.8.7) is
-                // what prunes/labels these once the player reaches them.
-                info.type = JSM_ENT_LINE_INTERACTIVE;
-            } else if (foundEventOp) {
-                info.type = JSM_ENT_LINE_EVENT;
-            } else {
-                info.type = JSM_ENT_LINE_CAMERA_PAN;
-            }
-        }
-
-        // v0.17.8.8: Save-line detection, signal (a) -- own-script save.
-        // The Line-classification block just above reclassifies EVERY Line
-        // entity to a LINE_* type, which discards the JSM_ENT_SAVE_POINT the
-        // type cascade would otherwise assign to a Line whose own script
-        // invokes the save menu (MENUSAVE/SAVEENABLE/PHSENABLE). Preserve that
-        // signal on a side flag the catalog can read, so the surfaced
-        // Interaction can be labelled "Save Point" instead of "Interaction N".
-        // (foundSaveenable also covers PHSENABLE -- see the opcode scan.)
-        //
-        // Two detection paths feed this:
-        //   * foundMenusave/foundSaveenable -- save opcode resolved through a
-        //     0x1C dispatch (works when the dispatch index is a readable
-        //     literal/PSHM the scan can follow).
-        //   * ownSaveConst -- the save opcode CONSTANTS appear as literal pushes
-        //     in the line's own bytecode. bghall_1 'selphie' dispatches save via
-        //     a runtime-supplied 0x1C (empty-stack, like the dorm bed) so the
-        //     resolved flags never fire, but it literally pushes 0x12F
-        //     (SAVEENABLE) and 0x130 (PHSENABLE). Requiring MENUSAVE alone, or
-        //     SAVEENABLE+PHSENABLE together, keeps it tight -- the sibling
-        //     control line 'zells' has neither and is unaffected.
-        bool ownSaveConst = sawLitMenusave || (sawLitSaveenable && sawLitPhsenable);
-        if (info.jsmCategory == 1 && (foundMenusave || foundSaveenable || ownSaveConst)) {
-            info.isSaveLine = true;
-            // Ensure the line actually surfaces in the catalog. A pure save
-            // line might have no dialog/extDispatch and would otherwise fall to
-            // CAMERA_PAN (hidden); force INTERACTIVE so it appears (and gets
-            // relabelled to Save Point by the catalog).
-            if (info.type != JSM_ENT_LINE_INTERACTIVE)
-                info.type = JSM_ENT_LINE_INTERACTIVE;
-            Log::Field("FieldArchive: [JSMScan] save-line(own): Line ent%d '%s' "
-                       "invokes save menu -> isSaveLine=1 (resolved=%d const=%d) [v0.17.8.8]",
-                       e, info.symName,
-                       (foundMenusave || foundSaveenable) ? 1 : 0, ownSaveConst ? 1 : 0);
-        }
-
-        // v0.12.24: Store ext dispatch flag for dual-purpose Line detection.
-        info.hasExtDispatch = foundExtDispatch;
-
-        // v0.17.7.1: Talk-setup flag for catalog walkmesh exclusion rule.
-        // True when the script uses TALKRADIUS or TALKON, indicating the player
-        // can interact via confirm-press (vs. crossing a Line trigger).
-        info.hasTalkSetup = foundTalkradius || foundTalkon;
-
-        // v0.18.3.274: publish the SETLINE data onto the entity.
-        //
-        // The scanner has always detected SETLINE, captured its literal
-        // coordinates, and LOGGED them ("[JSMScan] entN 'sym' SETLINE: ..."),
-        // but never wrote any of it back to JSMEntityInfo. So
-        // JSMEntityInfo::hasSetline / setlineX1..Z2 -- declared since v0.12.16 --
-        // were permanently false/zero: dead fields that looked populated.
-        //
-        // Found while debugging the v0.18.3.273 captured-line -> JSM-entity
-        // mapping, which keys off hasSetline: every field reported
-        // "0 SETLINE owners", so that mapping silently never engaged and always
-        // fell back to the legacy doors+t rule. Any other consumer of these
-        // fields was equally reading zeros.
-        info.hasSetline = foundSetline;
-        info.setlineX1  = setlineX1;  info.setlineY1 = setlineY1;  info.setlineZ1 = setlineZ1;
-        info.setlineX2  = setlineX2;  info.setlineY2 = setlineY2;  info.setlineZ2 = setlineZ2;
-
-        // v0.17.8.15: Export the behavior signal the catalog dedupe pass uses
-        // to distinguish raw-SYM Others-with-models (NPCs) from raw-SYM
-        // walk-across Lines (Interactions). Replaces v0.17.8.11's setmodelSlot
-        // + chara.one cross-reference. The persistent s_hasSetmodelInit[]
-        // array below still tracks the same signal for the Director-detection
-        // post-pass; this field exposes it on the per-entity export used by
-        // field_nav_catalog_dedupe.inl.
-        info.hasSetmodelInit = foundSetmodelInit;
-
-        // v0.12.20: Store persistent flags for Director/interaction detection.
-        if (e < 128) {
-            s_hasSetmodelInit[e] = foundSetmodelInit;
-            s_hasDialogAny[e] = foundDialogOp;
-            s_hasExtDispatchArr[e] = foundExtDispatch;
-        }
-
-        // v0.07.84: REQ-following post-classification.
-        // If this entity is still unclassified (or just "background/unknown")
-        // and it calls REQ/REQSW/REQEW to a method that contains MAPJUMP,
-        // classify it as MAP_EXIT with that destination.
-        if ((info.type == JSM_ENT_UNKNOWN || info.type == JSM_ENT_BACKGROUND ||
-             info.type == JSM_ENT_NPC) && e < 128 && info.jsmCategory == 3) {
-            for (int r = 0; r < s_entityReqs[e].count; r++) {
-                int tgtEnt  = s_entityReqs[e].calls[r].targetEntity;
-                int tgtMeth = s_entityReqs[e].calls[r].targetMethod;
-                if (tgtEnt < 0 || tgtEnt >= totalEntities) continue;
-                // Convert entity-relative method index to global method index.
-                // Method 0 = init, method 1 = first interaction, etc.
-                int globalMethIdx = groups[tgtEnt].startMethodIdx + tgtMeth;
-                if (globalMethIdx < 0 || globalMethIdx >= MAX_METHOD_MAPJUMPS) continue;
-                if (s_methodMapjumps[globalMethIdx].found) {
-                    info.type = JSM_ENT_MAP_EXIT;
-                    info.param = s_methodMapjumps[globalMethIdx].destFieldId;
-                    Log::Field("FieldArchive: [JSMScan] REQ-follow: ent%d '%s' -> ent%d method%d has MAPJUMP dest=%d",
-                               e, info.symName, tgtEnt, tgtMeth, info.param);
-                    break;
-                }
-            }
-        }
-
-        // v0.07.87: Variable-dispatch exit detection.
-        // If this "Other" entity writes to a memory address (POPM_W) that a
-        // MAPJUMP-containing method also reads (PSHM_W), this entity likely
-        // sets a dispatch variable that triggers a map transition in the
-        // Director entity's script loop. Classify as MAP_EXIT.
-        // v0.07.88: Filter out very low memory addresses (0-7) — these are
-        // scratch/temp variables used by virtually every entity (e.g. loop
-        // counters, temp flags) and produce massive false positive rates.
-        // Real dispatch variables use higher addresses.
-        static const int32_t VAR_DISPATCH_MIN_ADDR = 8;
-        if ((info.type == JSM_ENT_UNKNOWN || info.type == JSM_ENT_BACKGROUND ||
-             info.type == JSM_ENT_NPC) && e < 128 && info.jsmCategory == 3 &&
-            s_entityPopms[e].count > 0) {
-            for (int p = 0; p < s_entityPopms[e].count; p++) {
-                int32_t writeAddr = s_entityPopms[e].addrs[p];
-                if (writeAddr < VAR_DISPATCH_MIN_ADDR) continue;  // skip scratch vars
-                bool matched = false;
-                int matchDest = -1;
-                for (int mi = 0; mi < totalMethods && mi < MAX_METHOD_MAPJUMPS && !matched; mi++) {
-                    if (!s_methodMapjumps[mi].found) continue;
-                    for (int r = 0; r < s_methodMapjumps[mi].pshmCount; r++) {
-                        if (s_methodMapjumps[mi].pshmAddrs[r] == writeAddr) {
-                            matched = true;
-                            matchDest = s_methodMapjumps[mi].destFieldId;
-                            break;
-                        }
-                    }
-                }
-                if (matched) {
-                    info.type = JSM_ENT_MAP_EXIT;
-                    info.param = matchDest;
-                    Log::Field("FieldArchive: [JSMScan] var-dispatch: ent%d '%s' writes addr %d "
-                               "-> matches MAPJUMP method dest=%d",
-                               e, info.symName, (int)writeAddr, matchDest);
-                    break;
-                }
-            }
-        }
-
-        // v0.07.72: SYM-name fallback classification.
-        // Extended opcodes (MENUSAVE, DRAWPOINT, etc.) are dispatched via 0x1C,
-        // and save/draw point entities often push the dispatch index from a
-        // runtime memory variable (PSHM_W), not a literal. Our scanner can't
-        // know the runtime value, so opcode-based classification fails.
-        // Fall back to SYM naming conventions for unclassified entities.
-        if (info.type == JSM_ENT_UNKNOWN || info.type == JSM_ENT_BACKGROUND) {
-            int symIdx2 = e - countDoors;
-            if (symIdx2 >= 0 && symIdx2 < symCount) {
-                const char* sn = symNames[symIdx2];
-                // FF8 uses consistent SYM naming: "savePoint", "svpt", "dp01", etc.
-                if (_strnicmp(sn, "save", 4) == 0 || _strnicmp(sn, "svpt", 4) == 0) {
-                    info.type = JSM_ENT_SAVE_POINT;
-                } else if ((_strnicmp(sn, "dp", 2) == 0 && (sn[2] >= '0' && sn[2] <= '9')) ||
-                           _strnicmp(sn, "drpoint", 7) == 0 ||
-                           _strnicmp(sn, "drawpoint", 9) == 0 ||
-                           _strnicmp(sn, "draw_point", 10) == 0) {
-                    info.type = JSM_ENT_DRAW_POINT;
-                    // drawpointId remains -1 (unknown from static scan)
-                } else if (_strnicmp(sn, "shop", 4) == 0) {
-                    info.type = JSM_ENT_SHOP;
-                }
-            }
-        }
-
-        // v0.07.98: Interactive object detection for unclassified entities with dialog.
-        // Entities (background OR invisible others) with dialog opcodes (MES/ASK/AMES/AASK)
-        // and a position from SET3/SET are interactive objects the player can examine
-        // (B-Garden Directory, classroom terminals, beds, desks, bulletin boards).
-        // Promoted to JSM_ENT_INTERACTIVE_OBJECT for catalog injection.
-        // Uses foundDialogOp (not foundEventOp) to avoid false positives on
-        // lighting/animation controllers that use SHOW/HIDE but no dialog.
-        // Covers both Background (cat=2) and Other (cat=3) entities that remain
-        // unclassified after all prior classification passes.
-        // foundDialogOp catches literal MES/ASK pushes; foundExtDispatch catches
-        // runtime-dispatched extended opcodes (0x1C with PSHM_W or empty stack)
-        // which commonly include MES/ASK for interactive objects like the Directory.
-        // v0.07.99: Also accept hasPshmCoords — entity has SET3 but coordinates
-        // are from runtime memory. Classification is correct; catalog injection
-        // still requires hasPosition for navigable coordinates.
-        if ((info.type == JSM_ENT_BACKGROUND || info.type == JSM_ENT_UNKNOWN) &&
-            (foundDialogOp || foundExtDispatch) &&
-            (info.hasPosition || info.hasPshmCoords) && !foundSetmodel) {
-            // v0.17.8.7: skip debug leftovers (e.g. bgroad_5 / bghall_1
-            // 'cardgamemaster') that would otherwise surface as phantoms.
-            if (EntityIsDebugLeftover(e, info.symName)) {
-                Log::Field("FieldArchive: [JSMScan] ent%d '%s' NOT promoted to "
-                           "INTERACTIVE_OBJECT: debug leftover "
-                           "(cardgamemaster/test-battle, v0.17.8.7)", e, info.symName);
-            } else {
-                info.type = JSM_ENT_INTERACTIVE_OBJECT;
-            }
-        }
-
-        // v0.08.01: Paired entity position inheritance.
-        // FF8 uses a pattern where a positioning entity (SET3 with PSHM_W coords)
-        // is placed immediately before a dialog entity (0x1C extended dispatch with
-        // MES/ASK) in the JSM entity table. Example: bghall_1 ent24 'dic' (position)
-        // + ent25 'igyous1' (dialog). Neither passes interactive object detection
-        // alone. When a dialog entity has no position at all, check if the
-        // immediately preceding "Other" entity has PSHM_W coordinates and inherit them.
-        // v0.08.04: Paired inheritance with targeted light-entity filter.
-        // foundExtDispatch is needed because igyous1 (Directory dialog) uses 0x1C
-        // dispatch, not literal MES/ASK. But lighting controllers (displight,
-        // cornerlight, sidelight) also use 0x1C via stairlight inheritance.
-        // Fix: allow foundExtDispatch but skip entities whose SYM name contains "light".
-        if ((info.type == JSM_ENT_BACKGROUND || info.type == JSM_ENT_UNKNOWN) &&
-            (foundDialogOp || foundExtDispatch) && !foundSetmodel &&
-            !info.hasPosition && !info.hasPshmCoords &&
-            outCount > 0 &&
-            !strstr(info.symName, "light") &&
-            !EntityIsDebugLeftover(e, info.symName)) {  // v0.17.8.7: skip debug leftovers here too
-            JSMEntityInfo& prev = outEntities[outCount - 1];
-            if (prev.hasPshmCoords && prev.jsmIndex == e - 1 &&
-                (prev.jsmCategory == 3 || prev.jsmCategory == 2) &&
-                prev.type != JSM_ENT_NPC && prev.type != JSM_ENT_MAP_EXIT) {
-                // Inherit PSHM coordinates from the positioning entity.
-                info.hasPshmCoords = true;
-                info.pshmAddrX = prev.pshmAddrX;
-                info.pshmAddrY = prev.pshmAddrY;
-                info.pshmAddrZ = prev.pshmAddrZ;
-                info.posTriangle = prev.posTriangle;
-                info.posX = prev.posX;
-                info.posY = prev.posY;
-                info.posZ = prev.posZ;
-                // v0.08.13: Also inherit hasPosition if the positioning entity
-                // resolved its coordinates via the shift-pattern passthrough.
-                if (prev.hasPosition) info.hasPosition = true;
-                info.type = JSM_ENT_INTERACTIVE_OBJECT;
-                Log::Field("FieldArchive: [JSMScan] paired-entity: ent%d '%s' inherits PSHM coords "
-                           "from ent%d '%s' (addrX=%d addrY=%d addrZ=%d tri=%u)",
-                           e, info.symName, prev.jsmIndex, prev.symName,
-                           (int)info.pshmAddrX, (int)info.pshmAddrY, (int)info.pshmAddrZ,
-                           (unsigned)info.posTriangle);
-            }
-        }
-
-        // v0.12.20: Store persistent per-entity flags for Director detection post-pass.
-        if (e < 128) {
-            s_hasSetmodelInit[e] = foundSetmodelInit;
-            s_hasDialogAny[e] = foundDialogOp;
-            s_hasExtDispatchArr[e] = foundExtDispatch;
-        }
+        // Per-entity classification + post-passes. Extracted to
+        // field_archive_jsm_classify.inl (v0.18.3.294) to get this file back
+        // under the CI size ceiling (GitHub #37). The fragment runs inline here,
+        // operates on this loop's locals. It is brace-balanced and does NOT
+        // close the for-loop -- `outCount++;` and the loop brace stay below.
+        // Pure textual move -- no logic change.
+        #include "field_archive_jsm_classify.inl"
 
         outCount++;
     }
