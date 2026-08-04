@@ -6,6 +6,124 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.18.3.322
+
+**#114 Cycle 1.9: "very close" — the .321 seg-aim fix worked and the drive now reaches the descent edge on its own. It was parking one push short; this makes it finish the push.**
+
+### What the .321 BAT showed
+
+The last-waypoint seg-aim gate did its job: `trigRedir` is now 0 along the detour, and the drive tracks **west** all the way to the descent edge — player rides the path to (−2277,−559), tri 6. Then he goes **tri=0** (off the walkmesh — the descent beginning). But the tri=0 handler calls `ReleaseAllDirections()`, and per that function's own comment the **keyboard keys are what actually make the game move the player** (the analog only steers the direction). So releasing the keys parks him at the very edge; the 480-tick tolerance runs out and it gives up "Player position lost" at 18:17:32 — and the descent MAPJUMP only fires at 18:17:39, once Aaron taps down manually (player tri=5, (−2331,−536)). That's the "tiny down-arrow tap away from the trigger."
+
+### The fix
+
+In the tri=0 window, for a **transition target**, the drive no longer releases the keys — it keeps the last heading held so the player keeps pushing the final hair into the trigger. The keys persist from the prior tick (the drive's input helper only presses newly-needed keys and releases stale ones), so the game keeps moving him toward the last waypoint — (−2361,−503), just west of the trigger — he crosses, the floor changes 6→5, and completion-detection (which reads the floor even while off the walkmesh) ends the drive with "Stairs down to Floor 5." A non-transition dropout still releases the keys as before (a genuine one-frame position gap). This is general — it will also carry a ring crossing that stalls a hair short of its line. The .321 last-waypoint gate and the .320 pin-escape both stay in place.
+
+### Right side
+
+In this .321 run both ring crossings actually completed and the only "position lost" was the stairs, so the earlier right-side loss may already be improved by these changes. If it recurs it gets its own off-mesh pass.
+
+**Not MSVC-compiled or BAT'd yet.** BAT: auto-drive (`\`) down the shaft on the **left (stairs)** side a couple of floors — expect it to now descend on its own, no "position lost" and no manual down-tap, announcing "Stairs down to Floor N" as the floor changes. Grep `[drive] transition COMPLETE`. If it still parks, send the log — the drive-vec `pp` trail through the tri=0 window will show whether the held keys moved him.
+
+## v0.18.3.321
+
+**#114 Cycle 1.8: the .320 BAT — with Aaron's manual descent captured at the end — finally revealed where the descent actually fires, and why seg-aim kept fighting it.**
+
+### What the .320 BAT showed — two wins and a correction
+
+Two things went right. First, the .320 pin-escape fix **works**: the log shows `s_drivePinnedCount` climbing (`pinned=1`, `pinned=2`, `escapeMode` cycling 0→1→2) instead of stuck at 0, so the ~38-unit wiggle no longer defeats it. Second — and this is the key — the `[MAPJUMP-HOOK]` caught exactly where the Floor 6→5 descent triggers: **player tri=3, pos=(−2405,−465)**. That's *west*, at tri 3, mid-way along the A\* detour (tri 6→5→4→3→2→1→0→48) — **not** at the (−2150,−197) "Stairs down" line the drive has been targeting (that line is tri 48, the far east end).
+
+The correction: my .320 seg-aim dot-gate **failed**. At the stairs the funnel heading (toward wp0, west-and-north) and seg-aim (toward the line, east-and-north) *both point north*, so their dot product is positive (~+47000) and the gate let seg-aim through. It kept pulling the player **east** — the drive-vec shows him dragged from tri 5 (−2303,−579) to tri 6 (−2184,−562) with `trigRedir=1` — straight off the westward path into the same pin. Aaron's `[NAV-OBSERVE]` trail confirms the real approach: he pressed **UP repeatedly**, which in this rotated field moves the player *west* (`camDown=(0.995,−0.098)`, so UP = −X), to reach (−2405,−465) and descend.
+
+### The fix — gate seg-aim to the last waypoint
+
+seg-aim is the *final-approach push through a line*, so it should only fire on the last leg. The new gate engages it only when `s_waypointIdx >= s_waypointCount − 1` (or there are no waypoints). At the stairs the player is on **waypoint 0 of 3** of the detour, so seg-aim now stands down (`trigRedir` goes to 0), the funnel steers **west toward wp0**, and carries him along the path *through tri 3* — where the descent fires mid-way. A straight ring-crossing's last waypoint *is* the line, so seg-aim still applies there on the final leg. The .320 pin-escape (`DRIVE_PIN_MOVE_EPS = 45`) stays as the safety net for any residual wedge.
+
+### Right side still deferred
+
+The right-side "position lost" is untouched again this cycle — it's a separate off-mesh bug and gets its own pass next, so the stairs fix stays independently testable.
+
+**Not MSVC-compiled or BAT'd yet.** BAT: auto-drive (`\`) down the shaft on the **left (stairs)** side for a couple of floors — expect it to now track *west along the detour* and **descend** (announcing "Stairs down to Floor N" as the floor changes) instead of pinning at the edge. Grep `[drive] transition COMPLETE`, and in the `[drive-vec]` at the stairs `trigRedir` should read 0 now with the steer pointing *west* toward the waypoint, not east to (−1954,−267). If it still pins, the drive-vec `pp` trail shows the new wedge point.
+
+## v0.18.3.320
+
+**#114 Cycle 1.7: root-cause fix for the prison-shaft stairs, read directly off the .319 BAT trace. The last three cycles all treated this as a steering-target problem; the log shows it's a pin/path-traversal problem, and seg-aim was making it worse.**
+
+### What the .319 BAT actually showed
+
+The .319 build ran correctly — seg-aim fired 12 times and three ring crossings completed — but the stairs still never descended. The drive-vec trace is unambiguous: the player **pins at tri 6, about 360 units south of the stair line (−2150,−197)**, with `dist` frozen at 663 across fifteen-plus recoveries and `moveDist=0` under a sustained north-east press. That's a genuine collision **lip** — the stairs are behind a wall from his pocket, reachable only by a **westward A\* detour** (tri 6→5→4→3→2→1→0→48). He never gets within seg-aim's 450u range of the line *on a heading that matters*, because two bugs conspire to trap him there.
+
+### Bug 1 — seg-aim was sabotaging the detour
+
+The player sits 363u from the line, inside `SEG_AIM_ENGAGE_DIST` (450), so the .319 seg-aim engaged and pulled the heading **north-east toward the line — straight into the lip wall** — while the A\* route needed to go **west first** (`wp0 = (−2351,−538)`). seg-aim reversing the funnel's heading is what pinned him (the drive-vec shows the steer flip-flopping between the seg-aim point (−1954,−267) and the westward waypoint, `trigRedir=1`).
+
+The fix gates seg-aim at the apply site so it overrides **only when it agrees with the funnel heading** (dot ≥ 0). At the stairs, funnel = west and seg-aim = east → dot < 0 → seg-aim is dropped (`useSegAim=false`, `trigRedir` stays 0) and the detour runs. At a straight crossing the two agree → seg-aim still applies, so the .319 crossings keep working.
+
+### Bug 2 — the pin-escape never escalated
+
+The .309 pin-escape rotates its escape direction and lengthens the nudge as `s_drivePinnedCount` climbs — but the counter **reset every time the player moved more than `DRIVE_PIN_MOVE_EPS` = 12 units** since the last nudge. He was wiggling ~38u east-west in the pocket, so it reset on every cycle (`escapeMode=0 pinned=0` through all fifteen recoveries while `dist` sat at 663). Raising `DRIVE_PIN_MOVE_EPS` to **45** makes an in-place wiggle count as pinned, so the escape actually escalates through its alternate directions (opposite-perpendicular, centroid, back-along-corridor). A genuinely advancing player still covers far more than 45u per nudge, so normal drives are untouched.
+
+### Right side — diagnosed, deliberately not fixed here
+
+The right-side "position lost" is a **separate** bug: the Bottom-crossing drive was moving at `moveDist=1645/tick` (near full throttle over a 3300u haul) and fell off the walkmesh at (1631,30) — ~2600u from the target — then sat off-mesh for the full 480-tick tolerance and stopped. Not a transition that failed; a fast long drive shooting off a thin part of the mesh. I left it untouched this cycle so the stairs fix stays independently testable; it needs its own off-mesh-recovery pass, which is next.
+
+**Not MSVC-compiled or BAT'd yet.** BAT: auto-drive (`\`) down the shaft on the **left (stairs)** side for a couple of floors — expect it to now track *west along the detour* and take the player *down the stairs* (announcing "Stairs down to Floor N" as the floor changes) instead of pinning at the edge. Grep `[drive] transition COMPLETE`, and in the `[drive-vec]` at the stairs `trigRedir` should now read 0 with the steer pointing toward the waypoint, not north-east into the wall. If it still pins, the drive-vec shows the next wedge point exactly.
+
+## v0.18.3.319
+
+**#114 Cycle 1.6: segment-aim delivery for the prison-shaft stairs. Auto-drive now crosses the descent trigger line *within* its active segment instead of drifting south of it.**
+
+### What the .318 BAT showed
+
+The .318 rework fixed the right-side bottom crossings (2 of 3) and stopped the drive announcing "Arrived" short of the stairs, but the stairs *still never descended*. The trace was unambiguous: the A*/funnel routed the player across the stair line's **infinite extension** roughly 250 units **south** of the active segment — the player crossed at y ≈ −545, while the stair segment (`gpbig1a` line1, (−2141,−89) → (−2158,−305)) spans only y = −89 … −305. The engine fires the descent MAPJUMP only for a crossing *within* the segment, so a crossing that far south never triggered it. Aaron: "failed to cross the threshold to descend floors; I had to barely tap down-arrow to get there, right on the edge of the line."
+
+### The fix — steer at the segment, not the funnel heading
+
+When the drive target is a transition trigger line and the player is within `SEG_AIM_ENGAGE_DIST` (450 u) of the active segment, auto-drive now stops trusting the funnel heading and aims at the segment itself: it projects the player onto the line, clamps the foot to the **middle half** (t = 0.25 … 0.75) so it can't aim at an endpoint, and pushes the aim point `SEG_AIM_PUSH` (200 u) past that spot on the **far side** (perpendicular pointing away from the player) so the resulting heading carries the player straight *through* the segment body. This is applied at the final steer site — after waypoint and corridor steering — so it beats the funnel that mis-routed the .318 approach.
+
+Worked example from the .318 trace: player at (−2329,−545) → the segment foot clamps to t = 0.75 → aim (−2154,−251), inside the segment's y-range → pushed to (−1955,−267) on the east/far side. Steering north-east now crosses the line near y = −260 (within −89 … −305), so the descent fires in a single drive.
+
+### Scope and diagnostics
+
+Fires **only** for `s_driveTrigTarget` cross-line drives within 450 u — normal NPC/object/save-point drives and the long-range approach are untouched (the funnel still does all the cross-map routing; segment-aim owns only the last ~450 u into the line). It sets `vecTrigRedirected` for the `[drive-vec]` trail and logs `[drive] seg-aim ->`. The `field_nav_autodrive.inl` size was kept under the 80 KB gate (81797 B) by compressing historical comments; the dead wall-bias reference block and the `[SHAFT-DRYRUN]` catalog dry-run both remain for Cycle 2.
+
+**Not MSVC-compiled or BAT'd yet.** BAT: auto-drive (`\`) down the shaft on the **left (stairs)** side for a couple of floors — expect the drive to take the player *down the stairs in one go* (no stopping at the edge, no restart), announcing "Stairs down to Floor N" as the floor changes. Grep `[drive] seg-aim ->` (should fire on the stair approach) and `[drive] transition COMPLETE`. The right-side crossing should still behave as in .318. If the stairs still stop at the edge, the `[drive-vec]` + seg-aim trail shows whether segment-aim engaged and where the heading went — the fallback is option #2, an explicit reliable hand-off cue.
+
+## v0.18.3.318
+
+**#114 rework: auto-drive now steers *through* the prison-shaft stairs/crossings instead of stopping short of them. The Cycle 1 (.317) hand-off was the wrong layer.**
+
+### What the .317 BAT actually showed
+
+The full-log trace of one stairs descent: drive 1 announced **"Arrived" at (-2329,-545) — ~350 units *south* of the stair line** at (-2150,-197). That came from the plain `dist < arriveDist` check firing at the target *point*, so the drive set the player down near the stairs but not on the descent trigger — exactly "stops just before the threshold." The `.317` hand-off then fired on a later re-drive's `tri=0` and announced "Stairs down to Floor 5," but the player was stuck off the walkmesh at the edge, not descending (the `REFUSED — player_pos_known=0` for the next 7 seconds proves it). Only a *third* drive, once the player was finally on the stair triangle, fired the MAPJUMP. Tally: 6 hand-offs + 6 "position lost" + 21 restarts to descend 2 floors.
+
+### New model — a transition ends only when the floor/field actually changes
+
+For a transition target (`s_driveTrigTarget` — a trigger-line exit, the stairs, or a ring-crossing gateway):
+
+1. **Completion detection.** The drive captures `(fieldId, floor)` at start and, the instant either changes, ends with an accurate announcement ("Stairs down to Floor 5" / "Bottom crossing"). This runs before the dialog and position checks, so it fires even while the player is still off the walkmesh mid-animation.
+2. **Steer through the trigger.** Both "Arrived" exits are now gated to non-transition targets. A transition drive no longer stops at the edge — it keeps steering toward the point past the line until the transition fires, bounded by the existing drive/stuck timeouts so it can't loop.
+3. **Survive the off-walkmesh window.** Transition targets tolerate `tri=0` for ~8 s (was 0.5 s), so the drive stays alive through the whole descent/crossing instead of dying and forcing a restart.
+
+The `.317` 10-tick hand-off is removed. Everything is scoped to transition targets — normal drives (NPCs, objects, the save-point walk-onto) keep the old proximity arrival and short tolerance unchanged. The catalog floor-gating dry-run stays active (log-only).
+
+**BAT:** with auto-drive, descend the shaft on both sides — the drive should carry the player *through* the stairs/crossing in one go (no stopping short, no "position lost", no restart), announcing the target as the floor/field changes. Grep `[drive] transition COMPLETE`. If instead it says "Stuck. Distance remaining" at a threshold, the drive reached the edge but couldn't cross — the `[drive-vec]` trail in the log will show exactly where.
+
+## v0.18.3.317
+
+**D-District Prison shaft, Cycle 1 (from the 2026-08-02 playthrough): auto-drive now hands off cleanly at stairs/crossings instead of crying "Player position lost" (#114), plus a log-only dry-run to derive the catalog floor-gate (#95/#98/#115).**
+
+### #114 — auto-drive transition hand-off
+
+Auto-driving down the shaft, both the ring crossings (right side) and the stairs-down (left side) consistently ended with "Player position lost." The log shows why: the `tri=0` the drive treats as a fatal dropout is the **transition itself** — the engine takes the player off the walkmesh for the whole descent/crossing (seconds), and the `MAPJUMP` that completes it fires 2–5 s *after* the drive already gave up (the floor still changed 6→5→4). #111's fix only tolerates *one-frame* dropouts (30 ticks); a multi-second transition blows past it, and waiting longer is the wrong remedy anyway.
+
+Fix: when the drive target is a transition (`s_driveTrigTarget` — a trigger-line exit, the stairs, or a ring-crossing gateway) and `tri=0` persists past 10 ticks (a genuine one-frame dropout recovers in a single tick; a real transition sits there for seconds), the drive hands off cleanly — it announces the target's name ("Stairs down to Floor 5" / "Bottom crossing") and ends — instead of "Player position lost." The engine finishes the descent/crossing on its own and the floor announcement speaks the new floor. Tightly gated to non-chase F9 drives on transition targets, so normal drives, the Save Point walk-onto (#95, a JSM entity — not a trigger target), and genuine one-frame dropouts are all unchanged.
+
+### #95 / #98 / #115 — catalog floor-gating dry-run (log-only)
+
+The shaft field loads once and floors change without reloading it, so the catalog re-injects the field's static entities on every floor: the phantom Save Point (#95), the phantom "Object"s `l4`/`kabe` (#98), and the cell exit "…Prison 25" (#115) all appear on every floor regardless of what is really there. Deriving a floor-state gate is the exact catalog area that burned builds .286–.297, so — per the guidance in #95/#98 — this ships the dry-run *first*: `[SHAFT-DRYRUN]` dumps a window of candidate gating varblocks (around the floor byte) once per floor change. Correlated across floors with which floors actually have the save point / an unlocked cell, it pins the gating variable. Cycle 2 flips it to actually suppress and fixes the cell-exit lock/name.
+
+**BAT:** with auto-drive, descend a few shaft floors on both the stairs (left) and crossing (right) sides — expect no "Player position lost", the target name announced as it transitions, and the descent/crossing to complete. Open the catalog on each floor and note which floors truly have the save point and an unlocked cell. Grep `[drive] transition hand-off` and `[SHAFT-DRYRUN]`. If the stairs still stop at the edge and need a second drive, that is the #107 delivery piece flagged for a follow-up.
+
 ## v0.18.3.316
 
 **#110 SOLVED — the field/zone movement rotation is now read straight from the engine's own per-camera-zone offset, replacing the `.ca` camera derivation, the 90° cardinal quantizer, and the walk-to-calibrate for both manual navigation and auto-drive. Supersedes the local-only diagnostic arc v0.18.3.310–.315.**

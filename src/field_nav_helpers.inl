@@ -115,6 +115,45 @@ static int ReadShaftFloor()
     return v;
 }
 
+// v0.18.3.317 (#95/#98/#115): prison-shaft catalog floor-gating DRY-RUN, log-only.
+// The shaft field (gpbig1a/gpbig2a) loads once and the floor changes WITHOUT a
+// field reload, so RefreshCatalog re-injects the field's static entities on every
+// floor regardless of floor state: the Save Point (saveline0, #95), the phantom
+// Objects (l4/kabe, #98), and the cell-exit trigger line ("...Prison 25", #115).
+// The catalog dump already logs which entities are present each refresh, and the
+// STAIRS lines log the floor -- what's missing to derive a floor gate is the
+// per-floor VARBLOCK state. This dumps a window of candidate gating varblocks
+// once per distinct floor. Correlated across floors with Aaron's ground truth
+// (which floors actually have the save point / an unlocked cell), it pins the
+// gating variable for the Cycle-2 fix. Log-only, zero behaviour change. This
+// area burned .286-.297, so #95/#98 explicitly mandate a dry-run before acting.
+static int s_shaftDryRunLastFloor = -999;
+static unsigned ShaftVarByte(unsigned off) {   // SEH-guarded, no C++ objects (C2712)
+    unsigned v = 0xFFFFu;
+    __try { v = *(volatile uint8_t*)(uintptr_t)(SHAFT_VB_BASE + off); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { v = 0xFFFFu; }
+    return v;
+}
+static void ShaftCatalogDryRun() {
+    uint16_t fid = FF8Addresses::pCurrentFieldId ? *FF8Addresses::pCurrentFieldId : 0xFFFF;
+    if (!IsPrisonShaftFieldId(fid)) { s_shaftDryRunLastFloor = -999; return; }
+    int floorNow = ReadShaftFloor();
+    if (floorNow == s_shaftDryRunLastFloor) return;   // once per floor change (refresh is ~1/sec)
+    s_shaftDryRunLastFloor = floorNow;
+    Log::Field("FieldNavigation: [SHAFT-DRYRUN] floor=%d field=0x%04X vbBase=0x%08X floorByte@0x%04X "
+               "-- candidate gating varblocks follow; correlate across floors with which floors truly "
+               "have the save point / an unlocked cell [#95/#98/#115 v0.18.3.317]",
+               floorNow, fid, (unsigned)SHAFT_VB_BASE, (unsigned)SHAFT_VB_FLOOR);
+    for (unsigned b = 0x01A0; b <= 0x01DF; b += 16) {
+        Log::Field("FieldNavigation: [SHAFT-DRYRUN] vb[0x%04X]: %02X %02X %02X %02X %02X %02X %02X %02X "
+                   "%02X %02X %02X %02X %02X %02X %02X %02X", b,
+                   ShaftVarByte(b+0),ShaftVarByte(b+1),ShaftVarByte(b+2),ShaftVarByte(b+3),
+                   ShaftVarByte(b+4),ShaftVarByte(b+5),ShaftVarByte(b+6),ShaftVarByte(b+7),
+                   ShaftVarByte(b+8),ShaftVarByte(b+9),ShaftVarByte(b+10),ShaftVarByte(b+11),
+                   ShaftVarByte(b+12),ShaftVarByte(b+13),ShaftVarByte(b+14),ShaftVarByte(b+15));
+    }
+}
+
 // v0.18.3.315 (#110 SOLVED): the field/zone movement basis, straight from the
 // engine's OWN per-camera-zone movement-rotation offset. Static RE of
 // FF8_EN.exe proved field walk heading = input + [0x1CE4908] (byte, a 256-unit

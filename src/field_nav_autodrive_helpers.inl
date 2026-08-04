@@ -231,6 +231,27 @@ static void SetAnalogFromVector(float dx, float dy)
 static const int DRIVE_POS_LOST_TOLERANCE_TICKS = 30;
 static int s_drivePosLostTicks = 0;
 
+// v0.18.3.318 (#114): transition DELIVERY + completion detection (replaces the
+// .317 hand-off, which fired on the tri==0 window but was the wrong layer). The
+// .317 BAT showed the drive was ALREADY stopping ~350u SHORT of the descent
+// trigger -- a plain dist<arriveDist "Arrived" at the edge -- so the player never
+// reached the threshold and the hand-off just bolted a premature "Stairs down"
+// onto a drive that had not delivered (6 hand-offs + 6 "position lost" + 21
+// restarts to descend 2 floors). New model: for a TRANSITION target
+// (s_driveTrigTarget -- trigger-line exit / stairs / ring-crossing gateway) the
+// ONLY success is the floor or field ACTUALLY changing. The drive does NOT
+// "Arrive" by proximity (see UpdateAutoDrive: both Arrived exits are gated to
+// non-transition targets); it steers THROUGH the trigger until the transition
+// fires -- bounded by the existing driveMaxTicks / stuck timeouts so it can't
+// loop forever -- and survives the multi-second off-walkmesh window instead of
+// dying at 30 ticks and forcing a restart. Completion is detected by comparing
+// the live field id / shaft floor against the values captured at drive start.
+static const int DRIVE_TRANSITION_TOLERANCE_TICKS = 480;  // ~8s: covers the whole descent/crossing off-walkmesh window; the floor/field-change success below fires well before this on a real transition
+static uint16_t  s_driveTransStartFieldId = 0xFFFF;        // field id captured at transition-drive start
+static int       s_driveTransStartFloor   = -999;          // shaft floor captured at start (-1 off-shaft)
+static bool      s_driveTransCaptured     = false;         // start state captured for the current drive?
+static char      s_driveTransName[48]     = {0};           // target name, announced on completion
+
 // Read the raw fields GetEntityPos() rejects on, for the dropout diagnostic.
 // Deliberately its OWN function: MSVC C2712 forbids __try in a function that
 // needs C++ object unwinding, and UpdateAutoDrive() is large and has none
@@ -306,7 +327,7 @@ static void RecoveryRingPush(uint16_t tri)
 static int   s_drivePinnedCount = 0;
 static float s_drivePinnedPosX  = 0.0f;
 static float s_drivePinnedPosY  = 0.0f;
-static const float DRIVE_PIN_MOVE_EPS = 12.0f;   // moved less than this since last nudge == still pinned
+static const float DRIVE_PIN_MOVE_EPS = 45.0f;   // v0.18.3.320 (#114): 12->45. The .319 stairs BAT wedged with a ~38u E-W wiggle that kept resetting the pin count (moved>12) so the escape never escalated though dist was frozen at 663. 45 treats an in-place wiggle as pinned; a genuinely advancing player still covers far more per nudge.
 
 static void StopAutoDrive(const char* reason)
 {
@@ -343,6 +364,11 @@ static void StopAutoDrive(const char* reason)
 
     s_driveActive = false;
     s_drivePosLostTicks = 0;   // v0.18.3.306 (#111)
+    // v0.18.3.318 (#114): clear transition-completion capture for the next drive.
+    s_driveTransCaptured     = false;
+    s_driveTransStartFieldId = 0xFFFF;
+    s_driveTransStartFloor   = -999;
+    s_driveTransName[0]      = '\0';
     s_driveTrigTarget = false;
     s_driveTrigCrossStart = 0.0f;
     s_driveSkipTrigIdx = -1;

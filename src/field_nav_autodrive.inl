@@ -51,9 +51,42 @@ static void UpdateAutoDrive()
     } else {
         ei = catTarget.entityIdx;
         if (ei == s_playerEntityIdx) { StopAutoDrive("No target."); return; }
-        // v0.07.94: Valid targets: >=0 (runtime entity), <=-200 (trigger line), <=-300 (JSM-injected), <=-400 (INF gateway).
+        // Valid targets: >=0 entity, <=-200 trigline, <=-300 JSM, <=-400 INF-gw.
         if (ei < 0 && ei > -200) { StopAutoDrive("Target lost."); return; }
         if (ei >= MAX_ENTITIES)                              { StopAutoDrive("Target lost."); return; }
+    }
+
+    // v0.18.3.318 (#114): transition COMPLETION detection. For a transition target
+    // (trigger-line exit / stairs / ring-crossing gateway) the only clean success
+    // is the floor or field ACTUALLY changing. Capture the start state on the
+    // first tick, then each tick compare -- this fires the instant the
+    // descent/crossing completes, even while the player is still off the walkmesh
+    // during the animation (field id / shaft floor are separate globals that stay
+    // readable), so the drive ends with an accurate announcement instead of
+    // "Arrived" at the edge or a premature hand-off. Runs BEFORE the dialog and
+    // position gates so a scripted-cutscene descent can never hide it. Non-chase
+    // only (chase-drive is silent and has no catalog target).
+    if (!s_chaseDriveActive && s_driveTrigTarget) {
+        uint16_t curFid = FF8Addresses::pCurrentFieldId ? *FF8Addresses::pCurrentFieldId : 0xFFFF;
+        int curFloor = ReadShaftFloor();   // -1 when not on a prison-shaft field
+        if (!s_driveTransCaptured) {
+            if (curFid != 0xFFFF && curFid != 0) {   // wait for a valid field id before capturing
+                s_driveTransStartFieldId = curFid;
+                s_driveTransStartFloor   = curFloor;
+                const char* nm = (catTarget.name[0] != '\0') ? catTarget.name : "Through.";
+                snprintf(s_driveTransName, sizeof(s_driveTransName), "%s", nm);
+                s_driveTransCaptured = true;
+            }
+        } else if ((curFid != 0xFFFF && curFid != 0 && curFid != s_driveTransStartFieldId) ||
+                   (curFloor >= 1 && curFloor != s_driveTransStartFloor)) {
+            Log::Field("FieldNavigation: [drive] transition COMPLETE -- %s changed "
+                       "(field 0x%04X->0x%04X, floor %d->%d); '%s' reached [v0.18.3.318 #114]",
+                       (curFid != s_driveTransStartFieldId) ? "field" : "floor",
+                       (unsigned)s_driveTransStartFieldId, (unsigned)curFid,
+                       s_driveTransStartFloor, curFloor, s_driveTransName);
+            StopAutoDrive(s_driveTransName);
+            return;
+        }
     }
 
     // v05.37: Suspend key injection during dialog (scripted cutscenes lock movement).
@@ -83,15 +116,25 @@ static void UpdateAutoDrive()
                        "(ent%d, othersBase=%s, tri=%u; tri==0 means the engine has the player "
                        "temporarily off the walkmesh). Tolerance %d ticks. [v0.18.3.306 #111]",
                        s_playerEntityIdx, gotBase ? "ok" : "NULL", triId,
-                       DRIVE_POS_LOST_TOLERANCE_TICKS);
+                       (s_driveTrigTarget && !s_chaseDriveActive)
+                           ? DRIVE_TRANSITION_TOLERANCE_TICKS : DRIVE_POS_LOST_TOLERANCE_TICKS);
         }
-        if (s_drivePosLostTicks >= DRIVE_POS_LOST_TOLERANCE_TICKS) {
+        // v0.18.3.318 (#114): survive the transition's off-walkmesh window -- for a
+        // transition target the tri==0 run IS the descent/crossing (seconds long), and
+        // completion-detection (top of fn) ends the drive on the floor/field change.
+        int posLostTol = (s_driveTrigTarget && !s_chaseDriveActive)
+                         ? DRIVE_TRANSITION_TOLERANCE_TICKS
+                         : DRIVE_POS_LOST_TOLERANCE_TICKS;
+        if (s_drivePosLostTicks >= posLostTol) {
             StopAutoDrive("Player position lost.");
             return;
         }
-        // Same treatment as an open dialog: drop the held keys so the game does
-        // not see stuck input, and do not let the gap count as being stuck.
-        ReleaseAllDirections();
+        // v0.18.3.322 (#114): a TRANSITION target KEEPS the last heading held through the
+        // tri==0 window -- the .321 BAT parked the player one tap short of the descent
+        // because releasing the movement keys stopped his final push; completion-detection
+        // still ends it on the floor change. A non-transition dropout releases as before.
+        if (!(s_driveTrigTarget && !s_chaseDriveActive))
+            ReleaseAllDirections();
         s_driveStuckTicks = 0;
         return;
     }
@@ -194,6 +237,15 @@ static void UpdateAutoDrive()
     // them (point-distance plus per-line geometry is the proven path).
     bool gotCrossLine = false;
     float tlx1 = 0, tly1 = 0, tlx2 = 0, tly2 = 0;
+    // v0.18.3.319 (#114): segment-aim override for the final approach to a
+    // transition trigger line (see the compute block below and the apply site
+    // just before dx/dz). Fixes the .318 stairs failure where the funnel routed
+    // the player across the line SOUTH of its active segment so the descent
+    // never fired.
+    float segAimX = 0.0f, segAimY = 0.0f;
+    bool  useSegAim = false;
+    const float SEG_AIM_ENGAGE_DIST = 450.0f;  // take over the funnel within this range of the segment middle
+    const float SEG_AIM_PUSH        = 200.0f;  // aim this far past the segment (far side) so the crossing goes through
     if (s_driveTrigTarget) {
         if (s_driveCrossLineActive) {
             tlx1 = (float)s_driveCrossLineX1;
@@ -216,35 +268,36 @@ static void UpdateAutoDrive()
         float tdx = tlx2 - tlx1;
         float tdy = tly2 - tly1;
         float crossNow = tdx * (pz - tly1) - tdy * (px - tlx1);
+        // v0.18.3.319 (#114): within SEG_AIM_ENGAGE_DIST of the active segment,
+        // steer at its middle half (not the funnel heading, which routed the .318
+        // player SOUTH of the segment) and push SEG_AIM_PUSH past the far side so
+        // the crossing goes through. Applied at the steer site below.
+        {
+            float sl2 = tdx * tdx + tdy * tdy;
+            if (sl2 > 1.0f) {
+                float tp = ((px - tlx1) * tdx + (pz - tly1) * tdy) / sl2;
+                if (tp < 0.25f) tp = 0.25f; else if (tp > 0.75f) tp = 0.75f;
+                float ax = tlx1 + tp * tdx, ay = tly1 + tp * tdy;
+                float tX = ax - px, tY = ay - pz;
+                if (sqrtf(tX * tX + tY * tY) < SEG_AIM_ENGAGE_DIST) {
+                    float pX = -tdy, pY = tdx;
+                    float pl = sqrtf(pX * pX + pY * pY);
+                    if (pl > 0.001f) { pX /= pl; pY /= pl; }
+                    if (pX * (px - ax) + pY * (pz - ay) > 0.0f) { pX = -pX; pY = -pY; }
+                    segAimX = ax + pX * SEG_AIM_PUSH;
+                    segAimY = ay + pY * SEG_AIM_PUSH;
+                    useSegAim = true;
+                }
+            }
+        }
         // Player has crossed if the sign flipped from start.
-        //
-        // v0.18.3.304 (#107): ...AND the player must be ALONGSIDE the
-        // segment when it flips. This test was the INFINITE-LINE side test,
-        // the fifth site of that bug and the first one outside a catalog
-        // filter (v0.17.8.10 gateways, v0.18.3.268 interactions,
-        // v0.18.3.278 exits, #94 events -- all bounded, this one missed).
-        //
-        // Caught by the .303 BAT, and this is the direct answer to "driving
-        // to the stairs did not take me down the stairs": the drive
-        // announced "Arrived" while the player was ~960 units from the
-        // staircase and then released the keys, so he stopped in open floor
-        // having heard that he had got there. gpbig1a line1 runs
-        // (-2141,-89)->(-2158,-305): 217 units long and almost exactly
-        // parallel to the Y axis, so its infinite extension is a wall
-        // across the entire map at X = -2150. Walking to ANY point past
-        // that X flipped the sign. Player start (-2221,-1089) gave
-        // crossNow=-280; at (-2162,-1161), still nearly 1,000 units south
-        // of the line, crossNow=+13688 -> "Arrived".
-        //
-        // The bound: project the player onto the line and require the foot
-        // of that projection to lie within the segment, with a 15% margin
-        // at each end so a diagonal crossing right at an endpoint still
-        // counts. Failing this is the SAFE failure -- the drive simply
-        // keeps walking, and when the player really does cross, the engine
-        // fires the MAPJUMP and the field-transition handler stops the
-        // drive anyway. A false "Arrived" is unrecoverable for a blind
-        // player: it is a confident statement that the destination has been
-        // reached, and there is nothing to notice that it is wrong.
+        // v0.18.3.304 (#107): ...AND the player must be ALONGSIDE the segment
+        // when it flips. gpbig1a line1 (-2141,-89)->(-2158,-305) is nearly
+        // Y-parallel, so its infinite extension flips the sign for any point
+        // past X=-2150 -- the .303 BAT announced "Arrived" ~960u short of the
+        // stairs. Bound it: project the player onto the line and require the
+        // foot within the segment (15% end margin). Failing is the SAFE failure
+        // (keep walking); a false "Arrived" is unrecoverable for a blind player.
         bool sideFlipped = (s_driveTrigCrossStart != 0.0f &&
                             crossNow * s_driveTrigCrossStart < 0.0f);
         if (sideFlipped) {
@@ -255,19 +308,22 @@ static void UpdateAutoDrive()
             const float TRIG_CROSS_END_MARGIN = 0.15f;
             if (tParam >= -TRIG_CROSS_END_MARGIN &&
                 tParam <= 1.0f + TRIG_CROSS_END_MARGIN) {
-                StopAutoDrive("Arrived.");
-                return;
+                // v0.18.3.318 (#114): for a transition target, crossing the line is
+                // NOT the end -- the descent/crossing must actually fire. Keep
+                // steering through; the completion detection (floor/field change,
+                // top of UpdateAutoDrive) ends the drive with the real outcome.
+                if (!s_driveTrigTarget) {
+                    StopAutoDrive("Arrived.");
+                    return;
+                }
             }
             static int s_boundedRejectLogged = 0;
             if (s_boundedRejectLogged < 8) {
                 s_boundedRejectLogged++;
-                Log::Field("FieldNavigation: [drive] side flipped on the trigger line's "
-                           "INFINITE extension but player is not alongside the segment "
-                           "(t=%.2f, allowed %.2f..%.2f) -- NOT arrived, continuing. "
-                           "player=(%.0f,%.0f) line=(%.0f,%.0f)->(%.0f,%.0f) "
-                           "[v0.18.3.304 #107]",
-                           tParam, -TRIG_CROSS_END_MARGIN, 1.0f + TRIG_CROSS_END_MARGIN,
-                           px, pz, tlx1, tly1, tlx2, tly2);
+                Log::Field("FieldNavigation: [drive] side-flip on INF extension, "
+                           "not alongside segment (t=%.2f) -- NOT arrived. "
+                           "player=(%.0f,%.0f) line=(%.0f,%.0f)->(%.0f,%.0f) [#107]",
+                           tParam, px, pz, tlx1, tly1, tlx2, tly2);
             }
         }
         // Also offset the target 300 units past the line center
@@ -281,7 +337,12 @@ static void UpdateAutoDrive()
             dist = sqrtf(dx*dx + dz*dz);
         }
     }
-    if (dist < s_driveArriveDist) {
+    // v0.18.3.318 (#114): a transition target must NOT "Arrive" by mere proximity
+    // to the target point -- that is exactly what stopped the player ~350u short
+    // of the stairs threshold in the .317 BAT. Transition drives end only via the
+    // completion detection (floor/field change) at the top of UpdateAutoDrive; up
+    // to then they steer through the trigger (bounded by driveMaxTicks / stuck).
+    if (dist < s_driveArriveDist && !s_driveTrigTarget) {
         StopAutoDrive("Arrived.");
         return;
     }
@@ -485,16 +546,26 @@ static void UpdateAutoDrive()
         }
     }
 
+    // v0.18.3.321 (#114): seg-aim is the FINAL-approach push, so engage it ONLY on the
+    // last waypoint. The .320 dot-gate failed at the stairs (funnel + seg-aim both point
+    // north, dot>0) so seg-aim yanked the player EAST off the westward A* detour into the
+    // tri-6 pin -- but the .320 BAT proved the descent fires WEST at tri 3, mid-path.
+    if (useSegAim) {
+        bool onLastWp = (s_waypointCount == 0) || (s_waypointIdx >= s_waypointCount - 1);
+        if (onLastWp) {
+            steerX = segAimX; steerY = segAimY;
+            vecTrigRedirected = true;
+        } else {
+            useSegAim = false;  // mid-detour: follow the path (trigRedir stays 0)
+        }
+    }
     // Recompute dx/dz toward the steer target.
     dx = steerX - px;
     dz = steerY - pz;
 
-    // v06.17: Wall-avoidance steering bias.
-    // DISABLED in v06.20: Causes more harm than good. In narrow corridors
-    // (bg2f_1), the bias pushes the player OUT of the corridor. In classrooms,
-    // it interferes with short drives. The corridor-level steering + recovery
-    // system handles wall-stuck better without active avoidance.
-    // The code remains for potential re-enabling with better narrow-space logic.
+    // v06.17: Wall-avoidance steering bias. DISABLED in v06.20 (pushed players
+    // OUT of narrow corridors; corridor steering + recovery handles it better).
+    // Retained for potential re-enabling with better narrow-space logic.
     if (false && s_walkmesh.valid) {
         uint16_t nowTri2 = 0xFFFF;
         {
@@ -549,14 +620,10 @@ static void UpdateAutoDrive()
         }
     }
 
-    // v06.17: Trigger-line proximity check.
-    // Per-tick: if the current steering direction would carry the player across
-    // a non-target trigger line within the next ~200 units, redirect steering
-    // to be parallel to the trigger line instead of crossing it.
-    // Skip this check for trigger lines that the A* path legitimately crosses
-    // (the target trigger line, exempted via s_driveSkipTrigIdx).
-    // Also skip for NPC targets where the NPC is on the other side of a trigger
-    // line — A* already routed through it, so crossing is intentional.
+    // v06.17: Trigger-line proximity check. If the current heading would carry
+    // the player across a NON-target trigger line within ~200u, redirect steering
+    // parallel to it. Skips the target line (s_driveSkipTrigIdx) and NPC targets
+    // the A* path legitimately routes across.
     if (s_capturedLineCount > 0) {
         float steerLen = sqrtf(dx*dx + dz*dz);
         if (steerLen > 1.0f) {

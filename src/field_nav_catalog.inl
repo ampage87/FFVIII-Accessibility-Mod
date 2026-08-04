@@ -32,6 +32,11 @@ static void RefreshCatalog()
         if (!base) return;
         uint8_t lim = (entCount < MAX_ENTITIES) ? entCount : (uint8_t)MAX_ENTITIES;
 
+        // v0.18.3.317 (#95/#98/#115): prison-shaft catalog floor-gating dry-run
+        // (log-only; self-gates to shaft fields and fires once per floor change).
+        // Gathers the per-floor varblock state needed to derive the Cycle-2 gate.
+        ShaftCatalogDryRun();
+
         // Re-detect player.
         // v0.18.3.262 (#83 follow-up): the player controls the party LEADER, which
         // is formation[0] -- NOT necessarily Squall (setpc 0). The old setpc==0
