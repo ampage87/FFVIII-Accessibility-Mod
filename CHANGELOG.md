@@ -6,6 +6,12 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.19.6
+
+**Director-gate diagnostic (log-only): the REQ target is the opcode's INLINE PARAM, not the stack — which is why reqResolved=0.**
+
+*Exe RE of the field REQ handlers (`0x14`/`0x15`/`0x16` @ `0x51CD60`/`CED0`/`D060`) shows the target entity is the opcode's inline param (passed as arg2 -> `entityPtrTable[param]`); the two popped stack values are the method + priority. The scan has always read the target from its SIMULATED stack, which is exactly why `reqResolved=0` everywhere (the stack holds PSHM markers). This build adds a log-only `[REQ-TARGET]` line per REQ opcode: executing entity, the inline-param target + its SYM, and the stack values for contrast. BAT B-Garden hall (`bghall_1`, the directory you can reach) + a junk field: if `elelight`'s 12 REQs resolve (via `opcParam`) to the students/`aniki`/directory, the director over-promotion gate can read the director's REAL targets STATICALLY — promote only those instead of the field-wide dialog-OR-extDispatch sweep — with no runtime VM hook. Zero classification change; purely observational.*
+
 ## v0.19.5
 
 **Item-pickup DETECTION shipped (log-only) + exe-confirmed give-item mechanism. NPC→Item relabel shipped + proven offline (31 harness fixtures).**

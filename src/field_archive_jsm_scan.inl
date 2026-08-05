@@ -931,6 +931,25 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                 // v0.12.20: Also count REQ opcodes per entity (stack-independent).
                 if ((opcode == JSM_OP_REQ || opcode == JSM_OP_REQSW || opcode == JSM_OP_REQEW) && e < 128)
                     s_reqOpcodeCount[e]++;
+                // v0.19.6 [REQ-TARGET] diagnostic (director-gate): exe RE of the REQ handlers
+                // (0x14/0x15/0x16 @ 0x51CD60/CED0/D060) shows the TARGET entity is the opcode's
+                // INLINE PARAM (arg2 -> entityPtrTable[param]), NOT a stack value -- which is
+                // exactly why reqResolved=0 (the scan reads the simulated stack, which holds
+                // PSHM markers). Log the inline-param target + its SYM so a bghall BAT confirms
+                // whether elelight's REQs point at the real interactive entities (seito*/aniki/
+                // directory). If so, the director gate reads targets STATICALLY from opcParam
+                // and no runtime VM hook is needed. Log-only; zero classification change.
+                if (opcode == JSM_OP_REQ || opcode == JSM_OP_REQSW || opcode == JSM_OP_REQEW) {
+                    int tgtIdx = opcParam;
+                    const char* tgtName = "?";
+                    if (tgtIdx >= 0 && (tgtIdx - countDoors) >= 0 && (tgtIdx - countDoors) < symCount)
+                        tgtName = symNames[tgtIdx - countDoors];
+                    int st1 = (pushCount >= 1) ? pushStack[pushCount - 1] : -999;
+                    int st2 = (pushCount >= 2) ? pushStack[pushCount - 2] : -999;
+                    Log::Field("FieldArchive: [REQ-TARGET] ent%d '%s' m=%d opcParam=%d -> "
+                               "target ent%d '%s' | stackTop=%d stack2=%d pushCount=%d",
+                               e, info.symName, m, opcParam, tgtIdx, tgtName, st1, st2, pushCount);
+                }
                 // REQ pops 3 values: entity_id, method_id, priority.
                 // We record the target so we can check if it contains MAPJUMP.
                 if ((opcode == JSM_OP_REQ || opcode == JSM_OP_REQSW || opcode == JSM_OP_REQEW) &&
