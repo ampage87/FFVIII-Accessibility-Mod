@@ -1,10 +1,15 @@
-// world_map_catalog.inl - Location catalog + reachability + vehicle tracking
+// world_catalog.inl - Location catalog + reachability + vehicle tracking
 //
 // PART OF world_map.cpp -- TEXTUAL INCLUDE. Do NOT compile standalone.
 //
+// v0.19.x ISOLATION: renamed VERBATIM from world_map_catalog.inl (only this
+// header comment changed). The world catalog was already one self-contained
+// file, so isolation is a pure rename -- behavior-identical by construction,
+// proven byte-for-byte over the world_harness / run_diff_world fixtures.
 // Holds the world-map destination catalog (s_locations[]) plus all the
 // functions that derive from it: BFS reachability filter, distance-sorted
-// catalog builder, vehicle-state tracker.
+// catalog builder, vehicle-state tracker. Its only external deps remain
+// LocationEntry + MAX_LOCATIONS (declared in world_map_state.inl).
 //
 // LOCATION_COUNT is defined here as the size of s_locations[]; state.inl
 // has already declared MAX_LOCATIONS as a generous upper bound on this.

@@ -288,6 +288,16 @@ struct JSMEntityInfo {
     // is feeding some later branch, not deciding whether the entity exists.
     // Only `stateGuardConditional` entities may ever be suppressed.
     bool           stateGuardConditional;
+    // v0.19.5: True if this is an item/collectible PICKUP -- a positioned,
+    // model-bearing, NO-dialog entity whose script grants an item (a literal
+    // ADDITEM 0x125 push -- exe-confirmed give-item) or writes its own savemap
+    // "collected" flag in a non-init (interaction) method, matching the self-
+    // gating collectible pattern (init reads the flag -> self-hide once
+    // collected; interaction writes it). Weapons Monthly (saveline0, var 450 +
+    // ADDITEM) and Timber Maniacs (Urakata, var 304) both match; silent NPCs
+    // have empty interaction methods. Set by the classifier; the catalog uses it
+    // to relabel the entity "Item N" instead of "NPC N".
+    bool           isItemPickup;
 };
 
 const char* JSMEntityTypeName(JSMEntityType t);
@@ -386,6 +396,11 @@ bool DumpTrainCodeScripts(const char* fieldName);
 // proximity check + the "spotted" trigger (MAPJUMP/fail-flag) can be read
 // statically. Log-only -> ff8_field.log [SCRIPT-DUMP].
 bool DumpGuardScripts(const char* fieldName);
+
+// v0.19.x [ITEMDUMP] (#item-pickups): targeted log-only opcode dump for the
+// item-pickup investigation -- dumps hon/suit + Other entities via
+// DumpEntityScript, once per field-load. See field_archive_jsm_dump.inl.
+bool DumpItemPickupScripts(const char* fieldName);
 
 // v0.17.7.2: Look up init-method POPM_W writes to a specific varblock address.
 // After ScanJSMScripts() has run, this exposes the static init-script writes

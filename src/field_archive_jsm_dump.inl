@@ -158,6 +158,61 @@ bool DumpEntityScript(const char* fieldName, int jsmEntityIndex)
     return true;
 }
 
+// v0.19.x [ITEMDUMP] (#item-pickups): targeted, log-only opcode dump to confirm
+// how field item pickups (e.g. the B-Garden dorm Weapons Monthly on bookshelf
+// 'hon') are actually given. The scanner never resolves ADDITEM because the real
+// extended-opcode index reaches 0x1C at RUNTIME (empty static stack -- see the
+// "0x1C EMPTY STACK" log). This reuses DumpEntityScript's full decoded
+// [SCRIPT-DUMP] stream so ONE dorm BAT shows the exact opcode sequence (whether
+// ADDITEM 0x125 appears as a literal push -> a sawLit-style fix works, or a
+// different give-item opcode is used). Fires ONCE per field-load; dumps entities
+// whose SYM starts with 'hon'/'suit', else every 'Other'-category entity (where
+// pickups/Directors/Interactive Objects live). Cheap: a handful of entities.
+bool DumpItemPickupScripts(const char* fieldName)
+{
+    if (!s_initialized) return false;
+    static char s_lastItemDumpField[64] = {0};
+    if (strncmp(s_lastItemDumpField, fieldName, 63) == 0) return false;   // once per field-load
+    strncpy(s_lastItemDumpField, fieldName, 63); s_lastItemDumpField[63] = 0;
+
+    std::vector<uint8_t> jsmData;
+    if (!ExtractInnerFile(fieldName, ".jsm", jsmData)) return false;
+    if (jsmData.size() < 8) return false;
+
+    int countDoors = jsmData[0];
+    int countLines = jsmData[1];
+    int countBg    = jsmData[2];
+    uint16_t posFirst = *(const uint16_t*)(jsmData.data() + 4);
+    int totalEntities = ((int)posFirst - 8) / 2;
+    int firstOther = countDoors + countLines + countBg;
+
+    char symNames[128][32] = {};
+    int symCount = 0;
+    LoadSYMNames(fieldName, symNames, 128, symCount);
+
+    Log::Field("FieldArchive: [ITEMDUMP] === '%s': %d entities (D=%d L=%d B=%d firstOther=%d), "
+               "hunting item pickups ===",
+               fieldName, totalEntities, countDoors, countLines, countBg, firstOther);
+
+    // v0.19.4: dump EVERY "Other" (model-bearing) entity unconditionally. The old
+    // 'hon'/'suit' name-gate matched the dorm's director 'suit' and then skipped the
+    // fallback, so the ACTUAL magazine pickup ('zell', a model NPC) was never dumped --
+    // which sent us tracing the wrong entity. Others are where pickups, NPCs, Directors,
+    // and Interactive Objects all live; in a room like the dorm/hotel that's a handful.
+    Log::Field("FieldArchive: [ITEMDUMP] dumping all %d 'Other' entities (firstOther=%d)",
+               totalEntities - firstOther, firstOther);
+    int matched = 0;
+    for (int e = firstOther; e < totalEntities; e++) {
+        int symIdx = e - countDoors;
+        const char* nm = (symIdx >= 0 && symIdx < symCount) ? symNames[symIdx] : "?";
+        Log::Field("FieldArchive: [ITEMDUMP] -> Other ent%d '%s'", e, nm);
+        DumpEntityScript(fieldName, e);
+        matched++;
+    }
+    Log::Field("FieldArchive: [ITEMDUMP] === '%s' complete: %d dumped ===", fieldName, matched);
+    return matched > 0;
+}
+
 // v0.18.3.2: Train code-apparatus script dump (#56). Dumps the JSM opcode
 // stream of the Timber-train code entities so the uncoupling code's storage
 // can be found statically: the random-code generation, the POPM_W stores

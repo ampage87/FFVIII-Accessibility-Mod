@@ -6,6 +6,78 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.19.5
+
+**Item-pickup DETECTION shipped (log-only) + exe-confirmed give-item mechanism. NPC→Item relabel shipped + proven offline (31 harness fixtures).**
+
+*The exe settled the give-item question: field opcode `0x125` IS `ADDITEM` (pops item id + count, calls inventory-add `0x47ED00`), but `0xF0` is a movement/positioning opcode, NOT a give — so the hotel Timber Maniacs grants nothing to inventory; it only writes a savemap "read" flag. Both known pickups share ONE structural signature: a positioned, model-bearing, NO-dialog entity whose init reads a savemap flag and self-hides once collected, and whose non-init (interaction) method WRITES that flag (Weapons Monthly = `saveline0` var 450 + `ADDITEM`; Timber Maniacs = `Urakata` var 304, no `ADDITEM`). This build adds the detection to the `[MODELSIG]` diagnostic (new fields: nonInitWr, additemLit, pickup) — log-only, zero classification change — so a BAT confirms it fires exactly on the pickups and not on silent actors. The verbose investigation dumps ([ITEMDUMP] per-entity opcodes, [ITEMGATE-VARS] var-bank) are retired -- only the compact [MODELSIG] line stays active. The catalog LABEL change (surface these as "Item N" not "NPC N") is now in: the pickup surfaces via the runtime classifier (model≥10, no interaction → NPC), where the JSM pickup-signal needs a triangle/position link back to the JSM entity (the runtime SYM is shifted). That edit sits in the v0.19.0-sensitive dedup path, proven by the offline catalog-harness: 31 fixtures pass (30 unchanged + a new item_pickup lock that verifies a triangle-matched model NPC becomes "Item 1" while a non-matching control stays "NPC").*
+
+## v0.19.4
+
+**Item-pickup discriminator — LOCAL DIAGNOSTIC (log-only; do NOT push until the dump is analyzed).**
+
+*Supersedes the v0.19.3 diagnostic. The v0.19.3 note credited the dorm book `hon` with giving the magazine, but that was the wrong entity — the real pickup is a model NPC (`zell` in Squall's dorm, `Zell2` for Balamb Hotel's Timber Maniacs), which is why it surfaces as "NPC N". This build changes NO classification: (1) it reverts the un-BAT'd FIX-2 so TALKRADIUS stays at `0x056` for exact parity with the last BAT; (2) it re-enables the full `[ITEMDUMP]` opcode dump but pointed at ALL model-bearing "Other" entities (the old `hon`/`suit` name-gate skipped `zell`); and (3) it adds a compact `[MODELSIG]` one-line-per-model-entity signal dump (talkon/talkrad/dialog/extdisp/additem/hide/setline/req + final type). One dorm/hotel field-load reveals the pickup's true interaction opcodes, from which v0.19.5 designs the pickup-vs-real-NPC-vs-silent-NPC discriminator on evidence. `[ITEMGATE-VARS]` is retired for now — collected-behavior is already confirmed empirically (dorm + hotel).*
+
+## v0.19.3
+
+**Catalog consolidation + Phase B fixes + item-pickup investigation (diagnostic build).**
+
+*v0.19.3 iterates the item-pickup diagnostic: the verbose `[ITEMDUMP]` opcode dump is retired (it already revealed that the dorm book `hon` gives the magazine via a runtime-dispatched REQ hand-off, unresolvable statically) and replaced with a compact `[ITEMGATE-VARS]` var-bank snapshot (`0x01CFE9B8` +0x000..0x7FF). Diffing two dorm loads (magazine uncollected vs collected) reveals the persistent "collected" flag byte, which the catalog will gate item pickups on so a collected magazine drops from the list. All catalog consolidation + Phase B work below is unchanged.*
+
+The 8-file field catalog assembly is consolidated into one `field_catalog.inl` of real functions; `world_map_catalog.inl` -> `world_catalog.inl`. Behavior-identical to the old assembly, proven byte-identical offline across 28 field + 14 world fixtures, and committed as a CI regression guard (`tests/catalog_harness.cpp` + `catalog_golden.txt` + the `catalog-harness` job). `field_catalog.inl` is exempt from the 80 KB source-size gate in both `push_to_github.ps1` and `safety-checks.yml`. The 8 old catalog files are retired to `_to_delete/` (gitignored).
+
+Phase B (additive/inert, offline-proven): LADDER now surfaces as a navigable "Ladder" catalog entry (previously detected but never catalogued); FIX-4 adds ladder opcodes 0x27/0x28; FIX-1 corrects the SETLINE static-scan opcode 0x29 -> 0x39 (catalog-inert).
+
+Item/magazine pickups (IN PROGRESS -- diagnostic only): `ADDITEM` (0x125) that gives a Weapons Monthly is extended-opcode dispatched via 0x1C with a RUNTIME-supplied index, so the static scan reaches 0x1C with an empty stack and never resolves it -- which is why item pickups were never catalogued. This build adds a log-only `[ITEMDUMP]` diagnostic that dumps the dorm bookshelf (`hon`) opcode stream to find the real give-item path before wiring the surfacing. Timber Maniacs use a separate (non-inventory) system, handled separately.
+
+HELD for a runtime BAT: director junk-object gate (REQ targets + dialog are runtime-dispatched -- the v0.19.0 regression area) and TALKRADIUS 0x056 -> 0x62 (two-sided).
+
+DIAGNOSTIC BUILD -- not the finished item feature. BAT needs a fresh rebuild/deploy, then load the dorm save, grab the Weapons Monthly + leave/re-enter; grep [ITEMDUMP] / [SCRIPT-DUMP].
+
+## v0.19.1
+
+**Walk back the v0.19.0 object-drop — it was the wrong layer. The log-loud design caught it immediately: it would have removed a real object (the Balamb Garden directory) alongside the junk. Nothing is dropped now; the observation logging stays so we can fix it correctly.**
+
+### What the bghall_1 BAT showed
+
+Aaron checked B-Garden Hall, where there's a real, interactive **directory** used to fast-travel between Garden areas — and it wasn't in the catalog. The log explains why the v0.19.0 gate was misconceived. It's the **DIRECTOR pattern**: an invisible "director" entity (`elelight` in bghall_1, with 12 REQ opcodes and **17 dialog targets**) supplies the interaction for the entities it promotes to Interactive Object — the students (`seito4`/`seito7`/`seito15`), `aniki`, `l5`. Because the interaction lives on the *director*, each of those genuinely-interactive objects has `talk=0`, `setline=0`, `dialog=0` on **itself** — so my v0.19.0 gate, which judged each object by its own flags, wrongly dropped them.
+
+The prison junk (`l4`/`kabe`/`dic`/lights/music) is *also* director-promoted, but by directors that dispatch **non-dialog** REQs. So the real discriminator isn't the object's own flags — it's whether the director gives the object a real **dialog**. That decision belongs in the director-promotion logic (`field_archive_jsm_director.inl`), not in the catalog injection.
+
+### This build
+
+The injection gate is now **observe-only** — it drops nothing (the v0.19.0 over-drop is reverted, no regression), but it still logs `[refresh] JSM object <sym> interact-obs: talk=.. setline=.. dlgReq=..` for every Interactive Object, so the flags across fields can drive the correct fix. Separately, the real Garden directory (`dic`) isn't a promoted object at all — it has its own SETLINE at a position — so it needs its own recognition to be catalogued (it was never shown, even before v0.19.0).
+
+The save/cell diagnostic (widened `SHAFT-DRYRUN` including `0x0700–0x071F`) stays active.
+
+**Not MSVC-compiled or BAT'd yet.** BAT:
+
+1. Confirm the catalog is back to normal everywhere — nothing you'd navigate to should be missing (the v0.19.0 drop is undone).
+2. Still useful for the next builds: descend the prison shaft a few floors, try the cell exits (note which floors are open vs locked), confirm the save point is only on floor 6, and open the catalog on a couple of fields. Grep `[SHAFT-DRYRUN]` and `[refresh] JSM object` — that data drives both the save/cell gate and the director-aware object fix.
+
+## v0.19.0
+
+**Catalog cleanup, build 1 — the safe, log-loud correctness pass. Drops the phantom "Objects" and "Directory" everywhere, and gathers the save/cell signals for build 2. No gating applied yet.**
+
+The auto-drive shaft work is done and pushed (v0.18.3.322: full descent, stairs and both ring crossings, all transitions clean). This begins the catalog cleanup from the agreed plan.
+
+### 1. Drop non-interactive "Objects" (#97/#98) — general, all fields
+
+The scanner labels an entity "Interactive Object" from extended dispatch alone, and the DIRECTOR promoter forces `Unknown → Interactive Object`, so controllers and scenery with **no player interaction** leak into the catalog: walls (`kabe`), REQ dispatchers (`l4`), lights (`lig2`/`lig3`), music (`musikun`), and a non-readable board (`dic`). Every one of them has no TALKON, no SETLINE, and `dialog=0` — confirmed in the .322 descent log. A blind player hears them as navigable targets that do nothing.
+
+The fix, at the JSM injection point in `field_nav_catalog.inl`, keeps an `ENT_OBJECT` only if the player can actually interact with it: `hasTalkSetup` (TALKON/TALKRADIUS), `hasSetline` (a SETLINE interaction zone), or `isSaveLine`. This is general — it cleans junk out of every field, not just the shaft. It's **log-loud**: every `ENT_OBJECT` logs its decision (`interact-gate: talk=.. setline=.. ... -> KEEP/DROP`) so the BAT can confirm nothing real was dropped before we trust the rule.
+
+### 2. Save/cell signal diagnostic (#95/#115) — log-only
+
+The `0x01A0–0x01DF` varblock window is byte-identical across floors except the floor counter, so the save/cell state isn't there. The dry-run now also dumps `0x0700–0x071F` — the save point's SET3 references varblock `0x70D` for its Z coordinate — to hunt the "save present on floor 6" discriminator. The cell exit is a static Map Exit whose trigger line is always on; since locked cells genuinely can't be entered, the lock must be a story varblock, so we correlate the widened dump against which floors have open vs locked cells.
+
+**No gating is applied this build** — the phantom Save Point and cell exit still appear. That's build 2, once these signals are confirmed.
+
+**Not MSVC-compiled or BAT'd yet.** BAT:
+
+1. Open the catalog (`-`/`=`) on a normal field or two **and** in the prison shaft — the "Object" and "Directory" entries should be **gone**. Grep `[refresh] JSM object` and check every `DROP` is genuinely non-interactive and every real object is `KEEP`. Tell me if anything you'd expect to navigate to has disappeared.
+2. In the shaft, descend a few floors and try the cell exits: note which floors' cells are **open** (auto-driving to "Exit to Prison 25" transitions you) vs **locked** (nothing happens), and confirm the save point is only on floor 6. Grep `[SHAFT-DRYRUN]` so I can correlate the widened varblock dump.
+
 ## v0.18.3.322
 
 **#114 Cycle 1.9: "very close" — the .321 seg-aim fix worked and the drive now reaches the descent edge on its own. It was parking one push short; this makes it finish the push.**

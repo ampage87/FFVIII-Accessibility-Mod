@@ -1,0 +1,151 @@
+# catalog_harness logic-integrity dump  (fixtures=31)
+
+### FIXTURE empty_field
+count=0 nonplayer=0 player=-1 selected=0
+
+### FIXTURE players_and_npcs
+count=4 nonplayer=4 player=0 selected=0
+  [0] idx=1 type=NPC model=15 tri=11 gw=-1 name="NPC"
+  [1] idx=2 type=NPC model=12 tri=12 gw=-1 name="NPC"
+  [2] idx=3 type=NPC model=20 tri=13 gw=-1 name="NPC"
+  [3] idx=4 type=NPC model=8 tri=14 gw=-1 name="NPC"
+
+### FIXTURE leader_not_squall
+count=2 nonplayer=2 player=1 selected=0
+  [0] idx=0 type=NPC model=0 tri=10 gw=-1 name="Squall"
+  [1] idx=2 type=NPC model=15 tri=12 gw=-1 name="NPC"
+
+### FIXTURE assembly_and_partyfilter
+count=3 nonplayer=3 player=0 selected=0
+  [0] idx=1 type=NPC model=2 tri=11 gw=-1 name="Irvine"
+  [1] idx=2 type=NPC model=4 tri=12 gw=-1 name="Rinoa"
+  [2] idx=3 type=NPC model=15 tri=13 gw=-1 name="NPC"
+
+### FIXTURE walkmesh_exclusion
+count=2 nonplayer=2 player=0 selected=0
+  [0] idx=2 type=NPC model=20 tri=12 gw=-1 name="NPC"
+  [1] idx=3 type=NPC model=20 tri=13 gw=-1 name="NPC"
+
+### FIXTURE hidden_and_pushonly
+count=2 nonplayer=2 player=0 selected=0
+  [0] idx=3 type=NPC model=15 tri=13 gw=-1 name="NPC"
+  [1] idx=4 type=Draw Point model=-1 tri=14 gw=-1 name="Draw Point"
+
+### FIXTURE naming_paths
+count=5 nonplayer=5 player=0 selected=0
+  [0] idx=1 type=Card Game model=15 tri=11 gw=-1 name="Card Player"
+  [1] idx=2 type=Draw Point model=15 tri=12 gw=-1 name="Draw Point"
+  [2] idx=3 type=Save Point model=24 tri=13 gw=-1 name="Save Point"
+  [3] idx=4 type=Save Point model=15 tri=14 gw=-1 name="Save Point"
+  [4] idx=5 type=Save Point model=15 tri=15 gw=-1 name="Save Point"
+
+### FIXTURE trigline_exits
+count=3 nonplayer=3 player=0 selected=0
+  [0] idx=-200 type=Exit model=-1 tri=0 gw=-1 name="Exit to testbl14"
+  [1] idx=-201 type=Exit model=-1 tri=0 gw=-1 name="Exit to World Map"
+  [2] idx=-202 type=Exit model=-1 tri=0 gw=-1 name="Exit to B-Garden - Headmaster's Office 2"
+
+### FIXTURE trigline_event
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=-201 type=Object model=-1 tri=0 gw=-1 name="Event"
+
+### FIXTURE trigline_interaction
+count=2 nonplayer=2 player=0 selected=0
+  [0] idx=-200 type=Interaction model=-1 tri=0 gw=-1 name="Interaction 1"
+  [1] idx=-201 type=Interaction model=-1 tri=0 gw=-1 name="Interaction 2"
+
+### FIXTURE trigline_solo_statue
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=-200 type=Interaction model=-1 tri=0 gw=-1 name="Statue"
+
+### FIXTURE jsm_specials
+count=5 nonplayer=5 player=0 selected=0
+  [0] idx=-300 type=Save Point model=-1 tri=14 gw=-1 name="Save Point"
+  [1] idx=-301 type=Draw Point model=-1 tri=14 gw=-1 name="Draw Point"
+  [2] idx=-302 type=Shop model=-1 tri=14 gw=-1 name="Shop"
+  [3] idx=-303 type=Card Game model=-1 tri=14 gw=-1 name="Card Game"
+  [4] idx=-304 type=Object model=-1 tri=14 gw=-1 name="Directory"
+
+### FIXTURE jsm_drawpoint_consolidation
+count=2 nonplayer=2 player=0 selected=0
+  [0] idx=1 type=NPC model=15 tri=11 gw=-1 name="NPC"
+  [1] idx=-300 type=Draw Point model=-1 tri=14 gw=-1 name="Draw Point"
+
+### FIXTURE mapexits
+count=2 nonplayer=2 player=0 selected=0
+  [0] idx=-300 type=Exit model=-1 tri=14 gw=-1 name="Exit to Balamb Harbor 1"
+  [1] idx=-400 type=Exit model=-1 tri=0 gw=0 name="Exit"
+
+### FIXTURE gateways_merge
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=-400 type=Exit model=-1 tri=0 gw=0 name="Exit to Deep Sea Research Center - Levels 1"
+
+### FIXTURE gateways_ring_split
+count=2 nonplayer=2 player=0 selected=0
+  [0] idx=-400 type=Exit model=-1 tri=0 gw=0 name="Top crossing"
+  [1] idx=-401 type=Exit model=-1 tri=0 gw=1 name="Bottom crossing"
+
+### FIXTURE dedupe_object_line
+count=2 nonplayer=2 player=0 selected=0
+  [0] idx=-300 type=Object model=-1 tri=14 gw=-1 name="Object"
+  [1] idx=-301 type=Object model=-1 tri=14 gw=-1 name="Directory"
+
+### FIXTURE dedupe_entity_special
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=-200 type=Save Point model=-1 tri=0 gw=-1 name="Save Point"
+
+### FIXTURE sentinel_overlap
+count=2 nonplayer=2 player=0 selected=0
+  [0] idx=-400 type=Object model=-1 tri=14 gw=-1 name="Object"
+  [1] idx=-400 type=Exit model=-1 tri=0 gw=0 name="Exit to bvboat_1"
+
+### FIXTURE prison_stairs
+count=2 nonplayer=2 player=0 selected=0
+  [0] idx=-200 type=Exit model=-1 tri=0 gw=-1 name="Stairs down to Floor 5"
+  [1] idx=-201 type=Exit model=-1 tri=0 gw=-1 name="Stairs up to Floor 7"
+
+### FIXTURE state_exclusion
+count=2 nonplayer=2 player=0 selected=0
+  [0] idx=-301 type=Object model=-1 tri=14 gw=-1 name="Object"
+  [1] idx=-302 type=Object model=-1 tri=14 gw=-1 name="Gate 3"
+
+### FIXTURE lateres_centroid
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=-300 type=Object model=-1 tri=1 gw=-1 name="Gate 1"
+
+### FIXTURE lateres_bg
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=-300 type=Interaction model=-1 tri=0 gw=-1 name="Interaction 1"
+
+### FIXTURE crossing_filter
+count=0 nonplayer=0 player=0 selected=0
+
+### FIXTURE rebuild_retain
+count=2 nonplayer=2 player=0 selected=1
+  [0] idx=1 type=NPC model=15 tri=11 gw=-1 name="NPC"
+  [1] idx=2 type=NPC model=15 tri=12 gw=-1 name="NPC"
+
+### FIXTURE screen_filter
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=-200 type=Exit model=-1 tri=0 gw=-1 name="Exit"
+
+### FIXTURE jsm_controller_skip
+count=0 nonplayer=0 player=0 selected=0
+
+### FIXTURE drawpoint_nopos
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=1 type=Draw Point model=15 tri=11 gw=-1 name="Draw Point"
+
+### FIXTURE ladder_nav
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=-300 type=Object model=-1 tri=14 gw=-1 name="Ladder"
+
+### FIXTURE ladder_unnamed
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=-300 type=Object model=-1 tri=14 gw=-1 name="Ladder"
+
+### FIXTURE item_pickup
+count=2 nonplayer=2 player=0 selected=0
+  [0] idx=1 type=Object model=10 tri=12 gw=-1 name="Item 1"
+  [1] idx=2 type=NPC model=20 tri=13 gw=-1 name="NPC"
+

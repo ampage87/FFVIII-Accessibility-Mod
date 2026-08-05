@@ -42,6 +42,51 @@ static bool EntityIsDebugLeftover(int e, const char* sym)
     return false;
 }
 
+// v0.19.x [ADDITEM-DRYRUN] SEH-guarded single-byte varblock read. Isolated into
+// its own C-object-free function (like ShaftVarByte) so __try/__except never sits
+// inside ScanJSMScripts, which holds std::vector/std::string (MSVC C2712). Reads
+// EXIT_VARBLOCK_BASE + addr -- the same field-variable base the catalog's
+// state-exclusion pass reads for hasStateGuard entities.
+static unsigned AdditemVarByte(unsigned addr) {
+    unsigned v = 0xFFFFu;
+    __try { v = *(volatile uint8_t*)(uintptr_t)(0x01CFE9B8u + addr); }   // 0x01CFE9B8 = EXIT_VARBLOCK_BASE
+    __except (EXCEPTION_EXECUTE_HANDLER) { v = 0xFFFFu; }
+    return v;
+}
+
+// v0.19.x [ITEMGATE-VARS] SEH-safe bulk read of the persistent field/game var bank
+// at EXIT_VARBLOCK_BASE (0x01CFE9B8). No C++ objects in the __try body (MSVC C2712-safe).
+static bool ReadVarBank(uint8_t* out, int len) {
+    __try {
+        const volatile uint8_t* p = (const volatile uint8_t*)(uintptr_t)0x01CFE9B8u;
+        for (int i = 0; i < len; i++) out[i] = p[i];
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// v0.19.x [ITEMGATE-VARS] log-only: snapshot the var bank once per field-load in a
+// compact, diffable hex format. Diffing two dorm loads (magazine uncollected vs
+// collected) reveals the "collected" flag byte, which the catalog will then gate
+// item pickups on. Log-only; changes nothing in the catalog.
+static void DumpItemGateVars(const char* fieldName) {
+    static char s_lastGateField[64] = {0};
+    if (strncmp(s_lastGateField, fieldName, 63) == 0) return;   // once per field-load
+    strncpy(s_lastGateField, fieldName, 63); s_lastGateField[63] = 0;
+    static uint8_t vb[0x800];
+    if (!ReadVarBank(vb, 0x800)) {
+        Log::Field("FieldArchive: [ITEMGATE-VARS] '%s' READ FAULT", fieldName);
+        return;
+    }
+    Log::Field("FieldArchive: [ITEMGATE-VARS] === '%s' varbank 0x01CFE9B8 +0x000..0x7FF (32 bytes/row) ===", fieldName);
+    for (int row = 0; row < 0x800; row += 32) {
+        char line[80]; int lp = 0;
+        for (int c = 0; c < 32; c++) lp += snprintf(line + lp, sizeof(line) - lp, "%02X", vb[row + c]);
+        Log::Field("FieldArchive: [ITEMGATE-VARS] +%04X %s", row, line);
+    }
+}
+
+bool DumpItemPickupScripts(const char* fieldName);  // v0.19.x [ITEMDUMP] fwd decl (defined in dump.inl)
+
 bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEntities, int& outCount)
 {
     outCount = 0;
@@ -251,6 +296,9 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         bool foundSetmodelInit = false;  // v0.12.20: SETMODEL specifically in method 0 (init)
         bool foundTalkon       = false;
         bool foundTalkradius   = false;  // v0.17.7.1: TALKRADIUS opcode in this entity's scripts
+        bool foundHide         = false;  // v0.19.4 diag: entity's own script HIDEs itself (0x061) -- a pickup self-hides on collect; a real/silent NPC does not. Log-only, reported in [MODELSIG].
+        bool foundNonInitVarWrite = false;  // v0.19.5: POPM (savemap write) in a NON-init method -- the pickup's "collected" flag write (Urakata var304, saveline0 var450, both method[2]).
+        bool sawLitAdditem     = false;  // v0.19.5: literal push of ADDITEM (0x125) -- inventory item-pickup grant (exe-confirmed: 0x125 pops item id+count, calls inventory-add 0x47ED00).
         bool foundDoorline     = false;
         bool foundParticleon   = false;
         bool foundAdditem      = false;
@@ -332,6 +380,7 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                     if (pushVal == (int32_t)JSM_OP_MENUSAVE)        sawLitMenusave   = true;
                     else if (pushVal == (int32_t)JSM_OP_SAVEENABLE) sawLitSaveenable = true;
                     else if (pushVal == (int32_t)JSM_OP_PHSENABLE)  sawLitPhsenable  = true;
+                    else if (pushVal == (int32_t)JSM_OP_ADDITEM)    sawLitAdditem    = true;  // v0.19.5: item-pickup grant (exe-confirmed give-item)
                     if (detailDump) {
                         Log::Field("FieldArchive: [SVDUMP] ent=%d m=%d ip=%d PUSH 0x%X (%d) stk=%d",
                                    e, m, ip, (unsigned)pushVal, (int)pushVal, pushCount + 1);
@@ -478,6 +527,14 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                                         s_entityPopms[e].addrs[s_entityPopms[e].count++] = opcParam;
                                 }
                             }
+                            // v0.19.5: a POPM (savemap write) in a NON-init method (m>=1)
+                            // to a real var (addr>=8, skipping scratch/temp) is a
+                            // "collected/read" flag write -- the item-pickup signature.
+                            // Both known pickups write their flag in method[2] (Urakata
+                            // var304, saveline0 var450); silent NPCs have empty
+                            // interaction methods.
+                            if ((highByte == 0x08 || highByte == 0x0B) && m >= 1 && opcParam >= 8)
+                                foundNonInitVarWrite = true;
                             break;
                         // No stack effect (control flow only):
                         case 0x01: // JMP
@@ -708,7 +765,8 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                 if (opcode == JSM_OP_CARDGAME) foundCardgame = true;
 
                 // Ladder.
-                if (opcode == JSM_OP_LADDERUP || opcode == JSM_OP_LADDERDOWN)
+                if (opcode == JSM_OP_LADDERUP || opcode == JSM_OP_LADDERDOWN ||
+                    opcode == JSM_OP_LADDERUP2 || opcode == JSM_OP_LADDERDOWN2)  // FIX-4: add 0x27/0x28
                     foundLadder = true;
 
                 // Map transitions.
@@ -760,7 +818,7 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                 // v0.12.16: SETLINE interaction zone (opcode 0x29).
                 // SETLINE takes 7 params: x1, y1, z1, x2, y2, z2, lineIndex.
                 // Extract the line coordinates if they're all literals.
-                if (opcode == 0x29 && pushCount >= 7) {
+                if (opcode == JSM_OP_SETLINE && pushCount >= 7) {  // FIX-1: real SETLINE 0x39 (was hardcoded 0x29 = MAPJUMP)
                     int slBase = pushCount - 7;
                     bool slAllLit = true;
                     for (int sp = slBase; sp < slBase + 6; sp++) {
@@ -787,8 +845,59 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                 // Particle effect (draw points and save points use this).
                 if (opcode == JSM_OP_PARTICLEON) foundParticleon = true;
 
-                // Item pickup.
-                if (opcode == JSM_OP_ADDITEM) foundAdditem = true;
+                // Item pickup.  v0.19.x [ADDITEM-DRYRUN]: LOG-ONLY pickup diagnostic
+                // (mirrors ShaftCatalogDryRun/[SHAFT-DRYRUN]); it changes NOTHING in the
+                // catalog. Fires ONCE per entity per field-load (gated on !foundAdditem,
+                // which is per-entity and reset each scan). Purpose: confirm the real
+                // ADDITEM operand layout + collected-flag on one BAT before the
+                // JSM_ENT_ITEM feature is wired. Cheap; the only fault-prone read
+                // (live varblock) is isolated in the SEH helper AdditemVarByte().
+                if (opcode == JSM_OP_ADDITEM) {
+                    if (!foundAdditem) {
+                        char slotsBuf[176]; int sbp = 0; slotsBuf[0] = '\0';
+                        for (int k = 0; k < 4 && (pushCount - 1 - k) >= 0; k++) {
+                            int32_t v = pushStack[pushCount - 1 - k];
+                            sbp += snprintf(slotsBuf + sbp, sizeof(slotsBuf) - sbp, "[-%d]=0x%08X%c ",
+                                            k + 1, (unsigned)v, ((uint32_t)v & 0x80000000u) ? 'R' : 'L');
+                        }
+                        int32_t c1 = (pushCount >= 1) ? pushStack[pushCount - 1] : -1;
+                        int32_t c2 = (pushCount >= 2) ? pushStack[pushCount - 2] : -1;
+                        bool c1lit = (pushCount >= 1) && (((uint32_t)c1 & 0x80000000u) == 0);
+                        bool c2lit = (pushCount >= 2) && (((uint32_t)c2 & 0x80000000u) == 0);
+                        const char* n1 = (c1lit && c1 >= 1 && c1 <= 198) ? GetBattleItemName((int)c1) : "(n/a)";
+                        const char* n2 = (c2lit && c2 >= 1 && c2 <= 198) ? GetBattleItemName((int)c2) : "(n/a)";
+                        if (!n1) n1 = "(null)";
+                        if (!n2) n2 = "(null)";
+                        Log::Field("FieldArchive: [ADDITEM-DRYRUN] ent%d '%s' m=%d ip=%d pushCount=%d "
+                                   "slots: %s| cand id[-1]=%d(%s) id[-2]=%d(%s)",
+                                   e, info.symName, m, ip, pushCount, slotsBuf,
+                                   (int)c1, n1, (int)c2, n2);
+                        Log::Field("FieldArchive: [ADDITEM-DRYRUN] ent%d '%s' hasPosition=%d pos=(%d,%d) "
+                                   "talkSetup(TALKON|TALKRADIUS)=%d setline=%d",
+                                   e, info.symName, info.hasPosition ? 1 : 0, (int)info.posX, (int)info.posY,
+                                   (foundTalkon || foundTalkradius) ? 1 : 0, foundSetline ? 1 : 0);
+                        int  bsVar = -1, bsCmp = 0; bool bsJpf = false, bsHaveLit = false, bsHavePshm = false;
+                        int  lo = ip - 24; if (lo < (int)scriptStart) lo = (int)scriptStart;
+                        for (int k = ip - 1; k >= lo; k--) {
+                            uint32_t w = scriptData[k]; uint8_t hb = (uint8_t)(w >> 24);
+                            if (hb == 0x02) { bsJpf = true; }
+                            else if (hb == 0x00) { if (bsJpf && !bsHaveLit) { bsCmp = (int)(int32_t)w; bsHaveLit = true; } }
+                            else if (hb == 0x07 || hb == 0x09 || hb == 0x0A) {
+                                int32_t pp = (int32_t)(w & 0x00FFFFFF); if (w & 0x00800000) pp |= (int32_t)0xFF000000;
+                                if (bsJpf && !bsHavePshm && pp >= 0 && pp < 0x2000) { bsVar = pp; bsHavePshm = true; }
+                            }
+                        }
+                        int liveTrk = (guardSeen && guardAddr >= 0 && guardAddr < 0x2000)
+                                    ? (int)AdditemVarByte((unsigned)(uint16_t)guardAddr) : -1;
+                        int liveBsc = (bsVar >= 0) ? (int)AdditemVarByte((unsigned)bsVar) : -1;
+                        Log::Field("FieldArchive: [ADDITEM-DRYRUN] ent%d '%s' guard.tracker[seen=%d addr=0x%04X val=%d jpf=%d live=%d]"
+                                   " guard.backscan[found=%d var=0x%04X cmp=%d jpf=%d live=%d]",
+                                   e, info.symName, guardSeen ? 1 : 0, (unsigned)(uint16_t)guardAddr, (int)guardVal,
+                                   guardHadJpf ? 1 : 0, liveTrk,
+                                   bsHavePshm ? 1 : 0, (unsigned)(bsVar < 0 ? 0 : bsVar), bsHaveLit ? bsCmp : 0, bsJpf ? 1 : 0, liveBsc);
+                    }
+                    foundAdditem = true;
+                }
 
                 // v0.07.82: Camera/scroll opcodes for Line entity classification.
                 if (opcode == JSM_OP_BGDRAW || opcode == JSM_OP_BGOFF ||
@@ -808,6 +917,7 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                     opcode == JSM_OP_MOVE ||
                     opcode == JSM_OP_REQ || opcode == JSM_OP_REQSW || opcode == JSM_OP_REQEW)
                     foundEventOp = true;
+                if (opcode == JSM_OP_HIDE) foundHide = true;  // v0.19.4 diag: self-hide signal for pickup detection
                 if (opcode == JSM_OP_BATTLE) foundBattle = true;
 
                 // v0.07.98: Track dialog opcodes specifically (MES/ASK/AMES/AASK).
@@ -863,6 +973,26 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         // close the for-loop -- `outCount++;` and the loop brace stay below.
         // Pure textual move -- no logic change.
         #include "field_archive_jsm_classify.inl"
+
+        // v0.19.4 [MODELSIG] (#pickup-vs-silent-npc): one compact ground-truth line per
+        // model-bearing "Other" entity -- the full interaction-signal set + final producer
+        // type. Lets v0.19.5 design the pickup-vs-real-NPC-vs-silent-NPC discriminator from
+        // data, not a guess. Log-only; changes no classification.
+        if (info.jsmCategory == 3 && foundSetmodel) {
+            Log::Field("FieldArchive: [MODELSIG] ent%d '%s' type=%s pos=%d(%d,%d) "
+                       "talkon=%d talkrad056=%d dialog=%d extdisp=%d additem=%d hide=%d "
+                       "setline=%d reqcount=%d setmodelInit=%d nonInitWr=%d additemLit=%d pickup=%d",
+                       e, info.symName, JSMEntityTypeName(info.type),
+                       info.hasPosition ? 1 : 0, (int)info.posX, (int)info.posY,
+                       foundTalkon ? 1 : 0, foundTalkradius ? 1 : 0,
+                       foundDialogOp ? 1 : 0, foundExtDispatch ? 1 : 0,
+                       foundAdditem ? 1 : 0, foundHide ? 1 : 0,
+                       foundSetline ? 1 : 0,
+                       (e < 128 ? s_reqOpcodeCount[e] : -1),
+                       foundSetmodelInit ? 1 : 0,
+                       foundNonInitVarWrite ? 1 : 0, sawLitAdditem ? 1 : 0,
+                       (foundSetmodel && !foundDialogOp && (foundNonInitVarWrite || sawLitAdditem)) ? 1 : 0);
+        }
 
         outCount++;
     }
@@ -1104,6 +1234,22 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
     // once it confirmed the save signal -- 'selphie' literally pushes SAVEENABLE
     // (0x12F) + PHSENABLE (0x130), now detected by the own-script-constant path in
     // the Line-classification block (signal-a). See DEVNOTES / field_archive_jsm_dump.inl.
+
+    // v0.19.x [ITEMGATE-VARS] (#item-pickups): compact var-bank snapshot once per
+    // field-load. Diff two dorm loads (magazine uncollected vs collected) to find the
+    // "collected" flag byte. (The verbose [ITEMDUMP] opcode dump is retired -- it
+    // already gave us 'hon's opcodes; DumpItemPickupScripts is left defined but uncalled.)
+    //
+    // v0.19.5: item-pickup investigation dumps RETIRED. The verbose [ITEMDUMP]
+    // per-entity opcode dump did its job -- it revealed both pickup mechanisms (dorm
+    // Weapons Monthly = 'saveline0' var 450 + ADDITEM 0x125; hotel Timber Maniacs =
+    // 'Urakata' var 304, no ADDITEM), from which v0.19.5's isItemPickup discriminator
+    // was built and BAT-confirmed ("Item 1" in-game). The call is disabled to keep
+    // normal field-load logs clean; the compact [MODELSIG] line above (with the
+    // pickup= field) stays for ongoing item work. DumpItemPickupScripts / DumpItemGateVars
+    // remain DEFINED (dump.inl / above) -- re-enable a call if a future pickup mechanism
+    // needs the full opcode or var-bank stream.
+    // DumpItemPickupScripts(fieldName);
 
     return true;
 }

@@ -144,7 +144,12 @@ static void ShaftCatalogDryRun() {
                "-- candidate gating varblocks follow; correlate across floors with which floors truly "
                "have the save point / an unlocked cell [#95/#98/#115 v0.18.3.317]",
                floorNow, fid, (unsigned)SHAFT_VB_BASE, (unsigned)SHAFT_VB_FLOOR);
-    for (unsigned b = 0x01A0; b <= 0x01DF; b += 16) {
+    // v0.19.0 (#95/#115): the 0x01A0-0x01DF window is floor-invariant except the floor
+    // byte, so also dump 0x0700-0x071F -- the save SET3's Z PSHM ref is 0x70D. Correlate
+    // floor 6 (save present) vs 5/4/3, and open-cell vs locked-cell floors, for a discriminator.
+    static const unsigned kWin[][2] = { {0x01A0u, 0x01DFu}, {0x0700u, 0x071Fu} };
+    for (int w = 0; w < 2; w++)
+    for (unsigned b = kWin[w][0]; b <= kWin[w][1]; b += 16) {
         Log::Field("FieldNavigation: [SHAFT-DRYRUN] vb[0x%04X]: %02X %02X %02X %02X %02X %02X %02X %02X "
                    "%02X %02X %02X %02X %02X %02X %02X %02X", b,
                    ShaftVarByte(b+0),ShaftVarByte(b+1),ShaftVarByte(b+2),ShaftVarByte(b+3),
@@ -537,6 +542,7 @@ static EntityType JSMTypeToCatalogType(FieldArchive::JSMEntityType jt)
         case FieldArchive::JSM_ENT_CARD_GAME:         return ENT_CARD_GAME;
         case FieldArchive::JSM_ENT_MAP_EXIT:          return ENT_EXIT;
         case FieldArchive::JSM_ENT_NPC:               return ENT_NPC;
+        case FieldArchive::JSM_ENT_LADDER:             return ENT_OBJECT;  // ITEM-1: ladders navigable (named "Ladder" at injection)
         case FieldArchive::JSM_ENT_INTERACTIVE_OBJECT: return ENT_OBJECT;  // v0.07.98
         default: return ENT_UNKNOWN;
     }

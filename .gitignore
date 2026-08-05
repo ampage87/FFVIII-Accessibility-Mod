@@ -424,3 +424,6 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# v0.19.x catalog consolidation: retired files staged for deletion
+_to_delete/

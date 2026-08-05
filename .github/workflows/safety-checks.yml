@@ -79,6 +79,12 @@ jobs:
           # passes the 80 KB hard-fail check. The closest watch-zone file is
           # field_archive_jsm_scan.inl at 63 KB (accepted exception, will warn).
           declare -A ALLOWLIST
+          # v0.19.x: field_catalog.inl is the DELIBERATE consolidation of the
+          # former 8-file catalog assembly into one file of real functions
+          # (proven byte-identical offline). Intentionally NOT split, so it is
+          # permanently exempt from the 80 KB hard-fail (not a scheduled split
+          # like the historical v0.16.x entries).
+          ALLOWLIST["src/field_catalog.inl"]=1
 
           fail_count=0
           warn_count=0
@@ -208,3 +214,24 @@ jobs:
           python tests/gen_world_map_fixture.py tests/world_map_terrain_grid.txt tests/world_map_fixtures.h
           g++ -std=c++17 -O2 -o tests/world_map_harness tests/world_map_harness.cpp
           ./tests/world_map_harness
+
+  catalog-harness:
+    name: Field-catalog regression guard (real field_catalog.inl vs golden)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile + run the field-catalog regression guard
+        run: |
+          echo "=== Field-catalog regression guard (v0.19.x consolidation) ==="
+          echo ""
+          echo "Compiles the REAL src/field_catalog.inl (the consolidated 8-file"
+          echo "catalog assembly) with deterministic engine stubs, runs 30 fixtures"
+          echo "covering every catalog path, and diffs the dump against the committed"
+          echo "golden. A logic-integrity snapshot (a pure function of the catalog"
+          echo "code, no live game state) -- same philosophy as chase_harness. After"
+          echo "an INTENTIONAL catalog change, regenerate the golden with:"
+          echo "  g++ -std=c++17 -O2 -w tests/catalog_harness.cpp -Isrc -o catalog_harness && ./catalog_harness --print > tests/catalog_golden.txt"
+          echo ""
+          g++ -std=c++17 -O2 -w tests/catalog_harness.cpp -Isrc -o catalog_harness
+          ./catalog_harness

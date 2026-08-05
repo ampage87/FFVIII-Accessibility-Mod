@@ -185,6 +185,18 @@
         // field_nav_catalog_dedupe.inl.
         info.hasSetmodelInit = foundSetmodelInit;
 
+        // v0.19.5: item-pickup discriminator. A positioned model-bearing entity
+        // with NO dialog whose script grants an item (literal ADDITEM 0x125) or
+        // writes its own savemap collected-flag in a non-init interaction method
+        // is a collectible pickup, not an NPC. Exe-confirmed: 0x125 = ADDITEM
+        // (Weapons Monthly, saveline0 var 450); the flag-only write is the Timber
+        // Maniacs self-gate (Urakata var 304). Both write in method[1+]; silent
+        // NPCs have empty interaction methods. The catalog relabels these
+        // "Item N" instead of "NPC N" (matched back by SET3 walkmesh triangle,
+        // since the runtime SYM is shifted).
+        info.isItemPickup = foundSetmodel && !foundDialogOp &&
+                            (foundNonInitVarWrite || sawLitAdditem);
+
         // v0.12.20: Store persistent flags for Director/interaction detection.
         if (e < 128) {
             s_hasSetmodelInit[e] = foundSetmodelInit;

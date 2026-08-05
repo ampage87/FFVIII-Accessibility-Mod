@@ -18,6 +18,7 @@
 // name table instead of the (incorrectly derived) FL ordering. See the comment
 // on GetFieldNameById below.
 #include "field_display_names.h"
+#include "ff8_item_names.h"          // v0.19.x: GetBattleItemName() for the [ADDITEM-DRYRUN] diagnostic
 
 // Forward declarations for cross-module namespaces (restored in v0.14.28 build recovery).
 namespace Log { void Field(const char* format, ...); }

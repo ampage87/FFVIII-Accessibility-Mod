@@ -82,7 +82,7 @@ namespace WorldMap {
 #include "world_map_navmesh.inl"
 #include "world_map_segments.inl"
 #include "world_map_trigger_data.inl"
-#include "world_map_catalog.inl"
+#include "world_catalog.inl"
 #include "world_map_announce.inl"
 #include "world_map_planner.inl"
 #include "world_map_planner2.inl"   // v0.18.3.225: planner part 2 (grid A* + PlanDrivePath), split from planner.inl for the 80 KB CI guard
