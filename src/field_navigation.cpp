@@ -158,6 +158,15 @@ static const int    MAX_GATEWAYS  = 12;
 static FieldArchive::GatewayInfo s_gateways[MAX_GATEWAYS] = {};
 static int          s_gatewayCount = 0;
 
+// v0.20.7: duplicated-room phantom-exit suppression (field_nav_duproom.inl).
+// Destinations that are phantoms on the CURRENT field -- a scripted MAP_EXIT to
+// one of these is the cutscene twin of a real gateway exit in a sibling copy of
+// this room. Recomputed each field load by ComputeDupRoomSuppression().
+static uint16_t     s_dupSuppressDests[8] = {};
+static int          s_dupSuppressCount = 0;
+// v0.20.9 DIAGNOSTIC: current field name, for the [PUZZLE-GATE] var-bank dump.
+static char         s_currentFieldName[64] = {};
+
 // v0.07.94: Deduplicated INF gateway groups for catalog.
 // Multiple INF gateways with the same destFieldId are merged into one
 // catalog exit with averaged center position. This prevents 3 gateway
@@ -886,6 +895,7 @@ static int            s_deadClusterCount = 0;
 #include "field_nav_settriangle.inl"
 
 // --- HookedFieldScriptsInit (extracted v0.12.18) ---
+#include "field_nav_duproom.inl"      // v0.20.7: duplicated-room phantom-exit table + ComputeDupRoomSuppression()
 #include "field_nav_fieldscripts.inl"
 
 void Initialize()
@@ -1263,34 +1273,8 @@ void Update()
 
     // v0.14.45: POPM varblock write capture summary block removed (F12 diagnostic retired).
 
-    // v0.08.23: Descriptor table polling probe — DISABLED v0.12.05.
-    // Served its purpose: confirmed descriptor table is party-slot-only,
-    // not PSHM_W entity-scope cache. See DEVNOTES v0.08.23.
-    // Code retained but no longer activated on field change.
-    if (false && FF8Addresses::pCurrentFieldId) {
-        uint16_t curFieldId = *FF8Addresses::pCurrentFieldId;
-        if (curFieldId != s_descriptorPollFieldId && curFieldId != 0xFFFF) {
-            // New field loaded — start descriptor polling.
-            s_descriptorPollFieldId = curFieldId;
-            s_descriptorPollActive = true;
-            s_descriptorPollStart = GetTickCount();
-            s_descriptorPollCount = 0;
-            s_descriptorPollLastCheck = 0;
-            s_descriptorPollSummaryLogged = false;
-            Log::Field("FieldNavigation: [DESCPOLL] Starting descriptor table poll for field %d (%s), "
-                       "totalEnts=%d (D%d+L%d+B%d+O%d)",
-                       curFieldId,
-                       FF8Addresses::pCurrentFieldName ? FF8Addresses::pCurrentFieldName : "?",
-                       s_jsmDoors + s_jsmLines + s_jsmBackgrounds + s_jsmOthers,
-                       s_jsmDoors, s_jsmLines, s_jsmBackgrounds, s_jsmOthers);
-        }
-    }
-
-    // v0.08.24: One-shot hex dump of PSHM_W functions — DISABLED v0.12.11.
-    // DumpPshmFunctions();
-
-    // v0.08.23: Run descriptor table polling probe — DISABLED v0.12.11.
-    // PollDescriptorTable();
+    // v0.20.18: removed dead diagnostics (v0.08.23 descriptor-table poll probe + v0.08.24
+    // PSHM_W dump stubs, DISABLED since v0.12.05/.11) to fit the 80 KB CI limit -- see git.
 
     // Entity position polling is throttled to 500ms to reduce log spam.
     DWORD now = GetTickCount();

@@ -90,6 +90,10 @@ static const char* ENTITY_SKIP_NAMES[] = {
     "JumpTimer",
     "kabelight",
     "kage",
+    // v0.20.15: Caraway's Mansion glass-puzzle CONTROLLER -- REQ-dispatches to a
+    // dozen entities (like director1) and was surfacing as a phantom 'Object'
+    // co-located with the 'cup' Glass. 'kakusi' = "hidden": never player-facing.
+    "kakusi",
     "kanbanlight",
     "KANTOKU",
     "kantoku",

@@ -28,6 +28,15 @@
 namespace FieldArchive {
 
 // JSM entity category counts (from JSM header).
+// v0.20.12: sentinel destField the resolver stamps on an exit whose story-progress
+// gate is currently FALSE (InterpretExitMethod returns -1 with reason==1 = RET before
+// any MAPJUMP). The catalog treats a captured line / MAP_EXIT carrying this value as a
+// locked exit and drops it (no gateway-recovery, no entry) -- distinct from an ordinary
+// unresolved marker, which still gets recovery. bit31 set => it flows through the marker
+// paths unchanged; low word 0xFFFE is an impossible varblock address, so it can never
+// collide with a real VARBLOCK-sourced destination.
+static const int32_t EXIT_LOCKED_MARKER = (int32_t)0x8000FFFEu;
+
 struct JSMCounts {
     int doors;        // door entities
     int lines;        // walk-on trigger lines
@@ -298,6 +307,27 @@ struct JSMEntityInfo {
     // have empty interaction methods. Set by the classifier; the catalog uses it
     // to relabel the entity "Item N" instead of "NPC N".
     bool           isItemPickup;
+    // v0.19.7: director-gate. `wasDirectorPromoted` = this entity's INTERACTIVE_OBJECT
+    // type came from the Director post-pass (not classify's own-dialog/paired-entity
+    // path). `isReqTarget` = some entity REQs this one, resolved statically from the REQ
+    // opcode's inline param. The catalog DROPS a director-promoted Object that is NOT a
+    // REQ target: such an entity has talk=0/dialog=0 on itself AND nothing dispatches to
+    // it, so it has no interaction path at all (water/l5/background students). Genuinely
+    // interactive ones -- the students/aniki/directory the director actually talks to --
+    // ARE REQ targets and are kept. Directory-style objects promoted via other paths keep
+    // wasDirectorPromoted=false and are never gated.
+    bool           isReqTarget;
+    bool           wasDirectorPromoted;
+    // v0.20.0 (#5): true if a captured SETLINE interaction zone (or INF trigger) sits
+    // at this entity's position -- i.e. the engine has a real walk-into interaction
+    // trigger here (the Balamb directory fires its screen this way). Set by the
+    // SETLINE position-override pass in field_nav_fieldscripts.inl. This is the
+    // physical "can be interacted with" signal RE'd from the field engine
+    // (interaction check 0x47B460 needs a talk/push radius, and line-triggered objects
+    // like the directory carry their trigger as a co-located SETLINE, not a radius).
+    // The junk-gate keeps a marker-positioned Object only if it has one of these zones
+    // (or its own talk/dialog, or a curated name); the inert lights have none.
+    bool           hasNearbyInteractionZone;
 };
 
 const char* JSMEntityTypeName(JSMEntityType t);
@@ -373,6 +403,11 @@ struct WalkmeshData {
 // Caller owns the allocated arrays and must call FreeWalkmesh() when done.
 // Returns true if the ID file was found and parsed.
 bool LoadWalkmesh(const char* fieldName, WalkmeshData& outMesh);
+
+// v0.20.7: FNV-1a-64 hash of the raw .id (walkmesh). Two field files that are the
+// same physical room share an identical .id, so this is a stable room signature
+// used to cross-reference duplicated-room exits (field_nav_duproom.inl).
+uint64_t WalkmeshHash(const char* fieldName);
 
 // Free heap-allocated walkmesh data.
 void FreeWalkmesh(WalkmeshData& mesh);

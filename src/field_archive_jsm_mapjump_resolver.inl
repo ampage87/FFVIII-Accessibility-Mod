@@ -611,13 +611,40 @@ static void Run(const char* fieldName,
         // resolving. The interpreter follows live control flow + the real
         // varblock, so it succeeds where the fallback can't.
         int32_t interpDest = -1;
+        int     interpReason = 0;   // v0.20.12: InterpTrace.reason when interpDest<0 (1=RET/story-gate-false)
         if ((info.type == JSM_ENT_LINE_SCREEN_BOUND || info.type == JSM_ENT_MAP_EXIT) &&
             mjMethodStart >= 0) {
             interpDest = SafeInterpretExitMethod(scriptData, scriptDataDwords,
                                                  mjMethodStart, mjMethodEnd);
         }
 
-        if (info.type == JSM_ENT_LINE_SCREEN_BOUND && (interpDest >= 0 || anyResolved)) {
+        // v0.20.12: interpreter returned no destination -- find out WHY (reason).
+        // reason==1 (RET before any MAPJUMP) = the exit's story-progress gate is
+        // currently false, i.e. a locked door (Mansion 4/5 before the puzzle). This
+        // is distinct from reason==2 (MAPJUMP-arg underflow, e.g. the glprein1
+        // trapdoor -- a REAL hidden exit that must NOT be suppressed, #86).
+        if (interpDest < 0 &&
+            (info.type == JSM_ENT_LINE_SCREEN_BOUND || info.type == JSM_ENT_MAP_EXIT) &&
+            mjMethodStart >= 0) {
+            InterpTrace itr = {};
+            SafeInterpretExitMethod(scriptData, scriptDataDwords, mjMethodStart, mjMethodEnd, &itr);
+            interpReason = itr.reason;
+            Log::Field("FieldArchive: [MAPJUMP-RES] %s ent%d '%s' (%s): interp no-dest reason=%d "
+                       "[1=locked 2=underflow 6=tainted]",
+                       fieldName, ei, info.symName, JSMEntityTypeName(info.type), interpReason);
+        }
+        // v0.20.12: story gate proven FALSE -> stamp the locked sentinel so the catalog
+        // drops this exit instead of gateway-recovering it into a mislabeled "Mansion 6".
+        if (interpDest < 0 && interpReason == 1 &&
+            (info.type == JSM_ENT_LINE_SCREEN_BOUND || info.type == JSM_ENT_MAP_EXIT)) {
+            int32_t oldParam = info.param;
+            info.param = EXIT_LOCKED_MARKER;
+            paramUpdates++;
+            Log::Field("FieldArchive: [MAPJUMP-RES] %s ent%d '%s' (%s): LOCKED -- story gate false "
+                       "(interp RET, reason=1); param 0x%08X -> 0x%08X [SUPPRESS v0.20.12]",
+                       fieldName, ei, info.symName, JSMEntityTypeName(info.type),
+                       (unsigned)oldParam, (unsigned)info.param);
+        } else if (info.type == JSM_ENT_LINE_SCREEN_BOUND && (interpDest >= 0 || anyResolved)) {
             int32_t newParam;
             const char* src;
             if (interpDest >= 0)        { newParam = interpDest;  src = " [INTERP]"; }

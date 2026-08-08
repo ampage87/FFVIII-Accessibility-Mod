@@ -209,6 +209,9 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
             // INF gateways are the engine's native exit mechanism for many fields
             // (e.g. bghall_1 hallway exits) that don't use script-level MAPJUMP.
             FieldArchive::LoadINFGateways(fieldName, s_gateways, MAX_GATEWAYS, s_gatewayCount);
+            // v0.20.7: precompute duplicated-room phantom-exit suppression for this field.
+            ComputeDupRoomSuppression(fieldName);
+            strncpy(s_currentFieldName, fieldName, 63); s_currentFieldName[63] = '\0';  // v0.20.9 diag
 
             // v05.49: SYM offset = 0.
             // CONFIRMED by ENTDIAG: the entity state array maps 1:1 to the
@@ -744,6 +747,9 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                             s_jsmEntities[j].posX = newX;
                             s_jsmEntities[j].posY = newY;
                             s_jsmEntities[j].hasPosition = true;
+                            s_jsmEntities[j].hasNearbyInteractionZone = true;  // v0.20.0 (#5):
+                            // an INF trigger zone is bound to this entity BY NAME -- a definite
+                            // walk-into interaction trigger. Keeps it through the junk-gate.
                             trigOverridden++;
                             Log::Field("FieldNavigation: [INF-TRIG-POS] ent%d '%s' type=%s "
                                        "pos (%d,%d)->(%d,%d) from trigger zone %d (type=%d)",
@@ -802,6 +808,10 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                                    bestLine, bestCx, bestCy, bestDist);
                         je.posX = (int16_t)bestCx;
                         je.posY = (int16_t)bestCy;
+                        je.hasNearbyInteractionZone = true;  // v0.20.0 (#5): a real walk-into
+                        // interaction trigger sits at this object (the physical interactable
+                        // signal RE'd from the engine). The junk-gate keeps it; the inert
+                        // lights (no SETLINE within range) get no flag and are dropped.
                         setlineOverridden++;
                     }
                 }

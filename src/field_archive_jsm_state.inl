@@ -79,6 +79,13 @@ static bool s_hasSetmodelInit[128];   // SETMODEL found in init method (method 0
 static bool s_hasDialogAny[128];      // MES/ASK/AMES/AASK in any method
 static bool s_hasExtDispatchArr[128]; // 0x1C extended dispatch in any method
 
+// v0.19.7: this JSM entity is the TARGET of some REQ/REQSW/REQEW opcode, resolved
+// STATICALLY from the opcode's inline param (opcParam) -- exe RE proved the target is
+// arg2/inline, not a stack value (which is why the old stack-based s_entityReqs read
+// reqResolved=0). The director-gate keeps a promoted "Object" only if it is a real REQ
+// target; a director-promoted entity that no one REQs has no interaction path at all.
+static bool s_isReqTarget[128];
+
 // ---------- Forward declarations ----------
 
 // Director detection post-pass. Called from ScanJSMScripts() after the

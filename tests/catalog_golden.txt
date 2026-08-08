@@ -1,4 +1,4 @@
-# catalog_harness logic-integrity dump  (fixtures=31)
+# catalog_harness logic-integrity dump  (fixtures=33)
 
 ### FIXTURE empty_field
 count=0 nonplayer=0 player=-1 selected=0
@@ -76,6 +76,10 @@ count=2 nonplayer=2 player=0 selected=0
   [0] idx=-300 type=Exit model=-1 tri=14 gw=-1 name="Exit to Balamb Harbor 1"
   [1] idx=-400 type=Exit model=-1 tri=0 gw=0 name="Exit"
 
+### FIXTURE duproom_phantom
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=-301 type=Exit model=-1 tri=14 gw=-1 name="Exit to Deling City - Club 1"
+
 ### FIXTURE gateways_merge
 count=1 nonplayer=1 player=0 selected=0
   [0] idx=-400 type=Exit model=-1 tri=0 gw=0 name="Exit to Deep Sea Research Center - Levels 1"
@@ -148,4 +152,11 @@ count=1 nonplayer=1 player=0 selected=0
 count=2 nonplayer=2 player=0 selected=0
   [0] idx=1 type=Object model=10 tri=12 gw=-1 name="Item 1"
   [1] idx=2 type=NPC model=20 tri=13 gw=-1 name="NPC"
+
+### FIXTURE director_gate
+count=4 nonplayer=4 player=0 selected=0
+  [0] idx=-301 type=Object model=-1 tri=12 gw=-1 name="Object"
+  [1] idx=-302 type=Object model=-1 tri=13 gw=-1 name="Directory"
+  [2] idx=-303 type=Object model=-1 tri=15 gw=-1 name="Object"
+  [3] idx=-304 type=Object model=-1 tri=16 gw=-1 name="Object"
 

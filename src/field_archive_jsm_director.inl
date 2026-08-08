@@ -237,6 +237,12 @@ static void RunDirectorDetection(const char* fieldName,
                 // Promote target to INTERACTIVE_OBJECT
                 const char* oldType = JSMEntityTypeName(outEntities[tc].type);
                 outEntities[tc].type = JSM_ENT_INTERACTIVE_OBJECT;
+                // v0.19.7 (#5): mark this promotion as director-sourced. The field-wide
+                // promotion above is deliberately loose (dialog OR extDispatch OR model+req),
+                // so it sweeps in inert effect entities the director never actually REQs.
+                // The consumer junk-gate uses this flag + isReqTarget to drop only those
+                // that have no interaction path of their own AND are not REQ targets.
+                outEntities[tc].wasDirectorPromoted = true;
                 targetsPromoted++;
                 Log::Field("FieldArchive: [DIRECTOR]   promoted ent%d '%s' %s -> Interactive Object "
                            "(pos=%s %d,%d)",

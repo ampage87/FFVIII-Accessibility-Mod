@@ -238,6 +238,7 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
     memset(s_hasExtDispatchArr, 0, sizeof(s_hasExtDispatchArr));
     memset(s_initVarMaps,       0, sizeof(s_initVarMaps));
     memset(s_reqOpcodeCount,    0, sizeof(s_reqOpcodeCount));
+    memset(s_isReqTarget,       0, sizeof(s_isReqTarget));  // v0.19.7 (#5): field-wide REQ-target set
 
     // --- Scan each entity ---
     for (int e = 0; e < totalEntities && outCount < maxEntities; e++) {
@@ -297,6 +298,9 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         bool foundTalkon       = false;
         bool foundTalkradius   = false;  // v0.17.7.1: TALKRADIUS opcode in this entity's scripts
         bool foundHide         = false;  // v0.19.4 diag: entity's own script HIDEs itself (0x061) -- a pickup self-hides on collect; a real/silent NPC does not. Log-only, reported in [MODELSIG].
+        bool foundTalkRad62    = false;  // v0.19.8 RE: real TALKRADIUS (0x62) -> entity talk radius 0x1F8
+        bool foundPushRad63    = false;  // v0.19.8 RE: real PUSHRADIUS (0x63) -> entity push radius 0x1F6
+        bool foundProxChk5B    = false;  // v0.19.8 RE: opcode 0x5B tests "is target within talkRad+pushRad"
         bool foundNonInitVarWrite = false;  // v0.19.5: POPM (savemap write) in a NON-init method -- the pickup's "collected" flag write (Urakata var304, saveline0 var450, both method[2]).
         bool sawLitAdditem     = false;  // v0.19.5: literal push of ADDITEM (0x125) -- inventory item-pickup grant (exe-confirmed: 0x125 pops item id+count, calls inventory-add 0x47ED00).
         bool foundDoorline     = false;
@@ -810,6 +814,15 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                 }
                 if (opcode == JSM_OP_TALKON)   foundTalkon = true;
                 if (opcode == JSM_OP_TALKRADIUS) foundTalkradius = true;  // v0.17.7.1
+                // v0.19.8 RE (#5): the ACTUAL interaction opcodes, by exe-confirmed
+                // number. The engine interaction check (0x47B460) can only fire when
+                // talkRadius(0x1F8)+pushRadius(0x1F6) > 0; TALKRADIUS=0x62 sets the
+                // former, PUSHRADIUS=0x63 the latter, and 0x5B is the "is X within my
+                // interaction range" test. The legacy JSM_OP_TALKRADIUS constant is
+                // 0x056 (a DIFFERENT opcode), so foundTalkradius above never fires.
+                if (opcode == 0x62) foundTalkRad62 = true;
+                if (opcode == 0x63) foundPushRad63 = true;
+                if (opcode == 0x5B) foundProxChk5B = true;
 
                 // Door trigger line.
                 if (opcode == JSM_OP_DOORLINEON || opcode == JSM_OP_DOORLINEOFF)
@@ -931,6 +944,17 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                 // v0.12.20: Also count REQ opcodes per entity (stack-independent).
                 if ((opcode == JSM_OP_REQ || opcode == JSM_OP_REQSW || opcode == JSM_OP_REQEW) && e < 128)
                     s_reqOpcodeCount[e]++;
+                // v0.19.7 (#5): mark the REQ TARGET as a real dispatch target. The
+                // target entity is the opcode's INLINE param (opcParam), NOT a stack
+                // value -- exe RE of the REQ handler (0x51CD60) showed arg2 indexes
+                // entityPtrTable directly; the popped stack slots are method+priority,
+                // which is why the old stack-based s_entityReqs read reqResolved=0.
+                // BAT-confirmed on bghall_1: 'elelight' REQs resolve to seito3/seito4.
+                // The director junk-gate keeps a promoted Object only if it is a REQ
+                // target; one that nothing REQs has no interaction path and is dropped.
+                if ((opcode == JSM_OP_REQ || opcode == JSM_OP_REQSW || opcode == JSM_OP_REQEW) &&
+                    opcParam >= 0 && opcParam < 128)
+                    s_isReqTarget[opcParam] = true;
                 // v0.19.6 [REQ-TARGET] diagnostic (director-gate): exe RE of the REQ handlers
                 // (0x14/0x15/0x16 @ 0x51CD60/CED0/D060) shows the TARGET entity is the opcode's
                 // INLINE PARAM (arg2 -> entityPtrTable[param]), NOT a stack value -- which is
@@ -1000,7 +1024,8 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         if (info.jsmCategory == 3 && foundSetmodel) {
             Log::Field("FieldArchive: [MODELSIG] ent%d '%s' type=%s pos=%d(%d,%d) "
                        "talkon=%d talkrad056=%d dialog=%d extdisp=%d additem=%d hide=%d "
-                       "setline=%d reqcount=%d setmodelInit=%d nonInitWr=%d additemLit=%d pickup=%d",
+                       "setline=%d reqcount=%d setmodelInit=%d nonInitWr=%d additemLit=%d pickup=%d "
+                       "talkrad62=%d pushrad63=%d prox5B=%d",
                        e, info.symName, JSMEntityTypeName(info.type),
                        info.hasPosition ? 1 : 0, (int)info.posX, (int)info.posY,
                        foundTalkon ? 1 : 0, foundTalkradius ? 1 : 0,
@@ -1010,7 +1035,8 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                        (e < 128 ? s_reqOpcodeCount[e] : -1),
                        foundSetmodelInit ? 1 : 0,
                        foundNonInitVarWrite ? 1 : 0, sawLitAdditem ? 1 : 0,
-                       (foundSetmodel && !foundDialogOp && (foundNonInitVarWrite || sawLitAdditem)) ? 1 : 0);
+                       (foundSetmodel && !foundDialogOp && (foundNonInitVarWrite || sawLitAdditem)) ? 1 : 0,
+                       foundTalkRad62 ? 1 : 0, foundPushRad63 ? 1 : 0, foundProxChk5B ? 1 : 0);
         }
 
         outCount++;
@@ -1041,6 +1067,17 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
             }
             if (outEntities[e2].drawPointTriggerOf >= 0) break;
         }
+    }
+
+    // v0.19.7 (#5): propagate the field-wide REQ-target set onto each output
+    // entity. s_isReqTarget[] was filled during the per-entity opcode scan from
+    // every REQ/REQSW/REQEW inline param, so it is only complete now that the
+    // whole field has been scanned. The director junk-gate (consumer) reads
+    // je.isReqTarget to decide whether a director-promoted Object has any
+    // interaction path at all.
+    for (int ri = 0; ri < outCount; ri++) {
+        int rji = outEntities[ri].jsmIndex;
+        outEntities[ri].isReqTarget = (rji >= 0 && rji < 128) ? s_isReqTarget[rji] : false;
     }
 
     // v0.16.3: Director-dispatched interaction detection (extracted to director.inl).

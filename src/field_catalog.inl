@@ -1106,6 +1106,10 @@ if (ei_info.type == ENT_NPC) {
 // ============================================================================
 // 3b. Trigger-line Exit / Event injection  (was field_nav_catalog_triglines.inl)
 // ============================================================================
+// v0.20.15: forward decl -- CarawayMansionSealed() is defined later (before
+// InjectGatewayExits) but is used by InjectInteractionLines and InjectJsmSpecials
+// (both earlier) to gate the Caraway's Mansion puzzle entities.
+static bool CarawayMansionSealed();
 static void InjectTriggerLineExits(EntityInfo* newCatalog, int& newCount)
 {
 // ============================================================================
@@ -1344,6 +1348,35 @@ static void InjectTriggerLineExits(EntityInfo* newCatalog, int& newCount)
                     // paths), so the INF gateway won't be added as a separate
                     // entry once we've recovered its destId here.
                     int destId = s_capturedLines[t].destFieldId;
+                    // v0.20.12: resolver flagged this line as a story-locked exit
+                    // (Mansion 4/5 doors before the puzzle). Drop it whole -- NO
+                    // gateway-recovery (that borrow is what mislabeled it "Exit to
+                    // Mansion 6"), NO catalog entry. It re-appears when the gate opens
+                    // on the next field load.
+                    if ((uint32_t)destId == (uint32_t)FieldArchive::EXIT_LOCKED_MARKER) {
+                        Log::Field("FieldNavigation: [refresh] SETLINE line%d center=(%.0f,%.0f) "
+                                   "LOCKED (story gate false) -- suppressed [v0.20.12]", t, tcx, tcy);
+                        continue;
+                    }
+                    // v0.20.16: Caraway's Mansion 3 (glfurin5) -- the door Quistis heads for
+                    // to leave the mansion springs the "Rinoa runs back in" cutscene. Its
+                    // MAPJUMP destination is a runtime var the interpreter could not resolve
+                    // (reason=5 underflow), so it kept a VARBLOCK marker whose low word is
+                    // 0x2D6 = 726 = Mansion 6 -- the real destination -- but glfurin5 has no
+                    // local INF gateway for the recovery step to borrow a name from, so it
+                    // fell through to a bare "Exit". Adopt the marker's addr as the dest so it
+                    // reads as the Mansion 6 door it is: a blind player heads for it and gets
+                    // the same cutscene surprise a sighted player does. Label-only -- the
+                    // SETLINE-exit path applies no duplicated-room suppression, so the exit
+                    // stays visible; only its name changes. Scoped to mansion + addr 726.
+                    if (((uint32_t)destId & 0x80000000u) &&
+                        ((uint32_t)destId & 0xFFFFu) == 726u &&
+                        strncmp(s_currentFieldName, "glfurin", 7) == 0) {
+                        Log::Field("FieldNavigation: [refresh] SETLINE line%d center=(%.0f,%.0f) "
+                                   "marker=0x%08X addr=726 -> 'Exit to Mansion 6' (Rinoa-cutscene "
+                                   "door) [v0.20.16]", t, tcx, tcy, (unsigned)destId);
+                        destId = 726;
+                    }
                     if ((destId < 0 || destId >= FIELD_DISPLAY_NAMES_COUNT) &&
                         destId != -2 && s_gatewayCount > 0) {
                         float bestDistSq = 1000.0f * 1000.0f;
@@ -1727,6 +1760,18 @@ static void InjectInteractionLines(EntityInfo* newCatalog, int& newCount)
                         else
                             snprintf(intEntry.name, sizeof(intEntry.name), "Interaction %d", interactionNum);
                     }
+                    // v0.20.15: the Caraway's Mansion glass-shelf interaction line (the
+                    // 'Glass' trigger, line 1665's "glass shelf") is only interactive once
+                    // the escape puzzle activates -- gate it on the same sealed flag as the
+                    // puzzle objects. Save Points are never gated. glfurin* only; fires only
+                    // on the not-sealed side, so it never hides the glass during the puzzle.
+                    if (intEntry.type == ENT_INTERACTION &&
+                        strncmp(s_currentFieldName, "glfurin", 7) == 0 && !CarawayMansionSealed()) {
+                        Log::Field("FieldNavigation: [refresh] interaction line%d '%s' suppressed: "
+                                   "Caraway's Mansion escape puzzle not yet active (progress<=376) [v0.20.15]",
+                                   t, intEntry.name);
+                        continue;
+                    }
                     newCatalog[newCount++] = intEntry;
                 }
             }
@@ -1783,6 +1828,74 @@ static void InjectJsmSpecials(EntityInfo* newCatalog, int& newCount, const Entit
                            "talk=%d setline=%d saveLine=%d extDisp=%d dlgReq=%d setmodel=%d [v0.19.1 #97/#98]",
                            je.symName, je.hasTalkSetup, je.hasSetline, je.isSaveLine,
                            je.hasExtDispatch, je.hasDialogReqTarget, je.hasSetmodelInit);
+            }
+            // v0.19.9 RE (#5): the REAL interactability signal lives on the LIVE entity, not
+            // in the static script. The engine's interaction check needs a nonzero talk
+            // radius (0x1F8) or push radius (0x1F6); those are gated by the runtime enable
+            // flags talkonoff (0x24B) / pushonoff (0x249) that TALKON/PUSHON set. The mod's
+            // static talk scan reads the wrong opcode (0x056) so it is 0 for every entity,
+            // real ones included -- so read the flags straight from pFieldStateOthers. Log
+            // BOTH index conventions (Other-compact = jsmIndex-othStart, per
+            // ResolveLatePositions; and flat = jsmIndex) so one BAT settles which aligns.
+            // LOG-ONLY.
+            if (jt == ENT_OBJECT && je.jsmCategory == 3 && FF8Addresses::pFieldStateOthers) {
+                int othStart = s_jsmDoors + s_jsmLines + s_jsmBackgrounds;
+                int oirC = je.jsmIndex - othStart;   // Other-compact convention
+                int oirF = je.jsmIndex;              // flat convention
+                int tkC=-1,puC=-1,mdC=-999, tkF=-1,puF=-1,mdF=-999;
+                __try {
+                    uint8_t* ob = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+                    if (ob) {
+                        if (oirC >= 0 && oirC < MAX_ENTITIES) {
+                            uint8_t* b = ob + ENTITY_STRIDE * oirC;
+                            tkC = *(b + 0x24B); puC = *(b + 0x249); mdC = *(int16_t*)(b + 0x218);
+                        }
+                        if (oirF >= 0 && oirF < MAX_ENTITIES) {
+                            uint8_t* b = ob + ENTITY_STRIDE * oirF;
+                            tkF = *(b + 0x24B); puF = *(b + 0x249); mdF = *(int16_t*)(b + 0x218);
+                        }
+                    }
+                } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                Log::Field("FieldNavigation: [refresh] JSM object '%s' RT-INTERACT: "
+                           "compact(oir=%d talkon=%d pushon=%d model=%d) flat(oir=%d talkon=%d pushon=%d model=%d) [v0.19.9]",
+                           je.symName, oirC, tkC, puC, mdC, oirF, tkF, puF, mdF);
+            }
+            // v0.19.7 (#5): director "Object" junk gate. RunDirectorDetection promotes a
+            // director's REQ targets to INTERACTIVE_OBJECT, but that promotion is
+            // field-wide (dialog OR extDispatch OR model+req) and also sweeps in inert
+            // effect entities the director never actually REQs (bghall_1 water/l5/
+            // seito15). Such an entity has no interaction path of its own AND is not a
+            // REQ target, so it is not a navigable object -- drop it. NARROWER than the
+            // reverted v0.19.0 gate: requires wasDirectorPromoted (classify-promoted
+            // directories/desks carry =false and are untouched), !isReqTarget (genuine
+            // director targets survive; REQ target resolved statically from the opcode
+            // inline param -- see field_archive_jsm_scan.inl), AND no own interaction
+            // signal (talk/setline/saveline/dlgReq) so a player-interactable entity is
+            // never dropped even if the director over-reached to promote it.
+            // v0.20.0 (#5): SUPERSEDES the v0.19.7 gate comment above. RE'd from the
+            // field engine -- the player can only interact with an entity that has a
+            // talk/push radius (proximity) OR a walk-into trigger zone (SETLINE / INF
+            // trigger, captured as hasNearbyInteractionZone). Drop a marker-positioned
+            // Object (hasPshmCoords -- not placed at literal coords by the designer)
+            // only when it has NO interaction zone AND no own interaction AND no curated
+            // name. The bghall_5 lights (lr1/lr2/l4/s2) have none of these; the Balamb
+            // directory carries a co-located SETLINE trigger AND a curated name, and
+            // literal-placed objects (hasPshmCoords=false) are never in scope.
+            bool jsmOwnInteraction = je.hasTalkSetup || je.hasSetline ||
+                                     je.isSaveLine || je.hasDialogReqTarget;
+            bool jsmNamedObject = false;
+            if (je.symName[0] != '\0') {
+                for (const EntityDisplayName* mN = ENTITY_DISPLAY_NAMES; mN->sym != nullptr; mN++) {
+                    if (_stricmp(je.symName, mN->sym) == 0) { jsmNamedObject = true; break; }
+                }
+            }
+            if (jt == ENT_OBJECT && je.hasPshmCoords &&
+                !je.hasNearbyInteractionZone && !jsmOwnInteraction && !jsmNamedObject) {
+                Log::Field("FieldNavigation: [refresh] JSM object '%s' dropped: marker-positioned "
+                           "phantom -- no interaction zone (SETLINE/trigger), no own interaction, "
+                           "no curated name -- junk-gate [v0.20.0 #5]",
+                           je.symName);
+                continue;
             }
             // v0.18.3.286 (#85): ENT_OBJECT is not a singleton category -- a
             // field can hold several distinct Interactive Objects (the sewer
@@ -1941,6 +2054,21 @@ static void InjectJsmSpecials(EntityInfo* newCatalog, int& newCount, const Entit
                            je.jsmIndex, je.symName, (int)je.posX, (int)je.posY);
                 continue;
             }
+            // v0.20.14: Caraway's Mansion puzzle objects (glass/statue: sym 'cup',
+            // 'kakusi', etc.) are catalogued in every mansion phase but only become
+            // interactive once the escape puzzle activates (progress > 376, the same
+            // gate that unlocks the Mansion 4/5 doors). Suppress the mansion's JSM
+            // objects until then. The explicit glfurin* test is REQUIRED: off the
+            // mansion CarawayMansionSealed() is false, so !CarawayMansionSealed() alone
+            // would drop every object on every field. Fires only on the not-sealed
+            // side, so it never hides them during the puzzle (when the player needs them).
+            if (jt == ENT_OBJECT && strncmp(s_currentFieldName, "glfurin", 7) == 0 &&
+                !CarawayMansionSealed()) {
+                Log::Field("FieldNavigation: [refresh] JSM object '%s' suppressed: Caraway's "
+                           "Mansion escape puzzle not yet active (progress<=376) [v0.20.14]",
+                           je.symName);
+                continue;
+            }
             EntityInfo jsmEntry = {};
             jsmEntry.entityIdx  = -300 - j;  // unique sentinel for JSM-injected entities
             jsmEntry.modelId    = -1;
@@ -2039,6 +2167,31 @@ static void InjectMapExits(EntityInfo* newCatalog, int& newCount, uint8_t* base,
         for (int j = 0; j < s_jsmEntityCount && newCount < MAX_CATALOG; j++) {
             const FieldArchive::JSMEntityInfo& je = s_jsmEntities[j];
             if (je.type != FieldArchive::JSM_ENT_MAP_EXIT) continue;
+            // v0.20.8: drop a scripted map-exit to a WORLD-MAP STAGING field -- a wm* field
+            // (id 0..79) that no INF gateway anywhere targets, so you only ever arrive there ON
+            // the world map, never walk into it via a field exit. Real world-map view fields
+            // (efview/edview, which ARE gatewayed) are excluded. See field_nav_duproom.inl.
+            if (IsWorldMapStaging((uint16_t)je.param)) {
+                Log::Field("FieldNavigation: [catalog] JSM exit '%s' dest=%d dropped "
+                           "(world-map staging field: scripted scene transition, not a walk-in exit)",
+                           je.symName, je.param);
+                continue;
+            }
+            // v0.20.7: duplicated-room phantom drop. If this scripted exit's destination
+            // is one a real INF gateway serves in another copy of THIS room (same walkmesh)
+            // and this copy has no local gateway there, it is the cutscene twin of that
+            // gateway exit -- not a navigable exit. See field_nav_duproom.inl.
+            {
+                bool dupPhantom = false;
+                for (int s = 0; s < s_dupSuppressCount; s++)
+                    if (s_dupSuppressDests[s] == (uint16_t)je.param) { dupPhantom = true; break; }
+                if (dupPhantom) {
+                    Log::Field("FieldNavigation: [catalog] JSM exit '%s' dest=%d dropped "
+                               "(duplicated-room phantom: the real exit is an INF gateway in another copy of this room)",
+                               je.symName, je.param);
+                    continue;
+                }
+            }
             // Skip if already in catalog as a runtime entity or trigger line exit.
             bool alreadyInCatalog = false;
             for (int c = 0; c < newCount; c++) {
@@ -2224,6 +2377,12 @@ static void InjectMapExits(EntityInfo* newCatalog, int& newCount, uint8_t* base,
             // has neither a navigable position nor a resolvable/world-map
             // destination cannot be driven to or named; drop it. (param==-2 is the
             // world-map sentinel and is kept.)
+            // v0.20.12: resolver-flagged story-locked exit -> drop (any position).
+            if ((uint32_t)je.param == (uint32_t)FieldArchive::EXIT_LOCKED_MARKER) {
+                Log::Field("FieldNavigation: [catalog] JSM exit '%s' LOCKED (story gate false) "
+                           "-- suppressed [v0.20.12]", je.symName);
+                continue;
+            }
             if (!hasPos && je.param != -2 &&
                 (je.param < 0 || je.param >= FIELD_DISPLAY_NAMES_COUNT)) {
                 Log::Field("FieldNavigation: [refresh] MAP_EXIT '%s' dropped: "
@@ -2288,6 +2447,28 @@ static void InjectMapExits(EntityInfo* newCatalog, int& newCount, uint8_t* base,
 // ============================================================================
 // 3f. INF gateway exit injection  (was field_nav_catalog_gateways.inl)
 // ============================================================================
+// v0.20.14: Caraway's Mansion escape-puzzle gate. The Caraway corridor room is
+// reused across field files (glfurin*). Its INF gateway to Mansion 6 (dest 726)
+// stays ARMED the whole arc, but a physical door in front of it is OPEN in the
+// explore/mission phase and LOCKED once the escape puzzle activates -- so the
+// armed gateway is a phantom exit from then on. That same transition unlocks the
+// Mansion 4/5 doors and makes the glass/statue puzzle objects interactive; it is
+// the story-progress counter (0x01CFE9B8+0x100) crossing 376 (0x178) -- the exact
+// gate the Mansion 4/5 door scripts test (see v0.20.12's interpreter suppression).
+// (v0.20.13 used byte 0x0F2, which flips ~18 progress-units too early -- at mission
+// start, not puzzle start -- and even flickered within one progress value; the
+// monotonic progress word is the stable signal.) "Sealed" = escape puzzle active:
+// M6 locked, M4/5 + glass live. glfurin* only. SEH-guarded live read.
+static bool CarawayMansionSealed()
+{
+    if (strncmp(s_currentFieldName, "glfurin", 7) != 0) return false;
+    uint16_t prog = 0; bool ok = true;
+    __try {
+        prog = *(const volatile uint16_t*)(uintptr_t)(0x01CFE9B8u + 0x100u);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+    return ok && (prog > 376);
+}
+
 static void InjectGatewayExits(EntityInfo* newCatalog, int& newCount)
 {
 // ============================================================================
@@ -2546,7 +2727,20 @@ static void InjectGatewayExits(EntityInfo* newCatalog, int& newCount)
         // Losing a real exit is this project's worst failure mode (#88,
         // ladline7 hidden for three BAT cycles, and now gpbig2a). Erring toward
         // showing too much is the correct side to be wrong on.
-        bool staleGatewayRuleActive = fieldHasLineExits && (s_gatewayCount <= 1);
+        // v0.20.2: stale-gateway rule RETIRED (RE-driven). FF8_EN.exe RE + a live
+        // BAT (v0.20.1 [EXIT-DIAG]) proved the engine has no "present-but-stale
+        // gateway" state: every loaded INF gateway is a real, crossable exit, and
+        // disable/reroute is handled on trigger LINES instead (enable byte
+        // entity+0x194 via LINEON/LINEOFF; destination resolved at runtime by
+        // MAPJUMP). The rule deleted REAL exits -- confirmed bidirectionally on
+        // bghall_2<->bghall_5 (B-Garden 4<->10): each reaches its OTHER neighbours
+        // by script lines and the B4<->B10 doorway ONLY by its lone INF gateway, so
+        // (fieldHasLineExits && gatewayCount<=1) fired and dropped it
+        // (WOULD_SUPPRESS=1 for dest=174 and dest=168). Forcing false surfaces every
+        // loaded gateway; proven additive on the 32-fixture catalog harness. Worst
+        // case is glfurin1 showing one harmless ghost gateway -- the correct side to
+        // err on (per the note below, losing a real exit is the worst failure mode).
+        bool staleGatewayRuleActive = false;
         if (fieldHasLineExits && !staleGatewayRuleActive) {
             Log::Field("FieldNavigation: [refresh] stale-gateway rule NOT applied: "
                        "%d raw INF gateways (> 1) -- rule is scoped to its single-gateway "
@@ -2640,6 +2834,15 @@ static void InjectGatewayExits(EntityInfo* newCatalog, int& newCount)
                     }
                 }
                 if (dupExit) continue;
+                // v0.20.13: Mansion 6's INF gateway stays armed even after its
+                // door locks at the mission/trap phase -- drop the phantom then.
+                if (s_dedupGateways[d].destFieldId == 726 && CarawayMansionSealed()) {
+                    Log::Field("FieldNavigation: [refresh] INF-GW group %d '%s' SUPPRESSED: "
+                               "Caraway's Mansion sealed (story var 0x0F2==0x16) -- Mansion 6 "
+                               "door locked though gateway armed [v0.20.13]",
+                               d, s_dedupGateways[d].displayName);
+                    continue;
+                }
                 EntityInfo gwExit = {};
                 gwExit.entityIdx  = -400 - d;  // sentinel for INF gateway exits
                 gwExit.modelId    = -1;
@@ -2954,6 +3157,128 @@ static void DedupeCatalog(EntityInfo* newCatalog, int& newCount)
 // field_nav_helpers.inl (included earlier, so both stay visible here) to keep
 // this file under the 80 KB source-size CI guard.
 
+// ============================================================================
+// v0.20.9 DIAGNOSTIC [PUZZLE-GATE]: on catalog refresh in Caraway's Mansion (glfurin*),
+// snapshot the persistent story var-bank (0x01CFE9B8 +0x000..0x7FF) whenever it CHANGES
+// since the last dump. Aaron cycles the exits before the glass/statue puzzle and after;
+// diffing the two [PUZZLE-GATE] snapshots reveals the flag that turns the post-puzzle exit
+// real, so the catalog can gate the "Exit" (party-member SETLINE) on it. Log-only, and
+// self-gated to the mansion so it costs nothing elsewhere.
+static void DumpPuzzleGateVars()
+{
+    if (strncmp(s_currentFieldName, "glfurin", 7) != 0) return;
+    static uint8_t vb[0x800];
+    bool ok = true;
+    __try {
+        const volatile uint8_t* pvb = (const volatile uint8_t*)(uintptr_t)0x01CFE9B8u;
+        for (int i = 0; i < 0x800; i++) vb[i] = pvb[i];
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+    if (!ok) { Log::Field("FieldNavigation: [PUZZLE-GATE] '%s' varbank READ FAULT", s_currentFieldName); return; }
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (int i = 0; i < 0x800; i++) { h ^= vb[i]; h *= 0x100000001b3ULL; }
+    static uint64_t s_lastVbHash = 0;
+    if (h == s_lastVbHash) return;
+    s_lastVbHash = h;
+    Log::Field("FieldNavigation: [PUZZLE-GATE] === '%s' varbank 0x01CFE9B8 +0x000..0x7FF (32 bytes/row) hash=%016llx ===",
+               s_currentFieldName, (unsigned long long)h);
+    for (int row = 0; row < 0x800; row += 32) {
+        char line[80]; int lp = 0;
+        for (int c = 0; c < 32; c++) lp += snprintf(line + lp, sizeof(line) - lp, "%02X", vb[row + c]);
+        Log::Field("FieldNavigation: [PUZZLE-GATE] +%04X %s", row, line);
+    }
+}
+
+// v0.20.10 DIAGNOSTIC [GW-LOCK]: read the LIVE in-memory INF gateway table (FDAT+0x64,
+// 12 slots x 0x20) and log each slot's enable (+0x10) and fieldId (+0x12). The engine's
+// crossing check skips a slot when enable==0xFFFF or fieldId==0x7FFF, so this reveals
+// whether Caraway Mansion 1's "Exit to Mansion 6" gateway (dest 726) is LOCKED via the
+// gateway-enable byte (then the catalog can mirror it) or via a story var (then we gate on
+// that instead). FDAT-validated + SEH-guarded + self-gated to glfurin*, deduped on change.
+static void DumpGatewayLock()
+{
+    if (strncmp(s_currentFieldName, "glfurin", 7) != 0) return;
+    uint32_t fdat = 0;
+    __try { fdat = *(const volatile uint32_t*)(uintptr_t)0x01CDC744u; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    if (fdat < 0x00400000u || fdat >= 0x40000000u) return;
+    uint16_t en[12] = {}, fid[12] = {};
+    bool ok = true;
+    __try {
+        const uint8_t* inf = (const uint8_t*)(uintptr_t)(fdat + 0x64u);
+        for (int i = 0; i < 12; i++) {
+            en[i]  = *(const uint16_t*)(inf + i * 0x20 + 0x10);
+            fid[i] = *(const uint16_t*)(inf + i * 0x20 + 0x12);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+    if (!ok) return;
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (int i = 0; i < 12; i++) { h ^= en[i]; h *= 0x100000001b3ULL; h ^= fid[i]; h *= 0x100000001b3ULL; }
+    static uint64_t s_lastGwHash = 0;
+    if (h == s_lastGwHash) return;
+    s_lastGwHash = h;
+    Log::Field("FieldNavigation: [GW-LOCK] '%s' FDAT=%08X live INF gateway slots (enable+0x10 / fieldId+0x12):",
+               s_currentFieldName, fdat);
+    for (int i = 0; i < 12; i++)
+        Log::Field("FieldNavigation: [GW-LOCK]   slot%d enable=0x%04X fieldId=%u%s", i, en[i], fid[i],
+                   (en[i] == 0xFFFF || fid[i] == 0x7FFF) ? " (DISABLED)" : "");
+    for (int g = 0; g < s_gatewayCount; g++)
+        Log::Field("FieldNavigation: [GW-LOCK]   static s_gateways[%d] dest=%u", g, (unsigned)s_gateways[g].destFieldId);
+}
+
+// v0.20.11 DIAGNOSTIC [M6-DOOR]: Caraway's Mansion 6 is a physical animated door in front of
+// the (always-armed) INF gateway -- per Aaron you can walk up to it but it only opens when
+// unlocked. The open/closed state is a story flag driven from the director cutscene scripts,
+// NOT a gateway/DOORLINE lock. The full-playthrough [PUZZLE-GATE] snapshots could not isolate
+// it: the M6-open (player left via 726) and M6-closed (player used Mansion 4/5) states were
+// several story beats apart, so 88 varblock bytes differed. This logs JUST those 88 candidate
+// offsets, compact + labeled, so a TIGHT before/after-trapped capture (mansion entry with M6
+// still open, then again seconds later once the door has closed) narrows them to the single
+// byte that flips = the door flag. Full [PUZZLE-GATE] dump stays active as the backstop.
+// Log-only, glfurin*-gated, deduped on the candidate set. SEH-guarded (live varbank read).
+static void DumpM6DoorCandidates()
+{
+    if (strncmp(s_currentFieldName, "glfurin", 7) != 0) return;
+    static const uint16_t kCand[] = {
+        0x006,0x050,0x051,0x054,0x079,0x0C2,0x0F2,0x66A,0x66B,0x66C,0x66E,0x66F,
+        0x670,0x672,0x673,0x674,0x676,0x677,0x678,0x6CA,0x6CB,0x6CD,0x6CF,0x6D0,
+        0x6D1,0x6D2,0x6D4,0x6D5,0x6D6,0x6D7,0x6D9,0x6DA,0x6DB,0x6DC,0x6DD,0x6DE,
+        0x6DF,0x6E0,0x6E1,0x6E3,0x6E4,0x6E5,0x6E6,0x6E7,0x6E8,0x6E9,0x6EA,0x6EB,
+        0x6EC,0x6ED,0x6EE,0x6EF,0x6F0,0x6F2,0x6F3,0x6F4,0x6F5,0x6F7,0x6F8,0x6F9,
+        0x6FA,0x6FC,0x6FD,0x6FF,0x701,0x702,0x703,0x704,0x706,0x707,0x708,0x709,
+        0x76A,0x76B,0x76C,0x76D,0x76F,0x770,0x771,0x772,0x7BA,0x7BB,0x7BC,0x7BD,
+        0x7C0,0x7C1,0x7C4,0x7C5,
+    };
+    static const int N = (int)(sizeof(kCand) / sizeof(kCand[0]));
+    uint8_t vals[128] = {};
+    uint16_t prog = 0;
+    bool ok = true;
+    __try {
+        const volatile uint8_t* pvb = (const volatile uint8_t*)(uintptr_t)0x01CFE9B8u;
+        for (int i = 0; i < N; i++) vals[i] = pvb[kCand[i]];
+        prog = *(const volatile uint16_t*)(uintptr_t)(0x01CFE9B8u + 0x100u);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+    if (!ok) { Log::Field("FieldNavigation: [M6-DOOR] '%s' varbank READ FAULT", s_currentFieldName); return; }
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (int i = 0; i < N; i++) { h ^= vals[i]; h *= 0x100000001b3ULL; }
+    // v0.20.11: per-FIELD dedup -- reset on field change so each mansion entry logs its state
+    // even when two visits share candidate values (the initial global dedup suppressed
+    // glfurin1's block as a duplicate of glfurin4's in the first BAT).
+    static uint64_t s_lastM6Hash = 0;
+    static char s_lastM6Field[64] = {};
+    bool newField = (strncmp(s_currentFieldName, s_lastM6Field, 63) != 0);
+    if (newField) { strncpy(s_lastM6Field, s_currentFieldName, 63); s_lastM6Field[63] = 0; }
+    if (!newField && h == s_lastM6Hash) return;
+    s_lastM6Hash = h;
+    Log::Field("FieldNavigation: [M6-DOOR] '%s' progress[0x100]=%u  %d door-flag candidates (offset=value):",
+               s_currentFieldName, (unsigned)prog, N);
+    for (int i = 0; i < N; ) {
+        char line[256]; int lp = 0;
+        for (int c = 0; c < 22 && i < N; c++, i++)
+            lp += snprintf(line + lp, sizeof(line) - lp, "%03X=%02X ", (unsigned)kCand[i], vals[i]);
+        Log::Field("FieldNavigation: [M6-DOOR]   %s", line);
+    }
+}
+
 static void RefreshCatalog()
 {
     if (!FF8Addresses::pFieldStateOthers || !FF8Addresses::pFieldStateOtherCount) return;
@@ -2968,6 +3293,14 @@ static void RefreshCatalog()
         // (log-only; self-gates to shaft fields and fires once per floor change).
         // Gathers the per-floor varblock state needed to derive the Cycle-2 gate.
         ShaftCatalogDryRun();
+        // v0.20.17: Caraway's Mansion investigation diagnostics DISABLED -- the escape-puzzle
+        // signal (progress[0x100] > 376) is found and shipped (v0.20.12-.16), so the heavy
+        // per-refresh [PUZZLE-GATE] (full 0x000-0x7FF varbank dump) and [M6-DOOR] (88 candidate
+        // bytes) are just log noise now. Behind a compile-time flag (functions still referenced,
+        // so no unused-function warning) -- flip to true to re-probe the mansion later.
+        static const bool s_mansionInvestigationDiag = false;
+        if (s_mansionInvestigationDiag) { DumpPuzzleGateVars(); DumpM6DoorCandidates(); }
+        DumpGatewayLock();     // v0.20.10 DIAGNOSTIC [GW-LOCK] -- KEPT as a live-gateway backstop (self-gated to glfurin*)
 
         // Re-detect player.
         // v0.18.3.262 (#83 follow-up): the player controls the party LEADER, which

@@ -1181,4 +1181,14 @@ bool IsReady()
     return s_initialized;
 }
 
+uint64_t WalkmeshHash(const char* fieldName)
+{
+    if (!s_initialized || !fieldName) return 0;
+    std::vector<uint8_t> idData;
+    if (!ExtractInnerFile(fieldName, ".id", idData) || idData.empty()) return 0;
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (size_t i = 0; i < idData.size(); i++) { h ^= idData[i]; h *= 0x100000001b3ULL; }
+    return h;
+}
+
 }  // namespace FieldArchive

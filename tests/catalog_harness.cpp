@@ -181,6 +181,11 @@ static int      s_symNameCount = 0, s_symOthersOffset = 0;
 static int      s_jsmDoors = 0, s_jsmLines = 0, s_jsmBackgrounds = 0, s_jsmOthers = 0;
 static FieldArchive::GatewayInfo s_gateways[MAX_GATEWAYS] = {};
 static int      s_gatewayCount = 0;
+// v0.20.7: duplicated-room phantom suppression (set by ComputeDupRoomSuppression in the
+// real build; fixtures set it directly here to exercise the InjectMapExits drop).
+static uint16_t s_dupSuppressDests[8] = {};
+static int      s_dupSuppressCount = 0;
+static char     s_currentFieldName[64] = {};  // v0.20.9: empty here -> [PUZZLE-GATE] self-gate never fires in the harness
 static DedupGateway s_dedupGateways[MAX_DEDUP_GATEWAYS] = {};
 static int      s_dedupGatewayCount = 0;
 static FieldArchive::JSMEntityInfo s_jsmEntities[MAX_JSM_ENTITIES] = {};
@@ -356,6 +361,9 @@ static bool IsInFieldControlledParty(uint8_t charId) {
 // straight out of the shipped source tree (resolved via -Isrc). This is the
 // exact code that runs in the mod; nothing here is a re-implementation.
 // ============================================================================
+// v0.20.8: real impl in field_nav_duproom.inl (not compiled here); stub keeps existing fixtures unaffected.
+static bool IsWorldMapStaging(uint16_t) { return false; }
+
 #include "field_catalog.inl"
 
 }  // namespace FieldNavigation
@@ -393,6 +401,7 @@ static void resetState() {
     memset(s_symNames, 0, sizeof(s_symNames)); s_symNameCount = 0; s_symOthersOffset = 0;
     s_jsmDoors = s_jsmLines = s_jsmBackgrounds = s_jsmOthers = 0;
     memset(s_gateways, 0, sizeof(s_gateways)); s_gatewayCount = 0;
+    s_dupSuppressCount = 0;
     memset(s_dedupGateways, 0, sizeof(s_dedupGateways)); s_dedupGatewayCount = 0;
     memset(s_jsmEntities, 0, sizeof(s_jsmEntities)); s_jsmEntityCount = 0;
     memset(s_jsmTriangleApprox, 0, sizeof(s_jsmTriangleApprox));
@@ -552,6 +561,16 @@ static void fx_mapexits() {
     { auto& e = JSM(2, FieldArchive::JSM_ENT_MAP_EXIT, 3, "elev"); e.param = 500; JSMpos(e, -400, 0, 14);} // filtered (no gateway match)
     { auto& e = JSM(3, FieldArchive::JSM_ENT_MAP_EXIT, 3, "warp"); e.param = 990; JSMpos(e, 0, 400, 14); } // filtered (param>982 w/ gateway)
 }
+static void fx_duproom_phantom() {
+    // v0.20.7: the room (via ComputeDupRoomSuppression, stubbed here) says dest 726 is
+    // served by a real INF gateway in a SIBLING copy of this room and this copy has no
+    // local gateway there -> a scripted exit to 726 is a cutscene phantom and is dropped;
+    // a scripted exit to a non-duplicated dest (717) is a unique exit and is kept.
+    ENT(0, 1, 10, 0, 0, 0x00, 0,0,0);
+    FieldNavigation::s_dupSuppressDests[0] = 726; FieldNavigation::s_dupSuppressCount = 1;
+    { auto& e = JSM(0, FieldArchive::JSM_ENT_MAP_EXIT, 3, "rinoa"); e.param = 726; e.paramFromInterp = true; JSMpos(e, 100, 100, 14); } // DROP
+    { auto& e = JSM(1, FieldArchive::JSM_ENT_MAP_EXIT, 3, "trap");  e.param = 717; e.paramFromInterp = true; JSMpos(e, 200, 200, 14); } // KEEP
+}
 static void fx_gateways_merge() {
     ENT(0, 1, 10, 0, 0, 0x00, 0,0,0);
     GW(0, 300, 100.f, 100.f);                           // two gateways same dest, near -> merge count=2
@@ -693,6 +712,30 @@ static void fx_item_pickup() {
     JSMpos(q, 300, -50, 13); q.hasSetmodelInit = true; q.isItemPickup = false;
 }
 
+// v0.20.0: interaction-zone junk gate, RE'd from the field engine. Interaction
+// requires a talk/push radius OR a walk-into trigger zone (SETLINE/INF), captured
+// as hasNearbyInteractionZone. Drop a marker-positioned Object (hasPshmCoords)
+// ONLY when it has no zone AND no own interaction AND no curated name. All objects
+// here get a real injected position; the gate scopes on hasPshmCoords. Five cases:
+//   objphantom PSHM + no zone + no int + unnamed -> DROPPED (the bghall_5 light)
+//   objzone    PSHM + has interaction zone       -> SURVIVES (walk-into trigger)
+//   dic        PSHM + curated name ("Directory") -> SURVIVES (named)
+//   objtalk    PSHM + own talk interaction       -> SURVIVES (own interaction)
+//   objliteral literal position (not PSHM)       -> SURVIVES (out of gate scope)
+static void fx_director_gate() {
+    ENT(0, 1, 10, 100, 100, 0x00, 0,0,0);   // player/leader -> filtered
+    { auto& e = JSM(0, FieldArchive::JSM_ENT_INTERACTIVE_OBJECT, 3, "objphantom");
+      JSMpos(e, 200, 200, 11); e.hasPshmCoords = true; }
+    { auto& e = JSM(1, FieldArchive::JSM_ENT_INTERACTIVE_OBJECT, 3, "objzone");
+      JSMpos(e, 300, 300, 12); e.hasPshmCoords = true; e.hasNearbyInteractionZone = true; }
+    { auto& e = JSM(2, FieldArchive::JSM_ENT_INTERACTIVE_OBJECT, 2, "dic");
+      JSMpos(e, -200, 200, 13); e.hasPshmCoords = true; }
+    { auto& e = JSM(3, FieldArchive::JSM_ENT_INTERACTIVE_OBJECT, 3, "objtalk");
+      JSMpos(e, 400, 100, 15); e.hasPshmCoords = true; e.hasTalkSetup = true; }
+    { auto& e = JSM(4, FieldArchive::JSM_ENT_INTERACTIVE_OBJECT, 3, "objliteral");
+      JSMpos(e, -300, -100, 16); /* hasPshmCoords stays false -> not in gate scope */ }
+}
+
 struct Fixture { const char* name; void (*fn)(); };
 static const Fixture kFixtures[] = {
     { "empty_field",                fx_empty },
@@ -709,6 +752,7 @@ static const Fixture kFixtures[] = {
     { "jsm_specials",               fx_jsm_specials },
     { "jsm_drawpoint_consolidation",fx_jsm_drawpoint_consolidation },
     { "mapexits",                   fx_mapexits },
+    { "duproom_phantom",            fx_duproom_phantom },
     { "gateways_merge",             fx_gateways_merge },
     { "gateways_ring_split",        fx_gateways_ring_split },
     { "dedupe_object_line",         fx_dedupe_object_line },
@@ -727,6 +771,7 @@ static const Fixture kFixtures[] = {
     { "ladder_nav",                 fx_ladder },          // table-named -> "Ladder"
     { "ladder_unnamed",             fx_ladder_unnamed },  // pins the ITEM-1 naming hunk
     { "item_pickup",                fx_item_pickup },     // v0.19.5: NPC->Item relabel lock
+    { "director_gate",              fx_director_gate },   // v0.19.7: director junk-gate drop lock
 };
 static const int kFixtureCount = (int)(sizeof(kFixtures)/sizeof(kFixtures[0]));
 
