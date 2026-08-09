@@ -1110,6 +1110,156 @@ if (ei_info.type == ENT_NPC) {
 // InjectGatewayExits) but is used by InjectInteractionLines and InjectJsmSpecials
 // (both earlier) to gate the Caraway's Mansion puzzle entities.
 static bool CarawayMansionSealed();
+
+// ============================================================================
+// v0.20.19 (catalog revamp WS1 Step 1.1): OBSERVE-ONLY catalog audit.
+// For every entry each injection path is about to KEEP, emit one uniform
+// [CAT-AUDIT] line carrying the live-state signals available at that site, so a
+// BAT across the reference fields shows -- per field -- exactly what the catalog
+// announces and which signal would gate each bloat entry, BEFORE any behaviour
+// change (WS1 Step 1.3). Pure logging: a scoped brace block before each push;
+// no branch, no continue, no mutation. The existing per-path skip logs
+// (controller/effect, mansion-sealed, gateway-filter) still cover the DROP side.
+// One-line switch-off via s_catAudit. Reads only mod-side data (no live engine
+// memory), so it is safe in the offline catalog harness.
+// ============================================================================
+static const bool s_catAudit = true;
+static void CatAudit(const char* path, const EntityInfo& e, int x, int y,
+                     const char* sym, const char* detail)
+{
+    if (!s_catAudit) return;
+    Log::Field("FieldNavigation: [CAT-AUDIT] field=%s path=%s type=%d name='%s' "
+               "pos=(%d,%d) sym='%s' ctrl=%d | %s",
+               s_currentFieldName, path, (int)e.type, e.name, x, y,
+               (sym && *sym) ? sym : "-",
+               (sym && *sym && IsBgControllerName(sym)) ? 1 : 0,
+               detail ? detail : "");
+}
+// ============================================================================
+// v0.20.20 (catalog revamp WS1): camera-zone transition recognizer.
+// A SCREEN_BOUND captured line whose resolved destination is a DIFFERENT, real,
+// walkable field is a camera-zone transition -- walking across it moves the
+// player to the adjacent section of the same logical space (e.g. B-Garden
+// Classroom 1 -> Classroom 3 across the 'Selphie' line). Aaron's rule (v0.20.19
+// BAT): announce it as "Exit to <dest field's display name>", NOT demote it to a
+// nameless Interaction just because the line also REQs scene dialog (Classroom's
+// 'Selphie' is the scene director AND the pan). Self-loop lines (dest == current
+// field: dorm beds, prison stairs) and world-map staging dests are NOT zone
+// transitions and keep their existing handling.
+// ============================================================================
+// v0.20.23: the v0.20.20 camera-zone-transition recognizer was REMOVED. It promoted a
+// SCREEN_BOUND line with a different-field dest to an Exit even when it REQs dialog, which
+// mis-labeled Squall's classroom desk (bgroom_1 line6 'Selphie': REQs Quistis, and walking
+// into it MAPJUMPs to Classroom 3 as a scene consequence) as an exit. A dialog-REQ
+// SCREEN_BOUND line is a DIALOG-GATED interaction (desk/bed), not a walk-across transition;
+// the original rule (dialog-REQ -> Interaction) is correct and is restored below.
+
+// ============================================================================
+// v0.20.21 (catalog revamp WS1): topological camera-zone filter.
+// The old far-zone filter tested whether the STRAIGHT line player->entity crosses
+// a screen-bound segment -- fragile: from some positions that line slips past the
+// segment's end and a different-zone entry leaks (classroom BAT: the far hallway
+// exit was kept in 26 refreshes). This adds a TOPOLOGICAL test: flood-fill the
+// walkmesh outward from the player's triangle, refusing to step across an active
+// screen-bound segment (camera boundaries = walls); an entry is hidden only if it
+// sits in a triangle flood-fill could NOT reach. FAIL-SAFE (#88): no walkmesh /
+// unknown player triangle / unplaceable entry => s_zoneValid stays false or the
+// entry is KEPT, so the worst case is a leftover leak for one more BAT, never a
+// dropped reachable exit. Computed once per RefreshCatalog. Runs ALONGSIDE the
+// existing straight-line filter (either may hide; neither hides a reachable entry).
+// ============================================================================
+static const int ZONE_MAX_TRI = 4096;   // matches field_navigation.cpp MAX_TRI_ID; self-contained for the harness
+static bool s_zoneReachable[ZONE_MAX_TRI] = {};
+static bool s_zoneValid = false;
+static bool s_zoneBoundaryLine[MAX_CAPTURED_LINES] = {};  // v0.20.22: screen-bound lines that bound the player's zone -- their exits/transitions stay visible
+
+static uint16_t NearestWalkTriangle(float x, float y)
+{
+    if (!s_walkmesh.valid || !s_walkmesh.triangles || s_walkmesh.numTriangles <= 0) return 0xFFFF;
+    int best = -1; float bestD = 3.0e30f;
+    int n = s_walkmesh.numTriangles; if (n > ZONE_MAX_TRI) n = ZONE_MAX_TRI;
+    for (int i = 0; i < n; i++) {
+        float dx = s_walkmesh.triangles[i].centerX - x;
+        float dy = s_walkmesh.triangles[i].centerY - y;
+        float d = dx * dx + dy * dy;
+        if (d < bestD) { bestD = d; best = i; }
+    }
+    return best < 0 ? (uint16_t)0xFFFF : (uint16_t)best;
+}
+
+static bool ZoneReachablePoint(float x, float y)
+{
+    if (!s_zoneValid) return true;                                   // filtering disabled -> KEEP
+    uint16_t tri = NearestWalkTriangle(x, y);
+    if (tri == 0xFFFF || tri >= (uint16_t)s_walkmesh.numTriangles) return true;  // can't place -> KEEP
+    return s_zoneReachable[tri];
+}
+
+// A captured line straddles zones at a boundary, so KEEP it if ANY of its center or
+// two endpoints is in the player's zone -- this keeps the forward camera-pan
+// transition (whose far endpoint is across the line) while still hiding a line that
+// lies entirely in another zone (the classroom's far hallway exit).
+static bool ZoneReachableLine(int t)
+{
+    if (!s_zoneValid) return true;
+    if (t < 0 || t >= s_capturedLineCount) return true;
+    float cx = (float)(s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2.0f;
+    float cy = (float)(s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2.0f;
+    return ZoneReachablePoint(cx, cy)
+        || ZoneReachablePoint((float)s_capturedLines[t].x1, (float)s_capturedLines[t].y1)
+        || ZoneReachablePoint((float)s_capturedLines[t].x2, (float)s_capturedLines[t].y2);
+}
+
+static void ComputePlayerZoneReachability()
+{
+    s_zoneValid = false;
+    for (int i = 0; i < ZONE_MAX_TRI; i++) s_zoneReachable[i] = false;
+    for (int i = 0; i < MAX_CAPTURED_LINES; i++) s_zoneBoundaryLine[i] = false;
+    if (!s_walkmesh.valid || !s_walkmesh.triangles || s_walkmesh.numTriangles <= 0) return;
+    int nTri = s_walkmesh.numTriangles;
+    if (nTri > ZONE_MAX_TRI) return;                                   // oversize -> disable (bias KEEP)
+
+    // Player's current triangle: live entity field +0x1FA (same read auto-drive uses).
+    uint16_t playerTri = 0xFFFF;
+    if (FF8Addresses::pFieldStateOthers && s_playerEntityIdx >= 0) {
+        uint8_t* base2 = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+        if (base2)
+            playerTri = *(uint16_t*)(base2 + ENTITY_STRIDE * s_playerEntityIdx + 0x1FA);
+    }
+    if (playerTri == 0xFFFF || playerTri >= (uint16_t)nTri) return;  // unknown -> disable (bias KEEP)
+
+    static int bfsQueue[ZONE_MAX_TRI];
+    int qh = 0, qt = 0;
+    s_zoneReachable[playerTri] = true;
+    bfsQueue[qt++] = playerTri;
+    while (qh < qt) {
+        int cur = bfsQueue[qh++];
+        const auto& tc = s_walkmesh.triangles[cur];
+        for (int e = 0; e < 3; e++) {
+            uint16_t nb = tc.neighbor[e];
+            if (nb == 0xFFFF || nb >= (uint16_t)nTri || s_zoneReachable[nb]) continue;
+            const auto& tn = s_walkmesh.triangles[nb];
+            bool blocked = false;
+            for (int k = 0; k < s_capturedLineCount; k++) {
+                if (!s_capturedLines[k].active) continue;
+                if (s_capturedLines[k].lineType != FieldArchive::JSM_ENT_LINE_SCREEN_BOUND) continue;
+                if (SegmentsCross(tc.centerX, tc.centerY, tn.centerX, tn.centerY,
+                                  (float)s_capturedLines[k].x1, (float)s_capturedLines[k].y1,
+                                  (float)s_capturedLines[k].x2, (float)s_capturedLines[k].y2)) {
+                    blocked = true;                              // this line walls the player's zone here
+                    if (k < MAX_CAPTURED_LINES) s_zoneBoundaryLine[k] = true;
+                }
+            }
+            if (blocked) continue;                                  // camera boundary between cur and nb
+            s_zoneReachable[nb] = true;
+            bfsQueue[qt++] = nb;
+        }
+    }
+    s_zoneValid = true;
+    Log::Field("FieldNavigation: [refresh] zone-filter active: player tri=%d, %d/%d triangles reachable [v0.20.21]",
+               (int)playerTri, qt, nTri);
+}
+
 static void InjectTriggerLineExits(EntityInfo* newCatalog, int& newCount)
 {
 // ============================================================================
@@ -1159,6 +1309,32 @@ static void InjectTriggerLineExits(EntityInfo* newCatalog, int& newCount)
                 for (int t = 0; t < s_capturedLineCount && newCount < MAX_CATALOG; t++) {
                     if (!s_capturedLines[t].active) continue;
                     if (s_capturedLines[t].lineType != FieldArchive::JSM_ENT_LINE_SCREEN_BOUND) continue;
+
+                    // v0.20.29: camera-view transition line (routed to SCREEN_BOUND in
+                    // linetypes so it walls the zone BFS). Emit as a "Camera transition"
+                    // exit with no field destination, zone-filtered like any exit.
+                    if (s_capturedLines[t].isCameraTransition) {
+                        float ctcx = (float)(s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2.0f;
+                        float ctcy = (float)(s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2.0f;
+                        if (s_zoneValid && !ZoneReachableLine(t) &&
+                            !(t >= 0 && t < MAX_CAPTURED_LINES && s_zoneBoundaryLine[t])) {
+                            Log::Field("FieldNavigation: [refresh] camera-transition line%d filtered: not a boundary of player's zone [v0.20.29]", t);
+                            continue;
+                        }
+                        EntityInfo camExit = {};
+                        camExit.entityIdx  = -200 - t;
+                        camExit.modelId    = -1;
+                        camExit.triangleId = 0;
+                        camExit.type       = ENT_EXIT;
+                        camExit.gatewayIdx = -1;
+                        strncpy(camExit.name, "Camera transition", sizeof(camExit.name) - 1);
+                        camExit.name[sizeof(camExit.name) - 1] = '\0';
+                        CatAudit("camera-transition", camExit, (int)ctcx, (int)ctcy, "-", s_capturedLines[t].name);
+                        newCatalog[newCount++] = camExit;
+                        Log::Field("FieldNavigation: [refresh] camera-transition EXIT line%d '%s' center=(%.0f,%.0f) [v0.20.29]",
+                                   t, s_capturedLines[t].name, ctcx, ctcy);
+                        continue;
+                    }
                     // v0.17.7.1.2 / v0.17.7.5.4: SCREEN_BOUND lines that
                     // genuinely REQ a dialog-bearing entity are dual-purpose
                     // (exit-via-interaction). The Line REQs a background
@@ -1472,6 +1648,9 @@ static void InjectTriggerLineExits(EntityInfo* newCatalog, int& newCount)
                     trigExit.gatewayIdx = -1;
                     strncpy(trigExit.name, exitName, sizeof(trigExit.name) - 1);
                     trigExit.name[sizeof(trigExit.name) - 1] = '\0';
+                    { char caBuf[48]; snprintf(caBuf, sizeof caBuf, "destId=%d", destId);
+                        CatAudit("setline-exit", trigExit, (int)tcx, (int)tcy, "-", caBuf); }
+                    if (s_zoneValid && !ZoneReachableLine(t) && !(t >= 0 && t < MAX_CAPTURED_LINES && s_zoneBoundaryLine[t])) { Log::Field("FieldNavigation: [refresh] '%s' filtered: exit lies wholly in another camera zone (not a boundary of the player's zone) [v0.20.22]", trigExit.name); continue; }
                     newCatalog[newCount++] = trigExit;
                 }
             }
@@ -1572,6 +1751,8 @@ static void InjectTriggerLineExits(EntityInfo* newCatalog, int& newCount)
                     evEntry.gatewayIdx = -1;
                     strncpy(evEntry.name, "Event", sizeof(evEntry.name) - 1);
                     evEntry.name[sizeof(evEntry.name) - 1] = '\0';
+                    { CatAudit("trigger-event", evEntry, (int)tcx, (int)tcy, "-", "generic Event line"); }
+                    if (s_zoneValid && !ZoneReachableLine(t)) { Log::Field("FieldNavigation: [refresh] '%s' filtered: another camera zone (unreachable from player) [v0.20.21]", evEntry.name); continue; }
                     newCatalog[newCount++] = evEntry;
                 }
             }
@@ -1581,6 +1762,37 @@ static void InjectTriggerLineExits(EntityInfo* newCatalog, int& newCount)
 // ============================================================================
 // 3c. Interaction-line injection  (was inline block, field_nav_catalog.inl :535-715)
 // ============================================================================
+// v0.20.34 (Aaron): recognize signpost / notice-board LINE entities by SYM name
+// so the catalog labels them "Notice Board" instead of a bare "Interaction N".
+// Applies only to interaction lines the player reads as text (bgroom_1's
+// 'BritinBoard' = the classroom bulletin board that cycles the Disciplinary /
+// Garden Festival / cafeteria notices). The token set is deliberately TIGHT --
+// distinctive substrings plus whole-name matches only -- so it never fires on
+// unrelated words (bare "board"/"sign" would wrongly catch keyboard, design,
+// signal, cardboard). Misses fall back to "Interaction N" (safe), never an
+// over-label. Extend the lists as a field-SYM survey turns up more sign symbols;
+// the robust long-term form keys on the script actually displaying a message.
+static bool IsSignpostName(const char* sn)
+{
+    if (!sn || !sn[0]) return false;
+    static const char* kParts[] = {
+        "britin", "bulletin", "noticeboard", "notice_board",
+        "signboard", "sign_board", "billboard", "signpost"
+    };
+    for (size_t i = 0; i < sizeof(kParts) / sizeof(kParts[0]); i++) {
+        size_t nlen = strlen(kParts[i]);
+        for (const char* h = sn; *h; ++h)
+            if (_strnicmp(h, kParts[i], nlen) == 0) return true;
+    }
+    static const char* kExact[] = {
+        "board", "sign", "notice", "signpost",
+        "kanban", "keijiban", "keiji"
+    };
+    for (size_t i = 0; i < sizeof(kExact) / sizeof(kExact[0]); i++)
+        if (_stricmp(sn, kExact[i]) == 0) return true;
+    return false;
+}
+
 static void InjectInteractionLines(EntityInfo* newCatalog, int& newCount)
 {
         if (s_capturedLineCount > 0) {
@@ -1614,6 +1826,10 @@ static void InjectInteractionLines(EntityInfo* newCatalog, int& newCount)
                 }
                 for (int t = 0; t < s_capturedLineCount && newCount < MAX_CATALOG; t++) {
                     if (!s_capturedLines[t].active) continue;
+                    // v0.20.30: camera-view transition lines are emitted as exits by
+                    // InjectTriggerLineExits; never also list them here as interactions
+                    // (that double-emission was the catalog instability Aaron saw).
+                    if (s_capturedLines[t].isCameraTransition) continue;
                     // v0.17.7.1.2 / v0.17.7.5.4 / v0.17.7.5.5: Accept
                     // SCREEN_BOUND lines as Interactions in two cases:
                     //   1. hasDialogReqTarget=true (genuine dual-purpose,
@@ -1679,6 +1895,49 @@ static void InjectInteractionLines(EntityInfo* newCatalog, int& newCount)
                     // Reachability: must be on same side of screen-boundary trigger lines.
                     float tcx = (float)(s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2.0f;
                     float tcy = (float)(s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2.0f;
+                    // v0.20.33 (Aaron): a "door" interaction LINE co-located with a
+                    // screen-bound exit is that exit's door-open animation trigger --
+                    // crossing it plays the door opening automatically as the player
+                    // heads for the exit, so listing it as a separate "Interaction" is
+                    // redundant with the exit that's already catalogued. Drop it. BOTH
+                    // conditions are required (a "door" name AND a nearby real exit line)
+                    // so a genuine interaction that merely sits near a doorway is never
+                    // suppressed. bgroom_1: 'door01' (1418,-3352) pairs with the
+                    // 'to_corridor' exit (1418,-3444), 92 world units away.
+                    bool doorTrigger = false;
+                    {
+                        const char* doorSym = nullptr;
+                        int wIdxDoor = s_jsmDoors + t;
+                        for (int j = 0; j < s_jsmEntityCount; j++) {
+                            if (s_jsmEntities[j].jsmCategory == 1 &&
+                                s_jsmEntities[j].jsmIndex == wIdxDoor) {
+                                doorSym = s_jsmEntities[j].symName; break;
+                            }
+                        }
+                        bool nameHasDoor = false;
+                        if (doorSym)
+                            for (const char* p = doorSym; *p; ++p)
+                                if (_strnicmp(p, "door", 4) == 0) { nameHasDoor = true; break; }
+                        if (nameHasDoor) {
+                            for (int dt = 0; dt < s_capturedLineCount && !doorTrigger; dt++) {
+                                if (dt == t || !s_capturedLines[dt].active) continue;
+                                if (s_capturedLines[dt].lineType !=
+                                        FieldArchive::JSM_ENT_LINE_SCREEN_BOUND) continue;
+                                if (s_capturedLines[dt].isCameraTransition) continue;
+                                float ecx = (float)(s_capturedLines[dt].x1 + s_capturedLines[dt].x2) / 2.0f;
+                                float ecy = (float)(s_capturedLines[dt].y1 + s_capturedLines[dt].y2) / 2.0f;
+                                float ddx = tcx - ecx, ddy = tcy - ecy;
+                                if (ddx*ddx + ddy*ddy <= 400.0f * 400.0f) {
+                                    doorTrigger = true;
+                                    Log::Field("FieldNavigation: [refresh] interaction line%d '%s' "
+                                               "center=(%.0f,%.0f) suppressed: door-open trigger "
+                                               "co-located with screen-bound exit line%d [v0.20.33]",
+                                               t, doorSym, tcx, tcy, dt);
+                                }
+                            }
+                        }
+                    }
+                    if (doorTrigger) continue;
                     // v0.18.3.268 BUG B: BOUNDED segment-crossing test, not the
                     // infinite-line side test. IsSeparatedByTriggerLine extends
                     // every screen-bound line to infinity, so a short doorway
@@ -1741,6 +2000,20 @@ static void InjectInteractionLines(EntityInfo* newCatalog, int& newCount)
                             continue;
                         }
                     }
+                    // v0.20.31 (Aaron): the classroom desk trigger line ('Cliant') is a
+                    // unique interaction -- label it "Desk" instead of a generic number.
+                    const char* lineCurated = nullptr;
+                    {
+                        int wIdx2 = s_jsmDoors + t;
+                        for (int j = 0; j < s_jsmEntityCount; j++) {
+                            if (s_jsmEntities[j].jsmCategory == 1 && s_jsmEntities[j].jsmIndex == wIdx2) {
+                                const char* csn = s_jsmEntities[j].symName;
+                                if (_stricmp(csn, "Cliant") == 0) lineCurated = "Desk";      // v0.20.31: Squall's desk
+                                else if (IsSignpostName(csn)) lineCurated = "Notice Board";  // v0.20.34: bulletin/notice signs
+                                break;
+                            }
+                        }
+                    }
                     EntityInfo intEntry = {};
                     intEntry.entityIdx  = -200 - t;  // same sentinel as exits -- position lookup works identically
                     intEntry.modelId    = -1;
@@ -1753,12 +2026,18 @@ static void InjectInteractionLines(EntityInfo* newCatalog, int& newCount)
                         Log::Field("FieldNavigation: [refresh] line%d surfaced as "
                                    "Save Point (isSaveLine) [v0.17.8.8]", t);
                     } else {
-                        interactionNum++;
                         intEntry.type = ENT_INTERACTION;
-                        if (soloName)
+                        if (lineCurated) {
+                            snprintf(intEntry.name, sizeof(intEntry.name), "%s", lineCurated);
+                        } else if (soloName) {
                             snprintf(intEntry.name, sizeof(intEntry.name), "%s", soloName);
-                        else
-                            snprintf(intEntry.name, sizeof(intEntry.name), "Interaction %d", interactionNum);
+                        } else {
+                            // v0.20.22: provisional label; the contiguous number is assigned below,
+                            // AFTER filtering, so a dropped interaction never burns a number
+                            // (fixes "Interaction 6 of 4").
+                            strncpy(intEntry.name, "Interaction", sizeof(intEntry.name) - 1);
+                            intEntry.name[sizeof(intEntry.name) - 1] = '\0';
+                        }
                     }
                     // v0.20.15: the Caraway's Mansion glass-shelf interaction line (the
                     // 'Glass' trigger, line 1665's "glass shelf") is only interactive once
@@ -1772,6 +2051,15 @@ static void InjectInteractionLines(EntityInfo* newCatalog, int& newCount)
                                    t, intEntry.name);
                         continue;
                     }
+                    { CatAudit("interaction", intEntry, (int)tcx, (int)tcy, "-",
+                        (intEntry.type == ENT_SAVE_POINT) ? "save point" : "interaction line"); }
+                    if (s_zoneValid && intEntry.type != ENT_SAVE_POINT && !ZoneReachableLine(t)) { Log::Field("FieldNavigation: [refresh] '%s' filtered: another camera zone (unreachable from player) [v0.20.22]", intEntry.name); continue; }
+                    // v0.20.32: don't renumber a curated line name (e.g. "Desk") back
+                    // into "Interaction N" -- exempt lineCurated the same way soloName is.
+                    if (intEntry.type == ENT_INTERACTION && !soloName && !lineCurated) {
+                        interactionNum++;
+                        snprintf(intEntry.name, sizeof(intEntry.name), "Interaction %d", interactionNum);
+                    }
                     newCatalog[newCount++] = intEntry;
                 }
             }
@@ -1779,6 +2067,53 @@ static void InjectInteractionLines(EntityInfo* newCatalog, int& newCount)
 }
 
 // ============================================================================
+// v0.20.48 (#117): draw-point presence + TRUE position. v0.20.46/47 RE'd the visibility gate correctly
+// (renderer 0x00475170 draws when state==2 || (state==1 && cfg==1); createDrawPoint 0x00474750 sets
+// state=1 and cfg = word[0x01CDBFEA] = SETDRAWPOINT_param | Move-Find drawFlag, recomputed live -- so
+// cfg==1 is exactly "a sighted player sees this sparkle, Move-Find included"), and the v0.20.47 BAT
+// confirmed cfg (both tested points logged cfg=1 while the sparkle was on screen). What was WRONG was
+// matching the sparkle against the drpoint entity's CATALOG position: that position is unreliable
+// (otokun01 resolved 435/2422 world-units off the sparkle; zells resolved to (0,0)), so a VISIBLE draw
+// point was dropped. FIX: the sparkle world position (0x01CDC620/622 = the drpoint entity's own pos >>12,
+// written by createDrawPoint) IS the ground truth for where the draw point sits -- adopt it as the
+// catalog position, and reject a STALE sparkle (left by a previous field whose SETDRAWPOINT did not run)
+// by requiring it to lie on THIS field's walkmesh, not by matching a fragile entity position. state==2 is
+// a transient draw-burst mode (separate particle routine 0x00474872), not the steady sparkle, so it is
+// logged only. On success the sparkle position + its walkmesh triangle are returned for placement.
+// SEH-guarded, fail-OPEN.
+static bool IsDrawPointLivePresent(const char* sym, int16_t* outX, int16_t* outY, uint16_t* outTri)
+{
+    __try {
+        int16_t sx  = *(const volatile int16_t*)(uintptr_t)0x01CDC620u;   // sparkle world X (entityX>>12)
+        int16_t sy  = *(const volatile int16_t*)(uintptr_t)0x01CDC622u;   // sparkle world Y
+        int16_t cfg = *(const volatile int16_t*)(uintptr_t)0x01CDBFEAu;   // renderer visibility gate (param|MoveFind)
+        uint8_t st  = *(const volatile uint8_t*)(uintptr_t)0x01CE0750u;   // transient particle state (diagnostic)
+        bool visible = (cfg == 1);
+        bool onField = true;                 // fail-open: no walkmesh -> trust cfg alone
+        const char* why = "keep(no-walkmesh)";
+        float ndist = -1.0f;
+        uint16_t tri = 0xFFFF;
+        if (visible && s_walkmesh.valid && s_walkmesh.numTriangles > 0) {
+            uint16_t nt = NearestWalkTriangle((float)sx, (float)sy);
+            if (nt != 0xFFFF && nt < (uint16_t)s_walkmesh.numTriangles) {
+                tri = nt;
+                float ddx = s_walkmesh.triangles[nt].centerX - (float)sx;
+                float ddy = s_walkmesh.triangles[nt].centerY - (float)sy;
+                ndist = sqrtf(ddx*ddx + ddy*ddy);
+            }
+            if (IsInsideWalkmesh((float)sx, (float)sy))               { onField = true;  why = "on-mesh"; }
+            else if (tri != 0xFFFF && ndist >= 0.0f && ndist < 600.0f) { onField = true;  why = "near-mesh"; }
+            else                                                      { onField = false; why = "off-mesh(stale)"; }
+        }
+        bool present = visible && onField;
+        if (present && outX && outY) { *outX = sx; *outY = sy; if (outTri) *outTri = tri; }
+        Log::Field("FieldNavigation: [drawpt] '%s' live: state=%d cfg=%d sparkle=(%d,%d) nearTri=%d dist=%.0f mesh=%s -> %s [v0.20.48 #117]",
+                   sym ? sym : "?", (int)st, (int)cfg, (int)sx, (int)sy, (int)(int16_t)tri, ndist, why,
+                   present ? "PRESENT" : "absent");
+        return present;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return true; }  // fail-OPEN
+}
+
 // 3d. JSM special-entity injection  (was inline block, field_nav_catalog.inl :738-991)
 // ============================================================================
 static void InjectJsmSpecials(EntityInfo* newCatalog, int& newCount, const EntityInfo* fresh, uint8_t lim)
@@ -1802,6 +2137,17 @@ static void InjectJsmSpecials(EntityInfo* newCatalog, int& newCount, const Entit
             // always have correct positions. If a runtime entity of matching type
             // exists, prefer it — don't inject JSM with wrong coordinates.
             EntityType jt = JSMTypeToCatalogType(je.type);
+            // v0.20.48 (#117): draw-point gate. Presence = live sparkle (cfg==1) sitting on THIS field's
+            // walkmesh; on success adopt the sparkle's own world position + triangle as the catalog
+            // position (the drpoint entity's resolved position proved unreliable -- see the v0.20.47 BAT).
+            if (jt == ENT_DRAW_POINT) {
+                int16_t spx = je.posX, spy = je.posY; uint16_t sptri = je.posTriangle;
+                if (!IsDrawPointLivePresent(je.symName, &spx, &spy, &sptri)) { continue; }
+                s_jsmEntities[j].posX = spx;
+                s_jsmEntities[j].posY = spy;
+                s_jsmEntities[j].hasPosition = true;
+                if (sptri != 0xFFFF) s_jsmEntities[j].posTriangle = sptri;
+            }
             // v0.18.3.292 (#85): honour ENTITY_SKIP_NAMES for JSM-injected
             // objects too -- it was only consulted by IsBgControllerName() for
             // Background entities, so an Others entity with a controller name
@@ -1884,9 +2230,18 @@ static void InjectJsmSpecials(EntityInfo* newCatalog, int& newCount, const Entit
             bool jsmOwnInteraction = je.hasTalkSetup || je.hasSetline ||
                                      je.isSaveLine || je.hasDialogReqTarget;
             bool jsmNamedObject = false;
+            bool jsmIsGate = false;  // v0.20.43: curated AND its display name is a "Gate" -- the
+                                     // ALWAYS-PRESENT control mechanisms. STATE-DEPENDENT curated
+                                     // objects (hasigomodel="Ladder", which appears only when the
+                                     // shortcut ladder is down) must NOT get the out-of-window
+                                     // exemption, or they phantom when absent (Aaron's phantom ladders).
             if (je.symName[0] != '\0') {
                 for (const EntityDisplayName* mN = ENTITY_DISPLAY_NAMES; mN->sym != nullptr; mN++) {
-                    if (_stricmp(je.symName, mN->sym) == 0) { jsmNamedObject = true; break; }
+                    if (_stricmp(je.symName, mN->sym) == 0) {
+                        jsmNamedObject = true;
+                        jsmIsGate = (mN->display && strncmp(mN->display, "Gate", 4) == 0);
+                        break;
+                    }
                 }
             }
             if (jt == ENT_OBJECT && je.hasPshmCoords &&
@@ -1896,6 +2251,114 @@ static void InjectJsmSpecials(EntityInfo* newCatalog, int& newCount, const Entit
                            "no curated name -- junk-gate [v0.20.0 #5]",
                            je.symName);
                 continue;
+            }
+
+            // v0.20.29 (Aaron): drop opening-cutscene scene-actor phantoms. The
+            // junk-gate above keeps an Object that has an interaction or curated
+            // name -- but characters like Selphie carry a talk method yet are NOT
+            // present during free-roam (their state-gated SET3 never ran). The live
+            // "others" entity struct is the ground truth: a placed entity has a real
+            // triangle/position; an unplaced one reads tri=0 pos=(0,0). Only applied
+            // to marker-positioned (hasPshmCoords) Others so literally-placed and
+            // live-present entities (Squall at his desk) are never touched.
+            // v0.20.30: check ALL Others' live entity struct (v0.20.29 only checked
+            // hasPshmCoords ones, so literally-positioned scene actors like Selphie
+            // slipped through). No SEH (matches the sceneAssembly probe): base valid
+            // on-field, index bounded by the engine's live other-count. Also logs the
+            // flag word (+0x160) and model id (+0x218) so a visibility signal can be
+            // found for any placed-but-hidden phantom the live-position test misses.
+            if (jt == ENT_OBJECT && je.jsmCategory == 3 &&
+                FF8Addresses::pFieldStateOthers && FF8Addresses::pFieldStateOtherCount) {
+                uint8_t* obP  = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+                int      oirP = je.jsmIndex - (s_jsmDoors + s_jsmLines + s_jsmBackgrounds);
+                int      ocnt = (int)(*FF8Addresses::pFieldStateOtherCount);
+                if (obP && oirP >= 0) {
+                    // v0.20.31: the engine's live "others" array holds only the entities
+                    // actually loaded in the current scene (ocnt of them). A JSM other
+                    // whose slot index is >= ocnt has NO live entity -- it is a cutscene
+                    // actor from a different scene (Selphie/Quistis/Irvine in the opening
+                    // classroom) and is not present. Drop it.
+                    // v0.20.42 (#85 gate maze): oirP>=ocnt means this entity sits BEYOND the engine
+                    // active-tracking window (ocnt = only the nearest ~8-9 live others). For a sewer
+                    // gate/mechanism that is the NORMAL state, not an absent cutscene actor -- and it is
+                    // the drop that defeated v0.20.41: ocnt fluctuates 8<->9 across scenes, so a controller
+                    // hits THIS branch first (Aaron's "hit or miss"). A curated object with a real static
+                    // position is kept on it; there is NO live slot here, so blkP must NOT be dereferenced.
+                    bool keptOOW = false;
+                    if (oirP >= ocnt) {
+                        if (jsmIsGate && je.hasPosition && je.posTriangle != 0) {
+                            Log::Field("FieldNavigation: [refresh] JSM object '%s' KEPT despite oirP>=ocnt "
+                                       "(%d>=%d): curated gate beyond active window, static tri=%u pos=(%d,%d) "
+                                       "[v0.20.42]", je.symName, oirP, ocnt, (unsigned)je.posTriangle,
+                                       (int)je.posX, (int)je.posY);
+                            keptOOW = true;
+                        } else {
+                            Log::Field("FieldNavigation: [refresh] JSM object '%s' dropped: no live entity "
+                                       "slot (index %d >= liveOthers %d) -- scene actor not present [v0.20.31]",
+                                       je.symName, oirP, ocnt);
+                            continue;
+                        }
+                    }
+                    if (!keptOOW) {
+                    uint8_t*  blkP  = obP + ENTITY_STRIDE * oirP;
+                    uint16_t  ltri  = *(uint16_t*)(blkP + 0x1FA);
+                    int32_t   lfx   = *(int32_t*)(blkP + 0x190);
+                    int32_t   lfy   = *(int32_t*)(blkP + 0x194);
+                    if (ltri == 0 && lfx == 0 && lfy == 0) {
+                        // v0.20.41 (#85 gate maze): EXEMPT a curated named object that carries a real
+                        // STATIC position (its own SET3 triangle / walkmesh centroid). The sewer gate
+                        // controllers (ct_lf etc.) sit BEYOND the engine active-tracking window, so their
+                        // live slot legitimately reads tri=0/pos=0 -- but the static SET3 triangle is
+                        // authoritative (the #85 centroid-fallback case), and this live-0 drop is the
+                        // regression that hid the openable gate. Scene actors this filter targets
+                        // (Selphie/Quistis) are NOT curated gate names and have no static SET3, so they
+                        // are still dropped; reachability (below) then keeps only the reachable gate.
+                        if (jsmIsGate && je.hasPosition && je.posTriangle != 0) {
+                            Log::Field("FieldNavigation: [refresh] JSM object '%s' KEPT despite live "
+                                       "tri=0: curated object with static tri=%u pos=(%d,%d) -- "
+                                       "out-of-window, centroid-positioned [v0.20.41]",
+                                       je.symName, (unsigned)je.posTriangle,
+                                       (int)je.posX, (int)je.posY);
+                        } else {
+                            Log::Field("FieldNavigation: [refresh] JSM object '%s' dropped: scene-actor "
+                                       "phantom -- not placed in live state (tri=0 pos=0) [v0.20.31]", je.symName);
+                            continue;
+                        }
+                    }
+                    // v0.20.36 (glwater3 BAT): drop a JSM object whose live entity is HIDE-flagged
+                    // (+0x160 bit3, set by opcode 0x61/HIDE, cleared by 0x60/SHOW). This is the SAME
+                    // signal the entity-scan path's HIDDEN-ENTITY filter (v0.18.3.269) already trusts,
+                    // but that filter never ran on this JSM-injection path -- so the sewer's
+                    // not-yet-knocked-down ladder (hasigomodel, live hide=1) leaked into the catalog.
+                    // Global: a hidden JSM object is not drawn / not present, never a real target. It
+                    // reappears the moment the script SHOWs it (the ladder becomes a usable crossing).
+                    {
+                        // v0.20.43: duplicate-slot guard on the HIDE read -- the SAME guard LATE-RESOLVE
+                        // and STRUCT-POS already apply to POSITION. The engine's live "others" array only
+                        // tracks a window of entities; a slot whose live triangle disagrees with THIS
+                        // entity's own static SET3 triangle is ALIASED to a different entity, so its
+                        // +0x160 flags are not ours. glwater4: ct_lf_dw (own tri 59) and lf_up (own tri 73)
+                        // read slots that alias tri 199 -- a HIDDEN party member -- so their HIDE bit read
+                        // as set and BOTH gates the player needed were wrongly dropped. Trust the HIDE flag
+                        // only when the slot's tri matches our own (the slot really belongs to us).
+                        bool slotIsOurs = (je.posTriangle != 0) && (ltri == (uint16_t)je.posTriangle);
+                        uint32_t lflags = *(uint32_t*)(blkP + 0x160);
+                        if (slotIsOurs && (lflags & 0x08) != 0) {
+                            Log::Field("FieldNavigation: [refresh] JSM object '%s' dropped: HIDE flag set "
+                                       "(flags@0x160=0x%08X bit3) -- hidden/not shown [v0.20.36]",
+                                       je.symName, (unsigned)lflags);
+                            continue;
+                        }
+                        if (!slotIsOurs && (lflags & 0x08) != 0) {
+                            Log::Field("FieldNavigation: [refresh] JSM object '%s' HIDE bit IGNORED: live "
+                                       "slot tri=%u != own SET3 tri=%u -- aliased slot, flag not ours [v0.20.43]",
+                                       je.symName, (unsigned)ltri, (unsigned)je.posTriangle);
+                        }
+                    }
+                    Log::Field("FieldNavigation: [refresh] JSM object '%s' present: tri=%d pos=(%d,%d) [v0.20.31 diag]",
+                               je.symName, (int)ltri, (int)lfx, (int)lfy);
+                    }  // end if(!keptOOW) -- v0.20.42
+                }
             }
             // v0.18.3.286 (#85): ENT_OBJECT is not a singleton category -- a
             // field can hold several distinct Interactive Objects (the sewer
@@ -1969,7 +2432,7 @@ static void InjectJsmSpecials(EntityInfo* newCatalog, int& newCount, const Entit
                             if (dd < bestDist) { bestDist = dd; bestCatIdx = c; }
                         }
                     }
-                    if (bestCatIdx >= 0) {
+                    if (bestCatIdx >= 0 && bestDist < 300.0f) {   // v0.20.48: only adopt an NPC AT the sparkle; a standalone sparkle injects on its own below
                         newCatalog[bestCatIdx].type = ENT_DRAW_POINT;
                         strncpy(newCatalog[bestCatIdx].name, "Draw Point",
                                 sizeof(newCatalog[bestCatIdx].name) - 1);
@@ -1990,6 +2453,17 @@ static void InjectJsmSpecials(EntityInfo* newCatalog, int& newCount, const Entit
             // reclassify the nearest non-player entity as Draw Point.
             // This is less precise than position-based consolidation but
             // ensures draw points get correct labels in the catalog.
+            // v0.20.37 (glwater3): a cat=2 BACKGROUND false-typed as a no-position Draw Point is NOT a
+            // real draw point. glwater3's gate 'saku4' gets DRAWPOINT-typed from a DRAWPOINT opcode in its
+            // gate-controller script, has no position, and the fallback below then mislabeled a scene
+            // character (ent3) as the Draw Point at a wrong, reachable-looking spot. Real no-position draw
+            // points (Fire Cavern 'drpoint') are cat=3 "others". Drop the background outright; a genuinely
+            // present draw point still comes through the position-based path above.
+            if (jt == ENT_DRAW_POINT && !je.hasPosition && je.jsmCategory == 2) {
+                Log::Field("FieldNavigation: [catalog] no-position draw-point '%s' dropped: cat=2 "
+                           "background, not a real draw point (no fabricated fallback) [v0.20.37]", je.symName);
+                continue;
+            }
             if (jt == ENT_DRAW_POINT && !je.hasPosition) {
                 int bestCatIdx2 = -1;
                 for (int c = 0; c < newCount; c++) {
@@ -2118,6 +2592,37 @@ static void InjectJsmSpecials(EntityInfo* newCatalog, int& newCount, const Entit
             bool isApprox286 = (j < MAX_JSM_ENTITIES) && s_jsmTriangleApprox[j];
             strncpy(jsmEntry.name, jtName, sizeof(jsmEntry.name) - 1);
             jsmEntry.name[sizeof(jsmEntry.name) - 1] = '\0';
+            {
+                // v0.20.35 (WS1 Step 1.2): fold the live-state picture into the audit.
+                // For a live "other" (jsmCategory 3), read its engine struct: flags word
+                // +0x160 (bit3 = HIDE, cleared by SHOW), model id +0x218, triangle +0x1FA.
+                // Bounds-checked, NO SEH -- same idiom as the phantom filter above (base
+                // valid on-field, index < live other-count). Log-only; feeds the Step 1.3
+                // unified live gate by showing, per surviving object, which signal gates it.
+                char live[112] = "";
+                if (je.jsmCategory == 3 &&
+                    FF8Addresses::pFieldStateOthers && FF8Addresses::pFieldStateOtherCount) {
+                    uint8_t* obP2 = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+                    int oirP2 = je.jsmIndex - (s_jsmDoors + s_jsmLines + s_jsmBackgrounds);
+                    int ocnt2 = (int)(*FF8Addresses::pFieldStateOtherCount);
+                    if (obP2 && oirP2 >= 0 && oirP2 < ocnt2) {
+                        uint8_t* blk2 = obP2 + ENTITY_STRIDE * oirP2;
+                        uint32_t fl2 = *(uint32_t*)(blk2 + 0x160);
+                        int16_t  md2 = *(int16_t*)(blk2 + 0x218);
+                        uint16_t tr2 = *(uint16_t*)(blk2 + 0x1FA);
+                        snprintf(live, sizeof live,
+                                 " live[slot=%d flags@160=0x%08X hide=%d model=%d tri=%u]",
+                                 oirP2, (unsigned)fl2, (int)((fl2 >> 3) & 1), (int)md2, (unsigned)tr2);
+                    } else if (obP2 && oirP2 >= 0) {
+                        snprintf(live, sizeof live, " live[slot=%d/%d NO-SLOT]", oirP2, ocnt2);
+                    }
+                }
+                char caBuf[192];
+                snprintf(caBuf, sizeof caBuf, "talk=%d setline=%d jsmCat=%d%s",
+                         (int)je.hasTalkSetup, (int)je.hasSetline, (int)je.jsmCategory, live);
+                CatAudit("object", jsmEntry, (int)je.posX, (int)je.posY, je.symName, caBuf);
+            }
+            if (s_zoneValid && jt != ENT_DRAW_POINT && !ZoneReachablePoint((float)je.posX, (float)je.posY)) { Log::Field("FieldNavigation: [refresh] '%s' filtered: another camera zone (unreachable from player) [v0.20.21]", jsmEntry.name); continue; }  // v0.20.48: draw points exempt -- cfg==1 + on-mesh already == sighted-player parity
             newCatalog[newCount++] = jsmEntry;
             Log::Field("FieldNavigation: [refresh] JSM-injected %s at (%d,%d) sym='%s'%s",
                        jtName, (int)je.posX, (int)je.posY, je.symName,
@@ -2440,6 +2945,9 @@ static void InjectMapExits(EntityInfo* newCatalog, int& newCount, uint8_t* base,
             mapExit.gatewayIdx = -1;
             strncpy(mapExit.name, exitName, sizeof(mapExit.name) - 1);
             mapExit.name[sizeof(mapExit.name) - 1] = '\0';
+            { char caBuf[80]; snprintf(caBuf, sizeof caBuf, "dest=%d fromInterp=%d", (int)je.param, (int)je.paramFromInterp);
+                CatAudit("mapexit", mapExit, (int)je.posX, (int)je.posY, je.symName, caBuf); }
+            // v0.20.22: a map-exit is an EXIT -- never zone-filtered (exits are navigation aids; never hide one).
             newCatalog[newCount++] = mapExit;
         }
 }
@@ -2851,6 +3359,9 @@ static void InjectGatewayExits(EntityInfo* newCatalog, int& newCount)
                 gwExit.gatewayIdx = d;  // index into s_dedupGateways
                 strncpy(gwExit.name, s_dedupGateways[d].displayName, sizeof(gwExit.name) - 1);
                 gwExit.name[sizeof(gwExit.name) - 1] = '\0';
+                { char caBuf[80]; snprintf(caBuf, sizeof caBuf, "destField=%d gwMerged=%d", (int)s_dedupGateways[d].destFieldId, (int)s_dedupGateways[d].count);
+                CatAudit("gateway", gwExit, (int)s_dedupGateways[d].centerX, (int)s_dedupGateways[d].centerY, "-", caBuf); }
+                // v0.20.22: a gateway is an EXIT -- never zone-filtered (exits are navigation aids; never hide one).
                 newCatalog[newCount++] = gwExit;
                 Log::Field("FieldNavigation: [refresh] INF-GW group %d: '%s' center=(%.0f,%.0f) %d gateways merged",
                            d, s_dedupGateways[d].displayName,
@@ -3043,13 +3554,59 @@ static void DedupeCatalog(EntityInfo* newCatalog, int& newCount)
         if (strncmp(newCatalog[a].name, "NPC", 3) != 0) continue;  // generic "NPC", not "Quistis" etc.
         if (newCatalog[a].triangleId == 0) continue;               // need a real triangle to match on
         bool isPickup = false;
+        const char* curatedName = nullptr;   // v0.20.44 (ladder false-positive only)
+        // v0.20.49 (Balamb Hotel BAT): ONLY an item-pickup JSM entity may claim a generic runtime "NPC"
+        // here. The earlier code adopted the name of ANY JSM entity sharing the NPC's triangle and did so
+        // BEFORE the item check, which caused BOTH bugs Aaron saw in the hotel: (1) a party member standing
+        // on the save point (savePoint, tri 45) became a phantom SECOND "Save Point"; (2) the Timber
+        // Maniacs magazine was suppressed -- tri 27 holds the curated 'Irvine' object AND the 'Buki1'
+        // magazine (isItemPickup), 'Irvine' was matched first, so the runtime entity was relabeled 'Irvine'
+        // and the item never surfaced. Gating on isItemPickup means a non-pickup entity (save/draw/shop/
+        // card point, an Irvine object, a gate, ...) can no longer hijack the NPC; the curated-name
+        // adoption is kept ONLY for a pickup that is itself a curated non-item -- the glwater3 'hasigomodel'
+        // ladder false-positive, which must read "Ladder", never "Item".
         for (int j = 0; j < s_jsmEntityCount; j++) {
-            if (s_jsmEntities[j].isItemPickup &&
-                s_jsmEntities[j].posTriangle == newCatalog[a].triangleId) {
-                isPickup = true; break;
+            if (s_jsmEntities[j].posTriangle != newCatalog[a].triangleId) continue;
+            if (!s_jsmEntities[j].isItemPickup) continue;   // non-pickup entities never claim this NPC
+            isPickup = true;
+            if (s_jsmEntities[j].symName[0]) {
+                for (const EntityDisplayName* mN = ENTITY_DISPLAY_NAMES; mN->sym != nullptr; mN++) {
+                    if (_stricmp(s_jsmEntities[j].symName, mN->sym) == 0) {
+                        if (mN->display && strncmp(mN->display, "Item", 4) != 0)
+                            curatedName = mN->display;   // a pickup that is a curated non-item (Ladder)
+                        break;
+                    }
+                }
             }
+            break;
+        }
+        if (curatedName) {
+            Log::Field("FieldNavigation: [dedup] curated-name relabel: ent%d tri=%d 'NPC'->'%s' "
+                       "-- generic NPC on a curated entity, not an Item [v0.20.44]",
+                       newCatalog[a].entityIdx, (int)newCatalog[a].triangleId, curatedName);
+            snprintf(newCatalog[a].name, sizeof(newCatalog[a].name), "%s", curatedName);
+            newCatalog[a].type = ENT_OBJECT;
+            continue;
         }
         if (!isPickup) continue;
+        // v0.20.38 (glwater3 BAT): an item pickup sitting on an UNREACHABLE walkmesh triangle
+        // (across the sewer water / behind a closed gate) can't be collected right now, and a
+        // sighted player can't reach it either -- drop it. It returns when the player's zone
+        // grows to include its triangle. Items are must-WALK-to, so the walkmesh-reachability
+        // test is exactly right (no talk-across-a-gap exception like a conversational NPC). The
+        // runtime-entity path never applied the zone filter -- which is why 'Item 1' (ent3,
+        // tri 175) survived while the far-side ladder, filtered on the object path, did not.
+        if (s_zoneValid && newCatalog[a].triangleId >= 0 &&
+            newCatalog[a].triangleId < (int)s_walkmesh.numTriangles &&
+            newCatalog[a].triangleId < ZONE_MAX_TRI &&
+            !s_zoneReachable[newCatalog[a].triangleId]) {
+            Log::Field("FieldNavigation: [dedup] item-pickup ent%d tri=%d DROPPED: unreachable "
+                       "(not in player's zone) [v0.20.38]",
+                       newCatalog[a].entityIdx, (int)newCatalog[a].triangleId);
+            for (int m = a; m < newCount - 1; m++) newCatalog[m] = newCatalog[m + 1];
+            newCount--; a--;
+            continue;
+        }
         int n = 0;
         for (int c = 0; c < newCount; c++)
             if (strncmp(newCatalog[c].name, "Item ", 5) == 0) n++;
@@ -3288,6 +3845,36 @@ static void RefreshCatalog()
         uint8_t* base = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
         if (!base) return;
         uint8_t lim = (entCount < MAX_ENTITIES) ? entCount : (uint8_t)MAX_ENTITIES;
+
+        // v0.20.45 (#118): post-battle trigger-line preservation. s_capturedLines is captured via
+        // the SETLINE hook on field entry and cleared on every field-scripts re-init -- but SETLINE
+        // does NOT re-fire when the engine returns from a battle (the [LINE-PAIR] count came back 0
+        // for glwater3/glwater2 after fights), so every trigger-line EXIT vanished for the rest of the
+        // visit. Field geometry is stable per field, so keep the last non-empty capture tagged by the
+        // ENGINE field id (pCurrentFieldId is authoritative across a battle -- the battle-pause resume
+        // relies on it too), and restore it if a SAME-field refresh finds the table empty. A real field
+        // change has a different id, so it re-captures normally; if SETLINE does re-fire it dedupes by
+        // entity address (stable per field), so the restore never doubles lines. Runs before
+        // ComputePlayerZoneReachability (4274) and the trigger-line exit injection, which both read
+        // s_capturedLines.
+        {
+            static CapturedTriggerLine s_capBackup[MAX_CAPTURED_LINES];
+            static int      s_capBackupCount = 0;
+            static uint16_t s_capBackupField = 0xFFFF;
+            uint16_t curField = FF8Addresses::pCurrentFieldId ? *FF8Addresses::pCurrentFieldId : 0xFFFF;
+            if (s_capturedLineCount > 0) {
+                int nb = (s_capturedLineCount <= MAX_CAPTURED_LINES) ? s_capturedLineCount : MAX_CAPTURED_LINES;
+                for (int i = 0; i < nb; i++) s_capBackup[i] = s_capturedLines[i];
+                s_capBackupCount = nb;
+                s_capBackupField = curField;
+            } else if (s_capBackupCount > 0 && s_capBackupField == curField && curField != 0xFFFF) {
+                for (int i = 0; i < s_capBackupCount; i++) s_capturedLines[i] = s_capBackup[i];
+                s_capturedLineCount = s_capBackupCount;
+                Log::Field("FieldNavigation: [refresh] restored %d trigger lines for field 0x%04X after an "
+                           "empty re-init (post-battle SETLINE did not re-fire) [v0.20.45 #118]",
+                           s_capBackupCount, (unsigned)curField);
+            }
+        }
 
         // v0.18.3.317 (#95/#98/#115): prison-shaft catalog floor-gating dry-run
         // (log-only; self-gates to shaft fields and fires once per floor change).
@@ -3776,6 +4363,50 @@ static void RefreshCatalog()
         // under the CI size ceiling (see GitHub #37). The fragment runs inline
         // here and operates on the surrounding RefreshCatalog() locals.
         // Pure textual move -- no logic change.
+        ComputePlayerZoneReachability();
+
+        // v0.20.40 (gate observe, WIDENED): the v0.20.39 window (vars 328..359) did NOT catch the
+        // gate-open flip, so this gate writes a var outside 337/339/340. Diff the WHOLE field var
+        // bank (0x800 bytes @ EXIT_VARBLOCK_BASE 0x01CFE9B8 -- a fixed engine global, always mapped)
+        // and log EVERY changed var with the player triangle + world position. A BAT that opens a
+        // gate now reveals the exact varN:before->after wherever it lives, plus the gate spot.
+        // glwater* only, log-only, no catalog change.
+        if (strncmp(s_currentFieldName, "glwater", 7) == 0) {
+            static uint8_t s_gvLast[0x800] = {};
+            static bool    s_gvSeen  = false;
+            static char    s_gvField[64] = {};
+            const volatile uint8_t* vbk = (const volatile uint8_t*)(uintptr_t)0x01CFE9B8u;
+            bool fieldChg = (strncmp(s_gvField, s_currentFieldName, 63) != 0);
+            bool baseline = fieldChg || !s_gvSeen;
+            bool changed  = baseline;
+            char delta[320]; int dp = 0; delta[0] = 0; int nch = 0;
+            if (!baseline) {
+                for (int k = 0; k < 0x800; k++) {
+                    uint8_t v = vbk[k];
+                    if (v != s_gvLast[k]) {
+                        changed = true; nch++;
+                        if (dp < (int)sizeof(delta) - 24)
+                            dp += snprintf(delta + dp, sizeof(delta) - dp, "var%d:%d->%d ",
+                                           k, (int)s_gvLast[k], (int)v);
+                    }
+                }
+            }
+            if (changed) {
+                float pX = 0, pY = 0; GetEntityPos(s_playerEntityIdx, pX, pY);
+                int pTri = -1;
+                if (FF8Addresses::pFieldStateOthers && s_playerEntityIdx >= 0) {
+                    uint8_t* pb = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+                    if (pb) pTri = *(uint16_t*)(pb + ENTITY_STRIDE * s_playerEntityIdx + 0x1FA);
+                }
+                Log::Field("FieldNavigation: [GATE-DIAG] '%s' playerTri=%d pos=(%.0f,%.0f) nchanged=%d "
+                           "changed=[%s]%s [v0.20.40]",
+                           s_currentFieldName, pTri, pX, pY, nch, delta,
+                           baseline ? " (baseline)" : "");
+                for (int k = 0; k < 0x800; k++) s_gvLast[k] = vbk[k];
+                s_gvSeen = true;
+                strncpy(s_gvField, s_currentFieldName, 63); s_gvField[63] = 0;
+            }
+        }
         InjectTriggerLineExits(newCatalog, newCount);
 
         // v0.12.24 / v0.17.7.1: Add SETLINE-triggered interactive objects as

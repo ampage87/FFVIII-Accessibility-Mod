@@ -194,7 +194,13 @@
         // NPCs have empty interaction methods. The catalog relabels these
         // "Item N" instead of "NPC N" (matched back by SET3 walkmesh triangle,
         // since the runtime SYM is shifted).
-        info.isItemPickup = foundSetmodel && !foundDialogOp &&
+        // v0.20.43: a LADDER is never a collectible. The pickup discriminator keys on a
+        // non-init savemap write (the "collected" flag), but a sewer ladder writes its OWN
+        // "used/knocked-down" state flag in a non-init method too -- so glwater3's ladline
+        // entities tripped foundNonInitVarWrite and got relabeled "Item N" over a real ladder
+        // (Aaron: "one ladder was identified as an item"). foundLadder (LADDER-family opcode)
+        // is authoritative for identity, so exclude it.
+        info.isItemPickup = foundSetmodel && !foundDialogOp && !foundLadder &&
                             (foundNonInitVarWrite || sawLitAdditem);
 
         // v0.12.20: Store persistent flags for Director/interaction detection.

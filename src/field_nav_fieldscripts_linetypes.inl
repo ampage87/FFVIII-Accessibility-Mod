@@ -82,6 +82,7 @@
                     s_capturedLines[t].destFieldId = -1;
                     s_capturedLines[t].hasExtDispatch = false;
                     s_capturedLines[t].hasDialogReqTarget = false;  // v0.17.7.5.4
+                    s_capturedLines[t].isCameraTransition = false;  // v0.20.29
                     // v0.18.3.277 (#84): captured line t maps to JSM entity t --
                     // DOORS PARTICIPATE in the captured-line sequence, so the old
                     // "jsmDoors + t" over-shifted by the door count.
@@ -122,6 +123,16 @@
                         // is dual-purpose (exit-via-interaction) vs. a pure walk-across
                         // exit. hasExtDispatch alone is too noisy (fires on any 0x1C use).
                         s_capturedLines[t].hasDialogReqTarget = s_jsmEntities[jsmIdx].hasDialogReqTarget;
+                        // v0.20.29: camera-view transition lines follow FF8's "*jump*"
+                        // naming (validated across all 45 multi-camera fields). Route
+                        // them as SCREEN_BOUND so they wall the zone BFS and reach the
+                        // exit path, and tag them for a "Camera transition" label.
+                        if (s_jsmEntities[jsmIdx].jsmCategory == 1 &&
+                            (strstr(s_jsmEntities[jsmIdx].symName, "jump") ||
+                             strstr(s_jsmEntities[jsmIdx].symName, "Jump"))) {
+                            s_capturedLines[t].lineType = FieldArchive::JSM_ENT_LINE_SCREEN_BOUND;
+                            s_capturedLines[t].isCameraTransition = true;
+                        }
                         // v0.07.83 / v0.17.7.1.2: Capture MAPJUMP destination for screen boundary lines.
                         //
                         // The JSM scanner sets info.param to either:

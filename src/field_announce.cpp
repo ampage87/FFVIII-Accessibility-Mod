@@ -90,6 +90,17 @@ static uint16_t s_lastAnnouncedFieldId = 0xFFFF;
 static int s_lastAnnouncedFloor = -1;
 static int s_observedFloor      = -1;
 
+// v0.20.24: camera-zone index (0x1CE4906) is part of the on-screen identity, just
+// like the prison floor. A multi-camera field (e.g. B-Garden Classroom 1 has 2
+// cameras) switches this as the player crosses between its camera zones; when it
+// changes we re-announce the field name + which camera, so a blind player knows the
+// screen -- and therefore the catalog -- has changed. Per-field ordinals give a
+// stable "camera 1 / camera 2" instead of the arbitrary raw zone byte.
+static int     s_lastAnnouncedCamZone = -1;
+static int     s_observedCamZone      = -1;
+static uint8_t s_camZoneSeen[8]       = {};
+static int     s_camZoneSeenCount     = 0;
+
 // Last fieldId we observed (post-debounce). When the live fieldId
 // differs from this, we treat it as a candidate change and start the
 // debounce timer.
@@ -115,6 +126,62 @@ static uint16_t ReadFieldId()
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0xFFFF;
     }
+}
+
+// v0.20.24: live camera-zone index (0x1CE4906). -1 = unreadable. SEH-guarded,
+// no C++ objects (C2712).
+static int ReadCamZone()
+{
+    __try {
+        return (int)*(volatile uint8_t*)(uintptr_t)0x01CE4906u;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+// v0.20.25 DIAG (Aaron / camera-zone exits): static RE proved bgroom_1 (Classroom 1)
+// NEVER calls the zone-set opcode 0x11C, so the zone byte 0x1CE4906 stays 0 there and
+// the v0.20.24 "camera N" announce cannot fire in the classroom. The real front/back
+// view is switched by 4 'jump' trigger lines via a REQ chain -- but WHICH engine byte
+// records the active view is unknown. Watch a window of the camera-state cluster and
+// log any byte that changes WITHIN a field (baseline re-taken on each field change, so
+// only within-field front/back changes are logged). Pure observe-only.
+static uint8_t  s_camWatchPrev[0x40] = {};
+static uint16_t s_camWatchField      = 0xFFFF;
+static bool     s_camWatchInit       = false;
+static void WatchCameraCluster(uint16_t curId)
+{
+    __try {
+        const uintptr_t BASE = 0x01CE4900u;
+        if (curId != s_camWatchField) {          // new field: re-baseline silently
+            s_camWatchField = curId;
+            for (int i = 0; i < 0x40; i++)
+                s_camWatchPrev[i] = *(volatile uint8_t*)(BASE + i);
+            s_camWatchInit = true;
+            return;
+        }
+        if (!s_camWatchInit) return;
+        for (int i = 0; i < 0x40; i++) {
+            uint8_t v = *(volatile uint8_t*)(BASE + i);
+            if (v != s_camWatchPrev[i]) {
+                Log::Mod("FieldAnnounce: [CAMBYTE] field=0x%04X 0x%08X: %u -> %u [v0.20.25 diag]",
+                         (unsigned)curId, (unsigned)(BASE + i),
+                         (unsigned)s_camWatchPrev[i], (unsigned)v);
+                s_camWatchPrev[i] = v;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+// 1-based ordinal of a camera-zone id within the current field visit (a new
+// ordinal is assigned the first time each zone id is seen). 0 if unreadable.
+static int CamZoneOrdinal(int cam)
+{
+    if (cam < 0) return 0;
+    for (int i = 0; i < s_camZoneSeenCount; i++)
+        if (s_camZoneSeen[i] == (uint8_t)cam) return i + 1;
+    if (s_camZoneSeenCount < 8) { s_camZoneSeen[s_camZoneSeenCount++] = (uint8_t)cam; return s_camZoneSeenCount; }
+    return 0;
 }
 
 static bool IsAnnounceable(uint16_t fieldId)
@@ -160,15 +227,19 @@ void Update()
     uint16_t curId = ReadFieldId();
     if (!IsAnnounceable(curId)) return;
 
+    // WatchCameraCluster(curId);  // v0.20.25 diag: 0x1CE4906 confirmed as front/back byte; watch disabled
+
     // v0.18.3.301 (#90): the floor is part of the identity, not just the
     // fieldId. In the prison shaft the fieldId does NOT change between floors,
     // so watching it alone leaves every floor change silent.
     int curFloor = ReadPrisonFloor(curId);
+    int curCam   = ReadCamZone();   // v0.20.24: camera-zone, part of the screen identity
 
-    if (curId != s_observedFieldId || curFloor != s_observedFloor) {
-        // FieldId or floor just changed. Start (or restart) the debounce timer.
+    if (curId != s_observedFieldId || curFloor != s_observedFloor || curCam != s_observedCamZone) {
+        // FieldId, floor, or camera-zone just changed. Start (or restart) the debounce timer.
         s_observedFieldId = curId;
         s_observedFloor   = curFloor;
+        s_observedCamZone = curCam;
         s_changeTick      = GetTickCount();
         s_pendingAnnounce = true;
         return;
@@ -181,7 +252,7 @@ void Update()
     // Debounce elapsed and fieldId is stable. Decide whether to speak.
     s_pendingAnnounce = false;
 
-    if (curId == s_lastAnnouncedFieldId && curFloor == s_lastAnnouncedFloor) {
+    if (curId == s_lastAnnouncedFieldId && curFloor == s_lastAnnouncedFloor && curCam == s_lastAnnouncedCamZone) {
         // Already announced this field AND floor (e.g. mode flipped to battle
         // and back without a real change). Don't repeat.
         return;
@@ -190,15 +261,21 @@ void Update()
     const char* name = FIELD_DISPLAY_NAMES[curId];
     if (!name || !*name) return;
 
+    // v0.20.24: a genuine new field visit resets the per-field camera-zone ordinals.
+    bool fieldChanged = (curId != s_lastAnnouncedFieldId);
+    if (fieldChanged) s_camZoneSeenCount = 0;
+    int camOrd = CamZoneOrdinal(curCam);
+
     s_lastAnnouncedFieldId = curId;
     s_lastAnnouncedFloor   = curFloor;
+    s_lastAnnouncedCamZone = curCam;
 
     // v0.18.3.301 (#90): compose the prison shaft announcement. The ring
     // halves lose their archive ordinal entirely -- "Floor 4, left side" is
     // the pair of facts a player can actually navigate with, where "Galbadia
     // D-District Prison 3" is neither a floor nor a place. Everything else
     // keeps its name and gains the floor.
-    char buf[128];
+    char buf[160];
     const char* spoken = name;
     if (curFloor > 0) {
         const char* side = nullptr;
@@ -207,6 +284,15 @@ void Update()
         if (side) snprintf(buf, sizeof(buf), "Floor %d, %s", curFloor, side);
         else      snprintf(buf, sizeof(buf), "%s, Floor %d", name, curFloor);
         spoken = buf;
+    }
+    else if (!fieldChanged && camOrd >= 1) {
+        // v0.20.24 (Aaron): a pure camera-zone change within the same field.
+        // Announce the field name + which camera view, so a blind player knows the
+        // screen -- and the catalog -- has changed, mirroring a field-to-field move.
+        snprintf(buf, sizeof(buf), "%s, camera %d", name, camOrd);
+        spoken = buf;
+        Log::Mod("FieldAnnounce: camera-zone change -> '%s' (zone idx=%d ordinal=%d) [v0.20.24]",
+                 name, curCam, camOrd);
     }
 
     // Speak without interrupting. Field-name announcement is informative

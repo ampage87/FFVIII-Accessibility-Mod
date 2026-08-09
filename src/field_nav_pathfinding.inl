@@ -172,6 +172,10 @@ struct CapturedTriggerLine {
     // (distinct from hasExtDispatch which also fires on non-dialog 0x1C usage).
     // See JSMEntityInfo::hasDialogReqTarget for full rationale.
     bool hasDialogReqTarget;
+    // v0.20.29: camera-view transition line (FF8 "*jump*" naming). Routed as
+    // SCREEN_BOUND so it walls the zone BFS and reaches the exit path, but the
+    // catalog labels it "Camera transition" rather than a field destination.
+    bool isCameraTransition;
 };
 static const int MAX_CAPTURED_LINES = 32;
 static CapturedTriggerLine s_capturedLines[MAX_CAPTURED_LINES] = {};

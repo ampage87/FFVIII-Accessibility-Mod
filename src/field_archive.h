@@ -114,6 +114,11 @@ bool Initialize();
 // Returns true if the SYM file was found and parsed.
 bool LoadSYMNames(const char* fieldName, char names[][32], int maxNames, int& outCount);
 
+// v0.20.26: per-SYM-entity category (1=Line,2=Background,3=Other) by method
+// signature, parallel to LoadSYMNames order. Lets callers remap SYM names onto
+// group entities when SYM order != JSM group order (e.g. model-first fields).
+bool LoadSYMCategories(const char* fieldName, int* categories, int maxNames, int& outCount);
+
 // Look up a field ID by its internal name (e.g. "bghall_1" → 165).
 // Searches the FL file index loaded at init time.
 // Returns -1 if not found.

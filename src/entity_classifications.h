@@ -394,6 +394,30 @@ static const EntityDisplayName ENTITY_DISPLAY_NAMES[] = {
     { "saku6", "Gate 6" },
     { "saku7", "Gate 7" },
     { "saku8", "Gate 8" },
+    // v0.20.41 (#85 gate maze): the Deling sewer gate CONTROLLERS -- the entity the
+    // player actually walks up to and presses action on to open a gate. Static
+    // analysis of glwater3.jsm: each carries its own model + SET3 triangle and REQs a
+    // 'sakuN' gate visual (ct_lf tri83->saku3 = the blocking gate to Sewer 2;
+    // ct_rt tri138/ct_rt2 tri147->saku4; rt_up tri181->saku5). The visuals themselves
+    // have no reliable runtime position, so the controller is the navigable anchor.
+    // Needs a curated name to clear the junk-gate filter (same as saku = "Gate N").
+    { "ct_lf", "Gate" },
+    { "ct_rt", "Gate" },
+    { "ct_rt2", "Gate" },
+    { "rt_up", "Gate" },
+    // v0.20.42 (#85 gate maze): the SAME control-mechanism family in the OTHER sewer
+    // fields, enumerated from static analysis of every glwater*.sym (complete set, not a
+    // pattern): glwater4 ct_lf_dw/lf_up/ct_rt_dw/ct_lt_up/ct_rt_dw2, glwater5 ct_rt_up/
+    // ct_rt_dw, glwater1 seigyo. Each is an Other with a model that REQs a gate visual --
+    // the point the player operates to open a gate. Per-field catalog, so no cross-field
+    // collision (same rationale as the saku block above).
+    { "ct_lf_dw", "Gate" },
+    { "lf_up", "Gate" },
+    { "ct_rt_dw", "Gate" },
+    { "ct_lt_up", "Gate" },
+    { "ct_rt_dw2", "Gate" },
+    { "ct_rt_up", "Gate" },
+    { "seigyo", "Gate" },
     { "savePoint", "Save Point" },
     { "scoaul", "Squall" },
     { "Seifer", "Seifer" },

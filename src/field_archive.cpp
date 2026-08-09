@@ -536,6 +536,77 @@ bool LoadSYMNames(const char* fieldName, char names[][32], int maxNames, int& ou
     return (outCount > 0);
 }
 
+bool LoadSYMCategories(const char* fieldName, int* categories, int maxNames, int& outCount)
+{
+    outCount = 0;
+    if (!s_initialized) return false;
+
+    std::vector<uint8_t> symData;
+    if (!ExtractInnerFile(fieldName, ".sym", symData)) return false;
+
+    // SYM = variable-length symbols separated by NUL/newline. Function names can
+    // exceed 32 bytes (e.g. "cardgamemaster2::main_rule_process"), so a fixed
+    // 32-byte record parse drifts and drops methods. Tokenize instead.
+    // Layout: entity names first (no "::"); then a function section that begins
+    // by repeating a bare entity name (the "...student2\0Director\0Director::default"
+    // seam). We stop adding entity names at that repeat, so the count matches the
+    // JSM entity count (excluding doors, which SYM omits).
+    char entNames[128][32];
+    int  nEnt = 0;
+    bool isLine[128] = {}, isOther[128] = {};
+    bool inFuncs = false;
+
+    char tok[128];
+    int  tl = 0;
+    for (size_t i = 0; i <= symData.size(); i++) {
+        unsigned char c = (i < symData.size()) ? symData[i] : 0;
+        if (c != 0 && c != '\n' && c != '\r') {
+            if (tl < 127) tok[tl++] = (char)c;
+            continue;
+        }
+        while (tl > 0 && tok[tl-1] == ' ') tl--;   // trim trailing pad spaces
+        tok[tl] = '\0';
+        int len = tl;
+        tl = 0;
+        if (len == 0) continue;
+
+        char* sep = strstr(tok, "::");
+        if (sep == nullptr) {
+            bool seen = false;
+            for (int k = 0; k < nEnt; k++)
+                if (strcmp(entNames[k], tok) == 0) { seen = true; break; }
+            if (seen) {
+                inFuncs = true;                    // repeated bare name => function section
+            } else if (!inFuncs && nEnt < 128) {
+                strncpy(entNames[nEnt], tok, 31);
+                entNames[nEnt][31] = '\0';
+                nEnt++;
+            }
+        } else {
+            *sep = '\0';
+            const char* meth = sep + 2;
+            int ei = -1;
+            for (int k = 0; k < nEnt; k++)
+                if (strcmp(entNames[k], tok) == 0) { ei = k; break; }
+            if (ei >= 0) {
+                if (strcmp(meth,"accross")==0 || strcmp(meth,"across")==0 || strcmp(meth,"lineon")==0)
+                    isLine[ei] = true;
+                else if (strcmp(meth,"talk")==0 || strcmp(meth,"push")==0 ||
+                         strcmp(meth,"move")==0 || strcmp(meth,"seat")==0)
+                    isOther[ei] = true;
+            }
+        }
+    }
+    if (nEnt == 0) return false;
+
+    int n = (nEnt < maxNames) ? nEnt : maxNames;
+    for (int k = 0; k < n; k++)
+        categories[k] = isLine[k] ? 1 : (isOther[k] ? 3 : 2);
+    outCount = n;
+    Log::Field("FieldArchive: [SYMCAT] '%s': %d entities categorized (Line/Other by method signature)", fieldName, n);
+    return true;
+}
+
 bool LoadINFGateways(const char* fieldName, GatewayInfo* gateways, int maxGateways, int& outCount)
 {
     outCount = 0;

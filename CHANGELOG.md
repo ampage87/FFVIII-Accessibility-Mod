@@ -6,6 +6,358 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.20.49
+
+Balamb Hotel BAT: fix a phantom second save point and a suppressed magazine pickup -- both from the v0.20.44 curated-name relabel.
+
+ROOT CAUSE. The v0.20.44 "curated-name relabel" pass renames a generic runtime "NPC" catalog entry when it shares a walkmesh triangle with a curated JSM entity. It adopted the name of ANY JSM entity on that triangle, and did so BEFORE checking for an item pickup. Two failures in Balamb Hotel (bchtr_1):
+- A party member (runtime NPC) standing ON the save point's triangle (tri 45, sym 'savePoint') was renamed "Save Point", so the catalog listed TWO save points -- the real SETLINE save point plus this phantom.
+- The Timber Maniacs magazine was suppressed: its triangle (tri 27) also carries the curated 'Irvine' interactive object. 'Irvine' was matched first, so the runtime entity was relabeled 'Irvine' and never reached the 'Buki1' magazine's isItemPickup check, so no "Item" entry was produced. (This regressed exactly at v0.20.44: before it, this pass went straight to the item check and the magazine showed as "Item".)
+
+FIX. Only an item-pickup JSM entity may claim a generic runtime NPC in this pass. A non-pickup entity -- a save/draw/shop/card point, an 'Irvine' object, a gate, any curated non-item -- can no longer hijack the NPC's name. The curated-name adoption is kept for the one case it was added for: a pickup that is itself a curated non-item (the glwater3 'hasigomodel' ladder, an isItemPickup false-positive, still reads "Ladder", never "Item"). Net: the hotel shows ONE save point and the magazine as an "Item"; the sewer ladder and the already-working bccent_1 item pickup are unchanged.
+
+BUILD (no behavior change): the push was blocked by the CI size check -- field_archive_jsm_scan.inl had grown to 83,251 bytes, over the 80 KB hard limit, across the versions since the last push (v0.20.18). Extracted its four leading helper functions (EntityIsDebugLeftover, AdditemVarByte, ReadVarBank, DumpItemGateVars) plus the DumpItemPickupScripts forward decl VERBATIM into a new field_archive_jsm_scan_helpers.inl, #included at the point they used to sit. scan.inl is now 79,670 bytes; EntityIsDebugLeftover is already forward-declared in field_archive_jsm_state.inl so its cross-file callers (director/classify) are unaffected. Pure textual move.
+
+## v0.20.48
+
+Draw-point cataloging fix (#117): use the live sparkle position, not the drpoint entity position.
+
+WHAT THE v0.20.47 BAT SHOWED. The cfg==1 visibility gate was CORRECT -- both draw points Aaron tested logged cfg=1 while their sparkle was on screen. What failed was the position MATCH: v0.20.47 required the sparkle world position to sit within 300 units of the drpoint entity's resolved catalog position, but that catalog position is unreliable. The [drawpt] log showed 'otokun01' with the entity resolved 435/2422 world-units away from the sparkle, and 'zells' with the entity position never resolved at all (0,0). So the match failed and a visible draw point was dropped -- "neither appeared."
+
+ROOT CAUSE. A draw point's sparkle is drawn by createDrawPoint at the drpoint entity's OWN position (entityX>>12, stored at 0x01CDC620/622). That sparkle position IS the ground truth for where the draw point sits. The catalog, by contrast, resolves a drpoint entity's position through the same SET3/live-struct/centroid machinery used for NPCs, which for these script-only draw-point entities lands in the wrong place or nowhere.
+
+THE FIX. IsDrawPointLivePresent() now (a) gates presence on cfg==1 (unchanged -- keeps full Move-Find parity, since cfg = SETDRAWPOINT_param | Move-Find, recomputed live), (b) returns the sparkle's own world position + walkmesh triangle, and (c) rejects a stale sparkle left by a previous field whose SETDRAWPOINT did not run by requiring it to lie on THIS field's walkmesh (IsInsideWalkmesh, or within 600u of the nearest triangle) rather than matching a fragile entity position. The gate then adopts the sparkle position/triangle as the catalog entry's position, so the draw point is placed where the player actually sees it. The legacy "reclassify a nearby NPC as the draw point" heuristic is now capped to an NPC within 300u of the true sparkle (a standalone sparkle injects on its own), and draw points are exempt from the camera-zone reachability filter (cfg==1 + on-mesh already equals a sighted player's view). The [drawpt] log now prints state/cfg/sparkle/nearTri/dist/mesh each refresh.
+
+## v0.20.47
+
+Draw-point cataloging now accounts for the Move-Find ability (#117), correcting the v0.20.46 gate.
+
+WHY v0.20.46 WAS INCOMPLETE. v0.20.46 surfaced a draw point when the live sparkle render-enable byte (0x01CE0750) was non-zero. A deeper RE of the renderer shows that byte is a transient particle-animation counter: createDrawPoint (0x00474750) sets it to 1 for all eight sparkle particles, the renderer resets it to 0 and a re-trigger (0x00474970) sets it back to 1 as the sparkle pulses -- so it flickers, and it is set even for a HIDDEN draw point. Gating on it would show a hidden draw point with no Move-Find equipped, which is not what a sighted player sees.
+
+WHAT THE GAME ACTUALLY TESTS (RE'd). The draw-point renderer (0x00475170) draws the graphic only when state==2 || (state==1 && cfg==1). For a draw point state is only ever 0 or 1 (createDrawPoint and the re-trigger only ever write 1), so the real decision is cfg==1, where cfg is the config word at 0x01CDBFEA. The SETDRAWPOINT handler (0x00523030) forms cfg = SETDRAWPOINT_param | drawFlag: a VISIBLE draw point's script pushes param=1 (cfg is always 1); a HIDDEN one pushes param=0 (verified on bgeat1a), so its cfg equals drawFlag alone.
+
+drawFlag IS MOVE-FIND. drawFlag is byte G+0x58 (G = 0x01CFE9B8), which the engine recomputes every tick (0x0052B7EC) as bit 4 of the field-ability bitfield at 0x01CFF6D8. That bitfield is assembled (0x0049565C) by OR-ing a per-ability flag across the party's four equipped abilities over the field-ability id range 0x4E-0x52 -- i.e. it is set exactly when Move-Find is equipped. So cfg tracks Move-Find LIVE, and cfg==1 for a hidden draw point means precisely "Move-Find is equipped," identical to a sighted player's view. cfg has exactly one writer (configDrawPoint 0x004747A0) and one reader (the renderer), so reading it in the catalog is exact parity with what the game draws.
+
+THE FIX. IsDrawPointLivePresent() now gates on cfg==1 plus a position match against the entity (rejecting a stale cfg/sparkle carried over from a previous field; both sparkle and catalog positions are in the same >>12 world units). Net effect: a visible draw point always appears; a hidden draw point appears only when Move-Find is equipped; a state-gated draw point whose SETDRAWPOINT never ran stays absent; a field with no drpoint entity can never phantom one. SEH-guarded and fail-open. A [drawpt] log line records state/cfg/sparkle/entity each refresh for BAT verification.
+
+## v0.20.46
+
+Proper draw-point cataloging (#117), from a reverse-engineering of the draw system in FF8_EN.exe.
+
+WHAT A DRAW POINT ACTUALLY IS (RE'd). The field opcode dispatch table (0x00B8DE94) routes SETDRAWPOINT (0x155) -> 0x00523030, which reads the drpoint entity's OWN position (0x190/0x194) and calls createDrawPoint (0x00474750): that writes the world X/Y to 0x01CDC620/0x01CDC622 and sets a render-enable byte at 0x01CE0750 -- the visible swirling sparkle. So a draw point is present/visible exactly when its SETDRAWPOINT has executed. There is no separate Move-Find gate in the sparkle renderer; visibility is decided by whether SETDRAWPOINT ran.
+
+WHY THE PHANTOMS. A draw point's SET3 and SETDRAWPOINT sit in ONE conditional script block. Decoding glwater3's drpoint shows it is STATE-GATED on the sewer puzzle variable var340 -- the same variable the gates use: `PSHM_L 340; PSHM_W 3; CAL; JPF -> SET3(tri54); SETDRAWPOINT`. When var340 does not match, neither runs, so there is no sparkle and a sighted player sees nothing -- yet the static script still contains the opcodes, so the mod (which typed draw points purely from static analysis) listed it anyway. glroad1's drpoint, by contrast, runs SET3+SETDRAWPOINT unconditionally, so it is always present. An archive-wide scan confirms every field carries at most ONE draw point.
+
+THE FIX. New IsDrawPointLivePresent(): read the live sparkle render-enable + world position and surface a draw point ONLY when the sparkle is active AND positioned at this entity (the position match rejects a stale sparkle carried over from a previous field; SEH-guarded and fail-open, so an unreadable state keeps the point rather than hiding a real one). This gives true parity -- the catalog shows a draw point exactly when the game draws its sparkle, which automatically covers state-gating and any script-level Move-Find gating. Fields with no drpoint entity never reach this path, so they cannot produce a phantom. A [drawpt] log line records state/cfg/sparkle/entity each refresh so the BAT can confirm the read.
+
+OFFLINE VERIFICATION (sim). Scanned the field archive: 30+ fields carry a real drpoint (SETDRAWPOINT), all exactly one; non-drpoint fields (e.g. glwater1/4, glfuryb1) have no drpoint entity, so the gate never runs there -> structurally no phantoms. Live present-vs-absent parity is inherently a runtime signal and is what the BAT exercises.
+
+Static analysis + edits, NOT MSVC/BAT-d. BAT: visit a field whose draw point is currently visible (a sparkle you'd see) -- expect one "Draw Point" and a [drawpt] ... -> PRESENT line. Visit the sewer where the draw point is state-gated off, and random non-draw fields -- expect NO "Draw Point" and [drawpt] ... -> absent (or no line at all). If a real draw point reads 'absent', the [drawpt] log shows the sparkle state/position to tune the check.
+
+## v0.20.45
+
+Fix #118: the catalog losing exits after a battle.
+
+CONFIRMED CAUSE. Trigger-line geometry (the screen-boundary / map-exit lines that become the catalog's exits) is captured by the SETLINE opcode hook when a field's init script runs, stored in s_capturedLines, and cleared on every field-scripts re-init. When the engine returns from a battle it re-inits the field scripts -- clearing the table -- but does NOT re-fire SETLINE, so the capture comes back empty and every trigger-line exit is gone for the rest of that visit. The BAT log shows it plainly: glwater3 normally captures 8 lines but came back with 0 after fights, glwater2 6 -> 0.
+
+FIX. RefreshCatalog now keeps a backup of the last non-empty capture, tagged with the engine field id (pCurrentFieldId -- authoritative and stable across a battle; the existing battle-pause/resume logic relies on the same read). If a refresh finds the capture table empty while the field id still matches the backup, it restores it. This runs before the reachability pass and the exit injection that consume the lines, so the exits are present again the moment the catalog rebuilds after the battle. Safe by construction: a real field change carries a different id and re-captures normally, and if SETLINE ever does re-fire it dedupes by entity address (stable per field), so a restore can't double the lines. Logs a [refresh] "restored N trigger lines ... post-battle" line when it engages.
+
+FIELD MIS-NAME ("Presidential Residence"). In the log, "Presidential Residence" only ever appears as a legitimate exit destination (glwater1 genuinely has an exit back up to it) or a real transition the player made -- never as a wrong current-field name (the field name comes from pCurrentFieldId, which is correct across a battle). The most likely thing Aaron heard is the empty-exit fallback surfacing a stale/secondary residence exit once the sewer's own exits had dropped; restoring the trigger lines should remove it. Flagged to re-check in the BAT -- if a wrong field NAME is still announced post-battle, that's a separate name-resolution path and I'll chase it then.
+
+Static analysis + edits, NOT MSVC/BAT-d. BAT: in a multi-exit sewer field, trigger a random battle, win, reopen the catalog -- the exits should still be listed (log: [refresh] "restored N trigger lines ... post-battle"), and no phantom "Presidential Residence" as the lone exit. Leaving and re-entering the field was the old workaround; it should no longer be needed.
+
+## v0.20.44
+
+Sewer BAT: maze fully navigable now. Fix the ladder still labeled "Item 1"; post-battle catalog loss filed as its own issue.
+
+Aaron walked the whole maze with gates and interactions announced -- the core goal. Three residual notes: a ladder still read as "Item 1" at the glwater3 far side, one or two phantoms, and a new post-battle bug.
+
+LADDER-AS-ITEM (fixed). v0.20.43 excluded LADDER-opcode entities from the item-pickup heuristic, but this ladder is 'hasigomodel' -- the shortcut-ladder MODEL, which has NO LADDER opcode (it is a model + a non-init state-flag write), so foundLadder was false and it stayed flagged isItemPickup. It is, however, curated as "Ladder", and the runtime NPC the catalog was relabeling sits exactly on its triangle (175). So the item relabel now inspects the matched JSM entity: a generic runtime "NPC" sitting on a CURATED entity adopts that entity's name (here "Ladder") instead of being guessed as "Item". Never calls a curated Ladder/Gate an Item. Only touches generic "NPC" entries, so named NPCs are untouched.
+
+POST-BATTLE CATALOG LOSS (filed, not fixed here). Aaron saw the catalog drop exits after some battles, and in other cases announce "Presidential Residence" in a sewer. The log confirms the exit-drop: glwater3 (8 trigger lines) normally captures all 8, but after a battle the field re-inits and the SETLINE hook does not re-fire, so it captures 0 -- and every trigger-line exit vanishes for the rest of that visit (same for glwater2). This is a field-lifecycle subsystem (the version history flagged it as its own cycle when it first appeared): the trigger-line geometry is captured once on entry and cleared on re-init without being rebuilt. Filed as a dedicated issue with the captured=0 evidence and fix options (preserve/restore the last non-zero capture for the same field id, or read the line geometry from the live line-entity structs so it is battle-proof). The "Presidential Residence" name is the related post-battle field-identity read and is covered in the same issue.
+
+PHANTOMS. Down to one or two -- these are the draw points already filed as #117 (surfaced without Move-Find parity).
+
+NOT MSVC/BAT-d. BAT: at the glwater3 far side the ladder should read "Ladder", not "Item 1". Post-battle exit loss will persist until the filed issue is done.
+
+## v0.20.43
+
+Sewer BAT follow-up: the two gates a whole field was missing, phantom ladders, and a ladder mislabeled as an item. Three fixes; draw points filed as a separate larger issue.
+
+Aaron walked v0.20.42 to the Gateway (good) but flagged one field where BOTH gates he needed were absent (F11 placemarker at 19:49:22 = glwater4, player on tri 223), plus phantom ladders, a ladder shown as an item, and draw points announced that are not present.
+
+(1) MISSING GATES -- HIDE filter read an ALIASED slot. At tri 223 the two gates on the player's island were ct_lf_dw (own tri 59) and lf_up (own tri 73), both walkmesh-reachable. Both were dropped by the v0.20.36 HIDE filter -- but the log shows their live slots are ALIASED (STRUCT-POS: "struct tri=199 disagrees with own SET3 tri=59"), reading a hidden party member's flags (0x1008200A, identical to quistis). LATE-RESOLVE and STRUCT-POS already guard POSITION reads against this exact aliasing; the HIDE read had no such guard. FIX: trust the +0x160 HIDE bit only when the slot's live triangle matches the entity's own static SET3 triangle. ct_lf_dw/lf_up now survive to reachability and surface; genuinely-hidden entities on their own slot still drop.
+
+(2) PHANTOM LADDERS -- the out-of-window exemption was too broad. v0.20.41/42 exempted any CURATED object (jsmNamedObject) from the out-of-window drops, but that includes hasigomodel = "Ladder", the shortcut ladder that only exists when knocked down. Out-of-window we cannot read its live state, so it leaked in as a phantom. FIX: the exemption is now scoped to objects whose curated display name is a "Gate" (jsmIsGate) -- the always-present control mechanisms (ct_*/saku "Gate N"). State-dependent curated objects (Ladder) no longer get it, so a ladder only lists when it is actually loaded near the player.
+
+(3) LADDER-AS-ITEM -- the item-pickup discriminator false-matched a ladder. isItemPickup keys on a non-init savemap write (the "collected" flag), but a sewer ladder writes its own "used/knocked-down" flag in a non-init method too, so glwater3's ladline entities were relabeled "Item N" over a real ladder. FIX: exclude foundLadder (LADDER-family opcode = authoritative identity) from isItemPickup. No glwater3 entity has a real ADDITEM, so nothing real is lost.
+
+(4) DRAW POINTS -- deferred as Aaron asked. Every phantom draw point is a 'drpoint' entity surfaced regardless of whether Move-Find is equipped (field draw points are invisible without it, and Aaron chose parity). That needs the equipped-ability read, a separate subsystem; filed as its own issue with the data rather than rushed here.
+
+Static analysis + edits, NOT MSVC/BAT-d. BAT: re-walk the sewers. glwater4 at the tri-223 spot should now list its two reachable gates (log: HIDE bit IGNORED ... aliased slot for ct_lf_dw/lf_up); no phantom ladders from far-off islands; the far-side ladder no longer reads "Item". Draw points will still appear until the follow-up issue is done.
+
+## v0.20.42
+
+Sewer gates across the whole maze -- offline simulation of all 6 fields, plus the fix for the drop that made v0.20.41 "hit or miss".
+
+Aaron BAT'd v0.20.41 and got a few gates but not most, and could not follow the maze. He asked for an offline sim of the sewer field data to resolve it end to end. I extracted all six fields (glfuryb1, glwater1-5) from the archive -- walkmesh (.id, with the checked-in extract_walkmeshes.py projector), JSM, SYM -- and reconstructed the maze: glwater1(762) -> glwater2(763) -> glwater3(764) -> glwater4(765) -> glwater5(766) -> glwitch1(767, the Gateway). Field IDs and the ->glwitch1 exit are confirmed from the BAT log's MAPJUMP fires.
+
+THE STRUCTURE (why strict reachability is exactly right). Every sewer field is several DISCONNECTED walkmesh islands (glwater3 has 4, glwater4/5 have 5). The player enters on one island and the waterwheel/gates bridge to the others. The sim maps every gate to its island: in glwater3 ct_lf is on the START island (tri 83, the 40-tri island, 36 reachable -- the blocking gate to Sewer 2) while ct_rt/ct_rt2/rt_up are on the MAIN sewer island across the water (tri 138/147/181). So the existing per-triangle reachability filter ALREADY gates them the way Aaron wants -- a gate cannot surface until its island is reached (e.g. after the waterwheel jump). Nothing about reachability needed changing; the gates just were not surviving long enough to reach it.
+
+TWO root causes of "hit or miss", both found in the fresh BAT log:
+(1) The scene-actor phantom filter has TWO drops -- oirP>=ocnt (index beyond the live-others array) and tri=0/pos=0 -- and v0.20.41 only exempted the second. But a sewer gate is ALWAYS beyond the active-tracking window (ocnt is just the nearest ~8-9 live entities; that is the entire #85 premise), so it hits the FIRST drop. Worse, ocnt fluctuates 8<->9 as actors load/unload, so the same gate appeared in some scenes and vanished in others -- the literal "hit or miss". Fix: curated gates with a real static position are now exempt from the oirP>=ocnt drop too (and we correctly skip the live-slot read there, since no slot exists), not just the tri=0 drop.
+(2) The gate controllers have DIFFERENT names in each field. v0.20.41 curated only glwater3's (ct_lf/ct_rt/ct_rt2/rt_up). glwater4 uses ct_lf_dw/lf_up/ct_lt_up/ct_rt_dw/ct_rt_dw2, glwater5 uses ct_rt_up/ct_rt_dw, glwater1 uses seigyo -- none curated, so all junk-gate-dropped. That is why "most gates did not appear": Aaron walked glwater4 and glwater5 (195 and 202 field loads in the log) and their gates were never named. Fix: the complete control-name set, enumerated from every glwater*.sym (not a fragile prefix match), now maps to "Gate". glwater2's gates are the saku entities, already curated as "Gate N".
+
+NET: with both fixes every field's gates survive to the reachability filter, which then shows only the gate(s) on the player's current island. The sim confirms every gate lands on a real, player-visited island, so the maze is followable island by island from the start to the glwitch1 Gateway. Also corrected a stale decode from the prior cycle (the controllers are reached via a ct_/rt_/lf_ "control" family that REQs the saku gate visuals; the waterwheel is 'suisha').
+
+Static analysis + edits only, NOT MSVC-compiled/BAT'd. BAT: walk the sewers from the start save through to the Gateway. At each spot the catalog should list only the gate(s) you can currently reach (one on the glwater3 start island, more after each waterwheel jump), plus the exits, with no gates from islands you have not reached yet. Log shows [refresh] "KEPT despite oirP>=ocnt" lines for the reachable controllers and reachability-drop lines for the rest.
+
+## v0.20.41
+
+Sewer openable gates -- surface the reachable gate, from static analysis (no observe BAT).
+
+Per Aaron's ask to pin this down statically before another BAT, I pulled glwater3.jsm straight out of the field archive (nested LZSS: field.fi/fl/fs -> glwater3.fi/fl/fs -> glwater3.jsm) and disassembled it against the mod's own opcode table (field_archive_jsm_constants.inl: SET3=0x1E, REQ=0x14, PSHM_W=0x07, PSHM_L=0x0A, JPF=0x02). That corrected an earlier decode built on a wrong opcode table -- the source of the "no bit flip" dead end from the last cycle.
+
+WHAT THE GATE ACTUALLY IS. The Deling sewer gate is operated at a CONTROLLER entity, not at the gate visual. glwater3 has four: ct_lf (tri 83), ct_rt (tri 138), ct_rt2 (tri 147), rt_up (tri 181). Each carries its own model + SET3 triangle and REQ-fires a 'sakuN' visual (ct_lf->saku3, ct_rt/ct_rt2->saku4, rt_up->saku5). ct_lf at tri 83 is the confirmed blocking gate to Sewer 2 -- the exact spot Aaron stood "right in front of the gate" in #85 (.289/.290). The sakuN visuals sit on nearby triangles but have no reliable runtime position (out of the engine's active window), which is why the #85 "Gate 1/2/3" surfacing went invisible; the controllers are the reliable, navigable anchor.
+
+WHY THEY VANISHED -- two filters added AFTER #85. (1) The v0.20.0 junk-gate filter drops a marker-positioned Object with no interaction zone, no own interaction, and no curated name -- the controllers had no curated name. (2) The v0.20.31 scene-actor phantom filter drops any Object whose LIVE slot reads tri=0/pos=0 -- exactly what an out-of-window gate reads, even though its STATIC SET3 triangle (tri 83) is real. Together they hid every gate.
+
+THE FIX -- two changes, both feeding the existing reachability filter. (1) entity_classifications.h: ct_lf/ct_rt/ct_rt2/rt_up -> "Gate", clearing the junk-gate filter (the same mechanism saku1-8 = "Gate 1-8" already use). (2) field_catalog.inl scene-actor phantom filter: EXEMPT a curated object that has a real static position (jsmNamedObject && hasPosition && posTriangle != 0) from the live-0 drop -- the #85 centroid-fallback case. Selphie/Quistis (what that filter targets) are not curated gates and have no static SET3, so they are still dropped. The existing per-point reachability filter (ZoneReachablePoint) then keeps ONLY the gate the player can currently reach.
+
+NET at the sewer-start save (player tri 77, 36/235 reachable): ct_lf (tri 83, ~130u away) surfaces as "Gate"; ct_rt/ct_rt2/rt_up (500-1300u away, across the water) are reachability-dropped; the saku are unchanged (still position-less, harmless). The catalog shows exactly the one openable blocking gate.
+
+Reachability is a strong proxy for openability here: you can only open a gate you can reach, and the same water level that gates progress also gates which triangles are walkable. NOT yet modeled: a gate that is reachable but ALREADY open -- if one appears in a later section, the var340 test on its saku (decoded here) is the signal to hide it. The ct_*/rt_* + curated-name pattern generalises across the 4 gate fields; controller labels beyond ct_lf (gate vs valve) to be confirmed as they become reachable.
+
+Static analysis + edits only -- NOT MSVC-compiled/BAT'd. BAT from the sewer-start save and open the catalog: expect ONE "Gate" at the blocking gate to Sewer 2 (auto-drive should place you right in front of it), no far-side gates, a [refresh] "KEPT despite live tri=0" line for ct_lf, and reachability-dropped lines for ct_rt/ct_rt2/rt_up.
+
+## v0.20.40
+
+Openable gates -- observe pass, widened. The v0.20.39 BAT (from a later save, gates already resolved) confirmed the closed/not-openable state (`337=231, 339=71`, `var340=9` in glwater3 vs `10` in glwater1 -- so var 340 tracks the section's puzzle state). Then from the sewer-start save, opening a gate produced NO change in the 328..359 window -- so the gate-open flag lives in a different variable than the `ct_lf` writes I'd expected. This build widens the observe to diff the ENTIRE field var bank (0x800) and log every changed var with the player's triangle + world position, so the next open reveals the exact variable and the gate spot regardless of where it lives. Still log-only.
+
+## v0.20.39
+
+Openable sewer gates -- step 1: observe pass (log-only).
+
+v0.20.38 confirmed the sewer catalog is clean (exits + the climb ladder + waterwheel; far-side ladder, phantom draw point, and unreachable item all handled). Now the gates, which are essential for navigating the maze.
+
+From the earlier RE: the `saku` gate backgrounds are animation-only; the real logic is in hidden `ct_*` controllers positioned at each gate that REQ the `saku` and branch on a field variable (var 340, near 337/339). The player opens a gate by pressing action in front of it -- a scripted sequence, so the interaction is enabled at runtime and the scan never sees it.
+
+This build adds a `[GATE-DIAG]` observe line (glwater* only, log-only, no catalog change): whenever the gate-variable range (328..359) changes, it logs which variable flipped (`var340:0->9`), the player's triangle, and world position. A BAT that walks up to a gate and opens it will show exactly which variable is the "openable" signal and where the gate spot is -- the two facts needed to surface a "Gate" entry gated on that variable. The field var bank is a fixed engine global, so the read is safe with no behavior change.
+
+Next (step 2, after the BAT): surface a "Gate" catalog entry at the controller's position when the variable says it's currently openable, reachability- and hide-filtered like everything else.
+
+## v0.20.38
+
+Sewer (`glwater3`) BAT follow-up: drop unreachable item pickups.
+
+v0.20.37 confirmed the phantom draw point is gone. But removing it unmasked a real entry underneath: `ent3`, which the item-pickup pass correctly identifies as a genuine hidden **item pickup** (tri 175) -- surfaced as "Item 1". It's a real collectible, but it's across the water on the far side, so it can't be reached right now.
+
+Root cause: the walkmesh-reachability **zone filter** (the one that correctly excludes the far-side ladder, exits, and interactions) is applied on the trigger, interaction, event, and JSM-object paths -- but never on the **runtime-entity** path that NPCs and item pickups come through. So an unreachable pickup sailed through.
+
+Fix (surgical, in the item-pickup relabel): drop a pickup whose walkmesh triangle isn't in the player's reachable zone. Item pickups are must-*walk*-to, so plain walkmesh reachability is exactly the right test -- there's no "talkable across a gap" exception to worry about the way there would be for a conversational NPC, which is why this is scoped to identified pickups rather than all runtime entities. The item reappears the moment the player's zone grows to include its triangle (e.g. after opening the gate / crossing).
+
+Net: the sewer catalog should now be just the three exits plus the two real interactions (climb-out ladder, waterwheel) -- ladder, phantom draw point, and unreachable item all handled. Still open: openable-gate surfacing, and the Move-Find parity check.
+
+## v0.20.37
+
+Sewer (`glwater3`) BAT follow-up: kill the phantom Draw Point (and v0.20.36 confirmation).
+
+**v0.20.36 confirmed working:** the far-side ladder (`hasigomodel`) is now dropped by the HIDE filter on the JSM-injection path, along with a currently-hidden `book`. The hide bit is doing exactly what we want.
+
+**Phantom Draw Point fixed.** The BAT still showed a bogus "Draw Point" in the sewer. Root cause: the gate `saku4` -- a **cat=2 background** -- gets typed as a Draw Point because its gate-controller script contains a DRAWPOINT opcode, and it has no position. The v0.12.12 "no-position draw-point fallback" (a Fire-Cavern heuristic that relabels the nearest non-player NPC) then stuck "Draw Point" on a scene character (`ent3`, model 7) at a wrong, reachable-looking spot -- while the field's real `drpoint` is correctly dropped as not-present. Fix: the no-position fallback now skips cat=2 backgrounds outright (real positionless draw points -- Fire Cavern's `drpoint` -- are cat=3 "others", never backgrounds). So the phantom is gone, and no draw point shows here, which is correct since the real one isn't present or reachable at this point.
+
+Still open (unchanged): the openable-gate surfacing (mechanism cracked -- `ct_*` controllers REQ the `saku` gates, gated on var 340 -- pending an observe pass), and the Move-Find parity rule for genuinely hidden draw/save points (verifying whether the HIDE-flag filter already delivers it).
+
+## v0.20.36
+
+Sewer (`glwater3`) BAT (Aaron): first fix + findings for the remaining three issues.
+
+**Fix shipped -- HIDE filter now runs on the JSM-object-injection path.** The v0.20.35 audit paid off immediately: the sewer's not-yet-knocked-down ladder (`hasigomodel`) was in the catalog with live `hide=1` (flags@0x160 bit 3). The HIDDEN-ENTITY filter (v0.18.3.269) only ran on the entity-scan path, so JSM-injected objects skipped it. Now a hidden JSM object is dropped -- and reappears the instant the script SHOWs it (when the ladder becomes a real crossing). Global, and it covers the far-side ladder even during the brief field-entry window before the reachability filter activates.
+
+**Findings recorded for the next build (not yet fixed):**
+
+- *Draw point is a fabricated phantom.* The real `drpoint` entity isn't live-present (no slot). The v0.12.12 "no-position draw-point fallback" -- a Fire-Cavern heuristic that reclassifies the first non-player NPC as the Draw Point -- then grabs a party/dream character (`ent3`, model 7) and labels it "Draw Point" at a reachable-looking but wrong position, while the real draw point is across the water. Needs a scoped fix so the fallback doesn't fabricate a draw point from a character model.
+- *Reachability is off only during the field-entry window.* The walkmesh-triangle BFS zone filter correctly excludes the far side (36/235 triangles reachable) and stays active mid-visit; it just can't run until the player-triangle read (+0x1FA) is ready right after entry, which is when far-side entities flash in. Options: defer the catalog until the zone is valid, or seed the player triangle earlier.
+- *The openable gate, located via Aaron's before/after F11 shots* (14:39:56 -> 14:40:09): the party opens a scripted iron gate on the path to the Sewer 2 exit. The 13-second field-nav silence between the shots = a scripted sequence (not navigation), and the waterwheel spins as the mechanism. It is NOT a captured line or a talk entity -- the `saku1..6` gates are animation-only backgrounds, and `ct_lf`/`ct_rt`/`ct_rt2`/`rt_up` are hidden controllers driving the water/gate vars (337/339/340). Surfacing "only openable gates" needs the gate-state variable and gate position identified -- the location-specific RE, tracked in follow-up.
+
+## v0.20.35
+
+Catalog revamp WS1 Step 1.2 — fold the live-state picture into `[CAT-AUDIT]` (observe-only), plus findings from re-grounding the plan on `glwater3` (the sewer gate room — the canonical bloat field; Aaron has a save at the sewer entrance).
+
+Two findings while re-orienting:
+
+- **SHOW/HIDE visibility is already decoded and filtered.** The plan listed it as "not read live," but v0.18.3.269 (#71) had already found it: entity flags dword `+0x160`, **bit 3 (0x08) = HIDE** (set by opcode `0x61` @`0x0051EB40` `or ecx,8`; cleared by SHOW opcode `0x60` @`0x0051EAD0` `and ecx,~8`), and the HIDDEN-ENTITY filter already drops bit-3 entities. Resolving that also pinned the **FIELD opcode dispatch table base at `0x00B8DE94`** — the missing piece for issue #116 (signpost MES detection).
+- **`glwater3` entity picture** (extracted from `field.fs`; JSM D=0 L=8 B=8 O=17, 33 entities): 9 party/dream characters (`squall`..`ward`, party-filtered), controllers (`director0`, `ct_lf`/`ct_rt`/`ct_rt2`/`rt_up`), the `water` background controller (classic bloat), the `saku1`..`saku6` gates, the `hasigo` ladder (+ 8 `ladline` climb lines), a `drpoint` draw point, and `book`.
+
+Change (log-only): the object `[CAT-AUDIT]` line now carries each live "other" entity's engine signals — `flags@0x160` with the HIDE bit broken out, model id (`+0x218`), triangle (`+0x1FA`), and slot index. A `glwater3` BAT will show, per surviving catalog object, exactly which live signal would gate it — the empirical input for the unified `CatalogEntryIsLiveNow()` gate (Step 1.3). Reads are bounds-checked (no SEH, matching the phantom-filter idiom); nothing is added, dropped, or renamed.
+
+## v0.20.34
+
+Labeling the classroom bulletin board (follow-up to Aaron's three-signs question on v0.20.33).
+
+Aaron saw three panels on the classroom north wall and expected three catalog entries; only one appeared, as "Interaction 1". I extracted `bgroom_1` straight from `field.fs` and decoded it to settle what is actually there:
+
+- There is exactly **one** interactive object on that wall: the bulletin board, symbol `BritinBoard`, a single trigger line (JSM entity 7 at ~1664,-3171..-3304 -- the "Interaction 1" already surfaced, where Squall stands in the screenshot).
+- Its interaction method reads one variable and branches to one of **five** committee notices -- Tardiness / Magic-use / Garden Festival / cafeteria / "No alterations to uniforms" -- with **no player-position check**. At Aaron's current story point the variable is fixed, so re-reading the same spot always showed the uniforms notice (confirmed by two F11 screenshots).
+- Tracing those five message IDs through every entity's script confirms only `BritinBoard` displays them. The other two panels (the lit directory left of the door, the blue map screen on the right) are not entities at all -- they are painted into the background art and display no messages, so a sighted player cannot read them either.
+
+So nothing is being *missed* here: the one real sign was already in the catalog, just labeled generically. This release gives it a name. `IsSignpostName()` recognizes sign-type interaction lines by SYM name and labels them **"Notice Board"** (same curated-name path as the desk's "Desk"). The token set is intentionally tight -- distinctive substrings (`britin`, `bulletin`, `noticeboard`, `signboard`, `billboard`, `signpost`) plus whole-name matches (`board`, `sign`, `notice`, `kanban`, `keijiban`) -- so it never fires on unrelated words like keyboard, design, signal, or cardboard. It only renames; it never adds or removes a catalog entry, and a name it doesn't recognize simply stays "Interaction N".
+
+Note on going global: signpost interaction *lines* like this are already surfaced everywhere (they come through as interactions), so they are not being missed -- the gap is naming, which this addresses by pattern. The fully-robust version would label an interaction as a sign when its script actually displays a text message rather than by name; that needs the field message opcode pinned down in the JSM (a focused disassembly pass), which can follow if we want it.
+
+## v0.20.33
+
+Consolidating the classroom door-open trigger with its exit (Aaron BAT of v0.20.32).
+
+In the classroom front the door-open animation trigger showed up as its own "Interaction 1" right next to the actual hallway exit. Because the door animation plays automatically as you walk toward the exit, listing the trigger separately is just noise -- there is nothing there to navigate to that the exit does not already cover.
+
+`InjectInteractionLines` now drops an interactive line when BOTH conditions hold: its symbol name contains "door", AND it sits within 400 world units of a non-camera-transition `SCREEN_BOUND` exit line. That is the door-open-animation-then-transition pattern -- `bgroom_1`'s `door01` (center 1418,-3352) pairs with the `to_corridor` exit (center 1418,-3444), 92 units away. The exit entry itself is untouched; only the redundant trigger interaction is removed, and it is removed before the interaction-numbering pass so it never burns an "Interaction N" slot.
+
+Both conditions are required deliberately. A "door" name alone might be some other line; proximity alone could suppress a legitimate interaction that merely happens to sit near a doorway. Requiring the name *and* a real co-located exit keeps the rule tight and lets it generalize to the door01/door02 triggers elsewhere in the game without over-reaching. If a field's door trigger uses a non-"door" name it simply is not consolidated (it still lists as an interaction) -- a safe failure mode, never an over-suppression.
+
+## v0.20.32
+
+One-line follow-up: the desk was being named "Desk" correctly at injection, but the interaction-numbering pass immediately overwrote it back to "Interaction 1" (it exempted `soloName` from renumbering but not the new `lineCurated`). Now `lineCurated` is exempt too, so Squall's desk stays "Desk" in the catalog.
+
+The v0.20.31 phantom fix is confirmed working -- no more Selphie/Quistis/Irvine, verified against the screenshot (only Squall present).
+
+## v0.20.31
+
+Finishing the classroom (Aaron BAT of v0.20.30).
+
+- **The surviving phantoms had no live entity slot.** `Selphie`, `Selphie_u`, `Quistis`, `Irvine` weren't caught because the engine's live "others" array only holds the entities actually loaded in the current scene (`ocnt` of them), and these cutscene actors sit at higher indices than that -- so the `index < ocnt` guard skipped them entirely. Now any Other whose slot index is `>= ocnt` (no live entity at all) is dropped as a not-present scene actor. The in-range `tri=0 pos=(0,0)` drop from before still handles unplaced entities like `SelphieDummy`.
+- **Squall's desk is now labeled "Desk".** The desk is the `Cliant` trigger line (the interaction at 969,376 that read as "Interaction 1"); it now gets the fixed name "Desk" instead of a generic number.
+
+The v0.20.30 double-emission fix is confirmed working -- the jump lines are no longer listed as both exits and interactions.
+
+## v0.20.30
+
+Fixes for the v0.20.29 BAT (Aaron).
+
+- **Catalog instability was a double-emission.** The camera-transition jump lines were being listed twice -- once as `Camera transition` exits and again as generic interactions at the same positions -- so navigating hit whichever copy the last refresh produced. `InjectInteractionLines` now skips `isCameraTransition` lines, so each transition appears exactly once (as an exit).
+- **Phantom filter now catches the literally-positioned scene actors.** v0.20.29 only checked `hasPshmCoords` objects, so `Selphie`/`Selphie_u`/`Quistis`/`Irvine` (literal positions) slipped through. All Others now have their live entity struct checked and are dropped when it reads `tri=0 pos=(0,0)` (unplaced). The flag word and model id are also logged for present Others, so if a placed-but-hidden phantom survives the position test there's a visibility signal to filter on next.
+
+Squall's-desk rename is deferred until its current catalog label is identified (the two camera views use different coordinate spaces, so it can't be pinned from the log alone).
+
+## v0.20.29
+
+Two features built on the v0.20.28 naming fix (Aaron).
+
+**Camera transitions as exits.** The four `bgroom` jump lines are now routed to `SCREEN_BOUND` in the line-type pass (so they both wall the zone-reachability BFS *and* reach the exit-injection path) and tagged `isCameraTransition`. They're emitted as `Camera transition` catalog exits, zone-filtered so only the transitions bounding your current camera view are listed. Because they now wall the BFS, the front's hallway exit (`to_corridor`) is no longer reachable from the back, so it stops being announced there.
+
+**Phantom scene-actor filter.** Opening-cutscene characters (Selphie and the like) that the junk-gate keeps -- they carry a talk method -- but that aren't actually placed during free-roam are now dropped. The live "others" entity struct is the ground truth: a placed entity has a real triangle/position, an unplaced one reads `tri=0 pos=(0,0)`. Only marker-positioned (`hasPshmCoords`) Others are checked, so literally-placed, live-present entities (Squall at his desk) are never touched.
+
+Both are logged (`[refresh] camera-transition EXIT ...`, `... scene-actor phantom ... dropped`).
+
+## v0.20.28
+
+One-line fix on top of v0.20.27. The categorizer itself was correct (36 entities), but the scanner's index-building loop iterated to `symCount` (37 -- the SYM name table includes a trailing repeated name) instead of `symCatCount` (36), so the zero-initialized 37th slot was counted as an extra "Other" (`symOth=22` vs header 21) and the guard rejected the remap again (`remap=0`). The loop now bounds on `symCatCount`.
+
+With this, `bgroom_1` should log `remap=1` and the group Line entities get their correct names (`bgroom_1_jump01/02`, `bgroom_2_jump01/02`, `door01`, `to_corridor`, `Cliant`, `BritinBoard`).
+
+## v0.20.27
+
+FIX the v0.20.26 SYM categorizer (Aaron): the v0.20.26 BAT logged `[SYMREMAP] ... remap=0`, so the remap did not actually apply.
+
+Two bugs in `LoadSYMCategories`:
+
+- The SYM file is variable-length NUL/newline-separated, and some function names exceed 32 bytes (e.g. `cardgamemaster2::main_rule_process`). The fixed 32-byte record parse drifted, so `cardgamemaster2`/`cameraman`/`doorcont` got no methods attributed and were misclassified as Background (`symBg=11` vs header 7).
+- The SYM function section begins by repeating a bare entity name, which was being counted as a spurious 37th entity.
+
+Rewrote `LoadSYMCategories` to tokenize on NUL/newline and stop entity-name collection at the first repeated bare name, and dropped the `symCatCount == symCount` guard (the real entity count is 36; the SYM name table reads 37 with the trailing repeat).
+
+Verified offline across `bgroom_1`, `bghall_1`, `bgroom_4`, `glclock1`, `doani1_2` -- all now match their JSM header exactly (`bgroom_1`: symLine=8, symBg=7, symOth=21). With the remap applied, the classroom's lines get their correct names (`bgroom_1_jump01/02`, `bgroom_2_jump01/02`, `door01`, `to_corridor`, `Cliant`, `BritinBoard`) and the mislabeled desk/interactions resolve.
+
+## v0.20.26
+
+FIX (camera-zone exits, Aaron): corrected the SYM entity-naming bug that was the root of the classroom catalog problems.
+
+The v0.20.25 `[CAMBYTE]` BAT proved `0x1CE4906` (with `0x1CE4908`/`4909`) is the front/back zone byte and flips reliably on crossing -- so my earlier *static* claim that it never changes was wrong (the zone-set fires via dynamic dispatch), and the v0.20.24 "camera N" announcement does work.
+
+The actual bug: in model-first fields like `bgroom_1`, the SYM name-table order (Others, Lines, Backgrounds) differs from the JSM group order (Door, Line, Bg, Other), so `symIdx = e - countDoors` mislabeled every entity. The four camera-transition lines (`bgroom_1_jump01/02`, `bgroom_2_jump01/02`) were being named `Director`/`Squall`/etc, and the hallway exit `to_corridor` was named `SelphieDummy`.
+
+- New `LoadSYMCategories()` categorizes each SYM entity by method signature (accross/lineon -> Line, talk/push -> Other, else Background).
+- The scanner remaps SYM names per-category onto the correct group entities, guarded by a per-category count match so fields where SYM order already equals group order are byte-identical.
+- Logs `[SYMREMAP]`, `[SYMCAT]`, and `[CAMXLINE]` (the now-correctly-named `*jump*` transition lines).
+
+All 8 of `bgroom_1`'s lines are already captured with geometry via the SETLINE hook (calls #14-21), so surfacing the jump lines as catalog exits + zone-boundary walls is the next step. Disabled the v0.20.25 `[CAMBYTE]` watch (its job is done).
+
+## v0.20.25
+
+DIAG (camera-zone exits, Aaron): observe-only `[CAMBYTE]` watch to find which engine byte tracks the classroom front/back view.
+
+Deep static reverse-engineering of `bgroom_1` (Classroom 1) field data overturned the v0.20.24 premise:
+
+- `bgroom_1` **never calls the zone-set opcode `0x11C`**, so the zone byte `0x1CE4906` stays 0 there. The v0.20.24 "camera N" announcement (which reads that byte) therefore cannot fire in the classroom.
+- The front/back views are switched by **4 `jump` trigger lines** (`bgroom_1_jump01/02`, `bgroom_2_jump01/02`) via a REQ chain to the `cameraman` entity. These are the camera transitions Aaron wants in the catalog.
+- **`jump`-named lines are FF8's convention** for free-roam camera transitions: present in 7 of the 45 multi-camera fields (validated offline).
+- **Entity-naming bug found:** the SYM name table order (models, lines, backgrounds) differs from the JSM group order (door, line, bg, other), so `symIdx = e - countDoors` mislabels `bgroom_1`. The real line entities are group indices 0-7, and the hallway exit is `to_corridor` (MAPJUMP3 -> field 139) -- which the mod had been reporting as `SelphieDummy`.
+- `bgroom_1` uses **no `SETLINE` (0x39)**, so the mod's SETLINE-hook line-capture never fires there (no geometry for the classroom's lines).
+
+This build only logs the camera-state byte cluster `0x1CE4900..0x1CE4940` (any byte that changes within a field). Once a BAT identifies which byte flips front/back, the announcement fix + camera-transition catalog exits follow.
+
+## v0.20.24
+
+Accessibility: announces the camera view when you cross between a field's camera zones, and answers the classroom "walkways" question from the field data.
+
+You asked whether the two generic interactions in the back of the classroom are the front/back camera transitions. From the field data, no: the offline camera survey shows Classroom 1 (bgroom_1) has two cameras, and every captured line in it is a scene-actor trigger zone (the classroom cutscene entities), not a camera-transition line. The front/back switch is the engine's own per-zone camera index, not a scripted line — so there is nothing there to relabel. The right fix is to announce the change directly, which is your second request.
+
+The field-announce module now treats the camera-zone index as part of the on-screen identity, the same way it already treats the prison floor. When that index changes while the field itself stays the same — that is, when you cross from one camera zone of a field into another — it re-announces the field name followed by which camera you are now in ("B-Garden - Classroom 1, camera 2"), using a stable per-visit ordinal rather than the raw internal value. It is debounced the same 800ms as the field-name announcement, so it does not chatter, and single-camera fields never trigger it because their index never changes. This gives a blind player the same "the screen changed" cue for a camera move that they already get for a field move, which also tells them the catalog has refreshed.
+
+This change is in a Windows-only translation unit, so it is not covered by the offline harness; it was written to match the module's existing SEH-guarded read and announcement patterns. Not yet MSVC-compiled or BAT'd.
+
+## v0.20.23
+
+Catalog revamp: reverts the v0.20.20 "camera-zone transition as exit" change, which was based on a misreading of the opening classroom.
+
+The v0.20.22 BAT revealed that the catalog's "Exit to B-Garden - Classroom 3" is actually Squall's desk. Pressing interact on it fires his "...what a pain" prompt, and walking into it jumps to the next scene field. That line reports to a dialog-bearing entity (it drives the classroom scene), which makes it a dialog-gated interaction — a desk — not a walk-across transition. The real hallway exit does not report to any dialog entity and correctly stays an exit.
+
+v0.20.20 had keyed on the wrong signal — "the destination is a different field" — and promoted the desk to a phantom exit. This restores the original and correct rule: a screen-boundary line that reports to a dialog entity is an interaction. Squall's desk now reads as an interaction (interact for the desk dialog) rather than a phantom exit, and the recognizer added in v0.20.20 is removed along with its three uses.
+
+The v0.20.21/22 topological zone filter is unaffected and correct — the offline camera survey confirms the classroom really does have two camera zones, and the screen-boundary lines still serve as the flood-fill walls. Two things remain for the next pass: two generic interactions in the back that may be the walkways between the front and back (they need identifying so they can be labeled), and the fact that desk and scene interactions still read as a generic "Interaction N". Validated by the g++ harness compile and all 33 fixtures passing. Not yet MSVC-compiled or BAT'd.
+
+## v0.20.22
+
+Catalog revamp: classroom polish — fixes the two regressions the v0.20.21 BAT surfaced (interaction numbering and the hidden transition), and stops the zone filter from ever hiding an exit.
+
+The v0.20.21 BAT showed two problems. Interaction labels went non-contiguous ("Interaction 6 of 4") because the number was assigned before the zone filter ran, so a dropped interaction still consumed a number. And the front-to-back camera-pan transition was hidden from the far zone, because that transition line sits right on the zone boundary, so all of its sample points fall in the adjacent zone.
+
+The fixes: interactions are now numbered only after they survive filtering, just before they're added, so the labels are always contiguous. During the flood-fill, the filter now records which camera-boundary lines wall the player's current zone; a trigger-line exit is kept if it is reachable or if it bounds the player's zone — so the camera-pan transition (the way across) is announced from both zones, while an exit lying wholly in another zone (the far hallway exit) stays hidden. Map exits and gateways are no longer zone-filtered at all, so combined with the boundary rule, no exit you can reach is ever hidden. Save points are also never zone-filtered. Interactions, objects, and events still filter by zone, since those are the actual cross-zone noise.
+
+Two things are deliberately left for the next build, because the opening classroom is a dense cutscene field: the hallway exit and its co-located "door" interaction should merge into a single exit, and desk/scene interactions currently read as a generic "Interaction N" rather than a descriptive name. Validated by the g++ harness compile and all 33 fixtures passing. Not yet MSVC-compiled or BAT'd.
+
+## v0.20.21
+
+Catalog revamp: the far-zone half of the classroom fix — front-zone objects, interactions, and the far exit no longer leak into the back. This replaces the fragile geometry test with a topological one.
+
+The v0.20.20 BAT confirmed the front↔back transition is now announced, but you still heard the front's interactions and hallway exit while standing in the back. The cause: the existing far-zone filter tests whether the straight line from you to an entry crosses a camera-boundary segment, and it lives in only three of the six catalog paths. That straight-line test is fragile — from some positions the line to a front entry slips past the end of the boundary segment, so the entry leaks (the hallway exit was kept in 26 refreshes), and the object and map-exit paths had no filter at all.
+
+The fix adds a topological zone test, computed once per catalog refresh. It reads the triangle you're standing on, then flood-fills the walkmesh outward across triangle adjacencies, refusing to step across an active camera-boundary segment. An entry is hidden only if it sits in a triangle the flood-fill could not reach — and this check runs at all six catalog push sites, so objects and map exits are covered too. Trigger lines are tested at their center and both endpoints and kept if any point is in your zone, so a boundary-straddling camera-pan transition (the way forward) is never hidden, while a line lying wholly in another zone (the far exit) is.
+
+The design is fail-safe with respect to the never-drop-a-real-entry rule: if the walkmesh is missing, your triangle is unknown, or an entry can't be placed, the filter disables itself or keeps the entry, so the worst case is a leftover leak for one more BAT rather than a dropped exit you can actually reach. It runs alongside the old straight-line filter as a second layer, every hide is logged, and a per-refresh line confirms the filter engaged. Validated by the g++ harness compile and all 33 fixtures passing (behavior-neutral offline). It's general — every field split across camera zones benefits. Not yet MSVC-compiled or BAT'd.
+
+## v0.20.20
+
+Catalog revamp: camera-zone transitions now surface as named Exits, implementing your rule from the v0.20.19 BAT — a transition from one camera zone to another is announced as an exit to the destination's internal game name, with no manual per-zone labeling.
+
+The v0.20.19 audit showed the classroom (B-Garden "Classroom 1", field 232) spans multiple field files, and the walk-across into the next section (to "Classroom 3", field 234) was being dropped. The reason: that transition line is carried by `Selphie`, which is also the classroom's scene director — it REQ-dispatches dialog to Quistis and the students. Because the line REQs dialog (`hasDialogReqTarget`), the catalog's dual-purpose rule demoted its exit to a nameless "Interaction," so the way forward into the room was never offered as a target while the far hallway exit leaked across the boundary.
+
+The fix adds `IsCameraZoneTransitionLine()`: a SCREEN_BOUND captured line whose resolved destination is a different, real, walkable field (not the current field, has a display name, not a world-map staging field) is a camera-zone transition. The SETLINE-exit path no longer demotes such a line — it surfaces as "Exit to <destination's display name>" and logs the promotion — and the interaction path no longer emits it, so there is no duplicate at the same spot. Self-loop lines (destination equals the current field: dormitory beds, prison-shaft stairs) and world-map staging destinations are untouched, so the dual-purpose cases the demotion exists to protect (the dorm bed, fepic1) are unaffected — they are either self-loop or do not REQ dialog.
+
+This is the surfacing half of the classroom fix. The far-zone hiding — a reliable reachability filter to drop entries on the other side of the camera boundary, replacing the fragile straight-line "path crosses screen-bound line" test that hid the far exit in only 1 of 26 refreshes — is the next build. The `[CAT-AUDIT]` diagnostic stays on. The offline catalog harness is not run by the push utility (which checks only the SET3 marker, source size, and chase guards), so this does not block a push; the golden was regenerated after reviewing the diff. Not yet MSVC-compiled or BAT'd.
+
+## v0.20.19
+
+Catalog revamp, Workstream 1 Step 1.1: an observe-only `[CAT-AUDIT]` diagnostic across every catalog injection path (log-only, no behavior change).
+
+This begins the broader catalog refactor we set aside during the Caraway's Mansion work. The catalog over-trusts the static JSM scan — which can only say *what* an entity is — and under-uses live runtime state, which says whether that entity is usable *right now*. That is why fields list invisible controllers, hidden or story-locked entities, and several representations of one physical thing. The revamp's aim is to make a live-state check a uniform step of catalog assembly; this first build changes nothing and only measures.
+
+A new `CatAudit()` helper emits one `[CAT-AUDIT]` line for every entry each of the six injection push-sites keeps — setline-exit, trigger-event, interaction, object, mapexit, and gateway — recording the field, path, catalog type, name, position, SYM, controller flag (`IsBgControllerName`), and the live signals in scope at that site (exit `destId`; object `talk`/`setline`/`jsmCat`; mapexit `dest`/`fromInterp`; gateway `destField`/merge-count). Each call is a scoped brace block placed immediately before the existing push, with no branch, continue, or mutation, so the catalog's contents stay byte-identical and the offline harness is unaffected (the audit reads only mod-side data, never live engine memory). The existing per-path skip logs — controller/effect names, mansion-sealed, and the no-INF-gateway filter — continue to cover the drop side.
+
+To read the result, grep `[CAT-AUDIT]` per field and compare against reference expected-sets: the sewer gate room (`glwater3`, the canonical bloat example), a Garden hallway (`bghall_1`, whose real Directory must not be dropped), Caraway's Mansion 1 (`glfurin1`, now correct and a regression tripwire), a shop/save field, and a draw-point field. That comparison turns the rest of the revamp from a design into a data-driven checklist and pins which live signal would remove each bloat entry — without risking the loss of a real entry, which remains the worst failure mode.
+
+The diagnostic is switched off with a one-line `s_catAudit = false`. Step 1.2 will add the two signals not yet read live (SHOW/HIDE visibility and the `execution_flags` 0x160 UNUSE state). Not yet MSVC-compiled or BAT'd.
+
 ## v0.20.18
 
 Trim dead diagnostic code from field_navigation.cpp so it fits under the 80 KB CI limit (unblocks the push).
