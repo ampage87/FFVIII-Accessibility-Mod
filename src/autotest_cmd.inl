@@ -24,6 +24,11 @@
 // keystroke-injection surface and should not be active in a public release.
 // Flip to 1 and rebuild to drive the game from automation during a test session.
 
+// v0.20.70/.71 flipped this to 1 for an automated overnight session that never
+// ran -- the agent that was to drive it could not be started. Returned to 0:
+// what Aaron BATs should be exactly what he can push, and this is a file-polled
+// keystroke-injection surface with no business in a release build. Nothing in
+// .70 or .71 depends on it; the [GDTRACE] diagnostics are independent.
 #define AUTOTEST_CMD_ENABLED 0
 
 #if AUTOTEST_CMD_ENABLED

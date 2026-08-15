@@ -26,4 +26,11 @@ namespace FmvAudioDesc
 
     // Force stop any current playback (e.g., when user skips an FMV or movie ends).
     void StopPlayback();
+
+    // v0.20.106 (#minigame-bgbtl): hold the narration without losing the clock.
+    // The Garden-battle briefing freezes the field and talks; an AD cue firing
+    // mid-briefing would interrupt it, which is the same defect v0.20.103 fixed
+    // for the mod's own cues. While suppressed, cues are consumed and LOGGED on
+    // schedule but not spoken -- the track stays in sync, it just stops talking.
+    void SetSuppressed(bool on);
 }

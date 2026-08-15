@@ -50,12 +50,15 @@
 #include <cmath>
 #include <algorithm>
 #include <vector>
+#include <queue>          // #80: Garden planner priority queue
 #include "ff8_accessibility.h"
 #include "ff8_addresses.h"
 #include "resources.h"        // v0.18.3.172: IDR_WAV_TELEPORT
 #include "world_map.h"
 
 // Forward declarations for namespaces used by the .inl files below.
+// v0.20.87: the Garden drive must know when a scripted cutscene has the floor.
+namespace FieldDialog { bool IsDialogOpen(); }
 namespace Log { void World(const char* format, ...); }
 namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); }
 
@@ -88,6 +91,12 @@ namespace WorldMap {
 #include "world_map_planner2.inl"   // v0.18.3.225: planner part 2 (grid A* + PlanDrivePath), split from planner.inl for the 80 KB CI guard
 #include "world_map_routenet.inl"   // v0.18.3.209 (#70): validated route network -- data + RouteNetPlan (uses planner helpers; PlanDrivePath calls in via forward decl)
 #include "world_map_drive_helpers.inl"   // v0.18.3.225: AD lifecycle helpers (split from drive.inl for the 80 KB CI guard)
+#include "world_garden_dump.inl"         // #80 diagnostic: runtime world-map polygon dump (gated off)
+#include "world_garden_grid.inl"         // #80: mobile Balamb Garden -- the traversability grid and its build (v0.20.63 split)
+#include "world_garden_berths.inl"       // #80: the berth (park-point) table -- split out of world_garden.inl at v0.20.74 for the 80 KB CI guard
+#include "world_garden_plan.inl"         // #80: reachability, docks, aboard latch, A* -- split out of world_garden.inl at v0.20.84 for the same guard
+#include "world_garden_probe.inl"        // #80: collision probes -- split out at v0.20.94
+#include "world_garden.inl"              // #80: reachability, planner, dock tables and executor; runs only when the engine vehicle id is 0x30
 #include "world_map_drive.inl"           // UpdateAutoDrive (textually includes world_map_drive_exec.inl mid-body)
 #include "world_map_heading_scan.inl"
 #include "world_map_camera_scan.inl"
@@ -106,6 +115,7 @@ void Poll()
         s_onWorldMap = true;
         s_wmEntryTick = GetTickCount();   // v0.14.90.3: arm locomotion-byte suppression
         s_catalogBuilt = false;
+        Garden_OnWorldMapEntry();   // #80: arm the aboard/on-foot classification
         Log::World("WorldMap: Entered world map");
         // v0.18.3.255 (#79): capture the vehicle-state candidates the instant
         // the world map loads (scenes can spawn the player ALREADY aboard the
@@ -193,6 +203,19 @@ void Poll()
         // based on the settled game mode (MODE_FIELD = arrival, battle modes =
         // encounter). v0.16.0 Part B added a distance cap inside the arrival
         // branch so accidental wrong-field entries don't poison s_refined*.
+        // #80: a Garden drive never ends in a field entry -- the Garden cannot
+        // fire any trigger program except its own (locID 0x0172). So leaving
+        // the world map while piloting means a battle or a scripted event, not
+        // an arrival: release the keys and drop the drive rather than waiting
+        // on an arrival decision that will never come.
+        if (Garden_Active()) {
+            // #80: on a DOCKING run (Fisherman's Horizon) the world map handing
+            // off to a field IS the arrival -- driving the hull in is what
+            // fires it. On any other Garden drive it is a battle or an event.
+            char gbuf[256];
+            if (Garden_LeavingIsArrival(gbuf, sizeof(gbuf))) Garden_Stop(gbuf);
+            else                                             Garden_Stop("Garden navigation interrupted.");
+        }
         if (s_driveActive) {
             ReleaseAllDriveKeys();
             s_driveAwaitingArrivalDecision = true;
@@ -228,6 +251,12 @@ void Poll()
 
     if (!s_onWorldMap) return;
 
+    // #80: resolve "is the player piloting the Garden" BEFORE the catalog is
+    // built. The v0.20.54 BAT proved the engine vehicle id is 0 at every entry
+    // and every catalog build (it only names a vehicle while one is MOVING),
+    // so this has to be a latched decision rather than a spot read.
+    Garden_UpdateAboard();
+
     if (!s_catalogBuilt) {
         BuildDistanceCatalog();
     }
@@ -261,7 +290,13 @@ void Poll()
     }
 
     CheckVehicleChange();
-    UpdateAutoDrive();
+    // #80: the Garden has its own executor. When it owns the drive the
+    // foot/car one is not ticked at all -- the two never run together.
+    if (Garden_Active()) {
+        Garden_Update();
+    } else {
+        UpdateAutoDrive();
+    }
 
 #if WM_RUNTIME_WALK_DIAG
     // v0.18.3.102: re-gated runtime-walkmesh dump. The .101 BAT proved that

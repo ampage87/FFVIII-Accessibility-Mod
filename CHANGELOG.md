@@ -6,6 +6,1623 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.20.128
+
+#minigame-bgbtl: **the Garden battle is done, so the scaffolding comes down —
+and the log had two warts left in it.**
+
+> *"Please review the log in full and in detail to check for any other problems
+> or issues with the mini-game that we may have overlooked. After that look for
+> any diagnostics, dead code, etc. left over from building this out and do the
+> necessary clean up."* — Aaron
+
+---
+
+### What the log review found
+
+The 2026-08-15 16:12–16:16 run is the winning one: two attempts, a deliberate
+loss, a heavy punch that took the soldier 600 → 148, six blocks, best streak 3,
+F9 into a rescue FMV that played in full and handed off to G-Garden on the
+game's **own** `MAPJUMP3` at clock 1185. Nothing in the mini-game machinery
+misbehaved. Three things around it did.
+
+**1. The fight announced its own archive filename.** Twice — once per attempt:
+
+```
+16:12:29  FieldAnnounce: announced fieldId=0x0098 name='bgbtl_1' spoken='bgbtl_1'
+16:14:17  FieldAnnounce: announced fieldId=0x0098 name='bgbtl_1' spoken='bgbtl_1'
+```
+
+`FIELD_DISPLAY_NAMES[152]` is a placeholder — the table's own comment says
+`// 152: bgbtl_1 (???)` — so the player heard a filename in the two seconds
+before the Game Controls briefing opened. Field 152 joins field 95 on
+`NO_NAME_FIELDS` for the same reason field 95 is there: **it is not a place.**
+It is a fight, and the briefing that follows a heartbeat later says everything
+worth saying about it.
+
+**2. The loss was announced twice.**
+
+```
+16:13:06  "You are down."
+16:13:07  "You 0"
+```
+
+The outcome path announces and returns, but the *next* poll found the rounded
+percentage had changed and reported it as if the fight were still live. Once
+the round is decided there is nothing left to report, so health reports now stop
+at the outcome.
+
+**3. `+4294933093ms`.** DWORD underflow in the per-REQ timestamps: `EndBriefing`
+restarts the clock so REQ offsets read from the start of the fight, but the ring
+still held events stamped during the briefing. It went out with the log line
+that printed it.
+
+### The scaffolding
+
+Every instrument in this module was built to answer a question that is now
+answered. A run used to emit **711 `[BGBTL]` lines; it now emits about 75.**
+
+| removed | lines/run it was costing |
+|---|---|
+| `[BGBTL-REQ]` — every script REQ, named | 260 |
+| `[BGBTL-CLOCK]` — var 80, once a second | 188 |
+| `[BGBTL-KEY]` — raw X/Enter/F9 during the briefing | 102 |
+| `[BGBTL-BTN]` — the button word, change-only | 57 |
+| `[BGBTL-STATE]` — the fight's state bytes | 28 |
+
+What stays is what a future question would actually need: the arm/disarm
+summary, the briefing, `[BGBTL-LEARN]`, `[BGBTL-STREAK]`, `[BGBTL-HP]` on
+change, `[BGBTL-BLOCK]` and `[BGBTL-DLG]`.
+
+**Gone with them:** `LogKeys`, `LogKeyChanges`, `WatchButtons`, `WatchState`,
+`ReadButtonsAnySource` (and the `frozen` plumbing that fed it), `KeyCand`, seven
+orphaned statics (`s_aDownAtCue`, `s_lastKeyMask`, `s_state`, `s_stateValid`,
+`s_lastBtn`, `s_lastFieldBtn`, `s_lastKeyDiag`, `s_clockDone`) and fourteen
+unused constants (`ARM_CAP_MS`, `CLOCK_FIGHT_END`, `CLOCK_LADDER_END`,
+`CLOCK_NUDGE_HZ`, `CLOCK_STALL_MS`, `FIELD_BUTTONS_PREV`, `FIELD_MAIN_ADDR`,
+`GUARD_POLL_MS`, `HEARTBEAT_DEAD_MS`, `REACTION_WINDOW_MS`, `STATE_FIRST`,
+`STATE_LAST`, `WINDUP_FRAMES_PUNCH`, `WINDUP_FRAMES_KICK`, `X86_RET`).
+
+**One line was also just wrong**, and had been for four builds:
+
+```
+[BGBTL] Squall's guard script REQ'd (label 31, squall::squ_kicking0)
+```
+
+Label 31 in field 152 is `squ_kicking0`; the guard is 32. The check dated from
+before the `.sym` off-by-one was found, and the log printed the contradiction in
+its own text every run. It is deleted rather than corrected — `s_guardSeen` has
+come from `WatchStreak` since v0.20.120, because var 340 increments once per
+**blocked hit** where the flag has one rising edge per **hold**.
+
+The disarm summary now reports the vetoed-attack count it has been keeping
+privately, and says whether the dialog box was shown rather than "last pause
+ON/OFF", which described a mechanism that no longer exists.
+
+### `minigame/` must not be pushed
+
+`git add -A` would have staged it. It holds the extracted `bgbtl_1` and
+`bg2f_31` field archives, `chara.one`, and disassembled `FF8_EN.exe` handler
+listings — **718 KB of game data, none of it ours to redistribute.** Added to
+`.gitignore` with the reason written beside it. The findings that came out of it
+live in `DEVNOTES.md` and the project's `GARDEN_BATTLE_MINIGAME_FINDINGS.md`,
+which is where they belong.
+
+### `FF8OPC_VERSION` was lying
+
+It said `"0.20.118"`. It had said that through .119, .120, .121, .122, .123,
+.124, .125, .126 and .127 — ten builds, every one of them logging a banner for a
+build that was not running. Bumped to `0.20.128`, its 3 KB inline comment cut
+down to a paragraph, and a one-line history entry written for each of the ten
+builds that never got one.
+
+### Verification
+
+* `minigame_bgbtl_compile`: **0 errors, 0 bad.** The `WatchState` assertions are
+  replaced by ones that hold the same ground through the code that survives:
+  `GuardVarFor` returns 1030 for field 144 and 1028 for field 152, and
+  `ApplyBlockAssist` writes that byte **and never var 1031, the soldier's**, in
+  either field. The probe's own `#include <cmath>` also moved above the SEH
+  macros — `#define __try if(1)` was turning libstdc++'s own
+  `__try { } __catch(...) { }` into a syntax error.
+* `lint_seh` OK (88 files); `garden_harness` 26 ok / 0 bad; `catalog_story_test`
+  0 failures; `garden_aboard_test` and `world_map_harness` pass.
+* `field_navigation.cpp` **untouched at 81,645** — 275 from the hard fail.
+  `field_minigame_bgbtl.inl` is **64,716, down from 71,785**.
+
+**NOT MSVC-built.**
+
+### Still worth a look, not changed here
+
+Two things the log shows that are outside this cleanup and would change what you
+hear, so they are yours to call rather than mine:
+
+1. **The background movie's audio description plays during the fight.**
+   `disc01_33h.vtt` cues land mid-round — *"Turquoise energy and fire flash…"*
+   at 16:14:07, one second before *"Heavy punch ready"* had to fight it for the
+   channel. The briefing already suppresses FMV narration; extending that to the
+   whole fight and lifting it at the win would keep the round's audio clear
+   without losing the rescue scene's description.
+2. **The game's own legend and name labels are read out at each fight start** —
+   "Punch Block Kick", "Squall", "Galbadian Soldier" — while the mod's briefing
+   is covering the same ground in more detail.
+
+### BAT
+
+Nothing about the fight should feel different. What should change:
+
+1. No **"bgbtl_1"** spoken as you enter the fight, on either attempt.
+2. Lose on purpose: **"You are down."** and then nothing — no trailing "You 0".
+3. `ff8_field.log` should be quiet. Grep `[BGBTL]` — roughly 75 lines, not 700 —
+   and the banner at the top should now read **v0.20.128**.
+
+## v0.20.83
+
+#80 — **berths now stand off by 2–3 kilometres**, because the Garden is a flying school and cannot land on a tomb.
+
+**BAT (v0.20.82).** Aaron: *"This was much better! It overshot again the first time but the second time it did seem to stop. However, it stopped essentially on top of the destination so the Garden could not land. It should stop 2-3km away from the destination on land so the player can get off the Garden."*
+
+The log agrees on both halves. The near-goal drift keep from `.82` **worked**:
+
+```
+20:15:14  wall-follow drift at (-40827,-38221) but only 2325 units from Tomb of the
+          Unknown King -- releasing the guard and keeping the approach
+20:16:22  parked (arrived) at (-42253,-36739) canDisembark=1 walk=281
+```
+
+**Two hundred and eighty-one units.** That is roughly the length of the hull, and there was nowhere to set down.
+
+### What changes
+
+Every berth is regenerated as the **most open land cell** — highest clearance — in a **2,000–3,000 unit band** around the marker, preferring ~2,500. The walk figure the mod announces is that standoff, so the player is told plainly how far they have to go.
+
+Destinations with no land in the band — small islands, offshore platforms — fall back to the nearest usable land within 6 km: Galbadia Garden 4,529, Galbadia Station 4,891, Shumi Village 4,471, Chocobo Forest 5 3,238.
+
+**Fisherman's Horizon stays a drive-in.** Its field trigger fires on approach, so it never needs to set down at all.
+
+### A side effect worth having
+
+| destination | standoff | result |
+|---|---|---|
+| **Tomb of the Unknown King** | 2,429 | **gd 286, 0 replans** (v0.20.82: 0–4) |
+| Deling City | 2,816 | gd 270–272, 0 replans |
+| Trabia Garden | 2,521 | gd 278–286, 0 replans |
+| Winhill | 2,560 | gd 285–534, 0–1 |
+| Centra Ruins | 2,673 | gd 520–543, 1 replan |
+
+A 2.4 km standoff in open ground is a far easier target than a peninsula tip, so the Tomb approach got *simpler* as a consequence of making it correct.
+
+### Loose end, stated plainly
+
+Fire Cavern and Timber re-planned successfully (32 and 169 cells) but their full drive check was still running when this shipped. Fire Cavern's standoff berth has clearance 2 — the most open land the 2–3 km band offers there — which is tighter than I would like for a destination that already worked.
+
+### Verification
+
+* `gridtest`: 23 ok, 0 bad. `aboard_test`: ALL CHECKS PASSED.
+
+**NOT MSVC-built, NOT BAT'd.**
+
+## v0.20.82
+
+#80 — **the .81 drift abort was right; its recovery was catastrophic.**
+
+**BAT (v0.20.81).** Aaron: *"It sounded like it got very close, but then may have fallen off the peninsula back into the water."*
+
+Exactly right, and v0.20.81 got closer than any build before it.
+
+```
+19:58:28  wall-follow at (-40803,-37736) has carried the hull 1001 units FURTHER
+          from Tomb of the Unknown King than where it engaged (1006 -> 2007)
+          -- abandoning it and replanning 1/12
+```
+
+**One thousand and six units from the berth.** The tight-corridor surcharge worked. The abort was correct — the guard really had carried the hull outward.
+
+What followed was not. A full reverse-and-replan sent it **eight to ten kilometres back west**, and it did that **nine more times**; the goal distance at each subsequent abort reads 5,616 · 7,867 · 6,795 · 8,070 · 8,042 · 7,755 · 8,035 · 7,730. It never recovered the approach it had already made.
+
+### The fix
+
+**`GD_NEAR_GOAL_KEEP` = 3,000 units.** A full reverse-and-replan is for a hull that is **lost**. A hull one kilometre from its berth is not lost — it is circling a peninsula. Within that range a drift abort now releases the guard and **keeps the route**, rather than reversing away from an approach that was nearly complete. Mirrored in `gexec3`.
+
+### Measured
+
+| destination | result |
+|---|---|
+| **Tomb of the Unknown King** | **arrives from all four headings, gd 269–288**, 0–4 replans (v0.20.81: wedged) |
+| Deling City | gd 287–288, 0 replans |
+| Winhill | gd 283–284, 0 replans |
+| Timber | gd 285–286, 0 replans |
+| Trabia Garden | gd 273–283, 0–1 replans |
+
+This is an **executor-only** change, so every route plan is identical by construction and it can only reduce thrashing near a berth.
+
+### Verification
+
+* `gridtest`: 22 ok, 0 bad. `aboard_test`: ALL CHECKS PASSED. `parity_check`: OK.
+
+**NOT MSVC-built, NOT BAT'd.**
+
+## v0.20.81
+
+#80 — **Phase 3: the Tomb is fixed**, and for the first time that was established *before* the build left my hands.
+
+### One experiment, once the model conformed
+
+The v0.20.79 Tomb route had **30 of 340 waypoints at clearance ≤ 2**, and its three longest tight stretches are exactly where the game logged its wall-follows:
+
+| tight stretch in the route | wall-follow in the BAT log |
+|---|---|
+| (−31360, −55424) | (−31700, −55779) |
+| (−50304, −37504) | (−50432, −37913) |
+| (−45184, −35456) | (−45708, −37965) |
+
+**A quarter of that drive was spent inside the guard.** The planner was handing a local heuristic with a 256-unit horizon a one-cell channel to thread.
+
+### The fix
+
+**`GD_TIGHT_PENALTY`** — a flat surcharge of 4.0 on any cell with clearance ≤ 2, mirrored in `gsim3`. Tight waypoints drop **30 → 1**; the route lengthens **108 km → 134 km**, which Aaron has explicitly authorised:
+
+> *"It does not have to take the most direct route, it is perfectly fine to take a bit longer to take a cleaner / more open path."*
+
+The single survivor is the destination approach itself — *"the tomb is located at the tip of a peninsula on the Galbadia continent"* — narrow by construction, and exactly what the existing near-goal exemption is for.
+
+**Measured: the Tomb goes from `wedged, gd=3884, 12 replans` to `arrived, gd 281–288` from all four headings.**
+
+### The regression question was answered before shipping
+
+This is the part that matters, after a week of the opposite.
+
+**Fire Cavern** is a confirmed-working destination whose route is **16 of 41 waypoints tight** — a short inland run with no alternative — so the surcharge touches it. Rather than guess, I diffed the planned route with the surcharge off and on:
+
+| destination | surcharge off | on | |
+|---|---|---|---|
+| **Fire Cavern** | 41 cells | 41 cells | **IDENTICAL** |
+| **Winhill** | 288 | 288 | **IDENTICAL** |
+| Timber | 171 | 171 | changed |
+| Centra Ruins | 402 | 402 | changed |
+| Deling City | 431 | 443 | changed |
+| Trabia Garden | 756 | 757 | changed |
+| **Tomb** | 340 | **450** | changed — the fix |
+
+Fire Cavern's route is byte-identical, so the surcharge **cannot** regress it. The four that reroute were each re-validated as arriving (gd 272–541).
+
+I also tried scoping the surcharge to **water** cells to protect Fire Cavern. That **lost the Tomb fix entirely** — straight back to wedged at 9,066 — which proves the Tomb's problem cells are tight *land* on the approach, not sea channels. The unscoped rule is the correct one; the scoping was a wrong guess, discarded on measurement rather than shipped on plausibility.
+
+### Verification
+
+* `gridtest`: 22 ok, 0 bad. `aboard_test`: ALL CHECKS PASSED. `parity_check`: OK.
+* `replay`: 4 of 5 checks at 100%, `aim` at 98.5%.
+* Plan times 33–347 ms.
+
+**NOT MSVC-built, NOT BAT'd.**
+
+## v0.20.80
+
+#80 — **Phase 1 of the recovery plan: a replay harness, and the two real divergences it found in an hour.**
+
+Plan: `claude/WORLDMAP_NAV_RECOVERY_PLAN.md`.
+
+### The Tomb failure was never a map problem
+
+From the v0.20.79 trace, the last four seconds:
+
+| position | goal | blk | aim | guard | mv |
+|---|---|---|---|---|---|
+| (−45955,−38097) | 3,935 | 0 | 0 | on, 58 | 7/57 |
+| (−49498,−39125) | **7,605** | 0 | 0 | on, **229** | 22/57 |
+
+The hull is **moving**. Nothing is in front of it. The guard has been on for 229 consecutive frames turning right, and the goal distance climbed by 3.7 km. All four `[GDPROBE]` sweeps said `ENGINE MOVED`.
+
+The guard releases on `!blocked && (aimClear || goal < guardHit − 256)`. `aimClear` was 0 and the goal distance was *rising*, so **the release condition is unsatisfiable exactly when the guard is doing harm**. Several builds were spent fixing the map while the defect sat in the steering.
+
+### The method was the real problem
+
+Every rule here was derived by me, encoded in **both** `world_garden*.inl` and `gsim3`/`gexec3`, then "validated" by running the simulator — which embeds the same derived rule and can never falsify it. A clean 2,112-run matrix only ever proved the C++ agreed with my assumptions.
+
+**`offline/replay.py`** feeds the positions and headings the game actually logged back through the offline model and asks it to reproduce what the mod computed *at those positions* — no closed loop, no drift, just conformance.
+
+First run:
+
+| check | agreement |
+|---|---|
+| cell / cls / clear | 100% |
+| **blk** | **91.8%** |
+| **aim** | **77.6%** |
+
+The grid was right. The **line of sight was 22% wrong** — and `aim` is exactly what the stuck guard hangs on.
+
+**Cause:** `GdLineClear` carries two checks the offline `line_clear` never had — the **800-unit ramp gate between consecutive 96-unit samples along the chord** (in the C++ since v0.20.57), and the **water→land beach restriction** in the cell-transition test (since v0.20.73). Both made the model *more permissive* than the game, which is precisely why "the matrix is clean" kept being worthless.
+
+Mirrored: **blk 100%, aim 98.5%**, the two stragglers now erring conservative.
+
+**And with the corrected model the Tomb reproduces offline for the first time** — 7 to 10 replans and reverses where it previously sailed through with zero.
+
+### Phase 2: shipped, and not sufficient
+
+**`GD_GUARD_MAX_DRIFT`** — a wall-follow is a local heuristic with a 256-unit horizon; A* costs 25–190 ms and knows the whole map. Once the guard has added more than 1,000 units to the goal distance it has failed at its job: drop it and replan. Mirrored offline.
+
+This bounds the damage — fifteen seconds the wrong way becomes about two — but **it does not fix the Tomb.** Offline it still takes 10–12 replans and one start now wedges outright. Not fixed; reproducible, which is the first time that has been true.
+
+### An honesty bug the reproduction exposed
+
+The arrival radius widened 256 units per replan with **no ceiling**, so twelve replans made "arrived" mean **3,360 units away** — it would have announced arrival 3 km from the Tomb. Capped at +512 (`GD_ARRIVE_MAX_EXTRA`).
+
+### Verification
+
+* `gridtest`: 22 ok, 0 bad. `aboard_test`: ALL CHECKS PASSED. `parity_check`: OK.
+* `replay`: 4 of 5 checks at 100%, `aim` at 98.5%.
+
+**NOT MSVC-built, NOT BAT'd.**
+
+## v0.20.79
+
+#80: **the hull itself must be ashore.** Aaron has told me this three times; I implemented something else three times.
+
+**BAT (v0.20.78).** *"The Shumi drive was not clean — it ended with Garden still in the water."*
+
+Correct. And what he actually asked for, twice before that, was:
+
+> *"The mod has to make sure it is on land before announcing it has arrived"* — v0.20.73
+> *"The Garden must go up a beach to get onto land"* — v0.20.72
+
+What I built instead, in `.74`, `.75`, `.77` and `.78`, was *"is there a disembark cell near the hull"*. Three different versions of the wrong question.
+
+### The log discriminates cleanly
+
+| run | hull terrain | | outcome |
+|---|---|---|---|
+| Centra Ruins | 7 — land, foot-walkable | | **got off** |
+| Trabia Garden | 7 — land, foot-walkable | | **got off** |
+| Shumi `.77` | 33 — **water**, gate +208 | | could not |
+| Shumi `.78` | 33 — **water**, gate +208 | | could not |
+
+The discriminator is not the neighbourhood. It is whether the hull is standing on land.
+
+### What changes
+
+* **`GdCanDisembarkAt` tests the hull's own cell.** Afloat (`GDC_WATER`) or not foot-walkable ⇒ nowhere to step, and **no arrival is announced**.
+* **The berth table is regenerated as land berths** — reachable, Garden-masked, *not* water, foot-walkable.
+* Computed on the **same planner grid, with the same step rule, the mod actually plans with**. That is a bug I introduced and caught inside this build: the first regeneration used a fine-128 flood while the mod validates on the 256 planner grid, and the two disagree at the margins.
+
+### The Tomb of the Unknown King
+
+**Land berth at (−42368, −36480), walk 0** — on the marker — and A* routes to it in 340 cells. The old berth was a land cell with **no disembark bit**, which is what the hull spent two minutes circling. All four headings arrive, zero replans, as do Deling City, Winhill, Trabia Garden, Centra Ruins, Fire Cavern and Timber.
+
+### Shumi Village is reported unreachable — read that as a known-wrong answer
+
+The nearest reachable land near the island is (11392, −72576) and A* finds **no route to it**, so under the current beach model the Garden cannot get ashore there at all.
+
+**Aaron says Shumi is reachable and he is the one who has driven it, so the suspect is my beach rule, not his memory.** But the honest failure is to say "cannot" rather than to park in the ocean and announce arrival, which is what five builds did.
+
+### Fisherman's Horizon stays a drive-in
+
+Its platform is terrain 28 and it has no land berth — but it never needed one. The field trigger fires at ~1650 units and the berth is 975 out, which is how Aaron drives it by hand. `drive_in = true`.
+
+### Verification
+
+* `gridtest`: **22 ok, 0 bad**. `aboard_test`: ALL CHECKS PASSED. `parity_check`: OK.
+
+**NOT MSVC-built, NOT BAT'd.**
+
+## v0.20.78
+
+#80: a signed-modulo bug in my `.77` fix — and **the offline model had silently diverged from the C++ again**.
+
+### The coordinate
+
+The `.77` BAT logged:
+
+```
+[GARDEN] parked (arrived) at (10915,-75427) canDisembark=1 stepOff=(-251584,-75712)
+```
+
+An X of −251,584, outside a world that is 262,144 wide. `GdSubCellToWorld` — which I wrote in `.77` by copying `GdCellToWorld` — dropped that function's double-modulo and `int64` widening. C's `%` keeps the sign of a negative dividend, so `(mx - 0x60000 + 0x20000) % 0x40000` goes negative and the trailing `- 0x20000` drives it further out. The Y was right, which is what made it look half-plausible.
+
+Both guards restored. Shumi's step-off now resolves to **(10560, −75712)** — terrain 9, disembark bit, foot-walkable, h = −397 — about 1,270 units from the marker.
+
+### The bigger one
+
+Chasing the Tomb, I diffed the C++ cell classes against the offline model:
+
+| field | C++ | offline | disagreeing |
+|---|---|---|---|
+| PARK | 74,184 | 65,035 | **9,211** |
+| BEACH | 1,285 | 1,217 | **68** |
+
+**The exact process fault documented at v0.20.67, repeated.** The C++ disembark rule changed three times across `.74`/`.75`/`.77` and `gsim3.py` was never updated; and `HP` was the *mean* of a cell's four sub-heights where the C++ uses `(min+max)/2`. Beaches are the scarce resource that decides whether a landmass is reachable at all, so 5% of them is a lot.
+
+**Every offline result since `.74` — including the runs I used to justify shipping — was testing a world that does not exist.**
+
+Both are mirrored now. Parity is exact except **one** cell: a benign `seen`-flag edge case where the C++ tracks which sub-points a polygon ever covered and the offline rasteriser has no equivalent.
+
+### The guard that should have existed after .67
+
+New **`offline/parity_check.py`** diffs the C++ cell-class dump against `gsim3` across all seven bit-planes and fails on any divergence beyond that one known cell.
+
+```
+WALK      678,223    678,223        0
+PARK       74,184     74,185        1
+BEACH       1,285      1,285        0
+PARITY OK: the offline model and the shipped C++ describe the same world.
+```
+
+Worth wiring into `deploy.ps1` beside CHASEGUARD — left to Aaron, since it's his script.
+
+### The Tomb is still not reproduced offline
+
+With parity fixed, the calibrated model *still* drives Shumi → Tomb cleanly from four headings, zero replans — while the game thrashed near the destination: wall-follows at (−50414,−37915), (−45254,−38107), (−42208,−37941), a wall-follow timeout, and 7,188 units still to run.
+
+Something local to that approach diverges. I am not going to guess at it again — `[GDTRACE]` plus `[GDPROBE]` on an **uncancelled** Tomb run is the instrument, and if it wall-follows without ever being refused, that says the fault is my steering rather than the engine.
+
+### Verification
+
+* `gridtest`: 24 ok, 1 bad. `aboard_test`: ALL CHECKS PASSED. `parity_check`: OK. Grid totals unchanged.
+
+**NOT MSVC-built, NOT BAT'd.**
+
+## v0.20.77
+
+#80: **my .75 disembark fix was also wrong — in the opposite direction.**
+
+**BAT (v0.20.76).** Aaron: *"Make sure you read the whole log. I did try to go to the Tomb but it failed to arrive. I also don't think it actually got to Shumi — it was still in the water when it said it 'arrived'."*
+
+Both correct. I read the tail of the log and concluded from it, which is the exact failure mode this issue keeps punishing.
+
+### Shumi: the step-off did not exist
+
+```
+[GARDEN] parked (arrived) at (10915,-75427) parkBit=0 canDisembark=1 stepOff=(10624,-75648)
+```
+
+| point | terrain | height | park | foot |
+|---|---|---|---|---|
+| where the hull stopped | **33 — open water** | 0 | 0 | 0 |
+| the "step-off" it offered | **29** | −207 | **0** | **0** |
+
+It parked in the sea and named a disembark point that isn't one.
+
+**Cause — three mistakes in a row.** v0.20.74 demanded the disembark bit on *all four* 128-unit sub-points, and wrongly announced "nowhere here to leave the Garden" at Centra Ruins and Trabia Garden. v0.20.75 swung to *any* sub-point, which sets the bit when only a quarter of a 256-cell qualifies. And `GdCanDisembarkAt` then returned the **cell centre**, which need not be the quarter that qualified. At Shumi exactly one sub-cell is a real step-off — `fine(1359,1106)`, terrain 9, park + foot, h = −397 — and the coordinate handed back was a different quarter of the same cell.
+
+**Fix:** keep the sub-cell resolution instead of discarding it at build time. New `s_gdParkSub` holds 4 bits per cell marking sub-points that are **both** disembark-flagged **and** foot-walkable — somewhere the player can actually stand — and `GdCanDisembarkAt` scans those and returns the qualifying sub-cell's own centre via the new `GdSubCellToWorld`. Parkable cells 74,233 → 74,184; the foot requirement trims the phantoms.
+
+### The Tomb is not fixed, and I am not claiming it is
+
+The whole-log read shows it never got close:
+
+```
+bow blocked at (-50414,-37915) ... (-45254,-38107) ... (-42208,-37941)
+wall-follow timed out at (-47879,-43487) -- releasing
+no route progress at (-44792,-43417) remain=7188 -- reverse + replan 1/12
+stopped: Cancelled.
+```
+
+Repeated wall-follows along the Galbadia coast, a timeout, and 7,188 units still to run when Aaron gave up after about two minutes. Its coordinate is **exact** against the engine table and its berth now has a verified sub-cell step-off, so this is a **navigation** failure — limit cycles on a coastline, not an engine refusal. That is also why the refusal probe never fired during it: 7 probes, all early, all `MOVED`.
+
+### Measured this BAT, and this part is solid
+
+`[0x203EE88]` — the value the Garden terrain whitelist is gated on:
+
+| hull cell | gate |
+|---|---|
+| water (`cls=0x39`) | **+208**, 239 samples |
+| land (`cls=0x1F`) | **−338** |
+
+So `0x53E3DA` (`test eax,eax / jg → reject`) reads exactly as: **positive while afloat → only terrain 30–34 may be entered; negative once ashore → any Garden-masked terrain is fine.** The last unknown in the terrain rule, now measurement rather than inference.
+
+### Verification
+
+* `gridtest`: 24 ok, 1 bad. `aboard_test`: ALL CHECKS PASSED. Grid totals unchanged.
+
+**NOT MSVC-built, NOT BAT'd.**
+
+## v0.20.76
+
+#80: **the dump cleared the map data.** Now a refusal probe to catch the rule I invented.
+
+### The dump answered, and the answer was "not this"
+
+v0.20.75 wrote all **473,193 polygons the engine hands the mod**. Rebuilding the 128-unit grid from that dump and diffing it against the offline `wmx.obj` extraction:
+
+| | offline | engine dump | differ |
+|---|---|---|---|
+| terrain | — | — | **0** |
+| `byte15` (vehicle masks) | — | — | **0** |
+| `byte14` | — | — | **0** |
+| Garden-masked cells | 2,741,735 | 2,741,735 | 0 |
+| disembark cells | 278,625 | 278,625 | 0 |
+
+**100.00% identical across 3,145,728 cells. The map data was never wrong.**
+
+Not wasted: the raw polygon *order* does differ — 55% of records disagree position-for-position — and since the rasterizer is first-poly-wins, that could easily have changed the result. It doesn't. That is now measured rather than assumed.
+
+### So the defect is a rule I invented
+
+*"The Garden leaves the sea only where terrain 30–34 rises above sea level"* was my inference from the whitelist at `0x53E3C1`. The condition that actually lifts that whitelist — `[0x203EE88]` — I flagged as unestablished and then built two builds on top of anyway.
+
+### The refusal probe
+
+Aaron cannot drive the Garden by hand to somewhere he cannot see, so the manual trace that cracked Fisherman's Horizon is not available. This gets the same ground truth automatically.
+
+When the engine has refused to move the hull for a full second with the throttle down and nothing blocking, the mod **sweeps the compass** — 16 headings, forward plus turn, using only the keys auto-drive already presses, so there is no new control path and nothing to crash — and logs for each:
+
+```
+[GDPROBE] 7/16 at (x,y) hd=1792 -> ENGINE MOVED   | one step ahead cell (r,c)
+          cls=0x21 walk=1 water=1 beach=0 park=0 h=0
+```
+
+**Directions that move are the engine saying yes; directions that don't are it saying no.** That is the real rule, sampled at the exact spot my model is wrong.
+
+`[GDTRACE]` now also logs **`[0x203EE88]` itself** and the hull cell's class every second. If that value differs between afloat and ashore, the whitelist condition resolves with no probe needed at all.
+
+### Coordinate audit, anchored on what actually works
+
+Against the 64-record `wmsetus` table, using the destinations Aaron has **confirmed driving** as the calibration:
+
+| destination | offset from its record |
+|---|---|
+| Balamb Garden, Balamb Town, Timber, Fisherman's Horizon, Centra Ruins | **0** |
+| Winhill | 81 |
+| Trabia Garden | 304 |
+| Fire Cavern | 504 |
+| Deling City | 720 |
+
+The table is trustworthy and the catalog agrees with it wherever the drive works. **Tomb of the Unknown King is exact too** — so its failure is routing, not coordinates.
+
+**Shumi Village is the one destination under test with no record of its own** (nearest is Chocobo Forest 2's, 4,082 units away). Record 20 at (13000, −83977) is unclaimed, terrain 9, **Garden-masked**, with a disembark cell 512 units away — the Fisherman's Horizon shape exactly. But it is *not* reachable under the current beach rule either, so the rule is the blocker rather than the coordinate. Noted, not acted on.
+
+### Public sources checked — they are behind us
+
+* [ff7-flat-wiki](https://ff7-mods.github.io/ff7-flat-wiki/FF8/WorldMap_wmx.html): byte 13 is "Ground type"; bytes 14 and 15 are **"Unknown"**.
+* [Qhimm world.fs thread](https://forums.qhimm.com/index.php?topic=15979.25): byte 15's "last 4-bits seems to operate collision somehow", plus a report of trying to spoof the Ragnarok past mountains and sea and failing.
+
+No public ground-type enumeration, no vehicle traversal rules, no coordinate list. **The exe is the only source**, and what we have from it is more complete than anything published.
+
+### Verification
+
+* Dump gate back to **0**.
+* `gridtest`: 24 ok, 1 bad (Shumi, deliberately berthed at trigger range). `aboard_test`: ALL CHECKS PASSED. Grid totals unchanged.
+
+**NOT MSVC-built, NOT BAT'd.**
+
+## v0.20.75
+
+#80: **the .74 BAT caught my disembark test lying** — and a runtime map dump to settle the rest.
+
+**BAT (v0.20.74).** *"Successfully drove to Centra Ruins and Trabia Garden. Failed to get to the Tomb. Also, Shumi Village is 100% reachable with Balamb Garden. It seems like your construct of the world map is incomplete."*
+
+Right on both counts, and the log proves the first outright:
+
+```
+[GARDEN] parked (arrived) at (7289,55362)  canDisembark=0  walk=409 to Centra Ruins
+[GARDEN] stopped: ...there is nowhere here to leave the Garden.
+[GARDEN] disembark: 700 units from the parked hull -> on foot     <-- he got off anyway
+[GARDEN] parked (arrived) at (49081,-58020) canDisembark=0  walk=192 to Trabia Garden
+[GARDEN] stopped: ...there is nowhere here to leave the Garden.
+[GARDEN] disembark: 548 units from the parked hull -> on foot     <-- and again
+```
+
+### Cause
+
+`GDC_PARK` demanded the disembark bit on **all four** 128-unit sub-points of a 256 cell, while `GDC_FOOT` has always accepted **any one** of them. That inconsistency quietly made every coastal berth "unparkable" — and the engine's own set-down search (`0x53E7A0`) tries **five** candidate spots in a fan and takes the first that passes, so a single qualifying sub-point is the honest model of it.
+
+Parkable cells **65,035 → 74,233**. Galbadia Station comes straight back; its berth was never bad.
+
+### Shumi Village is restored
+
+v0.20.74 hid it on the strength of a model Aaron contradicted outright — and the same BAT proved that model wrong somewhere else. **Hiding a destination the user says works, on the say-so of a model with a known defect, is the Fisherman's Horizon mistake repeating.** Its berth is the nearest cell the grid believes is reachable: 1,431 units from the marker, and so *inside* the ~1650-unit field-trigger radius.
+
+### The runtime map dump
+
+New `world_garden_dump.inl`, **gated ON for this build only**. It writes every polygon the *engine* hands the mod — `byte13` terrain, `byte14`, `byte15`, and all three vertices in mesh space — to `Logs\worldmap_polys.bin` at grid-build time. 34 bytes a polygon, ~16 MB, written once.
+
+Every map fact this mod plans against has been derived offline from `wmx.obj` on disk, and that extraction gives the Shumi island **no Garden mask bit on a single polygon** — which cannot be true of a place the Garden demonstrably reaches. Either the parse is wrong or the file is not what the engine actually loads, and **no amount of re-reading the same file offline can tell which.** Diff the dump against the offline grid and whatever disagrees is the bug — the same method that settled the executor divergence, turned on the map itself.
+
+> ⚠️ **Turn `GARDEN_DUMP_ENABLED` back to 0 before pushing.** It writes ~16 MB every time the world map loads.
+
+### Also fixed: a third off-by-one in the wmsetus section table
+
+The 32×24 segment-region map is at offset **588** (index 1), not 1360 (index 2). Read correctly, Fisherman's Horizon is `0xFF` — no region, no trigger program, no vehicle restriction — which matches both the project doc and the observed behaviour. Shumi Village is region `0x07`.
+
+That table has now produced a wrong answer three times in this issue. Treat every index into it as suspect until it has been checked against a known value.
+
+### Verification
+
+* `gridtest`: **24 ok, 1 bad** — the 1 is Shumi, deliberately berthed at trigger range rather than at a step-off. `aboard_test`: ALL CHECKS PASSED. Grid totals unchanged.
+* Harnesses clean under `-Wall -Wextra`. Sizes: 74.0 / 29.9 / 8.5 KB.
+
+**NOT MSVC-built, NOT BAT'd. NOT PUSHABLE until the dump gate is 0.**
+
+## v0.20.74
+
+#80: **arrival is a claim about the disembark point, not about proximity** — plus the two catalog changes.
+
+**BAT (v0.20.73).** *"Made it to Centra Ruins and Timber"* — the terrain whitelist working — *"but the mod said I arrived at Shumi Village while the Garden was still in the water and I could not get off. I also tried to drive to the Tomb of the Unknown King and the Garden seemed to get stuck driving in circles around it."*
+
+### Both were stale berths
+
+The berth table was generated before the terrain rule and never re-validated against it.
+
+| | old berth | what it actually is |
+|---|---|---|
+| Shumi Village | (10304, −75200) | terrain 33, height 0, **open ocean**, `park=0` |
+| Tomb of the Unknown King | (−42688, −36672) | land, but `park=0` — no disembark bit |
+
+So the hull drove at points it could never deliver the player to: it announced arrival in the sea at Shumi, and circled the Tomb trying to reach a berth it could not use.
+
+**Regenerated against the terrain-rule reachable set:**
+
+* **Tomb of the Unknown King** → **(−42688, −36544)**, walk 746, on a cell that is reachable *and* has a legal step-off on the Tomb's own landmass.
+* **Shumi Village** → honestly **unreachable**. The nearest cell the Garden can legally reach is 1,431 units from the marker, and the nearest disembark point is the marker itself — there is no hull/step-off pair. Revisit if `[0x203EE88]` turns out to admit a beach onto that island.
+
+### Arrival now means something
+
+`Garden_Park` asks **`GdCanDisembarkAt`** — is there a cell carrying the set-down bit at or beside the hull, using the same small fan the engine's own placement search (`0x53E7A0`) uses — and gives one of three honest answers:
+
+1. **at a disembark point, destination close** — *"Balamb Garden parked at X. Leave the Garden to go in."*
+2. **at a disembark point, destination far** — *"parked as close as it can get. X is N hundred units \<compass\>. Leave the Garden and press backslash to walk the rest."*
+3. **no disembark point** — says so plainly, with range and bearing, and **never claims arrival.**
+
+A false "arrived" is expensive for a player who then has nothing to act on.
+
+### Catalog
+
+Both requested to speed up testing:
+
+* **Only reachable destinations are listed.** Up to .73 the Garden catalog kept every destination and merely sorted the unreachable ones to the back — long to page through with a screen reader, and every entry past the reachable ones is a dead end. The foot catalog has always filtered; the Garden catalog now does too. Rebuilds were already forced on vehicle change and on boarding/leaving the Garden, so it tracks the vehicle.
+* **World-map readouts interrupt.** Mashing the catalog keys now cycles entries instead of queueing a backlog. **The field catalog is deliberately untouched.**
+
+### Housekeeping
+
+`world_garden.inl` hit **80,659 bytes** against the 81,920 CI hard fail, so the berth table moved **verbatim** to a new `world_garden_berths.inl`. Now 73,971 / 29,556 / 8,316.
+
+### Verification
+
+* `gridtest`: **23 ok, 0 bad**. `aboard_test`: ALL CHECKS PASSED. Grid totals unchanged — 678,223 / 671,236 / 670,579.
+* Both garden harnesses clean under `-Wall -Wextra`; the split is behaviour-identical by construction.
+* Autotest gate stays 0; push-ready.
+
+**NOT MSVC-built, NOT BAT'd.**
+
+## v0.20.73
+
+#80: **the Garden has a terrain whitelist, and no build of this mod has ever known about it.**
+
+**BAT (v0.20.72).** *"Still getting stuck 5km away from Centra Ruins. Go back to the exe and game files."* — right call, and that is where it was.
+
+### The instruction
+
+`FF8_EN.exe`, `0x53E3C1`, inside the movement validator `0x53E2A0`:
+
+```asm
+0053E3C1  cmp  ebx, 0x30              ; vehicle id — 0x30 = BALAMB GARDEN
+0053E3C4  jne  0x53E3E0               ; every other vehicle skips this entirely
+0053E3C6  mov  eax, dword ptr [edi]   ; candidate polygon
+0053E3C8  mov  al,  byte ptr [eax+0xD]; byte13 = TERRAIN
+0053E3CB  cmp  al,  0x22              ; 34
+0053E3CD  ja   0x53E3D3
+0053E3CF  cmp  al,  0x1E              ; 30
+0053E3D1  jae  0x53E3E0               ; 30 <= terrain <= 34  -> ALLOWED
+0053E3D3  mov  eax, dword ptr [0x203EE88]
+0053E3D8  test eax, eax
+0053E3DA  jg   0x53E490               ; -> REJECT
+```
+
+**The movement mask and the 200-unit step gate are necessary but not sufficient.** There is a third condition, and it applies to vehicle `0x30` alone.
+
+### What it means in the data
+
+| | cells |
+|---|---|
+| Garden-masked (`byte15 & 0x20`) | 2,741,735 |
+| terrain 30–34 — water, enterable at sea level | 2,416,703 |
+| terrain **outside** 30–34 — land | **325,032** |
+| terrain 30–34 **and above sea level** — the beaches | **4,921** |
+
+Terrain 32/33/34 is water at height 0. Terrain 6/7/9/29 is land at −200 to −1100. The only cells where *allowed* terrain actually climbs are those 4,921 — **0.18% of the Garden's masked area.**
+
+That is Aaron's rule, in the engine's own code: *"the Garden must go up a beach to get onto land."* He said it three times. Both previous attempts modelled beaches by **height step**, which permits ~9,352 crossings the engine mostly refuses on terrain. The planner treated all 325,032 land cells as freely enterable from open water, so it routed straight at shores that will never open — and a planner that does not model this will never route through a real beach by chance.
+
+### How it presented
+
+The .72 BAT froze at **(4182, 51127)** for 36 seconds with **`mv=0/57`** — the frame census added in .72, showing the engine refusing **every frame** while reverse still worked. Every static check said go: flat water, height 0, Garden-masked, `|dH| = 0` on all 32 bearings, and the step east legal at `|dH| = 197`. The polygon east is **terrain 29**. Not in range. Nothing else mattered.
+
+### What changes
+
+* **`GDC_WATER`** — terrain 30–34, and only when *every* sampled sub-point qualifies; a cell that is half shore is not somewhere the hull may cross from the sea.
+* **`GDC_BEACH`** — water terrain that has risen above sea level.
+* **`GdTransitionOk`** forbids exactly one thing: leaving the sea anywhere but a beach. Land→land and land→water stay free — the hull drives overland perfectly well once ashore, which is why Deling City and Trabia Garden have always worked.
+* Reachability **665,412 → 657,082** cells. Expansion cap **400k → 1.5M**, because finding one of 4,921 beaches is a far harder search; plans now run 25–190 ms, and an exhausted search at 657,082 expansions is a true *unreachable* rather than a cap.
+
+### Four berths were relying on crossings the engine refuses
+
+* **Galbadia Garden** → `(−34176, −21888)`, park-and-walk, 4,575 units.
+* **Fisherman's Horizon** → `(19584, −2944)`. The platform is terrain **28** — outside the whitelist — so the hull may not enter it. It never needed to: the field trigger fires at ~1650 units and this berth is 975 out, which is exactly how Aaron drives it in by hand.
+* **Galbadia Station** and **Chocobo Forest 2** have no reachable cell with a legal step-off, and are now honestly reported unreachable rather than offered as berths the hull cannot occupy.
+
+### Verification
+
+* `gridtest`: **24 ok, 0 bad** (22 ok / 4 bad before the berth corrections). `aboard_test`: ALL CHECKS PASSED. Grid totals unchanged — 678,223 / 671,236 / 670,579.
+* The offline model carries the **identical** rule — `gsim3.transition_ok` mirrors `GdTransitionOk` line for line.
+* All seven destinations under test arrive from four headings on the **calibrated** executor (measured acceleration, measured 9 u/frame turn rate), most with zero replans.
+* Harnesses clean under `-Wall -Wextra`. `world_garden.inl` is 77,782 bytes — **2.2 KB from the 80 KB CI hard fail; split it before anything else lands in it.**
+* Autotest gate stays 0; push-ready.
+
+**NOT MSVC-built, NOT BAT'd.**
+
+## v0.20.72
+
+#80: **the Garden has inertia, and every matrix I have ever run did not know that.**
+
+**BAT (v0.20.71).** *"Nope, got stuck again while headed to Centra Ruins."* — and `[GDTRACE]` earned its place on its first outing.
+
+### What the trace says
+
+The hull froze at **(4179, 51136)**, 5 km short of Centra Ruins, and sat there for 36 seconds through twelve replans:
+
+```
+pos=(4179,51136) clear=3 blk=0 aim=1 guard=0/0/0 rev=0 keys=U---
+```
+
+`blk=0`, `aim=1`, no wall-follow. I sampled the **true wmx polygon** under the hull rather than the 128-unit raster: flat water, height 0, Garden-navigable, `|dH| = 0` on **all thirty-two bearings** — and it had crossed identical terrain-33 water seconds earlier. No menu, battle or field transition in any other log. **Nothing was stopping it.**
+
+Then the speeds, measured out of the same log:
+
+| | units/second |
+|---|---|
+| standing start | 0 → 923 → 1841 → 1940 |
+| running into the freeze | 211 → 634 → 207 → 153 → 48 → 35 → 15 → 7 → **0** |
+
+The Garden takes about **a second** to reach its 32.3 u/frame cruise. `GD_STALL_MS` is 3500 ms and a reverse burns 900 of them. A wall-follow near the shore chopped the throttle, speed decayed, the stall detector fired, the mod reversed and replanned — and the hull was interrupted again before it could spool back up. Each cycle ended slower than the last.
+
+**The mod was not stuck on the terrain. It was fighting its own recovery machinery, and losing.**
+
+### Two fixes, both justified by that trace alone
+
+**1. A stall with a clear path is not an obstruction.** With `blk=0` and `aim=1` there is nothing to back away from, and reversing throws away every unit of speed the hull has. The correct response is to *hold the throttle down* and let it accelerate. Up to three such stalls are ridden out before falling through to reverse-and-replan, which remains the answer when something really is in the way.
+
+**2. The stall detector re-arms after every throttle interruption.** `(now - s_gdStartTick) > GD_STALL_ARM_MS` only ever protected the first 2.5 seconds of a drive. A hull that has just reversed is judged again 3.5 seconds later, having spent the first of those accelerating. It now re-arms from the end of each reverse.
+
+### Why no matrix ever caught this — and the one that will
+
+`gexec3.py` applied **full speed on the first frame** `wantUp` went true, and turned at **16–32 units/frame**. Measured from the BAT log, the real hull accelerates at **0.52 u/frame²** and turns at most **9 u/frame**.
+
+So every matrix I have run — 450 runs, then 2,112, then 672 pairwise — drove a vehicle that reaches cruise instantly and turns **up to 3.6× faster than a Balamb Garden can**. In that model a reverse is free. In the game it costs a second. The model was structurally incapable of representing this failure, which is the honest answer to why four builds passed clean and then failed on the machine.
+
+The offline executor now carries measured acceleration, faster deceleration than acceleration, a reverse that zeroes forward momentum, calibrated turn rates, and the **identical** clear-stall and re-arm rules as the C++.
+
+### Honest status
+
+**The calibrated model still does not reproduce the freeze** from the exact recorded position — it drives away in 220 frames. So the root cause is **not proven**, and these two fixes are corrections to things that are definitely wrong rather than a claimed cure.
+
+What settles it is the new **`mv=n/N`** field in `[GDTRACE]`: how many of the last second's frames changed the raw position *at all*. Three hypotheses remain and that one number separates them:
+
+* `mv=0/60` → the engine is refusing every move, and the refusal is not the step gate.
+* `mv=60/60` → it is moving, below the resolution of a 1 Hz sample.
+* anything frozen while the game is plainly alive → the mod is reading a position that is no longer being updated.
+
+### Verification
+
+* Probe rule confirmed **identical** between `gexec3.py` and `world_garden.inl` on all five logged points — blocked at the three the game called blocked, clear at the two it called clear. The grids are in sync; the divergence was never there.
+* `gridtest`: 26 ok, 0 bad. `aboard_test`: ALL CHECKS PASSED. Grid totals unchanged — 678,223 / 671,236 / 670,579.
+* Harness clean under `-Wall -Wextra`.
+* ⚠️ `world_garden.inl` is **77,016 bytes — 2.9 KB from the 80 KB CI hard fail.** Split it before it grows again.
+* Autotest gate stays at 0; this is push-ready.
+
+**NOT MSVC-built, NOT BAT'd.**
+
+## v0.20.71
+
+#80: **the bow probe was measuring the gap it was supposed to be steering through** — and the reason four hundred and fifty clean runs never caught it.
+
+### Why the matrix kept passing
+
+`regress66.py` runs every route from **heading 0**. It always has. So "450 runs, zero failures" was never 450 tests — it was one starting condition sampled 450 times. Three builds shipped on the strength of it and then failed in the game.
+
+Add three more headings and the failure falls out on the first pass:
+
+```
+FAIL Trabia Garden -> Centra Ruins  hd=1024  wedged  gd=96371
+FAIL Trabia Garden -> Centra Ruins  hd=2048  wedged  gd=96555
+```
+
+Both endpoints are on Aaron's failing list. The leg had simply never been driven from those bearings.
+
+This is the most useful thing found tonight, and it is not the bug — it is the reason the bug survived three builds.
+
+### The bug
+
+`GD_PROBE_FAR` is 640 units — two and a half cells. A corridor of clearance 1 has walls about 256 units off either beam, so a 640-unit forward probe strikes terrain on very nearly **every** heading. `blocked` is stuck true. The wall-follow guard's release condition requires `not blocked`, so it can never fire, and the hull turns, and turns.
+
+The trace says it outright:
+
+```
+f   954 ( 61875, -58521) hd= 128 guard=0 clear=4
+f  1113 ( 62450, -63983) hd=1408 guard=1 clear=1
+f  2226 ( 62676, -61934) hd=2432 guard=1 clear=2
+f  3816 ( 62405, -61564) hd=2880 guard=1 clear=2
+f  4929 ( 63044, -62633) hd=   0 guard=1 clear=1
+```
+
+Four thousand one hundred frames — sixty-eight seconds — guard engaged the whole way, clearance 1 to 2, ending three hundred units from where it entered. Not pressed against terrain. Steering itself in circles around walls it could not see past.
+
+Same shape as the v0.20.68 shore-threading fault, same remedy: **when the gap is tight, look a shorter way ahead.** Below three cells of clearance, `GD_PROBE_FAR` is pulled in to `GD_PROBE_NEAR`'s 320.
+
+### Two wrong versions of that fix were built and measured first
+
+Both are worth recording, because both looked right.
+
+**Wrong version 1 — shorten the side-choice fan too.** It is the same probe function; leaving it long looked inconsistent. It **regressed Galbadia Station** from two clean arrivals to two wedges 5 km short. At 256 units every bearing in the eight-point fan reads clear, so `GdPickSide` fell through to its default and returned `+1` every time, and the hull committed to the wrong side of the obstacle.
+
+**The two probes answer different questions.** *"Is something immediately in my way?"* has to be measured at less than the corridor width. *"Which way round is it?"* has to be measured far enough to see past the obstacle. The side fan keeps its full 640.
+
+**Wrong version 2 — shorten the near probe too.** 160 units blinded the hull: it wedged Galbadia Station from Trabia at 48/20, a case that had been passing. Only the far probe ever needed to move.
+
+The shipped rule is the smallest of the four variants tried, and the only one that passes all five known-failing cases.
+
+### Result
+
+| case | before | after |
+|---|---|---|
+| Centra Ruins ← Trabia, hd 1024 | wedged, 96 km short | **arrived** |
+| Centra Ruins ← Trabia, hd 2048 | wedged, 96 km short | **arrived** |
+| Galbadia Station ← Balamb, 48/20 | arrived, 6,686 frames | **arrived, ~2,550 frames** |
+| Galbadia Station ← FH, 48/20 | arrived, 3,713 frames | **arrived, ~2,500 frames** |
+| Galbadia Station ← Trabia, 48/20 | arrived | **arrived** |
+
+Everything that arrived before still arrives, and several routes arrive markedly faster. A hull that stops arguing with phantom walls gets there sooner.
+
+### The matrix is wider now, permanently
+
+* **26 destinations × 7 starts × 3 speed/turn combos × 4 headings — 2,112 runs, zero failures.** The real slot-2/block-28 spawn — `(20271, −24355)`, read out of the save's own log rather than assumed — is now one of the starts.
+* A separate **672-run pairwise matrix** over every ordered pair of the seven destinations being tested — four headings AND all three speed/turn combos each, since both regressions found overnight were at 48/20 and the slow combo is where the executor is most fragile — because step 14 is "any random order" and the reported failure was *Centra Ruins → Shumi Village*, a leg nothing covered.
+
+### Also in this build (carried from v0.20.70)
+
+* **`[GDTRACE]`** — a once-a-second drive trace: position, heading, cell, clearance, the clamped steer target and its waypoint index, goal and remaining distance, bearing error, both probe results, full guard state, reverse flag, replan count, and the four keys pressed. Every field has a direct counterpart in `gexec3.run()`. It is what produced the orbit trace quoted above.
+* **`AUTOTEST_CMD_ENABLED` back to 0.** It was flipped to 1 for an automated overnight session that never ran, and has been returned to 0 so what gets BAT'd is exactly what can be pushed.
+
+### Ruled out along the way
+
+The v0.20.65 audit flagged Shumi Village 4.1 km from any `wmsetus` record, and Shumi is on the failing list — so it looked like Fisherman's Horizon again. It is not, and the FH lesson was applied where it belongs, to the **input**: the location table was re-decoded from scratch and the decode verified against known ground truth before anything was concluded from it. (The first attempt read section 9 and produced coordinates in the hundreds of millions — which is what a wrong decode looks like if you actually look at it.) The table is 64 records at offset 5580; FH lands on record 13 at (20480, −2560) exactly.
+
+Tonight's seven then sit within 720 units of their records, two of them exact. Shumi's nearest record is Chocobo Forest 2's — Shumi has none of its own — and its catalog cell is foot-walkable with the Garden disembark bit set, which is what a correct berth looks like.
+
+### Verification
+
+* Offline executor and `world_garden.inl` carry the **identical** probe rule, checked line by line. That divergence is what shipped v0.20.67 broken.
+* `gridtest`: 26 ok, 0 bad. `aboard_test`: ALL CHECKS PASSED. Grid totals unchanged — 678,223 / 671,236 / 670,579.
+* Harness clean under `-Wall -Wextra`; `world_garden.inl` inside the 80 KB CI limit.
+
+**NOT MSVC-built, NOT BAT'd.** The autotest gate is 0, so this is push-ready once it BATs.
+
+## v0.20.70
+
+#80: an instrumentation build. **The model says this cannot happen, and it keeps happening.**
+
+**BAT (v0.20.69).** Aaron: *"We're still failing to get to locations. In this latest BAT it failed to get to either Centra Ruins or Shumi Village."*
+
+### Why this build contains no fix
+
+v0.20.69 passed the full offline matrix — 26 destinations × 6 starts × 3 speed/turn combos, 450 runs, **zero failures** — and then wedged twice in the game. v0.20.68 did the same. v0.20.67 did the same, and that one turned out to be a straight divergence between `gsim3.py` and `world_garden.inl`.
+
+Three builds running, the offline model has said a destination arrives and the game has said otherwise. At that point the honest reading is not "the planner needs another rule". It is **the model is wrong, and no amount of running it harder will show me where**, because the model is exactly the thing doing the answering.
+
+So this build measures instead of guessing.
+
+### What changes
+
+**`[GDTRACE]` — a once-a-second drive trace.** Every field has a direct counterpart in `gexec3.run()`:
+
+```
+[GDTRACE] pos=(x,y) hd= cell=(r,c) clear= steer=(x,y) wp=i/n
+          goal= remain= off= blk= aim= guard=on/dir/frames rev= replans= keys=ULRD
+```
+
+Position, heading, the grid cell the hull thinks it is in, that cell's clearance, the *clamped* steer target and which waypoint it came from, goal and remaining-route distance, bearing error, both probe results, the full wall-follow guard state, and the four keys actually being pressed. When the next wedge happens, the C++ trace and the Python executor can be diffed line for line. Whatever disagrees first is the bug.
+
+**`AUTOTEST_CMD_ENABLED` flipped to 1.** The file-polled key-injection channel from v0.18.3.213 drives menus and the world map through the `ChaseKeyboard` DIK overlay — the only delivery path that reaches FF8's DirectInput buffer for direction keys, as .213/.214 established the hard way. This is what makes an unattended overnight BAT loop possible at all.
+
+> ⚠️ **This gate MUST go back to 0 before any push.** It is a keystroke-injection surface and has no place in a public release. Nothing else in v0.20.70 depends on it; flipping that one line makes the build shippable.
+
+### Ruled out: the coordinate audit
+
+The v0.20.65 audit flagged nineteen catalog entries more than 600 units from any `wmsetus` location record, **Shumi Village at 4.1 km among them** — and Shumi is on the failing list. Fisherman's Horizon proved that failure class is real, silent, and expensive to chase from the wrong end, so it was checked first.
+
+Applying the FH lesson properly means **validating the input before trusting the analysis**. The location table was re-decoded from scratch and the decode verified against known ground truth before any conclusion was drawn from it: the table is 64 records at file offset 5580 (mod-section index 8, not 9 — the first attempt was off by one and produced coordinates in the hundreds of millions, which is what a wrong decode looks like when you bother to look). FH lands on record 13 at **(20480, −2560)** exactly — the coordinate Aaron's manual drive proved.
+
+With a decode that can be trusted, tonight's seven destinations:
+
+| destination | offset from its record |
+|---|---|
+| Tomb of the Unknown King | **0** |
+| Centra Ruins | **0** |
+| Winhill | 81 |
+| Trabia Garden | 304 |
+| Fire Cavern | 504 |
+| Deling City | 720 |
+| Shumi Village | *(see below)* |
+
+**Shumi Village's 4.1 km gap is a false alarm.** Its nearest record is Chocobo Forest 2's own coordinate — Shumi simply has no record of its own in that table. Its catalog cell is terrain 17, foot-walkable, and **carries the Garden disembark bit**, which is precisely what a correct berth looks like. This is not another Fisherman's Horizon.
+
+### Reproduction attempt
+
+Driving to Shumi's **catalog** coordinate wedges 4 runs out of 4, 2–4 km short. Driving to Shumi's **berth** — which is what the mod actually does — arrives cleanly every time. All 28 runs (seven destinations × four headings) from the real slot-2/block-28 start arrive: the spawn `(20914,−24944)` and the Garden at `(20271,−24355)` were read out of the save's own log rather than assumed.
+
+So the offline model **still does not reproduce the in-game failure**, which is the whole reason this build exists.
+
+### Verification
+
+* `gridtest`: **26 ok, 0 bad**. Grid totals unchanged and still matching the offline model cell-for-cell — 678,223 traversable / 671,236 east / 670,579 south.
+* Harness clean under `-Wall -Wextra`; `world_garden.inl` at 71,120 bytes, inside the 80 KB CI limit.
+* No drive behaviour changed. Any difference in the next BAT is measurement, not steering.
+
+**NOT MSVC-built, NOT BAT'd. NOT PUSHABLE until the autotest gate is 0.**
+
+## v0.20.69
+
+#80: the world map is a torus in both axes, and the grid only knew about one.
+
+**BAT (v0.20.68).** *"That was a definite improvement! Successfully drove to Deling City and to Centra Ruins. However, when I tried to go from Centra Ruins to Shumi Village it seemed to get stuck. Make sure the route planner understands that you can go around the world… you go down around the southern pole."*
+
+The beach model holds — Deling City and Centra Ruins both drove. Shumi Village exposed a separate and much older bug, and Aaron diagnosed it exactly.
+
+### The inconsistency
+
+`CalculateWrappedDistance` and `TorusBearing` have wrapped in **y** since the beginning. The **grid never did**. Every row-neighbour test was guarded by `nr < 0 || nr >= GD_ROWS`, and `Garden_BuildEnd` hard-wired the last row's south edge shut.
+
+So the planner **measured** distances over the pole and then **could not route** there. That combination is the worst of both: the heuristic pulls toward a shortcut that does not exist in the graph, which is precisely the shape of failure that produces a long confident detour ending in a wedge.
+
+### The fix
+
+Rows now wrap exactly like columns:
+
+* the pole seam is a normal edge — south edges **669,555 → 670,579**, precisely one row of 1,024;
+* `GdEdgeOpen`, `GdStepOpen`, `GdSnapWalk`, the reachability flood, `Garden_CellReachable` and the A* neighbour loop all take rows modulo `GD_ROWS`;
+* new `GdRowDelta` / `GdColDelta` helpers give the A* heuristic and both endpoint-proximity tests the shorter way round on each axis, instead of the raw array difference.
+
+Centra Ruins → Shumi Village now plans as a **107 km route that crosses the pole seam**. Before, it had no route on that side at all.
+
+### And that alone was not enough
+
+The simulation caught a second half of the same bug. With the seam open the route crossed it — and the hull still would not drive a single step of it, wedging 27.7 km short at (24777, 97926), right on the seam.
+
+`GdLineClear`'s cell-transition check wrapped `dc` but not `dr`. A chord crossing the pole read as a 767-row jump, failed the adjacency test, and every probe came back blocked. **Both deltas now wrap.** With that, Centra Ruins → Shumi Village arrives in both directions, 0 replans, in seconds.
+
+This is the second time in two builds that fixing the planner exposed a matching gap in the executor. Worth remembering: a wrap-around assumption has to be made everywhere at once — distance, bearing, grid edges, flood, heuristic *and* the line probe — or the halves disagree and the disagreement looks like a wedge.
+
+### Verification
+
+* The offline model carries the identical change and agrees with the C++ **cell-for-cell on all three grid totals**: 678,223 traversable cells, 671,236 east edges, 670,579 south edges.
+* **Full matrix: 26 destinations × 6 starts × 3 speed/turn combos = 450 runs, 0 failures.**
+* `gridtest` 26 ok / 0 bad, `aboard_test` ALL CHECKS PASSED, both clean under `-Wall -Wextra`.
+
+**NOT MSVC-built, NOT BAT'd.**
+
+## v0.20.68
+
+#80: you get onto a landmass by driving up a beach, and beaches are rare.
+
+**BAT (v0.20.67).** Aaron: *"in order to get up on land masses like islands and continents you must pilot the Garden up a beach coastline… once you go up the beach you pilot the Garden overland to get close to the location."*
+
+That is the model my grid was missing, and counting it in the data confirms it exactly: there are only **8,565 cells on the entire map** where a Garden-navigable sea cell meets Garden-navigable land across a step under the 200-unit gate. Everywhere else the coast is a 200–400 unit escarpment the engine simply refuses.
+
+### Why Centra Ruins never worked
+
+Its berth is a **land** cell — 20 of the 26 berths are — and the nearest beach the Garden can climb is **4,574 units away at (5824, 50752)**. Flooding from that beach with the engine's own gate does reach the berth, so the route was always there. Two separate faults stopped it being driven.
+
+**1. The executor cut the corner.** A beach is one or two cells wide. With a 1536-unit lookahead the hull aims past the gateway and arrives at the land cell across a boundary that is *not* climbable; the engine refuses the move and the hull sits at the water's edge holding UP. That is precisely the `stalled at (3446,36029)` and `stalled at (-8879,56836)` signature from both BATs. The lookahead now collapses to a single waypoint whenever clearance drops below 3 cells, so the hull threads the gateway the planner actually chose.
+
+**2. The planner couldn't get ashore at all.** v0.20.67's sea-first mask banned land beyond six cells of an endpoint — and with the beach 4,574 units out, that made the berth unreachable. Land is now biased against rather than banned (×2.5), which keeps A* healthy (plans 22–34 ms) and still prefers open water for the crossing itself.
+
+### A process fault, owned
+
+v0.20.67 shipped broken partly because **the offline model and the shipped C++ had diverged**: `gsim3.py` kept a ×12 cost penalty while `world_garden.inl` carried a hard sea-first mask. The offline matrix was passing a build that did not exist. They now carry the identical rule, and the matrix is the thing that gates the release.
+
+### Verification
+
+* **Full matrix: 26 destinations × 6 starts × 3 speed/turn combos = 450 runs, 0 failures.**
+* Centra Ruins arrives from both BAT stall points, (−8879, 56836) and (3446, 36029), 0 replans.
+* Plan times 22–34 ms. `gridtest` 26 ok / 0 bad. `aboard_test` ALL CHECKS PASSED. Both harnesses clean under `-Wall -Wextra`.
+
+**NOT MSVC-built, NOT BAT'd.**
+
+## v0.20.67
+
+#80: the planner was routing the Garden overland.
+
+**BAT (v0.20.66).** *"Reached FH but failed to get from FH > Centra Ruins… I then tried to get to Centra Ruins from Edea's House and it failed to get to the Ruins from there as well, though it got 2-3 KM closer. I can assure you the Centra Ruins are reachable via the Garden."*
+
+Fisherman's Horizon is confirmed working twice now, and Edea's House navigated cleanly. Centra Ruins failed from two different starts, stalling at **(3446, 36029)** and then at **(-8879, 56836)** — different places, same fault.
+
+### The diagnosis
+
+`stalled` means the executor is holding UP and the hull is not moving: the engine is refusing the move. Both stall points sit exactly at a water's edge, with the sea behind and terrain rising inland — 0 → −27 → −381 in one case, over two 128-unit steps.
+
+Replaying the failing leg offline says why. The route from (−8879, 56836) was **66 of its 67 waypoints on land**, straight across the Centra continent.
+
+The Garden's movement mask admits a great deal of land — 47% of terrain 7 carries bit `0x20` — and the planner took that literally. But **the mask says where the hull may be, not how it may get there.** Every Centra coast is an escarpment of 200–400 units per 128, and the engine's 200-unit step gate refuses the climb. So the hull drove to the point where the route left the sea, and stopped there. Precisely as observed, twice, at two unrelated points.
+
+### Two fixes that were rejected on measurement
+
+**Ban land globally.** A water-only grid (Garden mask minus foot-walkable) drops from 665,412 reachable cells to 184,745 and **loses all 26 berths** — every one is a coastal cell that is both Garden- and foot-walkable. That is what a berth *is*.
+
+**Price land instead.** A ×12 cost multiplier on foot-walkable cells routes correctly, but it wrecks A*'s heuristic: the search degenerates toward Dijkstra and a single plan took **minutes** offline. That is a frame-rate hazard in the game, not merely a slow harness.
+
+### The fix that shipped
+
+**Sea-first search.** Foot-walkable cells are excluded from the A* outright, with a permissive retry if no sea route exists at all. A hard mask keeps every edge cost at 1.0, so planning stays at **12–28 ms**.
+
+Land is exempt within six cells of either endpoint — many berths *are* land cells (every walk=0 berth is one, because the hull parks on top of the destination), and six cells is nowhere near enough to buy an overland shortcut.
+
+The failing leg goes from 17.5 km with 66 of 67 waypoints overland to **38.8 km with 17 of 127**, running the coast by sea — which is how the Garden is actually driven.
+
+### Coordinate check
+
+After the v0.20.65 lesson, Centra Ruins' coordinate was re-checked against the wmsetus location table before anything else. It matches record 16 exactly, so the coordinate is sound and this really was the route.
+
+### Verification
+
+* **Centra Ruins arrives from 8 starts × 2 speed/turn combos, 0 replans — including both of the BAT's stall points**, (−8879, 56836) and (3446, 36029).
+* Plan times 12–28 ms in the C++ harness.
+* The broader 26-destination matrix did **not** finish inside this session; the targeted Centra run above is what backs this build.
+* Grid, berths and coordinates unchanged: `gridtest` 26 ok / 0 bad, `aboard_test` ALL CHECKS PASSED, both clean under `-Wall -Wextra`.
+* The shipped C++ and the offline executor carry the identical rule, so the matrix tests what ships.
+
+**NOT MSVC-built, NOT BAT'd.**
+
+## v0.20.66
+
+#80: limit-cycle brake on the wall-follow — the hull was steering itself in circles.
+
+**BAT (v0.20.65).** *"Successfully made it to FH, then from FH to Timber. Tried to head to Centra Ruins but got stuck 19km out."*
+
+The coordinate fix landed: Balamb Garden reached Fisherman's Horizon, and FH → Timber ran clean. The Centra wedge is a separate and older fault.
+
+### The diagnosis
+
+The position track is unambiguous. For ninety seconds the hull ran back and forth along the **same 1100-unit diagonal**, between roughly (2996, 36650) and (3653, 35747), about five seconds a lap. And no `bow blocked` was logged at the wedge at all — so the hull was never against terrain. It was steering itself in circles.
+
+The mechanism is the `aimClear` half of the Bug2 leave condition:
+
+1. wall-follow turns the hull away from the obstacle;
+2. from the new heading the aim point is line-of-sight clear, so the guard releases;
+3. the hull swings back toward the goal;
+4. the bow blocks, the guard re-engages and turns it away;
+5. go to 1.
+
+Nothing in that loop requires the hull to have got any **closer**. `aimClear` is a statement about geometry from where you happen to be standing; leaving a wall needs a statement about progress.
+
+### The fix that was rejected
+
+Demanding progress before any aim-clear release is the obvious answer, and it was implemented and measured. It **regressed four routes** in the offline matrix — in a tight coastal approach the guard then holds on past the berth. Recorded here because it looks right and is not.
+
+### The fix that shipped
+
+Arm the brake by evidence. Count guard engagements that happen **without the hull having got closer since the last one**; only when three stack up is it a cycle, and then flip the side and commit to it for three seconds with no early release. A normal wall-follow never reaches the counter and behaves exactly as before. A 15-second wall-follow timeout backs it up so no orbit can be unbounded.
+
+The log says which happened: `wall-follow to the left (limit cycle -- reversing the side and committing)`.
+
+### Verification
+
+* Offline matrix — 26 destinations × 6 starts × 3 speed/turn combos — clean, against 4 failures for the rejected variant on the same matrix.
+* The shipped C++ and the offline executor carry the identical rule, so the matrix tests what ships.
+* Grid, berths and coordinates unchanged from v0.20.65: `gridtest` 26 ok / 0 bad, `aboard_test` ALL CHECKS PASSED, both clean under `-Wall -Wextra`.
+
+**NOT MSVC-built, NOT BAT'd.**
+
+## v0.20.65
+
+#80: the Fisherman's Horizon coordinate was wrong by 30 kilometres.
+
+**BAT (v0.20.64).** Aaron: *"You can drive Garden back to FH at any point in the game after it becomes mobile."* Then he drove it in by hand — and that log answered in one line what four builds of dock-hunting could not.
+
+```
+[18:51:20] WorldMap: Exited world map
+[18:51:20] [DRIVE] Manual world-map exit (lastPos=(18895,-2122))
+[18:51:23] ChaseDetector: name debounce settled: id=0x025A name='fhdeck2'
+```
+
+### What was wrong
+
+The catalog had FH at **(48811, −1653)**. The real FH is at **(20480, −2560)** — wmsetus location record 13, and 1644 units from where the transition actually fired.
+
+| | catalog's FH (48811,−1653) | real FH (20480,−2560) |
+|---|---|---|
+| terrain | 7 (Esthar west coast) | 28 (platform deck) |
+| Garden-navigable | no | **yes** |
+| Garden disembark bit | none within 15 km | **122 cells clustered around it** |
+
+Thirty kilometres east, on a stretch of Esthar coastline that has nothing to do with Fisherman's Horizon.
+
+**Every geometric conclusion from v0.20.59 onward was correct about the wrong place.** The 2273-unit standoff, the eight water-touches-land contact cells, the gap in the coastal wall, the railroad-side analysis — all of it accurately describes a piece of the Esthar coast. None of it was ever about FH.
+
+The v0.20.64 trigger-table reading was also sound, and is kept: the field-entry programs really do gate on vehicle, story window and region, and the table really does contain exactly one Garden clause. What that analysis was fed was a coordinate 30 km off. FH's actual segment (col 18, row 12) carries **no region byte at all**, so it has no trigger program and no vehicle restriction — the engine admitted the Garden the moment it came within ~1650 units, exactly as Aaron described.
+
+Applying a correct analysis to a wrong input is how a build ships a confident wrong answer. The lesson, recorded in the source: **validate the input to an analysis as hard as the analysis itself.**
+
+### What changes
+
+* FH's catalog coordinate → **(20480, −2560)**.
+* FH is an ordinary park-and-walk berth at the same point, **zero units of walking** — the berth cell carries the Garden disembark bit. Reachable count back to **26 of 39**.
+* The refusal line reverts to the generic one; FH no longer needs a special case.
+* The `[GARDEN] trigger state` diagnostic stays, reworded: a region byte of `0xFF` means no trigger program and therefore no vehicle restriction. That is the line that would have caught this immediately.
+* The `drive_in` / nose-in / dock-site / shoreline-patrol machinery from v0.20.59–.63 is retained but unused — no destination needs it now.
+
+### Verification
+
+* `gridtest`: **26 ok, 0 bad**. `aboard_test`: ALL CHECKS PASSED.
+* Simulated from **8 starts × 4 speed/turn combos**: all arrive, 0–1 replans, and **every run crosses the observed ~1650-unit trigger radius before arrival**, so the field should load on approach rather than at the berth.
+
+### Coordinate audit
+
+Every catalog coordinate was cross-checked against the 64-record wmsetus location table. FH now matches record 13 exactly. **Nineteen entries sit more than 600 units from any record** — some legitimately (the Alien Ship sidequest points and the offshore islands may simply not be in that table), but Edea's House (6.4 km), White SeeD Ship (4.5 km), Shumi Village (4.1 km), Esthar City (7.1 km), Lunar Gate (9.1 km) and Cactuar Island (17.6 km) are worth the same scrutiny FH just got. Logged for follow-up, not touched here.
+
+**NOT MSVC-built, NOT BAT'd.**
+
+## v0.20.64
+
+#80: the answer was in the trigger table all along — **there is no Garden entry for Fisherman's Horizon.**
+
+**BAT report (v0.20.63).** *"This is so weird! It still failed to dock. Go back to the game exe and world map files … and pin this down."*
+
+Right call. Four builds were spent on geometry — which coastal cell, which side of the railroad, how close to the marker — and the answer was never in the geometry.
+
+### What the data says
+
+The world map's field-entry programs live in `wmsetus.obj` (mod section 8, file offset 2928). They were decoded back at v0.14.93 and have sat in `src/world_map_trigger_data.inl` ever since, trusted by the foot planner. Each program is a destination gated by vehicle, story window and **region**.
+
+Across the whole 38-program table there is **exactly one clause that names the Garden**:
+
+```
+program 20:  locID 0x0172
+             top vehicle  TRIG_VEH_GARDEN
+             story        636 .. 3899
+             clause       region 0x0C
+```
+
+Region IDs come from the 32×24 segment-region byte map (mod section 2, offset 588 — one byte per 8192-unit segment). Mapping it onto the catalog:
+
+* **region 0x0C** is the northern sea, and the only catalog destination whose segment carries it is **Trabia Garden**.
+* **Fisherman's Horizon** is in **region 0x0A**, and every clause on 0x0A is `TRIG_VEH_FOOT` or `TRIG_VEH_FOOT_ALT`.
+
+There is no Garden clause for FH anywhere in the table. No amount of steering can fire a trigger that does not exist.
+
+### Four independent facts, all agreeing
+
+1. No Garden clause for FH in the field-entry trigger table — the only one in the table is Trabia Garden.
+2. FH's platform carries **no Garden disembark bit** (`byte15 & 0x02`) anywhere within 15 km — you cannot step off there.
+3. FH **does** carry the Ragnarok landing bit (`byte14 & 0x80`).
+4. The hull cannot physically come within **2273 units** of the FH marker from any bearing on the map, and the eight cells where Garden water touches FH's landmass have now all been swept without a handoff.
+
+The docking Aaron remembers is the **scripted story event** — Balamb Garden drifting into FH as part of the plot — not a repeatable world-map trigger.
+
+### What changes
+
+* FH is reported honestly, with its own catalog line rather than the generic refusal: *"Balamb Garden cannot dock at Fisherman's Horizon. The world map has no Garden entry for it — you reach it on foot or in the Ragnarok."* Reachable count 26 → 25.
+* **New `[GARDEN] trigger state` diagnostic**, logged on boarding: the live story word, whether program 20 is inside its 636–3899 window at all, and the hull's current region byte. The claim above is now checkable from a BAT log instead of taken on trust — and if program 20 has already expired at this point in the story, that line will say so.
+* The v0.20.63 shoreline patrol is fixed: it set `wantUp = false` on a blocked bow, so it turned on the spot for 82 seconds instead of hugging the coast. It now creeps forward whenever the near probe is clear. (Nothing reaches it today — no destination is drive-in any more — but a wrong loop left in place is a trap.)
+* The dock-site machinery is kept and wired to Trabia Garden, the one place the engine does have a Garden clause, but **not enabled**: Trabia's berth already puts the hull on top of the destination with zero units of walking, and there is no reason to risk a working destination on an unproven drive-in. Answer the story-window question from the log first.
+
+### Verification
+
+* `gridtest`: 25 ok / 0 bad. `aboard_test`: ALL CHECKS PASSED (its `WmSafeReadBytes` stub now refuses addresses the test has not planted, instead of dereferencing them).
+* Berth table and grid unchanged from v0.20.61; spot-check of 9 destinations × 2 speed/turn combos from Balamb Garden, all arrive.
+* Both harnesses clean under `-Wall -Wextra`.
+
+**NOT MSVC-built, NOT BAT'd.**
+
+## v0.20.63
+
+#80: off-grid recovery — the hull can stand on a cell the planner calls blocked, and when it does the executor is completely paralysed.
+
+**BAT report (v0.20.62).** *"Still didn't reach FH."*
+
+Two separate results in that log, and the second one is a real bug that had nothing to do with FH.
+
+### Result 1: the wall gap is ruled out
+
+The run reached site 0 and swept it properly — `nose-in site 0 phase N` at (45643, 507), (45653, 455), (45539, 811), (45574, 692), every one within 60–80 units of the three contact cells — and nothing fired. That site is dead. It is dropped from the table, so the untried south tip goes first now.
+
+### Result 2: the hull froze at (-16605, -1050)
+
+On the way to site 1 it stopped dead for ninety seconds: `bow blocked` on every heading, `remain` unchanged across four replans, position constant to within a few units.
+
+The hull's **fine** cell there is terrain 33 at height 0 — open water. It is the **256-unit cell around it** that is blocked, by a cliff in one of its other corners.
+
+That is not a rare corner case. The planner grid is deliberately conservative: a cell counts as traversable only if all four of its 128-unit sub-points do. So every coastline carries a fringe of cells the engine will happily let the hull skim through and the grid calls solid. Once the hull is inside one, **every** probe fails — `GdLineClear` rejects its very first sample because that sample is still inside the blocked cell, and `GdStepOpen` reads edge bits that a blocked cell never carries. The wall guard fans out across every heading, finds no clear direction anywhere, and nothing moves. There was no way out of that state at all.
+
+**Fix:** the executor now checks its own cell before it does anything else. Off the grid, it stops asking the grid questions — it steers at the nearest traversable cell centre with the guard bypassed, reverses if six seconds of that hasn't worked (the way in may not be the way out), and re-plans on getting back. Logs `[GARDEN] OFF-GRID at …` and `back on the grid at …`.
+
+This is a general robustness fix. Any coastal berth could have produced this freeze; FH is just where it happened to surface.
+
+### The shoreline patrol
+
+Pressing at the cells that touch FH has now failed at one of the two clusters, and the other is one BAT away. If it also fails, the remaining possibility is a trigger somewhere along the coast that is not at a contact point — so after every discrete site has been pressed, the run now **patrols the shoreline** for ninety seconds: aim at the marker, hug whatever blocks the way, trace once a second.
+
+If that finds nothing, there is no world-map proximity trigger for FH anywhere the hull can reach, the trace is the evidence for saying so, and the search moves into the world-map event scripts.
+
+### File split
+
+`world_garden.inl` reached 82,918 bytes, past the 80 KB CI hard fail that would have blocked the push. It is split at the end of `Garden_BuildEnd`: `world_garden_grid.inl` (25.7 KB) owns everything that turns wmx polygons into the grid, `world_garden.inl` (58.6 KB) owns everything that reads it — reachability, the planner, the berth and dock tables, the executor. No code changed in the move, and both harnesses reproduce the same grid totals and the same 26 ok / 0 bad.
+
+### Verification
+
+* South tip approach `(48512, -7552)`: 35.6 km direct route, drivable from **6 starts × 4 speed/turn combos, zero failures**.
+* Grid, berths and harnesses unchanged: `gridtest` 26 ok / 0 bad, `aboard_test` ALL CHECKS PASSED, both clean under `-Wall -Wextra`.
+
+**NOT MSVC-built, NOT BAT'd.**
+
+## v0.20.62
+
+#80: stop betting on one dock site — ask the walkmesh which points of FH the hull can actually touch, and try all of them in one run.
+
+**BAT report (v0.20.61).** *"Still failed to reach FH. Took F11 screenshots when it said it was close."*
+
+### What went right
+
+The drive itself was clean. 107 waypoints, a direct 35 km route, approach point reached in nineteen seconds, no cliff wedge anywhere — the v0.20.61 grid fix holds, and `[GARDEN] cliff gate: 671236 east edges and 669555 south edges open` appears exactly as predicted.
+
+### What went wrong
+
+The press point. The screenshots show the hull grinding against a bare grey cliff face with the railroad bridge marching out over the ocean behind it — no city, no platform, nothing to dock with. `(46850, -2970)` is terrain 29, the mountain wall. The hull was pressing at rock.
+
+### The question that should have been asked two builds ago
+
+Not "how close to the marker can the hull get" but **"which points of FH can the hull actually touch?"**
+
+Take FH's foot landmass — the label containing the marker: 1,842 cells, its own connected component, not Esthar's — and list every Garden-water cell in the world directly adjacent to it with no wall cell between. There are exactly **eight**, in two clusters:
+
+| cluster | cells | distance to marker | side of the rail bridge |
+|---|---|---|---|
+| the wall gap | (45632, 576) (45632, 704) (45760, 320) | 3.6 – 4.0 km | far side |
+| the south tip | (48832, −7360) … (49472, −8128) | 5.7 – 6.5 km | Balamb side |
+
+**Nothing else on the map touches FH at all.** The v0.20.61 press point is in neither cluster.
+
+And v0.20.60 picked the wall gap correctly — then **never reached it**, because the cliff bug wedged the hull 50 km short. So the gap has still never actually been tried. The "120 km detour" that v0.20.61 rejected it for works out to about seventy seconds at the hull's real speed; the v0.20.60 log clocks 30 km in seventeen. That was a bad reason.
+
+### The fix
+
+A new `s_gardenDocks[]` table lists **every touchable site** for a drive-in destination. The run works through them: drive to site 0's approach, sweep its frontage, and if nothing fires, drive to site 1 and sweep that — *"No dock here. Trying the other side."* — rather than reporting failure after one attempt. One BAT settles which site the docking lives at instead of one site per BAT.
+
+The nose-in also traces the hull once a second now, so a sweep that finds nothing is still evidence: `[GARDEN] nose-in trace site N (x,y) hd=… dist to press point …`.
+
+### Verification
+
+* Both approach points drivable from 5 starts × 3 speed/turn combos, zero failures; site 0 route 120 km, site 1 route 36 km.
+* Nose-in simulated on the 128-unit engine grid at two speed/turn combos: the sweep puts the hull **within 15–65 units of the real contact cells** at both sites, and site 1's sweep covers all five of its contacts.
+* Grid, berths and harnesses unchanged from v0.20.61: `gridtest` 26 ok / 0 bad, `aboard_test` ALL CHECKS PASSED, both clean under `-Wall -Wextra`.
+
+If both sites come up empty, the docking is not a proximity trigger on the world map at all, and the eight-cell list above means there is nowhere left for it to hide — the search moves into the world-map event scripts.
+
+**NOT MSVC-built, NOT BAT'd.**
+
+## v0.20.61
+
+#80: the step gate is right for a ramp and wrong for a cliff — the planner was routing courses into coastlines.
+
+**BAT report (v0.20.60).** *"Got stuck ~50 km away. Took F11 screenshots when stuck."*
+
+The screenshots are what cracked it. The hull was not adrift in open water — it was pressed against a two-tier cliff coastline with the transcontinental rail line running along the top, at `(-5127, -5196)` on the east coast of the Galbadia continent. The log agrees: the executor held UP for ninety seconds, stalling and replanning nine times, and the hull never moved more than 400 units.
+
+### The defect
+
+Those coastal polygons **do** carry the Garden mask bit. What stops the hull is the 200-unit step gate: climbing 227 units from sea level onto the shelf, in one 64-unit move step.
+
+The v0.20.57 derivation said a 256-unit planner cell is four 64-unit move steps, so the faithful budget between adjacent cells is 4 × 200 = **800**. That is correct for a **ramp**, whose drop genuinely accumulates across the cell. It is wrong for a **cliff**, where the entire drop happens in one step however the grid is quantised — and taking the mean of four sub-heights as the cell height erases the cliff from the model completely. Which is exactly how a course got planned into a coastline.
+
+### The fix
+
+Apply the gate where the cliff is still visible: between the **128-unit sub-points the rasterizer already samples**, at the engine's own **200**.
+
+* A cell is traversable only if none of its four internal sub-pairs is a cliff.
+* An edge between two cells is open only if at least one of the two sub-point crossings is climbable — half an open boundary is still a boundary a hull can round. Stored as two new class bits (`GDC_OPEN_E`, `GDC_OPEN_S`), honoured by the reachability flood, the A* and `GdLineClear` alike, with diagonals legal only when one of their two L-shaped routes is.
+
+**This satisfies both BATs and nothing else does.** At the Centra continental shelf (the v0.20.56 wedge) every sub-pair is far under 200, so the shelf stays open and that failure does not return. At the Galbadia cliff the sub-pairs are 227 / 249 / 251, so the edge closes.
+
+Map-wide it shuts **14,401 of 5,466,034 sub-edges — 0.26%**, which is the right order of magnitude for a real cliff set, and leaves 678,223 of 786,432 cells traversable with 665,412 reachable from Balamb Garden. The C++ build and the independently written Python model agree **cell-for-cell on all three numbers**.
+
+### Consequences
+
+The entire berth table was re-derived against the corrected grid and re-validated by simulation: **25 park-and-walk berths, every one driven from 8 starts × 4 speed/turn combos with zero failures.** The reachable set is unchanged at 26 of 39. Several berths improved: Balamb Town 384 → 256 units of walking, Trabia Garden 128 → 0, Chocobo Forest 1 and Deling City re-sited; Tomb of the Unknown King 256 → 286 and Edea's House 724 → 1159 gave a little back to stay drivable.
+
+### Fisherman's Horizon is back on the Balamb side
+
+v0.20.60 read Aaron's railroad warning as a diagnosis and moved the approach to a gap in FH's coastal wall on the far side of the rail bridge. It is the only such gap — but reaching it means sailing around the west end of a 52 km bridge: a **120 km route for a destination 35 km away**, and the wedge above happened on the way.
+
+From the Balamb side the route is **35 km, direct, 0 replans**. The press point is the FH marker itself, and the hull comes to rest in the cove at about `(46850, -2970)`, **2273 units off the marker — as close as the Garden mask allows from any bearing on the map**. The nose-in sweep then works that frontage over seven 4-second phases.
+
+That standoff is the open question the BAT answers. v0.20.60 never actually pressed: it reported honestly from 3204 units out. If the docking trigger is a proximity test anywhere in the 2300–3200 band, this reaches it.
+
+### Verification
+
+* `gridtest`: cliff gate 671,236 east + 669,555 south edges open; 678,223 traversable cells; 665,412 reachable; **park points 26 ok, 0 bad**.
+* `aboard_test`: **ALL CHECKS PASSED (0 failures)**.
+* Berth validation: 25 berths × 8 starts × 4 speed/turn combos, **0 failures** (31 min of simulation).
+* Twelve named legs including all nine from the v0.20.57 BAT list plus three fresh runs to FH: **all arrive**, worst case 1 replan.
+* Both harnesses compile clean under `g++ -Wall -Wextra`.
+
+**NOT MSVC-built, NOT BAT'd.**
+
+## v0.20.60
+
+#80: Fisherman's Horizon — the dock is a gap in the coastal wall.
+
+**BAT report (v0.20.59).** *"Failed to dock at FH. Took screenshots at the spot where docking failed. Keep in mind Garden needs to steer into the FH model on the map, not pull up alongside it — drive right into it. Also, make sure Garden is on the correct side of the transcontinental railroad — if Garden is on the opposite side of the track from the FH model it won't dock."*
+
+Both of Aaron's constraints turn out to be the same geometric fact, and the world map data states it plainly once you ask it the right question.
+
+### What was wrong
+
+`.59` treated "drive into FH" as "press at the FH location marker" — `(48790, -1788)`, read out of `wmsetus.obj` section 8. That marker sits **2.6 km inside ground the Garden mask never permits**. An exhaustive scan of the 128-unit walkmesh finds the nearest Garden-navigable water to that marker, on any bearing, is **2560 units away**; the whole FH platform is terrain 7 with `byte15 & 0x20` clear. So the `.59` nose-in could not have worked from anywhere: pressing at that point is pressing at something no hull can occupy.
+
+The second half is the railroad. The transcontinental rail bridge is terrain 27, and west of FH it severs the ocean in a **solid 512-unit band at z ≈ −1536 … −1920** — no Garden cell anywhere in it. The `.59` approach point was `(46016, −3392)`, which is **south** of that band. FH's dock is north of it. That is precisely the failure Aaron described, and no amount of pressing from the south side can cross the bridge.
+
+### What the data actually says
+
+An adjacency scan of every Garden-water cell within 7.7 km of the FH marker, looking for water that touches FH's landmass with **no wall cell between them**, returns exactly one place:
+
+| water cell | land cell | distance to marker |
+|---|---|---|
+| (45760, 320) | (45888, 320) | 3587 |
+| (45632, 576) | (45760, 576) | 3843 |
+| (45632, 704) | (45760, 704) | 3923 |
+
+A single ~450-unit gap at x ≈ 45700, z ≈ +320…+770. Every other cell of that coast for kilometres in both directions is terrain 29 — the Esthar mountain wall Aaron described when he explained why the Esthar continent is off limits. One opening in a continuous wall, at the one destination the player is told to drive *into*, is the dock.
+
+It is also, as Aaron said, on the far side of the railroad from where `.59` stopped.
+
+### The fix
+
+* **`GardenPark` gains `dock_x` / `dock_y`** — where a `drive_in` destination is *pressed*, named separately from where it is *marked*. Zero means "use the marker", so no other row changes meaning.
+* **FH approach moves `(46016, −3392)` → `(45440, 640)`**, 250 units off the gap mouth and north of the rail band; the dock point is `(46400, 560)`, straight east through the gap. `walk_units` drops to 0 — a `drive_in` destination has no walk.
+* **The NOSE-IN phase now backs off between sweep positions.** It drives at the dock point with the wall-guard, LOS clamping and stall/replan machinery all bypassed — grinding into the shore is the objective, not a fault — and sweeps the mouth over 7 phases of 4 s at ±384, ±768, ±1152. Simulated on the engine grid, **a jammed hull cannot re-aim**: without a back-off, phases 1–6 moved the hull *zero units* and every phase re-pressed the identical spot. Each phase after the first now opens by reversing for 900 ms.
+
+### Verification
+
+* Approach `(45440, 640)` reached from **7 starts × 4 speed/turn combos, 28/28 arrivals, 0 replans**, worst final error 283 units.
+* Nose-in simulated on the 128-unit engine grid at 4 speed/turn combos: the hull jams against the shore at z = 618, then the sweep presses at z = 718, 502, 861, 330 — **covering all three water/land contact cells** and the full gap mouth with margin either side. Phase 6 reaches (45783, 330), inside the closest contact cell.
+* `gridtest`: park points reachable from Balamb Garden **26 ok, 0 bad**.
+* `aboard_test`: **ALL CHECKS PASSED (0 failures)**.
+* Both harnesses compile clean under `g++ -Wall -Wextra`.
+
+If the docking still does not fire from inside that gap, the trigger is not a proximity test on the world map at all, and the honest failure line — *"Balamb Garden could not dock at Fisherman's Horizon. Stopped alongside it."* — plus the per-phase `[GARDEN] nose-in phase N at (x,y)` log lines will say exactly which points were tried.
+
+**NOT MSVC-built, NOT BAT'd.**
+
+## v0.20.59
+
+#80: Fisherman's Horizon is a DOCKING destination, not park-and-walk.
+
+Aaron: *"You dock the Garden at FH. Driving the Garden into FH triggers the docking."*
+
+That explains the thing v0.20.58 could not: **FH's entire platform and bridge carry the foot bit and never the disembark bit `byte15 & 0x02`** -- not one such cell within 15 km. Not a gap in the data. You do not step off the Garden at FH, so the game never marks anywhere for it.
+
+**The bit's meaning is now corroborated across the map.** Every landmass with no disembark bit is one you cannot step onto from a vehicle, and every one of them carries the Ragnarok **landing** bit (`byte14 & 0x80`) instead:
+
+| landmass | Garden step-off | Ragnarok landing |
+|---|---|---|
+| Fisherman's Horizon | no | yes |
+| Cactuar Island | no | yes |
+| Island Closest to Hell | no | yes |
+| Island Closest to Heaven | no | yes |
+| Great Salt Lake shore | no | yes |
+
+**New `drive_in` class in the park table.** For a drive-in destination `park_x/park_y` is an *approach* point, not a berth; arrival is the world map handing off to a field, so `Poll`'s world-map exit edge now asks `Garden_LeavingIsArrival()` before calling the exit an interruption. Reaching the approach point with nothing having fired reports that honestly -- *"This is as close as Balamb Garden gets to Fisherman's Horizon, and the docking did not trigger"* -- rather than announcing an arrival that did not happen. The start announcement says "Docking Balamb Garden at" rather than "Piloting to", and the already-parked prompt is suppressed on a docking run.
+
+The approach point (46016,-3392) was chosen by the same validate-by-simulation pass the berths use: the two closer candidates wedge from 8 and 7 of 28 runs respectively, this one is clean across all 28.
+
+**26 of 39 destinations reachable.**
+
+**Note on the trigger table.** The docking is not derivable from the decoded `wmsetus` Section 8 data: its only Garden clause is program 20, locID `0x0172`, and field 370 is Lunatic Pandora, not FH. Either the docking lives outside Section 8 or the locID numbering is not the field-id numbering. Recorded so the next person does not repeat the search.
+
+**BAT.** Drive to Fisherman's Horizon and let it run to the approach point. Either the docking fires -- expect *"Docked at Fisherman's Horizon."* -- or you get the honest "as close as it gets" line, which tells us the approach point needs to be nearer and roughly where.
+
+## v0.20.58
+
+#80: the berth model was wrong in two ways, both of which Aaron caught. Shumi Village, Edea's House and Fisherman's Horizon were being reported Ragnarok-only when the Garden can reach them.
+
+**Error 1 — the same 4x quantisation mistake as v0.20.57, applied to the foot side.** Foot connectivity was computed with the 200-unit gate between 128-unit cells. The FOOT move step is `0x20` = 32 units (`0x53E7A0:0x53E84D`), so a 128-unit cell is four steps and the faithful budget is **800**, exactly as a 256-unit cell is four Garden steps. At 200 the rule severed landmasses that are really one walk: Edea's House was cut off from Chocobo Forest 7's, which is why it came out unreachable. Fixing the Garden side and not the foot side was an oversight -- it is one derivation and it applies to every vehicle.
+
+**Error 2 — a berth is a PAIR of cells, not one.** The old rule demanded a single cell be both Garden-traversable *and* carry the disembark bit. Physically those are two different places: the hull stops on water it may occupy, the player steps off onto adjacent ground the game allows. **Shumi Village's own cell carries the disembark bit (`byte15 & 0x02`) and is not Garden-traversable**, so the old rule could never see it no matter how the gates were tuned.
+
+A berth is now: a hull cell the Garden can occupy and reach, with a step-off cell (disembark bit, foot-walkable, on the destination's own landmass) within 384 units, and a 6 km cap on the resulting walk -- past that it is not a berth for that place, it is a hike.
+
+**And the table is now validated by construction.** Berth candidates are ranked, then **simulated from 7 start positions x 4 speed/turn combinations**, and the first one the hull can actually reach is what ships. Three destinations needed a fallback candidate: Chocobo Forest 5 (candidate 0 wedged from 6 of 7 starts), Shumi Village and Alien Ship 1. A berth that looks good on the map but wedges the hull is not a berth, and that is now enforced by the generator rather than discovered in a BAT.
+
+**Result: 25 of 39 reachable, and the unreachable set is now exactly what Aaron described** -- the Esthar continent behind its mountain wall (Esthar City, Great Salt Lake, Lunatic Pandora Lab, Lunar Gate, Sorceress Memorial, Tears' Point, Chocobo Forest 3), the offshore islands the Garden cannot set down beside (Cactuar Island, Island Closest to Hell, Island Closest to Heaven, Chocobo Forest 4, Alien Ship 2), and the Deep Sea Research Center, which has no world-map foot ground at all.
+
+**The walks collapse as a side effect.** Dollet 3415 -> 1336, Galbadia Station 4891 -> 0, Galbadia Garden 4529 -> 0, Balamb Town 768 -> 384, Chocobo Forest 5 3238 -> 1669, Tomb of the Unknown King 923 -> 256, D-District Prison 256 -> 0. Fourteen of the twenty-five berths now put the hull within 400 units of the destination, and nine put it right on top.
+
+**Validation.** Full matrix 200/200 route-start pairs, zero wedges, zero plan failures.
+
+**Still open: Fisherman's Horizon.** The model reports it unreachable and the model may be wrong -- but not for either reason above. There is **no disembark-bit cell anywhere within 15 km of FH**: its whole platform and bridge carry the foot bit and never `0x02`. So no rule built on that bit can see it, and loosening the rule to "any foot ground next to Garden water" re-admits the Esthar coast, which contradicts the mountain wall. Left reporting unreachable pending Aaron's answer on how one actually steps off the Garden at FH.
+
+## v0.20.57
+
+#80 fix from the v0.20.56 BAT: the continental shelf was reading as a wall. Two quantisation errors, one of them mine in the simulator.
+
+**The wedge.** The Centra Ruins drive oscillated between (2885,36904) and (3920,35354) five times over 60 seconds, logging `bow blocked` continuously — in **open ocean**. The `remain` figure never improved past ~27,000:
+
+```
+13:42:42 stalled at (2895,36900) remain=28568 -- reverse + replan 4/12
+13:42:58 no route progress at (3834,35479) remain=29053 -- replan 5/12
+13:43:18 no route progress at (2885,36904) remain=27796 -- replan 7/12
+13:43:38 no route progress at (3897,35386) remain=28171 -- replan 9/12
+```
+
+**Cause 1 — `GdProbe` applied a per-step rule across a whole probe length.** It compared the hull's 256-unit cell to the cell one entire 640-unit probe away and called the pair blocked if they differed by the 200-unit gate. A 640-unit probe spans 2.5 cells, so any slope longer than the probe accumulates past 200 even though every individual cell-to-cell step is well under it. The continental shelf is exactly such a slope. Measured at the wedge, along one row of cells:
+
+```
+heights  0  0  0  0  0  0  0  0 -107 -273 -358 -406 -468 -500 -517 -558 -573
+steps    0  0  0  0  0  0  0 107  166   85   48   62   32   17   41   15
+                                    every step legal; the 2.5-cell jump = 299
+```
+
+All **15 of 15** positions the BAT logged as `bow blocked` reproduce exactly under that rule. `GdProbe` is now defined as `!GdLineClear(...)`, which already marches the gate correctly.
+
+**Cause 2 — the gate itself was 4x too strict at cell scale.** The engine's rule is `|dH| >= 200` between the current polygon and the one **one move step** away, and the Garden's move step is `0x40` = 64 units (`0x53E7A0:0x53E84D`). A 256-unit planner cell is **four** such steps, so the faithful budget between adjacent cells is 4 x 200 = **800**. Applying the raw 200 at cell scale manufactures a wall along every gentle slope. Over the whole map the 200 rule blocks **2,955 cell edges and 3,990 cells**; the faithful 800 blocks **zero edges and one degenerate cell**. That is the real answer: the Garden's permission is the per-vehicle **mask** (`byte15 & 0x20`), not a slope rule — the 200 gate is a cliff test a hovering hull never meets at sea.
+
+**A berth improvement fell out of it.** With the phantom walls gone, the two worst walks in the table collapse: **Galbadia Garden 4529 -> 0 units** and **Galbadia Station 4891 -> 362**. Those cells were always parkable; the over-strict gate was fencing them off. No destination gained or lost reachability — still 23 of 39, same berths everywhere else.
+
+**And a methodology error in the offline simulator, which is why the .56 matrix missed all of this.** `offline/garden_exec.py` probed the **128-unit** engine grid, on my reasoning that "finer is a stricter test". It is not a stricter test, it is a *different* one: the shipped `GdProbe` / `GdLineClear` read the **256-unit** planner grid, so the simulation was exercising code the game does not run. `offline/garden_exec2.py` replaces it and reads exactly what the C++ reads. Re-running the BAT's own route under both rules:
+
+| leg | v0.20.56 rule | v0.20.57 |
+|---|---|---|
+| Fire Cavern -> Timber | arrived, 1 replan, 538 off | arrived, 0 replans, 260 off |
+| Timber -> Centra Ruins | arrived, 5 replans, 1556 off | arrived, 0 replans, 287 off |
+| **Winhill -> Balamb Town** | **WEDGED**, 12 replans | arrived, 0 replans, 267 off |
+| Balamb Town -> Trabia Garden | arrived, 10 replans, 2829 off | arrived, 0 replans, 284 off |
+| Winhill -> Centra Ruins (the BAT route) | arrived, 7 replans, 2047 off | arrived, 0 replans, 257 off |
+
+Worst of four speed/turn combinations each, spanning turning radii from 650 to 2600 units.
+
+**On the legs that could not be tested.** Five of the nine requested drives have an endpoint with no Garden berth at all: Shumi Village, Edea's House and Fisherman's Horizon. Each sits on a landmass carrying zero Garden-parkable ground, and in every case the nearest berth is on a *different* landmass, so it is not walkable either — Shumi Village is 4.6 km from the Chocobo Forest 2 berth across water, Edea's House 7.0 km from Chocobo Forest 7's. These are Ragnarok destinations. Stand-in legs over the same water were substituted (Centra Ruins -> Chocobo Forest 7, Chocobo Forest 7 -> Winhill, Trabia Garden -> Chocobo Forest 2, Chocobo Forest 2 -> White SeeD Ship) and all pass.
+
+**BAT.** Repeat the Centra Ruins drive from Winhill — the leg that failed. Expect a continuous crossing with no `bow blocked` in open water and few or no replans. Worth also re-driving Galbadia Garden, whose berth has moved right onto the destination.
+
+## v0.20.56
+
+#80 fix from the v0.20.55 BAT: stepping off the mobile Garden never leaves the world map, so the aboard latch could never clear.
+
+**The .55 fix was right about the mechanism and wrong about the exit.** v0.20.55 latched "aboard" on a confirmed engine vehicle id and cleared it only on positive on-foot evidence **at a world-map entry** — because in the .54 session the disembark had produced one. It doesn't in general. The .55 log contains no world-map entry of any kind between the Timber park at 13:24:28 and the player walking off:
+
+```
+13:24:28 [GARDEN] parked (arrived) at (-23366,-3987) parkBit=1 walk=1191 to Timber
+13:24:34 [GARDEN] start -> Timber park=(-23168,-4480) from (-22697,-3813)   <- a SECOND Garden drive
+13:24:36 [GARDEN] stalled ... reverse + replan 1/12
+13:24:36 [GARDEN] catalog: 23 of 39 ...   (rebuilt as the Garden catalog, three times over)
+```
+
+You climbed out and pressed backslash 816 units from the berth, and because the latch was still set you got another Garden drive instead of the walk-in. You disembark straight onto the world map — there is no field transition to hang the test on.
+
+**Disembark is now detected continuously, and deliberately without the savemap mirror.** Whether `bgu_pos` refreshes live is still unproven, so nothing depends on it: while a Garden drive is running, or while the engine names the Garden in motion, the live position **is** the hull, so it is recorded. Once the hull is stationary, a sustained 450-unit separation between the player and that recorded spot means the player climbed out — 450 because the hull's own footprint is bigger than that, and 700 ms of hold so a single bad sample cannot flip it. Logged as `[GARDEN] disembark: N units from the parked hull`. The world-map entry classification still runs and still wins when it is available, since it is direct evidence.
+
+**The "Car" and "Garden" announcements are a second, independent fault — and it is older than #80.** The locomotion byte at `0x02040A5E` committed **3 (Ship), 33, 36, 39 (Car) and 48 (Garden) within three seconds** while you were simply walking away from a parked hull:
+
+```
+13:24:36 ... ignoring stale locomotion=3  and using foot pos (-22731,-3860)
+13:24:42 ... ignoring stale locomotion=33 and using foot pos (-22449,-3293)
+13:24:42 ... ignoring stale locomotion=36 and using foot pos (-22457,-3293)
+13:24:43 ... ignoring stale locomotion=39 and using foot pos (-22466,-3293)
+13:24:45 ... ignoring stale locomotion=48 and using foot pos (-22518,-3276)
+```
+
+DEVNOTES has described that byte as an ANIMATION-state byte that is "never authoritative for vehicle detection" since v0.18.3.255 — but `CheckVehicleChange` still committed it outright, spoke its name, and forced a catalog rebuild on every rule-class change. Worse, each commit repoints `GetWorldMapPosition_Active` at that vehicle's savemap mirror; the car's is 50 km away at the Missile Base. Only the v0.18.3.217 foot-motion override kept the position sane, and that override only works while the player is actually moving — stand still and the drive would have read the car's coordinate.
+
+A non-foot locomotion value now has to be **corroborated** by one of the two signals that genuinely concern vehicles: the engine's in-motion id naming the same family, or that vehicle's own savemap mirror being within 600 units of the player. Uncorroborated values are dropped with a `[VEH-REJECT]` line naming both signals. `CheckVehicleChange` is also skipped entirely while a Garden drive is running, matching the exemption the foot/car drive already had.
+
+**Two smaller things from the same run.** The stall detector no longer arms during the first 2.5 seconds of a drive — the Timber run tripped it three seconds in, at the exact coordinate it started from, because the hull was still getting under way; the spurious replan then widened the arrival radius and cost 500 units of berth accuracy (parked 1191 from Timber against a 724-unit berth). And the already-parked prompt now reaches 1500 units, so a few steps off the hull still gets "leave the Garden first" rather than a re-drive.
+
+**Regression guard.** `tests/garden_aboard_test.cpp` now replays the .55 disembark verbatim — hull parked at `(-23366,-3987)`, player at `(-22697,-3813)`, no world-map entry — alongside the .54 sequence. 13 checks, all passing under g++.
+
+**BAT.** Repeat the Timber run. After parking, step off and walk a few paces: expect `[GARDEN] disembark:` in the log and no vehicle announcements at all — any that appear should be matched by a `[VEH-REJECT]` line saying which signal refused. Then press backslash for the walk-in; it should be a foot drive (`[DRIVE] Start`, not `[GARDEN] start`). Worth also boarding and immediately pressing backslash without moving first, since that is the one path where the latch still depends on the entry classification.
+
+## v0.20.55
+
+#80 fix, straight off the v0.20.54 BAT: the engine vehicle id is a VEHICLE-IN-MOTION register, not a riding register.
+
+**One wrong assumption caused all three reported faults.** `world_garden.inl` gated the entire subsystem on `[0x020409E0] == 0x30`, on the strength of the engine's own dispatcher at `0x546307` comparing that dword against `0x30` for the Garden. The BAT log says the dispatcher is right about the *value* and .54 was wrong about *when it is written*. Every reading in the session:
+
+```
+13:08:42 [VEHDUMP] vehicleId=0      <- world-map entry, aboard the Garden
+13:08:42 [BFS]     vehicleId=0      <- catalog build
+13:08:47 [DRIVE]   vehicleId=0      <- backslash pressed
+13:08:51 [VEHID]   vehicleId=48     <- four seconds INTO an active drive
+13:09:48 [DRIVE]   vehicleId=0      <- parked at the Fire Cavern berth
+13:10:34 [VEHDUMP] vehicleId=0
+```
+
+It names a vehicle only while one is actually moving, and falls back to 0 the moment the hull is stationary. v0.20.54 asked the question at exactly the two moments it is always 0 — catalog-build time and keypress time — so:
+
+* **The catalog never flipped.** `Garden_IsAboard()` was false during every `BuildDistanceCatalog`, so the foot filter ran instead: "Filtered to 3 reachable locations" plus the Garden marker, a 4-entry catalog where 23 destinations were expected. There is not one `[GARDEN] catalog:` line in the whole log.
+* **Everything announced "not reachable from here."** `AnnounceLocation` checks the flag live, so by 13:08:54 it *was* true — but `Garden_ComputeReach` had never run, `s_gdReachRow` was still −1, and `Garden_CellReachable` answered false for a map that had simply never been built.
+* **The post-park backslash started a FOOT drive on a player still aboard.** At 13:09:48 the hull was parked, the id had fallen back to 0, `PollKeys` took the foot branch, and the camera-write steering law was pointed at a mobile Garden. That is the "auto-drive seemed to fail to enter the cavern."
+
+**The fix: latch, don't sample.** A read of `0x30` is now a one-way CONFIRMATION that sets the latch; it is cleared only on positive evidence of being on foot, or by a different vehicle id in motion. The on-foot evidence comes from the savemap mirrors, which the same BAT proved are fresh at a world-map transition — at 13:10:34, just after disembarking, `|P − char_pos| = 0` and `|P − bgu_pos| = 1015`. Piloting reads the mirror image. The entry test is deliberately three-way — clear / set / **leave alone** — so an ambiguous entry (like 13:08:42, where the position was still `(0,0,0)` and both mirrors were stale) never flips the latch in either direction; the id corrects it the moment the hull moves. `[GARDEN] entry classify:` logs the two distances and the verdict every time.
+
+**Everything downstream of the latch now updates with it.** An aboard transition forces `s_catalogBuilt = false`, so the catalog is rebuilt as the Garden set the moment the state is known, and "Piloting Balamb Garden." is spoken so the change is audible rather than inferred. `Garden_CellReachable` builds its flood on demand rather than answering false out of an empty map. `Garden_UpdateAboard()` runs once per Poll, before the catalog build.
+
+**Three smaller things the BAT surfaced.**
+
+* Pressing backslash at a berth the hull is already parked at now says *"Already parked at Fire Cavern. Leave the Garden, then press backslash to walk there."* instead of re-driving. That was the exact confusion at 13:09:48.
+* The arrival radius drops 384 → 288. The .54 park stopped 379 units short of the berth, which turned Fire Cavern's 362-unit walk into the 666 units actually announced.
+* Cycling onto "Mobile Balamb Garden" while piloting it no longer says "The Garden cannot reach this."
+
+**Regression guard.** `tests/garden_aboard_test.cpp` replays the BAT's id sequence and savemap values verbatim — `(20914,−24944)` / `(20271,−24355)` at the ambiguous entry, `(30195,−27881)` / `(30764,−28722)` at the disembark — and asserts the latch holds through the parked `id = 0` that broke .54. Host-compilable with g++, no Windows dependency.
+
+**BAT.** Same as .54, and the first thing to listen for is *"Piloting Balamb Garden."* shortly after the world map appears, or as soon as you nudge the hull. Then cycle the catalog: it should now be long, reachable destinations first, with the Esthar-side ones saying the Garden cannot reach them. Drive to Fire Cavern again; at the berth press backslash once more *before* getting off — you should hear "Already parked… leave the Garden" — then disembark and press it again for the walk-in. `ff8_world.log`: `[GARDEN] entry classify`, `[GARDEN] aboard`, `[GARDEN] catalog:`, and whether `[VEHPOS32]` ever appears (it did not in .54, because the locomotion byte never committed to 48 — which is expected and is why nothing depends on it any more).
+
+## v0.20.54
+
+#80: mobile Balamb Garden auto-drive — pilot the Garden to any reachable destination, park on ground you can walk off, hand back to the on-foot drive.
+
+**The engine's per-vehicle walkability rule, read out of the binary.** The mod knew on-foot walkability was `wmx` polygon `byte15 & 0x80` but not why, or what the other bits were. `FF8_EN.exe 0x53E6B0` is the whole table in one function: `typeTriple = poly[15]<<16 | poly[14]<<8 | poly[13]`, then foot (veh 0x00-0x09, 0x80) tests `0x80`, car (0x20-0x28, 0x84) tests `0x40`, **Garden (0x30) tests `0x20`**, chocobo (0x31) tests `0x10`, and everything else (the Ragnarok) returns 1 because it flies. The same test is inlined in the step validator `0x53E7A0` at `0x53E92E`, and `0x30` is the same constant the per-vehicle dispatcher at `0x546307` compares the engine vehicle id `[0x020409E0]` against. A sibling function `0x53E730`, reached only through `0x54B860`, applies a *different* set — car `0x04`, **Garden `0x02`**, chocobo `0x01`, Ragnarok `byte14 & 0x80` — and the Ragnarok's presence here (it is absent from the walkability function) is the tell: this second set is where a vehicle may be SET DOWN, not where it may move.
+
+**Cross-checked against the mesh, three ways.** Tabulating both bit sets over all 473,193 polygons of `wmx.obj` by terrain type reproduces rules nobody supplied: bit `0x40` is 0-1.1% on every forest terrain 0-5, which is the cars-cannot-enter-forest rule the mod had only ever established from live BATs; bit `0x20` is 99.4/87.4/99.9% on the three ocean terrains and 13.2% on terrain 29, i.e. the Garden sails and is stopped by mountains; and `byte14 bit 0x80` is 0% on every ocean, mountain and forest terrain and 97-100% on open plains, which is exactly an airship's landing rule. Every "set down" bit is a near-perfect subset of foot-walkable (Garden 99.9%, car 100.0%, chocobo 100.0%, Ragnarok 100.0%) — which is what "the player ends up standing here" requires. The 200-unit height-step gate (`0x53E7A0:0x53E9C2`, `0x54B860:0x54B87A`) is NOT vehicle-dependent: the Garden obeys the same rule a walking character does.
+
+**Why a separate subsystem.** Everything in `world_map_planner*.inl` / `world_map_routenet.inl` / `world_map_navmesh.inl` models FOOT walkability — `WorldFootBlockedAt()` is literally `terr == 29 || (terr >= 32 && terr <= 34)`, the route network's 13 nodes are all land nodes, and open ocean returns `WGH_NO_GROUND`, which every consumer reads as blocked. A vehicle whose entire purpose is crossing the ocean cannot borrow any of it. `world_garden.inl` therefore owns its own grid, planner and executor, and is gated on `GetActiveVehicleId() == 0x30`: when the player is not piloting the Garden not one line of it runs, so the BAT-proven foot and car drives are untouched.
+
+**Grid.** 256 units per cell, 1024x768, built in the same `LoadTerrainGrid` polygon pass as the foot grids (with ocean polygons fed in, which the foot path skips). Each cell is sampled at its four 128-unit sub-centres and is traversable only if ALL four are — a coarse cell that is half cliff must not be planned through, because the executor probes real geometry. 256 was chosen empirically: the reachable-destination set is IDENTICAL at 128 and 256 (23 of 39), while 512 seals the passes to Galbadia Garden, Galbadia Station and Chocobo Forest 5. Cost 2.3 MB against 9.4 MB for a 128 grid.
+
+**What the Garden can and cannot reach.** 23 of the 39 catalog destinations have a park point. The 16 that do not are Fisherman's Horizon, Great Salt Lake, Esthar City, Lunatic Pandora Lab, Lunar Gate, Sorceress Memorial, Shumi Village, Tears' Point, Chocobo Forests 3 and 4 and Alien Ship 1 — all on the Esthar continent or its bridge, ringed by mountains the hull cannot cross — plus Edea's House, Cactuar Island, Island Closest to Hell, Island Closest to Heaven (islands with no Garden-parkable ground) and the Deep Sea Research Center (no foot-walkable world-map ground at all). That is the engine's own encoding of "you need the Ragnarok", derived rather than assumed. Unreachable destinations are NOT hidden: they stay in the catalog after the reachable ones and announce "The Garden cannot reach this", because a silently shorter list would read as the mod having lost Esthar.
+
+**Park-and-walk is forced, not chosen.** Exactly ONE trigger program in `wmsetus` Section 8 carries a Garden clause (program 20, locID 0x0172, region 0x0C), so no destination can be ENTERED by driving the Garden into it. A park point is the cell nearest the destination that is simultaneously Garden-traversable, Garden-parkable (bit 0x02) and on the SAME foot landmass as the destination, so the existing on-foot auto-drive can finish the trip. The remaining walk is announced on selection and again on arrival with a compass direction; most are under 1000 units, and the long ones (Galbadia Garden 4529, Alien Ship 2 11820) are honest — that ground is genuinely not hoverable.
+
+**Finding the Garden again.** While NOT aboard, the catalog gains a "Mobile Balamb Garden" entry at the hull's live savemap position, inserted in distance order, so the player can walk back to their ride.
+
+**Planner.** 8-neighbour A* on the Garden grid with a clearance penalty: edges into cells with less than 7 cells (1792 units) of clearance are surcharged, waived within 10 cells of either endpoint. That one term is what made the system work — a hull with a ~1300-unit turning radius cannot follow a route that hugs a 256-unit-resolution coastline, and before the clearance term the offline validation matrix was mostly wedged. Measured cost on the real grid: 10-33 ms for routes of 66-187 km.
+
+**Executor.** The car's steering law (deadzone 320, forward cone 576, pivot outside it) plus four behaviours, each added to kill a wedge mode reproduced in simulation. (1) LINE-OF-SIGHT-CLAMPED LOOKAHEAD: the aim point is the furthest waypoint in the lookahead arc whose straight line from the hull is clear, so the lookahead cannot cut a corner across a headland. (2) WALL-FOLLOW: when the bow probe is blocked the drive commits to the side whose heading fan clears first, keeps turning that way, and CREEPS FORWARD on every frame the bow happens to be clear. **The existing rule in `world_map_drive_exec.inl` turns toward the target side and never moves, which limit-cycles at plus-or-minus one turn step against a wall — that is precisely the "moveDist=0 for 18 s, 11 identical re-paths" signature of #100/H2.** The Garden path does not inherit it; whether to port the fix back to the foot/car executor is a separate change, deliberately not made here. (3) BUG2 LEAVE CONDITION: the wall is left when the aim is clear again OR simply when the hull is measurably closer to the goal than where it hit, without which a wall-follow orbits an island forever. (4) STALL -> REVERSE -> REPLAN, counting only frames where forward motion was wanted and denied (pivots are legitimate no-motion), with the clearance target escalating to 12 then 18 cells on repeated failure.
+
+**Savemap fix (latent, affects the car too).** The per-vehicle position mirrors are 12-byte records of int32 X, int32 Y, int16 Z, int16 rotation — NOT six int16s. Proof from a live `[VEHDUMP]`: `car_pos` read as words `(-6076,-2,-14815,-1,-340,1966)`; as int32 pairs that is X = 0xFFFEE844 = -71100, Y = -14815, the Galbadia Missile Base coast, which is where the car actually was. The old int16 reading gave -6076, an open-ocean coordinate 65 km away. It survived every BAT so far only because all of them ran on Balamb, where |X| < 32767. `[VEHPOS32]` logs the new reading alongside what the old one would have produced.
+
+**Offline validation.** The shipping C++ `Garden_RasterizeTri` was fed the real `wmx.obj` through the same polygon loop `world_map_segments.inl` uses and its grid diffed cell-for-cell against an independently written Python model: WALK 677,934 vs 677,934, PARK 65,035 vs 65,035, **zero disagreements** — which validates the mesh-space transform `mz = 196608 - vwy` the whole system rests on. All 23 park points are reachable from Balamb Garden's berth in the shipping flood fill. The executor was then simulated against the 128-unit grid (finer than the planner's own) from 8 start positions across the map under 4 speed/turn-rate combinations spanning turning radii of roughly 650-2600 units, since the Garden's true rate is not yet known. Tooling and results: `offline/garden_*.py`, `offline/GARDEN_MATRIX.md`, `Plan & Research Documents/Balamb Garden Auto-Drive - offline analysis.md`.
+
+**BAT.** Board the Garden and get to the world map. First confirm the gate: `ff8_world.log` should show `[GARDEN] aboard vehicleId=48`. Then cycle the catalog with -/= and listen — reachable destinations first, then the unreachable ones saying so. Press backslash on a near one (Balamb Town, Fire Cavern) and let it run: expect "Piloting Balamb Garden to X", periodic kilometre calls, then "Balamb Garden parked" with the remaining walk and direction. Leave the Garden and press backslash again to have the on-foot drive finish the trip. Then try a long ocean crossing (Deling City or Trabia Garden) and one refusal (Esthar City). Send `ff8_world.log`; the lines that matter are `[GARDEN] aboard`, `[GARDEN] grid built`, `[GARDEN] planned`, `[GARDEN] bow blocked`, `[GARDEN] stalled`, `[GARDEN] parked` and `[VEHPOS32]`.
+
+## v0.20.53
+
+Catalog revamp WS1 Step 1.4 (observe-only): co-located dedup groundwork.
+
+The last planned Workstream-1 step is collapsing the multiple representations of one physical thing into a single entry -- the mansion glass shelf was surfaced as a trigger line AND a JSM object AND an invisible controller at one spot; the hotel save point was a line plus an object. The existing DedupeCatalog only handles ONE of these overlaps (a JSM object coincident with an interaction line, keeping the more informative one), so 3-way clusters and other cross-type overlaps still slip through as duplicates.
+
+This build adds the groundwork, observe-only. CatalogEntryPos() resolves a uniform (x,y) for ANY catalog entry regardless of which path produced it (runtime entity via GetEntityPos, trigger line via its midpoint, JSM object via SET3, gateway via its dedup center -- gateways keyed by gatewayIdx since the -300/-400 sentinel ranges collide). A new [CO-LOCATED] pass at the end of DedupeCatalog then logs every pair of surviving catalog entries within 160 units, with the representation it WOULD keep (highest interactability rank: Save/Draw/Shop/Card > Exit > Object > Interaction/NPC). Nothing is removed.
+
+BAT: visit fields with suspected duplicates -- Caraway's Mansion (glass/statue), the Balamb Hotel, a B-Garden hall -- open the catalog, send ff8_field.log, grep [CO-LOCATED]. Each logged pair is a candidate the current dedup misses; the BAT tells us which are genuinely one thing (collapse) vs distinct things that happen to be close (leave), which is what the actual Step 1.4 collapse rules will be built from.
+
+## v0.20.52
+
+Catalog revamp WS1 Step 1.3 (observe-only): refine the live-state gate after the v0.20.51 BAT.
+
+The v0.20.51 BAT confirmed the runtime-entity path now feeds the gate -- every NPC read vis=1 act=1 talk=0/1 (real values, no more -1), so the entity-level signals (visible / active / talkable) are landing. It also produced the key design finding: applied uniformly, zone-reachability OVER-DROPS. The gate's would-DROP verdicts were all "zone-unreachable", and they included a talkable NPC (talk=1), an exit ("Exit to B-Garden - Hall 1"), and a camera transition -- all of which are reachable-to-USE across a camera-zone boundary and must never be dropped (project principle: losing a real entry is the worst failure).
+
+Fix: zone-reachability is a POSITIONAL concern, not an entity live-state signal, and the per-path code already applies it with the correct exemptions (gateways/exits exempt; a conversational NPC stays because it is talkable across a gap; camera transitions are cross-zone by definition). So the gate no longer treats zone as a drop reason -- it is kept in the [LIVE-GATE] log for context only. The unified gate now owns the ENTITY-level spine: visible (HIDE bit), active (UNUSE bit), line-active, gateway-enabled. Still observe-only; nothing is dropped.
+
+Learning for the enforce phase: the visible signal is already enforced upstream (the entity scan and the object-path HIDE filter drop hidden entities before the catalog), which is why the gate sees vis=1 everywhere. The genuinely NEW signal the gate adds is the active/UNUSE bit -- none of the tested fields contained a deactivated entity, so it read act=1 throughout and has not yet been exercised on the drop side. Enforcement will start there once a field surfaces a real UNUSE'd entity to validate against.
+
+## v0.20.51
+
+Catalog revamp WS1 Step 1.3 (still observe-only): wire the runtime-entity path into the live-state gate.
+
+The v0.20.50 [LIVE-GATE] BAT was clean but revealed a coverage gap: visible/active/talkable came back "unknown" (-1) on every entry. Cause -- only the JSM-object, line, and gateway paths were wired, and the only object entries in the tested B-Garden fields were positionless Draw Points (no live entity block). The runtime "others" entities (NPCs, students, the Directory) -- the ones that actually carry the +0x160 flag word (HIDE bit3 / USE bit1) and the +0x24B talk byte -- are merged into the catalog at a separate point that had no gate call.
+
+This build adds LiveGateRuntime and calls it at both runtime merge points, so runtime entities now emit [LIVE-GATE] path=runtime lines with real visible/active/talkable. For a runtime entity, entityIdx directly indexes the live others array (it is the entity's own slot), so the slot-alias guard is skipped. Zone-reachability is read straight from the entity's triangleId. Still SEH-guarded and observe-only -- nothing is dropped.
+
+BAT: revisit fields with real NPCs and interactables (bghall_1's Directory + students, a save-point field, the sewer gates) with the catalog open; send ff8_field.log; grep [LIVE-GATE] path=runtime. Now the vis/act/talk columns should read 0/1, and we can finally see whether any entity reads inactive (UNUSE) or hidden, and whether those verdicts match what is really usable.
+
+## v0.20.50
+
+Catalog revamp WS1 Step 1.3: unified live-state gate (observe-only).
+
+The catalog's live-state checks (HIDE visibility, zone-reachability, story-gates, gateway-enable) are scattered across its 7 assembly paths and applied inconsistently -- the same scattering that produced the Balamb Hotel phantom save point and the suppressed magazine. This build introduces the single policy point the revamp is built toward: CatalogEntryIsLiveNow(), which every path now reports through.
+
+OBSERVE-ONLY -- nothing is dropped or relabeled. Each of the 7 paths (camera-transition, setline-exit, trigger-event, interaction, object, mapexit, gateway) fills the live signals it can see and calls the gate, which logs one [LIVE-GATE] line per catalogued entry: visible / active / talkable / line-active / zone-reachable / gateway-enabled, plus the verdict (KEEP or would-DROP + reason) it WOULD reach. The existing per-path filters still own behavior; this records only what a unified gate would decide, so a BAT across the reference fields validates it against the expected-sets before any signal is flipped to enforcing.
+
+New signal wired for the first time: the UNUSE/USE "active" bit. Reverse-engineered from FF8_EN.exe (UNUSE 0x1A clears execution_flags +0x160 bit1; USE 0xE5 sets it; HIDE 0x61 sets bit3; SHOW 0x60 clears it), read live and slot-alias-guarded exactly like the HIDE bit -- the engine's live "others" array tracks only a window, so a slot whose live triangle disagrees with the entity's own SET3 triangle is a different entity and its flags are ignored. All live reads are SEH-guarded; one-switch off via s_liveGate.
+
+NEXT (Step 1.3 enforce): once a BAT confirms the [LIVE-GATE] verdicts match reality per field, flip signals from log-only to enforcing one at a time -- starting with the active bit -- each its own BAT cycle.
+
 ## v0.20.49
 
 Balamb Hotel BAT: fix a phantom second save point and a suppressed magazine pickup -- both from the v0.20.44 curated-name relabel.

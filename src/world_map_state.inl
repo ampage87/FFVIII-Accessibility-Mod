@@ -988,3 +988,110 @@ static inline uint16_t PackSeg(int row, int col)
 }
 static inline int UnpackRow(uint16_t s) { return (s >> 8) & 0xFF; }
 static inline int UnpackCol(uint16_t s) { return  s       & 0xFF; }
+
+// ============================================================================
+// #80: mobile Balamb Garden auto-drive -- forward declarations
+// ============================================================================
+// The Garden subsystem lives in world_garden.inl, which is included AFTER
+// world_map_drive_helpers.inl (it drives the key injector). Three earlier
+// files need to call into it, so their entry points are declared here:
+//   - world_map_segments.inl : LoadTerrainGrid feeds every wmx triangle to the
+//     Garden rasterizer in the same pass it builds the foot grids.
+//   - world_catalog.inl      : BuildDistanceCatalog filters and re-labels the
+//     catalog while the player is piloting the Garden, and injects the
+//     "Mobile Balamb Garden" marker while the player is on foot.
+//   - world_map_announce.inl : appends the not-reachable-by-Garden suffix.
+// A static function may be declared and defined later in the same translation
+// unit, which is what world_map.cpp is.
+static void Garden_BuildBegin();
+static void Garden_FeedPoly(const uint8_t* poly, const int32_t* vwx,
+                            const int32_t* vwy, const int16_t* vwz, int vertCount);
+static void Garden_LogVehPos(uintptr_t addr, const char* tag,
+                             int32_t vx, int32_t vy, int32_t vz);
+static void Garden_BuildEnd();
+static bool Garden_IsAboard();
+static bool Garden_Active();
+static void Garden_Update();
+static void Garden_Toggle();
+static void Garden_Stop(const char* reason);
+static bool Garden_LeavingIsArrival(char* out, size_t n);
+static void Garden_ComputeReach(int32_t px, int32_t py);
+static bool Garden_CellReachable(int32_t gx, int32_t gy);
+// Park table row. Defined here rather than in world_garden.inl because
+// world_catalog.inl and world_map_announce.inl -- both included earlier --
+// read its fields.
+//   park_x/park_y : the cell nearest the destination that is simultaneously
+//                   Garden-traversable, Garden-parkable (engine bit 0x02) and
+//                   on the destination's own foot landmass.
+//   walk_units    : straight-line distance from that cell to the destination
+//                   marker, announced so the player knows the walk ahead.
+//   reachable     : false means no such cell exists anywhere on that landmass.
+struct GardenPark {
+    const char* name;
+    int32_t     park_x;
+    int32_t     park_y;
+    int32_t     walk_units;
+    bool        reachable;
+    // v0.20.59: Fisherman's Horizon is not a park-and-walk destination -- you
+    // DOCK there, and driving the hull into FH is what triggers the docking.
+    // For a drive_in destination park_x/park_y is the approach point, arrival
+    // is the world map handing off to a field, and there is no walk to
+    // announce. Aaron supplied the mechanism; it is not derivable from the
+    // trigger table, whose only Garden clause (program 20, locID 0x0172) is a
+    // different destination entirely (field 370 is Lunatic Pandora).
+    bool        drive_in;
+    // v0.20.60: WHERE to press for a drive_in destination. The location marker
+    // is no use for this: FH's marker (48790,-1788) sits 2.6 km inside ground
+    // the Garden mask never permits, so no amount of pressing at it can reach
+    // it -- the nearest Garden-navigable water to that marker, anywhere on the
+    // compass, is 2560 units away. An adjacency scan of every Garden-water cell
+    // within 7.7 km of the marker finds exactly ONE place where Garden water
+    // touches FH's landmass with no wall cell between them: a ~450-unit gap at
+    // x ~ 45700, z ~ +320..+770. Every other cell of that coast is terrain 29,
+    // the Esthar mountain wall Aaron described. That gap is NORTH of the
+    // transcontinental railroad, whose bridge (terrain 27) severs the water in
+    // a solid 512-unit band at z ~ -1536..-1920 -- and the v0.20.59 approach
+    // sat at z = -3392, on the far side of the track, which is exactly the
+    // failure Aaron reported. Zero here means "aim at the location marker".
+    int32_t     dock_x;
+    int32_t     dock_y;
+    // v0.20.88: THIS BERTH IS REACHED BY DRIVING UP A BEACH THE MODEL CANNOT SEE.
+    //
+    // Aaron, on Shumi Village: "You go up the beach like any other. Let's have
+    // the build try to drive up the beach and get as close as possible to the
+    // Shumi Village. If it runs into walls or something like that so be it, but
+    // we can at least use that data to survey the area around the village."
+    //
+    // The beach is in the data -- 53 terrain-9 polygons with b15=0xF7, the only
+    // Garden-masked ground on the island's 7,034 foot cells -- but between it
+    // and the water sits a skirt of terrain-29 polygons carrying NO masks at
+    // all, so the model reads a 295-unit step against a 200 gate and refuses.
+    // The engine does not. Rather than loosen the beach rule map-wide on a
+    // guess (that rule is what fixed Balamb island in .84 and it is measured),
+    // a beach_climb berth is allowed to be entered from adjacent water for its
+    // OWN goal cell only. If the engine refuses after all, the drive fails at a
+    // known coordinate with the trace running, which is the survey Aaron asked
+    // for.
+    bool        beach_climb;
+};
+static const GardenPark* Garden_ParkFor(const char* name);
+// v0.20.89: ask about a BERTH, not a coordinate. A beach_climb berth is only
+// reachable with its own exception in force, and v0.20.88 armed that exception
+// in Garden_StartDrive alone -- so the CATALOG, which is built long before any
+// drive starts, tested Shumi Village without it and hid the destination it had
+// just been given. Every reachability question about a berth goes through here.
+static bool Garden_BerthReachable(const GardenPark* gp);
+
+
+// v0.19 #80: the savemap's per-vehicle position mirrors are 12-byte records of
+// int32 X, int32 Y, int16 Z, int16 rotation -- NOT six int16s. Proven from a
+// live [VEHDUMP]: car_pos read as words (-6076,-2,-14815,-1,-340,1966); read
+// as int32 pairs that is X = 0xFFFEE844 = -71100, Y = -14815, i.e. the
+// Galbadia Missile Base coast, which is where the car actually was. Read as
+// int16 the X came out as -6076, an open-ocean coordinate 65 km away.
+// The old int16 reader is correct only while |X| < 32768, which is why it
+// survived every BAT so far (all of them on the Balamb continent).
+static const uint32_t WMS_VEHPOS_X_OFF   = 0;    // int32
+static const uint32_t WMS_VEHPOS_Y_OFF   = 4;    // int32
+static const uint32_t WMS_VEHPOS_Z_OFF   = 8;    // int16
+static const uint32_t WMS_VEHPOS_ROT_OFF = 10;   // int16

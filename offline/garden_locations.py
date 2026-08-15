@@ -1,0 +1,13 @@
+LOC=[("Balamb Garden",24576,-29406),("Balamb Town",13249,-26779),("Dollet",-15639,-39437),
+("Timber",-22564,-4867),("Galbadia Garden",-37471,-25062),("Galbadia Station",-38394,-24803),
+("Deling City",-61806,-28649),("Tomb of the Unknown King",-42471,-36562),("D-District Prison",-55306,-4841),
+("Galbadia Missile Base",-71695,-15591),("Fisherman's Horizon",48811,-1653),("Trabia Garden",48893,-57979),
+("Edea's House",-23150,62853),("White SeeD Ship",4887,51285),("Great Salt Lake",49888,-2683),
+("Esthar City",57011,-2295),("Lunatic Pandora Lab",79521,-9135),("Lunar Gate",88021,7865),
+("Sorceress Memorial",81521,11865),("Shumi Village",10362,-76967),("Winhill",-50285,6320),
+("Centra Ruins",6887,55285),("Deep Sea Research Center",-119138,86000),("Cactuar Island",54806,62040),
+("Tears' Point",83021,31865),("Island Closest to Hell",-105137,-3802),("Island Closest to Heaven",102251,-53082),
+("Chocobo Forest 1",11332,-63659),("Chocobo Forest 2",10927,-81010),("Chocobo Forest 3",51893,-3959),
+("Chocobo Forest 4",97253,-48250),("Chocobo Forest 5",17383,22013),("Chocobo Forest 6",44504,76259),
+("Chocobo Forest 7",-20953,68906),("Alien Ship 1",79823,-61212),("Alien Ship 2",40495,54649),
+("Alien Ship 3",-12952,-10202),("Alien Ship 4",-48806,5808),("Fire Cavern",30326,-29221)]

@@ -152,6 +152,13 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
         Log::Field("FieldNavigation: [fieldload] id=%u name='%s' entities=%u",
                    (unsigned)fieldId, fieldName, (unsigned)entCount);
 
+        // #minigame-bgbtl: install the REQ hook ONLY while the Garden-battle
+        // mini-game is loaded, and drop it on any other field. REQ is far
+        // hotter than SET3, which field_nav_mapjump_diag.inl records as
+        // hanging the infirmary cutscene when hooked -- so it never stays
+        // installed a moment longer than the one field that needs it.
+        GardenBattle::OnFieldLoaded(fieldId);
+
         // v0.18.3.281 (#85): field-gated re-arm of EXTSCAN. Permanently
         // disabled since v0.18.3.234 ("done -- train staff found" on ggsta1),
         // but glwater1's sewer gates (sakua/sakub/seigyo) are suspected to sit

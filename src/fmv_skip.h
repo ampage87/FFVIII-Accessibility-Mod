@@ -32,6 +32,13 @@ namespace FmvSkip
     // (based on AVI file handle tracking).
     bool IsMoviePlaying();
 
+    // v0.20.117 (#minigame-bgbtl): skip the current FMV from code, on the same
+    // path Backspace uses. The Garden-battle skip needs this because the fight's
+    // opening phase is gated on the battle FMV finishing -- the field's own
+    // clock is frozen at 140 for its whole duration, so there is nothing else to
+    // shorten. Returns false if no movie is playing.
+    bool RequestSkip();
+
     // Returns the lowercase basename of the current AVI file being played.
     // Empty string if no AVI is active.
     // Used by FmvAudioDesc to match AVI files to VTT tracks.

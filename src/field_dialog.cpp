@@ -168,6 +168,13 @@ namespace ChaseDiag       { void OnAskOpcodeFired(const char* opcodeLabel); }
 // the Manual/Freeze/Skip picker when it sees the tiyane1 trigger line.
 namespace TrainModeAskOverlay { void OnDialogText(const char* text); }
 
+// v0.20.104 (#minigame-bgbtl): the Garden-battle mini-game starts ~15 s BEFORE
+// its field loads -- it plays over the FMV while the engine still reports the
+// previous field. The one signal that arrives at the right moment is the game's
+// OWN on-screen legend ("Punch / Block / Kick"), which lands in this hook. Same
+// pattern as the two overlays above: cheap strstr inside, near-no-op elsewhere.
+namespace FieldNavigation { void GardenBattleOnDialogText(const char* text); }
+
 // v0.15.6.1 Phase 2b: dialog_inject.cpp's text override coordination.
 // When IsOverrideActive() returns true, our Hook_opcode_ask patches
 // slot[GetOverrideSlot()]+0x08 (text_data1) with GetOverrideText() AFTER

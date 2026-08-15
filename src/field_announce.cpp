@@ -258,6 +258,33 @@ void Update()
         return;
     }
 
+    // v0.20.124 (Aaron): SOME SCREENS ARE NOT PLACES. The Garden-battle Game
+    // Over screen -- field 95, 'testbl6' -- is a menu offering "Try again" and
+    // "Try again with HP+200", and announcing a field name over it reads as a
+    // location the player has arrived at rather than the choice they have to
+    // make. Aaron: "The game over screen ... has a field name that is a bit
+    // awkward. Let's suppress the field name on that particular screen."
+    //
+    // v0.20.128: AND FIELD 152 IS A FIGHT, NOT A PLACE -- and it has no display
+    // name at all, so the 2026-08-15 log has the mod reading the raw archive
+    // filename out loud, twice: `announced fieldId=0x0098 name='bgbtl_1'`, once
+    // per attempt, in the two seconds before the Game Controls briefing opens.
+    // "bgbtl_1" tells the player nothing and the briefing that follows tells
+    // them everything, so the name is dropped rather than invented.
+    //
+    // A list rather than a blanked table entry, so FIELD_DISPLAY_NAMES stays a
+    // pure id-to-name map and the reason for each omission is written down.
+    static const uint16_t NO_NAME_FIELDS[] = {
+        0x005F,   // 95   testbl6 -- the Garden-battle Game Over menu
+        0x0098,   // 152  bgbtl_1 -- the Garden-battle fight itself
+    };
+    for (size_t i = 0; i < sizeof(NO_NAME_FIELDS) / sizeof(NO_NAME_FIELDS[0]); i++) {
+        if (curId != NO_NAME_FIELDS[i]) continue;
+        Log::Mod("FieldAnnounce: fieldId=0x%04X suppressed -- it is a menu or a "
+                 "cutscene, not a place", (unsigned)curId);
+        return;
+    }
+
     const char* name = FIELD_DISPLAY_NAMES[curId];
     if (!name || !*name) return;
 

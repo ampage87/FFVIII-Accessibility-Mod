@@ -142,10 +142,12 @@ static void GetWorldMapPosition_Active(int32_t* x, int32_t* y, int32_t* z)
     else                            return;   // foot/Chocobo/Ship use foot DWORDs
 
     __try {
-        const int16_t* arr = (const int16_t*)addr;
-        int32_t vx = (int32_t)arr[0] * WM_SAVEMAP_TO_DWORD_SCALE;
-        int32_t vz = (int32_t)arr[1] * WM_SAVEMAP_TO_DWORD_SCALE;   // savemap [1] = Z (altitude)
-        int32_t vy = (int32_t)arr[2] * WM_SAVEMAP_TO_DWORD_SCALE;   // savemap [2] = Y (north-south)
+        // #80: the mirror is int32 X, int32 Y, int16 Z, int16 rotation -- NOT
+        // six int16s (proof at WMS_VEHPOS_*_OFF in world_map_state.inl).
+        int32_t vx = *(const int32_t*)(addr + WMS_VEHPOS_X_OFF);
+        int32_t vy = *(const int32_t*)(addr + WMS_VEHPOS_Y_OFF);
+        int32_t vz = (int32_t)*(const int16_t*)(addr + WMS_VEHPOS_Z_OFF);
+        Garden_LogVehPos(addr, tag, vx, vy, vz);
         // v0.16.0.1: only overwrite foot DWORDs when the vehicle pos looks
         // valid. (0,0) is a sentinel for "vehicle not owned / savemap not
         // maintained" -- the BAT failure mode where the WM-ENTRY-DEBOUNCE
@@ -688,6 +690,7 @@ static bool LoadTerrainGrid()
 #if NAVMESH_DIAG
     Navmesh_Reset();   // v0.18.3.104: accumulate non-ocean triangles for the true navmesh
 #endif
+    Garden_BuildBegin();   // #80: allocate + clear the Garden traversability grid
 
     for (int seg = 0; seg < WMX_PLAYABLE_SEGS; seg++) {
         int row = seg / WMX_SEG_COLS;
@@ -747,6 +750,10 @@ static bool LoadTerrainGrid()
                 const uint8_t* poly = blockBase + WMX_BLOCK_HDR_SIZE + p * WMX_POLY_SIZE;
                 uint8_t terrain = poly[WMX_TERRAIN_OFFSET];
                 terrainHist[terrain]++;   // #67 v0.18.3.84: terrain-type tally
+
+                // #80: every polygon, ocean included -- see world_garden.inl.
+                if (vertsOk) Garden_FeedPoly(poly, vwx, vwy, vwz, vertCount);
+
                 bool isOcean = (terrain >= 32 && terrain <= 34);
                 if (isOcean) {
                     segOceanCount++;
@@ -1096,6 +1103,8 @@ static bool LoadTerrainGrid()
     s_rtWalkDumpPending = true;
     Log::World("WorldMap: [RTWALK] dump deferred -- will fire on first Poll() tick with polyCount > 0");
 #endif
+
+    Garden_BuildEnd();     // #80: finalize the Garden grid + clearance field
 
     free(wmxData);
     s_terrainLoaded = true;

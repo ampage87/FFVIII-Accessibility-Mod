@@ -24,6 +24,12 @@
 // SEH note: plain data types only in this function (no C++ unwinding).
 static void PollBattlePauseResume()
 {
+    // v0.20.106 (#minigame-bgbtl): the Garden-battle briefing patches a RET
+    // over field_main to pause the game. GardenBattle::Update() -- which owns
+    // the un-pause -- sits behind Update()'s on-field early-returns, so the
+    // watchdog is called from HERE, above them. No-op unless frozen.
+    GardenBattle::FreezeWatchdog();
+
     // Live battle mode value is 3 (see chase_detector.cpp MODE_BATTLE_VAL and
     // the 2026-07-12 log edges "game-mode 0x0001 -> 0x0003").
     static const uint16_t MODE_BATTLE_LIVE = 3;

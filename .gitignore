@@ -13,6 +13,15 @@ FFNx-Steam-v1.23.0.182/
 # Game files copied from Steam install (copyrighted game data)
 Game Files/
 
+# v0.20.128: offline scratch for the Garden-battle mini-game. Everything in
+# here is DERIVED FROM THE GAME -- the extracted bgbtl_1/bg2f_31 field archives
+# (.lzs, .fs, .jsm, .sym, chara.one) and disassembled FF8_EN.exe handler
+# listings -- so none of it is ours to redistribute. The tooling that reads it
+# (jsm2.py, sim.py) is reproducible from the notes in DEVNOTES.md and the
+# project's GARDEN_BATTLE_MINIGAME_FINDINGS.md; `git add -A` would otherwise
+# stage ~718 KB of copyrighted field data.
+minigame/
+
 # Built mod DLL (users should build from source or download from Releases)
 dinput8.dll
 

@@ -790,3 +790,64 @@ BAT of v0.20.48 (draw points all working) surfaced two Balamb Hotel regressions.
 **Regression timing confirms it:** the 'Irvine'/'Save Point' adoption IS v0.20.44. Before v0.20.44 this pass went straight to the isItemPickup check, so the magazine read "Item" and no NPC-on-the-save-triangle became a save point.
 
 **Fix (field_catalog.inl ~3556):** gate the whole loop on `isItemPickup` -- only an item-pickup JSM entity may claim a generic runtime NPC. A non-pickup entity can no longer hijack it. Curated-name adoption is kept ONLY for a pickup that is itself a curated non-item (the ladder). Net: hotel shows ONE save point + the magazine as "Item"; ladder ("Ladder") and the working bccent_1 item ("Item 1") unchanged. Save points themselves were never broken -- no save-system deep dive was needed; the relabel over-reached.
+
+---
+
+## Step 1.2 RE — the execution_flags (+0x160) bits (verified from FF8_EN.exe handlers)
+
+Field opcode dispatch table 0x00B8DE94. Handlers disassembled:
+- HIDE  (0x61) @0x0051EB40: `[ent+0x160] |= 0x08`  -> bit 3 set = HIDDEN
+- SHOW  (0x60) @0x0051EAD0: `[ent+0x160] &= ~0x08` -> bit 3 clear = VISIBLE
+- UNUSE (0x1A) @0x0051DD80: `[ent+0x160] &= ~0x02` -> bit 1 clear = DEACTIVATED
+- USE   (0xE5) @0x0051DD60: `[ent+0x160] |= 0x02`  -> bit 1 set = ACTIVE
+
+So the single flag word at +0x160 encodes BOTH unread signals:
+- **Visible  = (execFlags & 0x08) == 0**  (HIDE bit; already filtered on the object path since v0.20.36)
+- **Active   = (execFlags & 0x02) != 0**  (USE/UNUSE bit; NOT yet read live -- the Step 1.2 gap)
+
+CAUTION for the observe-only pass: whether bit 1 is SET on entities at field init (so bit1==0 reliably means "explicitly UNUSE'd" rather than "never USE'd") must be confirmed by BAT before this becomes a DROP signal. That is exactly what the log-only [LIVE-GATE] verdict is for.
+
+---
+
+## v0.20.50 — WS1 Step 1.3: unified live-state gate (OBSERVE-ONLY, shipped)
+
+The structural core of the revamp: one policy point, `CatalogEntryIsLiveNow(path, e, signals)`, that all 7 catalog assembly paths report through, replacing the scattered per-path live-state logic with a single decision (long-term). This build is LOG-ONLY -- it changes no behavior; it emits a `[LIVE-GATE]` line per catalogued entry so a BAT validates the gate's verdicts against the expected-sets before Step 1.3 flips any signal to enforcing.
+
+**The 7 paths + what each fills** (field_catalog.inl ~1264 core; call sites at the 7 CatAudit sites):
+- camera-transition / setline-exit / trigger-event / interaction (line-backed, `-200-t`): `LiveGateLine` -> lineActive (s_capturedLines[t].active) + zoneReachable (ZoneReachableLine).
+- object (JSM `-300-j`): `LiveGateObject` -> visible/active/talkable from the live "others" block via `ReadLiveEntityFlags` (SEH + slot-alias guard) + zone. This is the rich path where UNUSE matters.
+- mapexit (`-300-j`) / gateway (`-400-d`): `LiveGatePos` -> zone (gateways exit-exempt).
+
+**Signal semantics** (execution_flags +0x160, exe-verified): visible = (fl&0x08)==0 (HIDE bit3), active = (fl&0x02)!=0 (USE/UNUSE bit1). talkable = 0x24B!=0. Tri-state -1 = unknown/not-applicable.
+
+**Verdict policy** (errs toward KEEP; DROP only on a confident 0): hidden -> inactive -> line-off -> gateway-disabled -> zone-unreachable. Reason logged.
+
+**BAT (validation, not a behavior test):** visit the reference fields -- glwater3 (sewer bloat), bghall_1 (Directory must stay), glfurin1 (mansion), a save/draw field, bchtr_1 (hotel, just fixed) -- open the catalog on each, send ff8_field.log, grep `[LIVE-GATE]`. Check: (1) does any entry get `would-DROP` that is actually REAL to the player (an over-drop the enforce step must avoid)? (2) do the `inactive (UNUSE bit)` verdicts land only on things a sighted player can't use? (3) on runtime objects, are vis/act/talk actually reading (not all -1)? Findings feed the enforce order.
+
+**NEXT:** flip signals log-only -> enforcing one at a time (active bit first), each its own BAT, validated vs expected-sets. Then Step 1.4 (co-located dedup).
+
+---
+
+## v0.20.51 / v0.20.52 BAT — the observe-only gate's verdict (important, reshapes Step 1.3 enforce)
+
+v0.20.51 wired the runtime-entity path; the BAT (bg2f_1/2, bghall_1/4, bgroom_1) finally exercised the entity-level signals. Findings:
+
+1. **Signals read.** Every runtime NPC logged vis=1 act=1 talk=0/1 -- real values, no more -1. The gate's live reads work.
+2. **Uniform zone-reachability OVER-DROPS.** The only would-DROP verdicts were "zone-unreachable", and they hit a talkable NPC (talk=1), an exit, and a camera transition -- all reachable-to-USE across a camera-zone boundary. Enforcing zone uniformly would strand the player. => zone is POSITIONAL, stays per-path (with its existing exemptions); removed from the gate's drop policy in v0.20.52 (logged for context only).
+3. **visible is already enforced upstream.** The entity scan (v0.18.3.269) and the object-path HIDE filter (v0.20.36) drop hidden entities BEFORE the catalog, so the gate sees vis=1 everywhere. The visible signal is not new value.
+4. **active/UNUSE is the only genuinely NEW signal -- and it is rare.** No tested field contained a deactivated entity (act=1 throughout), so the gate's new junk-catching never fired.
+
+**Conclusion.** The unified gate is built, reads correctly, and is architecturally right (one place for entity live-state). But its *incremental* junk-catching is small: visible is handled, active is rare, zone can't be uniform. Its real payoff is architectural (add future live signals once, not per-path) rather than a pile of new drops. The higher-bloat targets remain Step 1.4 (co-located dedup -- duplicate representations, e.g. the hotel's line+object+controller for one thing) and the known inflation bugs (#97 event lines typed ENT_OBJECT, #98 director-controller leak). Gate enforcement of the active bit waits for a field that actually surfaces a UNUSE'd entity to validate against.
+
+---
+
+## v0.20.53 — WS1 Step 1.4: co-located dedup groundwork (OBSERVE-ONLY, shipped)
+
+Aaron chose Step 1.4 (co-located dedup) as the next revamp move after the live-state gate hit its ceiling. Existing state: DedupeCatalog handles exactly ONE cross-type overlap (a JSM object coincident with an interaction line, within 128u, keeping the more informative). The plan's real target is broader -- one physical thing surfaced as line + object + controller (mansion glass), or line + object (hotel save point), or runtime + object.
+
+This build is groundwork, observe-only:
+- `CatalogEntryPos(e, &x, &y)` -- uniform position for ANY entry regardless of source path: runtime via GetEntityPos; trigger line via endpoint midpoint; JSM via SET3 posX/Y; gateway via s_dedupGateways[].center (keyed by gatewayIdx, since the -300 JSM and -400 gateway sentinel ranges collide at slot 100).
+- `CoLoRank(e)` -- interactability rank (Save/Draw/Shop/Card 5 > Exit 4 > Object 3 > Interaction/NPC 2 > other 1) = which representation to KEEP.
+- `[CO-LOCATED]` pass at the END of DedupeCatalog (after the existing pairwise dedup + entity dedup): logs every surviving pair within 160u + the tentative keep. Nothing removed.
+
+**BAT:** visit fields with suspected duplicates (Caraway's Mansion glass/statue, Balamb Hotel, a B-Garden hall), open the catalog, grep `[CO-LOCATED]`. Each logged pair is a duplicate the current dedup misses. The BAT sorts them into: genuinely-one-thing (collapse in the real Step 1.4) vs distinct-but-close (leave). Those categories become the collapse rules -- likely type-pair based (line+object+controller = one; NPC+exit = two), NOT pure proximity.

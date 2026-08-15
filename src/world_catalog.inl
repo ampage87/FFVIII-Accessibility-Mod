@@ -48,7 +48,16 @@ static const LocationEntry s_locations[] = {
     {"Tomb of the Unknown King",  -42471,  -36562},
     {"D-District Prison",         -55306,   -4841},
     {"Galbadia Missile Base",     -71695,  -15591},
-    {"Fisherman's Horizon",        48811,   -1653},
+    // v0.20.65: (48811,-1653) was WRONG BY 30 KM -- it is a stretch of the
+    // Esthar west coast, terrain 7, not Garden-navigable and carrying no
+    // disembark bit, which is why four builds of dock-hunting found nothing
+    // there to dock with. Aaron drove the Garden into FH by hand and the log
+    // gives the answer outright: world map exited at (18895,-2122) into field
+    // 'fhdeck2'. That is 1644 units from wmsetus location record 13,
+    // (20480,-2560) -- a platform in open ocean, terrain 28, Garden-navigable,
+    // with 122 Garden-disembark cells clustered around it. FH is a normal
+    // drive-to destination and always was.
+    {"Fisherman's Horizon",        20480,   -2560},
     {"Trabia Garden",              48893,  -57979},
     {"Edea's House",              -23150,   62853},
     {"White SeeD Ship",             4887,   51285},
@@ -57,7 +66,80 @@ static const LocationEntry s_locations[] = {
     {"Lunatic Pandora Lab",        79521,   -9135},
     {"Lunar Gate",                 88021,    7865},
     {"Sorceress Memorial",         81521,   11865},
-    {"Shumi Village",              10362,  -76967},
+    // v0.20.97: THE COORDINATE WAS WRONG. It was 7,248 units north-west of the
+    // village, on a different foot landmass, and that is the whole six-build
+    // story.
+    //
+    // Found by identifying the world map's own settlement marker. Every wmx
+    // polygon carries a texture page in byte 14, and every named place on the
+    // world map sits on a patch of page 8 with the location's wmsetus record
+    // 600-1,300 units OUTSIDE it (Balamb Town 1,102, Timber 993, Deling City
+    // 1,280, Winhill 809, Dollet 1,072, Trabia Garden 1,221 -- the arrival point
+    // is deliberately outside the entry trigger so you don't re-enter on exit).
+    //
+    // Winter Island has exactly TWO page-8 patches:
+    //     32 cells, terrain 1, centred (10752,-80384)  -- Chocobo Forest 2
+    //     71 cells, terrain 29, centred (12274,-83958) -- SHUMI VILLAGE
+    //
+    // 32 cells of page 8 is the Chocobo Forest signature; there are seven such
+    // patches map-wide. The 71-cell patch is town-sized (Balamb Town 135,
+    // Trabia Garden 184, Winhill 68) and is the only other structure on the
+    // island. wmsetus record 20 (13000,-83977) -- the point Aaron walked to and
+    // stood on for fifty seconds with nothing loading -- is 725 units due EAST
+    // of it, exactly the arrival-point offset every other town shows. He was
+    // standing just outside the door.
+    //
+    // The old coordinate's foot landmass is 7,034 cells with no Garden landing
+    // anywhere on it. The village's is 6,216 cells and is the one the Garden
+    // already parks on for Chocobo Forest 2.
+    // v0.20.98: THE MARKER IS THE DOOR, NOT THE BUILDING.
+    //
+    // The .97 BAT landed the Garden correctly and then the foot drive wedged
+    // 778 units short, at (11962,-83245), on the dome's SOUTH-WEST face, and the
+    // un-wedge bursts walked it back out to 2,478 and eventually into the
+    // Chocobo Forest. The height map says why: the dome sits on a platform whose
+    // rim clears the engine's 200-unit step gate on every side BUT ONE. Flood
+    // the foot mask from the Garden's own step-off at (12952,-81477) with that
+    // gate and exactly five cells of the structure come back reachable --
+    //
+    //   (12736,-83776) (12736,-83904) (12736,-83968) (12736,-84032) (12736,-84288)
+    //
+    // -- one 640-unit strip on the EAST face, all at height -878 on flat snow.
+    // That is the apron in front of the entrance, and wmsetus record 20,
+    // (13000,-83977), sits 264 units due east of its middle: you step out of
+    // Shumi, cross the apron, and you are on the world map.
+    //
+    // So the destination is (12736,-83968) -- the middle of that strip, directly
+    // west of the arrival record. The old marker was the centre of the building
+    // footprint, which is not walkable at all, so the planner snapped to
+    // whatever was nearest and sent the player at the back wall.
+    {"Shumi Village",              12736,  -83968},
+    // v0.20.100: MOBILE GALBADIA GARDEN, and it exists for a WINDOW.
+    //
+    // Aaron: "That trigger is where Mobile Galbadia Garden is located on the
+    // World Map, so that is how it should be identified in the catalog. Also,
+    // once the battle of the Gardens is over, Galbadia Garden disappears from
+    // the world map forever."
+    //
+    // Pinned from the v0.20.99 BAT, where auto-drive to Edea's House crossed it:
+    //
+    //   [DRIVE] Manual field entry at (-24982,65761) -- nearest location
+    //           Edea's House is 3437u away (> 3000), not capturing
+    //   [fieldload] id=253 name='bgsido_4'
+    //   FieldAnnounce: name='B-Garden - Headmaster's Office 5'
+    //
+    // Driving onto it loads field 253, so arrival needs no special handling --
+    // the drive already ends when a field loads. It is a drive_in destination:
+    // the hull goes to the coordinate itself, and 16 gexec3 routes from four
+    // starts arrive with zero replans.
+    //
+    // No map archaeology could have found this. The spot is terrain 7, texture
+    // page 128, with nothing but more of the same for 1,000 units in every
+    // direction, and the nearest page-8 settlement patch is 5,249 units away.
+    // The page-8 method finds places the map DRAWS; a scripted event zone is a
+    // pure coordinate test with no geometry behind it. The candidate offered
+    // before that BAT, (-29632,70108), was 6,365 units wrong.
+    {"Mobile Galbadia Garden",    -24982,   65761},
     {"Winhill",                   -50285,    6320},
     {"Centra Ruins",                6887,   55285},
     {"Deep Sea Research Center", -119138,   86000},
@@ -113,6 +195,143 @@ static int FindLocationIndexByTargetCoords(int32_t tx, int32_t ty)
 // below calls it from there. Extracted for the #67/#65 host harness.
 
 // ============================================================================
+// v0.20.99: DESTINATIONS THE STORY HAS RETIRED
+// ============================================================================
+// Aaron: "The original location for Balamb Garden on the Balamb continent is no
+// longer accessible since Garden is now mobile. This entry shouldn't be in the
+// catalog anymore at this point in the game." Same for Galbadia Garden, which
+// the Sorceress takes and which is simply gone from the world map until it
+// reappears near Edea's House.
+//
+// THE SIGNAL IS ALREADY IN HAND AND IS NOW PROVEN ACROSS A WHOLE PLAYTHROUGH.
+// `bgu_pos` -- WORLDMAP struct +0x24, the same read that builds the "Mobile
+// Balamb Garden" entry below -- is ZERO while the Garden is parked and live
+// from the moment it moves. Read out of Aaron's own 39 save files, decompressed
+// offline (an .ff8 is a 4-byte length + LZS -> 8,192 bytes, savemap at +0x184):
+//
+//   slot1_save01 .. slot2_save27   bgu = (0,0)          <- 37 saves, all empty
+//   slot2_save28, slot2_save29     bgu = (20271,-24355) <- mobile
+//
+// (20271,-24355) is the same coordinate the offline berth generator has used as
+// GARDEN_START since v0.20.84, which is a second independent confirmation.
+//
+// Galbadia Garden rides the same signal, on Aaron's testimony: "G-Garden is
+// already mobile by the time B-Garden becomes mobile." So there is no window
+// where the Garden is mobile and the Galbadia site is still occupied, and no
+// separate story flag is needed to retire it.
+//
+// NOT the mobile Galbadia Garden's position: the same 39-save sweep shows the
+// four unexamined WORLDMAP slots (+0x0C, +0x3C, +0x48, +0x54) are empty in
+// EVERY save of the playthrough, so Galbadia Garden has no position record
+// there. When it reappears near Edea's House it will need a coordinate of its
+// own and a flag of its own -- see WORLDMAP_CATALOG_OPEN_ITEMS.
+static bool WmGardenIsMobile()
+{
+    int32_t bx = 0, by = 0;
+    if (!WmSafeReadBytes(WM_BGU_POS_ADDR + WMS_VEHPOS_X_OFF, &bx, 4)) return false;
+    if (!WmSafeReadBytes(WM_BGU_POS_ADDR + WMS_VEHPOS_Y_OFF, &by, 4)) return false;
+    return (bx != 0 || by != 0) &&
+           bx > -131072 && bx < 131072 && by > -98304 && by < 98304;
+}
+
+// v0.20.100: MOBILE GALBADIA GARDEN HAS A WINDOW, NOT AN APPEARANCE.
+//
+//   before it appears near Edea's House  ->  not in the catalog
+//   present near Edea's House            ->  the destination
+//   after the battle of the Gardens      ->  GONE FOREVER
+//
+// Aaron gave the closing edge outright: "by the time the battle of the Gardens
+// is over, you are on disc 3. You can use that as a signal to know when
+// Galbadia Garden is 100% gone from the world map." The savemap header carries
+// the disc at +0x44 as a 0-indexed uint32 -- disc 1 reads 0, and the 41-save
+// sweep shows the disc-2 transition at slot2_save11.
+//
+// The OPENING edge is a savemap byte, narrowed but NOT YET CONFIRMED. The
+// filter: bytes identical in all 40 saves before slot2_save30 and changed in
+// slot2_save30 -- the one save where Galbadia Garden is present, every earlier
+// one being either "still at its original site" or "vanished". That took an
+// 84-byte raw diff down to three fields:
+//
+//     savemap+0x0B94..0x0B95   0000 -> 01b7      an append-only list of uint16s
+//     savemap+0x0E8D           00   -> 02        ISOLATED byte, static neighbours
+//     savemap+0x0FDC           00   -> 03        inside a region that churns
+//
+// +0x0E8D is the one that behaves like a state enum: a single byte that is zero
+// for 100,000 seconds of play and steps to 2 exactly when the Garden appears,
+// with its neighbourhood unchanged throughout. The other two sit in regions that
+// are already moving for other reasons.
+//
+// SO THIS SHIPS AS A CANDIDATE, AND THE DISC RULE MAKES THE FAILURE MODE SAFE:
+// if +0x0E8D is the wrong byte the destination can only appear at the wrong time
+// WITHIN disc 2, never after. All three candidates are logged every catalog
+// build so the next BAT either confirms it or names the right one.
+static const uint32_t WMS_DISC_OFF     = 0x0044;   // uint32, 0-indexed
+static const uint32_t WMS_GGSTATE_OFF  = 0x0E8D;   // candidate: Galbadia Garden world-map state
+static const uint32_t WMS_GGALT1_OFF   = 0x0B94;   // logged for the record
+static const uint32_t WMS_GGALT2_OFF   = 0x0FDC;   // logged for the record
+
+static int WmCurrentDisc()
+{
+    uint32_t d = 0;
+    if (!WmSafeReadBytes(WM_SAVEMAP_BASE + WMS_DISC_OFF, &d, 4)) return 0;
+    return (d <= 3u) ? (int)d + 1 : 0;             // 0 = unreadable/implausible
+}
+
+static bool WmGalbadiaGardenPresent()
+{
+    const int disc = WmCurrentDisc();
+    if (disc >= 3) return false;                   // Aaron: gone forever by disc 3
+    uint8_t st = 0;
+    if (!WmSafeReadBytes(WM_SAVEMAP_BASE + WMS_GGSTATE_OFF, &st, 1)) return false;
+    return st != 0;
+}
+
+// v0.20.101: THE WHITE SEED SHIP HAS A WINDOW TOO, AND BOTH ITS EDGES ARE
+// ALREADY-VALIDATED SIGNALS.
+//
+// Aaron: "the White SeeD Ship -- it only becomes available on Disc 3 and
+// disappears from the World Map when the player receives the Ragnarok."
+//
+//   opening edge: disc >= 3               -- the same header field, +0x44
+//   closing edge: ragnarok_pos goes live  -- WORLDMAP struct +0x18
+//
+// The closing edge needs no new discovery. `ragnarok_pos` is the exact analogue
+// of `bgu_pos`, whose "zero while parked, live from the moment you have it"
+// behaviour is proven across all 41 of Aaron's saves. Ragnarok is +0x18 and is
+// empty in every one of them, which is correct -- it is a disc-3 vehicle he does
+// not have yet. When he receives it, that slot fills, exactly as the Garden's
+// did at slot2_save28.
+//
+// So unlike Galbadia Garden, NEITHER EDGE HERE IS A GUESS.
+static bool WmHaveRagnarok()
+{
+    int32_t rx = 0, ry = 0;
+    if (!WmSafeReadBytes(WM_RAGNAROK_POS_ADDR + WMS_VEHPOS_X_OFF, &rx, 4)) return false;
+    if (!WmSafeReadBytes(WM_RAGNAROK_POS_ADDR + WMS_VEHPOS_Y_OFF, &ry, 4)) return false;
+    return (rx != 0 || ry != 0) &&
+           rx > -131072 && rx < 131072 && ry > -98304 && ry < 98304;
+}
+
+static bool WmWhiteSeedShipPresent()
+{
+    if (WmCurrentDisc() < 3) return false;         // not available before disc 3
+    return !WmHaveRagnarok();                      // gone once you have the Ragnarok
+}
+
+// One predicate, asked in every place the catalog is assembled. The v0.20.88
+// lesson: a condition armed in one place and asked about in three silently
+// loses a destination -- so this is the only test, and every builder calls it.
+static bool WmStoryRetired(const char* name)
+{
+    if (!name) return false;
+    if (strcmp(name, "Mobile Galbadia Garden") == 0) return !WmGalbadiaGardenPresent();
+    if (strcmp(name, "White SeeD Ship") == 0)        return !WmWhiteSeedShipPresent();
+    if (strcmp(name, "Balamb Garden") != 0 &&
+        strcmp(name, "Galbadia Garden") != 0) return false;
+    return WmGardenIsMobile();
+}
+
+// ============================================================================
 // Catalog management
 // ============================================================================
 static void BuildDistanceCatalog()
@@ -155,8 +374,40 @@ static void BuildDistanceCatalog()
         }
     }
 
+    // v0.20.99: drop the destinations the story has retired BEFORE any filter
+    // runs, so every branch below counts the same list. nLive replaces
+    // LOCATION_COUNT from here down.
+    int nLive = 0;
+    {
+        int retired = 0;
+        for (int i = 0; i < LOCATION_COUNT; i++) {
+            if (WmStoryRetired(s_catalog[i].name)) { retired++; continue; }
+            if (nLive != i) s_catalog[nLive] = s_catalog[i];
+            nLive++;
+        }
+        if (retired) {
+            Log::World("WorldMap: [STORY] %d destination(s) retired -- the Garden is mobile, "
+                       "so the fixed Garden sites are empty ground", retired);
+        }
+        // v0.20.100: the raw evidence beside the verdict, every build. The
+        // opening edge of the Galbadia Garden window is a CANDIDATE byte; this
+        // line is what confirms it or names the right one, and it costs nothing.
+        {
+            uint8_t st = 0, alt2 = 0; uint16_t alt1 = 0;
+            WmSafeReadBytes(WM_SAVEMAP_BASE + WMS_GGSTATE_OFF, &st,   1);
+            WmSafeReadBytes(WM_SAVEMAP_BASE + WMS_GGALT1_OFF,  &alt1, 2);
+            WmSafeReadBytes(WM_SAVEMAP_BASE + WMS_GGALT2_OFF,  &alt2, 1);
+            Log::World("WorldMap: [STORY] disc=%d  gg[0x0E8D]=%u  alt[0x0B94]=%u  alt[0x0FDC]=%u"
+                       "  -> Mobile Galbadia Garden %s | Ragnarok %s -> White SeeD Ship %s",
+                       WmCurrentDisc(), (unsigned)st, (unsigned)alt1, (unsigned)alt2,
+                       WmGalbadiaGardenPresent() ? "PRESENT" : "absent",
+                       WmHaveRagnarok() ? "held" : "not held",
+                       WmWhiteSeedShipPresent() ? "PRESENT" : "absent");
+        }
+    }
+
     if (!s_walkGridLoaded) {
-        s_catalogCount = LOCATION_COUNT;
+        s_catalogCount = nLive;
         Log::World("WorldMap: [BFS] Fine walk grid not loaded — catalog unfiltered (%d entries)",
                    s_catalogCount);
     } else {
@@ -183,7 +434,7 @@ static void BuildDistanceCatalog()
                    px, py, pfc, pfr, (int)veh);
 
         if (veh == VEH_RAGNAROK) {
-            s_catalogCount = LOCATION_COUNT;
+            s_catalogCount = nLive;
             Log::World("WorldMap: [BFS] Ragnarok mode — catalog unfiltered (%d entries)",
                        s_catalogCount);
         } else {
@@ -193,7 +444,7 @@ static void BuildDistanceCatalog()
             ComputeReachabilityFine(pfc, pfr, veh);
 
             int kept = 0;
-            for (int i = 0; i < LOCATION_COUNT; i++) {
+            for (int i = 0; i < nLive; i++) {
                 if (IsFineCellReachable(s_catalog[i].x, s_catalog[i].y)) {
                     if (kept != i) s_catalog[kept] = s_catalog[i];
                     kept++;
@@ -202,6 +453,92 @@ static void BuildDistanceCatalog()
             s_catalogCount = kept;
             Log::World("WorldMap: [BFS] Filtered to %d reachable locations (vehicle type %d)",
                        s_catalogCount, (int)veh);
+        }
+    }
+
+    // ========================================================================
+    // #80: mobile Balamb Garden
+    // ========================================================================
+    // Aboard the Garden the reachability filter above is meaningless -- it ran
+    // a land-only rule against a hull whose whole point is crossing oceans --
+    // so it is replaced wholesale. Every destination stays in the catalog; the
+    // ones the Garden can actually set down beside move to the front in
+    // distance order and the rest follow, still selectable and announced with
+    // the reason. Hiding them would leave the player wondering whether the mod
+    // had simply lost Esthar.
+    if (Garden_IsAboard()) {
+        Garden_ComputeReach(px, py);
+        // Rebuild from s_locations rather than reusing whatever the foot filter
+        // above left behind: that filter COMPACTS s_catalog in place, so the
+        // slots past its kept-count hold stale duplicates. Today it happens to
+        // keep everything for the Garden (IsFineTraversable waves the Garden
+        // through), but relying on that would make this silently emit duplicate
+        // destinations the day that rule changes.
+        static int   order[MAX_LOCATIONS];
+        static double odist[MAX_LOCATIONS];
+        // v0.20.99: the retired sites are skipped HERE too. This branch rebuilds
+        // from s_locations rather than from the compacted s_catalog, so it has
+        // to ask the same question again -- exactly the shape of the .88 bug,
+        // which is why WmStoryRetired is the single predicate both sides use.
+        int nOrder = 0;
+        for (int i = 0; i < LOCATION_COUNT; i++) {
+            if (WmStoryRetired(s_locations[i].name)) continue;
+            order[nOrder++] = i;
+            odist[i] = CalculateWrappedDistance(px, py, s_locations[i].x, s_locations[i].y);
+        }
+        std::sort(order, order + nOrder,
+                  [](int a, int b) { return odist[a] < odist[b]; });
+        // v0.20.74: SHOW ONLY WHAT THIS VEHICLE CAN ACTUALLY REACH.
+        //
+        // Aaron: "Only show destinations that are reachable using the current
+        // vehicle ... Exclude locations that are out of range for the current
+        // vehicle." Up to .73 the Garden catalog kept every destination and
+        // merely sorted the unreachable ones to the back, on the theory that
+        // hiding Esthar would look like a bug. In practice it makes the list
+        // long and slow to page through with a screen reader, and every entry
+        // past the reachable ones is a dead end. The foot catalog has always
+        // filtered; the Garden catalog now does too.
+        static LocationEntry tmp[MAX_LOCATIONS];
+        int n = 0, hidden = 0;
+        for (int k = 0; k < nOrder; k++) {
+            const LocationEntry& le = s_locations[order[k]];
+            const GardenPark* gp = Garden_ParkFor(le.name);
+            const bool ok = Garden_BerthReachable(gp);   // v0.20.89
+            if (ok) tmp[n++] = le; else hidden++;
+        }
+        memcpy(s_catalog, tmp, sizeof(LocationEntry) * (size_t)n);
+        s_catalogCount = n;
+        Log::World("WorldMap: [GARDEN] catalog: %d destinations the Garden can reach, "
+                   "%d hidden as out of range for this vehicle", n, hidden);
+    } else {
+        // Not aboard: if the Garden is mobile and parked somewhere, put it in
+        // the catalog so the player can find their ride again.
+        // WmSafeReadBytes rather than a local __try: BuildDistanceCatalog
+        // contains std::sort with a lambda, and MSVC rejects __try in a
+        // function that requires object unwinding (C2712).
+        int32_t bx = 0, by = 0;
+        if (!WmSafeReadBytes(WM_BGU_POS_ADDR + WMS_VEHPOS_X_OFF, &bx, 4)) bx = 0;
+        if (!WmSafeReadBytes(WM_BGU_POS_ADDR + WMS_VEHPOS_Y_OFF, &by, 4)) by = 0;
+        const bool plausible = (bx != 0 || by != 0) &&
+                               bx > -131072 && bx < 131072 && by > -98304 && by < 98304;
+        if (plausible && s_catalogCount < MAX_LOCATIONS) {
+            LocationEntry ge;
+            ge.name = "Mobile Balamb Garden";
+            ge.x = bx; ge.y = by;
+            const double gdist = CalculateWrappedDistance(px, py, bx, by);
+            int at = s_catalogCount;
+            for (int i = 0; i < s_catalogCount; i++) {
+                if (CalculateWrappedDistance(px, py, s_catalog[i].x, s_catalog[i].y) > gdist) {
+                    at = i; break;
+                }
+            }
+            for (int i = s_catalogCount; i > at; i--) s_catalog[i] = s_catalog[i - 1];
+            s_catalog[at] = ge;
+            s_catalogCount++;
+            Log::World("WorldMap: [GARDEN] added 'Mobile Balamb Garden' at (%d,%d), %.0f units away, catalog slot %d",
+                       bx, by, gdist, at);
+        } else if (bx != 0 || by != 0) {
+            Log::World("WorldMap: [GARDEN] bgu_pos (%d,%d) rejected as implausible", bx, by);
         }
     }
 
@@ -242,8 +579,14 @@ static int     s_pendingVehicleCount = 0;
 static const DWORD WM_ENTRY_DEBOUNCE_MS = 3000;
 static DWORD s_wmEntryTick = 0;
 
+static inline bool IsFootLocomotion(uint8_t mode) { return mode == 0 || mode == 6; }
+
 static void CheckVehicleChange()
 {
+    // #80: arrow-key injection makes the animation byte cycle, exactly as it
+    // does for the foot/car drive (which is already exempt via s_driveActive).
+    if (Garden_Active()) return;
+
     // v0.14.94: while a drive is active, ignore the locomotion byte entirely.
     // AD's keybd_event arrow-key injection causes the byte to cycle through
     // canonical vehicle values; debounce passes them; downstream arrival
@@ -307,6 +650,45 @@ static void CheckVehicleChange()
 
     s_pendingVehicle      = -1;
     s_pendingVehicleCount = 0;
+
+    // v0.20.56 (#80): CORROBORATION GATE. The v0.20.55 BAT caught this byte
+    // committing 3 (Ship), 33/36/39 (Car) and 48 (Garden) in the space of
+    // three seconds while the player was simply WALKING away from a parked
+    // Garden -- it announced "Car" three times and "Garden" once, and each
+    // commit also repointed GetWorldMapPosition_Active at that vehicle's
+    // savemap mirror (the car's is 50 km away at the Missile Base). DEVNOTES
+    // has said since .255 that this byte is an ANIMATION-state byte and is
+    // "never authoritative for vehicle detection" -- but the commit path still
+    // trusted it outright. It now has to be seconded by one of the two signals
+    // that ARE about vehicles: the engine's in-motion id, or that vehicle's own
+    // savemap position being where the player actually is.
+    if (!IsFootLocomotion(vehicle)) {
+        const int  id      = GetActiveVehicleId();
+        const bool idAgrees = (id > 0 && GetVehicleType((uint8_t)id) == GetVehicleType(vehicle));
+        bool mirrorAgrees = false;
+        int32_t vpx = 0, vpy = 0, ppx = 0, ppy = 0, ppz = 0;
+        GetWorldMapPosition(&ppx, &ppy, &ppz);
+        uintptr_t mirror = 0;
+        switch (GetVehicleType(vehicle)) {
+            case VEH_CAR:      mirror = WM_CAR_POS_ADDR;      break;
+            case VEH_GARDEN:   mirror = WM_BGU_POS_ADDR;      break;
+            case VEH_RAGNAROK: mirror = WM_RAGNAROK_POS_ADDR; break;
+            default:           mirror = 0;                    break;
+        }
+        if (mirror && (ppx || ppy) &&
+            WmSafeReadBytes(mirror + WMS_VEHPOS_X_OFF, &vpx, 4) &&
+            WmSafeReadBytes(mirror + WMS_VEHPOS_Y_OFF, &vpy, 4) && (vpx || vpy)) {
+            mirrorAgrees = CalculateWrappedDistance(ppx, ppy, vpx, vpy) < 600.0;
+        }
+        if (!idAgrees && !mirrorAgrees) {
+            Log::World("WorldMap: [VEH-REJECT] locomotion=%u (%s) not corroborated "
+                       "(engine id=%d, |P-mirror|=%.0f) -- keeping s_lastVehicle=%d",
+                       vehicle, GetVehicleName(vehicle), id,
+                       (mirror && (vpx || vpy)) ? CalculateWrappedDistance(ppx, ppy, vpx, vpy) : -1.0,
+                       s_lastVehicle);
+            return;
+        }
+    }
 
     {
         if (s_lastVehicle != -1) {

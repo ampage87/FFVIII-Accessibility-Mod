@@ -240,6 +240,37 @@ static const DWORD FMV_SUPPRESS_MS = 1500;
 static DWORD s_postFmvResnapEndTime = 0;
 static const DWORD POST_FMV_RESNAP_MS = 2500;  // re-snapshot for 2.5 more seconds
 
+// v0.20.127: A FIELD CHANGE LEAVES EXACTLY THE SAME STALE TEXT AN FMV DOES.
+//
+// Aaron: "there is a repeat of phantom dialogue after Squall finishes his
+// speech. Squall returns to the headmaster's office lower level, which is
+// empty, but Irvine's dialogue from before... inadvertently repeats. Irvine is
+// not in the room and this is a phantom."
+//
+// The 2026-08-15 15:43 log has it, and it is four phantoms rather than one --
+// every window the previous field left behind, spoken in a single poll the
+// instant `bgsido5a` finished loading:
+//
+//     15:43:33  MAPJUMPO -> destField=255 (B-Garden Headmaster's Office 7)
+//     15:43:35  [fieldload] id=255 name='bgsido5a'
+//     15:43:35  [POLL] win[0] "the attack.""
+//     15:43:35  [POLL] win[1] "l you're CERTAIN that there's nothing more..."
+//     15:43:35  [POLL] win[2] "'s  nothing more you can do!""
+//     15:43:35  [POLL] win[3] "an do!""
+//
+// Every one of them starts mid-word -- "l you're" is the tail of "until
+// you're" -- because the window objects still point into the PREVIOUS field's
+// dialogue buffer, partway through wherever its paging had got to. The engine
+// does not clear them on a field change, and the poller had no reason to know
+// the field had changed.
+//
+// So the field change gets the same treatment the FMV already had: snapshot
+// whatever the windows hold as "already spoken", and keep snapshotting for a
+// moment while the pointers settle.
+static uint16_t s_lastPollFieldId  = 0xFFFF;
+static DWORD    s_fieldChangeTime  = 0;
+static const DWORD FIELD_CHANGE_SUPPRESS_MS = 2000;
+
 // ============================================================================
 // Forward declarations for cross-.inl references
 //

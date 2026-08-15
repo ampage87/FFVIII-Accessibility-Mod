@@ -366,6 +366,29 @@ namespace FmvSkip
     {
         return g_moviePlaying;
     }
+    // v0.20.117: the Backspace path, callable. Same three writes, same order,
+    // so a code-driven skip and a player-driven one cannot diverge.
+    bool RequestSkip()
+    {
+        if (!g_initialized) return false;
+        if (!g_moviePlaying) return false;
+        if (g_skipActive.load()) return true;      // already skipping
+        g_skipActive.store(true);
+        // v0.20.125: **DELIBERATELY NOT g_skipRequested.** That flag is what
+        // makes OnFrame say "Skipping video", and this is the CODE path, not
+        // the player pressing Backspace. Aaron on the Garden battle: "I still
+        // did not hear You Win once I pressed F9. I instead heard it say
+        // skipping video which was weird since it did not skip any video that
+        // I could tell." Both halves were this one line: the mod ends the
+        // battle movie behind the scenes to move the phase along, and that
+        // announcement then talked over the caller's own. A caller who wants
+        // the player told says so itself.
+        FmvAudioDesc::StopPlayback();
+        Log::Mod("[FmvSkip] Skip requested by code, silently (handles=%zu).",
+                 g_aviHandles.size());
+        return true;
+    }
+
 
     std::string GetCurrentAviName()
     {

@@ -193,7 +193,8 @@ cl /nologo /W3 /EHsc /O2 /MD /LD ^
     gdi32.lib ^
     gdiplus.lib ^
     dxguid.lib ^
-    opengl32.lib > "%PROJECT_DIR%\Logs\build_latest.log" 2>&1
+    opengl32.lib ^
+    winmm.lib > "%PROJECT_DIR%\Logs\build_latest.log" 2>&1
 
 if errorlevel 1 (
     echo.

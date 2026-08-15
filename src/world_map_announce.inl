@@ -19,14 +19,37 @@ static void AnnounceLocation(int index)
     double distance = CalculateWrappedDistance(px, py, s_catalog[index].x, s_catalog[index].y);
     int distanceKm = (int)(distance / 1000.0);  // rough conversion to kilometers
     
+    // #80: while piloting the Garden, say plainly which destinations it cannot
+    // set down beside, and how far the walk is from where it can.
+    const char* gsuffix = "";
+    char gwalk[64] = {};
+    if (Garden_IsAboard() && strcmp(s_catalog[index].name, "Mobile Balamb Garden") != 0) {
+        const GardenPark* gp = Garden_ParkFor(s_catalog[index].name);
+        if (!gp || !gp->reachable) {
+            gsuffix = " The Garden cannot reach this.";
+        } else if (!Garden_BerthReachable(gp)) {   // v0.20.89
+            gsuffix = " Not reachable from here.";
+        } else if (gp->walk_units >= 200) {
+            snprintf(gwalk, sizeof(gwalk), " Then %d hundred units on foot.",
+                     (int)((gp->walk_units + 50) / 100));
+            gsuffix = gwalk;
+        }
+    }
+
     char buf[256];
     if (distanceKm < 1) {
-        snprintf(buf, sizeof(buf), "%s. Very close.", s_catalog[index].name);
+        snprintf(buf, sizeof(buf), "%s. Very close.%s", s_catalog[index].name, gsuffix);
     } else {
-        snprintf(buf, sizeof(buf), "%s. %d kilometers away.", s_catalog[index].name, distanceKm);
+        snprintf(buf, sizeof(buf), "%s. %d kilometers away.%s",
+                 s_catalog[index].name, distanceKm, gsuffix);
     }
     
-    ScreenReader::Speak(buf);
+    // v0.20.74: INTERRUPT. Aaron: "if the user presses a catalog key, a location
+    // starts reading, and the user presses another catalog key then the readout
+    // of the first catalog entry should be interrupted and the next one should
+    // read. This way the user can quickly mash the catalog keys to cycle between
+    // catalog entries." World map only -- the field catalog is left alone.
+    ScreenReader::Speak(buf, true);
     Log::World("WorldMap: [LOCATION] %s", buf);
 }
 
@@ -76,6 +99,6 @@ static void AnnounceBearing()
     snprintf(buf, sizeof(buf), "%s. %s, %d kilometers.", 
              s_catalog[s_catalogIndex].name, direction, distanceKm);
     
-    ScreenReader::Speak(buf);
+    ScreenReader::Speak(buf, true);   // v0.20.74: interruptible, as above
     Log::World("WorldMap: [BEARING] %s", buf);
 }

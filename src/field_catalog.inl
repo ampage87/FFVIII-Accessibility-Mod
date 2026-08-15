@@ -1260,6 +1260,115 @@ static void ComputePlayerZoneReachability()
                (int)playerTri, qt, nTri);
 }
 
+// ============================================================================
+// v0.20.50 (WS1 Step 1.3) -- unified live-state gate, OBSERVE-ONLY (log-only).
+// The catalog's live-state checks are scattered across 7 assembly paths; this is
+// the single policy point every path reports through, so a BAT shows PER FIELD
+// exactly what the gate WOULD decide and why, BEFORE any signal is enforced.
+// Signals are tri-state: -1 unknown/not-applicable, 0 no, 1 yes. The verdict errs
+// toward KEEP -- it says would-DROP only on a confidently not-live signal. NOTHING
+// is dropped here: the existing per-path filters still own behavior; this emits a
+// [LIVE-GATE] line only. Step 1.3 flips signals from log-only to enforcing one at a
+// time in later builds, each validated against the reference expected-sets.
+struct LiveSignals { int visible, active, talkable, lineActive, zoneReachable, gatewayEnabled; };
+static LiveSignals LiveSignalsInit() { LiveSignals s = { -1, -1, -1, -1, -1, -1 }; return s; }
+static const bool s_liveGate = true;   // one-switch off, like s_catAudit
+
+// SEH-guarded read of a live "others" entity's flag word (+0x160: bit3=HIDE,
+// bit1=USE/active, per exe RE) and talk-enable byte (+0x24B). Applies the slot-alias
+// guard (v0.20.36/.43): the engine's others array tracks only a window, so a slot
+// whose live triangle (+0x1FA) disagrees with the entity's own static SET3 triangle
+// belongs to a DIFFERENT entity and its flags are not ours -- reject that read.
+static bool ReadLiveEntityFlags(int otherIdx, uint16_t ownTri, uint32_t* outFlags, uint8_t* outTalk)
+{
+    __try {
+        if (!FF8Addresses::pFieldStateOthers || !FF8Addresses::pFieldStateOtherCount) return false;
+        uint8_t* ob = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+        int ocnt = (int)(*FF8Addresses::pFieldStateOtherCount);
+        if (!ob || otherIdx < 0 || otherIdx >= ocnt) return false;
+        uint8_t* blk = ob + ENTITY_STRIDE * otherIdx;
+        uint16_t ltri = *(uint16_t*)(blk + 0x1FA);
+        if (ownTri != 0 && ltri != ownTri) return false;   // aliased slot -- flags not ours
+        if (outFlags) *outFlags = *(uint32_t*)(blk + 0x160);
+        if (outTalk)  *outTalk  = *(uint8_t*)(blk + 0x24B);
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// The unified live-state policy. OBSERVE-ONLY: logs [LIVE-GATE], returns the
+// would-keep verdict (callers currently ignore it -- behavior unchanged).
+static bool CatalogEntryIsLiveNow(const char* path, const EntityInfo& e, const LiveSignals& sg)
+{
+    bool keep = true; const char* reason = "live";
+    if      (sg.visible        == 0) { keep = false; reason = "hidden (HIDE bit)"; }
+    else if (sg.active         == 0) { keep = false; reason = "inactive (UNUSE bit)"; }
+    else if (sg.lineActive     == 0) { keep = false; reason = "line off (LINEOFF)"; }
+    else if (sg.gatewayEnabled == 0) { keep = false; reason = "gateway disabled"; }
+    // v0.20.52: zone-reachability is POSITIONAL, not entity live-state, and the v0.20.51 BAT proved a
+    // uniform zone-drop OVER-DROPS -- it flagged a talkable NPC, an exit, and a camera transition (all
+    // reachable-to-USE across a camera-zone boundary) as would-DROP. The per-path code already applies
+    // zone with the correct exemptions (gateways/exits exempt; talk-across-a-gap NPCs kept). The gate
+    // owns the ENTITY-level spine only (visible / active / line / gateway); zone stays logged for context.
+    if (s_liveGate)
+        Log::Field("FieldNavigation: [LIVE-GATE] field=%s path=%s name='%s' "
+                   "vis=%d act=%d talk=%d line=%d zone=%d gw=%d -> %s (%s) [v0.20.50 WS1-1.3 observe]",
+                   s_currentFieldName, path, e.name,
+                   sg.visible, sg.active, sg.talkable, sg.lineActive, sg.zoneReachable, sg.gatewayEnabled,
+                   keep ? "KEEP" : "would-DROP", reason);
+    return keep;
+}
+
+// Per-path resolvers: fill only the signals a path can see, then call the gate.
+static void LiveGateLine(const char* path, const EntityInfo& e, int t)
+{
+    LiveSignals ls = LiveSignalsInit();
+    if (t >= 0 && t < s_capturedLineCount) {
+        ls.lineActive = s_capturedLines[t].active ? 1 : 0;
+        if (s_zoneValid) ls.zoneReachable = ZoneReachableLine(t) ? 1 : 0;
+    }
+    CatalogEntryIsLiveNow(path, e, ls);
+}
+static void LiveGateObject(const char* path, const EntityInfo& e, int jsmIndex, uint16_t ownTri, int x, int y)
+{
+    LiveSignals ls = LiveSignalsInit();
+    int oidx = jsmIndex - (s_jsmDoors + s_jsmLines + s_jsmBackgrounds);
+    uint32_t fl = 0; uint8_t tk = 0;
+    if (ReadLiveEntityFlags(oidx, ownTri, &fl, &tk)) {
+        ls.visible  = ((fl & 0x08) == 0) ? 1 : 0;
+        ls.active   = ((fl & 0x02) != 0) ? 1 : 0;
+        ls.talkable = (tk != 0) ? 1 : 0;
+    }
+    if (s_zoneValid) ls.zoneReachable = ZoneReachablePoint((float)x, (float)y) ? 1 : 0;
+    CatalogEntryIsLiveNow(path, e, ls);
+}
+static void LiveGatePos(const char* path, const EntityInfo& e, int x, int y, bool applyZone)
+{
+    LiveSignals ls = LiveSignalsInit();
+    if (applyZone && s_zoneValid) ls.zoneReachable = ZoneReachablePoint((float)x, (float)y) ? 1 : 0;
+    CatalogEntryIsLiveNow(path, e, ls);
+}
+
+// v0.20.51: runtime "others" entities (NPCs etc.). entityIdx directly indexes the live
+// others array, so it IS this entity's own slot -- no alias risk, pass ownTri 0 to skip
+// that guard. This is the path that actually carries the visible/active/talkable flags,
+// which is why the v0.20.50 BAT saw them all -1 (only JSM objects were wired, and those
+// were positionless Draw Points with no live block).
+static void LiveGateRuntime(const char* path, const EntityInfo& e)
+{
+    LiveSignals ls = LiveSignalsInit();
+    if (e.entityIdx >= 0) {
+        uint32_t fl = 0; uint8_t tk = 0;
+        if (ReadLiveEntityFlags(e.entityIdx, 0, &fl, &tk)) {
+            ls.visible  = ((fl & 0x08) == 0) ? 1 : 0;
+            ls.active   = ((fl & 0x02) != 0) ? 1 : 0;
+            ls.talkable = (tk != 0) ? 1 : 0;
+        }
+    }
+    if (s_zoneValid && e.triangleId != 0 && (int)e.triangleId < ZONE_MAX_TRI)
+        ls.zoneReachable = s_zoneReachable[e.triangleId] ? 1 : 0;
+    CatalogEntryIsLiveNow(path, e, ls);
+}
+
 static void InjectTriggerLineExits(EntityInfo* newCatalog, int& newCount)
 {
 // ============================================================================
@@ -1330,6 +1439,7 @@ static void InjectTriggerLineExits(EntityInfo* newCatalog, int& newCount)
                         strncpy(camExit.name, "Camera transition", sizeof(camExit.name) - 1);
                         camExit.name[sizeof(camExit.name) - 1] = '\0';
                         CatAudit("camera-transition", camExit, (int)ctcx, (int)ctcy, "-", s_capturedLines[t].name);
+                        LiveGateLine("camera-transition", camExit, t);
                         newCatalog[newCount++] = camExit;
                         Log::Field("FieldNavigation: [refresh] camera-transition EXIT line%d '%s' center=(%.0f,%.0f) [v0.20.29]",
                                    t, s_capturedLines[t].name, ctcx, ctcy);
@@ -1649,7 +1759,7 @@ static void InjectTriggerLineExits(EntityInfo* newCatalog, int& newCount)
                     strncpy(trigExit.name, exitName, sizeof(trigExit.name) - 1);
                     trigExit.name[sizeof(trigExit.name) - 1] = '\0';
                     { char caBuf[48]; snprintf(caBuf, sizeof caBuf, "destId=%d", destId);
-                        CatAudit("setline-exit", trigExit, (int)tcx, (int)tcy, "-", caBuf); }
+                        CatAudit("setline-exit", trigExit, (int)tcx, (int)tcy, "-", caBuf); LiveGateLine("setline-exit", trigExit, t); }
                     if (s_zoneValid && !ZoneReachableLine(t) && !(t >= 0 && t < MAX_CAPTURED_LINES && s_zoneBoundaryLine[t])) { Log::Field("FieldNavigation: [refresh] '%s' filtered: exit lies wholly in another camera zone (not a boundary of the player's zone) [v0.20.22]", trigExit.name); continue; }
                     newCatalog[newCount++] = trigExit;
                 }
@@ -1751,7 +1861,7 @@ static void InjectTriggerLineExits(EntityInfo* newCatalog, int& newCount)
                     evEntry.gatewayIdx = -1;
                     strncpy(evEntry.name, "Event", sizeof(evEntry.name) - 1);
                     evEntry.name[sizeof(evEntry.name) - 1] = '\0';
-                    { CatAudit("trigger-event", evEntry, (int)tcx, (int)tcy, "-", "generic Event line"); }
+                    { CatAudit("trigger-event", evEntry, (int)tcx, (int)tcy, "-", "generic Event line"); LiveGateLine("trigger-event", evEntry, t); }
                     if (s_zoneValid && !ZoneReachableLine(t)) { Log::Field("FieldNavigation: [refresh] '%s' filtered: another camera zone (unreachable from player) [v0.20.21]", evEntry.name); continue; }
                     newCatalog[newCount++] = evEntry;
                 }
@@ -2052,7 +2162,7 @@ static void InjectInteractionLines(EntityInfo* newCatalog, int& newCount)
                         continue;
                     }
                     { CatAudit("interaction", intEntry, (int)tcx, (int)tcy, "-",
-                        (intEntry.type == ENT_SAVE_POINT) ? "save point" : "interaction line"); }
+                        (intEntry.type == ENT_SAVE_POINT) ? "save point" : "interaction line"); LiveGateLine("interaction", intEntry, t); }
                     if (s_zoneValid && intEntry.type != ENT_SAVE_POINT && !ZoneReachableLine(t)) { Log::Field("FieldNavigation: [refresh] '%s' filtered: another camera zone (unreachable from player) [v0.20.22]", intEntry.name); continue; }
                     // v0.20.32: don't renumber a curated line name (e.g. "Desk") back
                     // into "Interaction N" -- exempt lineCurated the same way soloName is.
@@ -2621,6 +2731,7 @@ static void InjectJsmSpecials(EntityInfo* newCatalog, int& newCount, const Entit
                 snprintf(caBuf, sizeof caBuf, "talk=%d setline=%d jsmCat=%d%s",
                          (int)je.hasTalkSetup, (int)je.hasSetline, (int)je.jsmCategory, live);
                 CatAudit("object", jsmEntry, (int)je.posX, (int)je.posY, je.symName, caBuf);
+                LiveGateObject("object", jsmEntry, je.jsmIndex, (uint16_t)je.posTriangle, (int)je.posX, (int)je.posY);
             }
             if (s_zoneValid && jt != ENT_DRAW_POINT && !ZoneReachablePoint((float)je.posX, (float)je.posY)) { Log::Field("FieldNavigation: [refresh] '%s' filtered: another camera zone (unreachable from player) [v0.20.21]", jsmEntry.name); continue; }  // v0.20.48: draw points exempt -- cfg==1 + on-mesh already == sighted-player parity
             newCatalog[newCount++] = jsmEntry;
@@ -2946,7 +3057,7 @@ static void InjectMapExits(EntityInfo* newCatalog, int& newCount, uint8_t* base,
             strncpy(mapExit.name, exitName, sizeof(mapExit.name) - 1);
             mapExit.name[sizeof(mapExit.name) - 1] = '\0';
             { char caBuf[80]; snprintf(caBuf, sizeof caBuf, "dest=%d fromInterp=%d", (int)je.param, (int)je.paramFromInterp);
-                CatAudit("mapexit", mapExit, (int)je.posX, (int)je.posY, je.symName, caBuf); }
+                CatAudit("mapexit", mapExit, (int)je.posX, (int)je.posY, je.symName, caBuf); LiveGatePos("mapexit", mapExit, (int)je.posX, (int)je.posY, true); }
             // v0.20.22: a map-exit is an EXIT -- never zone-filtered (exits are navigation aids; never hide one).
             newCatalog[newCount++] = mapExit;
         }
@@ -3360,7 +3471,7 @@ static void InjectGatewayExits(EntityInfo* newCatalog, int& newCount)
                 strncpy(gwExit.name, s_dedupGateways[d].displayName, sizeof(gwExit.name) - 1);
                 gwExit.name[sizeof(gwExit.name) - 1] = '\0';
                 { char caBuf[80]; snprintf(caBuf, sizeof caBuf, "destField=%d gwMerged=%d", (int)s_dedupGateways[d].destFieldId, (int)s_dedupGateways[d].count);
-                CatAudit("gateway", gwExit, (int)s_dedupGateways[d].centerX, (int)s_dedupGateways[d].centerY, "-", caBuf); }
+                CatAudit("gateway", gwExit, (int)s_dedupGateways[d].centerX, (int)s_dedupGateways[d].centerY, "-", caBuf); LiveGatePos("gateway", gwExit, (int)s_dedupGateways[d].centerX, (int)s_dedupGateways[d].centerY, false); }
                 // v0.20.22: a gateway is an EXIT -- never zone-filtered (exits are navigation aids; never hide one).
                 newCatalog[newCount++] = gwExit;
                 Log::Field("FieldNavigation: [refresh] INF-GW group %d: '%s' center=(%.0f,%.0f) %d gateways merged",
@@ -3374,6 +3485,52 @@ static void InjectGatewayExits(EntityInfo* newCatalog, int& newCount)
 // ============================================================================
 // 3g. Object/line dedupe + raw-SYM relabel  (was field_nav_catalog_dedupe.inl)
 // ============================================================================
+// ============================================================================
+// v0.20.53 (WS1 Step 1.4) -- co-located dedup, OBSERVE-ONLY groundwork.
+// Uniform position for ANY catalog entry (each source path stores position
+// differently) + an interactability rank, so the [CO-LOCATED] pass at the end of
+// DedupeCatalog can log the duplicate clusters the existing pairwise dedup misses
+// (the plan's target: one thing surfaced as line + object + controller at a spot).
+static bool CatalogEntryPos(const EntityInfo& e, float& x, float& y)
+{
+    if (e.gatewayIdx >= 0 && e.gatewayIdx < s_dedupGatewayCount) {   // INF gateway (by gatewayIdx; -300/-400 sentinels collide)
+        x = (float)s_dedupGateways[e.gatewayIdx].centerX;
+        y = (float)s_dedupGateways[e.gatewayIdx].centerY;
+        return true;
+    }
+    int idx = e.entityIdx;
+    if (idx >= 0) return GetEntityPos(idx, x, y);                    // runtime "others"
+    if (idx <= -200 && idx > -300) {                                // trigger line (-200-t)
+        int t = -(idx + 200);
+        if (t >= 0 && t < s_capturedLineCount) {
+            x = (float)(s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2.0f;
+            y = (float)(s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2.0f;
+            return true;
+        }
+    }
+    if (idx <= -300) {                                              // JSM-injected (-300-j; gatewayIdx == -1 here)
+        int j = -(idx + 300);
+        if (j >= 0 && j < s_jsmEntityCount) {
+            x = (float)s_jsmEntities[j].posX;
+            y = (float)s_jsmEntities[j].posY;
+            return true;
+        }
+    }
+    return false;
+}
+// higher rank = more interactable = the representation to KEEP when a cluster collapses.
+static int CoLoRank(const EntityInfo& e)
+{
+    switch (e.type) {
+        case ENT_SAVE_POINT: case ENT_DRAW_POINT: case ENT_SHOP: case ENT_CARD_GAME: return 5;
+        case ENT_EXIT:        return 4;
+        case ENT_OBJECT:      return 3;
+        case ENT_INTERACTION: return 2;
+        case ENT_NPC:         return 2;
+        default:              return 1;
+    }
+}
+
 static void DedupeCatalog(EntityInfo* newCatalog, int& newCount)
 {
 // field_nav_catalog_dedupe.inl — v0.17.8.8 object/line dedupe + raw-SYM relabel.
@@ -3685,6 +3842,34 @@ static void DedupeCatalog(EntityInfo* newCatalog, int& newCount)
     }
     newCount = ew;
 }
+
+    // v0.20.53 (WS1 Step 1.4) OBSERVE-ONLY: log co-located clusters that survived the pairwise dedup
+    // above. Positions are resolved uniformly (CatalogEntryPos); any two kept entries within COLO_DIST
+    // are a candidate duplicate the current dedup does NOT collapse (3-way line+object+controller,
+    // runtime+object, object+object, ...). Logs the pair + which representation would be kept (higher
+    // interactability rank). NOTHING is removed -- a BAT tells us which pairs are truly one thing vs
+    // distinct-but-close before Step 1.4 does any collapsing.
+    if (s_liveGate) {
+        const float COLO_DIST = 160.0f;
+        for (int a = 0; a < newCount; a++) {
+            float ax = 0, ay = 0;
+            if (!CatalogEntryPos(newCatalog[a], ax, ay)) continue;
+            for (int b = a + 1; b < newCount; b++) {
+                float bx = 0, by = 0;
+                if (!CatalogEntryPos(newCatalog[b], bx, by)) continue;
+                float dx = ax - bx, dy = ay - by;
+                float d2 = dx*dx + dy*dy;
+                if (d2 > COLO_DIST * COLO_DIST) continue;
+                const EntityInfo& keep = (CoLoRank(newCatalog[a]) >= CoLoRank(newCatalog[b]))
+                                       ? newCatalog[a] : newCatalog[b];
+                Log::Field("FieldNavigation: [CO-LOCATED] field=%s d=%.0f A={'%s' %s} B={'%s' %s} -> keep '%s' [v0.20.53 WS1-1.4 observe]",
+                           s_currentFieldName, sqrtf(d2),
+                           newCatalog[a].name, EntityTypeName(newCatalog[a].type),
+                           newCatalog[b].name, EntityTypeName(newCatalog[b].type),
+                           keep.name);
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -4345,6 +4530,7 @@ static void RefreshCatalog()
             int ei = s_catalog[c].entityIdx;
             if (ei >= 0 && ei < (int)lim && qualifies[ei]) {
                 newCatalog[newCount++] = fresh[ei];
+                LiveGateRuntime("runtime", fresh[ei]);
                 qualifies[ei] = false;  // mark as placed
             }
             // Gateway and background entries are re-added below — skip them here.
@@ -4354,6 +4540,7 @@ static void RefreshCatalog()
         for (int i = 0; i < (int)lim && newCount < MAX_CATALOG; i++) {
             if (qualifies[i]) {
                 newCatalog[newCount++] = fresh[i];
+                LiveGateRuntime("runtime", fresh[i]);
                 added++;
             }
         }

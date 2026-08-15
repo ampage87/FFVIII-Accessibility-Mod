@@ -460,6 +460,38 @@ static void GuardFreezePin()
 // Thread safety: acquires s_cs to coordinate with hook callbacks.
 // ============================================================================
 
+// Marks whatever the windows currently hold as already spoken, so the poller
+// will not announce it. Used by both transition guards -- FMV end and field
+// change -- because both leave the same kind of debris behind.
+//
+// Caller must NOT hold s_cs (this takes it; it is recursive, so a nested take
+// is safe but pointless).
+static void SnapshotWindowsAsSpoken(bool withExpansion)
+{
+    EnterCriticalSection(&s_cs);
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        uint8_t* winObj = GetWindowObj(i);
+        char* text1 = GetWinText1(winObj);
+        if (!text1 || !IsValidTextPointer(text1) || !ProbePointer(text1)) continue;
+        if (*(const uint8_t*)text1 == 0x00) continue;
+        // v0.18.3.239 (#77): must match what the scanner produces, or the
+        // "already spoken" dedup misses and the text re-speaks anyway.
+        std::string decoded = withExpansion
+            ? DecodeDialogWithExpansion(text1, 512)
+            : TrimDecoded(FF8TextDecode::Decode((const uint8_t*)text1, 512));
+        if (decoded.empty()) continue;
+        s_winState[i].lastSpokenText = decoded;
+        s_winState[i].lastRawText    = decoded;
+    }
+    // Also reset show_dialog per-window tracking to absorb pointer changes.
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        s_sdLastTextPtr[i] = nullptr;
+        s_sdLastHash[i]    = 0;
+        s_sdLastDecoded[i].clear();
+    }
+    LeaveCriticalSection(&s_cs);
+}
+
 void PollWindows()
 {
     if (!s_initialized || !FF8Addresses::pWindowsArray) return;
@@ -478,22 +510,7 @@ void PollWindows()
         // so the poller doesn't re-announce it when suppression ends.
         s_lastPollMoviePlaying = false;
         s_movieEndTime = GetTickCount();
-        EnterCriticalSection(&s_cs);
-        for (int i = 0; i < MAX_WINDOWS; i++) {
-            uint8_t* winObj = GetWindowObj(i);
-            char* text1 = GetWinText1(winObj);
-            if (text1 && IsValidTextPointer(text1) && ProbePointer(text1) && *(const uint8_t*)text1 != 0x00) {
-                // v0.18.3.239 (#77): must match what the scanner produces, or
-                // the "already spoken" dedup misses and the text re-speaks.
-                // (s_cs is recursive; the lookup re-entering it here is safe.)
-                std::string decoded = DecodeDialogWithExpansion(text1, 512);
-                if (!decoded.empty()) {
-                    s_winState[i].lastSpokenText = decoded;
-                    s_winState[i].lastRawText = decoded;
-                }
-            }
-        }
-        LeaveCriticalSection(&s_cs);
+        SnapshotWindowsAsSpoken(/*withExpansion=*/true);
         Log::Write("FieldDialog: [POLL] FMV ended, captured stale text, suppressing %ums + resnap %ums",
                    FMV_SUPPRESS_MS, POST_FMV_RESNAP_MS);
         return;
@@ -513,31 +530,47 @@ void PollWindows()
             // Still in re-snapshot period: capture current window text as
             // "already spoken" without speaking. This absorbs rapidly-changing
             // garbage that appears in window buffers during transitions.
-            EnterCriticalSection(&s_cs);
-            for (int i = 0; i < MAX_WINDOWS; i++) {
-                uint8_t* winObj = GetWindowObj(i);
-                char* text1 = GetWinText1(winObj);
-                if (text1 && IsValidTextPointer(text1) && ProbePointer(text1) && *(const uint8_t*)text1 != 0x00) {
-                    std::string decoded = TrimDecoded(FF8TextDecode::Decode((const uint8_t*)text1, 512));
-                    if (!decoded.empty()) {
-                        s_winState[i].lastSpokenText = decoded;
-                        s_winState[i].lastRawText = decoded;
-                    }
-                }
-            }
-            // Also reset show_dialog per-window tracking to absorb pointer changes
-            for (int i = 0; i < MAX_WINDOWS; i++) {
-                s_sdLastTextPtr[i] = nullptr;
-                s_sdLastHash[i] = 0;  // v04.23: reset hashes too
-                s_sdLastDecoded[i].clear();
-            }
-            LeaveCriticalSection(&s_cs);
+            SnapshotWindowsAsSpoken(/*withExpansion=*/false);
             return;
         }
         // Re-snapshot period ended -- clear FMV state, resume normal polling
         Log::Write("FieldDialog: [POLL] Post-FMV resnap period ended, resuming normal polling");
         s_movieEndTime = 0;
         s_postFmvResnapEndTime = 0;
+    }
+
+    // v0.20.127: THE SAME GUARD FOR A FIELD CHANGE. See the note in
+    // field_dialog_state.inl -- the engine does not clear the window objects
+    // when the field changes, so their text pointers still aim into the
+    // previous field's dialogue buffer, partway through. In the 15:43 log that
+    // put four mid-word fragments of Irvine's line into an empty Headmaster's
+    // Office the moment it loaded.
+    {
+        const uint16_t fieldNow = FF8Addresses::pCurrentFieldId
+                                ? *FF8Addresses::pCurrentFieldId : 0xFFFF;
+        if (fieldNow != s_lastPollFieldId) {
+            const uint16_t was = s_lastPollFieldId;
+            s_lastPollFieldId = fieldNow;
+            s_fieldChangeTime = GetTickCount();
+            SnapshotWindowsAsSpoken(/*withExpansion=*/true);
+            Log::Write("FieldDialog: [POLL] field 0x%04X -> 0x%04X, captured stale "
+                       "window text, suppressing %ums",
+                       (unsigned)was, (unsigned)fieldNow,
+                       FIELD_CHANGE_SUPPRESS_MS);
+            return;
+        }
+        if (s_fieldChangeTime != 0) {
+            if (GetTickCount() - s_fieldChangeTime < FIELD_CHANGE_SUPPRESS_MS) {
+                // Keep absorbing while the pointers settle. The new field's own
+                // dialogue comes through the OPCODE hooks, which are untouched
+                // by this -- only the poller is held back.
+                SnapshotWindowsAsSpoken(/*withExpansion=*/false);
+                return;
+            }
+            s_fieldChangeTime = 0;
+            Log::Write("FieldDialog: [POLL] field-change suppression ended, "
+                       "resuming normal polling");
+        }
     }
 
     DiagRawWindowDump();

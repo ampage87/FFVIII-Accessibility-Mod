@@ -15,6 +15,46 @@ static void HandleKeys()
     // \ (backslash) toggles auto-drive to selected entity.
     bool drive = (GetAsyncKeyState(VK_OEM_5) & 0x8000) != 0;
 
+    // #minigame-bgbtl: two keys that only do anything around the Garden-battle
+    // fight, so they cost nothing anywhere else.
+    //
+    //   F9   during the briefing -- repeat it. During the fight -- swap the
+    //        Block cue between speech and a tone. The reaction window is 700 ms
+    //        (measured in the v0.20.102 BAT), which a one-word cue only just
+    //        fits, so which cue works is Aaron's call.
+    //   F9   SKIP -- during the fight OR on the Game Over screen. Writes exactly
+    //        the transition the winning script writes (field 675 ggback1). Same
+    //        idea as the Dollet Chase and Timber Train skips. v0.20.107 made it
+    //        available mid-fight on Aaron's request; the briefing announces it.
+    //
+    // v0.20.103: WAS F7, WHICH IS GameAudio::VolumeDown IN dinput8.cpp -- the
+    // v0.20.102 BAT log shows both firing on one press ("Block cue: tone." then
+    // "Music volume 30 percent"). F9 and F10 were the only unbound function
+    // keys and both are now spoken for.
+    {
+        // v0.20.121, at Aaron's request and for two good reasons:
+        //   * the SKIP moved F10 -> F9. "F10 is used by the Windows system
+        //     menu", and in a windowed build that is a real conflict.
+        //   * REPEAT/TOGGLE moved F9 -> Space, and CONFIRM moved X -> Enter
+        //     (handled inside GardenBattle::Update), because X is mask 64 --
+        //     the kick. The key that dismissed the Game Controls screen was one
+        //     of the four keys the screen exists to teach.
+        static bool s_f9Was = false, s_spaceWas = false;
+        const bool f9    = (GetAsyncKeyState(VK_F9)    & 0x8000) != 0;
+        const bool space = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
+        const uint16_t fid = FF8Addresses::pCurrentFieldId
+                           ? *FF8Addresses::pCurrentFieldId : 0xFFFF;
+        if (space && !s_spaceWas) {
+            if (fid == GardenBattle::FIELD_MINIGAME || GardenBattle::IsArmed())
+                GardenBattle::ToggleCueMode();
+        }
+        if (f9 && !s_f9Was) {
+            if (GardenBattle::OnGameOverScreen(fid) || GardenBattle::IsArmed())
+                GardenBattle::SkipToVictory();
+        }
+        s_f9Was = f9; s_spaceWas = space;
+    }
+
     // v0.14.75: F11 VISDIAG dump removed. Was a v05.69 research diagnostic
     // for finding the entity SHOW/HIDE visibility-flag offset by dumping
     // candidate byte ranges (0x188, 0x1A0, 0x21A, 0x240) for every

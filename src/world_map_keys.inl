@@ -44,7 +44,14 @@ static void PollKeys()
     if (bslash && !s_bslashWas) {
         // v0.14.86: toggle auto-drive. If a drive is already running, cancel it;
         // otherwise start a drive toward the currently-selected catalog entry.
-        if (s_driveActive) {
+        // #80: while piloting the mobile Garden the backslash key drives the
+        // GARDEN subsystem instead. It is a separate executor on a separate
+        // grid; nothing in the foot/car drive is reached in this branch.
+        if (Garden_IsAboard()) {
+            Log::World("WorldMap: [KEY] backslash -> Garden toggle (idx %d)", s_catalogIndex);
+            if (s_driveActive) StopAutoDrive(nullptr);   // never run both
+            Garden_Toggle();
+        } else if (s_driveActive) {
             StopAutoDrive("Cancelled.");
             Log::World("WorldMap: [KEY] backslash -> cancel");
         } else if (s_catalogBuilt && s_catalogCount > 0) {

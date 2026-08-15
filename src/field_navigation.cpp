@@ -38,6 +38,7 @@
 #include <windows.h>
 #include <cmath>
 #include <cstdio>
+#include <string>
 #include "ff8_accessibility.h"
 #include "ff8_addresses.h"
 #include "field_dialog.h"
@@ -61,7 +62,10 @@
 
 // Forward declarations for cross-module namespaces (restored in v0.14.28 build recovery).
 namespace Log { void Field(const char* format, ...); }
-namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); }
+namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); bool IsSpeaking(); }
+namespace FmvAudioDesc { void SetSuppressed(bool on); }  // #minigame-bgbtl briefing
+namespace FmvSkip { std::string GetCurrentAviName(); bool RequestSkip();
+                    bool IsMoviePlaying(); }  // #minigame-bgbtl
 namespace NavLog {
     void SessionStart();
     void FieldLoad(const char* fieldName, int fieldId, int numTris, int numEntities, int numExits, int numEvents);
@@ -844,6 +848,7 @@ static int32_t       s_chaseDriveTargetY = 0;
 //   can identify the destination value for variable-dispatch MAPJUMPs that
 //   static analysis couldn't resolve. Diagnostic-only, no catalog changes.
 #include "field_nav_mapjump_diag.inl"
+#include "field_minigame_bgbtl.inl"   // #minigame-bgbtl
 
 // --- Catalog announce: AnnounceCurrentTarget, AnnounceDirections, CycleEntity (extracted v0.12.18) ---
 #include "field_nav_announce.inl"
@@ -1254,6 +1259,7 @@ void Update()
     // talk-enable byte cannot slip between samples. No-op off glfurin4.
     CarawaySceneDiagTick();
 
+    GardenBattle::Update();   // #minigame-bgbtl: reaction cue, unthrottled; no-op off bgbtl_1
     // Key handling and auto-drive are unthrottled: runs every ~16ms.
     HandleKeys();
     UpdateAutoDrive();

@@ -35,6 +35,17 @@ namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); }
 
 namespace FmvAudioDesc
 {
+    // v0.20.106: set by the Garden-battle briefing. Cues still advance and log
+    // on schedule; they just do not reach the screen reader.
+    static bool g_suppressed = false;
+
+    void SetSuppressed(bool on)
+    {
+        if (g_suppressed == on) return;
+        g_suppressed = on;
+        Log::Mod("[FMV_AD] narration %s", on ? "SUPPRESSED" : "resumed");
+    }
+
     // ---- VTT data structures ----
 
     struct Cue
@@ -602,10 +613,11 @@ namespace FmvAudioDesc
 
             if (elapsed >= cue.startTime)
             {
-                Log::Mod("[FMV_AD] [%.1fs] Cue %d: %s",
-                    elapsed, g_nextCueIndex, cue.text.c_str());
+                Log::Mod("[FMV_AD] [%.1fs] Cue %d: %s%s",
+                    elapsed, g_nextCueIndex, cue.text.c_str(),
+                    g_suppressed ? "   [SUPPRESSED -- briefing in progress]" : "");
 
-                ScreenReader::Speak(cue.text.c_str(), true);
+                if (!g_suppressed) ScreenReader::Speak(cue.text.c_str(), true);
 
                 g_nextCueIndex++;
             }
