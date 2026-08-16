@@ -80,11 +80,14 @@ namespace WorldMap {
 //     needs the definition visible when arrival.inl is compiled).
 //   - keys.inl last: calls StartAutoDrive + StopAutoDrive (drive.inl)
 //     and AnnounceLocation + AnnounceBearing (announce.inl).
+#include "world_map_vehsig.inl"          // v0.21.0 (#79): the foot/vehicle discriminator's policy, unit-tested
 #include "world_map_state.inl"
 #include "world_map_geometry.inl"
 #include "world_map_navmesh.inl"
 #include "world_map_segments.inl"
 #include "world_map_trigger_data.inl"
+#include "world_map_trigeval.inl"        // v0.21.2 (#79): the entry trigger, evaluated the way the GAME evaluates it
+#include "world_map_trigwalk.inl"        // v0.21.5 (#79): the whole program set, walked live -- a known-good and a known-bad through identical code
 #include "world_catalog.inl"
 #include "world_map_announce.inl"
 #include "world_map_planner.inl"
@@ -290,6 +293,10 @@ void Poll()
     }
 
     CheckVehicleChange();
+    // v0.21.2 (#79): once a second, what the GAME's own entry test is seeing --
+    // segment index, whose position it is using, the story word and the UNK21
+    // bit. Read-only. See the note at the top of world_map_trigeval.inl.
+    TriggerEvalTick();
     // #80: the Garden has its own executor. When it owns the drive the
     // foot/car one is not ticked at all -- the two never run together.
     if (Garden_Active()) {

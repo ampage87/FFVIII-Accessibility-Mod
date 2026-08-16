@@ -401,7 +401,52 @@ struct EntryAimInfo {
     int32_t     y0, y1;       // area bbox y [min,max]
     bool        footOnly;     // no FOOT_ALT clause: cannot be entered by car
 };
+// ----------------------------------------------------------------------------
+// v0.21.6 (#79): THE TABLE WAS RIGHT AND SEVEN ROWS LONG.
+//
+// The comment above has said since v0.18.3.206 that an entry fires only while
+// standing on a wmx poly with byte 14 bit 3 set. Three sessions of Edea's House
+// hunting then went looking for a story gate, a "master gate" and a destination
+// table -- and the v0.21.5 [TRIGWALK] interpreter reproduced that same blind
+// spot: it models the 8192u SEGMENT and the clause bounds, so it printed MATCH
+// at every one of Aaron's positions across a whole 8 km square. The real
+// positional gate is per-POLYGON, and this table is where it lives. It was never
+// wrong. It was seven rows long, and Edea's House was not one of them.
+//
+// So the rows below are now GENERATED from wmx.obj instead of hand-found
+// (offline/gen_entryaims.py):
+//
+//   1. every polygon with byte 0x0E bit 3 set              -> 7,359 map-wide
+//   2. keep only those also foot-walkable, byte 0x0F bit 7 -> 2,877
+//   3. flood-fill into patches; take the patch nearest the catalog marker
+//   4. aim = the interior sample farthest from the patch edge, so an approach
+//      that overshoots by tens of units still lands on a trigger
+//
+// Cross-check, which is why this is trustworthy: run the generator against the
+// five hand-proven aims above and it returns Timber within 91u, Dollet 54u,
+// Balamb Town 47u, Fire Cavern 83u, Galbadia Station 379u -- every one inside
+// its own proven bbox. tests/entryaim_test.cpp keeps that honest.
+//
+// **WHY EDEA'S HOUSE REFUSED.** Segment 652 holds 103 entry polys and only
+// SEVEN are foot-walkable -- the other 96 are inside walls the move validator
+// will not let Squall stand on. Those seven cover x[-29975,-29310]
+// y[69632,70078]: about 665 x 446 units, roughly a three-hundredth of the
+// segment. The catalog marker was (-28950,70090), 234 units east of the patch,
+// off the only ground that can open the door. In the 2026-08-16 BAT Aaron's
+// closest approach was (-29144,70004) -- 287 units short. Every gate the exe
+// names passed on every frame because they all genuinely did pass; he was never
+// standing on a trigger polygon. The aim below sits 140 units inside the patch
+// in every direction.
+//
+// Only destinations whose generated aim is within 800u of the existing marker
+// are added -- "the marker is just outside its own door", which is unambiguous.
+// Deling City (1,966u), Great Salt Lake (1,717u), D-District Prison (1,462u),
+// Trabia Garden (1,443u) and Winhill (1,234u) also have patches, but a retarget
+// that large deserves its own BAT; they are listed in
+// docs/WORLDMAP_ENTRY_POLYGONS.md and deliberately NOT shipped yet.
+// ----------------------------------------------------------------------------
 static const EntryAimInfo s_entryAims[] = {
+    // --- hand-proven in the field; left exactly as they were ---
     { "Timber",           -22580,  -5291, -22685, -22371,  -5632,  -5120, true  },
     { "Dollet",           -14513, -39119, -15409, -13516, -39951, -38175, false },
     { "Balamb Town",       12560, -26800,  12288,  12884, -26896, -26624, false },
@@ -409,7 +454,114 @@ static const EntryAimInfo s_entryAims[] = {
     { "Fire Cavern",       30239, -29528,  30112,  30394, -29750, -29192, true  },
     { "Galbadia Garden",  -36895, -27082, -37764, -35964, -28036, -26236, true  },
     { "Galbadia Station", -38914, -24767, -39426, -38398, -24936, -24682, true  },
+    // --- v0.21.6: generated from the entry polygons (patch tris / edge margin) ---
+    { "Edea's House",     -29459,  69772, -29975, -29310,  69632,  70078, true  },   //   7 tris, margin 140, marker was 600u out
+    { "Tomb of the Unknown King",
+                          -42011, -36843, -42335, -41648, -37163, -36541, true  },   //  64 tris, margin 204, marker 539u
+    { "Centra Ruins",       6143,  55295,   5632,   6656,  54784,  55808, true  },   // 291 tris, margin 259, marker 744u
+    { "Shumi Village",     12743, -84026,  12638,  12800, -84341, -83625, true  },   //   8 tris, margin  50, marker  58u (the v0.20 marker fix lands inside)
+    { "Chocobo Forest 1",  11507, -64253,  11099,  11971, -64679, -63828, true  },   //  32 tris, margin 294, marker 619u
+    { "Chocobo Forest 2",  10740, -80384,  10326,  11199, -80810, -79959, true  },   //  32 tris, margin 294, marker 653u
+    { "Chocobo Forest 4",  97792, -48650,  97316,  98267, -49140, -48140, true  },   //  98 tris, margin 336, marker 671u
+    { "Chocobo Forest 5",  17908,  22528,  17494,  18367,  22102,  22953, true  },   //  32 tris, margin 294, marker 735u
+    { "Chocobo Forest 6",  44020,  75776,  43606,  44479,  75350,  76201, true  },   //  32 tris, margin 294, marker 684u
+    { "Chocobo Forest 7", -21004,  69632, -21418, -20545,  69206,  70057, true  },   //  32 tris, margin 294, marker 728u -- the known-good control
+    // ------------------------------------------------------------------------
+    // v0.21.7: THE FIVE HELD-BACK RETARGETS, RESOLVED FROM THE PROGRAM TABLE.
+    //
+    // v0.21.6 assigned patches to destinations by nearest centroid, which is a
+    // guess, so anything needing a 1-2 km move was held back. The authority is
+    // not distance: **a patch sits in a SEGMENT, a segment has exactly one entry
+    // PROGRAM, and that program names its destinations with clause bounds.**
+    //
+    //   Deling City        seg 264  prog 8   dest 8   story>=333  no bound
+    //   D-District Prison  seg 361  prog 16  dest 10  story>=350  no bound
+    //   Trabia Garden      seg 149  prog 3   dest 19  story>=750  no bound
+    //   Winhill            seg 393  prog 24  dest 14/15  story>=750  SPLIT
+    //   Great Salt Lake    seg 373  prog 21  dest 24  story>=1600 foot only
+    //
+    // Each of the first four markers is IN the segment its patch is in, so the
+    // binding is not an inference -- the door and the icon are in the same
+    // 8192-unit square and the square has one program. The 1-2 km is just how
+    // far a city icon sits from its gate.
+    //
+    // **WINHILL WAS THE ONE WORTH HOLDING BACK.** Program 24 splits segment 393
+    // at Xoff 6144: destination 14 on the high side, 15 on the low. The v0.21.6
+    // generated aim was at Xoff 5825 -- the LOW half, a different destination
+    // from the one the marker (Xoff 7059) sits over. Taking the interior point
+    // of the whole patch would have shipped a confidently-wrong coordinate of
+    // exactly the kind this table exists to stop. The aim below is restricted to
+    // the high side and its whole bbox clears the split (Xoff 6147 at its west
+    // edge). The low half is deliberately not covered, so the planner does not
+    // treat it as a no-go zone for other routes.
+    //
+    // **GREAT SALT LAKE vs CHOCOBO FOREST 3, settled.** Program 21 has NO
+    // chocobo clause and a story>=1600 gate. Every chocobo forest's program has
+    // a vehicle-49 clause and no story gate at all (progs 1, 2, 5, 31, 35, 36).
+    // So segment 373 is not a forest, and the patch is Great Salt Lake's -- which
+    // fits a location that opens after the Lunar Cry. Chocobo Forest 3's marker
+    // is in segment 374, whose program (22) is also foot-only, and segment 374
+    // has no walkable entry polygon at all. That marker is wrong and its real
+    // home is an open question, not a guess to ship -- see the doc.
+    //
+    // footOnly is now DERIVED rather than judged: a program with a vehicle-132
+    // (FOOT_ALT) clause can be entered by car. That rule reproduces all seven
+    // hand-set flags above -- Dollet and Balamb Town have 132 and are false;
+    // Timber, Fire Cavern and Galbadia Station do not and are true.
+    //
+    // Great Salt Lake's gate is story>=1600 and Aaron is at 912, so that row is
+    // correct but cannot be BAT-confirmed until much later in the game. Shipped
+    // anyway: it is strictly better than the marker it replaces and cannot
+    // regress anything that does not already refuse.
+    // ------------------------------------------------------------------------
+    { "Deling City",       -61947, -30631, -62453, -60616, -31456, -29696, false },   //  48 tris, margin 374, marker 1,966u -- prog 8 dest 8
+    { "D-District Prison", -55308,  -6296, -55743, -54858,  -6556,  -5741, false },   // 260 tris, margin 195 -- prog 16 dest 10. SEE THE PRISON NOTE BELOW: this door never opens.
+    // v0.21.8: Trabia's firing area is BOTH segments, not one. See the note below.
+    { "Trabia Garden",      49096, -59393,  48128,  50176, -60416, -58368, true  },   // 366 tris across segs 149+150, margin 737 -- prog 3 dest 19 unconditional, prog 4 dest 19 where Yoff>4096
+    { "Winhill",           -51071,   6326, -51199, -50679,   6200,   6464, true  },   //   6 tris, margin 126 -- prog 24 dest 14, HIGH side of the Xoff 6144 split (bbox from vertices: Xoff 6145..6665)
+    { "Great Salt Lake",    48248,  -2174,  48128,  48640,  -2294,  -2050, true  },   //  46 tris, margin 120 -- prog 21 dest 24, story>=1600 so untestable at story 912
 };
+// ----------------------------------------------------------------------------
+// v0.21.8: THREE THINGS THE 2026-08-16 BAT SAID.
+//
+// **TRABIA'S DOOR IS TWICE THE SIZE THIS TABLE CLAIMED.** v0.21.7 restricted the
+// aim to segment 149, where program 3 grants destination 19 with no coordinate
+// bound, because that was the conservative choice. But program 4 grants the SAME
+// destination 19 in segment 150 whenever Yoff > 4096, and the patch runs straight
+// across the seam: 194 walkable entry triangles in 149 and 172 more in 150. The
+// BAT entered at (49966,-58834) -- Yoff 6702, comfortably past the split, in
+// segment 150 -- which is 1,363 units from the v0.21.7 aim. The drive got in
+// anyway because it passed through the eastern half on its way to the western
+// one. Taking both halves moves the aim to the middle of the real 2048x2048 door
+// and raises its edge margin from 418 to 737, the largest in the table.
+//   The whole bbox is safe to treat as one rectangle: its y range is -60416 to
+//   -58368, which is Yoff 5120 to 7168, so every part of it clears the 4096
+//   split. Being conservative about a clause is right; being conservative about
+//   which HALF of a door to aim at is just aiming at the far side.
+//
+// **THE D-DISTRICT PRISON DOOR NEVER OPENS.** Aaron: *"it is not possible to
+// enter the D-District Prison. You can see it on the world map but can never
+// enter it from the world map. It is entered via a story sequence triggered in
+// Deling City."* The geometry here is real and correct -- program 16, 260
+// walkable entry polygons, story >= 350, and the BAT drove onto them -- and no
+// field loads. The prison is a mobile drilling rig that relocates and sinks
+// during the story, so the likeliest reading is that its world-map presence is
+// vestigial by disc 3. **The row stays deliberately**, for two reasons Aaron
+// asked for: the drive still delivers the player to the gate for an equivalent
+// experience, and the planner still routes other journeys around a real firing
+// area. Do not read a future "arrived but nothing loaded" here as a regression.
+//
+// **WINHILL HAS TWO DOORS AND THIS IS THE RIGHT ONE.** Aaron: *"Winhill also has
+// two entry points... the one that auto-drive took me to now is the one in the
+// north part of town."* That is destination 14, the high side of the Xoff 6144
+// split, field 0x029E -- the half v0.21.7 moved the aim onto, and the half the
+// v0.21.6 whole-patch aim would have missed. Destination 15, the low side, is
+// the other door and stays uncatalogued by his call. The bbox is now taken from
+// the triangle VERTICES rather than the raster samples the aim search uses (the
+// raster under-reports by up to one step); its west edge is Xoff 6145, one unit
+// inside the clause, since Xoff exactly 6144 satisfies neither `> 6144` nor
+// `< 6143` and would open no door at all.
+// ----------------------------------------------------------------------------
 static const int ENTRY_AIM_COUNT = (int)(sizeof(s_entryAims) / sizeof(s_entryAims[0]));
 static int FindEntryAim(const char* name)
 {

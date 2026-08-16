@@ -541,6 +541,12 @@ void MenuTTS::Initialize()
 // --- Main-menu GF screen TTS / discovery (#41, v0.18.0) ---
 #include "menu_tts_gf.inl"
 
+// --- Magic submenu: the pure announcement logic, shared verbatim with
+//     tests/menu_sim.cpp (#81, v0.22.0). Must precede menu_tts_ability.inl,
+//     which now uses this file's MAGIC_SPELL_NAMES instead of its own partial
+//     copy -- that copy was correct to id 37 and wrong from 38 on. ---
+#include "menu_magic_model.inl"
+
 // --- Main-menu Ability screen TTS (#42, v0.18.1) ---
 #include "menu_tts_ability.inl"
 
@@ -549,6 +555,10 @@ void MenuTTS::Initialize()
 
 // --- Switch submenu TTS (#65, v0.18.3.35) ---
 #include "menu_tts_switch.inl"
+
+// --- Magic submenu TTS (#81, v0.22.0). After junction.inl (roster + the
+//     dream-party name rule) and after the model above. ---
+#include "menu_tts_magic.inl"
 
 void MenuTTS::Update()
 {
@@ -861,6 +871,16 @@ void MenuTTS::Update()
                     s_prevMagStatCursor = 0xFF;
                     ResetCharSelGroup();
                 }
+
+                // v0.22.0 (#81): everything AFTER a character is chosen. The
+                // block above only covers the character-select phase and its
+                // comment said as much -- "the per-character spell/status screen
+                // has a different focus, so we fall silent there". This is that
+                // screen. PollMagicSubmenu re-checks the gate itself and stays
+                // quiet unless the Magic module is really open, so it is safe to
+                // call whenever the character-select block is not speaking.
+                if (!magStatCharSel) PollMagicSubmenu();
+                else                 ResetMagicSubmenu();
             }
 
             // Switch screen TTS (#65/#66): the main-menu Switch (subsystem +0x1E8==10)

@@ -14,6 +14,47 @@ static void UpdateAutoDrive()
 
     if (px == 0 && py == 0) return;
 
+    // ------------------------------------------------------------------------
+    // v0.21.4: **A CUTSCENE IS NOT A STALL**, and on foot the old behaviour did
+    // lasting damage.
+    //
+    // The Garden executor has paused on an open dialog window since v0.20.87,
+    // after three BATs wedged in the same spot during the Lunar Cry scene --
+    // Aaron: "There is a spot on the world map that causes the Garden to go
+    // haywire temporarily. Nida even comments on it." `IsDialogOpen()` was
+    // declared for that fix and the foot executor never called it.
+    //
+    // While a dialog is open the engine ignores movement. The foot freeze
+    // detector fires at 40 ticks (~0.65 s), and its first act is CamwLearnBlock,
+    // which writes into the LEARNED OBSTACLE OVERLAY -- and that overlay is
+    // deliberately persistent across drives. So every world-map cutscene taught
+    // the planner that a piece of open ground was a wall, permanently, and then
+    // pressed keys into a locked engine and retreated through terrain it had
+    // just libelled.
+    //
+    // The pause releases the keys, holds the generic stuck clock at `now`, and
+    // bumps s_driveWatchdogGen on the way out, which is the mechanism v0.18.3.216
+    // already built to reseed the route-progress and give-up clocks after a
+    // battle -- a cutscene is the same event with a different cause.
+    // ------------------------------------------------------------------------
+    if (FieldDialog::IsDialogOpen()) {
+        ReleaseAllDriveKeys();
+        s_driveStuckX = px; s_driveStuckY = py; s_driveStuckCheckTime = GetTickCount();
+        if (!s_driveInDialog) {
+            s_driveInDialog = true;
+            Log::World("WorldMap: [DRIVE] cutscene at (%d,%d) -- a dialog window is open, so the "
+                       "engine is ignoring movement. Pausing; this is not a stall.", px, py);
+        }
+        return;
+    }
+    if (s_driveInDialog) {
+        s_driveInDialog = false;
+        s_driveWatchdogGen++;          // reseed the route-progress and give-up clocks
+        s_camwFrzTicks = 0;            // and the CAMW freeze counter
+        s_driveStuckCount = 0;
+        Log::World("WorldMap: [DRIVE] cutscene over at (%d,%d) -- resuming the drive", px, py);
+    }
+
     double dist = CalculateWrappedDistance(px, py, s_driveTargetX, s_driveTargetY);
     DWORD now = GetTickCount();
 
@@ -889,7 +930,8 @@ static void UpdateAutoDrive()
     }
 
     // #67 v0.18.3.66: CLOSED-LOOP steering on the REAL facing. The .65 F12
-    // heading scan PROVED WM_HEADING (0x0203ED02, what GetWorldMapHeading reads)
+    // heading scan PROVED WM_HEADING (0x0203FE52, what GetWorldMapHeading reads --
+    // v0.21.4 corrected this line, which named the camera yaw's address by mistake)
     // IS the live facing -- holding RIGHT raised it ~80/sample (clockwise), LEFT
     // lowered it, in the SAME compass units as TorusBearing (0 = North,
     // clockwise). The earlier "frozen" reads were the character not rotating

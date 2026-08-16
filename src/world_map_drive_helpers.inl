@@ -490,7 +490,7 @@ static void StartAutoDrive(int catIdx)
     // v0.18.3.257 (#79): reset the physics vehicle-detector per drive, so a
     // stale ring from a car drive can never latch a following foot drive.
     s_driveVehicleSig = false;
-    s_vsHad = false; s_vsRing = 0; s_vsCount = 0; s_vsPx = 0; s_vsPy = 0;
+    s_vsHad = false; s_vsPx = 0; s_vsPy = 0; VehSigReset(s_vsSig);
     // v0.18.3.258 Part D (#79): sample the engine vehicle id at every drive
     // start -- the post-init confirmation record the .257 entry dumps couldn't
     // provide (they fire before the setup writers run).
@@ -598,6 +598,19 @@ static void StartAutoDrive(int catIdx)
     s_sweptFailN             = 0;     // v0.18.3.204: swept-fail edges are per-drive (stale
                                       // world-keyed entries from old routes shouldn't tax new ones)
     s_driveBridgeActive      = false; // #70 v0.18.3.97: fresh bridge-out state per drive
+    // v0.21.4: **STATE THAT SURVIVED A DRIVE AND CHANGED THE NEXT ONE.**
+    //
+    // s_drivePathWorld is the worst of them: it gates the reverse un-wedge and
+    // the WHOLE route-progress/give-up watchdog block in UpdateAutoDrive, it was
+    // cleared on neither the planner-ineligible path nor in StopAutoDrive, and
+    // it is also written by the GARDEN executor. So whether a foot drive had
+    // route watchdogs at all could depend on what the previous drive did --
+    // including a drive by a different vehicle.
+    //
+    // s_driveInDialog must start false or a drive begun during a cutscene would
+    // never take the resume branch that reseeds the watchdog clocks.
+    s_drivePathWorld         = false;
+    s_driveInDialog          = false;
     s_driveBridgeCount       = 0;
     // #67 v0.18.3.62: reset motion-derived heading tracking for the new drive.
     s_driveMoveHeading    = -1;     // unknown until he moves
@@ -725,6 +738,10 @@ static void StartSweep(int32_t px, int32_t py, DWORD now)
     s_driveStuckCheckTime = now;
     s_driveStuckCount = 0;
     ScreenReader::Speak("Searching for entrance.", true);
+    // v0.21.2: a sweep means the mod arrived and no field loaded. That is the
+    // exact moment to record what the game's own trigger test is seeing.
+    LogTriggerEvaluation("sweep-start");
+    LogTriggerWalk("sweep-start");
     Log::World("WorldMap: [DRIVE-SWEEP] Started (target=%s, phase 1 turning right %dms)",
                s_driveTargetName, SWEEP_TURN_BASE_MS);
 }

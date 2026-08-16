@@ -59,7 +59,79 @@ static const LocationEntry s_locations[] = {
     // drive-to destination and always was.
     {"Fisherman's Horizon",        20480,   -2560},
     {"Trabia Garden",              48893,  -57979},
-    {"Edea's House",              -23150,   62853},
+    // v0.21.1: **THE MARKER WAS 9.6 KM FROM THE ORPHANAGE, AND IT IS THE SHUMI
+    // FAILURE REPEATING ALMOST TO THE KILOMETRE.**
+    //
+    // Aaron, on disc 3: *"Auto-Drive says searching for entrance, then it sounds
+    // like it is going back and forth in front of the location... Also tried to
+    // randomly walk into it but was unsuccessful."* The drive was not failing --
+    // the log's last twenty samples are dist=5 and dist=26, it was standing ON
+    // the marker. There is simply nothing there.
+    //
+    // Found the same way Shumi was, and the method is worth trusting because it
+    // was audited against the whole catalog first. Every named place the world
+    // map DRAWS sits on a patch of texture page 8, and a correct marker sits a
+    // few hundred units outside it:
+    //
+    //     Fire Cavern 241u   Shumi 349u   Galbadia Station 502u   Tomb 540u
+    //     Chocobo Forests 619-734u   Centra Ruins 741u   Winhill 881u
+    //     Timber 900u   Balamb Town 1002u   Trabia 1396u   Dollet 1397u
+    //
+    // Nineteen markers land in that band. **Edea's House was 7,110 units from
+    // its nearest patch -- and that patch is a 32-poly one already claimed by
+    // Chocobo Forest 7 at 728u.** It had no settlement of its own anywhere near
+    // it.
+    //
+    // THE WHOLE SOUTHERN HALF OF THE MAP CONTAINS EXACTLY FOUR PAGE-8 PATCHES:
+    //
+    //     291 polys (  6145, 55295)  Centra Ruins        claimed, 741u
+    //      32 polys (-21005, 69632)  Chocobo Forest 7    claimed, 728u
+    //      32 polys ( 44018, 75776)  Chocobo Forest 6    claimed, 684u
+    //     103 polys (-29583, 70090)  UNCLAIMED           <-- the orphanage
+    //
+    // 103 polys is settlement-sized (Winhill 248, Shumi 248, Tomb 64) and the
+    // structure measures 800 x 900 units. It carries **terrain 29** -- the same
+    // signature Shumi Village has, and the terrain the planner already notes is
+    // "entered via terrain-29 polygon trigger, not wmsetus script event".
+    // Its apron is terrain 29 on all four faces; the EAST face has the most of
+    // it (7 polys at h -346..-188), and east is the side the player arrives from
+    // after landing the Garden. This coordinate is that apron.
+    //
+    // WHY THE STORY GATE WAS A RED HERRING. The trigger table has program [32],
+    // field 506 `ehhana1` (Edea's House - Flower Field), gated story >= 1750,
+    // and the live story word reads 912 -- which looked like an answer and was
+    // not one. Aaron: *"Edea's House is now open at this point in the game. It
+    // becomes reachable at the start of disc 3, which is where I am at now."*
+    // He is right, and the terrain-29 finding explains the contradiction: the
+    // orphanage is entered by walking onto its polygons, exactly as Shumi is,
+    // so program [32] is a LATER, scripted visit and has nothing to do with
+    // this one. A gate that fails does not mean the door is locked when the
+    // door is not that gate.
+    //
+    // The old marker was (-23150, 62853). If this one is also wrong the mod's
+    // own entry capture will say so the moment a field loads within 3,000 units
+    // -- which is how Galbadia Garden's coordinate was pinned.
+    //
+    // v0.21.6: IT WAS ALSO WRONG, BY 600 UNITS, AND THIS IS WHY.
+    //
+    // The page-8 archaeology above found the right STRUCTURE and then aimed at
+    // the wrong part of it. The patch is real -- 103 polygons -- but a polygon
+    // only opens the door if it carries the entry flag (byte 0x0E bit 3, which
+    // sub_545EA0 tests first) AND is foot-walkable (byte 0x0F bit 7, the move
+    // validator's flag). At Edea's House **only seven of the 103 are both**; the
+    // other 96 are the building itself, ground Squall cannot stand on. The seven
+    // cover x[-29975,-29310] y[69632,70078].
+    //
+    // "The EAST face has the most terrain-29 apron, and east is the side the
+    // player arrives from" was a plausible inference and it put the marker 234
+    // units east of the only ground that works. In the 2026-08-16 BAT Aaron got
+    // to (-29144,70004) -- 287 units short -- with every gate in the exe passing
+    // on every frame, because they all did pass. He was never on a trigger poly.
+    //
+    // This coordinate is the interior point of those seven triangles farthest
+    // from their edge: 140 units of margin in every direction. The matching
+    // firing-area row in world_map_trigger_data.inl carries the bbox.
+    {"Edea's House",              -29459,   69772},
     {"White SeeD Ship",             4887,   51285},
     {"Great Salt Lake",            49888,   -2683},
     {"Esthar City",                57011,   -2295},

@@ -2,8 +2,20 @@
 // Included from menu_tts.cpp. Do not compile independently.
 // v0.12.18: Extracted for readability.
 
+// v0.22.1 (#81): defined in menu_tts_magic.inl, which is included after this
+// file. Returns true when it has spoken, i.e. when the Magic module is open.
+static bool AnnounceMagicHelpText();
+
 static void AnnounceHelpText()
 {
+    // v0.22.1 (#81): **the Magic screen's help bar was invisible to "/".** The
+    // scrape below looks for a dash separator or a known prefix in the RENDERED
+    // text, and the Magic bar matches neither -- so the key did nothing there.
+    // It never needed the scrape: the Magic module holds a pointer to the very
+    // string the bar is drawing, straight into the loaded mngrp.bin. Reading
+    // that is exact rather than reconstructed, and it is the game's own wording.
+    if (AnnounceMagicHelpText()) return;
+
     // Snapshot GCW buffer and decode
     uint8_t gcwBuf[1024];
     int gcwLen = FieldDialog::SnapshotGcwBuffer(gcwBuf, sizeof(gcwBuf));

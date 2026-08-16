@@ -321,27 +321,27 @@ static const char* REFINE_CHAR_NAMES[] = {
 // (elemental, GF-tier, healing, support). A name not in this table is treated as
 // unknown -> the stock line is skipped (name only) rather than risk a wrong count.
 // Extend with the status-magic ids (41+) once they're confirmed the same way.
-static const char* const MAGIC_NAMES[] = {
-    "",                                                    // 0
-    "Fire", "Fira", "Firaga",                              // 1-3
-    "Blizzard", "Blizzara", "Blizzaga",                    // 4-6
-    "Thunder", "Thundara", "Thundaga",                     // 7-9
-    "Water",                                               // 10 (confirmed)
-    "Aero", "Bio", "Demi", "Holy", "Flare",                // 11-15
-    "Meteor", "Quake", "Tornado", "Ultima", "Apocalypse",  // 16-20
-    "Cure", "Cura", "Curaga", "Life", "Full-life",         // 21-25
-    "Regen", "Esuna", "Dispel", "Protect", "Shell",        // 26-30
-    "Reflect", "Aura", "Double", "Triple", "Haste",        // 31-35
-    "Slow", "Stop", "Float", "Drain", "Pain"               // 36-40
-};
+// v0.22.0 (#81): **THE TABLE THAT USED TO LIVE HERE WAS WRONG.** It ran
+// "Slow, Stop, Float, Drain, Pain" at ids 36-40 and stopped there, with a note
+// to extend it "once they're confirmed". 36 and 37 are right; 38, 39 and 40 are
+// Blind, Confuse and Sleep. Float is 47, Drain 44, Pain 45. So a refine whose
+// yield was Float, Drain or Pain looked up a DIFFERENT spell's stock and spoke
+// that number -- and this is the one line in this file where a wrong answer is
+// worse than no answer, since its whole job is "you already have N of these".
+//
+// The canonical 57-entry table now lives in menu_magic_model.inl, in the same id
+// space the Magic submenu indexes, cross-checked against the game's own
+// mmagic.bin: its field-usable bit lands on exactly Cure, Cura, Curaga, Life,
+// Full-Life, Esuna and Dispel, which a table with the wrong ids could not
+// produce. tests/menu_sim.cpp pins all three corrected ids.
 
 // Map a (possibly pluralised) refine-result magic name to its spell id, or -1.
 static int MagicNameToId(const char* nm)
 {
     if (!nm || !nm[0]) return -1;
-    const int N = (int)(sizeof(MAGIC_NAMES) / sizeof(MAGIC_NAMES[0]));
+    const int N = MAGIC_SPELL_NAME_COUNT;
     for (int id = 1; id < N; id++)
-        if (MAGIC_NAMES[id][0] && strcmp(nm, MAGIC_NAMES[id]) == 0) return id;
+        if (MAGIC_SPELL_NAMES[id][0] && strcmp(nm, MAGIC_SPELL_NAMES[id]) == 0) return id;
     // The preview pluralises the yield ("20 Waters"); retry without a trailing 's'.
     size_t L = strlen(nm);
     if (L > 1 && nm[L - 1] == 's') {
@@ -349,8 +349,12 @@ static int MagicNameToId(const char* nm)
         size_t c = (L - 1 < sizeof(base) - 1) ? L - 1 : sizeof(base) - 1;
         memcpy(base, nm, c); base[c] = '\0';
         for (int id = 1; id < N; id++)
-            if (MAGIC_NAMES[id][0] && strcmp(base, MAGIC_NAMES[id]) == 0) return id;
+            if (MAGIC_SPELL_NAMES[id][0] && strcmp(base, MAGIC_SPELL_NAMES[id]) == 0) return id;
     }
+    // The old table spelled id 25 "Full-life"; the canonical one uses the game's
+    // own "Full-Life". Accept the old spelling so a preview quoting it still
+    // resolves rather than silently losing the stock line.
+    if (strcmp(nm, "Full-life") == 0 || strcmp(nm, "Full-lifes") == 0) return 25;
     return -1;
 }
 

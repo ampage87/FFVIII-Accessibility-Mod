@@ -739,15 +739,10 @@
                 s_navPx = px; s_navPy = py; s_navHadPrev = true;
             }
         }
-        // v0.18.3.257 (#79): physics vehicle-detector, PROMOTED from log-only.
-        // Offline-validated discriminator (foot: motion sides with camYaw in 100%
-        // of disagreement frames across all controls; car: with mh in 94-97%;
-        // fired live 24/24 one second into the .256 car BAT). On verdict while
-        // steering as foot: latch s_driveVehicleSig -> UpdateAutoDrive treats the
-        // REST of this drive as a VEHICLE (turn-then-go law), announce once.
-        // State lives in state.inl and resets in StartAutoDrive, so a stale ring
-        // can never latch a following foot drive. The verdict is unreachable on
-        // foot (0/153 disagreement frames sided with mh in the control data).
+        // v0.18.3.257 (#79): physics vehicle-detector. The geometry is here; every
+        // DECISION lives in world_map_vehsig.inl, which tests/vehsig_test.cpp
+        // replays real logged frames through -- see the note at the top of that
+        // file for why v0.21.0 had to put two guards in front of it.
         {
             int vsCam = GetWorldMapCameraYaw();
             if (s_vsHad && vsCam >= 0) {
@@ -756,23 +751,26 @@
                 if ((double)vdx * vdx + (double)vdy * vdy >= 64.0) {
                     int vsGap = ((((int)heading - vsCam + 2048) % 4096 + 4096) % 4096) - 2048;
                     if (vsGap < 0) vsGap = -vsGap;
-                    if (vsGap > 300) {
-                        double vr = atan2((double)vdx, -(double)vdy);
-                        int mb = ((((int)(vr / 6.283185307179586 * 4096.0)) % 4096) + 4096) % 4096;
-                        int em = ((((mb - (int)heading + 2048) % 4096 + 4096) % 4096)) - 2048; if (em < 0) em = -em;
-                        int ec = ((((mb - vsCam + 2048) % 4096 + 4096) % 4096)) - 2048;        if (ec < 0) ec = -ec;
-                        s_vsRing = ((s_vsRing << 1) | (em < ec ? 1u : 0u)) & 0x00FFFFFFu;
-                        if (s_vsCount < 24) s_vsCount++;
-                        if (s_vsCount >= 24) {
-                            int mhSided = 0;
-                            for (int vb = 0; vb < 24; vb++) mhSided += (int)((s_vsRing >> vb) & 1u);
-                            if (mhSided >= 20 && !s_driveVehicleSig) {
-                                s_driveVehicleSig = true;
-                                Log::World("WorldMap: [VEHSIG] VEHICLE DETECTED: motion sided with mh in %d of last 24 disagreement frames -- switching this drive to the vehicle steering law (#79)", mhSided);
-                                ScreenReader::Speak("Vehicle detected.", true);
-                                s_vsLastLog = now;
-                            }
-                        }
+                    double vr = atan2((double)vdx, -(double)vdy);
+                    int mb = ((((int)(vr / 6.283185307179586 * 4096.0)) % 4096) + 4096) % 4096;
+                    int em = ((((mb - (int)heading + 2048) % 4096 + 4096) % 4096)) - 2048; if (em < 0) em = -em;
+                    int ec = ((((mb - vsCam + 2048) % 4096 + 4096) % 4096)) - 2048;        if (ec < 0) ec = -ec;
+
+                    const int  vsId   = GetActiveVehicleId();
+                    const bool vsFoot = (vsId >= 0 &&
+                                         GetVehicleType((uint8_t)vsId) == VEH_ON_FOOT);
+                    int vsVotes = 0;
+                    const VehSigResult vsR = VehSigFeed(s_vsSig, vsGap, em < ec,
+                                                        vsFoot, &vsVotes);
+                    if (vsR == VS_ID_VETO) {
+                        Log::World("WorldMap: [VEHSIG] verdict VETOED: motion sided with mh in %d of %d, but the engine's vehicleId=%d says ON FOOT -- staying on the foot steering law (#79)",
+                                   vsVotes, VS_WINDOW, vsId);
+                    } else if (vsR == VS_LATCH && !s_driveVehicleSig) {
+                        s_driveVehicleSig = true;
+                        Log::World("WorldMap: [VEHSIG] VEHICLE DETECTED: motion sided with mh in %d of last %d disagreement frames -- switching this drive to the vehicle steering law (#79)",
+                                   vsVotes, VS_WINDOW);
+                        ScreenReader::Speak("Vehicle detected.", true);
+                        s_vsLastLog = now;
                     }
                 }
             }

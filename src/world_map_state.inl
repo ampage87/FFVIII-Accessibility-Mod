@@ -35,7 +35,12 @@
 #define NAVMESH_DIAG 1
 // v0.18.3.186: per-frame motion-fidelity capture ([MFRAME]) so the offline sim can learn the
 // engine's exact wall-slide and its true ground height vs our oracle. Set to 0 to silence.
-#define WM_MOTION_DIAG 1
+// v0.21.4: OFF. This emits ONE UNTHROTTLED [MFRAME] line per poll tick, and
+// Log::World flushes synchronously -- 120-180 formatted file writes a second on
+// the poll thread for the whole of every drive. It was built to feed the offline
+// motion sim and that work is done; turn it on for a capture session, not for a
+// shipped build.
+#define WM_MOTION_DIAG 0
 
 // ============================================================================
 // v0.18.3.106: Navmesh routing toggle (#70 routing swap, stage 1)
@@ -519,7 +524,7 @@ static const int    DRIVE_PROBE_MAX_FAILS    = 8;     // this many non-progressi
 // pivot-in-place (no forward key, heading turning) apart from forward-into-
 // collision (UP pressed but position frozen). Per-session diagnostic -- set
 // false (or remove this block + the trace) before the #67 push.
-static const bool   DRIVE_STEER_DIAG            = true;   // #70 v0.18.3.98: re-enabled to watch the bridge-out steer toward the road cell (set false before push)
+static const bool   DRIVE_STEER_DIAG            = false;  // #70 v0.18.3.98 turned this on "to watch the bridge-out steer toward the road cell (set false before push)" -- v0.21.4 does what that comment asked. 50 ms of synchronous file I/O on the poll thread, every drive.
 static const int    DRIVE_STEER_DIAG_INTERVAL_MS = 50;    // v0.18.3.179: 200->50ms, denser movement-physics data
 
 // #70 v0.18.3.201: CAMERA-WRITE steering. true = the on-foot executor steers by writing
@@ -575,17 +580,21 @@ static int     s_trigAvoidN = 0;
 
 static bool s_driveActive            = false;
 // v0.18.3.257 (#79): physics-detector state. s_driveVehicleSig latches TRUE for
-// the CURRENT drive when the offline-validated motion discriminator reaches
-// verdict (>=20 of last 24 clean disagreement frames side with mh) while
-// steering as foot -- UpdateAutoDrive then treats the drive as a VEHICLE (the
-// turn-then-go law). All fields reset in StartAutoDrive so a stale ring from a
-// car drive can never latch a following foot drive. Foot controls measured 0%
-// mh-sided across 153 disagreement frames -- the verdict is unreachable on foot.
+// the CURRENT drive when the motion discriminator reaches verdict (>=20 of last
+// 24 clean disagreement frames side with mh) while steering as foot --
+// UpdateAutoDrive then treats the drive as a VEHICLE (the turn-then-go law).
+// All fields reset in StartAutoDrive so a stale ring from a car drive can never
+// latch a following foot drive.
+//
+// v0.21.0: **THE VERDICT WAS NOT UNREACHABLE ON FOOT. IT FIRED FIVE TIMES IN
+// ONE WALK TO EDEA'S HOUSE, AND EACH TIME IT THREW THE DRIVE INTO AN ORBIT IT
+// COULD NOT LEAVE.** See the note above the detector in world_map_drive_exec.inl.
+// Two guards now stand in front of it: the engine's own vehicle id vetoes it
+// outright, and frames where the character is mid-turn no longer count.
 static bool     s_driveVehicleSig = false;
 static int32_t  s_vsPx = 0, s_vsPy = 0;
 static bool     s_vsHad = false;
-static uint32_t s_vsRing = 0;     // last 24 disagreement verdicts (bit 1 = motion sided with mh)
-static int      s_vsCount = 0;    // disagreement frames collected (saturates at 24)
+static VehSigRing s_vsSig = { 0, 0, -1, false };   // see world_map_vehsig.inl
 static DWORD    s_vsLastLog = 0;
 // v0.18.3.203: PAUSED-IN-FIELD drive. An off-target field entry no longer kills the drive:
 // it pauses (drive stays active, keys released, UpdateAutoDrive idle off-map) and the
@@ -605,6 +614,10 @@ static DWORD    s_driveStartTime         = 0;
 // instantly fired StopAutoDrive("Cannot reach...") on the first resumed
 // frame (BAT .215, 21:24:14). Watchdogs key on startTime + this generation.
 static DWORD    s_driveWatchdogGen       = 0;
+// v0.21.4: true while a dialog window holds the world map. See the note at the
+// top of UpdateAutoDrive -- a cutscene is not a stall, and on foot mistaking one
+// for a stall wrote permanent damage into the learned-obstacle overlay.
+static bool     s_driveInDialog          = false;
 // v0.18.3.220: world-map re-entry resume replan is DEFERRED this many ticks.
 // The .219 BAT showed the immediate replan races the engine: on the first
 // re-entry frame GetWorldMapPosition_Active still returns the PRE-pause

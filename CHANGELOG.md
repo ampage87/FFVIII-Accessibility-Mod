@@ -6,6 +6,1067 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.22.5
+
+#81: **the latch was disarmed by the very frames it had to survive.**
+
+**The All transfer was still silent.** v0.22.4 detected it by watching the
+giver's total drop to zero — correct — but cleared the latch on any poll that was
+not state 97. The chain is **99 → 104 → 105 → 96 → 97**, and 104 and 96 are both
+`MP_NONE`, so a poll landing on either disarmed the latch one or two frames
+before the transfer it existed to detect.
+
+The v0.22.4 test passed because it stepped straight from 99 to 97 and never
+visited the transient states. That is the second time in two builds that a green
+test covered a path the game cannot take — v0.22.1 tested state 105 directly,
+which the poll can never observe. The latch now survives until the player is
+demonstrably out of the flow, and the test walks the real chain.
+
+**The step prompt repeated with every character.** v0.22.3 made a character
+change force the header, which on the All steps prefixed "Select member to
+receive magic" to every left/right. The prompt belongs to the step and the name
+to the line, so a new `MagicLineNamesCharacter()` suppresses the header on the
+two All steps and the Exchange partner picker — and deliberately not on the spell
+list or action row, whose lines name nobody.
+
+The lesson, written into the file: both recent failures had one shape — **a test
+that constructs a state the game only reaches through a sequence, without walking
+the sequence.** Where a transition matters, the test now replays it rather than
+jumping to its endpoints.
+
+---
+
+## v0.22.4
+
+#81: **the All transfer ran silently.** The v0.22.3 character fix is confirmed
+working; completing an All transfer for the first time exposed the last defect.
+
+Receiver Zell, giver Irvine — and afterwards Zell's Exchange list reads "Life 75,
+Scan 88, Cure 92", which is Irvine's exact loadout from earlier in the same log.
+The transfer happened, and there were **zero** transfer announcements.
+
+**State 105 performs the transfer and lasts one frame.** The chain is 99 →
+confirm → 104 → 105 → 96 → 97, and everything but 99 and 97 is transient, so a
+polling reader cannot see it. v0.22.1 implemented the announcement on state 105
+and unit-tested it — and the test passed, because a test can hand itself state
+105 whenever it likes. The game will not.
+
+Fixed by watching the **effect**: latch how much the giver is holding while the
+giver step is up, and announce when that total reaches zero. A cancel leaves it
+untouched, so the two outcomes separate cleanly without ever observing the state
+that did the work. The latch re-snapshots every tick, because the log shows the
+giver being changed mid-step (Squall, then Irvine) and a once-only latch would
+have named the wrong character. State 107 joins 106 as the pre-flight warning,
+for the same one-frame reason.
+
+The general lesson, written into the file: **a state only the game can enter
+transiently cannot be verified by a test that constructs that state directly.**
+Where the effect is visible in the savemap, watch the effect.
+
+---
+
+## v0.22.3
+
+#81: **the one thing the log found that the player did not.** v0.22.2 BAT'd
+clean; this is the full-log review before calling Magic production-ready.
+
+The log is otherwise excellent — 1,448 lines, zero errors, the help bar reading
+the game's own per-spell descriptions ("Revive from KO", "Scan enemy's HP and
+weakness"), castability correct live (Scan and Thunder say "cannot be cast here",
+Life and Cure do not), the Exchange split running 0/100 → 50/50 with the savemap
+agreeing afterwards, and the module walk confirming pool slot 2 rather than
+depending on it.
+
+**But L1/R1 changes the character without leaving the phase, so nothing was said
+about it.** The spell list went `char=2` → `char=5` announced only as "Cure,
+quantity 82, slot 1 of 32" — you would believe you were still looking at Irvine's
+magic when you were looking at Selphie's. On a screen whose whole purpose is
+"whose spells are these and how many", that is the worst thing it could get
+wrong, and it is invisible in play because both lines are individually correct.
+
+A character change now counts as an arrival, so the header fires, and the list
+header **names the character** ("Selphie's magic") instead of the generic "Magic
+list" that said nothing precisely when it mattered. Which character an
+announcement is *about* differs by phase, so swapping the partner re-announces in
+the partner panel while changing it on the action row stays quiet.
+
+A latent bug fell out of the test: the header used the cached `charName` rather
+than deriving from `charId`, and those can desync because a swap updates `charId`
+first. It now derives from `charId`.
+
+Not fixed, cosmetic: the help bar renders the game's interpuncts as spaces
+("Rearrange in order of Restore Attack Indirect"). That is the game's own text
+and reads fine.
+
+---
+
+## v0.22.2
+
+#81: **the garbled help bar, and one name too many.** All now works as expected,
+which settles the v0.22.1 direction correction — step 1 receiver, step 2 giver.
+
+**Help text was garbled throughout.** `DecodeMenuText` indexes its glyph table
+with a **glyph index**, because its existing caller hands it the GCW buffer,
+which the renderer has already converted. `mngrp.bin` is one stage earlier and
+holds **text-stream bytes** — `glyph + 0x20` — so every character came out 32
+slots too high. From the real file, `59 71 63 20 6B 5F 65 67 61` read as
+`AaI'UEIOE`; shifted, it reads `Use magic`. The v0.22.1 comment claiming the bar
+and the scrape "were always reading the same encoding, just at different points
+in the pipeline" was half right and therefore wrong: same table, different
+offset, and the offset was the whole bug. `DecodeMenuText` is untouched — its
+other callers pass glyph indices and are correct.
+
+**Exchange repeated the partner's name on every slot.** The owner now lives in
+the phase header ("Zell's magic"), spoken once on arrival in a panel. v0.22.1 put
+it on every line for a real reason — two lists on one screen are ambiguous — and
+the header solves that without the repetition.
+
+New gate: three byte sequences lifted verbatim out of `mngrp.bin` are decoded and
+checked, *and* the un-shifted reading is asserted to be wrong — a fixture that
+decodes correctly either way proves nothing. The compile probe's stub decoder is
+now the inverse of the shift, with its header stating plainly that it checks
+control flow and not encoding, because a stub cannot falsify its own convention.
+
+---
+
+## v0.22.1
+
+#81: **the four Magic bugs.** Use and Rearrange were reported clean; these are
+the rest.
+
+**"Magic list" on every page turn.** Paging runs state 13 → 14/16 → 13, and the
+poll recorded the transient state as the current phase, so returning looked like
+a fresh arrival. It now keeps the last *spoken* phase; the header is said once,
+when focus lands.
+
+**"/" did nothing on the Magic screen.** The usual help reader scrapes the
+rendered text out of the GCW buffer looking for a dash separator or a known
+prefix, and the Magic bar has neither. It never needed the scrape: the module
+caches a pointer to the exact string the bar draws (`module +0x24`), and the text
+getter returns a pointer straight into the loaded `mngrp.bin` — raw NUL-terminated
+FF8 bytes in long-lived data, safe to read cross-thread. Stated rather than
+hidden: the game does not refresh that pointer in target select or All's second
+step, so those read slightly stale text — never wrong text.
+
+**Exchange was entirely silent.** States 26 (your list), 28 (choose partner), 44
+(their list), 52/55 (Give All · Take All · Split) and 63 (the quantity split) are
+all narrated. Both columns share one per-character cursor array with column B
+paging on its own byte. Each panel now names *whose* list it is — two lists on one
+screen with identical wording was the ambiguity that made this unusable. The split
+reads both counters, because the two numbers move in opposite directions.
+
+**All was confusing, and the direction is the reverse of what it looked like.**
+State 97 picks the **receiver**, state 99 the **giver**: state 105 calls the
+transfer with the step-2 character losing every spell and the step-1 character
+gaining them, and step 2's mask excludes the step-1 choice. The game's own help
+bar agrees — "Select member to receive magic" then "Select member to transfer
+magic" — so the mod now speaks those strings verbatim.
+
+**The root cause of both flows being broken:** v0.22.0 routed on `screenMode == 3`,
+and *both* flows use mode 3 and mode 4, so they were indistinguishable. Routing is
+now on the state number.
+
+`lint_seh` caught a C2712 before MSVC could: the first draft of the help reader
+mixed `__try` with a `std::string`. The raw copy is now its own frame.
+
+---
+
+## v0.22.0
+
+#81: **the Magic submenu** — action row, the 32-slot spell list, cast target
+select, the sort popup and the discard confirmation. Plus an offline simulator
+for the main menu, and a bug it found in the Ability screen.
+
+**The structural finding.** Everything this mod has called `pMenuStateA + 0x2xx`
+for two years is really a field of a **menu module object**. The game allocates
+modules from a pool at `0x01D76BC8` (stride `0x78`, 10 slots) and threads them
+onto an MRU list at `0x01D76B48`. The main menu lands in slot 1, the open submenu
+in slot 2 — so `+0x22E`, which this codebase calls "focus", is **slot 2 + 0x10,
+the state word of a 114-state machine**. That is why it takes values like 3, 13,
+20 and 72: they are jump-table indices. And `+0x230`, called a "phase" in the
+comments, is slot 2's **in-use flag**. It was never a phase.
+
+Slot 2 is an allocation-order coincidence, so the hook walks the list and matches
+Magic by its update function `0x004F02F0` — from the submenu dispatch table at
+`0x00B87ED8` index 3, whose Status/Save/Switch/Junction indices match the
+`+0x1E8` values the mod had already observed, confirming it from two directions.
+
+**The slot formula**, which is the one computation that decides whether the right
+spell gets named: `slot = (module[0x38 + charId] & 3) + module[0x42] * 4`. The
+list is 1 column × 4 rows × 8 pages, the cursor is stored *per character*, and it
+lags one frame after a page change, so only its low two bits are trustworthy. The
+trap avoided: `pMenuStateA + 0x272` is the *Item* menu's list cursor — in the
+Magic module that byte is written only during the post-sort redraw.
+
+**The labels are decoded, not guessed**, from the game's own
+`Data/lang-en/menu.fs` → `mngrp.bin` group 8, via the entry tables the code
+itself indexes: Use / Exchange / All / Rearrange, and the seven sort orders. That
+also settles what disassembly could not — action 1 is Exchange (one member),
+action 2 is All (everyone).
+
+Uncastable spells are **greyed, not hidden**, which is invisible to a blind
+player and decides whether a spell will cast, so the list says "cannot be cast
+here" — in the Use flow only. `mmagic.bin` bit 0 gives exactly Cure, Cura,
+Curaga, Life, Full-Life, Esuna, Dispel.
+
+**New offline simulator** (`tests/menu_sim.cpp`). The wording lives in
+`src/menu_magic_model.inl` as pure functions of a `MagicView` struct, so all six
+phases are testable without playing — which is the point, since every previous
+submenu could only be tested by playing it. It caught a real defect on its first
+run ("No target, 4 of 3"). `MenuSim` models the module pool and a state machine
+rather than the Magic screen, so the remaining submenus can reuse it.
+`tests/menu_magic_compile.cpp` adds the only pre-MSVC syntax check the hook gets
+and exercises the module walk against a real mapped pool.
+
+**Bug fixed en route:** `menu_tts_ability.inl`'s spell-name table listed Float,
+Drain and Pain at ids 38–40. Those are **Blind, Confuse and Sleep**; Float is 47,
+Drain 44, Pain 45. A refine preview yielding any of the three read a *different
+spell's* stock and spoke that number.
+
+---
+
+## v0.21.8
+
+#79: **three things the BAT log said.** All four testable retargets arrived —
+Deling City at 37 units, the Tomb at **2** — with zero real errors in 27,878
+lines.
+
+**Trabia entered at `dist=1360`, and that was the tell: its door is twice the
+size this table claimed.** v0.21.7 restricted the aim to segment 149, where
+program 3 grants destination 19 with no coordinate bound — the conservative
+choice. But program 4 grants the *same* destination 19 in segment 150 whenever
+`Yoff > 4096`, and the patch runs straight across the seam: 194 walkable entry
+triangles in 149 and 172 more in 150. He entered at (49966,-58834) — Yoff 6702,
+in segment 150 — 1,363 units from the aim and **818 outside its bbox**. Taking
+both halves centres the aim in the real 2048 × 2048 door and raises its edge
+margin from 418 to **737**, the largest in the table. Being conservative about a
+clause is right; being conservative about which *half* of a door to aim at is
+just aiming at the far side.
+
+**The D-District Prison door never opens.** Aaron: *"you can see it on the world
+map but can never enter it from the world map. It is entered via a story sequence
+triggered in Deling City."* The geometry is real — program 16, 260 walkable entry
+polygons, story ≥ 350, and the drive went onto them — and no field loads; the
+prison is a mobile rig that relocates and sinks, so its world-map presence is
+vestigial by disc 3. **The row stays deliberately**: the drive still delivers the
+player to the gate for the equivalent experience, and the planner still routes
+other journeys around a real firing area. Written down so a future "arrived but
+nothing loaded" here is not re-investigated as a regression.
+
+**Winhill has two doors and v0.21.7 picked the right one** — destination 14, the
+high side of the Xoff 6144 split, field `0x029E`, the half the v0.21.6
+whole-patch aim would have missed. Its bbox is now taken from triangle vertices
+rather than raster samples; the west edge is Xoff 6145, because exactly 6144
+satisfies neither `> 6144` nor `< 6143` and would open no door at all.
+
+New gate: the four positions where the game actually let him through must sit
+within the **200-unit position-sampling lag** of their own firing area — not
+strict containment, since `lastPos` is the drive's last sample rather than the
+frame the engine tested, and all four are 59–166 units outside a raw triangle.
+Verified to fail on the v0.21.7 Trabia row, at 818 units.
+
+Checked and *not* a bug: the 9 km prison drive's four `[NAVBLK-PRUNE]` releases,
+two of them on blocks 30 km away at the Tomb. The prune picks the block nearest
+the start and keeps anything genuinely blocked, and the plan succeeded.
+
+---
+
+## v0.21.7
+
+#79: **the five held-back retargets, resolved offline** — not by measuring
+distances more carefully, but by using the thing that actually decides it.
+
+v0.21.6 bound entry-polygon patches to catalog destinations by nearest centroid,
+which is a guess, so anything needing a 1–2 km move was held back. The authority
+is not distance: **a patch sits in a segment, a segment has exactly one entry
+program, and that program names its destinations with clause coordinate bounds.**
+
+| destination | seg | prog | dest | story | bounds |
+|---|---|---|---|---|---|
+| Deling City | 264 | 8 | 8 | ≥333 | none |
+| D-District Prison | 361 | 16 | 10 | ≥350 | none |
+| Trabia Garden | 149 | 3 | 19 | ≥750 | none |
+| Winhill | 393 | 24 | 14/15 | ≥750 | **split at Xoff 6144** |
+| Great Salt Lake | 373 | 21 | 24 | ≥1600 | none, foot only |
+
+The first four markers sit in the same segment as their own patch, so the binding
+is a fact rather than an inference — icon and door in one 8192-unit square with
+one program. The 1–2 km is how far a city icon sits from its gate.
+
+**Winhill was the one worth holding back.** Program 24 splits segment 393 at
+`Xoff 6144`: destination 14 high, 15 low. The marker is at Xoff 7059; the v0.21.6
+whole-patch aim came out at Xoff 5825 — the low half, a *different destination*.
+The new aim and its entire bbox clear the split, so a drive arriving at the near
+edge cannot open the wrong door.
+
+**Great Salt Lake vs Chocobo Forest 3, settled.** Program 21 has no chocobo
+clause and a story ≥ 1600 gate; every chocobo forest program has a vehicle-49
+clause and no story gate at all. Segment 373 is Great Salt Lake. Chocobo Forest
+3's marker is in segment 374, which has no walkable entry polygon at all — that
+marker is wrong, and where it belongs stays an open question rather than a guess.
+
+`footOnly` is now derived rather than judged: a vehicle-132 (FOOT_ALT) clause
+means car-enterable. The rule reproduces all seven hand-set flags and makes
+Deling City and D-District Prison car-enterable, which the previous blanket
+`true` had wrong.
+
+Confirmed in instructions along the way: `sub_544630` at `0x544702` copies bit 3
+of the polygon you left from straight into the bit `0xFF21` tests — the v0.21.6
+BAT's re-entry-inhibit reading, from the exe rather than from behaviour.
+
+`ENTRY_AIM_COUNT` 17 → 22. Great Salt Lake is gated at story ≥ 1600 and cannot be
+confirmed at 912; it ships because it is strictly better than the marker it
+replaces and cannot regress anything that already refuses.
+
+---
+
+## v0.21.6
+
+#79: **Edea's House — the door is seven triangles wide.** The refusal was never a
+story gate, a master gate or the destination table. It was 234 units of ground.
+
+`sub_545EA0` opens with `mov eax,[0x020409FC]` / `test byte ptr [eax+0x0E], 8`.
+**That pointer is the polygon under the player** — which is why it churned every
+frame, and why v0.21.3 wrongly retracted it as a broken instrument. It was
+reading exactly the right thing, correctly: bit 3 clear, everywhere Aaron walked.
+
+Being an entry polygon is not enough — it must also be foot-walkable, and that is
+a different byte (`0x0F` bit 7, the move validator's flag the navmesh feed
+already uses). Map-wide: 7,359 entry polygons, 2,877 foot-walkable. The gap is
+where this bug lived.
+
+**Segment 652 holds 103 entry polygons. Seven are foot-walkable** — the other 96
+are the orphanage building. The seven cover `x[-29975,-29310] y[69632,70078]`,
+about 665 × 446 units, roughly a three-hundredth of the segment. The shipped
+marker `(-28950,70090)` was 234 units east of it, against the wall: v0.21.1's
+page-8 archaeology found the right structure and then aimed at the wrong face.
+In the 2026-08-16 BAT the closest approach was `(-29144,70004)` — 287 units
+short — with every gate the exe names passing on every frame, because they all
+genuinely did pass. New aim **(-29459,69772)**, 140 units of margin in every
+direction.
+
+v0.21.5's `[TRIGWALK]` said MATCH across 8 km of Centra because programs 34 and
+35 carry no coordinate clauses, so its finest positional unit is the 8192-unit
+segment. It reported *"every condition the exe names is satisfied and the refusal
+is elsewhere"* — a blind spot with a confident sentence attached. The sentence is
+gone, and the polygon gate now gets its own `[ENTRYPATCH]` line beside every
+verdict: on entry ground, or which patch is nearest and by how much.
+
+`world_map_trigger_data.inl` has documented byte 14 bit 3 since **v0.18.3.206**.
+The table was never wrong — it was seven rows long, and Edea's House was not one
+of them. It is now generated by `offline/gen_entryaims.py`, which reproduces all
+five hand-proven aims (Timber 91 u, Dollet 54 u, Balamb Town 47 u, Fire Cavern
+83 u, Galbadia Station 379 u) inside their own proven bboxes.
+
+Ten new firing areas shipped — Edea's House, Tomb of the Unknown King, Centra
+Ruins, Shumi Village and Chocobo Forests 1, 2, 4, 5, 6, 7 — every one a marker
+sitting within 800 units of its own door. Five larger retargets (Deling City,
+Great Salt Lake, D-District Prison, Trabia Garden, Winhill) are held back for
+their own BAT. Side effect: the planner prices non-target firing areas at +4096,
+so ten more real doors are now routed around instead of through.
+
+New gate `tests/entryaim_test.cpp`; `docs/WORLDMAP_ENTRY_POLYGONS.md` carries the
+full decode and the open questions.
+
+---
+
+## v0.21.5
+
+#79: **the entry interpreter, re-implemented from the exe and run live — with a
+known-good and a known-bad going through identical code.**
+
+---
+
+### Why re-implement rather than probe again
+
+Reading single addresses from the mod's own thread has now been wrong twice. The
+v0.21.3 "master gate" — `test byte ptr [eax+0x0E], 8` — turned out to read a
+**per-frame pointer that churns every tick** (`01FAACD8`, `01FAC720`,
+`01FB6528`, `0201A878`…), and it printed `bit3=CLEAR` on every line *including
+while an entry demonstrably succeeded*. A sampled address proves nothing when
+you cannot tell a stable value from a transient one.
+
+The control experiment gave the thing that does prove something. **Chocobo
+Forest 7 — the segment next door — opened on demand.** So the engine's walker
+runs, entries work, and Edea's House alone is refused.
+
+So this build stops sampling and evaluates **the whole 38-program set**, with
+the opcode semantics read out of the dispatch tables at `0x546CAC` / `0x546D3C`,
+against the same state the game reads. One case the game accepted, one it
+refused, through the same code.
+
+### What the model says
+
+`tests/trigwalk_test.cpp`:
+
+```
+Chocobo Forest 7 (-20953,68906): program 35, destination 38 -- the game agrees
+Edea's House     (-29585,70739): program 34 verdict = MATCH, destination 18
+```
+
+**The model reproduces the known-good exactly, and says the known-bad should
+fire.** Every condition the exe names — segment 652, story 912 past the 900
+gate, on foot, `UNK21` bit 0 — is satisfied at the position Aaron's screenshot
+puts at the orphanage wall.
+
+That is a real result, not a dead end. It moves the search off the *conditions*
+and onto what happens after them: `sub_545EA0` extracts the destination and
+hands it to `sub_544630`. **Destination 18 is the next thing to decode** — the
+table that turns a destination id into a field, and whatever gating lives there.
+
+The test also proves the gates bite, so a MATCH means something: story 899 fails
+the window, `UNK21` bit 1 fails the bit, the `UNK21` skip bypasses it, a Ragnarok
+fails the vehicle clause, and the pre-v0.21.1 marker fails the segment. And it
+checks the table's shape — 38 programs, 75 clauses, only segment 370 shared, by
+its three vehicle variants.
+
+### The live report
+
+New `[TRIGWALK]` line, once a second on the world map and again at every sweep
+start, riding the throttle the `[TRIGEVAL]` line already had:
+
+```
+[TRIGWALK] tick seg=652 prog 34 -> **MATCH, destination 18** (story=912 veh=0
+           unk21 bit=0 skip=0). If no field loads, every condition the exe names
+           is satisfied and the refusal is elsewhere.
+```
+
+or, when something does refuse:
+
+```
+[TRIGWALK] tick seg=652 prog 34 -> refused: story window
+           (story=880 needs [900,0) | veh=0 | unk21 bit=0 needs 0 skip=0)
+```
+
+Only programs covering the player's current square are reported, so it is one or
+two lines a second, not thirty-eight.
+
+### Verification
+
+* `trigwalk_test` **OK (0 bad)** — new gate.
+* `trigseg_test` needed a one-line stub after `TriggerEvalTick` gained the walk
+  call; **it caught that as a link error immediately**, which is the gate doing
+  its job.
+* `pathdecimate_test`, `vehsig_test`, `catalog_story_test`, `garden_harness`,
+  `garden_aboard_test`, `world_map_harness`, `minigame_bgbtl_compile`,
+  `lint_seh` (88 files) — all pass.
+* Read-only. No steering, planning or catalog logic changed.
+
+**NOT MSVC-built.**
+
+### BAT
+
+Stand at Edea's House for a few seconds, then at Chocobo Forest 7 for a few
+seconds, and send `ff8_world.log`. Two possibilities, and both are progress:
+
+* **Both report MATCH** — the model is right, the conditions are all satisfied,
+  and the difference is downstream in the destination table. That is where I go
+  next, and it is a much smaller search than the one this replaces.
+* **They disagree with what the game did** — then the model is wrong in a way
+  the log will name, and the line says which clause.
+
+## v0.21.4
+
+#70: **the on-foot auto-drive, reviewed against everything the Garden system
+taught us — and five defects it had been carrying.**
+
+> *"We haven't reviewed or updated the world map walking auto drive system since
+> we implemented the B-Garden world map auto drive system. I suspect the walking
+> auto drive system could be improved based on the findings from the B-Garden
+> system research and implementation."* — Aaron
+
+Two full read-throughs, planner and executor, each with the Garden subsystem
+beside it. The findings are written up with file:line evidence in
+**`docs/FOOT_AUTODRIVE_REVIEW.md`**. Shipped here are the five that are
+unambiguous; the rest are ranked there with a suggested order.
+
+---
+
+### 1. A cutscene is not a stall — and on foot it was doing permanent damage
+
+The Garden executor has paused on an open dialog window since v0.20.87, after
+three BATs wedged in the same spot during the Lunar Cry scene. `IsDialogOpen()`
+was declared for that fix. **The foot executor never called it.**
+
+While a dialog holds the world map the engine ignores movement. The foot freeze
+detector fires after 40 ticks — about 0.65 s — and its first act is
+`CamwLearnBlock`, which writes into the learned-obstacle overlay. That overlay is
+**deliberately persistent across drives**. So every world-map cutscene taught the
+planner that a piece of open ground was a wall, permanently, then pressed keys
+into a locked engine and retreated through the terrain it had just libelled.
+
+`UpdateAutoDrive` now pauses on the same predicate, releases the keys, holds the
+stuck clock, and on resume bumps `s_driveWatchdogGen` — the mechanism v0.18.3.216
+already built to reseed the route clocks after a battle. A cutscene is the same
+event with a different cause.
+
+### 2. The learned-obstacle overlay went silently sterile at 256
+
+`AddNavBlock` returned `false` when full — and that return value is not just
+"dropped". It is the signal the recovery ladder reads as *no new knowledge*,
+which routes it to the fence-inflation branch, whose entire job is to add blocks.
+So at 256 entries the executor entered a state where **every recovery was a no-op
+and every replan was sterile**, with nothing logged.
+
+It now evicts oldest-first and says so. The overlay records where the engine
+refused to walk; the oldest entries are the least likely to still matter, and
+keeping `AddNavBlock` truthful keeps the ladder moving.
+
+### 3. The grid planner truncated long routes and called them planned
+
+```c
+for (i = rc-1; i >= 0 && n < DRIVE_PATH_MAX; i--)   // 768 waypoints
+```
+
+A 1,500-cell route kept 768 waypoints and **ended 732 cells short, in open
+country**, marked `s_drivePathPlanned = true`, with no log line. The 384-cell
+margin ladder exists to permit ~49 km horseshoe detours, which is exactly the
+case that overflows. `PlanPathFine` has stride-sampled for this reason since it
+was written; the live planner never did.
+
+It now decimates, keeps the goal, and logs the resolution it dropped to.
+
+**`tests/pathdecimate_test.cpp` earned its place immediately** — the first
+version of this fix picked stride 2 for a 1,536-cell route, every stride-aligned
+index came out odd, and the goal was never emitted. The test caught it on the
+first run, before the build left this machine.
+
+### 4. `s_drivePathWorld` survived between drives
+
+It gates the reverse un-wedge and the **whole** route-progress and give-up
+watchdog block. It was cleared on neither the planner-ineligible path in
+`StartAutoDrive` nor in `StopAutoDrive` — and it is also written by the **Garden**
+executor. So whether a foot drive had route watchdogs at all could depend on what
+the previous drive did, including a drive by a different vehicle. Reset per drive.
+
+### 5. Diagnostics were shipped on
+
+`WM_MOTION_DIAG` emitted one **unthrottled** `[MFRAME]` line per poll tick, and
+`Log::World` flushes synchronously — 120–180 formatted file writes a second on
+the poll thread, for the whole of every drive. `DRIVE_STEER_DIAG` added another
+every 50 ms; its own comment read *"set false before push"*. Both off.
+
+---
+
+### What is deliberately NOT done, because the review was wrong about it
+
+The review's highest-ranked item was "the LOS clamp and lookahead are computed
+and discarded — one line to fix". The discard is real:
+
+```c
+wi = s_drivePathIdx + 1;   // world_map_drive.inl
+```
+
+**But it is deliberate, and documented.** v0.18.3.155 records the far selector
+oscillating between adjacent corridor cells with the character limit-cycling and
+never advancing, and the offline sim carrying it 20 km with sequential follow
+versus ~700 units with the selector.
+
+So the fix is not to restore the discarded value — that reverts a hard-won
+correction. It is to add what the Garden pairs with its lookahead and the foot
+system never had: **commitment**, plus a lookahead that collapses near obstacles.
+That is a design change, it changes how every drive feels, and it should be built
+against a harness rather than shipped on an argument. It is item 4 in the review's
+order of work, behind the harness itself.
+
+This is worth recording as a method note: **an audit that reads only the code
+will recommend reverting fixes whose reasons live in the comments.** Both agents
+that produced the review missed that comment; the check that caught it was
+reading the site before editing it.
+
+### Verification
+
+* `pathdecimate_test` **OK (0 bad)** — new gate. Asserts the old emission
+  reproduces the truncation, then over every route length from 2 to 1,539: never
+  overflows the buffer, starts at the start, **ends at the goal**, stays
+  monotonic, and leaves routes that fit at full 128-unit resolution.
+* `trigseg_test`, `vehsig_test`, `catalog_story_test`, `garden_harness`
+  (26 ok / 0 bad), `garden_aboard_test`, `world_map_harness`,
+  `minigame_bgbtl_compile` (0 errors / 0 bad), `lint_seh` OK (88 files).
+
+**NOT MSVC-built.**
+
+### BAT
+
+Drive somewhere long on foot.
+
+1. **The log should be much quieter** — no `[MFRAME]`, no `[YAWDRIVE]`. If a
+   drive still feels wrong, say so and I will turn them back on for a capture.
+2. **Walk into a world-map cutscene if you can find one** (the spot where Nida
+   comments is the known one). The drive should say *"cutscene … pausing; this is
+   not a stall"* and resume, instead of learning a phantom obstacle.
+3. Everything else should behave exactly as before. Items 2–5 are all
+   fault-path changes: on a clean drive none of them executes.
+
+## v0.21.3
+
+#79: **every condition passes and the door is still shut, so instrument the one
+gate above them all.**
+
+---
+
+### What the v0.21.2 instrument said
+
+Three sweep-starts and 215 ticks, all identical:
+
+```
+[TRIGEVAL] sweep-start pos(-28950,70102) liveSeg=652 box x[-32768,-24576] y[65536,73728]
+           | posFlag=0 cachedBlock=(0,0) cachedSeg=0 (live position is used)
+           | story=912 | UNK21 skip=0 bit=0 | vehId=0
+```
+
+Every one of them is the answer I was hoping *not* to get:
+
+| condition | program 34 requires | measured |
+|---|---|---|
+| segment | 652 | **652** ✓ |
+| whose position | — | **live** — not the parked Garden ✓ |
+| story | ≥ 900 | **912** ✓ |
+| `UNK21` | bit 0 == 0 | **0** ✓ |
+| vehicle | on foot (128) | **vehId 0, on foot** ✓ |
+
+**Every condition the exe's own decode names is satisfied, and no field loads.**
+Both of the suspects I raised last build are cleared: the Garden is not stealing
+the position test, and there is no world-state flag holding the orphanage shut.
+
+### The one gate left, and it is the first instruction in the walker
+
+```
+0x00545EA3  mov  eax, [0x020409FC]
+0x00545EAB  test byte ptr [eax + 0x0E], 8
+0x00545EAF  jne  <walk the 38 programs>
+0x00545EB1  xor  eax, eax
+0x00545EB4  ret                        <-- NOTHING IS EVALUATED
+```
+
+`sub_545EA0` checks **bit 3 of the byte at `[[0x020409FC] + 0x0E]`** before it
+looks at anything else. With that bit clear the game never reads a single entry
+program — not Edea's House, not anywhere on the world map. Every `[TRIGEVAL]`
+line now carries it:
+
+```
+| GATE [020409FC+0x0E]=0x?? bit3=SET (entry armed)
+| GATE [020409FC+0x0E]=0x?? bit3=CLEAR <-- NO PROGRAM IS EVALUATED
+```
+
+### The control experiment, which costs a two-minute walk
+
+Decoding the neighbouring programs gives a near-perfect control. **Chocobo
+Forest 7 is segment 653 — the square immediately east of Edea's House** — and
+its program (35) is as simple as they come:
+
+```
+SEGMENT== 653
+BEGIN
+  VEHICLE==128 (on foot)  AND  DEST 38
+  VEHICLE==49  (chocobo)  AND  DEST 38
+END
+```
+
+**No story gate. No `UNK21`. No coordinate bounds.** Nothing but "be in segment
+653 on foot". It is already in the catalog, roughly 8 km east of where you are
+standing.
+
+* **If the Chocobo Forest opens and Edea's House does not** — the master gate is
+  set, the walker is running, and program 34 is being refused for a reason still
+  unnamed. That is a much narrower search than the one I have been running.
+* **If neither opens** — the gate is clear and nothing on the world map is
+  enterable right now. That is a game-state condition, not a location problem,
+  and the `GATE` field will say so outright.
+
+Either way the next step stops being a guess.
+
+### Verification
+
+* `trigseg_test` OK (0 bad); `vehsig_test` OK; `catalog_story_test` 0 failures;
+  `lint_seh` OK (88 files); `minigame_bgbtl_compile` 0 errors / 0 bad;
+  `garden_harness` 26 ok / 0 bad; `garden_aboard_test` and `world_map_harness`
+  pass.
+* Read-only instrument. One extra field on a line that already existed.
+
+**NOT MSVC-built.**
+
+### BAT
+
+1. Stand at Edea's House for a few seconds — the ticks are enough, no need to
+   drive.
+2. Then auto-drive to **Chocobo Forest 7** and walk into it.
+3. Send `ff8_world.log`.
+
+I only need the `GATE` field and whether the forest let you in.
+
+## v0.21.2
+
+#79: **the trigger decode was wrong, and the exe says so.**
+
+> *"Still failed to arrive at Edea's House. Took an F11 screenshot when it said
+> it was <1km out... Go back to the exe and game files to pin its location down
+> like we did with Shumi if necessary."* — Aaron
+
+The screenshot settles the geography: **Squall is standing beside the
+orphanage's lighthouse.** The marker is right. The door is not opening for a
+different reason, and finding it meant going back to the dispatch tables.
+
+---
+
+### The opcode meanings were the other way round
+
+`sub_546100` dispatches through a jump table at `0x546CAC` indexed by a byte map
+at `0x546D3C`. Read those two tables out of `FF8_EN.exe` and the research
+document this module was built on does not survive:
+
+| opcode | old reading | what the dispatch table actually says |
+|---|---|---|
+| `0xFF06` | "program header, location/field id" | slot 2 → `0x00546192`: **segment test** — calls `sub_553910(X,Y)` and compares the operand to its return |
+| `0xFF08` | "region equals" | slot 35 — the **destination id**, not a test at all |
+| `0xFF0F` | unknown | slot 5 → `0x005463A7`: **X offset < operand** |
+| `0xFF10` | unknown | slot 6 → `0x00546406`: **Y offset < operand** |
+| `0xFF11` | unknown | slot 7 → `0x00546461`: **X offset > operand** |
+| `0xFF12` | unknown | slot 8 → `0x005464C0`: **Y offset > operand** |
+
+and `sub_553910` is four lines:
+
+```
+row = ((Y + 0x48000) mod 0x30000) >> 13      ; 24 rows of 8192
+col = ((X + 0x60000) &   0x3FFFF) >> 13      ; 32 cols of 8192
+return row * 32 + col
+```
+
+**A program's "location id" is a segment index — an 8192-unit square — and the
+four unknown opcodes are the bounds that narrow it.** The numbers this module
+has been reading as field ids and regions are each other.
+
+The transcription reproduces the mod's own segment arithmetic exactly: the old
+catalog point (−23150, 62853) prints as `seg(13,19)` in every `PLAN-DEBUG` line
+of the 2026-08-15 logs, and 19 × 32 + 13 = **621**.
+
+### What that makes of Edea's House
+
+Re-decoding wmsetus section 8 with the corrected opcodes, **program 34**:
+
+```
+SEGMENT== 652        -> x[-32768,-24576]  y[65536,73728]
+STORY>=   900
+UNK21     0
+BEGIN
+  VEHICLE==128 (on foot)  AND  DEST 18
+  VEHICLE==49  (chocobo)  AND  DEST 18
+END
+```
+
+**Segment 652 is the orphanage.** Aaron's story word reads 912 (≥ 900 ✓), he is
+on foot ✓, and his position at the lighthouse — (−29585, 70739) — is inside that
+box ✓. Every condition the mod can model passes.
+
+And **program 32**, the one this module reported last build as the story-locked
+Edea's House entrance, is `SEGMENT== 506` = x[81920, 90112] y[24576, 32768] —
+the far east of the map, nowhere near Centra. It was never Edea's House. My
+"the game has the door locked" conclusion two builds ago was built on that
+mis-decode, and Aaron was right to reject it.
+
+**The v0.21.1 marker is inside segment 652 and the pre-v0.21.1 marker was not.**
+So that move was correct even though it did not open the door.
+
+### What is left, and why this build instruments instead of guessing
+
+Two conditions the mod has never modelled, either of which explains a silent
+door, and **neither is decidable from static analysis**:
+
+**1. `UNK21` (opcode `0xFF21`, handler `0x00546A11`).**
+
+```
+if ([0x2040A34] != 0) pass
+else pass only if ((*(byte*)([0x20403A4] + 0x6D)) & 1) == operand
+```
+
+Program 34's operand is **0**, so that bit has to read 0.
+
+**2. Whose position is tested.** Every position opcode has two paths:
+
+```
+if ([0x2040A30] != 0) use cached block coords [0x2040A24]/[0x2040A28], /4
+else                  use the live player position
+```
+
+If a vehicle still owns the position while Aaron is on foot, the segment test
+runs against **the Garden — which he parked 6.3 km away, in segment 621, a
+different square.** No amount of walking would ever open that door.
+
+This build logs both, once a second on the world map and again the moment a
+drive gives up and starts sweeping:
+
+```
+[TRIGEVAL] sweep-start pos(...) liveSeg=652 box x[...] y[...] |
+           posFlag=... cachedBlock=(...) cachedSeg=... | story=912 |
+           UNK21 skip=... bit=... | vehId=0
+```
+
+One BAT reading those numbers answers it. A third guess would not.
+
+### Verification
+
+* `trigseg_test` **OK (0 bad)** — new gate. Five points whose segment the mod
+  has already printed from its own independently written arithmetic reproduce
+  exactly; segment 652's box is asserted; every point inside four segment boxes
+  round-trips; and segment 506 is asserted to be in the far east, not Centra.
+* `vehsig_test` OK; `catalog_story_test` 0 failures; `lint_seh` OK (88 files);
+  `minigame_bgbtl_compile` 0 errors / 0 bad; `garden_harness` 26 ok / 0 bad;
+  `garden_aboard_test` and `world_map_harness` pass.
+* Read-only instrument. No steering, planning or catalog logic changed.
+
+**NOT MSVC-built.**
+
+### BAT
+
+Walk to Edea's House and let it sweep — the sweep is now the *point*, not the
+failure. Then send me `ff8_world.log` and I will read the answer straight off
+the `[TRIGEVAL]` lines:
+
+* `posFlag` non-zero and `cachedSeg` ≠ `liveSeg` → the game is testing the
+  Garden's position, not yours, and the fix is to make the mod park it
+  differently or clear that ownership.
+* `UNK21 bit=1` → there is a world-state flag holding the door, and it becomes
+  the next thing to find.
+* Both clean → the trigger is firing its test and something downstream is
+  eating it, which is a third and much narrower search.
+
+If you would rather not walk it again, standing anywhere inside
+**x −32768…−24576, y 65536…73728** for a few seconds produces the same lines.
+
+## v0.21.1
+
+#79: **Edea's House was 9.6 km from its marker, and it is the Shumi failure
+repeating almost to the kilometre.**
+
+> *"Auto-Drive says searching for entrance, then it sounds like it is going back
+> and forth in front of the location. Also tried to randomly walk into it but
+> was unsuccessful."* — Aaron
+
+---
+
+### First, v0.21.0 passed
+
+```
+22:01:54  [VEHSIG] verdict VETOED: motion sided with mh in 23 of 24, but the
+          engine's vehicleId=0 says ON FOOT -- staying on the foot steering law
+22:04:54  [VEHSIG] verdict VETOED: ... 22 of 24 ... vehicleId=0 says ON FOOT
+```
+
+No "Vehicle detected." was spoken and the foot law kept the drive. **The last
+twenty distance samples are `dist=5` and `dist=26`** — the back-and-forth Aaron
+heard is the drive standing *on* the marker, not failing to reach it.
+
+Worth recording honestly: **the turn guard alone did not suppress those
+verdicts** (23 of 24 frames still voted vehicle). The engine-id veto carried it.
+That is the belt-and-braces design working as intended, but it means the physics
+fallback would still misfire on foot if the id ever became unreadable.
+
+### The marker had nothing under it
+
+Every named place the world map *draws* sits on a patch of texture page 8, and a
+correct marker sits a few hundred units outside it. Audited against the whole
+catalog first, because a method is only worth trusting if it reproduces the cases
+already known good:
+
+```
+Fire Cavern 241u   Shumi 349u   Galbadia Station 502u   Tomb 540u
+Chocobo Forests 619-734u   Centra Ruins 741u   Winhill 881u
+Timber 900u   Balamb Town 1002u   Trabia 1396u   Dollet 1397u
+```
+
+Nineteen markers land in that band. **Edea's House was 7,110 units from its
+nearest patch — and that patch is a 32-poly one already claimed by Chocobo
+Forest 7 at 728u.** It had no settlement of its own anywhere near it.
+
+The whole southern half of the map contains exactly **four** page-8 patches:
+
+| polys | centre | claimed by |
+|---|---|---|
+| 291 | (6145, 55295) | Centra Ruins, 741u |
+| 32 | (−21005, 69632) | Chocobo Forest 7, 728u |
+| 32 | (44018, 75776) | Chocobo Forest 6, 684u |
+| **103** | **(−29583, 70090)** | **nothing** |
+
+103 polys is settlement-sized (Winhill 248, Shumi 248, Tomb 64), the structure
+measures **800 × 900 units**, and it carries **terrain 29** — the same signature
+Shumi Village has, and the terrain the planner's own comment already calls out as
+*"entered via terrain-29 polygon trigger, not wmsetus script event"*. Its apron
+is terrain 29 on all four faces; the **east** face has the most of it (7 polys at
+h −346..−188), and east is the side you arrive from after landing the Garden.
+
+**The marker is now that apron: (−28950, 70090).**
+
+### The story gate was a red herring, and I said otherwise
+
+The trigger table has program [32], field 506 `ehhana1` — *Edea's House, Flower
+Field* — gated `story >= 1750`, and the live story word reads **912**. That
+looked like an answer. It was not one.
+
+> *"Edea's House is now open at this point in the game. It becomes reachable at
+> the start of disc 3, which is where I am at now."* — Aaron
+
+He is right, and the terrain-29 finding explains the contradiction: **the
+orphanage is entered by walking onto its polygons, exactly as Shumi is**, so
+program [32] is a later scripted visit and has nothing to do with this one. A
+gate that fails does not mean the door is locked when the door is not that gate.
+
+### Other markers the audit flagged
+
+The audit is a lead generator, not a verdict — Fisherman's Horizon is 25 km from
+any page-8 patch and is *correct*, because it is a platform in open ocean, and
+Cactuar Island and the Missile Base are the same kind of case. But several
+disc-3 destinations are about to matter and have never been driven to:
+
+```
+Sorceress Memorial   3,713u        Esthar City          9,018u
+White SeeD Ship      4,203u        Lunar Gate           8,321u
+Chocobo Forest 3     4,315u        Lunatic Pandora Lab  6,740u
+Tears' Point         6,036u        Island C. to Heaven  6,290u
+```
+
+None is touched here. They are recorded so the next one that misbehaves starts
+from evidence rather than from a fresh investigation.
+
+### Verification
+
+* `catalog_story_test` 0 failures — the only host test that compiles
+  `world_catalog.inl`; `vehsig_test` OK (0 bad); `lint_seh` OK (88 files);
+  `minigame_bgbtl_compile` 0 errors / 0 bad; `garden_harness` 26 ok / 0 bad;
+  `garden_aboard_test` and `world_map_harness` pass
+* Coordinate change only — no executable logic touched
+
+**NOT MSVC-built.**
+
+### BAT
+
+Auto-drive to Edea's House. It is about 10 km west-north-west of where the mod
+used to send you, so expect a longer drive.
+
+1. **It should arrive and a field should load** — the orphanage, not a sweep.
+2. If it sweeps again, that is still useful: grep `[DRIVE] Manual field entry`
+   and `arming entry capture`. The moment any field loads within 3,000 units of
+   the marker the mod captures the true coordinate itself, which is exactly how
+   Galbadia Garden's was pinned.
+3. If nothing loads anywhere near it, tell me and I will go after the terrain-29
+   polygon list directly rather than the texture map.
+
+## v0.21.0
+
+#79: **the auto-drive called a walking man a vehicle, five times, and orbited
+Edea's House.**
+
+> *"I landed the Garden outside Edea's House, but the auto-drive failed to get
+> me there on foot. It would get 1-2km out, then announce vehicle detected, then
+> wouldn't finish the approach and the distance would increase once again."*
+> — Aaron
+
+---
+
+### The log, in seven lines
+
+```
+21:29:27  YAWDRIVE  dist=4750     <- the FOOT law, walking straight in
+21:29:29  YAWDRIVE  dist=3305
+21:29:31  YAWDRIVE  dist=1604
+21:29:33  YAWDRIVE  dist=16       <- SIXTEEN UNITS from the waypoint
+21:29:33  VEHSIG    VEHICLE DETECTED (24 of 24)
+21:29:34  HDG-DIAG  dist=293      <- the VEHICLE law takes over
+21:29:38  HDG-DIAG  dist=2469     ...and then an orbit at 1200-1400, forever
+```
+
+**The foot law was working.** It closed 4,750 units to 16 without a stumble. The
+discriminator fired in that same second and handed a walking character to the
+turn-then-go law written for a car, which pushed him back out and held him in a
+circle he could not leave. The same shape repeats at 21:21:18 (dist 4), 21:27:06
+(dist 84) and 21:28:41 (dist 14) — **every verdict lands the instant the drive
+reaches a waypoint.**
+
+### Why the waypoint, and why it was always going to happen
+
+Because the waypoint is what manufactures the evidence.
+
+The discriminator compares the measured motion bearing against two references —
+the model heading (`mh`) and the camera yaw — on frames where those two disagree
+by more than ~26°. Whichever the motion follows names the vehicle.
+
+When the route advances a waypoint **the mod slews the camera to the new bearing
+in a single write**, and the character then rotates to catch up over several
+frames. Through all of them he is still walking the *old* heading. Two adjacent
+frames from the log say it outright:
+
+```
+cam=3403  mh=3403      walking straight -- the references agree, no vote
+cam=3855  mh=3403      camera written; gap 452; he has not turned yet
+```
+
+and the turn that follows reads `1977, 1465, 953, 441` — the gap **closing**,
+frame by frame, as the rotation completes. Every one of those frames sides with
+`mh`, and not one of them says anything about what the player is riding.
+
+**Of the 25 voting frames the ring held at the first verdict, every single one
+came from a turn.** The old comment claimed the verdict was "unreachable on foot
+(0/153 disagreement frames)". That control data was honest — it simply never
+contained a mod-driven camera slew.
+
+### Two guards, one of them authoritative
+
+**1. A run of closing gaps is a turn, and cannot vote.** One shrinking frame is
+noise and still counts; two in a row is a rotation. A vehicle's gap does not
+systematically close — it persists while the vehicle drives on, and a gap that
+merely wobbles still votes.
+
+**2. The engine's own vehicle id vetoes the verdict.** `0x020409E0` read **0 —
+on foot — at every drive start of that session**, while this heuristic declared
+a vehicle five times. A heuristic does not get to overrule a direct reading. An
+unreadable id (-1) still makes no claim, so the fallback keeps doing the exact
+job it was built for.
+
+### The policy is now testable, because that is why this survived
+
+**Nothing in the tree compiled `world_map_drive_exec.inl`** before a Windows
+build — no host harness reaches it, so a 66 KB fragment of steering logic had no
+check at all. The decisions are extracted into **`src/world_map_vehsig.inl`**
+(the geometry stays in the executor) and **`tests/vehsig_test.cpp`** drives them
+with the 25 real frames recovered from `ff8_world.log`:
+
+* the **old** policy latches on that fixture — the test asserts this first, so a
+  fixture that stops reproducing the defect fails loudly rather than passing
+  vacuously
+* the **new** policy does not latch, with the id readable *or* unreadable
+* a vehicle with an unreadable id is **still detected**, whether its gap is
+  steady or wobbling
+* the same vehicle-shaped evidence with the engine saying on foot is refused,
+  and announced **once**, not once per frame
+* the `1977, 1465, 953, 441` rotation contributes 2 votes instead of 4
+* `VehSigReset` really resets, so a car drive cannot arm the following foot drive
+
+### Verification
+
+* `vehsig_test` **OK (0 bad)** — new gate, add it to the run list
+* `lint_seh` OK (88 files); `minigame_bgbtl_compile` 0 errors / 0 bad;
+  `garden_harness` 26 ok / 0 bad; `catalog_story_test` 0 failures;
+  `garden_aboard_test` and `world_map_harness` pass
+* `world_map_drive_exec.inl` 66,357 → **66,207**; `field_navigation.cpp`
+  untouched at 81,645
+
+**NOT MSVC-built.**
+
+### BAT
+
+Stand outside Edea's House on foot and auto-drive to it.
+
+1. **No "Vehicle detected."** should be spoken at any point.
+2. The distance should fall and keep falling — no bounce back out to 2 km, no
+   orbit.
+3. If you want the guard's own voice, grep `[VEHSIG]`: silence is the pass. A
+   `verdict VETOED ... vehicleId=0 says ON FOOT` line means the physics latch
+   still reached a majority and the engine id caught it — worth telling me
+   about, but harmless.
+
+Then drive somewhere in the car to confirm the vehicle law still engages —
+`[VEHID] engine vehicleId=… -> steering as VEHICLE from drive start` should
+appear at the drive start, which is the path that does the work now.
+
 ## v0.20.130
 
 #minigame-bgbtl: **the briefing vetoed the soldier and left Squall swinging.**

@@ -26,7 +26,23 @@ static bool AddNavBlock(int32_t x, int32_t y) {
         if (dx > -192 && dx < 192 && dy > -192 && dy < 192) return false;   // already near a known block
     }
     if (s_navBlkN < 256) { s_navBlkX[s_navBlkN] = x; s_navBlkY[s_navBlkN] = y; s_navBlkN++; return true; }
-    return false;
+    // v0.21.4: **A FULL STORE USED TO GO SILENTLY STERILE.** Returning false here
+    // does not merely drop the new block -- it is also the signal the recovery
+    // ladder reads as "no new knowledge", which sends it to the fence-inflation
+    // branch, which cannot help either because that branch's whole job is to add
+    // blocks. So at 256 the executor entered a loop where every recovery was a
+    // no-op and every replan was sterile, with nothing logged.
+    //
+    // Evict the OLDEST. The overlay is a record of where the engine refused to
+    // walk, and the oldest entries are the least likely to still matter: they
+    // were learned furthest back, most often on a leg the player has since left.
+    // A ring keeps the store bounded, keeps recent knowledge, and -- crucially --
+    // keeps AddNavBlock returning true so the ladder keeps making progress.
+    Log::World("WorldMap: [NAVBLK] overlay full (256) -- evicting the oldest entry "
+               "(%d,%d) to make room for (%d,%d)", s_navBlkX[0], s_navBlkY[0], x, y);
+    for (int i = 1; i < 256; i++) { s_navBlkX[i-1] = s_navBlkX[i]; s_navBlkY[i-1] = s_navBlkY[i]; }
+    s_navBlkX[255] = x; s_navBlkY[255] = y;
+    return true;
 }
 static bool IsNavBlockedWorld(int32_t x, int32_t y) {
     for (int i = 0; i < s_navBlkN; i++) {
@@ -498,8 +514,39 @@ static bool PlanPathGridM(int32_t startX, int32_t startY, int marginCells)
     int rc=0, cur=gLi;
     while(cur!=-1 && rc<4096){ revBuf[rc++]=cur; if(cur==sLi)break; cur=came[cur]; }
     if(rc==0 || revBuf[rc-1]!=sLi) return false;
+    // v0.21.4: **DECIMATE, DO NOT TRUNCATE.** The old emission was
+    // `for (i = rc-1; i >= 0 && n < DRIVE_PATH_MAX; i--)`, which on a route longer
+    // than DRIVE_PATH_MAX waypoints simply STOPPED COPYING partway along and then
+    // set s_drivePathPlanned = true. The executor followed a route that ended in
+    // open country, with no log line saying so. The 384-cell margin ladder exists
+    // to allow ~49 km horseshoe detours, which is exactly the case that overflows.
+    //
+    // PlanPathFine has always stride-sampled for this reason
+    // (world_map_planner.inl); the live grid planner never did. Stride here the
+    // same way, and always keep the LAST cell so the route still ends at the goal.
+    // The +1 reserves a slot for the goal cell, which is emitted unconditionally
+    // below. Without it, rc=1536 picks stride 2, every stride-aligned index is
+    // odd, and the goal (index 0) is never reached -- a route that ends 128 units
+    // short, which is precisely the class of bug this change exists to remove.
+    // tests/pathdecimate_test.cpp caught that on the first run.
+    int stride = 1;
+    for (;;) {
+        // stride 1 emits every cell; any coarser stride also emits the goal, so
+        // it costs one extra slot.
+        const int emit = (stride == 1) ? rc : ((rc + stride - 1) / stride) + 1;
+        if (emit <= DRIVE_PATH_MAX) break;
+        stride++;
+    }
+    if (stride > 1) {
+        Log::World("WorldMap: [PLAN] route is %d cells for a %d-waypoint buffer -- "
+                   "decimating by %d (the route is kept whole; resolution drops to %d units)",
+                   rc, DRIVE_PATH_MAX, stride, stride * STEP);
+    }
     int n=0;
     for(int i=rc-1;i>=0 && n<DRIVE_PATH_MAX;i--){
+        // Keep every `stride`-th cell counting from the START, and always the goal.
+        const int fromStart = (rc - 1) - i;
+        if (stride > 1 && i != 0 && (fromStart % stride) != 0) continue;
         int li=revBuf[i]; int cx=bx0+li/BH, cy=by0+li%BH;
         int32_t gx=cx*STEP+STEP/2-131072, gy=cy*STEP+STEP/2-98304;
         // v0.18.3.163: keep FULL 128u resolution in the world-coord path so the executor follows
