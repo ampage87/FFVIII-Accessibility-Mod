@@ -155,6 +155,10 @@ static bool SkipToVictory()
     s_skipActive   = true;
     s_wonAnnounced = true;      // the skip IS the win; do not repeat it later
     SkipTick();
+    // The fight is over, so the movie gets its voice back -- everything left in
+    // disc01_33h.avi is the rescue, and its description is the point of pressing
+    // F9 rather than Backspace.
+    ResumeNarration("F9 -- the fight is over, the rescue is what is left");
     Log::Field("FieldNavigation: [BGBTL] SKIP engaged -- foe at 0, Squall pinned at "
                "full, the soldier's attacks vetoed at the REQ");
     // Say what it actually does, and what it cannot do. The fight and the

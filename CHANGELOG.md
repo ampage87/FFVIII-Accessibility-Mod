@@ -6,6 +6,209 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.20.130
+
+#minigame-bgbtl: **the briefing vetoed the soldier and left Squall swinging.**
+
+> *"While the controls screen is visible, you can hear the scene playing in the
+> background, and as I press punch or kick on the controls screen I can hear
+> Squall striking the enemy. When I press enter to actually start, the enemy's
+> HP is not full."* — Aaron
+
+He is right, and **the log from 2026-08-15 had already measured it — nobody
+looked at the number.**
+
+```
+16:12:06  briefing 1 opened          armed  Squall 440/600   Foe 0/0
+   ...34.5 seconds of tapping W, D, A, X to have the keys named...
+16:12:41  briefing ended
+16:12:41  Squall 440/600 (75%)   Foe 431/600 (70%)      <-- NOT 600
+```
+
+**169 damage, dealt before "Game start."** The control run beside it is the same
+log's second attempt: a 5.4-second briefing in which he pressed nothing but
+Enter, and the first health line reads `Foe 600/600`.
+
+### Why
+
+It is the cost of the thing that makes the briefing work at all. Since
+v0.20.123 the field is **not** frozen — freezing `field_main` would stop the
+dialog box from ever being drawn — so `squall::squ_punchkeyscan0` is running
+behind the Game Controls the whole time. Its four `BTNTEST`s read the same
+button word the key learner reads, so every tap of the punch or kick key REQ'd
+`squ_punching0` / `squ_kicking0`, which reach `gal_hpcalc0` and take `30 + rnd/4`
+off the soldier.
+
+**The calibration step was a free hit on the enemy** — and the player was being
+charged for learning their own controls, in the only currency this fight has.
+Two or three taps is most of an ordinary punch; a careful player who tapped each
+key twice to lock a binding started the round against a soldier already down a
+quarter of his health, which quietly makes the fight *easier* and makes every
+"how many heavy punches does this take" answer wrong.
+
+### The fix
+
+The briefing now vetoes **both** fighters. Squall's three attack scripts are
+redirected to `squall::push` — his own entity's `PUSH8 n ; RET 8`, the same
+no-op trick the soldier's veto has used since .123 — so the tap is named by the
+mod, and nothing else happens: no animation, no strike, no damage.
+
+`squ_guarding0` is deliberately **not** vetoed. It only raises the guard flag,
+costs nobody anything, and the block key is the one control worth letting the
+player feel while they are being told about it.
+
+**The labels were derived, then verified in the scripts themselves.** A `.sym`
+group `(count, start)` spans `count+1` slots and its names run
+`header, default, talk, push, …`, so `push` is always `start+3`:
+
+| field | squall group | ⇒ `squall::push` | ⇒ keyscan | disassembly at `push` |
+|---|---|---|---|---|
+| 144 `bg2f_31` | `(18, 0)` | **3** | 12 | `PUSH8 3 ; RET 8` |
+| 152 `bgbtl_1` | `(14, 22)` | **25** | 28 | `PUSH8 25 ; RET 8` |
+
+Both keyscan numbers are the ones the log prints, and the same arithmetic
+reproduces `gal0::push = 45` and `g_hei0::push = 48`, which this module already
+used and the fight already proved. The three attack labels were disassembled
+too: 13/14/15 and 29/30/31 are the animation-and-SFX scripts, and 16/32 are the
+guards that write var 1030 / 1028 — Squall's own flag in each field, exactly as
+`GuardVarFor` has it.
+
+### Verification
+
+* `minigame_bgbtl_compile`: **0 errors, 0 bad**, with eleven new cases — all six
+  of Squall's attack labels redirect to his `push` in the right field, the
+  soldier is still vetoed alongside him, and **the guard and the keyscan itself
+  come through untouched**. One more asserts the *skip* veto still leaves
+  Squall's punch alone, since after F9 the foe is pinned at zero anyway and
+  swinging costs nothing.
+* `lint_seh` OK (88 files); `garden_harness` 26 ok / 0 bad; `catalog_story_test`
+  0 failures; `garden_aboard_test` and `world_map_harness` pass.
+* `field_navigation.cpp` **untouched at 81,645** — 275 from the hard fail.
+
+**NOT MSVC-built.**
+
+### BAT
+
+On the Game Controls screen, tap every key several times — punch, kick, heavy,
+block. The mod should name each one and **nothing else should happen**: no
+strike, no impact sound, no HP movement.
+
+Then press Enter and listen to the first health report. **The soldier must be at
+100.** The quickest way to be sure is to do what caught it: sit on the briefing
+for half a minute, tapping, before you start.
+
+---
+
+## Also in v0.20.130: "Punch, W." fifty-three times
+
+The same briefing that proved the bug above proved a second one. From
+`ff8_field.log`, **53 `[BGBTL-LEARN]` lines, every one of them `Punch`** — and
+in `ff8_mod.log`:
+
+```
+17:57:47  "Punch, W." (interrupt)      x6 inside one second
+17:57:48  "Punch, W." (interrupt)      x5 more
+```
+
+A held key **auto-repeats**, and every repeat is a fresh rising edge on the
+button word, so the learner announced it again — each announcement interrupting
+the one before it, so the sentence never finished saying itself.
+
+The learner now debounces **per mask**, 1200 ms. A deliberate re-tap still
+confirms the binding, which is worth keeping: pressing a key and hearing nothing
+would read as "the key is not registering." What goes away is the stutter.
+
+The probe drives six auto-repeats 100 ms apart and requires **exactly one**
+announcement, then a re-tap after the window and requires that it speaks. It
+reports `a held key announced 6 times in 600 ms` against the old code.
+
+## v0.20.129
+
+#minigame-bgbtl: **the movie stops talking over the fight** — and the push
+utility stops dying on a lock file left behind three days earlier.
+
+---
+
+### The fight's audio channel belongs to the fight
+
+`disc01_33h.avi` plays behind the entire Garden battle, and it has an audio
+description track. From the 2026-08-15 log:
+
+```
+16:14:07  [FMV_AD] Cue 2: Turquoise energy and fire flash; Galbadia Garden presses in at the edge.
+16:14:08  "Heavy punch ready. Let go of block and press D."
+```
+
+**One second apart, both spoken with interrupt, and only one of them is
+something you can act on.** The heavy punch already has a priority path
+precisely because the health report was cutting it off; it should not also have
+to out-shout a description of the scenery.
+
+The briefing has suppressed FMV narration since v0.20.123 — but `EndBriefing`
+resumed it, and `EndBriefing` is what *starts the round*. So the suppression
+covered the one stretch where nothing was happening and lifted for the one
+stretch where everything was.
+
+**Narration is now held from the moment the briefing opens until the round is
+decided**, and given back by whichever of the four things decides it: the win,
+the loss, F9, or the module disarming. `Disarm` resumes unconditionally, so
+there is no path that can leave a player's descriptions switched off.
+
+**Nothing is lost.** `fmv_audio_desc` consumes each cue on its timestamp rather
+than queueing it, so a suppressed cue is dropped, not deferred — and every cue
+worth hearing in that movie (Rinoa on the cable, the soldiers exchanging fire,
+the run for the entrance) falls *after* the win, when narration is back on.
+
+### The push utility now clears a stale lock instead of stopping dead
+
+Three pushes have failed on:
+
+```
+fatal: Unable to create '.../.git/index.lock': File exists.
+ERROR: git add failed.
+```
+
+Each time from a lock left by a git process that had already gone away —
+2026-08-02, 2026-08-12, 2026-08-15. Git cannot tell a crashed process from a
+live one, so it refuses, and the failure names nothing actionable.
+
+`tasklist` can tell them apart. `push_to_github.bat` gains a Step 0: if
+`.git\index.lock` exists **and no `git.exe` is running**, it is a leftover and
+gets removed, with a line in `git_latest.log` saying so. If a git process *is*
+running the lock is real, so it is left alone and Step 1 fails with git's own
+message. (`Utilities/` is git-ignored, so this stays local.)
+
+**The recurring cause is worth writing down:** those locks came from git
+commands run against the mod folder through the Cowork desktop bridge, which
+cannot unlink them — `warning: unable to unlink '.git/index.lock': Operation not
+permitted`. Every such command left one behind. Git through that bridge is off
+the table; the push utility runs natively and is unaffected.
+
+### Verification
+
+* `minigame_bgbtl_compile`: **0 errors, 0 bad**, with the policy written as its
+  own assertion — narration must survive `EndBriefing` (the check fails on the
+  old code and passes on this one), and must be back on after both the
+  HP-driven win and the disarm.
+* `lint_seh` OK (88 files); `garden_harness` 26 ok / 0 bad; `catalog_story_test`
+  0 failures; `garden_aboard_test` and `world_map_harness` pass.
+* `field_navigation.cpp` **untouched at 81,645** — 275 from the hard fail.
+
+**NOT MSVC-built.**
+
+### BAT
+
+Play the fight normally. **From "Game start." to the moment you win, lose or
+press F9, the only voice should be the mod's** — block cues, "Blocked.", the
+health reports, "Heavy punch ready". No descriptions of the battle scenery
+mid-round.
+
+The moment you win (or press F9), the descriptions come back and the rescue
+scene should narrate as it always has: Rinoa on the cable, the soldiers below,
+the run for the entrance. Grep `[FMV_AD]` — suppressed cues are logged with
+`[SUPPRESSED -- the mod holds the channel]`, so the log shows exactly which ones
+were held and when narration resumed.
+
 ## v0.20.128
 
 #minigame-bgbtl: **the Garden battle is done, so the scaffolding comes down —

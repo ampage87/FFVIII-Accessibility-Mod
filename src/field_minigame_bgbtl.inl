@@ -261,6 +261,10 @@ static const DWORD HEAVY_HOLD_MS    = 2000;
 // The briefing gives the round back this far before the resolution at 580.
 static const uint32_t CLOCK_BRIEF_LIMIT = 420;
 static DWORD    s_lastBriefPoll = 0;
+// A held key auto-repeats; without this the learner re-announces on every
+// repeat and each announcement interrupts the one before it.
+static const DWORD LEARN_REPEAT_MS = 1200;
+static DWORD    s_lastLearnSpoke[4] = { 0, 0, 0, 0 };
 static int      s_streak = -1;            // var 340, blocks in a row
 static bool     s_heavyAnnounced = false;
 
@@ -285,6 +289,7 @@ static int16_t HeavyPunchLabel(uint16_t field)
 
 static void CueReport(const char* text);          // defined below, with the gate
 static void AnnounceHeavy();                     // ...and so is this
+static void ResumeNarration(const char* why);    // ...and the movie's voice
 
 // THE HEAVY PUNCH, AND WHY THIS FIGHT IS WINNABLE AT ALL.
 //
@@ -453,6 +458,59 @@ static int16_t SkipVetoLabel(uint16_t field, int16_t label)
                                      : (int16_t)48;   // g_hei0::push
 }
 
+// v0.20.130: **THE BRIEFING VETOED THE SOLDIER AND LEFT SQUALL SWINGING.**
+// Aaron: *"as I press punch or kick on the controls screen I can hear Squall
+// striking the enemy. When I press enter to actually start, the enemy's HP is
+// not full."*
+//
+// The 2026-08-15 log measures it exactly. Briefing 1 ran 34.5 s while he tapped
+// his four keys to have them named, and the first health line after it reads
+// **`Foe 431/600`** -- 169 damage already dealt before "Game start." Briefing 2
+// lasted 5.4 s, he pressed nothing but Enter, and it reads `Foe 600/600`.
+//
+// The cause is the same thing that makes the briefing work at all: since
+// v0.20.123 the field is NOT frozen, so `squ_punchkeyscan0` is live behind the
+// box. Its four BTNTESTs read the same button word the key learner does, and a
+// tap on punch or kick REQs `squ_punching0` / `squ_kicking0`, which reach
+// `gal_hpcalc0` and take 30 + rnd/4 off the soldier. **The calibration step was
+// a free hit on the enemy, and the player was being charged for learning their
+// own controls in the only currency this fight has.**
+//
+// So the briefing now vetoes BOTH fighters. Squall's three attack scripts are
+// redirected to `squall::push` -- his own entity's `PUSH8 n ; RET 8` no-op, the
+// same trick the soldier's veto has used since .123.
+//
+// `squ_guarding0` is deliberately NOT vetoed: it only raises the guard flag,
+// costs nobody anything, and the block key is the one control worth letting the
+// player feel while they are being told about it.
+//
+// Label derivation, checked against two known-good values: a `.sym` group
+// (count, start) spans count+1 slots and its names run
+// header, default, talk, push, ... -- so `push` is always start+3. bgbtl_1's
+// squall group is (14, 22), giving squall::push = 25 and keyscan = 28, which is
+// the number the log prints. bg2f_31's is (18, 0), giving squall::push = 3 and
+// keyscan = 12, likewise. The same arithmetic reproduces gal0::push = 45 and
+// g_hei0::push = 48, which this file already used and the fight already proved.
+struct PlayerAttackSet { uint16_t field; int16_t punch, heavy, kick, push; };
+static const PlayerAttackSet PLAYER_ATTACKS[] = {
+    //                punching0  punching1  kicking0  push
+    { FIELD_HOST,        13,        14,        15,      3 },   // bg2f_31 squall
+    { FIELD_MINIGAME,    29,        30,        31,     25 },   // bgbtl_1 squall
+};
+
+static int16_t BriefingVetoLabel(uint16_t field, int16_t label)
+{
+    const int16_t soldier = SkipVetoLabel(field, label);
+    if (soldier != label) return soldier;
+    for (int i = 0; i < (int)(sizeof(PLAYER_ATTACKS) / sizeof(PLAYER_ATTACKS[0])); i++) {
+        const PlayerAttackSet& p = PLAYER_ATTACKS[i];
+        if (p.field != field) continue;
+        if (label == p.punch || label == p.heavy || label == p.kick) return p.push;
+        return label;
+    }
+    return label;
+}
+
 static int __cdecl HookedReq(void* ctx, int param)
 {
     if (s_inMinigame && ctx != nullptr) {
@@ -463,7 +521,8 @@ static int __cdecl HookedReq(void* ctx, int param)
             if (s_skipActive || s_briefing) {
                 const uint16_t fid = FF8Addresses::pCurrentFieldId
                                    ? *FF8Addresses::pCurrentFieldId : 0xFFFF;
-                const int16_t veto = SkipVetoLabel(fid, label);
+                const int16_t veto = s_briefing ? BriefingVetoLabel(fid, label)
+                                                : SkipVetoLabel(fid, label);
                 if (veto != label) {
                     *(int16_t*)((char*)ctx + (int)sp * 4) = veto;
                     s_vetoed++;
@@ -808,12 +867,14 @@ static void PollHealth(const char* why)
         SetHpGauge(GAUGE_FOE, 0);         // and let a watcher see it
         Log::Field("FieldNavigation: [BGBTL] foe HP reached %d -- WIN called from HP; "
                    "attacks vetoed and HP pinned so it cannot be taken back", fCur);
+        ResumeNarration("the round is won -- the rescue scene is worth hearing");
         ScreenReader::Speak("You win.", true);
         return;
     }
     if (!s_playerDown && s_sawPlayerAlive && sCur <= 0) {
         s_playerDown = true;
         Log::Field("FieldNavigation: [BGBTL] Squall reached %d -- loss called from HP", sCur);
+        ResumeNarration("the round is lost");
         ScreenReader::Speak("You are down.", true);
         return;
     }
@@ -912,6 +973,26 @@ static void SpeakBriefing()
     s_lastRemind = GetTickCount();
 }
 
+// THE FIGHT OWNS THE AUDIO CHANNEL, NOT THE MOVIE BEHIND IT.
+//
+// The whole fight plays over disc01_33h.avi, and that movie has an audio
+// description track. In the 2026-08-15 log its cues landed in the middle of the
+// round -- "Turquoise energy and fire flash; Galbadia Garden presses in at the
+// edge." at 16:14:07, ONE SECOND before "Heavy punch ready" had to fight it for
+// the same channel. Both are speech, both interrupt, and only one of them is
+// something the player can act on.
+//
+// So narration is suppressed from the moment the briefing opens until the round
+// is decided, and resumed the instant it is: a win, a loss, F9, or the module
+// disarming. The cues are DROPPED rather than queued (fmv_audio_desc consumes
+// them on their timestamp), so the rescue scene's own descriptions -- which are
+// the ones worth hearing, and which all fall after the win -- still play.
+static void ResumeNarration(const char* why)
+{
+    FmvAudioDesc::SetSuppressed(false);
+    Log::Field("FieldNavigation: [BGBTL] movie narration resumed (%s)", why);
+}
+
 // Opens the briefing and pauses the fight. ONE briefing per attempt: the game
 // re-shows its legend at every phase change, and v0.20.106 re-opened the
 // briefing on each one -- twice in the middle of a live fight. A fresh attempt
@@ -926,6 +1007,7 @@ static void OpenBriefing(const char* why)
     s_awaitRelease       = false;
     s_needKeyUp          = true;      // see the note in Update()
     s_lastBriefPoll      = 0;
+    for (int i = 0; i < 4; i++) s_lastLearnSpoke[i] = 0;
     FmvAudioDesc::SetSuppressed(true);
     BuildBriefScreenText();
     s_pausedThisAttempt = OpenBriefDialog(s_briefScreen);
@@ -943,7 +1025,9 @@ static void EndBriefing(const char* why, bool announce)
     s_briefing = false;
     s_awaitRelease = false;
     CloseBriefDialog();
-    FmvAudioDesc::SetSuppressed(false);
+    // NOT ResumeNarration() -- see the note above it. The round is starting, not
+    // ending, and the movie's description track is the loudest thing competing
+    // with the block cue. Disarm(), the win and the loss all resume it.
     Log::Field("FieldNavigation: [BGBTL] briefing ended after %lums (%s)",
                (unsigned long)(GetTickCount() - s_briefStart), why);
     // Restart the clock so REQ offsets read from the start of the FIGHT rather
@@ -1049,6 +1133,7 @@ static void Disarm(uint16_t fieldId, const char* why)
     if (!s_inMinigame) return;
     EndBriefing("disarming", false);      // never leave the veto in place
     s_inMinigame = false;
+    ResumeNarration("disarming");     // never leave the player's descriptions off
     Uninstall();
     PollHealth("on-exit");
     Log::Field("FieldNavigation: [BGBTL] disarmed by %s (field %u, %d cues suppressed)",
@@ -1230,6 +1315,16 @@ static void Update()
                 for (int i = 0; i < 4; i++) {
                     const uint32_t m = s_learned[i].mask;
                     if (!(rose & m)) continue;
+                    // v0.20.130: **ONE NAME PER PRESS, NOT ONE PER RISING EDGE.**
+                    // Aaron's 17:57 briefing said "Punch, W." FIFTY-THREE TIMES
+                    // -- eleven of them inside two seconds -- because a held key
+                    // auto-repeats and every repeat is a fresh rising edge on
+                    // the button word. Each one interrupted the last, so the
+                    // sentence never finished. A deliberate re-tap is still
+                    // worth confirming, so this debounces per mask rather than
+                    // going silent once the binding locks.
+                    if (now - s_lastLearnSpoke[i] < LEARN_REPEAT_MS) continue;
+                    s_lastLearnSpoke[i] = now;
                     const char* key = KeyName(s_learned[i].vk);
                     char msg[64];
                     if (key) snprintf(msg, sizeof(msg), "%s, %s.", ActionForMask(m), key);

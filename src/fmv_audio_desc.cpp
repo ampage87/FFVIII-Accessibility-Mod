@@ -615,7 +615,7 @@ namespace FmvAudioDesc
             {
                 Log::Mod("[FMV_AD] [%.1fs] Cue %d: %s%s",
                     elapsed, g_nextCueIndex, cue.text.c_str(),
-                    g_suppressed ? "   [SUPPRESSED -- briefing in progress]" : "");
+                    g_suppressed ? "   [SUPPRESSED -- the mod holds the channel]" : "");
 
                 if (!g_suppressed) ScreenReader::Speak(cue.text.c_str(), true);
 

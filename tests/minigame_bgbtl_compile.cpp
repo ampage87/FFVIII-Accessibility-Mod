@@ -128,13 +128,23 @@ static LONG InterlockedCompareExchange(volatile LONG* p, LONG v, LONG c)
 { LONG o = *p; if (o == c) *p = v; return o; }
 static LONG InterlockedExchange(volatile LONG* p, LONG v) { LONG o = *p; *p = v; return o; }
 namespace Log { void Field(const char*, ...) {} }
-namespace FmvAudioDesc { void SetSuppressed(bool) {} }
+static int g_narrationSuppressed = -1;
+namespace FmvAudioDesc { void SetSuppressed(bool on) { g_narrationSuppressed = on ? 1 : 0; } }
 static std::string g_fakeAvi;
 static int g_fmvSkipCalls = 0;
 namespace FmvSkip { std::string GetCurrentAviName() { return g_fakeAvi; }
                     bool RequestSkip() { g_fmvSkipCalls++; g_fakeAvi.clear(); return true; }
                     bool IsMoviePlaying() { return !g_fakeAvi.empty(); } }
-namespace ScreenReader { bool Speak(const char*, bool = false) { return true; } bool IsSpeaking() { return false; } }
+static int  g_speakCount = 0;
+static char g_lastSpoken[256] = {0};
+namespace ScreenReader {
+    bool Speak(const char* t, bool = false) {
+        g_speakCount++;
+        if (t) { size_t i = 0; for (; t[i] && i + 1 < sizeof(g_lastSpoken); i++) g_lastSpoken[i] = t[i]; g_lastSpoken[i] = 0; }
+        return true;
+    }
+    bool IsSpeaking() { return false; }
+}
 namespace FF8Addresses { static uint32_t table[512]; static uint32_t* pExecuteOpcodeTable = table;
                           static uint32_t btn = 0; static uint32_t* pEngineInputConfirmedButtons = &btn;
                           static uint32_t btn2 = 0; static uint32_t* pEngineInputValidButtons = &btn2;
@@ -330,6 +340,77 @@ int main()
             }
             printf("skip veto: cancelled attacks no longer cue\n");
         }
+        // v0.20.130: **THE BRIEFING HAS TO VETO BOTH FIGHTERS.** The field is
+        // not frozen behind the box, so squ_punchkeyscan0 is live and a tap on
+        // punch or kick during the key-naming step reached gal_hpcalc0. Aaron's
+        // 34.5 s briefing left the soldier on 431/600 before "Game start."
+        {
+            const struct { unsigned short f; short lbl; short want; const char* what; } CASES[] = {
+                { 152, 29, 25, "squall::squ_punching0 (152)" },
+                { 152, 30, 25, "squall::squ_punching1 (152)" },
+                { 152, 31, 25, "squall::squ_kicking0  (152)" },
+                { 144, 13,  3, "squall::squ_punching0 (144)" },
+                { 144, 14,  3, "squall::squ_punching1 (144)" },
+                { 144, 15,  3, "squall::squ_kicking0  (144)" },
+                { 152, 49, 45, "the soldier is still vetoed too" },
+                { 144, 55, 48, "...in the host field as well" },
+                { 152, 32, 32, "squall::squ_guarding0 SURVIVES" },
+                { 144, 16, 16, "...in the host field too" },
+                { 152, 28, 28, "the keyscan itself is untouched" },
+            };
+            for (unsigned i = 0; i < sizeof(CASES)/sizeof(CASES[0]); i++) {
+                const short got = GB::BriefingVetoLabel(CASES[i].f, CASES[i].lbl);
+                if (got != CASES[i].want) {
+                    bad++;
+                    printf("  BAD: briefing veto %s -> %d, want %d\n",
+                           CASES[i].what, (int)got, (int)CASES[i].want);
+                }
+            }
+            // and outside the briefing the player keeps his fists
+            if (GB::SkipVetoLabel(152, 29) != 29) {
+                bad++; printf("  BAD: the skip veto swallowed Squall's own punch\n");
+            }
+            printf("briefing veto: both fighters held, the guard and the keyscan "
+                   "left alone\n");
+        }
+        // v0.20.130: **ONE NAME PER PRESS, NOT ONE PER RISING EDGE.** A held key
+        // auto-repeats, and Aaron's 17:57 briefing said "Punch, W." fifty-three
+        // times -- eleven inside two seconds -- each interrupting the last.
+        {
+            const bool wasBrief = GB::s_briefing;
+            FF8Addresses::curField = 152;
+            GB::s_briefing = true; GB::s_needKeyUp = false; GB::s_awaitRelease = false;
+            GB::s_briefStart = 0;
+            for (int i = 0; i < 4; i++) GB::s_lastLearnSpoke[i] = 0;
+            GB::s_btnPrev = 0;
+            g_fakeKey = 'W'; g_tick = 100000;
+
+            int spoke = 0;
+            for (int rep = 0; rep < 6; rep++) {        // six auto-repeats, 100 ms apart
+                g_fieldButtons = 0;             GB::Update();
+                g_fieldButtons = GB::BTN_PUNCH;
+                const int before = g_speakCount;
+                GB::Update();
+                if (g_speakCount > before && strstr(g_lastSpoken, "Punch")) spoke++;
+                g_tick += 100;
+            }
+            if (spoke != 1) {
+                bad++; printf("  BAD: a held key announced %d times in 600 ms\n", spoke);
+            }
+            // ...but a deliberate re-tap later still confirms the binding
+            g_tick += 1500;
+            g_fieldButtons = 0;             GB::Update();
+            g_fieldButtons = GB::BTN_PUNCH;
+            const int before = g_speakCount;
+            GB::Update();
+            if (g_speakCount == before) {
+                bad++; printf("  BAD: a re-tap after the debounce said nothing\n");
+            }
+            g_fieldButtons = 0; g_fakeKey = 0;
+            GB::s_briefing = wasBrief;
+            printf("key learner: one name per press, silent through auto-repeat, "
+                   "speaks again on a real re-tap\n");
+        }
         // v0.20.123: without the field_main pause the round's clock keeps
         // running behind the briefing, so an unread box must hand the fight
         // back before the resolution at 580 rather than lose to a reading
@@ -344,6 +425,7 @@ int main()
             GB::Update();
             if (GB::s_briefing) { bad++; printf("  BAD: briefing outlived the round\n"); }
             printf("briefing clock guard: holds at 100, hands back at 500\n");
+
             FF8Addresses::curField = 144;
             *(unsigned*)(0x01CFE9B8 + 80) = 0;
             GB::s_briefing = true;              // put it back for the checks below
@@ -769,6 +851,45 @@ int main()
             for (int i = 0; i < 64; i++) { int v = pcm[i]; if (v < 0) v = -v; if (v > peak) peak = v; }
             printf("tone peak in first 64 samples: %d\n", peak);
             if (peak < 1000) { bad++; printf("  BAD: check 24\n"); }              // taper is 4 ms; must ramp up fast
+        }
+        // v0.20.129: THE MOVIE'S DESCRIPTION TRACK MUST NOT TALK OVER THE FIGHT.
+        // disc01_33h.avi plays behind the whole round and has its own audio
+        // description; in the 2026-08-15 log a cue landed one second before
+        // "Heavy punch ready" and both went out as interrupting speech. The
+        // briefing suppressed it and EVERY exit resumed it, including the one
+        // that starts the fight -- so the suppression has to survive EndBriefing
+        // and be lifted only by the win, the loss, F9 or the disarm.
+        {
+            FF8Addresses::curField = 152;
+            const bool wasBrief = GB::s_briefing;
+            g_narrationSuppressed = -1;
+            GB::s_briefing = true; GB::s_briefStart = 0;
+            GB::EndBriefing("probe", false);
+            if (g_narrationSuppressed == 0) {
+                bad++; printf("  BAD: starting the fight resumed the movie narration\n");
+            }
+            // ...and the win gives it back, because the rescue scene follows.
+            volatile short* foe = (short*)(0x01CFE9B8 + 356);
+            GB::s_foeDown = false; GB::s_sawFoeAlive = true;
+            GB::s_skipActive = false; GB::s_wonAnnounced = false;
+            g_narrationSuppressed = 1;
+            *foe = 0;
+            GB::PollHealth(nullptr);
+            if (!GB::s_foeDown) { bad++; printf("  BAD: win not called\n"); }
+            if (g_narrationSuppressed != 0) {
+                bad++; printf("  BAD: the win left the movie narration suppressed\n");
+            }
+            // ...and so does the disarm, whatever the reason.
+            g_narrationSuppressed = 1;
+            GB::s_inMinigame = true;
+            GB::Disarm(152, "probe");
+            if (g_narrationSuppressed != 0) {
+                bad++; printf("  BAD: the disarm left the movie narration suppressed\n");
+            }
+            GB::s_briefing = wasBrief;
+            GB::s_skipActive = false; GB::s_foeDown = false;
+            printf("movie narration: held through the whole round, given back at "
+                   "the win and at the disarm\n");
         }
         printf("briefing/freeze checks: %s (%d bad)\n", bad ? "FAILED" : "OK", bad);
         if (bad) return 1;
