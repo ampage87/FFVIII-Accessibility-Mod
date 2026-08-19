@@ -336,12 +336,44 @@ static void PollMagicSubmenu()
         return;
     }
 
+    // v0.29.0 (#88): the shared yes/no window. Read what the game actually put
+    // on screen -- question and highlighted option -- and speak it only when it
+    // changes, so moving between the two options reads the new one and sitting
+    // still reads nothing.
+    if (phase == MP_ALL_WARN) {
+        // The box's own cursor: module +0x70 (0x004F1CC4), i.e. slot 2 + 0x70.
+        int dlgCur = 0;
+        __try { if (mod) dlgCur = (int)*(mod + 0x70); }
+        __except(EXCEPTION_EXECUTE_HANDLER) { dlgCur = 0; }
+        char dlg[256];   // matches s_mmLastSpoken, so the dedup key cannot truncate
+        if (MenuDialogCompose(dlgCur, dlg, sizeof(dlg))) {
+            if (strcmp(dlg, s_mmLastSpoken) != 0) {
+                ScreenReader::Speak(dlg, true);
+                snprintf(s_mmLastSpoken, sizeof(s_mmLastSpoken), "%s", dlg);
+                Log::Menu("[MagicTTS] dialog cur=%d: \"%s\"", dlgCur, dlg);
+            }
+        }
+        s_mmPhase = phase;
+        return;
+    }
+
     char line[256];
     MagicAnnounce(v, phase, line, sizeof(line));
     if (line[0] == '\0') { s_mmPhase = phase; return; }
-    // v0.22.1: these two are one-shot events, not cursor positions -- say them
-    // every time they occur even though the sentence is unchanged.
-    if (phase == MP_ALL_DONE || phase == MP_ALL_WARN) s_mmLastSpoken[0] = '\0';
+    // v0.22.1: MP_ALL_DONE is a one-shot event, not a cursor position -- say it
+    // every time it occurs even though the sentence is unchanged.
+    //
+    // **v0.29.0 (#88): MP_ALL_WARN is NOT one of those, and treating it as one
+    // made it repeat on every poll for as long as the box was open.** State 107
+    // (0x004F1CB6) is a steady two-option dialog -- `0x004C0A30(edge, 2,
+    // [ebp+0x70])` -- that the player sits in and answers; clearing the dedup key
+    // here re-spoke the line indefinitely. Worse, the sentence was wrong twice
+    // over: the box is a CONFIRMATION, not a refusal, and states 106/107 are
+    // SHARED by Exchange (0x004F0E09), state 59 and the Split picker
+    // (0x004F47B8), so an Exchange announced "Cannot take all magic".
+    // MagicAnnounce no longer emits anything for it; the block below reads the
+    // window's own text instead.
+    if (phase == MP_ALL_DONE) s_mmLastSpoken[0] = '\0';
 
     // v0.22.3: **a character change counts as an arrival.** L1/R1 swaps the
     // character without leaving the phase, so the 2026-08-16 log shows the spell

@@ -55,7 +55,22 @@ struct ChoiceDialog {
 // Decode a raw FF8-encoded byte string into a single UTF-8 string.
 // Newlines become spaces. Control codes are stripped.
 // Character name substitutions (0x03+id) replaced with default names.
-std::string Decode(const uint8_t* data, size_t maxBytes = 1024);
+// `droppedOut`, when non-null, receives the number of bytes that were consumed
+// but produced no text -- an unresolved substituted word, an unmapped glyph, a
+// name insert this decoder cannot expand. Zero means "what you got back is the
+// whole string"; anything else means a caller that reads the result aloud is
+// reading a fragment and should say so.
+std::string Decode(const uint8_t* data, size_t maxBytes = 1024,
+                   int* droppedOut = nullptr);
+
+// Resolve a 0x0E / 0x0F substituted word (namedic.bin) into its FF8-encoded
+// bytes. Returns the number of bytes written; 0 means the engine would have
+// emitted nothing too. See the disassembly block in ff8_text_decode.cpp.
+size_t ResolveWord(uint8_t code, uint8_t param, uint8_t* out, size_t outSize);
+
+// Point the word-table lookup at a namedic.bin image instead of the engine's
+// own pointer at 0x01D2B80C. Host probes use this; the game never calls it.
+void SetWordTableBase(const void* base);
 
 // Decode raw FF8-encoded bytes into separate lines (split on 0x02 newlines).
 // Each element is one line of dialog text, trimmed of whitespace.

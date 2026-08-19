@@ -171,6 +171,11 @@ struct DedupGateway { float centerX, centerY; uint16_t destFieldId; char display
 struct CapturedTriggerLine {
     uint32_t entityAddr; int lineOrder; int16_t x1,y1,z1,x2,y2,z2; bool active; char name[48];
     FieldArchive::JSMEntityType lineType; int destFieldId; bool hasExtDispatch; bool hasDialogReqTarget;
+    // v0.23.0: the harness keeps its OWN copy of this struct, and v0.20.29 added
+    // isCameraTransition to the real one without adding it here -- so this
+    // harness has not built since. A duplicated struct fails by not compiling,
+    // which is a silent kind of failure when nobody runs that harness.
+    bool isCameraTransition;
 };
 struct CapturedSET3 { uint32_t entityAddr; int16_t posX, posY, posZ; uint16_t triId; bool firstLogged; };
 

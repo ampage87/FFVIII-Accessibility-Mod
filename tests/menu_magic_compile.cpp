@@ -70,12 +70,26 @@ namespace FF8TextDecode {
         for (size_t i = 0; i < n; i++) s += (char)(d[i] + 0x20);
         return s;
     }
+    // v0.29.0: menu_dialog.inl decodes the shared window's text with this one.
+    // Unlike DecodeMenuText above, the real Decode takes RAW STREAM BYTES, so on
+    // the printable range it is the identity. Getting that backwards here would
+    // pin a convention the mod does not use; menu_save_compile.cpp is where the
+    // window reader is actually exercised.
+    std::string Decode(const uint8_t* d, size_t n = 1024) {
+        std::string s;
+        for (size_t i = 0; i < n; i++) {
+            if (d[i] == 0x00) break;
+            s += (d[i] == 0x01 || d[i] == 0x02) ? ' ' : (char)d[i];
+        }
+        return s;
+    }
 }
 
 // menu_tts_magic.inl reads these from its host translation unit.
 static WORD*   pMenuStateA = nullptr;
 static uint8_t s_prevCursor = 2;
 
+#include "menu_dialog.inl"
 #include "menu_magic_model.inl"
 #include "menu_tts_magic.inl"
 

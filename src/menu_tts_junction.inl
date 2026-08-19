@@ -33,26 +33,37 @@ static uint8_t  s_juncPrevGfToggle = 0xFF;      // previous GF toggle state (+0x
 // v0.09.46: Ability screen state — CORRECTED via user testing
 // Each panel has its own focus value and cursor offset:
 //   LEFT (equipped slots):   focus=24, cursor at +0x27C
-//   RIGHT (available list):  focus=28, cursor at +0x271
+//   RIGHT (available list):  focus=28, cursor at +0x270 + kind  (v0.23.0)
 // v0.09.45 had these swapped. User test proved: focus=28 cursor goes to 10+
 // (many GF abilities = RIGHT), focus=24 cursor stays 0-3 (few slots = LEFT).
 // Intermediate focus values (21, 22, 26, 27) are transitions — ignore them.
+// v0.23.0: the right cursor is not a fixed +0x271 — that is only the COMMAND
+// list's copy. See JUNC_ABIL_CUR_OFF below and the focus==28 block.
 static const int ABIL_LEFT_CURSOR_OFF  = 0x27C;  // left panel cursor (focus=24)
-static const int ABIL_RIGHT_CURSOR_OFF = 0x271;  // right panel cursor (focus=28)
 static const int ABIL_LEFT_FOCUS  = 24;
 static const int ABIL_RIGHT_FOCUS = 28;
 static uint8_t  s_juncPrevAbilLeftCursor  = 0xFF;
 static uint8_t  s_juncPrevAbilRightCursor = 0xFF;
 static uint8_t  s_juncPrevAbilFocus = 0xFF;  // tracks focus for panel transition detection
-// v0.09.48: Right panel GF bitmap reconstruction
-// Builds the available abilities list from junctioned GFs' completeAbilities bitmaps.
-// Sorted in ascending unified ability ID order. Rebuilt when entering the right panel.
-static const int ABIL_RIGHT_LIST_MAX = 128;
-static uint8_t  s_abilRightList[ABIL_RIGHT_LIST_MAX] = {};  // ability IDs in display order
-static int      s_abilRightListCount = 0;
+// v0.23.0 (#82): the right panel's cursor is per-LIST, and the lists are the
+// game's own. See the focus==28 block for the derivation; these are the four
+// addresses 0x004DAE08 and 0x004E0110 use between them.
+static const int JUNC_ABIL_CUR_OFF  = 0x270;   // + kind: 0x271 command, 0x272 character
+static const int JUNC_ABIL_KIND_OFF = 0x274;   // 1 = command list, 2 = character list
+static const uintptr_t JUNC_ABIL_CMD_LIST   = 0x01D8B258;  // {id, nameIdx} pairs, ids 20..38
+static const uintptr_t JUNC_ABIL_CMD_COUNT  = 0x01D8B690;
+static const uintptr_t JUNC_ABIL_CHAR_LIST  = 0x01D8B280;  // {id, nameIdx} pairs, ids 39..82
+static const uintptr_t JUNC_ABIL_CHAR_COUNT = 0x01D8B691;
 static uint8_t  s_abilLastLeftCursor = 0;  // tracks which left slot was last active (0-2=cmd, 3-6=ability)
 static uint16_t s_juncCachedGfMasks[8] = {}; // v0.09.49: GF bitmasks for ALL chars, cached at Junction entry (game zeroes them during editing)
 static uint8_t  s_juncSelectedCharIdx = 0xFF;  // v0.09.49: cached charIdx from char select (formation array gets rewritten during editing)
+// v0.23.3: which character the char-select screen most recently SPOKE. The
+// Junction hook's character watcher consumes this to tell "you confirmed the
+// character you were just told about" (silent) from "L1/R1 switched to a
+// different one" (speak the name). Keyed on the VALUE, not on time: the two
+// cases are two seconds apart either way, so recency cannot separate them, but
+// only the first lands on the character char-select just named.
+static uint8_t  s_juncCharSelSpoke = 0xFF;
 
 // v0.18.2.22: active/reserve party grouping legend for the Junction/Magic/Status
 // character-select screens. Sighted players see the 3 active battle members'
@@ -124,6 +135,15 @@ static LONG CALLBACK JuncAutoBP_VEH(PEXCEPTION_POINTERS pEx)
     // which runs on a CONFIRM of the Auto submenu (including a no-op confirm) and
     // NOT on a cancel. Gate on the Auto submenu being focused (+0x22E==11) so the
     // same byte's menu-load / manual-junction writes don't trip the flag.
+    //
+    // **v0.23.3: that gate is load-bearing, and it was closer than it looked.**
+    // 0x004BE790 is ALSO called by the L1/R1 character swap -- 0x004DABA9 and
+    // 0x004DAD05, both in the action-row handler on the way into states 4 and 6.
+    // Without the focus test every character switch would announce "Junctioned
+    // automatically for ...", and it would do so only after an Auto submenu had
+    // been opened at some point, which is exactly the kind of intermittent that
+    // costs a BAT cycle to pin down. Anyone tempted to widen this gate should
+    // read that sentence twice.
     __try {
         if (pMenuStateA && ((uint8_t*)pMenuStateA)[0x22E] == 11)
             s_juncAutoRoutineRan = true;
@@ -205,7 +225,6 @@ static void ResetJunctionState()
     s_juncPrevAbilLeftCursor = 0xFF;
     s_juncPrevAbilRightCursor = 0xFF;
     s_juncPrevAbilFocus = 0xFF;
-    s_abilRightListCount = 0;
     s_abilLastLeftCursor = 0;
     memset(s_juncCachedGfMasks, 0, sizeof(s_juncCachedGfMasks));
     s_juncSelectedCharIdx = 0xFF;
@@ -333,6 +352,7 @@ static void AnnounceJuncCharSelect(uint8_t cursorPos, bool announceGroup = false
         sprintf(buf, "%s%s", groupPrefix, mbuf);
         
         ScreenReader::Speak(buf, true);
+        s_juncCharSelSpoke = charIdx;   // consumed by the Junction character watcher
         Log::Menu("[JuncTTS] CharSelect: %s (cursor=%u roster[%u]=%u modelId=%u)",
                    buf, (unsigned)cursorPos, (unsigned)cursorPos, (unsigned)charIdx, (unsigned)modelId);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
@@ -426,75 +446,13 @@ static uint8_t GetJuncSelectedCharIdx()
     return 0xFF;
 }
 
-// v0.09.48: Build the right panel available abilities list from GF bitmaps.
-// Reads all junctioned GFs' completeAbilities[16] bitmaps, unions them,
-// and filters by the relevant ability ID range based on the left panel slot type.
-// Result is stored in s_abilRightList[] in ascending ID order.
-//
-// Left cursor 0-2 = command slot selected → show command abilities (IDs 20-38, skip 24)
-// Left cursor 3-6 = ability slot selected → show character/party abilities (IDs 39-82)
-static void BuildAbilityRightPanel(uint8_t charIdx, uint8_t leftCursor)
-{
-    s_abilRightListCount = 0;
-    if (charIdx > 7) return;
-    
-    __try {
-        uint8_t* sm = (uint8_t*)0x1CFDC5C;
-        uint8_t* chr = sm + 0x48C + charIdx * 0x98;
-        uint16_t gfMask = *(uint16_t*)(chr + 0x58);  // junctioned GF bitmask (live)
-        // v0.09.49: Game zeroes gfMask during Junction editing. Use per-char cached value.
-        if (gfMask == 0 && charIdx < 8 && s_juncCachedGfMasks[charIdx] != 0) {
-            gfMask = s_juncCachedGfMasks[charIdx];
-        }
-        // Ultimate fallback — if both are 0, use ALL existing GFs.
-        if (gfMask == 0) {
-            for (int g = 0; g < 16; g++) {
-                uint8_t* gf = sm + 0x4C + g * 0x44;
-                if (gf[0x11]) gfMask |= (1 << g);
-            }
-        }
-        
-        // Union all junctioned GFs' completeAbilities bitmaps (16 bytes = 128 bits)
-        uint8_t unionBitmap[16] = {};
-        for (int g = 0; g < 16; g++) {
-            if (!(gfMask & (1 << g))) continue;  // GF not junctioned
-            uint8_t* gf = sm + 0x4C + g * 0x44;  // GF struct base
-            if (!gf[0x11]) continue;  // GF doesn't exist
-            uint8_t* completeAbil = gf + 0x14;  // completeAbilities[16]
-            for (int b = 0; b < 16; b++)
-                unionBitmap[b] |= completeAbil[b];
-        }
-        
-        // Determine ID range based on left panel slot type
-        int idMin, idMax;
-        if (leftCursor <= 2) {
-            // Command slot selected: show command abilities (IDs 20-38)
-            idMin = 20;
-            idMax = 38;
-        } else {
-            // Ability slot selected: show character/party abilities (IDs 39-82)
-            idMin = 39;
-            idMax = 82;
-        }
-        
-        // Collect all learned abilities in the relevant range, ascending ID order
-        for (int id = idMin; id <= idMax; id++) {
-            if (id == 24) continue;  // ID 24 = "Empty" placeholder, skip
-            // Check bit 'id' in the union bitmap
-            int byteIdx = id / 8;
-            int bitIdx = id % 8;
-            if (unionBitmap[byteIdx] & (1 << bitIdx)) {
-                if (s_abilRightListCount < ABIL_RIGHT_LIST_MAX)
-                    s_abilRightList[s_abilRightListCount++] = (uint8_t)id;
-            }
-        }
-        
-        Log::Menu("[AbilTTS] Built right panel list: %d abilities (leftCursor=%u range=%d-%d)",
-                   s_abilRightListCount, (unsigned)leftCursor, idMin, idMax);
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        Log::Menu("[AbilTTS] Exception in BuildAbilityRightPanel");
-    }
-}
+// v0.23.0 (#82): BuildAbilityRightPanel lived here. It reconstructed the
+// available-ability list by unioning the junctioned GFs' completeAbilities
+// bitmaps and filtering by id range (20-38 for a command slot, 39-82 for an
+// ability slot) -- which is exactly what the game's own builder at 0x004E0110
+// does, into 0x01D8B258 and 0x01D8B280. Since the cursor indexes THOSE arrays,
+// the reconstruction was a second opinion that could only ever agree or be
+// wrong, so it is gone and the focus==28 block reads the arrays directly.
 
 // Main Junction submenu poller — called every frame while top-level cursor == 0
 // Gate: +0x1E8==17 means Junction subsystem is active. This is set when the
@@ -548,9 +506,12 @@ static void PollJunctionSubmenu()
         
         if (!s_juncActive) return;
         
-        // DEBUG: Log unhandled focus states
+        // DEBUG: Log unhandled focus states.
+        // v0.23.3: 49..62 are the grid, the magic list and their slide/scroll
+        // states, and PollJunctionStats owns all of them -- logging them as
+        // "unhandled" made a solved screen read like a hole in the next BAT log.
         if (focus != 0 && focus != 3 && focus != 8 && focus != 11 && focus != 37 && focus != 38 && focus != 41 &&
-            !(focus >= 20 && focus <= 28)) {
+            !(focus >= 20 && focus <= 28) && !(focus >= 49 && focus <= 62)) {
             static uint8_t s_lastLoggedFocus = 0xFF;
             if (focus != s_lastLoggedFocus) {
                 s_lastLoggedFocus = focus;
@@ -593,9 +554,6 @@ static void PollJunctionSubmenu()
                 }
                 if (focus == ABIL_RIGHT_FOCUS && fromOtherPanel) {
                     s_juncPrevAbilRightCursor = 0xFF;  // force re-announce on right entry
-                    // v0.09.48: Rebuild available abilities list when entering right panel
-                    uint8_t charIdx = GetJuncSelectedCharIdx();
-                    BuildAbilityRightPanel(charIdx, s_abilLastLeftCursor);
                     Log::Menu("[AbilTTS] -> RIGHT panel (focus=%u, leftCursor=%u)",
                                (unsigned)focus, (unsigned)s_abilLastLeftCursor);
                 }
@@ -629,31 +587,52 @@ static void PollJunctionSubmenu()
                 }
             }
 
-            // RIGHT PANEL (focus=28): available abilities from junctioned GFs
-            // v0.09.48: Index into reconstructed list built from GF completeAbilities bitmaps.
-            // The list is rebuilt each time the user enters the right panel.
+            // RIGHT PANEL (focus=28): available abilities from junctioned GFs.
+            //
+            // v0.23.0 (#82) -- THE CHARACTER-ABILITY LIST WAS READING A CURSOR
+            // THAT HAD STOPPED MOVING. The state-28 handler at 0x004DAE12
+            // addresses its cursor as `module[0x52 + kind]`, where kind (module
+            // +0x56 = pMenuStateA + 0x274) is 1 for the COMMAND list and 2 for
+            // the CHARACTER list. The command list is therefore +0x271 -- which
+            // is what this block read, and why commands worked -- and the
+            // character list is +0x272, which nothing read at all. Aaron: *"the
+            // character and party abilities list (command abilities are hooked
+            // already)"*. That sentence describes this exact off-by-one.
+            //
+            // The list CONTENTS now come from the game's own arrays too. The
+            // builder at 0x004E0110 unions the junctioned GFs' completeAbilities
+            // bitmaps into 0x01D8B580, then walks ids 20..38 into 0x01D8B258
+            // (count 0x01D8B690) and ids 39..82 into 0x01D8B280 (count
+            // 0x01D8B691), as {id, nameIdx} pairs. BuildAbilityRightPanel
+            // reconstructed the same membership from the same bitmaps, which was
+            // a fair guess -- but a reconstruction can agree on membership and
+            // still disagree on ORDER, and order is the only thing a cursor
+            // index means. Reading the array the cursor actually indexes cannot
+            // be off by one, so the reconstruction is gone.
             if (focus == ABIL_RIGHT_FOCUS) {
-                uint8_t cursor = base[ABIL_RIGHT_CURSOR_OFF];
-                if (cursor != s_juncPrevAbilRightCursor) {
-                    s_juncPrevAbilRightCursor = cursor;
-                    // v0.09.48: Build list on demand if not yet built
-                    // (handles first entry without a left→right transition)
-                    if (s_abilRightListCount == 0) {
-                        uint8_t charIdx = GetJuncSelectedCharIdx();
-                        BuildAbilityRightPanel(charIdx, s_abilLastLeftCursor);
-                    }
-                    // Look up ability ID from our reconstructed list
-                    if (cursor < s_abilRightListCount) {
-                        uint8_t abilId = s_abilRightList[cursor];
-                        const char* name = GetAbilityName(abilId);
+                uint8_t kind   = base[JUNC_ABIL_KIND_OFF];
+                uint8_t cursor = 0;
+                int     count  = 0;
+                int     abilId = -1;
+                if (kind == 1 || kind == 2) {
+                    cursor = base[JUNC_ABIL_CUR_OFF + kind];
+                    const uint8_t* list = (const uint8_t*)
+                        (kind == 1 ? JUNC_ABIL_CMD_LIST : JUNC_ABIL_CHAR_LIST);
+                    count = (kind == 1)
+                          ? (int)(*(const uint32_t*)JUNC_ABIL_CMD_COUNT & 0xFF)
+                          : (int)(*(const uint8_t*)JUNC_ABIL_CHAR_COUNT);
+                    if (count > 0 && cursor < count) abilId = (int)list[cursor * 2];
+
+                    // The remembered position folds in the KIND, so switching
+                    // lists always re-announces instead of looking like "the
+                    // cursor did not move".
+                    uint8_t sig = (uint8_t)((kind << 6) | (cursor & 0x3F));
+                    if (sig != s_juncPrevAbilRightCursor) {
+                        s_juncPrevAbilRightCursor = sig;
+                        const char* name = (abilId >= 0) ? GetAbilityName((uint8_t)abilId) : "Empty";
                         ScreenReader::Speak(name, true);
-                        Log::Menu("[AbilTTS] RIGHT cursor %u: id=%u -> %s",
-                                   (unsigned)cursor, (unsigned)abilId, name);
-                    } else {
-                        // Cursor past end of list = empty slot
-                        ScreenReader::Speak("Empty", true);
-                        Log::Menu("[AbilTTS] RIGHT cursor %u: past list end (%d items) -> Empty",
-                                   (unsigned)cursor, s_abilRightListCount);
+                        Log::Menu("[AbilTTS] RIGHT kind=%u cursor=%u/%d: id=%d -> %s",
+                                   (unsigned)kind, (unsigned)cursor, count, abilId, name);
                     }
                 }
             }
@@ -662,6 +641,19 @@ static void PollJunctionSubmenu()
         // ---- Character Select (focus == 0 or 8) ----
         // v0.09.41: focus=8 is char select after Switch rearrangement.
         // focus=0 is the normal char select on first entry.
+        //
+        // v0.23.3: the "force re-announce on return from deeper" reset used to
+        // live at the END of this function, which announced the character TWICE
+        // on every return -- once with the stale cursor still matching, then
+        // again on the next frame after the reset. The BAT log has it plainly:
+        // two identical "CharSelect: Irvine, Level 19, HP 522 of 1837" lines in
+        // the same second, at 17:39:45 and again at 17:40:23. Doing the reset
+        // BEFORE the announce makes the arrival frame the only one that speaks.
+        if ((focus == 0 || focus == 8) &&
+            s_juncPrevFocus != 0 && s_juncPrevFocus != 8 && s_juncPrevFocus != 0xFF &&
+            !s_juncAutoConfirmPending) {
+            s_juncPrevCharCursor = 0xFF;
+        }
         if (focus == 0 || focus == 8) {
             uint8_t charCursor = base[JUNC_CHARSEL_CURSOR_OFF];
             if (s_juncAutoConfirmPending) {
@@ -733,7 +725,6 @@ static void PollJunctionSubmenu()
             s_juncPrevAbilLeftCursor = 0xFF;
             s_juncPrevAbilRightCursor = 0xFF;
             s_juncPrevAbilFocus = 0xFF;
-            s_abilRightListCount = 0;
         }
 
         // ---- Auto-junction submenu (focus == 11) ----
@@ -863,11 +854,8 @@ static void PollJunctionSubmenu()
             }
         }
         
-        // When returning to char select (focus==0 or 8) after being deeper,
-        // force re-announce the current character
-        if ((focus == 0 || focus == 8) && s_juncPrevFocus != 0 && s_juncPrevFocus != 8 && s_juncPrevFocus != 0xFF) {
-            if (!s_juncAutoConfirmPending) s_juncPrevCharCursor = 0xFF;
-        }
+        // (The "returning to char select" re-announce reset now runs ABOVE the
+        //  announce block -- see the v0.23.3 note there.)
         
         // Reset sub-phase cursors when leaving those phases
         if (focus != 37 && focus != 38 && s_juncPrevFocus >= 37 && s_juncPrevFocus <= 38) {

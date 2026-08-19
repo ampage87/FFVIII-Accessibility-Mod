@@ -43,6 +43,12 @@
 // (#72 test automation). Textual include per project .inl convention.
 #include "autotest_cmd.inl"
 
+// v0.25.1 (#84): Alt+K restores FF8's in-game button map. The Config screen's
+// Customize sub-screen is a one-way door for a blind player -- Cancel is not
+// handled there and the Steam rebinder is listening -- so the mod carries the
+// ladder out. See src/button_map_rescue.inl.
+#include "button_map_rescue.inl"
+
 // Forward declarations for TitleScreen (no title_screen.h exists; defined in title_screen.cpp).
 namespace TitleScreen {
     void Initialize();
@@ -639,6 +645,10 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
         // F1 = Cycle SAPI voice  | F2 = Toggle audio ducking
         // F3/F4 = Speech rate -/+ | Shift+F3/F4 = Speech volume -/+
         // F5/F6 = SFX vol -/+ | F7/F8 = BGM vol -/+
+        // Shift+F9 = restore FF8's stock button map (v0.25.2). Was Alt+K, which
+        //   never once fired: holding Alt puts the window into menu-modal mode
+        //   and can stall this very loop. Bare F9 belongs to the Garden battle
+        //   SKIP in field_nav_handlekeys.inl, hence the modifier.
         // F11 = On-demand screenshot
         // F12 = #79 world-map vehicle-state dump [VEHDUMP] (per-session)
         // Navigation (-/+/Backspace) handled inside FieldNavigation::Update()
@@ -684,6 +694,7 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
             if (f6 && !s_f6was && !alt) GameAudio::SfxVolumeUp();
             if (f7 && !s_f7was && !alt) GameAudio::VolumeDown();
             if (f8 && !s_f8was && !alt) GameAudio::VolumeUp();
+            ButtonMapRescue::PollHotkey();
             if (f11 && !s_f11was && !alt) {
                 SYSTEMTIME wt;
                 GetLocalTime(&wt);

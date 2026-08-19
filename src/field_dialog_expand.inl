@@ -391,37 +391,26 @@ static const uintptr_t FIELD_NAME_RESOLVER_0D = 0x0047EA30;  // other names
 // straight off the executable, and the read below replicates it byte for byte,
 // including the two silent-skip cases (null table / entry >= count), so a
 // failed lookup emits exactly what the engine emits: nothing.
-static const uintptr_t FIELD_DEFERRED_TABLE_PTR = 0x01D2B80C;
-
-// Look up a 0x0E-family deferred-text entry and copy its FF8 bytes into out.
-// Fully SEH-guarded, no C++ objects (C2712). Returns bytes written; 0 means
-// "emit nothing", which is also the engine's behavior for a missing entry.
-static size_t ResolveDeferredText(uint8_t code, uint8_t param,
-                                  uint8_t* out, size_t outSize)
-{
-    size_t written = 0;
-    __try {
-        uintptr_t table = *(volatile uintptr_t*)FIELD_DEFERRED_TABLE_PTR;
-        if (table != 0) {
-            uint32_t entry = (uint32_t)(code - 0x0E) * 224u
-                           + (uint32_t)(uint8_t)(param - 0x20);
-            uint16_t count = *(volatile uint16_t*)table;
-            if (entry < count) {
-                uint16_t off = *(volatile uint16_t*)(table + 2 + entry * 2);
-                const uint8_t* s = (const uint8_t*)(table + off);
-                for (; written < outSize - 1; written++) {
-                    uint8_t sb = s[written];
-                    if (sb == 0x00) break;
-                    out[written] = sb;
-                }
-            }
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        written = 0;
-    }
-    if (written < outSize) out[written] = 0x00;
-    return written;
-}
+// v0.35.0 (#93): THE TABLE HAS A NAME -- namedic.bin -- AND ONE READER.
+//
+// The block above was right about the mechanism and right about the layout, and
+// v0.35.0 finished the job: `[0x01D2B80C]` is the load buffer for **main.fs
+// entry 13, namedic.bin** (408 bytes, 32 entries), set at 0x004A1980 from
+// `[0x00B6D060]`. Two things follow.
+//
+// First, the substitution is NOT field-specific. `sub_4B8B30` is the shared
+// window text expander -- the item shop's own draw callback runs its
+// descriptions through it (0x004ED56D) before the glyph drawer ever sees them
+// -- so the same words go missing on every menu screen that reads kernel text.
+// The resolver therefore moved into `FF8TextDecode` where all of those screens
+// can reach it, and `FF8TextDecode::Decode` now expands 0x0E/0x0F itself.
+//
+// Second, this file keeps pre-expanding into the raw buffer (the 0x04 and
+// 0x0C/0x0D inserts still have to happen here, and doing 0x0E in the same pass
+// costs nothing), but it no longer carries its OWN copy of the table read.
+// Two implementations of one lookup is the shape this project keeps paying for.
+// After this pass the buffer holds no 0x0E at all, so the decoder's expansion
+// simply finds nothing left to do -- there is no double substitution.
 
 // SEH-guarded dword read. No C++ objects (C2712).
 static bool SafeReadDword(uintptr_t addr, uint32_t* out)
@@ -709,7 +698,8 @@ static int FieldExpandRawVars(const uint8_t* src, size_t srcLen,
         if (b >= 0x0E && b <= 0x0F && i + 1 < srcLen) {
             uint8_t param = src[++i];
             uint8_t nameBuf[128];
-            size_t n = ResolveDeferredText(b, param, nameBuf, sizeof(nameBuf));
+            size_t n = FF8TextDecode::ResolveWord(b, param, nameBuf,
+                                                  sizeof(nameBuf));
             for (size_t k = 0; k < n && o + 1 < outSize; k++) {
                 out[o++] = nameBuf[k];   // already FF8-encoded; copy through
             }

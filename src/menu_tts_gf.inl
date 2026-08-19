@@ -104,7 +104,7 @@ static int   s_gfDetailLastIdx    = -1;
 // into the rendered page. So we read BOTH bytes and use whichever just changed
 // and is in range, de-duping on the resolved ability id. A window log
 // ([GFLEARN]) captures the full picture for a clean confirmation pass.
-static int   s_gfLearnLastId  = -1;     // last announced ability id (dedupe)
+static int   s_gfLearnLastId  = -1;     // v0.29.2: dedupe key = 1000 + page*64 + row
 static int   s_gfLearnPrev257 = -1;
 static int   s_gfLearnPrev258 = -1;
 static DWORD s_gfLearnPoll     = 0;
@@ -744,6 +744,124 @@ static void SpeakGFDetailField(int key)
 
 // SEH raw read of both Learn-list cursor-candidate bytes (+0x257 page 1,
 // +0x258 page 2). No C++ objects (C2712-safe). Returns false on fault.
+// ===========================================================================
+// v0.29.2 (#88): THE LEARN LIST, READ FROM THE ENGINE
+// ---------------------------------------------------------------------------
+// Aaron, on v0.29.1: *"It did not seem to consistently announce abilities as I
+// moved through the list on later GFs like Leviathan, Cerberus, and
+// Pandemona."* He is describing the same defect the Ability screen had, one
+// screen over, and 0x004D35ED settles every part of it:
+//
+//     mov   al,  byte [esi+0x36]              ; page
+//     movsx ecx, byte [eax+esi+0x39]          ; row = cursor[page]
+//     lea   edx, [eax+eax*4]                  ; page*5
+//     lea   eax, [eax+edx*2]                  ; page*11
+//     add   ecx, eax                          ; ABSOLUTE = page*11 + row
+//     mov   eax, [0x01D7DAA0]                 ; total abilities
+//     cmp   ecx, eax
+//     jge   no_ability                        ; -> [esi+0x20] = 0
+//     mov   al,  byte [ecx*8 + 0x01D7D9F0]    ; ability id
+//
+// So:
+//   +0x36        the PAGE (0 or 1; 0x004D2C1F toggles it with `sete al`)
+//   +0x39[page]  the cursor row ON THAT PAGE -- an ARRAY, not two unrelated bytes
+//   +0x3B[page]  how many rows that page has (0x004D2C2F clamps the cursor to it)
+//   11           rows per page (`idiv 0xB` at 0x004D33DC, and the page*11 above)
+//   0x01D7D9F0   THE WHOLE ability list, stride 8, byte 0 = ability id
+//   0x01D7DAA0   its length, filled in one call at 0x004D2F13/0x004D2F24
+//
+// What the mod did instead: it identified the row by parsing ability names out
+// of the GCW DRAW BUFFER -- which holds only the page on screen -- and indexed
+// that with whichever of pMenuStateA+0x257 / +0x258 had just changed. Those two
+// bytes are module +0x39 and +0x3A, i.e. cursor[0] and cursor[1]: the right
+// bytes, guessed, with no page byte to say which one is live and no way to
+// reach page 2's rows at all.
+//
+// **The failure was silence, and silence is why it took a BAT to find.** When
+// the parse under-read (as it did on Leviathan, three rows short -- see
+// NormalizeAbilityToGcw), the cursor ran past the parsed count into the
+// "empty slot" branch, which only speaks when the help text is blank; the
+// help text was not blank, it was the run-on. Nothing was announced, and
+// nothing was logged either.
+//
+// The GCW parse still runs, for two things it is genuinely good at: proving the
+// Learn list is on screen at all, and slicing the help description. **It no
+// longer decides which ability the cursor is on.**
+// ===========================================================================
+
+static const uintptr_t GF_POOL_BASE   = 0x01D76BC8;
+static const uintptr_t GF_POOL_END    = 0x01D77078;   // base + 10 * 0x78
+static const uintptr_t GF_LIST_HEAD   = 0x01D76B48;
+static const uint32_t  GF_STATE_FN    = 0x004D2A00;   // creator 0x004D4840
+
+static const uintptr_t GF_LEARN_LIST  = 0x01D7D9F0;   // stride 8, byte 0 = ability id
+static const uintptr_t GF_LEARN_COUNT = 0x01D7DAA0;   // dword
+static const int GF_ROWS_PER_PAGE     = 11;
+static const int GF_MAX_PAGES         = 2;            // 0x004D2C1F toggles 0/1
+static const int GFO_PAGE             = 0x36;
+static const int GFO_PAGE_CURSOR      = 0x39;         // [page]
+static const int GFO_PAGE_ROWS        = 0x3B;         // [page]
+
+// Bounded by the pool and capped at 12 hops, exactly as the Magic and Save
+// walks are: a corrupt pointer must not walk off into the process and a cycle
+// must not hang the game thread.
+static uint8_t* FindGFModule()
+{
+    __try {
+        uint8_t* m = *(uint8_t* volatile*)GF_LIST_HEAD;
+        for (int i = 0; i < 12 && m; i++) {
+            const uintptr_t a = (uintptr_t)m;
+            if (a < GF_POOL_BASE || a >= GF_POOL_END) break;
+            if ((a - GF_POOL_BASE) % 0x78 != 0) break;
+            if (*(uint32_t*)(m + 0x08) == GF_STATE_FN) return m;
+            m = *(uint8_t* volatile*)m;
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    return nullptr;
+}
+
+struct GFLearnSel {
+    int page;        // 0..1
+    int row;         // row on that page
+    int pageRows;    // how many rows that page has
+    int absIdx;      // page * 11 + row
+    int count;       // total abilities for this GF
+    int abilityId;   // -1 when absIdx is past the end (an empty slot)
+};
+
+// Everything the engine knows about where the cursor is, read the way the
+// engine reads it. Returns false rather than guessing.
+static bool GFReadLearnSel(GFLearnSel& sel)
+{
+    memset(&sel, 0, sizeof(sel));
+    sel.abilityId = -1;
+    uint8_t* m = FindGFModule();
+    if (!m) return false;
+    __try {
+        const int page = (int)*(volatile uint8_t*)(m + GFO_PAGE);
+        if (page < 0 || page >= GF_MAX_PAGES) return false;
+        const int row      = (int)*(volatile uint8_t*)(m + GFO_PAGE_CURSOR + page);
+        const int pageRows = (int)*(volatile uint8_t*)(m + GFO_PAGE_ROWS + page);
+        if (row < 0 || row > GF_ROWS_PER_PAGE) return false;
+
+        const int count = (int)*(volatile uint32_t*)GF_LEARN_COUNT;
+        if (count < 0 || count > 24) return false;      // a GF has at most 24
+
+        sel.page     = page;
+        sel.row      = row;
+        sel.pageRows = pageRows;
+        sel.count    = count;
+        sel.absIdx   = page * GF_ROWS_PER_PAGE + row;
+        // The engine's own bound (0x004D3602): past the end there is no ability
+        // and it writes 0 into the help slot. That is an EMPTY SLOT, and saying
+        // so does not depend on the help text being blank the way the old
+        // classification did.
+        if (sel.absIdx < count)
+            sel.abilityId = (int)*(volatile uint8_t*)(GF_LEARN_LIST + sel.absIdx * 8);
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
 static bool GFReadLearnCursors(int* out257, int* out258)
 {
     __try {
@@ -825,6 +943,27 @@ static std::string NormalizeAbilityToGcw(const char* tts)
         else
             i++;
     }
+    // v0.29.1 (#88): **the game drops "-J" in front of a multiplier.** The
+    // v0.29.0 BAT's own GCW buffer says so verbatim -- Leviathan's list reads
+    //     "...Mag-JSpr-JElem-Defx2MagicGFDrawItem..."
+    // -- so id 14 draws as "Elem-Defx2", not "Elem-Def-Jx2". The list parse
+    // therefore failed at that row, stopped three rows short, and the help
+    // slice (everything between "Save" and the first row it did parse) then
+    // swallowed the rows it had missed: the "/" key read
+    // *"Raises Spr by 20%Mag-JSpr-JElem-Defx2"*.
+    //
+    // Only four table entries have a multiplier after a "-J" suffix -- ids 14,
+    // 15, 16, 17 -- and they are all built the same way. x2 is confirmed from
+    // the buffer above; x4 and the ST- pair follow by construction and are not
+    // separately witnessed. The SPOKEN name is untouched: this function exists
+    // to produce the on-screen form for matching, and nothing else reads it.
+    for (size_t i = 0; i + 3 < s.size(); ) {
+        if (s.compare(i, 2, "-J") == 0 && s[i + 2] == 'x' &&
+            s[i + 3] >= '0' && s[i + 3] <= '9')
+            s.erase(i, 2);
+        else
+            i++;
+    }
     return s;
 }
 
@@ -838,6 +977,38 @@ static const std::vector<std::string>& GcwAbilityNames()
             v.push_back(NormalizeAbilityToGcw(ABILITY_NAMES[i]));
     }
     return v;
+}
+
+// v0.29.1 (#88): **the help slice is only as good as the list parse.**
+//
+// The description is whatever lies between "Save" and the FIRST row the parse
+// managed to match, so any row it failed to match ends up inside the help text
+// and is spoken as part of it. That is how the "/" key came to read
+// "Raises Spr by 20%Mag-JSpr-JElem-Defx2" -- the name fix in
+// NormalizeAbilityToGcw closes the case that was witnessed; this closes the
+// CLASS.
+//
+// The test is the parse's own: an ability name sitting GLUED to the character
+// before it (not space-preceded) belongs to the list, not to the prose. A help
+// line that legitimately ends in an ability word survives, because the game puts
+// a space there -- Boost's help really is "Boost GF".
+//
+// It fails towards silence on purpose. Dropping the line costs a description the
+// row announce has already given; keeping it states something the screen does
+// not say.
+static bool GFHelpSliceIsClean(const std::string& desc)
+{
+    const std::vector<std::string>& gcwNames = GcwAbilityNames();
+    for (int id = 0; id < ABILITY_NAME_COUNT; id++) {
+        if (id == 0 || id == 24) continue;              // "None"/"Empty"
+        const std::string& nm = gcwNames[id];
+        if (nm.empty()) continue;
+        for (size_t at = desc.find(nm); at != std::string::npos;
+             at = desc.find(nm, at + 1)) {
+            if (at > 0 && desc[at - 1] != ' ') return false;
+        }
+    }
+    return true;
 }
 
 // Parse the displayed Learn list out of the decoded GCW. The list is the run of
@@ -927,10 +1098,21 @@ static void UpdateGFLearnPhase()
     }
     if (desc == "Select ability to learn" || desc.size() > 64) desc.clear();
 
+    if (!desc.empty() && !GFHelpSliceIsClean(desc)) {
+        Log::Menu("[MenuTTS] GF help slice rejected (a list row is glued into it -- "
+                  "the parse under-read): \"%s\"", desc.c_str());
+        desc.clear();
+    }
+
     int cur257 = -1, cur258 = -1;
     if (!GFReadLearnCursors(&cur257, &cur258)) return;
     bool ch257 = (cur257 != s_gfLearnPrev257);
     bool ch258 = (cur258 != s_gfLearnPrev258);
+    // v0.29.2: these two are module +0x39 and +0x3A -- cursor[0] and cursor[1].
+    // They are read for the diagnostics below and for nothing else now; the
+    // announce path goes through GFReadLearnSel, which also knows which of them
+    // is live.
+    (void)ch257; (void)ch258;
 
 #if GF_DIAG
     // Confirmation-pass window log: fire whenever the +0x250 window changes, so
@@ -993,39 +1175,50 @@ static void UpdateGFLearnPhase()
     s_gfLearnPrev257 = cur257;
     s_gfLearnPrev258 = cur258;
 
-    // Pick the active cursor and classify the row. Page 1 navigates via +0x257,
-    // page 2 via +0x258 (whichever just changed is the live cursor). A value in
-    // [0,count) is a real ability row; a value in [count,22) with blank help is
-    // an EMPTY slot in the padded list area below the abilities (confirmed: Quez
-    // page 2 = 4 rows but +0x258 ran 4..10 over the empty rows, all help="").
-    // Dedupe so each distinct row speaks once: real -> id (0..115), empty -> 200+row.
-    int idx = -1;        // real-ability row
-    int emptyRow = -1;   // empty-slot row
-    if      (ch257 && cur257 >= 0 && cur257 < count)  idx = cur257;
-    else if (ch258 && cur258 >= 0 && cur258 < count)  idx = cur258;
-    else if (ch257 && cur257 >= count && cur257 < 22) emptyRow = cur257;
-    else if (ch258 && cur258 >= count && cur258 < 22) emptyRow = cur258;
-    else if (s_gfLearnLastId < 0) {                   // fresh entry: nothing moved yet
-        if (cur257 >= 0 && cur257 < count)      idx = cur257;
-        else if (cur258 >= 0 && cur258 < count) idx = cur258;
+    // ---- v0.29.2 (#88): the engine decides which row the cursor is on -------
+    //
+    // page*11 + cursor[page], bounded by the engine's own ability count, with
+    // the id taken from the engine's own list. The GCW parse above has already
+    // done the two jobs it is good at (proving the Learn list is on screen, and
+    // slicing the help text); it does not get a vote on WHICH ability this is.
+    //
+    // Dedupe on (page, row), not on the ability id. The id-based key went silent
+    // whenever two rows resolved the same way and, more to the point, could not
+    // tell "moved to a different row" from "same row, re-polled" once paging
+    // entered the picture.
+    GFLearnSel sel;
+    if (!GFReadLearnSel(sel)) {
+        // No GF module in the pool, or a field that failed its bounds check.
+        // Say nothing rather than fall back to the parse that caused the
+        // silence -- but SAY SO IN THE LOG, once. A reader that goes quiet
+        // without leaving a trace is what made the v0.29.1 defect take a BAT
+        // and three screenshots to find.
+        static bool s_warned = false;
+        if (!s_warned) {
+            s_warned = true;
+            Log::Menu("[MenuTTS] GF learn: engine read failed (module not in the "
+                      "pool, or a field out of range) -- the row readout is off");
+        }
+        return;
     }
 
-    if (idx >= 0) {
-        uint8_t id = ids[idx];
-        if ((int)id == s_gfLearnLastId) return;       // dedupe on resolved ability id
-        s_gfLearnLastId = id;
+    // The key carries the DISPLAYED GF as well as the row, because Q/R switch
+    // GFs without moving the cursor: on a row-only key, stepping from Cerberus
+    // to Pandemona with the cursor still on row 3 would have said nothing at
+    // all, which is the shape of the bug this whole change is about.
+    const int rowKey = 1000 + (s_gfDetailIdx + 1) * 4096 + sel.page * 64 + sel.row;
+    if (rowKey == s_gfLearnLastId) return;          // sitting still says nothing
+    s_gfLearnLastId = rowKey;
 
+    if (sel.abilityId >= 0) {
+        const uint8_t id = (uint8_t)sel.abilityId;
         const char* nm = GetAbilityName(id);
         bool learned = false, learning = false;
         GFReadLearnStatus(s_gfDetailIdx, id, &learned, &learning);
 
         // (#44, v0.18.0.15) Streamlined row readout: name + AP only -- NO help
         // description on cursor move (the "/" key reads that on demand, to cut
-        // repeats). Learned -> ", Learned"; otherwise always ", C out of R AP"
-        // (one consistent format, even at 0 AP). C = savemap APs[slot-of-id]
-        // (0 if untouched); R = ability_ap_cost[id]. The actively-learning
-        // ability is held out of the displayed list, so its progress is read by
-        // detail key 5, not here.
+        // repeats). Learned -> ", Learned"; otherwise always ", C out of R AP".
         char apbuf[64]; apbuf[0] = '\0';
         int req = GFAbilityApCost(id);
         if (learned) {
@@ -1040,26 +1233,27 @@ static void UpdateGFLearnPhase()
 
         char out[256];
         snprintf(out, sizeof(out), "%s%s", nm ? nm : "Unknown", apbuf);
-        // (#3) Stash the row under the cursor for the on-demand "/" help re-read,
-        // mirroring exactly what we announce here (name + help description).
+        // (#3) Stash the row under the cursor for the on-demand "/" help re-read.
         s_gfLearnSelValid = true;
         s_gfLearnSelId    = (int)id;
         snprintf(s_gfLearnSelName, sizeof(s_gfLearnSelName), "%s", nm ? nm : "Unknown");
         snprintf(s_gfLearnSelDesc, sizeof(s_gfLearnSelDesc), "%s", desc.c_str());
         ScreenReader::Speak(out, true);
-        Log::Menu("[MenuTTS] GF learn row %d/%d: id=%u \"%s\"", idx, count, (unsigned)id, out);
-    }
-    else if (emptyRow >= 0 && desc.empty()) {         // empty slot (blank help confirms)
-        int key = 200 + emptyRow;
-        if (key == s_gfLearnLastId) return;           // dedupe per empty row
-        s_gfLearnLastId = key;
-        // (#3) Stash the empty slot for the "/" help re-read.
+        Log::Menu("[MenuTTS] GF learn page %d row %d (abs %d/%d, page has %d): "
+                  "id=%u \"%s\"",
+                  sel.page, sel.row, sel.absIdx, sel.count, sel.pageRows,
+                  (unsigned)id, out);
+    } else {
+        // Past the end of the engine's list: the padded area below the
+        // abilities. The engine writes 0 into its own help slot here
+        // (0x004D361D), so this is not a guess.
         s_gfLearnSelValid   = true;
         s_gfLearnSelId      = -1;
         snprintf(s_gfLearnSelName, sizeof(s_gfLearnSelName), "Empty Ability Slot");
         s_gfLearnSelDesc[0] = '\0';
         ScreenReader::Speak("Empty Ability Slot", true);
-        Log::Menu("[MenuTTS] GF learn row %d/%d: empty slot", emptyRow, count);
+        Log::Menu("[MenuTTS] GF learn page %d row %d (abs %d/%d): empty slot",
+                  sel.page, sel.row, sel.absIdx, sel.count);
     }
 }
 

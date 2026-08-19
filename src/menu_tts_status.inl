@@ -90,7 +90,15 @@ struct StatusLimitChar {
 static const StatusLimitChar ST_LIMIT_CHARS[] = {
     //                                                  cnt step lead curByte
     { "Squall",  ST_RENZ_FINISHERS, ST_RENZ_DESC, 4,  1, 4,  0 },  // +0x25F; cur 0-3 = 2 toggles x ON/OFF, 4+ = finishers (step 1)
-    { "Zell",    ST_ZELL_DUEL,      ST_ZELL_DESC, 10, 1, 0,  1 },  // +0x260 (band[1])
+    // v0.29.0 (#88): leadingToggles was 0 and every Duel row was announced as
+    // the NEXT ability -- cursor 1 is Punch Rush and the mod said "Booya".
+    // The page builder pre-seeds its row counter per layout mode: Squall
+    // (mode 0) with 4 at 0x004CE92C, and **Zell (mode 1) with 1** --
+    // `mov ebx, 1` at 0x004CE968 then `mov [esp+0x30], ebx` at 0x004CE9AD.
+    // Corroborated by the help-table bias: mode 0 uses cursor-4
+    // (0x004CE4BD), mode 1 uses cursor-1 (0x004CE536). Cell 0 in mode 1 is
+    // the Duel-Auto toggle (0x004CE3BB).
+    { "Zell",    ST_ZELL_DUEL,      ST_ZELL_DESC, 10, 1, 1,  1 },  // +0x260 (band[1])
     { "Quistis", ST_QUISTIS_BLUE,   nullptr,      16, 1, 0, -1 },  // +0x262 (unconfirmed; auto-detect)
     { "Rinoa",   ST_RINOA_ANGELO,   nullptr,      9,  1, 0,  4 },  // +0x263 (band[4])
 };

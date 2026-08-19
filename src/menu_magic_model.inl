@@ -582,7 +582,12 @@ static void MagicAnnounce(const MagicView& v, MagicPhase phase, char* out, size_
     }
 
     case MP_ALL_WARN:
-        MagicAppend(out, n, "Cannot take all magic. See the message on screen");
+        // v0.29.0 (#88): deliberately empty. This phase is the SHARED yes/no
+        // window (states 106/107), reached from Exchange and the Split picker as
+        // well as from All, so a fixed sentence here was wrong wherever it was
+        // not All -- and it described a refusal when the box is a confirmation.
+        // menu_tts_magic.inl reads the window's own text and its own option
+        // labels instead.
         break;
 
     case MP_CLOSING:

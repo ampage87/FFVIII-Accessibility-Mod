@@ -705,6 +705,18 @@ static void PollMemoryMonitor()
 // Offsets with small-integer patterns (0-20, changing by 1) are flagged as
 // likely cursor candidates.
 
+// v0.26.2: OFF FOR SHIP. This is a DISCOVERY tool -- it hunts for the cursor
+// offset of a submenu nobody has reverse-engineered yet -- and every submenu the
+// main menu has is now built out: Item, Junction, Magic, GF, Status, Save, Card,
+// Config and, as of #85, Tutorial and the SeeD exam. What it produces now is
+// noise: **5,399 of the 6,217 lines in Aaron's v0.26.1 BAT log, 87% of the
+// file**, which is exactly the kind of volume that hides the next real defect.
+//
+// Gated, not deleted, per this file's own convention -- the Information pages
+// (menutips, sections 128-133) are still unexplored and this is the tool that
+// would find their cursor. Flip to 1 for that session.
+#define SUBMON_DIAG 0
+
 static const int SUBMON_REGION_SIZE = 4096;
 static bool     s_submonActive = false;
 static DWORD    s_submonStableSince = 0;     // when top-level cursor last changed

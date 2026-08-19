@@ -2,110 +2,6 @@
 // Included from menu_tts.cpp. Do not compile independently.
 // v0.12.18: Extracted for readability.
 
-static void SubmonStart(uint8_t submenuIdx)
-{
-    s_submonActive = true;
-    s_submonSubmenu = submenuIdx;
-    s_submonSnapValid = false;
-    s_submonLastPoll = 0;
-    s_submonTotalPolls = 0;
-    memset(s_submonChangeCount, 0, sizeof(s_submonChangeCount));
-    memset(s_submonMinVal, 0xFF, sizeof(s_submonMinVal));
-    memset(s_submonMaxVal, 0, sizeof(s_submonMaxVal));
-    memset(s_submonFirstVal, 0, sizeof(s_submonFirstVal));
-    const char* name = GetMenuItemName(submenuIdx);
-    Log::Menu("[SUBMON] === Started monitoring submenu %u (%s) ===",
-               (unsigned)submenuIdx, name ? name : "?");
-}
-
-static void SubmonStop()
-{
-    if (!s_submonActive) return;
-    s_submonActive = false;
-
-    // Log summary: which offsets changed, how many times, value range
-    const char* name = GetMenuItemName(s_submonSubmenu);
-    Log::Menu("[SUBMON] === Summary for submenu %u (%s): %d polls ===",
-               (unsigned)s_submonSubmenu, name ? name : "?", s_submonTotalPolls);
-
-    // First pass: collect all changed offsets
-    int changedCount = 0;
-    for (int i = 0; i < SUBMON_REGION_SIZE; i++) {
-        if (s_submonChangeCount[i] > 0 && !IsSubmonNoiseOffset(i))
-            changedCount++;
-    }
-    Log::Menu("[SUBMON] %d offsets changed (excluding noise)", changedCount);
-
-    // Log each changed offset, flagging likely cursors
-    for (int i = 0; i < SUBMON_REGION_SIZE; i++) {
-        if (s_submonChangeCount[i] == 0 || IsSubmonNoiseOffset(i)) continue;
-        uint8_t minV = s_submonMinVal[i];
-        uint8_t maxV = s_submonMaxVal[i];
-        uint8_t firstV = s_submonFirstVal[i];
-        int range = (int)maxV - (int)minV;
-        int changes = s_submonChangeCount[i];
-
-        // Flag as likely cursor if: small value range (0-30), changes > 1
-        const char* flag = "";
-        if (range >= 1 && range <= 30 && maxV <= 50 && changes >= 2)
-            flag = " <<< CURSOR CANDIDATE";
-        else if (range >= 1 && range <= 10 && changes >= 2)
-            flag = " <<< POSSIBLE CURSOR";
-
-        Log::Menu("[SUBMON]   +0x%03X: changes=%d first=%u min=%u max=%u range=%d%s",
-                   i, changes, (unsigned)firstV, (unsigned)minV, (unsigned)maxV, range, flag);
-    }
-
-    Log::Menu("[SUBMON] === End summary ===");
-}
-
-static void SubmonPoll()
-{
-    if (!s_submonActive) return;
-
-    DWORD now = GetTickCount();
-    if (now - s_submonLastPoll < 150) return;  // poll every 150ms
-    s_submonLastPoll = now;
-    s_submonTotalPolls++;
-
-    uint8_t* base = (uint8_t*)pMenuStateA;
-    uint8_t cur[SUBMON_REGION_SIZE];
-    __try {
-        memcpy(cur, base, SUBMON_REGION_SIZE);
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        return;
-    }
-
-    if (!s_submonSnapValid) {
-        memcpy(s_submonSnap, cur, SUBMON_REGION_SIZE);
-        // Initialize first/min/max from initial snapshot
-        for (int i = 0; i < SUBMON_REGION_SIZE; i++) {
-            s_submonFirstVal[i] = cur[i];
-            s_submonMinVal[i] = cur[i];
-            s_submonMaxVal[i] = cur[i];
-        }
-        s_submonSnapValid = true;
-        return;
-    }
-
-    // Compare and track changes
-    for (int i = 0; i < SUBMON_REGION_SIZE; i++) {
-        if (cur[i] != s_submonSnap[i]) {
-            s_submonChangeCount[i]++;
-            if (cur[i] < s_submonMinVal[i]) s_submonMinVal[i] = cur[i];
-            if (cur[i] > s_submonMaxVal[i]) s_submonMaxVal[i] = cur[i];
-
-            // Log individual changes for non-noise offsets (first 200 only to limit spam)
-            if (!IsSubmonNoiseOffset(i) && s_submonChangeCount[i] <= 5) {
-                Log::Menu("[SUBMON] +0x%03X: %u -> %u (change #%d)",
-                           i, (unsigned)s_submonSnap[i], (unsigned)cur[i],
-                           s_submonChangeCount[i]);
-            }
-            s_submonSnap[i] = cur[i];
-        }
-    }
-}
-
 // ============================================================================
 // v0.08.29: Item submenu TTS — polls phase + cursor, announces actions/items
 // ============================================================================
@@ -324,63 +220,232 @@ static int FormatPartyMemberAnnouncement(uint8_t charIdx, const char* name,
     return pos;
 }
 
-// v0.18.2.10 (#46): party member char index by cursor position (0-based).
-// The Use-target screen lists the FULL party roster, not just the 3 battle
-// members. The roster is an 0xFF-terminated array of char indices at pMenuStateA
-// +0x1DB (BAT: [1,0,5,3,FF...] = Zell,Squall,Selphie,Quistis), and the screen
-// renders it SORTED BY CHARACTER INDEX (BAT via potion errors: cursor 0/1/2/3 =
-// Squall/Zell/Quistis/Selphie = idx 0,1,3,5). Collect the roster, sort, map the
-// cursor. Fall back to the battle formation (+0xAF0) only if the roster array is
-// empty/unreadable (a degraded safety net). NB: the Use screen lists every
-// AVAILABLE (joined) character, not the battle party — benched members included,
-// and it grows as characters join (e.g. Rinoa/Irvine later).
-static uint8_t GetPartyCharAtVisualPos(uint8_t cursorPos)
+// ===========================================================================
+// v0.30.0 (#89): THE USE-TARGET LIST, READ FROM THE ENGINE
+// ---------------------------------------------------------------------------
+// Aaron: *"The list of characters / party members / GFs doesn't always seem to
+// be accurate. Most of the time it is, but sometimes not."*
+//
+// 0x004F8600..0x004F86BF builds the target list and settles every part of it:
+//
+//     xor  ebp, ebp
+//     test bl, 2            ; the item targets CHARACTERS
+//     call 0x004AD030       ;   -> 16-bit character mask
+//     mov  bp, ax
+//     test bl, 4            ; the item targets GFs
+//     call 0x004AD090       ;   -> 16-bit GF mask
+//     shl  eax, 0x10        ;   GFs live in the HIGH half
+//     or   ebp, eax
+//     test ebp, 0xffff0000
+//     mov  byte [esi+0x64], 1   ; GF bits present -> two columns
+//     ...            [esi+0x64], 0   ; characters   -> one column
+//     mov  dword [esi+0x38], ebp    ; THE MASK
+//
+// and the two mask builders say what the bits mean:
+//
+//   0x004AD030  bit i = character i, for i in 0..7, set when that character's
+//               savemap +0x94 "exists" byte is odd (0x01CFE17C, stride 0x98,
+//               eight of them) -- AND, when [0x01CFE97A] & 1, further limited
+//               to the three ids in the battle formation at 0x01CFE74C.
+//   0x004AD090  bit 16+j = GF j, for j in 0..15, set when its savemap +0x11
+//               byte is odd (0x01CFDCB9, stride 0x44, sixteen of them).
+//
+// **The cursor at +0x58 is the BIT INDEX, not a position in a packed list.**
+// The draw code proves it: with characters only it puts row `cur` at
+// `y = cur*13 + 0x42` in a single column (0x004F8886), and with GFs at
+// `row = cur/2, col = cur&1` (0x004F889C). Position comes from the SLOT. **The
+// screen does not compact -- it leaves gaps.**
+//
+// What the mod did instead: it collected an 0xFF-terminated roster from
+// pMenuStateA+0x1DB, SORTED it by character index, and used the cursor as a
+// position in that packed list. That agrees with the truth **only when the set
+// bits happen to run 0,1,2,... with no gaps** -- which is exactly Aaron's party
+// today (Squall 0 through Selphie 5) and exactly why it was right most of the
+// time. Recruit Seifer or Edea over a gap, or hit the case where
+// [0x01CFE97A] & 1 narrows the mask to a three-member formation like {0,2,5},
+// and every name below the gap shifts by one. **And it never handled GFs at
+// all: a GF target list was read out as party members.**
+// ===========================================================================
+
+static const uintptr_t ITEM_POOL_BASE = 0x01D76BC8;
+static const uintptr_t ITEM_POOL_END  = 0x01D77078;   // base + 10 * 0x78
+static const uintptr_t ITEM_LIST_HEAD = 0x01D76B48;
+static const uint32_t  ITEM_STATE_FN  = 0x004F81F0;   // creator 0x004F8010
+
+static const int ITMO_TARGET_MASK = 0x38;   // u32: low 16 = characters, high 16 = GFs
+static const int ITMO_TARGET_CUR  = 0x58;   // i16, the BIT INDEX under the cursor
+static const int ITMO_TARGET_KIND = 0x64;   // 0 = characters, 1 = GFs
+
+static const int ITEM_TARGET_MAX_SLOT = 16;
+
+static uint8_t* FindItemModule()
 {
-    static const int ROSTER_OFFSET          = 0x1DB;  // pMenuStateA-relative, 0xFF-terminated
-    static const int PARTY_FORMATION_OFFSET = 0xAF0;  // savemap battle formation (fallback)
-
-    uint8_t members[12];
-    int count = 0;
-
-    // Primary: the menu roster list (every available character)
-    if (pMenuStateA) {
-        uint8_t* roster = (uint8_t*)pMenuStateA + ROSTER_OFFSET;
-        for (int i = 0; i < 11; i++) {
-            uint8_t c = roster[i];
-            if (c == 0xFF) break;
-            if (c <= 10 && count < 11) members[count++] = c;
+    __try {
+        uint8_t* m = *(uint8_t* volatile*)ITEM_LIST_HEAD;
+        for (int i = 0; i < 12 && m; i++) {
+            const uintptr_t a = (uintptr_t)m;
+            if (a < ITEM_POOL_BASE || a >= ITEM_POOL_END) break;
+            if ((a - ITEM_POOL_BASE) % 0x78 != 0) break;
+            if (*(uint32_t*)(m + 0x08) == ITEM_STATE_FN) return m;
+            m = *(uint8_t* volatile*)m;
         }
-    }
-    bool usedRoster = (count > 0);
-
-    // Fallback: battle formation, if the roster list was empty/unreadable
-    if (!usedRoster) {
-        uint8_t* formation = (uint8_t*)SAVEMAP_BASE + PARTY_FORMATION_OFFSET;
-        for (int i = 0; i < 4; i++)
-            if (formation[i] != 0xFF && formation[i] <= 10 && count < 11)
-                members[count++] = formation[i];
-    }
-
-    // Sort by character index (the screen's display order)
-    for (int i = 1; i < count; i++) {
-        uint8_t key = members[i];
-        int j = i - 1;
-        while (j >= 0 && members[j] > key) { members[j + 1] = members[j]; j--; }
-        members[j + 1] = key;
-    }
-
-    Log::Menu("[MenuTTS] GetPartyCharAtVisualPos: pos=%u src=%s count=%d sorted=[%u %u %u %u %u %u]",
-               (unsigned)cursorPos, usedRoster ? "roster" : "formation", count,
-               count > 0 ? (unsigned)members[0] : 255u,
-               count > 1 ? (unsigned)members[1] : 255u,
-               count > 2 ? (unsigned)members[2] : 255u,
-               count > 3 ? (unsigned)members[3] : 255u,
-               count > 4 ? (unsigned)members[4] : 255u,
-               count > 5 ? (unsigned)members[5] : 255u);
-
-    if (cursorPos < count) return members[cursorPos];
-    return 0xFF;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    return nullptr;
 }
+
+struct ItemTargetSel
+{
+    bool     isGF;        // which half of the mask this screen is showing
+    int      slot;        // the bit index under the cursor == character id / GF id
+    bool     available;   // is that slot's bit actually set
+    uint32_t mask;
+    int      rawCursor;   // for the log, so a bad read is diagnosable
+    int      rawKind;
+    const char* how;      // which identification answered
+};
+
+// v0.30.1 (#89): **the pool walk alone was not enough, and the BAT proved it.**
+// v0.30.0 logged "engine read failed" on every entry to the target screen while
+// the screenshot showed eleven GFs drawn and the cursor sitting on Alexander.
+// So the module was there and the walk did not find it.
+//
+// The fix is not to trust a slot instead. It is to accept EITHER identification
+// and require the same evidence from both: the module's own state word must be
+// the state the caller is already reading out of it. `pMenuStateA + 0x21E` is
+// pool slot 2, and the Item reader has been reading its state byte from
+// +0x22E == slot2 + 0x10 successfully all along -- so checking +0x10 against the
+// live state turns that base from an assumption into a positive test, and if the
+// two ever disagree the log says which one answered.
+// v0.30.2 (#89): **the walk really does fail, and the BAT settled it.** With
+// this helper in place the GF target list read perfectly on every row --
+// "Use target entered [slot2 (walk found nothing)]: GF slot 0 avail=1
+// mask=0x07FF0000" -- so the Item module IS at pMenuStateA+0x21E and
+// FindItemModule does not see it. Why is still open; the pool dump below is
+// there to answer it next time without costing a test of its own.
+//
+// The identification accepts either source and demands the same evidence from
+// both: the module's own state word must fall in the range the caller is in.
+// That is what keeps the alias a TEST rather than the fixed-slot assumption this
+// audit exists to remove.
+static void ItemDumpPoolOnce()
+{
+    static bool s_done = false;
+    if (s_done) return;
+    s_done = true;
+    __try {
+        uint8_t* head = *(uint8_t* volatile*)ITEM_LIST_HEAD;
+        Log::Menu("[MenuTTS] pool dump: head=%p base=%p end=%p",
+                  (void*)head, (void*)ITEM_POOL_BASE, (void*)ITEM_POOL_END);
+        for (int i = 0; i < 10; i++) {
+            uint8_t* m = (uint8_t*)(ITEM_POOL_BASE + i * 0x78);
+            Log::Menu("[MenuTTS]   slot %d @%p inUse=%u state=%u upd=0x%08X "
+                      "next=%p prev=%p",
+                      i, (void*)m, (unsigned)m[0x12],
+                      (unsigned)*(uint16_t*)(m + 0x10),
+                      (unsigned)*(uint32_t*)(m + 0x08),
+                      (void*)*(uint8_t**)m, (void*)*(uint8_t**)(m + 4));
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log::Menu("[MenuTTS] pool dump: faulted");
+    }
+}
+
+static uint8_t* ItemModuleBaseInStates(int lo, int hi, const char** how)
+{
+    *how = "walk";
+    uint8_t* m = FindItemModule();
+    if (m) {
+        int st = -1;
+        __try { st = (int)*(volatile uint16_t*)(m + 0x10); }
+        __except(EXCEPTION_EXECUTE_HANDLER) { st = -1; }
+        if (st >= lo && st <= hi) return m;
+    }
+    // The slot-2 alias, VERIFIED rather than assumed: the Item reader has been
+    // taking its state byte from +0x22E == slot2 + 0x10 all along, so requiring
+    // that word to agree with the live state turns the base into a positive test.
+    if (!pMenuStateA) return nullptr;
+    uint8_t* alias = (uint8_t*)pMenuStateA + 0x21E;
+    int st = -1;
+    __try { st = (int)*(volatile uint16_t*)(alias + 0x10); }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    if (st < lo || st > hi) return nullptr;
+    *how = m ? "slot2 (walk found a different state)" : "slot2 (walk found nothing)";
+    ItemDumpPoolOnce();
+    return alias;
+}
+
+static uint8_t* ItemTargetBase(int expectState, const char** how)
+{
+    return ItemModuleBaseInStates(expectState, expectState, how);
+}
+
+static bool ItemReadTargetSel(int expectState, ItemTargetSel& sel)
+{
+    memset(&sel, 0, sizeof(sel));
+    const char* how = "";
+    uint8_t* m = ItemTargetBase(expectState, &how);
+    if (!m) return false;
+    sel.how = how;
+    __try {
+        const uint32_t mask = *(volatile uint32_t*)(m + ITMO_TARGET_MASK);
+        const int      cur  = (int)*(volatile int16_t*)(m + ITMO_TARGET_CUR);
+        const int      kind = (int)*(volatile uint8_t*)(m + ITMO_TARGET_KIND);
+        sel.rawCursor = cur;
+        sel.rawKind   = kind;
+        if (cur < 0 || cur >= ITEM_TARGET_MAX_SLOT) return false;
+        sel.mask      = mask;
+        sel.isGF      = (kind != 0);
+        sel.slot      = cur;
+        sel.available = (mask & (1u << (cur + (sel.isGF ? 16 : 0)))) != 0;
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// The whole line for the row the cursor is on. GFs are named from the savemap,
+// so a renamed GF reads as the player named it.
+static void ItemFormatTarget(const ItemTargetSel& sel, bool isEntry,
+                             char* buf, size_t n)
+{
+    if (!buf || n == 0) return;
+    buf[0] = '\0';
+    if (sel.isGF) {
+        char gfn[32] = {};
+        DecodeGFName(sel.slot, gfn, sizeof(gfn));
+        snprintf(buf, n, "%s%s", isEntry ? "Use on " : "",
+                 gfn[0] ? gfn : "Guardian Force");
+        // An unobtained GF still occupies its slot -- the screen leaves the gap
+        // rather than closing it -- so say the slot is not a target instead of
+        // reading a name the player cannot pick.
+        if (!sel.available) {
+            const size_t l = strlen(buf);
+            snprintf(buf + l, (l < n) ? n - l : 0, ", not available");
+        }
+        return;
+    }
+    const uint8_t charIdx = (uint8_t)sel.slot;
+    const char* name = GetCharacterNameByPortrait(ResolveDreamAwareCharId(charIdx));
+    if (!name) {
+        snprintf(buf, n, "%sslot %d", isEntry ? "Use on " : "", sel.slot + 1);
+        return;
+    }
+    if (!sel.available) {
+        snprintf(buf, n, "%s%s, not available", isEntry ? "Use on " : "", name);
+        return;
+    }
+    FormatPartyMemberAnnouncement(charIdx, name, isEntry, buf, (int)n);
+}
+
+// v0.30.0 (#89): GetPartyCharAtVisualPos is GONE.
+//
+// It collected an 0xFF-terminated roster from pMenuStateA+0x1DB, sorted it by
+// character index, and treated the target cursor as a position in that packed
+// list. The engine's cursor is the BIT INDEX of the slot (see
+// ItemReadTargetSel above), and the screen leaves gaps rather than packing, so
+// the two agreed only while the available characters happened to run 0,1,2,...
+// with nothing missing. It is deleted rather than kept as a fallback: a
+// fallback that is wrong in exactly the cases the fix exists for is not a
+// safety net, it is a second answer nobody asked for.
+
 
 // SEH-protected: reads submenu offsets and announces changes.
 // v0.08.60: Primary detection via +0x22E focus state (3=action menu, 5=items list).
@@ -425,6 +490,38 @@ static const int BATTLE_ITEMS_PER_PAGE = 4;
 // Engine builds this filtered list from battle_order on screen open.
 // qty=0 means empty slot. This is what the screen actually shows.
 static const uint32_t BATTLE_DISPLAY_STRUCT = 0x1D8DFF4;
+
+// v0.29.0 (#88): the item id sitting at the SOURCE slot when a swap was armed.
+// Both arrange flows leave their destination screen to the same state whether
+// the player confirmed or cancelled, so the transition proves nothing; the slot
+// does. 0xFFFF = nothing armed.
+static uint16_t s_swapSrcIdAtArm = ITEM_SWAP_NO_ID;
+
+static uint16_t ItemBattleSlotId(uint8_t pos)
+{
+    uint16_t v = 0xFFFF;
+    __try { v = ((const uint8_t*)BATTLE_DISPLAY_STRUCT)[pos * 2]; }
+    __except(EXCEPTION_EXECUTE_HANDLER) { v = 0xFFFF; }
+    return v;
+}
+static uint16_t ItemInventorySlotId(uint8_t pos)
+{
+    uint16_t v = 0xFFFF;
+    __try { v = ((const uint8_t*)(SAVEMAP_BASE + ITEM_INVENTORY_OFFSET))[pos * 2]; }
+    __except(EXCEPTION_EXECUTE_HANDLER) { v = 0xFFFF; }
+    return v;
+}
+// True only if the armed source slot now holds something different. A swap of
+// two slots holding the SAME id is indistinguishable from a cancel and is also
+// a no-op, so reporting it as cancelled costs the player nothing.
+static bool ItemSwapHappened(uint16_t nowId)
+{
+    // The judgement is in menu_item_swap_model.inl so tests/menu_sim.cpp can
+    // exercise it; this wrapper only consumes the arm so it cannot fire twice.
+    const bool changed = ItemSwapDecide(s_swapSrcIdAtArm, nowId);
+    s_swapSrcIdAtArm = ITEM_SWAP_NO_ID;
+    return changed;
+}
 
 static void AnnounceBattleItemAtCursor(uint8_t cursor)
 {
@@ -548,26 +645,39 @@ static void PollItemSubmenu()
             // --- v0.08.86: Arriving at Use target selection (focus==14) ---
             else if (focusState == 14 && !s_inUseTargetMode) {
                 s_inUseTargetMode = true;
-                uint8_t targetCur = *(base + ITEM_TARGET_CURSOR_OFFSET);
-                s_prevTargetCursor = targetCur;
-                uint8_t charIdx = GetPartyCharAtVisualPos(targetCur);
-                const char* name = GetCharacterNameByPortrait(ResolveDreamAwareCharId(charIdx));  // v0.17.8.17.7 dream-aware
-                char buf[256];
-                if (name) {
-                    FormatPartyMemberAnnouncement(charIdx, name, true, buf, sizeof(buf));
-                } else {
-                    sprintf(buf, "Use on party member %u", (unsigned)targetCur + 1);
-                }
-                ScreenReader::Speak(buf, true);
-                Log::Menu("[MenuTTS] Use target entered: cursor %u charIdx=%u -> \"%s\"",
-                           (unsigned)targetCur, (unsigned)charIdx, buf);
-                // v0.18.2.7 (#10): baseline the target HP so the live-HP poll below
-                // only re-announces on an actual change from using an item.
-                {
+                // v0.30.0 (#89): the slot, the kind and the availability all come
+                // from the module now -- see ItemReadTargetSel's header.
+                ItemTargetSel sel;
+                if (ItemReadTargetSel((int)focusState, sel)) {
+                    s_prevTargetCursor = (uint8_t)sel.slot;
+                    s_prevTargetIsGF   = sel.isGF;
+                    char buf[256];
+                    ItemFormatTarget(sel, true, buf, sizeof(buf));
+                    ScreenReader::Speak(buf, true);
+                    Log::Menu("[MenuTTS] Use target entered [%s]: %s slot %d avail=%d "
+                              "mask=0x%08X -> \"%s\"",
+                              sel.how, sel.isGF ? "GF" : "char", sel.slot,
+                              (int)sel.available, (unsigned)sel.mask, buf);
                     uint16_t initCur = 0, initMax = 0;
-                    GetCharacterHP(charIdx, initCur, initMax);
+                    const uint8_t charIdx = sel.isGF ? 0xFF : (uint8_t)sel.slot;
+                    if (!sel.isGF) GetCharacterHP(charIdx, initCur, initMax);
                     s_prevTargetCharIdx = charIdx;
-                    s_prevTargetHP = initCur;
+                    s_prevTargetHP = sel.isGF ? 0xFFFF : initCur;
+                } else {
+                    // Refuse rather than guess -- and say so, so a BAT can see it.
+                    // Say WHY, not just that. v0.30.0 logged one sentence that
+                    // covered three different causes and told us none of them.
+                    ItemTargetSel d; const char* how = "";
+                    uint8_t* base = ItemTargetBase((int)focusState, &how);
+                    Log::Menu("[MenuTTS] Use target entered: read failed -- base=%s "
+                              "(%s) walk=%p slot2=%p state=%u",
+                              base ? "found" : "NONE", how,
+                              (void*)FindItemModule(),
+                              (void*)(pMenuStateA ? (uint8_t*)pMenuStateA + 0x21E : nullptr),
+                              (unsigned)focusState);
+                    if (base && ItemReadTargetSel((int)focusState, d))
+                        Log::Menu("[MenuTTS]   (retry succeeded: cursor=%d kind=%d)",
+                                  d.rawCursor, d.rawKind);
                 }
             }
             // --- v0.08.64: Rearrange mode detection (focus stabilizes ~97) ---
@@ -595,6 +705,7 @@ static void PollItemSubmenu()
             else if (focusState == 36 && s_inBattleMode && s_prevFocusState != 36) {
                 s_inBattleDestMode = true;
                 s_battleSwapSrcPos = s_prevBattleItemCursor;  // remember source for swap
+                s_swapSrcIdAtArm = ItemBattleSlotId(s_battleSwapSrcPos);
                 uint8_t batDestCur = *(base + 0x286);
                 s_prevBattleItemCursor = batDestCur;
                 AnnounceBattleItemAtCursor(batDestCur);
@@ -603,24 +714,61 @@ static void PollItemSubmenu()
             }
 
             // --- v0.08.79: Battle swap detection (returning from dest to source) ---
+            //
+            // v0.29.0 (#88): **"returning to the source" is NOT "a swap happened".**
+            // State 36 leaves to state 30 on BOTH paths -- Cancel at 0x004F9D9D
+            // (`test bl,0x10` -> sound 3 -> `mov word[esi+0x10], 0x1E`) does no
+            // swap at all, while Confirm at 0x004F9DB2 goes the long way round
+            // through state 41 and arrives at the same 30. The mod saw both as
+            // 36 -> 30 and said "Swapped" either way, so backing out of a battle
+            // arrange told the player their inventory had changed when it had
+            // not. The two live slot bytes settle it: compare what is actually
+            // in the two positions against what was there before.
             if (s_inBattleMode && s_inBattleDestMode && focusState >= 26 && focusState <= 35) {
-                // Was in dest mode (focus==36), now back to source (~30) = swap completed
+                // Was in dest mode (focus==36), now back to source (~30)
                 uint8_t destPos = s_prevBattleItemCursor;  // last dest cursor position
                 s_inBattleDestMode = false;
-                // v0.08.79: No manual swap tracking needed — live buffer is authoritative
-                ScreenReader::Speak("Swapped", true);
-                Log::Menu("[MenuTTS] Battle swap completed: pos %u <-> %u",
-                           (unsigned)s_battleSwapSrcPos, (unsigned)destPos);
+                const bool swapped = ItemSwapHappened(ItemBattleSlotId(s_battleSwapSrcPos));
+                ScreenReader::Speak(swapped ? "Swapped" : "Cancelled", true);
+                Log::Menu("[MenuTTS] Battle swap pos %u <-> %u -> \"%s\"",
+                           (unsigned)s_battleSwapSrcPos, (unsigned)destPos,
+                           swapped ? "Swapped" : "Cancelled");
                 s_battleSwapSrcPos = 0xFF;
                 uint8_t battleCur = *(base + BATTLE_ITEM_CURSOR_OFFSET);
                 s_prevBattleItemCursor = battleCur;
                 AnnounceBattleItemAtCursor(battleCur);
             }
 
-            // --- v0.08.64: Rearrange swap detection (focus 99->97 = swap completed) ---
+            // --- v0.08.64: Rearrange swap detection (focus 99->97) ---
+            //
+            // v0.29.0 (#88): same defect as the battle path above. Cancel in
+            // state 99 (0x004FB999: `test al,0x10` -> sound 3 -> `mov
+            // word[esi+0x10], 0x61`) lands on 97 exactly as a completed swap
+            // does, and state 100 -- which is where the real swap happens -- is
+            // entered by a same-frame chain the poll can never observe. It also
+            // refuses outright when both slots hold the SAME item id
+            // (0x004FB9EB) and stays in 99. Compare the slots instead of
+            // trusting the transition.
+            // v0.29.1 (#88): ARM HERE, not in the destination-cursor block below.
+            // That block runs later in the same poll, AFTER
+            // `s_rearrangePrevFocus = focusState` a few lines down has already
+            // set it to 99 -- so its "am I arriving?" test was false on every
+            // frame including the first, the arm never fired, and v0.29.0 said
+            // "Cancelled" for every rearrange including real swaps. That is the
+            // v0.29.0 defect inverted: same lie, other direction.
+            if (s_inRearrangeMode && s_rearrangePrevFocus != 99 && focusState == 99) {
+                s_swapSrcIdAtArm = ItemInventorySlotId((uint8_t)s_prevItemCursor);
+                Log::Menu("[MenuTTS] Rearrange armed: source slot %u holds id=%u",
+                          (unsigned)s_prevItemCursor, (unsigned)s_swapSrcIdAtArm);
+            }
+
             if (s_inRearrangeMode && s_rearrangePrevFocus == 99 && focusState == 97) {
-                ScreenReader::Speak("Swapped", true);
-                Log::Menu("[MenuTTS] Rearrange swap completed (99->97)");
+                const bool swapped = ItemSwapHappened(ItemInventorySlotId((uint8_t)s_prevItemCursor));
+                ScreenReader::Speak(swapped ? "Swapped" : "Cancelled", true);
+                Log::Menu("[MenuTTS] Rearrange 99->97: source slot %u now id=%u -> \"%s\"",
+                          (unsigned)s_prevItemCursor,
+                          (unsigned)ItemInventorySlotId((uint8_t)s_prevItemCursor),
+                          swapped ? "Swapped" : "Cancelled");
                 // Re-announce item at cursor after swap
                 AnnounceItemAtCursor(listCur);
                 s_prevItemCursor = listCur;
@@ -674,29 +822,32 @@ static void PollItemSubmenu()
         // from using an item. The cursor stays on the same character through a use,
         // so the cursor-move check alone never re-reads the (now updated) HP.
         if (s_inUseTargetMode) {
-            uint8_t targetCur = *(base + ITEM_TARGET_CURSOR_OFFSET);
-            uint8_t charIdx = GetPartyCharAtVisualPos(targetCur);
-            uint16_t curHP = 0, maxHP = 0;
-            GetCharacterHP(charIdx, curHP, maxHP);
-            bool cursorMoved = (targetCur != s_prevTargetCursor);
-            bool hpChanged   = (!cursorMoved && charIdx == s_prevTargetCharIdx &&
-                                s_prevTargetHP != 0xFFFF && curHP != s_prevTargetHP);
-            if (cursorMoved || hpChanged) {
-                const char* name = GetCharacterNameByPortrait(ResolveDreamAwareCharId(charIdx));  // v0.17.8.17.7 dream-aware
-                char buf[256];
-                if (name) {
-                    FormatPartyMemberAnnouncement(charIdx, name, false, buf, sizeof(buf));
-                } else {
-                    sprintf(buf, "Party member %u", (unsigned)targetCur + 1);
+            ItemTargetSel sel;
+            if (ItemReadTargetSel((int)focusState, sel)) {
+                const uint8_t charIdx = sel.isGF ? 0xFF : (uint8_t)sel.slot;
+                uint16_t curHP = 0, maxHP = 0;
+                if (!sel.isGF) GetCharacterHP(charIdx, curHP, maxHP);
+                const bool moved = (sel.slot != (int)s_prevTargetCursor) ||
+                                   (sel.isGF != s_prevTargetIsGF);
+                // v0.18.2.7 (#10): the cursor stays put through a use, so the
+                // move check alone never re-reads the healed HP.
+                const bool hpChanged = (!moved && !sel.isGF &&
+                                        charIdx == s_prevTargetCharIdx &&
+                                        s_prevTargetHP != 0xFFFF && curHP != s_prevTargetHP);
+                if (moved || hpChanged) {
+                    char buf[256];
+                    ItemFormatTarget(sel, false, buf, sizeof(buf));
+                    ScreenReader::Speak(buf, true);
+                    Log::Menu("[MenuTTS] Use target [%s]: %s slot %d avail=%d hp=%u/%u "
+                              "mask=0x%08X -> \"%s\"%s",
+                              sel.how, sel.isGF ? "GF" : "char", sel.slot, (int)sel.available,
+                              (unsigned)curHP, (unsigned)maxHP, (unsigned)sel.mask, buf,
+                              hpChanged ? " (HP changed)" : "");
+                    s_prevTargetCursor  = (uint8_t)sel.slot;
+                    s_prevTargetIsGF    = sel.isGF;
+                    s_prevTargetCharIdx = charIdx;
+                    s_prevTargetHP      = sel.isGF ? 0xFFFF : curHP;
                 }
-                ScreenReader::Speak(buf, true);
-                Log::Menu("[MenuTTS] Use target cursor %u: charIdx=%u hp=%u/%u -> \"%s\"%s",
-                           (unsigned)targetCur, (unsigned)charIdx,
-                           (unsigned)curHP, (unsigned)maxHP, buf,
-                           hpChanged ? " (HP changed)" : "");
-                s_prevTargetCursor = targetCur;
-                s_prevTargetCharIdx = charIdx;
-                s_prevTargetHP = curHP;
             }
         }
 

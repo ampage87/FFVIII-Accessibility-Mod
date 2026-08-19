@@ -6,6 +6,2798 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.35.0
+
+#93: **The preprocessor has a name — `sub_4B8B30` — and its table is `namedic.bin`.**
+
+`0x0E xx` is expanded, everywhere, and the fix is not scoped to shops: every
+screen in the game that reads kernel text goes through the same routine.
+
+### BAT RESULT — PASSED, and every prediction held
+
+Aaron's 2026-08-19 run, 20:27–20:28, item shop. **Zero `[SHOP-TEXT]` lossy
+lines, zero "Partial description:".** The three fragments from the previous BAT,
+and the ones derived statically from `namedic.bin` before the game ever saw the
+build:
+
+| v0.34.9 spoke | v0.35.0 spoke |
+|---|---|
+| `"GF"` | **"GF learns Magic ability"** |
+| `" 1000 HP to GF"` | **"Restores 1000 HP to GF"** |
+| `" HP to all GF"` | **"Restores HP to all GF"** |
+| `" for dog lovers"` | **"Magazine for dog lovers"** |
+| `"Makes GF forget an"` | **"Makes GF forget an ability"** |
+
+Plus every scroll on the shelf read whole — *"GF learns Item ability"*, *"GF
+learns Draw ability"*, *"GF learns GF ability"* — and *"Revives GF from KO"*,
+*"Restores 200 HP to GF"*. The first row of the table is the one that matters:
+those ten bytes were decoded on paper, out of the exe and the archive, and the
+game said the same sentence back.
+
+**This was never only a shop fix.** `FF8TextDecode::Decode` has 57 call sites
+across 24 files — every menu, the battle readers, the field scan, the save
+screen, junction, magic, cards, status. Anywhere a `0x0E` or a byte in
+`0x79`–`0xCB` appeared in game text, it was being dropped without a word.
+
+### Chasing it statically, from the shop's own draw call
+
+The v0.34.9 note said a byte search could not find this, and it could not — but
+the shop's draw function knows where its description goes. Following the
+pointer at `+0x20`:
+
+```
+0x004ED278  lea  ecx, [esi + 0x20]        ; the description pointer
+0x004ED2BC  mov  [0x01D76AA0], ecx        ; hand it to the window drawer
+0x004ED2C2  call 0x004B2900               ; ... which calls back into
+0x004ED534  mov  ecx, [0x01D76AA0]        ; 0x004ED530, the content callback
+0x004ED56D  call 0x004B8B30               ; EXPAND into a 0x80-byte buffer
+0x004ED58B  call 0x004BDE30               ; draw the EXPANDED bytes
+```
+
+**That is why there is no `cmp al, 0x0E` near the glyph drawer: the drawer never
+sees one.** `sub_4B8B30(src, dst, maxLen)` is the shared window text expander,
+and its tail case at `0x004B8CB8` is the substitution:
+
+```
+0x004B8CBD  mov dl, [ebp] / inc ebp       ; read + consume the param byte
+0x004B8CC0  add ecx, -0xE                 ; group = code - 0x0E
+0x004B8CC3  sub dl, 0x20                  ; idx   = param - 0x20
+0x004B8CC7+ eax = group*7, shl 5          ; entry = group*224 + idx
+0x004B8CD6  mov ecx, [0x01D2B80C]         ; the table
+0x004B8CF1  movzx edx, word [ecx]         ; entry count
+0x004B8CF4  cmp edx, eax / jle            ; out of range -> emit NOTHING
+0x004B8D01  movzx esi, word [ecx+eax*2+2] ; offset, relative to the table
+```
+
+### The table is a file
+
+`[0x01D2B80C]` is set at `0x004A1980` from `[0x00B6D060]`, the buffer that
+`0x0047D46C` fills from a filename built out of `[0x00B81024]` = **`namedic.bin`**
+— `main.fs` entry 13, 408 bytes, LZS-compressed. Decompressed, it is exactly
+what the code reads: `u16 count` (32), then 32 × `u16 offset`, then packed
+FF8-encoded strings. Nineteen place names, then thirteen words:
+
+> Restores · status · learns · ability · Magic · Refine · Junctions · Raises ·
+> command · Magazine · Ultimecia Castle · Garden · Deling
+
+So the ten bytes from the BAT —
+
+```
+F0 20 0E 35 20 0E 37 20 0E 36
+```
+
+— are `"GF"` + `" "` + entry 0x15 + `" "` + entry 0x17 + `" "` + entry 0x16 =
+**"GF learns Magic ability"**, the Magic Scroll's description in full. And
+v0.34.8's *" 1000 HP to GF"* — the fragment that sounded complete — is
+**"Restores 1000 HP to GF"**.
+
+**Decoding the shipped `kernel.bin` with this table turns all 80 of its
+substituted strings into whole English sentences, with nothing left dropped.**
+
+### The other half: 57 bytes that were never in the table at all
+
+The glyph drawer maps `glyph = byte - 0x20` for every byte ≥ 0x20, which means
+the raw encoding *is* the sysfnt grid, shifted. This file was carrying two
+hand-built tables that were never independent: of the ~90 bytes both defined,
+they agree on every one except seven slots where the Deling grid is blank. So
+`s_charTable` is now **derived** from the glyph table plus that seven-entry
+override list — one table, not two — and the 57 bytes the old one had no entry
+for (`0x79`–`0xA7` accented letters, brackets, semicolon, degrees, `TM`, `<`,
+`>`) resolve instead of vanishing. Those were the other half of what made shop
+descriptions come out as fragments.
+
+Two smaller consumption bugs fell out of the same instruction stream: `0x0D`
+consumed no parameter (so its param byte leaked out as a stray letter mid
+sentence), and neither did `0x08`/`0x09` — `0x004B8D21` reads and consumes one
+for all of `0x05/0x06/0x08/0x09/0x0A/0x0B`.
+
+### The lossiness test moved to where the knowledge is
+
+`ShopCountDropped()` is **deleted**. It hard-coded a copy of "what the decoder
+throws away", which stopped being true the moment the decoder stopped throwing
+it away — the exact shape of duplicate that this project keeps paying for.
+`FF8TextDecode::Decode()` now reports its own losses through a `droppedOut`
+parameter (an unresolved word, an unmapped glyph, a name insert it cannot
+expand), so the reader and the decoder can no longer disagree. `"Partial
+description: …"` still fires — the probe proves it by taking the word table
+away — but on real text it now never has to.
+
+`field_dialog_expand.inl` loses its private copy of the table read too and calls
+`FF8TextDecode::ResolveWord()`. It still pre-expands, so nothing changes there;
+there is simply one reader now instead of two.
+
+### A probe for the decoder itself
+
+**`tests/text_decode_compile.cpp` is new, and it is overdue.** The decoder is
+the one piece every screen depends on and no probe had ever exercised — ten of
+the eleven menu probes stub it, which is how v0.34.9 shipped a decoder that
+dropped a word out of every item description in the game with all fourteen
+gates green. The new probe links the **real** `ff8_text_decode.cpp` and drives
+it with the **real** 408 bytes of `namedic.bin`, asserting the BAT's own byte
+string comes back as its sentence.
+
+`tests/menu_shop_compile.cpp` now links the real decoder as well, instead of a
+stub that "mirrors the real one where it matters" — it did not; it dropped every
+byte ≥ 0x80, so it agreed with the bug.
+
+**All fifteen gates** (`lint_seh`, `lint_xtu`, `lint_stub`, eleven `menu_*`
+probes, the new `text_decode_compile`, `menu_sim`, `button_map_rescue_test`).
+
+New: `tests/text_decode_compile.cpp`, `docs/TEXT_ENCODING.md`.
+
+**BAT:** in an item shop press `/` on several rows — the descriptions should now
+be whole sentences with no "Partial description:" in front of them. Then check
+that ordinary field dialogue and menu text are unchanged. Grep `[SHOP-TEXT]`:
+that line should no longer appear at all.
+
+## v0.34.9
+
+#92: **The hex named the code: `0x0E xx` is a substituted word.**
+
+One `[SHOP-TEXT]` line was enough:
+
+```
+lossy decode: 10 raw bytes -> 2 chars "GF" | F0 20 0E 35 20 0E 37 20 0E 36
+```
+
+`F0` is the two-char code "GF". `20` is a space. And **`0E xx` is a word the game
+substitutes** — which `DecodeByte` treats as an icon and eats both bytes of,
+silently. That is every gap in the BAT:
+
+| spoken | actually |
+|---|---|
+| " 1000 HP to GF" | "**Restores** 1000 HP to GF" |
+| " HP to all GF" | "**Restores** HP to all GF" |
+| "Makes GF forget an" | "Makes GF forget an **ability**" |
+| "GF" | three substituted words and nothing else |
+
+Bytes `0x80..0xE7` are discarded the same way.
+
+**Expanding `0x0E` needs its substitution table, and that is not where a byte
+search finds it.** The menu text path dispatches control codes through a jump
+table — there is no `cmp al, 0x0E` anywhere in `0x004Bxxxx` to follow. That is
+the next piece of work, and it will fix every screen that reads kernel text, not
+just shops.
+
+### What ships now: knowing, not estimating
+
+v0.34.8 flagged a lossy decode by **length ratio**. That caught "GF" out of ten
+bytes and **passed the dangerous ones** — " 1000 HP to GF" sounds like a whole
+sentence, so it was spoken as one.
+
+`ShopCountDropped()` counts the bytes the decoder actually discards: each `0x0E`
+pair, and each byte in `0x80..0xE7`. One missing word in a long sentence is now
+flagged as surely as nine missing out of ten, and a string the decoder fully
+understands is not flagged at all.
+
+The probe uses the Magic Scroll's real bytes from the BAT as its fixture, plus a
+sentence that loses only its first word — the case v0.34.8 let through.
+
+Everything else in the BAT is clean: the sell list on its own cursor and its own
+price table, both stock pages, the quantity screen from 1 to 72, holdings
+updating after a purchase, and no pool dumps.
+
+Gates: `lint_seh` (97), `lint_xtu` (179), `lint_stub` (24), all eleven `menu_*`
+probes, `menu_sim` and `button_map_rescue_test`.
+
+## v0.34.8
+
+#92: **The sell side is clean; the descriptions are fragments and now say so.**
+
+Everything the shop does reads correctly:
+
+```
+[SHOP] sell row 0/1 pages=25: id=1 price=50 owned=34 -> "Potion, 50 gil, have 34"
+[SHOP] buy  row 1/1 pages=2:  id=37 price=600 owned=8 -> "G-Hi-Potion, 600 gil, have 8"
+[SHOP] quantity: -> "72 of 72 Pet Pals Vol. 4, 72000 gil, 400 left"
+[SHOP] buy  row 10/2 pages=2: id=192 price=1000 owned=73 -> "Pet Pals Vol. 4, 1000 gil, have 73"
+```
+
+The sell list reads off its **own** cursor and its **own** price table — 50 gil
+against a buy price of 100, 25 pages against 2 — which is the thing most likely
+to have gone wrong and did not. Zero pool dumps, so the v0.34.7 gating works.
+
+### `/` gives fragments, not descriptions
+
+```
+detail (/): " HP to all GF"      (Pet House)
+detail (/): "GF"                 (Magic Scroll)
+detail (/): " for dog lovers"    (Pet Pals Vol. 4)
+detail (/): "Removes KO"         (Phoenix Down — correct)
+```
+
+**These are not truncations.** They are the pieces `FF8TextDecode::Decode`
+happened to recognise, with every unrecognised byte thrown away — bytes
+`0x80..0xE7` are skipped by design, and the comment in `DecodeByte` says so. A
+player hearing "GF" has no way to know he was handed two characters of a
+sentence.
+
+The shop's own labels and messages decode perfectly through the same call
+("What do you want to buy?", "Come back soon!"), so the encoding is right for
+*those*. Item descriptions come from a different bank: `0x0047EA90` resolves them
+out of `0x01CF3E48 + [0x01CF3EE4] + offset`, using **two tables split at item id
+`0x21`** — and that is exactly where the good and bad cases split. Phoenix Down
+is 7; Pet House 34, Magic Scroll 55, Pet Pals Vol. 4 192.
+
+**Not guessed at a fourth time.** `[SHOP-TEXT]` now logs the raw bytes beside any
+decode that comes back suspiciously short for its input, so the next log
+identifies the encoding for certain instead of by inference.
+
+And until it is fixed, the fragment is spoken as **"Partial description: …"** —
+it still carries what little it has, but it cannot pass for the whole sentence.
+Same principle as suppressing Card Mod's row names rather than faking them.
+
+The probe's `Decode` stub now mirrors the real decoder where it matters —
+printable ASCII passes, bytes ≥ 0x80 are dropped — so the lossy case is
+reproducible without the game.
+
+Gates: `lint_seh` (97), `lint_xtu` (179), `lint_stub` (24), all eleven `menu_*`
+probes, `menu_sim` and `button_map_rescue_test`.
+
+## v0.34.7
+
+#92: **The item shop is done; the diagnostic is gated.**
+
+The BAT is clean end to end:
+
+```
+[SHOP] entered item shop: shop=0 type=0 (+0x45=0) gil=71400
+[SHOP] message: "Welcome"
+[SHOP] top menu 0 -> "Shop, 71400 gil. Buy"
+[SHOP] top menu 1 -> "Sell"
+[SHOP] message: "What do you want to buy?"
+[SHOP] buy row 1/1 pages=2: id=37 price=600 owned=8 -> "G-Hi-Potion, 600 gil, have 8"
+[SHOP] buy row 9/2 pages=2: id=191 price=1000 owned=0 -> "Pet Pals Vol. 3, 1000 gil, have 0"
+[SHOP] quantity: ... -> "1 of 71 Pet Pals Vol. 3, 1000 gil, 70400 left"
+[SHOP] buy row 9/2 pages=2: id=191 price=1000 owned=1 -> "Pet Pals Vol. 3, 1000 gil, have 1"
+[SHOP] message: "Come back soon!"
+```
+
+The action bar reads the instant it appears, both pages of stock read with name,
+price and holding, the quantity screen gives the running total and the gil left,
+and the holding updates after the purchase. Zero errors.
+
+### Why the pool diagnostic had to go
+
+It fired 121 times in that log — eighty of them on screens that were not shops.
+
+**Game mode 10 is not shop-only.** The same log shows the party-switch screen
+(`upd=004CBA50`, dispatch 9/10) running in it. And the shop-number global at
+`0x01D75450` goes **stale between shops**, so `ShopTypeNow()` reported "type 0 =
+ITEM" on a screen that had no shop in it at all, and the gate opened.
+
+Worth recording as a rule: **the module's own `+0x45` is the authoritative shop
+type. The global is only trustworthy while a shop is actually being opened** —
+which is exactly when the creator reads it.
+
+The diagnostic is now `#define SHOP_POOL_DIAG 0` — gated, not deleted, the same
+convention as `ABIL_DIAG` and `REFINE_FLOW_DIAG`. Both settings compile and the
+probe passes under each. It earned its keep first: the dump it produced is what
+identified the clobbered `+0x08` *and* the unwritten `+0x47` in one line.
+
+Not yet exercised by any BAT: the **sell** list, `/` on a shop row, and the
+"not enough gil" message. All three are covered by the probe.
+
+Gates: `lint_seh` (97), `lint_xtu` (179), `lint_stub` (24), all eleven `menu_*`
+probes, `menu_sim` and `button_map_rescue_test`.
+
+## v0.34.6
+
+#92: **The draw fn was intact all along.**
+
+The item shop reads. And the pool dump names the cause in a single line:
+
+```
+slot 1 @01D76C40 inUse=1 state=0x03 upd=605D8130 draw=004ED1B0 +2C=01CFE79C +45=1 +46=0 +47=0
+```
+
+**`+0x08` has been overwritten with a heap pointer** — the same thing
+`SUBMENU_AUDIT.md` §9 records for the Item *menu* module (`0x605D8200`; note how
+close the two values are) — **and `+0x0C`, the draw fn, is untouched.**
+
+Four builds went looking for a value that is not there, while the field
+immediately next to it was correct the whole time. Identification now matches
+either, so the shop is found the moment it exists.
+
+### Which explains the remaining symptom exactly
+
+Aaron: *"when the item shop first appears, the action bar with Buy, Sell, and
+Exit does not read out. Once I pick an option I can go back to the action bar and
+it works, but initially when the shop loads it does not."*
+
+The v0.34.5 field fallback required `+0x47` to be 2 or 25. But `+0x47` is written
+by the **top-menu confirm** (`0x004EC2F3` / `0x004EC306`), not by the creator — so
+it is 0 while the action bar is up, and the fallback could not fire until a
+choice had been made. Every dump in the log shows `+0x47=0` at state 3.
+
+**That is the third identification in this file keyed on a field the engine had
+not written yet** — `+0x46` in v0.34.0, `+0x47` in v0.34.5. The rule that
+survives: **only test fields the creator sets.**
+
+### The entry line
+
+"Shop, N gil" was built into a local variable during states 0..2, where there is
+no row to attach it to, so every poll before the top menu appeared threw it away
+— which was every time. It now survives until something actually speaks, and
+comes out as "Shop, 4900 gil. Buy".
+
+Everything else in the log is correct: the buy list reads names, prices and
+holdings ("Potion, 100 gil, have 15"), the top row reads the game's own labels,
+and the shop is identified as shop 1, type 1.
+
+Gates: `lint_seh` (97), `lint_xtu` (179), `lint_stub` (24), all eleven `menu_*`
+probes, `menu_sim` and `button_map_rescue_test`. The probe now builds the module
+exactly as the dump shows it — `+0x08` clobbered, `+0x47` zero — and asserts the
+shop is found and read at state 3, before any choice.
+
+## v0.34.5
+
+#92: **The exe model re-verified end to end, and a module-free way to say which shop is open.**
+
+Aaron: *"Can you go back to the game exe to make sure you have everything pinned
+down correctly for the item shop before I do another BAT?"*
+
+Done. The model is airtight — and that is itself the finding, because it means
+the problem has never been the model.
+
+### One pool, and only one
+
+Only two functions in the whole binary reference `0x01D76BC8`: `0x004BE540` and
+`0x004BE5B0`. Both walk **ten** slots of `0x78`, both store arg0 at `+0x08` and
+set `+0x12`, and the free routine `0x004BE610` clears both. The two list heads —
+`0x01D76B48` and `0x01D76ACC` — thread the *same array*.
+
+So a scan of the ten slots cannot miss a module that exists, and there is no
+second pool for a shop to hide in.
+
+### The dispatch table, correctly located
+
+`0x004BDB30` reads `[idx*8 + 0xB87ED8]` — pairs of `{creator, music kind}`:
+
+| index | creator | |
+|---|---|---|
+| 11 | `0x004EDA40` | the item shop |
+| 12 | `0x004EA4D0` | the Junk Shop |
+
+My earlier reading of that table was off by one entry: I guessed its base at
+`0xB87F00`, and **nothing in `.text` references that address**. The real base is
+`0xB87ED8`. The conclusions were unchanged, but the guess should have been
+checked at the time.
+
+`shop.ovl` in the strings is a dead PSX overlay name (`menushop.ovl` and its
+siblings sit unreferenced in the same block) — ruled out.
+
+### What was actually missing: evidence
+
+`0x004B2D70`, which both creators call to decide what they are, is two
+instructions:
+
+```
+004B2D70  mov eax, [0x01D75450]
+004B2D75  and eax, 0xFF
+```
+
+and the type is `byte [0x00B88918 + n]` over a 52-entry table — 0..20 map to
+themselves, 21..31 to 0, and **32..42 to 21**, the Junk Shops. (The table's
+length is knowable exactly: the byte after index 51 begins the string
+`"shop.bin"`.)
+
+The mod now reads that **with no module, no pool and no list walk**. So the log
+can finally distinguish *"an item shop is open and I could not read it"* from
+*"no shop was open in that window"* — a distinction none of the three previous
+BATs could make.
+
+That matters, because reviewing them: the **only confirmed item-shop visit** was
+at 18:09, screenshot and all — and that build was v0.34.1, which still used the
+MRU-list walk. The pool scan arrived in v0.34.2 and **has never demonstrably been
+inside a Balamb Shop**. The 22-second mode-10 window in the v0.34.3 log has no
+screenshot and may not have been an item shop at all.
+
+The pool dump now fires only when the engine itself says an item shop is open and
+the reader could not find it, and leads with the shop number and type.
+
+Gates: `lint_seh` (97), `lint_xtu` (179), `lint_stub` (24), all eleven `menu_*`
+probes, `menu_sim` and `button_map_rescue_test`.
+
+## v0.34.4
+
+#92: **The diagnostic fired a frame too early — and a second way to recognise the shop.**
+
+The Junk Shop is complete and correct now. From the BAT:
+
+```
+[SHOP] detail (/): "Needs 6 M-Stone Piece, have 9; 2 Screw, have 0 (short)"
+```
+
+Both columns, which is what Aaron asked for.
+
+### The pool dump proved nothing, and I should have seen why before shipping it
+
+It fired **once**, on the first poll after the mode change — and the modules do
+not exist at that moment. The junk-shop visit is the proof, in the same log:
+
+```
+18:43:07  [SHOP-POOL] slot 0 ... (every other slot free)
+18:43:08  [SHOP] entered junk shop: gil=4900 mask=0x002B chars=4
+```
+
+An empty pool one second before a module was found in it. So "the pool is empty
+during the item shop" was a false negative, and the whole diagnostic settled
+nothing.
+
+It now samples the **steady state**: every two seconds while the game is in shop
+mode and no shop module has been found, up to eight times a visit. Each dump
+prints both list heads (`0x01D76B48` and the second allocator's `0x01D76ACC`)
+and, for every slot, `+0x2C`, `+0x45`, `+0x46` and `+0x47` alongside the update
+and draw pointers.
+
+### A second identification
+
+Identity-by-update-fn **provably does not hold everywhere in this engine**:
+`SUBMENU_AUDIT.md` §9 records the Item *menu* module carrying `upd=0x605D8200`
+in that field. Betting the shop reader on `+0x08` alone was the same assumption
+in a new place.
+
+`ShopFindByFields()` requires three things the creator sets and nothing else
+does:
+
+* `+0x2C == 0x01CFE79C` — the inventory base (`0x004EDAE8`)
+* `+0x47 == 2` or `25` — the page count: 16 stock rows, or 198 inventory rows,
+  over 8 rows a page (`0x004EC2F3` / `0x004EC306`)
+* a state inside the machine's range
+
+A module satisfying all three that is not the shop would have to be a
+coincidence in three independent fields. When the fallback fires, the log says
+so and prints the actual `+0x08`, so the cause is recorded rather than papered
+over.
+
+If the item shop is reachable at all, this reaches it. If it is not, the next log
+says where the modules really are.
+
+Gates: `lint_seh` (97), `lint_xtu` (179), `lint_stub` (24), all eleven `menu_*`
+probes, `menu_sim` and `button_map_rescue_test`. The probe clobbers `+0x08` and
+asserts the shop is still found — and that a wrong page count or a wrong
+inventory pointer is refused.
+
+## v0.34.3
+
+#92: **A stub is a second implementation that nothing checks.**
+
+v0.34.2 did not build:
+
+```
+menu_tts_shop.inl(551): error C2660: 'MenuDialogCompose': function does not take 2 arguments
+```
+
+I hand-wrote a stub in the probe —
+
+```cpp
+static std::string MenuDialogCompose(const MenuDialogRaw&, int cursor)
+```
+
+— against the real declaration in `src/menu_dialog.inl`:
+
+```cpp
+static bool MenuDialogCompose(int cursor, char* out, size_t n)
+```
+
+**The probe compiled, ran, and passed every assertion against a function that
+does not exist.** MSVC caught it; nothing on this side did.
+
+The call site is corrected, and the probe now includes the **real**
+`menu_dialog.inl` and fills the window's three globals the way `0x004C2A20`
+fills them — so the confirmation test exercises the actual reader, padding
+collapse and all, instead of a fiction that agreed with it.
+
+### The gate
+
+`tests/lint_stub.py`: if a probe defines a free function whose name is also
+defined in `src/`, and the probe does not include the file that really defines
+it, the **parameter count must match**. Thin stubs that mirror a real signature
+pass; invented ones do not. Verified by re-introducing the exact v0.34.2 stub,
+which the lint rejects:
+
+```
+lint_stub: menu_shop_compile.cpp stubs MenuDialogCompose([2] args) but src/menu_dialog.inl defines it with [3]
+```
+
+**This is the second build a mismatched stub has cost.** The first was the
+`FF8TextDecode::Decode` stub that treated its input as glyph indices when the
+real decoder takes raw stream bytes — and that one failed nothing at all. It
+simply tested the wrong decoder and reported OK.
+
+No behaviour change otherwise; v0.34.2's four fixes are intact.
+
+Gates: `lint_seh` (97), `lint_xtu` (179), **`lint_stub` (24)**, all eleven
+`menu_*` probes, `menu_sim` and `button_map_rescue_test`.
+
+## v0.34.2
+
+#92: **Both columns, the confirmation, the stats — and a pool scan for the item shop.**
+
+Weapon names read correctly now: Revolver, Metal Knuckle, Chain Whip, Shear
+Trigger, Cutting Trigger, Maverick, Pinwheel, Valkyrie, Flail. Aaron's
+screenshots showed three things the mod was not saying, and one it still cannot
+reach.
+
+### Both material columns
+
+The panel draws
+
+```
+M-Stone Piece
+        2   100      <- required, held
+Bomb Fragment
+        1     0
+```
+
+and v0.34.1 spoke only the first number — the one that decides nothing on its
+own. Aaron: *"I do not hear how many of the item I have in inventory along with
+how many I need to upgrade."*
+
+`/` now reads "Needs 2 M-Stone Piece, have 100; 1 Bomb Fragment, have 0 (short)".
+The held count is taken from the inventory directly rather than from
+`0x01D8D058`, which only the **item shop's** creator fills — in a Junk Shop that
+table is whatever the last item shop left in it.
+
+### The confirmation dialog
+
+*"Remodel Rinoa's weapon to 'Valkyrie' OK?"* with Yes / No — state `0x0B`
+(`0x004EADA6`), its text built at `0x004EACDD` from template string `0x3B` with
+the character and weapon names substituted, and opened through **the same
+`0x004C2B10` every other confirmation in the game uses**. So `menu_dialog.inl`
+already knew how to read it; it simply had no caller here. The cursor is `+0x42`:
+0 = Yes, 1 = No, and the reader says which rather than assuming the default.
+
+That is the fourth of that window's twenty call sites now wired.
+
+### The stat comparison
+
+The bottom panel shows `Str 28 ▲ 31` and `Hit 99% ▲ 101%` — what the weapon is
+worth. Both come from tables the draw code reads at `0x004EB843`:
+
+* Str — `[0x01D8CB84 + weaponIdx*4]`, computed per weapon by the creator
+* Hit% — `byte [0x01CF7407 + weaponIdx*12]`
+
+A row now reads "Valkyrie, 200 gil, strength 28 to 31, hit 99 to 101 percent",
+and the weapon already carried states its stats rather than a change from itself
+to itself.
+
+Also corrected: the price is scaled by `+0x30`, which is 1000 normally and **750
+with Haggle** (`0x004EAE2B`). v0.34.1's figure was 25% high for a player with the
+ability.
+
+### The item shop is still not found
+
+Two BATs, a screenshot of "Balamb Shop" with Buy / Sell / Exit and a full stock
+list, and not one line of output.
+
+The MRU-list walk is gone. It stopped at the first entry outside the pool, which
+is right for the tail sentinel and wrong for anything the engine relinks —
+`0x004BE5B0` is a **second allocator** that threads modules onto a different list
+head (`0x01D76ACC`), and a module reachable from that one is invisible from
+`0x01D76B48`. **The pool is ten fixed slots; reading all ten cannot miss a module
+that exists**, costs ten compares, and does not care which list it is on.
+
+If that still fails, `[SHOP-POOL]` now dumps all ten slots — in-use flag, state,
+update and draw pointers — once per entry into shop mode. Reasoning from the
+disassembly has been wrong about this twice; the next BAT gets evidence rather
+than a third guess.
+
+Gates: `lint_seh` (97), `lint_xtu` (179), all eleven `menu_*` probes, `menu_sim`
+and `button_map_rescue_test`. The probe drives the confirmation dialog, both
+material columns and the stat comparison through `PollShops()`.
+
+## v0.34.1
+
+#92: **The item shop declined itself, and the weapon name is not where the module points.**
+
+The Junk Shop worked on the first try. From the BAT log:
+
+```
+[SHOP] entered junk shop: gil=4900 mask=0x002B chars=4
+[SHOP] junk message: "Welcome!  Who needs to remodel?"
+[SHOP] junk character 0/4: id=0 -> "Squall"
+[SHOP] junk character 2/4: id=3 -> "Quistis"
+[SHOP] junk weapon 0/1: rec=15 flags=0xC0 price=100 equip=15 -> "..., already equipped" | Needs 2 M-Stone Piece, 1 Spider Web
+[SHOP] junk message: "Come back soon"
+```
+
+Mask `0x002B` is bits 0, 1, 3 and 5 — **a packed list would have called Quistis
+"Irvine"**, which is exactly the failure the set-bit picker exists to avoid.
+Prices, materials, "already equipped" and "not available yet" are all correct.
+
+Two defects.
+
+### The item shop produced nothing
+
+Not one `[SHOP]` line for it, though the log shows the game entering shop mode a
+second time.
+
+`+0x46` — the buy/sell mode — is written by the **top-menu confirm** at
+`0x004EC2E1` and by nothing else. The creator never touches it. So through
+states 0..3, which is the whole opening of the shop, it holds whatever the last
+shop left there. v0.34.0 required it to be 0 or 1 before it would accept the view
+at all:
+
+```c
+v->ok = (state ok && v->mode >= 0 && v->mode <= 1);   // wrong
+```
+
+A byte the engine has not written yet is not a reason to declare the module
+unreadable. It is clamped now, and read only on the list and quantity screens —
+the screens the engine has written it for.
+
+### Every weapon read as "Unknown weapon"
+
+The module puts `mwepon.msg base + record[0]` into `+0x20` (`0x004EAB3E`) and
+v0.34.0 read the name from there. **`mwepon.msg` is 68 bytes of nothing but
+spaces and terminators in this release** — 34 empty strings.
+
+The draw function does not use it either. `0x004EB590` calls
+`0x0047EBA0(recIdx)`:
+
+```
+u16 off = word [0x01CF7400 + idx*12]     ; 0xFFFF = no name
+return  0x01CF3E48 + [0x01CF3ED8] + off
+```
+
+which is what the mod now reproduces. Still the game's own text — just not the
+empty file the module happened to point at. The record index doubles as the
+weapon index; the engine's own "already equipped" test compares them directly
+(`0x004EAB94`), which is what settles it.
+
+The probe now enters the shop with a garbage `+0x46` and asserts both the entry
+line and that an unavailable weapon is still named.
+
+Gates: `lint_seh` (97), `lint_xtu` (179), all eleven `menu_*` probes, `menu_sim`
+and `button_map_rescue_test`.
+
+## v0.34.0
+
+#92: **Item shops and Junk Shops.**
+
+Aaron: *"let's go ahead and implement support for junk shops and item shops in
+the mod. Look into the exe and game files, disassemble the functionality, code,
+interface, etc."*
+
+Both screens were entirely silent. The mod had never spoken a word inside a
+shop, so every purchase, every sale and every weapon remodel in the game was
+done blind.
+
+### There are two modules, not one
+
+`0x004EDA40` is the entry point. It asks `0x004B2D70` which shop this is, looks
+the answer up in the table at `0x00B88918`, and branches:
+
+```
+004EDA53  call 0x4B2D70                    ; shop number
+004EDA58  cmp  byte [eax + 0xB88918], 0x15
+004EDA5F  jne  0x4EDA73                    ; -> the ITEM shop
+004EDA66  call 0x4EA4D0                    ; -> the JUNK shop
+```
+
+That table maps shop numbers 0..20 to themselves, 21..31 to 0, and **32..39 to
+21** — so type `0x15` is the Junk Shop and there are eight of them. It is a
+module of its own (creator `0x004EA4D0`, update `0x004EA890`) sharing no state
+machine, no field layout and no cursor with the item shop (creator
+`0x004EBBA0`, update `0x004EBE40`).
+
+### The item shop
+
+The creator loads `shop.bin`, `price.bin` and `mitem.bin` and builds everything
+the reader needs:
+
+| address | what |
+|---|---|
+| `0x01D8D038` | the stock on offer, 16 × `{u8 itemId, u8 avail}` — **compacted**, so every row present is buyable |
+| `0x01D8D058` | owned quantity by item id, rebuilt on entry and on every confirm |
+| `0x01D8CD18` | buy price, 200 × u32 — `base × 10`, or `× 7.5` with Haggle |
+| `0x01D8D120` | sell price — `(base × sellFactor) / 2`, `× 3/4` of that with Sell-High |
+
+Both prices are computed by the engine at `0x004EBD82..0x004EBDE9`, so the mod
+reads them rather than re-deriving a formula that could drift from the game's.
+
+**Buy and sell keep separate cursors.** `0x004EBF9D` indexes them as
+`word [esi + mode*2 + 0x3C]`. Reading one while in the other names a row from the
+wrong list — the defect this project has now found on five screens — so the
+probe switches modes with the two cursors at different values and asserts the
+sell row is named with the sell price.
+
+Rows read as name, price and what you already hold. The quantity screen reads
+`n of max`, the total, and the gil you are left with. `/` reads the item's own
+description out of `+0x20`.
+
+### The Junk Shop
+
+A mwepon record is 12 bytes: `+0x00` u16 offset into `mwepon.msg`, `+0x03` the
+price **in tens**, `+0x04..0x0B` four `{itemId, count}` materials.
+`0x004EA770(charId)` builds the visible list at `0x01D8CC08`, one byte per row:
+
+* low 6 bits — the mwepon record index
+* `0x40` — seen before
+* **`0x80` — buildable right now**: the engine has already checked gil *and* all
+  four materials (`0x004EA808..0x004EA839`), so saying so is not a second
+  opinion, it is the same bit the screen greys the row with
+
+Its character picker indexes the **set bits** of a mask (`0x004ABC40`) — exactly
+the refine screen's shape — so it reuses `AbilCharAtPickerRow()` rather than
+growing a second copy of something this project has already got wrong once. A
+weapon reads its name, its price, whether it is available, and whether the
+character is already carrying it; `/` lists the materials.
+
+### Nothing here is a translation
+
+Every label, message, item description and weapon name is the game's own text,
+resolved exactly as `0x004BD630` resolves it (`[0x00B86D30] + 0x2E000`, group 3).
+The top row's three options are group-3 strings 52, 53 and 54, terminated by
+`0xFFFF` at index 3 in the table at `0x00B88910` — so the count and the order
+come from the exe, and the words come from the game.
+
+### Wiring
+
+`PollShops()` is called from **outside both mode blocks**. A shop opens from the
+*field*, not from the main menu, so a mode-6 gate would have left it silent in
+the only place it is ever used. Both readers find their module by walking the
+pool and say nothing when it is not there. `/` is bound again outside the
+menu-mode chain for the same reason, and claimed only while a shop is open.
+
+The gil rides on the first utterance ("Shop, 1000 gil. Buy") rather than being
+its own line — a separate entry line is interrupted by the row the cursor is
+already sitting on, which is how the refine outcome got stepped on in v0.33.3.
+
+### The probe drives, it does not check
+
+`tests/menu_shop_compile.cpp` maps the real addresses, builds both shops in
+them, calls `PollShops()`, and asserts the string that was **spoken** — the top
+menu, both lists, the mode switch, the quantity screen, a message, `/`, the
+character picker, a buildable weapon, an unavailable one, and the
+already-equipped case. Its `GetTickCount()` advances so the poll gate opens.
+
+Gates: `lint_seh` (97), `lint_xtu` (179), all eleven `menu_*` probes, `menu_sim`
+and `button_map_rescue_test`.
+
+## v0.33.4
+
+#91: **One poll later is still over the top of it.**
+
+The outcome line landed, on all three refines, with every number right:
+
+```
+Refine outcome: done (src=33  before=5  after=2  consumed=3  produced=30) -> "Refined 3 Tent into 30 Curaga, 30 total"
+Refine outcome: done (src=158 before=2  after=1  consumed=1  produced=2)  -> "Refined 1 Dead Spirit into 2 Death Stone, 2 total"
+Refine outcome: done (src=21  before=84 after=49 consumed=35 produced=7)  -> "Refined 35 Cure into 7 Cura, 78 total"
+```
+
+71 Cura held plus 7 made is 78. Item output, magic output and magic-from-magic
+all measured correctly.
+
+**But on sub-mode 0 it is still spoken over.** v0.33.3 returned from the poll the
+outcome happened in, which is only half the problem — a sub-mode 0 refine lands
+back on the **recipient picker**, and the popup had re-armed that announcer on
+its way past. So one poll later, in the same second:
+
+```
+17:12:30  "Refined 3 Tent into 30 Curaga, 30 total"
+17:12:30  Refine recipient: id=0 slot=0 "Squall"
+17:12:30  Refine recip stock: id=0 magic="Curagas" stock=30
+```
+
+Both interrupt, so the player hears a character's name where he should have heard
+what just happened to his items — and the picker's own information ("has 30
+Curagas") is already inside the outcome line as "30 total".
+
+The outcome now seeds the picker's dedupe, and its stock follow-up, to whatever
+screen the engine drops us on. **Seeded, not disabled**: moving the picker still
+announces, and the probe asserts that too.
+
+The probe also now asserts that the poll *after* the outcome is silent — the
+assertion v0.33.3 lacked, and the reason a returning-early fix looked complete.
+
+Not yet exercised in a BAT: the "Cancelled" path. All three refines were
+confirmed.
+
+Gates: `lint_seh` (96), `lint_xtu` (177), all ten `menu_*` probes, `menu_sim` and
+`button_map_rescue_test`.
+
+## v0.33.3
+
+#91: **v0.33.2 shipped the reader and not the line that arms it.**
+
+The BAT log contains not one `Refine outcome` line, and the GCW proves a refine
+completed — Death Stone appears in the item list at `17:04:15`, one Dead Spirit
+lighter.
+
+**My error, plainly.** The edit that added `PollRefineOutcome()` and the edit that
+added the block *arming* it were one script. The script aborted on its second
+assertion before writing anything, and I re-applied only the half I had watched
+fail. `s_abilQtyArmed` was declared, reset, and read — and never once set to
+`true`. Everything compiled. Every probe passed. The feature did nothing.
+
+**And the probe could not have caught it.** It asserted `RefineOutcomeOf()`, a
+pure function, while nothing in the program called it. Testing a pure function is
+not testing that anything calls it — the same lesson as the magazine probe that
+stubbed `FindItemModule()` to null, wearing different clothes.
+
+`tests/menu_ability_compile.cpp` now **drives `PollAbilityItemList()`** through
+real module memory and asserts what was spoken: the popup line, then the close,
+then the cancel, then that the outcome fires once and not on every poll after.
+Its `GetTickCount()` stub advances so the 80 ms poll gate actually opens; pinned
+at 0, the function returned before doing anything and the test would have been
+vacuous.
+
+That found a second defect the pure test never could. **The outcome fell through
+to the source-row branch in the same poll.** Both utterances interrupt, so
+"Refined 1 Dead Spirit into 2 Death Stone, 2 total" would have been cut off by
+"Dead Spirit, 1" and the player would have heard only the row he was already
+standing on. The poll now returns when the outcome speaks, and the probe asserts
+the utterance count.
+
+Everything else in the BAT was clean: totals correct on every popup (72, 73, 74,
+75 for Cura against 71 held; 39 for Fira against 38), no pre-write zero line
+anywhere, zero errors.
+
+Gates: `lint_seh` (96), `lint_xtu` (177), all ten `menu_*` probes, `menu_sim` and
+`button_map_rescue_test`.
+
+## v0.33.2
+
+#91: **The refine itself said nothing.**
+
+The v0.33.1 BAT is clean on both counts. No pre-write `Number to refine 0` line
+anywhere in the log, and every popup carried the resulting stock:
+
+```
+"Number to refine 1 of 16, makes 1 Cura for 72 total, 79 Cure left"   (71 held + 1)
+"Number to refine 1 of 2, makes 2 Death Stone for 2 total, 1 Dead Spirit left"
+"5 of 5, makes 50 Curaga for 50 total, 0 Tent left"
+```
+
+— item output, magic output, and a result held from none, all matching the
+screen's third row. The sub-mode 2 picker logs as "Refine source character" now.
+
+**What the BAT showed by omission.** Every refine in it was backed out of. Had
+one been confirmed, the mod would have said nothing at all.
+
+State `0x2A` performs the refine in a single frame and jumps straight out
+(`0x004D7DEA`), so a poller running at 80 ms cannot count on ever seeing it. And
+cancel and confirm both clear `+0x51` and both land the player back on a list
+with the cursor exactly where it was — so neither path re-announces the row
+either. **The one action on this screen that changes the save was the one action
+with no feedback.**
+
+The two are now told apart by measurement rather than inference: a confirm
+consumes exactly `sourcePer * count` of the source, a cancel consumes nothing.
+The popup stages what it would do, and the close reads the source back:
+
+> "Refined 5 Tent into 50 Curaga, 50 total"
+>
+> "Cancelled"
+
+Any pair that does not add up says **nothing**. Announcing a refine that did not
+happen would be the same class of error as everything else in this thread, and
+the probe asserts the silent cases: a partial drop, a count going up, an
+unreadable before or after, and a zero consumed.
+
+Gates: `lint_seh` (96), `lint_xtu` (177), all ten `menu_*` probes, `menu_sim` and
+`button_map_rescue_test` clean.
+
+## v0.33.1
+
+#91: **The popup's third row is the resulting stock, not the amount made.**
+
+The v0.33.0 BAT confirmed both fixes in the log. Mid Mag-RF reads its character
+picker and then that character's *magic* — "Cure, 84", "Esuna, 4", "Protect, 94",
+"Fire, 69" — and the quantity popup speaks on every arrow with the recipe's real
+per-unit arithmetic (5 Cure → 1 Cura, 1 Dead Spirit → 2 Death Stone). The
+screenshots then showed two things worth another build.
+
+**The third row is the resulting stock.** The screen reads
+
+```
+Cure                4
+Number to refine   16
+Cura               87
+```
+
+while sixteen Cura are being made — 87 because Squall already held 71. The other
+two shots agree: "Fira 51" for thirteen made, "Death Stone 4" for four made from
+none. v0.33.0 spoke only the produced count, which is accurate and **hides the
+100 cap** — and the cap is exactly where refine materials get thrown away. Both
+grant paths clamp at `0x64` (`0x004C2CCC` for magic, `0x0047ED54` for items), so
+the total is computable and now spoken:
+
+> "16 of 16, makes 16 Cura for 87 total, 4 Cure left"
+
+**The pre-write frame.** State `0x28` is where the engine writes `+0x4C` and
+`+0x4F`, and polling inside it caught them at zero once:
+
+```
+Refine quantity: count=0 max=0 ... -> "Number to refine 0, makes 0 Death Stone, 2 Dead Spirit left"
+Refine quantity: count=1 max=2  ... -> "1 of 2, makes 2 Death Stone, 1 Dead Spirit left"
+```
+
+`0x28` still counts as the popup, so no source row is announced over it, but
+nothing is spoken until `RefineQtyReady()` sees a real count and a real maximum.
+
+Also: sub-mode 2's picker no longer logs as "Refine recipient". It is the
+**source** character — whose magic is being consumed — and calling it the
+recipient is how this screen got misread in the first place.
+
+Gates: `lint_seh` (96), `lint_xtu` (177), all ten `menu_*` probes, `menu_sim`
+and `button_map_rescue_test` clean. The stock lookup is asserted through the real
+addresses with the screenshot's own numbers as the fixture.
+
+## v0.33.0
+
+#91: **The refine screen has five flows, not one.**
+
+Aaron BAT'd v0.32.1 and sent two screenshots.
+
+**Mid Mag-RF showed a list of characters and the mod read out the item
+inventory.** The screen is Squall / Zell / Irvine / Quistis / Rinoa / Selphie
+with their HP, and the log has the mod saying "Potion, 34", "Phoenix Down, 3",
+"Elixir, 6" over it. The ability's own help line, three lines earlier in the same
+log, said what it was: *"Refine Mid-Level Magic from other Magic."*
+
+**And Tool-RF's quantity popup said nothing at all** — "Force Armlet:1 will
+refine into 30 Shell Stones", a source count, a "Number to refine" and a result
+count, every word of it sitting in the GCW in the log with no `[MenuTTS]` line
+after it.
+
+**One root cause.** The refine flow was modelled as one flow — browse an item
+list, pick a recipient, choose a quantity — and that is sub-mode 0 and nothing
+else. The module's `+0x45`, copied from the ability descriptor's byte +5
+(`0x004D71DF`), is a jump-table index with five values, and the engine's own
+tables say what each one is: the source base at `0x004D8DA8`, the post-source
+destination at `0x004D8C04`, the grant/consume calls at `0x004D8B7C`.
+
+| `+0x45` | source rows | result | after the source |
+|---|---|---|---|
+| 0 | item inventory | magic | recipient picker |
+| 1 | item inventory | item | quantity popup |
+| 2 | **a character's magic** (`0x01CFE0F8 + charId*152`, 32 slots) | magic | quantity popup |
+| 3 | item inventory | item | quantity popup |
+| 4 | **the card list** (`0x01D8B064`) | item | quantity popup |
+
+The gate everything hung on was `+0x53 == 0`. The engine clears that byte at
+state `0x1A` — **the first state of the recipient picker, which only sub-mode 0
+enters.** Tool-RF (sub-mode 1) goes `0x14 → 0x28` straight to the popup and Mid
+Mag-RF (sub-mode 2) goes `0x14 → 0x1D` straight to a magic grid, so on both of
+them the byte stayed `0xFF`, the gate never opened, and the item-list branch ran
+over a screen that was not an item list.
+
+**What changed.** The flow is now driven by the state machine and by the
+engine's own popup flag `+0x51` (set at state `0x28`, cleared on both ways out),
+and every read is taken off `AbilRefineBase()` at an offset that came from an
+instruction. Sub-mode 2's two screens are handled as what they are: a character
+picker on cursor `+0x49` that runs *before* the source list exists, and that
+character's 32 magic slots on `+0x4A`.
+
+**The quantity popup reads its numbers from the recipe.** Entry `+2` is the
+result count per unit, `+5` the source id, `+6` the source count per unit, `+7`
+the result id — the same fields state `0x2A` multiplies when it actually performs
+the refine. So the three numbers spoken are the three the screen draws, and they
+are right for a recipe that consumes more than one per unit rather than assuming
+1:1.
+
+**Card Mod is named now.** v0.32.0 read its rows as "Card 1", "Card 2" because
+the card list's order could not be checked against any save Aaron has. It can be
+checked against the engine: the creator at `0x004D7344` *builds* that list, one
+`{cardId + 1, count}` pair per card owned, so the row under the cursor names
+itself out of the existing 110-card table.
+
+Deleted: the seven `pMenuStateA` offsets this file used to drive the flow. Every
+one of them pointed at a real byte — `pMenuStateA + 0x296` is the slot-3 module
+base — but `+0x2E7` was read as "1 = quantity screen" when it is the *number to
+refine* (which merely starts at 1), and `+0x2E9` as "0 = past the item list" when
+it is sub-mode 0's marker. That is the fifth screen in this menu where a byte
+correlated for a reason nobody wrote down.
+
+Gates: `lint_seh` (96) and `lint_xtu` (177) clean; all ten `menu_*` probes,
+`menu_sim` and `button_map_rescue_test` pass. `menu_ability_compile` now drives
+the five sub-modes, the phase decision across every state, the quantity
+arithmetic, and all three source arrays through their real addresses.
+
+## v0.32.1
+
+#91: **The "/" refine preview ran past its end on item-output recipes.**
+
+The v0.32.0 BAT did what it was meant to do. The refine flow itself reads well —
+item names, ability ids (100 = L Mag-RF, 108 = Tool-RF), the recipient, the
+quantity, and the Refinable tag all came back correct — and then the log showed
+the exact failure v0.32.0's own BAT instruction had named as the risk:
+
+```
+Refine info (/): "1 will refine into 30 Shell StonesCoral FragmentBetrayal SwordDead SpiritHeroForce Armlet"
+Refine info (/): "100 will refine into 1 Dark MatterZombie PowderPet Pals Vol.2Girl Next DoorSoft..."
+Refine info (/): "1 will refine into 30 Shell StonesForce ArmletNumber to r"
+Refine info (/): "3 will refine into 1 Phoenix Pinion"        <- correct
+```
+
+**`ParseRefinePreview` bounded the sentence with the party names.** That worked
+on every recipe tested to date because a magic-output refine draws the recipient
+panel immediately after the preview. **An item-output refine has no recipient**,
+so no party name is ever drawn, so no marker was ever found, `e` stayed at
+`dec.size()`, and the whole drawn source list was spoken as though it were part
+of the result. On Tool-RF that is five item names glued to "30 Shell Stones" —
+not a garbled announcement the player can dismiss, but a wrong one he can act on.
+
+**The cut is now the end of the result's own name.** A refine result is always a
+named thing: an item on the item-output recipes, a spell on the magic ones. From
+the position just past `"into <count> "`, `RefineResultEnd()` takes the longest
+match across the game's item table and its spell table and ends the sentence
+there, plural `s` included ("30 Shell Stones", "10 Curagas"). Nothing about what
+the screen draws next enters into it.
+
+The layout bounds are kept as the fallback for a result neither table knows, and
+one was added: **the current page of drawn source rows**, eleven from
+`(cursor/11)*11`, read out of the savemap inventory — because on an item recipe
+the party panel that used to do the bounding is not there.
+
+**The probe that should have caught this could not have.**
+`tests/menu_ability_compile.cpp` declared `SAVEMAP_BASE = 0`,
+`ITEM_INVENTORY_OFFSET = 0`, and a three-name spell stub, so the inventory read
+mapped page zero and the spell match had almost nothing to match against — a
+broken cut would have passed. It now uses the real savemap address, the real
+item table, the real spell table, and the real party markers, and the fixtures
+are the two failing BAT strings verbatim plus an unknown-result case that keeps
+the fallback path live.
+
+Gates: `lint_seh` and `lint_xtu` clean; all ten `menu_*` probes, `menu_sim`, and
+`button_map_rescue_test` pass.
+
+## v0.32.0
+
+#91: **The Ability submenu, read out of the exe.**
+
+Aaron: *"I want to ensure that all of the various abilities are accessible... I
+don't have access to all of the abilities in-game and it isn't realistic to BAT
+each and every one. Let's make sure the best we can though from the game exe and
+the code."*
+
+**The twenty-four menu abilities do not all go to one screen.** Picking a row
+runs `0x004E7990`, which looks the ability up in the descriptor table at
+`0x01CF7F28 + id*8` and branches on the type byte at `+5`:
+
+| type | destination |
+|---|---|
+| `0xFF` | nothing — not selectable |
+| `0x81` | a **modal message** ("can't use that here") — dispatch 12, `0x004EA890`. **Silent.** |
+| `0x80` | the **shop** — Call Shop, Junk Shop; `[0x01D8CB6D]` decides open vs refuse-with-a-beep. **No reader at all.** |
+| else | the **refine screen** — `[esi+0x3D] = ability id`, state `0x17`, push dispatch 19 |
+
+**The refine screen is a module of its own** (creator `0x004D7180`, update fn
+`0x004D7410`), and this file has been driving it through pool slot 3 for four
+builds without that being written down anywhere. Its fields now have provenance:
+
+* `+0x45` sub-mode (jump table `0x004D8B40`)
+* `+0x48` chosen character id (`0x004D7589`, via `0x004AD030` / `0x004ABC40`)
+* **`+0x49` the source-list cursor — absolute; the drawn row is `cursor % 11`** (`0x004D75A7`)
+* `+0x4A` the character-picker cursor, packed over available characters
+
+— exactly the bytes read as `pMenuStateA + 0x2DE / +0x2DF / +0x2E0`. **The
+offsets were right and the reason was never recorded**, which is how the GF
+screen's "two cursors" stayed wrong for eight builds. The module is now found
+**walk first, state-checked slot-3 alias second**, the shape the Item screen
+needed.
+
+**Card Mod refines from cards, not items.** Every other menu ability sources the
+item inventory, and this file names each row with `GetItemName()` on the savemap
+inventory — so on Card Mod that is a confident wrong name on every row, the exact
+failure the #88/#89 audits kept turning up. **The name is now suppressed rather
+than faked** ("Card 1", "Card 2", …). Naming them properly needs the card list's
+order and cursor mapping, and neither can be checked against any save Aaron has.
+
+**What he can actually test.** Read out of `slot2_save30.ff8` (28h01m): Quezacotl
+**T Mag-RF**, Shiva **I Mag-RF**, Siren **L Mag-RF** and **Tool-RF**, Leviathan
+**Supt Mag-RF** — five of twenty-four. Four are magic-refines; **Tool-RF is the
+only item-output recipe among them**, and the preview parser was written against
+*"N will refine into M ⟨Magic⟩"*, so that is the one worth watching.
+
+Everything found, including the gaps left open, is in
+`docs/ABILITY_MENU_FINDINGS.md`.
+
+Verified: `menu_ability_compile` OK (0 bad) — the refine module found by walk in
+all ten pool slots; the in-use, state-checked slot-3 alias answering when the walk
+cannot; a state past the machine's `0x2C` maximum and a free slot refused; cyclic
+and misaligned lists terminating; and all 23 item-sourced abilities accepted for
+item naming with Card Mod excluded and an out-of-range ability id refused.
+`menu_sim` / `menu_item_compile` / `menu_gf_compile` / `menu_save_compile` /
+`menu_magic_compile` / `menu_junction_compile` / `menu_card_compile` /
+`menu_config_compile` / `menu_tutorial_compile` / `button_map_rescue_test` OK;
+`lint_seh` OK (95 files); `lint_xtu` OK (176 files); all source files inside the
+80 KB guard.
+
+**BAT:** Ability → each of the five in turn; walk the source list and let the
+cursor settle so the Refinable tag fires; then take **Tool-RF** all the way
+through a refine — character picker and quantity. Grep `Refine item`, which now
+carries the ability id and the resolved module base.
+
+## v0.31.1
+
+#90: **The "Items for remodeling" panel.**
+
+v0.31.0 read the heading — it is text block 2 of the record — and then stopped.
+That is the v0.28.1 empty-page failure again: **a heading followed by silence is
+indistinguishable from the mod having broken**, and on a Weapons Monthly that
+list is the practical point of the page.
+
+It is not in the mmag record, and the GCW buffer holds only the item names mixed
+in with the page-slide leftovers. It is keyed off the weapon:
+
+| what | where |
+|---|---|
+| weapon id | mmag record `+0x18` — records 0..27 carry a permutation of 0..27, `0xFF` on the other magazines |
+| the table | `[0x01D2BB58]` → `mwepon.bin`, loaded by the Item creator at `0x004F8023` right beside `mmag.bin`. **33 records of 12 bytes**, record W = weapon W |
+| the items | record `+0x04`: four `{u8 itemId, u8 count}` pairs, ending at the first zero count |
+
+**Checked against the page in Aaron's own screenshot:** the Maverick is mmag
+record 9, weapon id 8, and `mwepon` record 8 reads `{155 ×1, 127 ×1}` — **Dragon
+Fin 1, Spider Web 1**, the two lines on that page, in that order.
+
+Read as *"Dragon Fin, 1. Spider Web, 1."* — the v0.28.1 column rule, because that
+is exactly what the panel is: a label column and a number column. The items are
+read live from the loaded table, so a page always states what the Junk Shop
+actually wants rather than what a baked copy said.
+
+A page whose weapon id is `0xFF` gets no list rather than borrowing the previous
+weapon's, and a weapon needing one item reads one rather than running to the end
+of its four slots.
+
+Verified: `menu_tutorial_compile` OK (0 bad) — the fixture plants a real
+`mwepon`-shaped table and requires both Maverick items with their counts, in the
+panel's order; a one-item weapon to read exactly one requirement with no
+"Unknown item" spill; and a page with no weapon id to get no list at all.
+`menu_sim` / `menu_item_compile` / `menu_gf_compile` / `menu_save_compile` /
+`menu_ability_compile` / `menu_magic_compile` / `menu_junction_compile` /
+`menu_card_compile` / `menu_config_compile` / `button_map_rescue_test` OK;
+`lint_seh` OK (95 files); `lint_xtu` OK (176 files); all source files inside the
+80 KB guard.
+
+**BAT:** any Weapons Monthly page — after "Items for remodeling" you should now
+hear the items and their counts. Grep `item magazine`.
+
+## v0.31.0
+
+#90: **What the Weapons Monthly pictures show.**
+
+Aaron: *"each page of the weapons monthly has a picture of the weapon. Would it
+be possible for you to pull all of the weapons monthly pages / images, describe
+the appearance of each weapon, and include that on the page as well?"* — and then
+the note that decided the method: *"Make sure to use the text on the page to help
+you create accurate descriptions of the images. e.g. Quistis' Slaying Tail might
+look like a tail, but it is a whip, and that is clear if you read the text on the
+page that accompanies the image."*
+
+**All 28 plates extracted, viewed beside their own page prose, and described.**
+`/` on a magazine page now speaks the description.
+
+**The chain, so it can be checked rather than trusted:**
+
+| step | what |
+|---|---|
+| `menu.fs` / `.fi` / `.fl` | the `.fi` triple is **{size, offset, compression}** — not {offset, size, …}. Read the other way it produces plausible multi-megabyte files that decode into nothing. |
+| `mmag.bin` | 69 records × 68 bytes. Records 0..27 are Weapons Monthly, four to an issue, in page order. `+0x17` sheet, `+0x18` weapon id, `+0x34` text blocks. |
+| `magNN.TEX` | 256×256, 8bpp, one 256-entry palette at `0xEC`, pixels at `0x4EC`. **The palette is RGBA, not BGRA** — read as BGRA every weapon comes out cyan. Sheet = record/4, cell = record%4, clockwise from top-left. |
+| `mngrp` section `0x57` | 111 strings — the page prose — decoded with the mod's own glyph table. |
+
+**The mapping is verified, not assumed.** Record 9 decodes to *"With the
+Maverick… The gloves are made of black leather and have metal plates on the
+knuckles"*, and sheet 2 cell 1 is a pair of near-black gloves with pale studs
+across the knuckles — which is also the page in Aaron's own v0.30.1 screenshot.
+Every other page was checked the same way: the gunblade pages show gunblades, the
+saw-toothed ring sits on the page that says *"similar to a circular saw"*, and
+the Flame Saber's red edge is on the page that says it *"got its name from its
+red blade"*.
+
+**And the three that a shape alone would get wrong are all named as whips** —
+Strange Vision, Slaying Tail and Red Scorpion — on the authority of their own
+prose, exactly as Aaron said. Colour is described only where the sprite and the
+prose agree; the art is heavily dithered 8-bit and precise shades are not
+claimed.
+
+`/` is claimed before the other `/` readers, because a magazine page covers the
+screen and nothing underneath it has a help bar to read. On the other magazines
+it says *"No picture description for this page"* rather than borrowing one.
+
+Verified: `menu_tutorial_compile` OK (0 bad) — the fixture now uses the **real**
+record numbers (Weapons Monthly April is records 8..11, the Maverick is 9), so
+the art test checks the KEYING and not just the plumbing: record 9 must speak
+"Maverick" and its description must be of gloves; all 28 entries must exist, be
+substantial and be distinct from one another; the three whips must be called
+whips; a page with no plate must say so; and off the magazine the key must fall
+through. `menu_sim` / `menu_item_compile` / `menu_gf_compile` /
+`menu_save_compile` / `menu_ability_compile` / `menu_magic_compile` /
+`menu_junction_compile` / `menu_card_compile` / `menu_config_compile` /
+`button_map_rescue_test` OK; `lint_seh` OK (95 files); `lint_xtu` OK (176 files);
+all source files inside the 80 KB guard.
+
+**BAT:** open a Weapons Monthly, turn to any page and press `/`. Then try it on a
+Pet Pals, which should say there is no picture description. Grep `magazine art`.
+
+## v0.30.2
+
+#89: **I fixed the identification one function over and left the magazine on the broken one.**
+
+**The GF target list works.** Every row, by name:
+
+```
+Use target entered [slot2 (walk found nothing)]: GF slot 0 avail=1 mask=0x07FF0000 -> "Use on Quezacotl"
+Use target [slot2 (walk found nothing)]: GF slot 7 ... -> "Leviathan"
+Use target [slot2 (walk found nothing)]: GF slot 11 avail=0 ... -> "Doomtrain, not available"
+```
+
+Mask `0x07FF0000` is GFs 0..10, and slot 11 correctly reads as present-but-not-a-target.
+
+**And that same line is the proof the magazine could never have worked.**
+`walk found nothing` — so `FindItemModule()` returns null, and
+`PollItemMagazine()` asked the *raw walk* on its very first line and returned
+before reaching any log statement. That is why there was no `item magazine` line
+at all, not even the failure one. I had written the verified identification for
+the target reader in the same build and did not apply it here.
+
+Both now go through `ItemModuleBaseInStates(lo, hi, &how)`: the walk if it finds
+a module whose state is in range, otherwise the `pMenuStateA + 0x21E` alias
+**with the same state check**, so the alias stays a test rather than the
+fixed-slot assumption this audit exists to remove.
+
+**The decode had never been executed by anything.** Two builds shipped a magazine
+reader that no probe ran — `menu_tutorial_compile` stubbed the Item module to
+null, so every line of it was dead in the test as well as in the game. It now
+plants the real layout —
+
+| what | where |
+|---|---|
+| page range | `[0x01D2BB2C] + magId*4`, `+2` first, `+3` last |
+| record | `[0x01D2BB6C] + page*68` |
+| block list | record `+0x34`, 4 × {u16 x, u8 y, u8 strIndex} |
+| strings | `[0x00B86D30] + 0x1F000` |
+
+— in the game's own text encoding, and requires the headline, the body prose and
+the page counter to come out; the `0x51..0x54` opening states to stay silent; a
+page slide to re-speak exactly once; the last page to say so; and a page outside
+the magazine's range to be refused rather than read out of a neighbouring
+magazine's records.
+
+**Why the pool walk fails is still open**, and a one-shot pool dump now fires the
+first time the alias has to answer — slot by slot, with `inUse`, state, update fn,
+`next` and `prev`. The next log settles it instead of another guess. Nothing
+depends on the answer: the alias is verified, so both readers are correct either
+way.
+
+**Still outstanding:** the *"Items for remodeling"* panel.
+
+Verified: `menu_tutorial_compile` OK (0 bad) with the new magazine section;
+`menu_item_compile` OK (0 bad) including the identification tests; `menu_sim` /
+`menu_gf_compile` / `menu_save_compile` / `menu_ability_compile` /
+`menu_magic_compile` / `menu_junction_compile` / `menu_card_compile` /
+`menu_config_compile` / `button_map_rescue_test` OK; `lint_seh` OK (95 files);
+`lint_xtu` OK (175 files); all source files inside the 80 KB guard.
+
+**BAT:** read a Weapons Monthly and turn its pages. Grep `item magazine` — the
+open line now carries the identification, the id, the page range and the two data
+pointers — and `pool dump`, which will appear once.
+
+## v0.30.1
+
+#89: **The BAT refuted both halves of v0.30.0 — and said so in its own log.**
+
+**1. THE TARGET READ FAILED ON EVERY ENTRY.**
+
+Three times: *"engine read failed (no Item module in the pool, or the cursor out
+of range)"*. The screenshot taken at that moment shows eleven GFs drawn in two
+columns and the cursor on Alexander — slot 10, comfortably inside the bounds
+check. **So the module was there and the pool walk did not find it.**
+
+The fix is not to trust a slot instead. `ItemTargetBase` accepts **either**
+identification — the walk, or the `pMenuStateA + 0x21E` slot-2 alias — and
+demands the same evidence from both: **the module's own state word must equal the
+state the caller is already in.** That alias is the base the Item reader has been
+using for its state byte all along (`+0x22E` is `slot2 + 0x10`), so checking
+`+0x10` against the live state turns it from an assumption into a test. If the
+two ever disagree, the log names which one answered.
+
+The failure line names *why* now, instead of covering three different causes with
+one sentence — which is what made this cost a BAT to diagnose.
+
+**2. THE ITEM MENU'S MAGAZINES ARE NOT A SEPARATE MODULE.**
+
+v0.30.0 assumed they opened the Tutorial's viewer and that only the gate was in
+the way. **The log's own focus trace refutes it:**
+
+```
+Item focus: 5 -> 81 -> 82 -> 83 -> 84 -> 85      (opening)
+Item focus: 85 -> 86 -> 87 -> 85                 (page left)
+Item focus: 85 -> 88 -> 89 -> 85                 (page right)
+```
+
+Those are states `0x51..0x59` of the **Item** state machine. There is no second
+module, so hoisting the viewer's gate could never have helped — and did not. I
+had the evidence to know that before shipping and did not look for it.
+
+The data is the same shape in a different place:
+
+| what | where |
+|---|---|
+| page range | `[0x01D2BB2C] + magId*4`, `+2` first, `+3` last (`0x004FB60A`) |
+| magazine id | module `+0x65` |
+| page on screen | module `+0x52` (`0x004FCA96`) |
+| the record | `[0x01D2BB6C] + page*68` (`0x004FCAA0`) |
+| text blocks | record `+0x34`, 4 × {u16 x, u8 y, u8 strIndex}, `0xFF`-terminated |
+| the strings | `[0x00B86D30] + 0x1F000`: u16 count, u16 offsets (`0x004FD746`) |
+
+— byte for byte the layout v0.27.0 already decodes for the Tutorial magazines, so
+`MagCopyRawFrom` serves both.
+
+**Why not scrape the screen instead:** the GCW buffer during that page held only
+`"Steel PipeScrewDragon FinSpider Web to scroll/ to go to Item screen"` — the
+remodel item names and the footer hint. **The headline and the prose are not in
+it at all.** A scrape would have produced a confident fragment of the page and
+called it the page.
+
+**Still outstanding:** the *"Items for remodeling"* panel — the names and counts
+down the right of the page — is drawn from the record's own fields, not from the
+text blocks, and is not read yet. On a Weapons Monthly that panel is the point of
+the page, so it is named here rather than left implied.
+
+Verified: `menu_item_compile` OK (0 bad), now including **the identification
+itself** — the walk answers when its state agrees; with no walk result the
+verified slot-2 alias answers and names the same character; **a slot-2 state that
+disagrees is refused**, so the fallback cannot degrade into the fixed-slot guess;
+and a stale walk hit falls through to a good alias rather than winning. Plus
+everything from v0.30.0: the gapped mask {0,2,5}, both halves of the mask, the
+unavailable rows, and the out-of-range refusals. `menu_tutorial_compile` /
+`menu_sim` / `menu_gf_compile` / `menu_save_compile` / `menu_ability_compile` /
+`menu_magic_compile` / `menu_junction_compile` / `menu_card_compile` /
+`menu_config_compile` / `button_map_rescue_test` OK; `lint_seh` OK (95 files);
+`lint_xtu` OK (175 files); all source files inside the 80 KB guard.
+
+**BAT:** Item → Use → a GF-targeted item (a G-Returner or G-Hi-Potion) and walk
+the GF panel — every name must speak. Then a Potion, and walk the character
+column. Then read a Weapons Monthly and turn its pages — the headline and the
+prose must speak; the remodeling list will not yet. Grep `Use target` (the line
+now carries `[walk]` or `[slot2 …]`) and `item magazine`.
+
+## v0.30.0
+
+#89: **The Item submenu — the target list, and the magazines.**
+
+**1. THE USE-TARGET LIST IS A BIT MASK, NOT A PACKED LIST.**
+
+Aaron: *"The list of characters / party members / GFs doesn't always seem to be
+accurate. Most of the time it is, but sometimes not."*
+
+`0x004F8600..0x004F86BF` builds it:
+
+```
+xor  ebp, ebp
+test bl, 2            ; the item targets CHARACTERS
+call 0x004AD030       ;   -> 16-bit character mask
+mov  bp, ax
+test bl, 4            ; the item targets GFs
+call 0x004AD090       ;   -> 16-bit GF mask
+shl  eax, 0x10        ;   GFs live in the HIGH half
+or   ebp, eax
+test ebp, 0xffff0000
+mov  byte [esi+0x64], 1   ; GF bits present -> two columns
+...            [esi+0x64], 0   ; characters   -> one column
+mov  dword [esi+0x38], ebp    ; THE MASK
+```
+
+and the two builders say what the bits mean:
+
+* `0x004AD030` — bit *i* = character *i* (0..7), set when that character's
+  savemap `+0x94` byte is odd (`0x01CFE17C`, stride `0x98`), **and** — when
+  `[0x01CFE97A] & 1` — narrowed to the three ids in the battle formation at
+  `0x01CFE74C`.
+* `0x004AD090` — bit *16+j* = GF *j* (0..15), set when its savemap `+0x11` byte
+  is odd (`0x01CFDCB9`, stride `0x44`).
+
+**The cursor at `+0x58` is the bit index.** The draw code proves it: characters
+go at `y = cur*13 + 0x42` in a single column (`0x004F8886`), GFs at
+`row = cur/2, col = cur&1` (`0x004F889C`). Position comes from the slot — **the
+screen leaves gaps, it does not compact.**
+
+The mod collected an `0xFF`-terminated roster from `pMenuStateA+0x1DB`, sorted it
+by character index, and used the cursor as a position in that packed list. That
+agrees with the engine **only while the set bits run 0,1,2,… with nothing
+missing** — which is Aaron's party exactly (Squall 0 through Selphie 5), and why
+it was right most of the time. Put a gap in it — the three-member formation case
+gives masks like {0,2,5} — and **every name below the gap shifts by one**. And it
+never handled GFs at all: a GF target list was read out as party members.
+
+Now the reader walks the pool for update fn `0x004F81F0`, takes mask, cursor and
+kind from the module, names by slot, names GFs from the savemap so a renamed GF
+reads as the player named it, and says *"not available"* on a slot whose bit is
+clear instead of silently skipping past it.
+
+`GetPartyCharAtVisualPos` is **deleted**, not kept as a fallback. A fallback that
+is wrong in exactly the cases the fix exists for is not a safety net.
+
+**2. THE MAGAZINES NOW READ FROM THE ITEM MENU.**
+
+Aaron: *"We haven't added support for magazines such as Weapons Monthly and Pet
+Pals, which are accessed via the item menu."*
+
+The viewer was already written — v0.27.0 built it for the Tutorial's Battle
+Operation / Card Game Rules / Icon Explanation, and its own comment noted that
+records 0..42 are the field magazines, *"which share this viewer but are not
+reached from here"*. **They share it because it is one module**: all three
+creators call `0x004BE540(0x004C9060, 0x004C9330)`, and `0x004C99B0` is a
+generic setter taking an index into the table at `[0x01D2BB3C]` and writing
+`{first, last}` into `0x01D7D3A5/A6`. The Tutorial uses entries 0, 1 and 2.
+Nothing about the viewer is Tutorial-specific.
+
+What kept the Item menu's magazines silent was **the gate, not the reader**: the
+poll only ran when the active-submenu byte held one of the dispatch ids the
+Tutorial pushes. A module found by its update function is already positive
+identification — either `0x004C9060` is in the pool or it is not — so the id gate
+added nothing except a way to be wrong about where the viewer was opened from.
+It runs before that gate now.
+
+The topic name is only spoken for the three the mod can name; a field magazine's
+stored text carries its own heading, so it reads its own title rather than one I
+would have had to guess.
+
+**3. SUBMON IS SPLIT OUT, WITH A NOTE ON WHAT IT IS FOR.**
+
+The submenu memory monitor moves to `src/menu_submon.inl` — partly so
+`menu_tts_item.inl` can be compiled by a host probe, and partly to write down
+what it cost. Nearly every `pMenuStateA`-relative offset in this mod was found
+with it. **It finds bytes that correlate; it cannot tell you what they mean**,
+and #88/#89 were largely spent on that difference: the GF Learn "two cursors"
+were `cursor[page]`, this target cursor was a bit index, and the Switch screen's
+availability flag is still a hypothesis its own comment admits to. An offset it
+suggests is a lead. The disassembly is the evidence.
+
+Verified: **new `menu_item_compile`** OK (0 bad) — the module walk in all ten
+pool slots and the three bad-list hazards; the contiguous-party case that always
+worked; **a gapped mask {0,2,5}, where slot 2 must still be Irvine and slot 1
+must be "Zell, not available"**; a mask starting at slot 6; both halves of the
+mask, including that a character bit must not make a GF available or vice versa;
+the "Use on" prefix only on arrival; and refusals on slot 16, a negative cursor
+and an empty pool. `menu_sim` / `menu_gf_compile` / `menu_save_compile` /
+`menu_ability_compile` / `menu_magic_compile` / `menu_junction_compile` /
+`menu_card_compile` / `menu_config_compile` / `menu_tutorial_compile` /
+`button_map_rescue_test` OK; `lint_seh` OK (95 files); `lint_xtu` OK (175 files);
+all source files inside the 80 KB guard.
+
+**BAT:** Item → Use → a Potion, and walk the whole target column — every row must
+name the character at that position, and any row you cannot pick must say so
+rather than going quiet or naming the next one down. Then use a **GF-targeted
+item** (a Pet Pals, or a GF-healing item) — that list must read as GFs, by name.
+Then **read a Weapons Monthly or a Pet Pals from the Item menu** and turn its
+pages. Grep `Use target` — the line now carries the slot, the kind and the raw
+mask, so a wrong row is visible in the log.
+
+## v0.29.2
+
+#88: **The GF Learn list, read from the engine.**
+
+Aaron, on v0.29.1: *"It did not seem to consistently announce abilities as I
+moved through the list on later GFs like Leviathan, Cerberus, and Pandemona."*
+
+This is the Ability-screen defect, one screen over, and `0x004D35ED` spells out
+every part of it:
+
+```
+mov   al,  byte [esi+0x36]              ; page
+movsx ecx, byte [eax+esi+0x39]          ; row = cursor[page]   <- an ARRAY
+lea   edx, [eax+eax*4]                  ; page*5
+lea   eax, [eax+edx*2]                  ; page*11
+add   ecx, eax                          ; ABSOLUTE = page*11 + row
+mov   eax, [0x01D7DAA0]                 ; total abilities
+cmp   ecx, eax
+jge   no_ability                        ; -> writes 0 into its own help slot
+mov   al,  byte [ecx*8 + 0x01D7D9F0]    ; ability id
+```
+
+* `+0x36` — the page (0 or 1; `sete al` toggles it at `0x004D2C1F`)
+* `+0x39[page]` — the cursor row on that page
+* `+0x3B[page]` — how many rows that page has (`0x004D2C2F` clamps to it)
+* 11 rows per page (`idiv 0xB` at `0x004D33DC`, and the `page*11` above)
+* `0x01D7D9F0` — **the whole ability list**, stride 8, byte 0 = ability id
+* `0x01D7DAA0` — its length, filled in one call at `0x004D2F13`
+
+**What the mod did instead.** It identified the row by parsing ability names out
+of the GCW **draw buffer** — which holds only the page on screen — and indexed
+that parsed list with whichever of `pMenuStateA+0x257` / `+0x258` had just
+changed. Those two bytes are module `+0x39` and `+0x3A`: `cursor[0]` and
+`cursor[1]`. The right bytes, guessed, with no page byte to say which one is
+live and no way to reach page 2's rows at all.
+
+**And the failure mode was silence.** When the parse under-read — as it did on
+Leviathan, three rows short, for the reason v0.29.1 fixed — the cursor ran past
+the parsed count into an "empty slot" branch that only speaks when the help text
+is blank. On that screen the help text was not blank; it was the run-on. So
+nothing was announced, and nothing was logged either.
+
+**Now:** the reader walks the module pool for update fn `0x004D2A00`, reads
+page / row / count / id the way the engine reads them, and treats past-the-count
+as an empty slot on **the engine's own bound** rather than on whether help text
+happened to be blank. It dedupes on (GF, page, row) — the old id-based key went
+quiet when Q/R switched GFs without moving the cursor — and it **logs when it
+cannot read** instead of going silent, because a reader that stops talking
+without leaving a trace is what made this take a BAT and three screenshots.
+
+The GCW parse still runs. It proves the Learn list is on screen and it slices the
+help description, which it is good at. It no longer decides which ability the
+cursor is on.
+
+**Checked and deliberately not changed:** the Ability screen composes its own
+absolute index and stores it — `mov dl,0xB / imul dl / add al,bl /
+mov [esi+0x3a],al` at `0x004E7975` — so reading `+0x258` there was correct. The
+two screens keep their cursors differently, which is exactly why one guess worked
+and the other did not.
+
+Verified: `menu_gf_compile` OK (0 bad) — it now maps the pool and the ability
+list at the game's own addresses and exercises `page*11 + cursor[page]` across
+both pages of a 16-ability GF, proves the two cursors do not leak into each
+other, pins the empty-slot boundary at `abs == count`, keeps the single-page case,
+and requires a refusal on every out-of-range field (page 2, row 12, count 25, no
+module). Plus the module walk in all ten pool slots and the three bad-list
+hazards. `menu_sim` / `menu_save_compile` / `menu_ability_compile` /
+`menu_magic_compile` / `menu_junction_compile` / `menu_card_compile` /
+`menu_config_compile` / `menu_tutorial_compile` / `button_map_rescue_test` OK;
+`lint_seh` OK (95 files); `lint_xtu` OK (174 files); all source files inside the
+80 KB guard.
+
+**BAT:** Leviathan, Cerberus and Pandemona — walk the whole Learn list on each,
+**including onto page 2 if the GF has one**, and every row must speak. Then press
+Q/R to switch GF without moving the cursor; that must re-announce. Grep
+`GF learn page` — the line now carries page, row, absolute index and count, so a
+wrong row is visible in the log this time.
+
+## v0.29.1
+
+#88: **What the v0.29.0 BAT showed — including one I broke.**
+
+**Confirmed working.** The Save overwrite prompt speaks: *"Data exists.
+Overwrite?. No"*, once per cursor move, with both labels read off the window and
+the default correctly announced as No. Zell's Duel page is right — cursor 1 is
+Punch Rush through cursor 5 Burning Rave, checked against the screenshot rather
+than against the log. The Magic All transfer announced correctly.
+
+**1. I BROKE THE ITEM REARRANGE IN THE OPPOSITE DIRECTION.**
+
+v0.29.0 armed the swap check inside the destination-cursor block. That block runs
+**later in the same poll** than `s_rearrangePrevFocus = focusState` a hundred
+lines above it — so its "am I arriving?" test was already false on the first
+frame, `s_swapSrcIdAtArm` never left `0xFFFF`, and `ItemSwapDecide` answered
+false every time. **Every rearrange said "Cancelled", real swaps included.** That
+is the defect v0.29.0 set out to fix, inverted: the same lie pointing the other
+way.
+
+The arm moves into the focus-change block, beside the battle path's — which was
+always correct, because it was written there.
+
+**And the log could not have shown it.** Both outcomes printed *"Rearrange swap
+completed"*, so the decision the player actually heard was absent from a log I
+had already read. Both paths now log the word they spoke, with the slot id
+behind it.
+
+**2. THE GF LEARN HELP SWALLOWED THE TOP OF THE LIST.**
+
+Pressing "/" on Leviathan's Learn list read *"Raises Spr by
+20%Mag-JSpr-JElem-Defx2"*. One cause, two symptoms.
+
+**The game drops "-J" in front of a multiplier.** Its own draw buffer in that BAT
+reads `...SaveRaises Spr by 20%Mag-JSpr-JElem-Defx2MagicGFDrawItem...`, so id 14
+renders as **"Elem-Defx2"**, not "Elem-Def-Jx2". The right-to-left list parse
+could not match it, stopped three rows short — and the help description, which is
+everything between "Save" and the first row the parse *did* match, then swallowed
+the three rows it had missed.
+
+Fixed in `NormalizeAbilityToGcw` (ids 14/15/16/17; x2 is witnessed in the buffer,
+x4 and the ST- pair follow by the same construction and are not separately
+witnessed). Plus a guard for the class rather than the case: **`GFHelpSliceIsClean`
+drops any slice holding an ability name glued to its neighbour** — the parse's own
+test. A help line that legitimately ends in an ability word survives, because the
+game puts a space there (Boost's help really is *"Boost GF"*). It fails towards
+silence on purpose: dropping the line costs a description the row announce has
+already given, while keeping it states something the screen does not say.
+
+`ABILITY_NAMES` is split out to `src/menu_ability_names.inl` so the new probe
+exercises the real table instead of a copy that would drift from it.
+
+**3. REPORTED, NOT FIXED: Zell's Duel inputs.**
+
+The screenshot shows each Duel move listed with the buttons that perform it —
+Punch Rush is Down then X, Burning Rave is a five-step string. **The mod says the
+name and the description and never the input**, which on this page is the part
+that matters. The glyphs are sprites: they are not in the GCW buffer at all, so
+this needs the exe's Duel input table and a build of its own.
+
+Also still open from the audit: dimmed ability rows read the same as available
+ones (visible in both GF screenshots), and the shared confirmation window is
+still read on only three of its twenty call sites — see `docs/SUBMENU_AUDIT.md`.
+
+Verified: **new `menu_gf_compile`** OK (0 bad) — it replays **both real Learn
+screens out of the BAT log, pasted verbatim**, and requires all eleven rows and a
+clean help line on each; plus the four multiplier substitutions, the bare "-J"
+forms left alone, and the guard accepting *"Boost GF"* while rejecting a glued
+list head. `menu_sim` / `menu_save_compile` / `menu_ability_compile` /
+`menu_magic_compile` / `menu_junction_compile` / `menu_card_compile` /
+`menu_config_compile` / `menu_tutorial_compile` / `button_map_rescue_test` all OK;
+`lint_seh` OK (95 files); `lint_xtu` OK (174 files); all source files inside the
+80 KB guard.
+
+**BAT:** an item rearrange — do one you **complete** and one you **cancel**, and
+they must differ. Then "/" on Leviathan's Learn list (expect *"Raises Spr by
+20%"* and nothing after it). Grep `Rearrange armed` and `Rearrange 99->97` — the
+second line now names the word it spoke.
+
+## v0.29.0
+
+#88: **The submenu audit — six defects, and the confirmation window nobody was reading.**
+
+Aaron: *"go through all the main menu submenus — Junction through Save — and
+compare their implementation in the mod to their code in the exe... I know of two
+outstanding bugs in the submenus, but instead of telling you them I want to see
+if you can find and fix them yourself."*
+
+Every screen from Junction to Save was read against its state machine in
+FF8_EN.exe. Six defects are fixed here. All six are proved against the
+disassembly, not inferred from behaviour.
+
+**1. THE SAVE OVERWRITE PROMPT WAS SILENT, AND IT DEFAULTS TO NO.**
+
+Choosing an occupied block opens a two-option window (0x004E3B0E: phase +0x48 = 4,
+cursor +0x4F preset to **1**, text = group 5 entry 5, *"Data exists.
+Overwrite?"*). State 0x37 at 0x004E4C1E runs that cursor and on Confirm does
+`neg dl / sbb edx,edx / and edx,0xFFFFFFE8 / add 0x38` — cursor 0 writes the
+save, anything else abandons it. Cancel abandons it too.
+
+The mod said nothing at all. So a blind player pressed Confirm on a block, heard
+nothing, pressed Confirm again on the default, and was returned to the block list
+**believing he had saved**. There is no later symptom. Nothing about that is
+recoverable.
+
+The same module opens the window once more, at 0x004E4FD9 (phase 8, the
+unformatted-folder prompt); it is read too.
+
+**2. A SHARED READER FOR THE SHARED WINDOW** (`src/menu_dialog.inl`).
+
+Every confirmation in the main menu goes through one opener,
+`0x004C2B10 → 0x004C2A20`, which stores the body at `[0x01D77300]` and the two
+option strings at `[0x01D772F0]` / `[0x01D772E0]`. Those are globals, so one
+reader serves all of them.
+
+**The option words are read off the window, never assumed.** This mod has already
+shipped a screen that assumed Yes-then-No and met a dialog that lists NO first
+(v0.26.2, the exam's *"Really?"*). Getting that wrong tells the player the
+opposite of what he is about to confirm.
+
+The Save module is found by **walking the module pool** for its update function
+(0x004E3090), not by the fixed `pMenuStateA+0x1A6` / `+0x21E` slot aliases the
+rest of the Save code still uses. For a dialog that decides whether the save
+happens, a wrong base is worse than silence.
+
+**3. THE MAGIC "ALL" WARNING REPEATED EVERY FRAME, WITH THE WRONG WORDS.**
+
+State 107 (0x004F1CB6) is a steady two-option window, and the mod cleared its
+dedup key on every poll, so the line repeated for as long as the box was up. The
+line itself was wrong twice over: it announced a warning where the game is asking
+a question, and states 106/107 are **shared with Exchange and Split**, so an
+Exchange announced *"Cannot take all magic."* The model now emits nothing for
+that phase and the window is read through the shared reader (cursor at module
++0x70, 0x004F1CC4).
+
+**4. FIVE ABILITIES WERE NOT ABILITIES.**
+
+`ABIL_MENU_ID_LO` was 97. The engine's own guard at 0x004C2B40 accepts
+[0x5C, 0x74) — 92..115 — so five real abilities at the bottom of the range were
+rejected and read out as nothing.
+
+**5. THE ABILITY LIST WAS THE ELEVEN DRAWN ROWS; THE CURSOR WAS THE WHOLE LIST.**
+
+The list was parsed out of the GCW draw buffer, which holds only what is on
+screen, while the cursor at +0x258 indexes the full list. On any GF with more
+than eleven abilities the mod **named the wrong ability from the twelfth row on,
+and named it confidently**. 0x004E770F reads the flat list from 0x01D8CB54 with
+its count at 0x01D8CB6C; that is what the mod reads now, with the GCW parse kept
+as the fallback.
+
+**6. ZELL'S DUEL LIST WAS OFF BY ONE.**
+
+Cursor 1 is Punch Rush and the mod said *"Booya"*. The page builder pre-seeds its
+row counter per layout mode — Squall (mode 0) with 4 at 0x004CE92C, **Zell (mode
+1) with 1**: `mov ebx, 1` at 0x004CE968, `mov [esp+0x30], ebx` at 0x004CE9AD.
+Corroborated by the help-table bias (mode 0 uses cursor−4 at 0x004CE4BD, mode 1
+uses cursor−1 at 0x004CE536) and by cell 0 in mode 1 being the Duel-Auto toggle
+(0x004CE3BB). `leadingToggles` 0 → 1.
+
+**7. CANCELLING AN ITEM ARRANGE WAS ANNOUNCED AS "SWAPPED".**
+
+Both arrange flows — the battle-item order (focus 36) and the inventory rearrange
+(focus 99) — leave their destination screen for the same state whether the player
+confirmed or backed out, and the mod watched that transition. So a cancel was
+reported as a completed swap. A sighted player sees the list did not move; a
+blind player is told the wrong thing about his own inventory and has nothing to
+check it against.
+
+The decision no longer watches the transition. It remembers the item id at the
+**source slot** when the swap was armed and compares it afterwards — the slot is
+evidence, the state change is not. Two slots holding the same item are
+indistinguishable and are reported as *"Cancelled"*, because swapping them is a
+no-op and that statement stays true either way.
+
+**WHAT THE AUDIT FOUND AND THIS BUILD DOES NOT FIX.**
+
+The shared window is opened in **20 places across the menu** (every call to
+0x004C2B10 / 0x004C2A20 in .text). Before this build the mod read **one** of
+them; it now reads three. The other seventeen are mapped — screen, entry state
+and cursor byte, all confirmed — in `docs/SUBMENU_AUDIT.md`, and they include
+destructive confirmations: the Junction screen's *"Off"* (state 0x12) and *"Keep
+previous setting"* (0x2C, cursor +0x5C), the Switch screen's junction exchange
+(0x10, +0x3F), GF's *"Don't learn anything?"* (0x18, +0x57) and four on Status.
+They are deliberately not wired yet: the shared reader has never run on live
+hardware, and pointing an unproven reader at sixteen more screens is how this
+project has shipped confident wrong lines before. **BAT the Save prompt first.**
+
+Verified: `menu_sim` OK (0 bad), including the arrange decision and its ambiguous
+same-id case; **new `menu_save_compile`** OK (0 bad) — the module walk in all ten
+pool slots, out-of-pool / misaligned / cyclic lists, the overwrite prompt spoken
+once and following the cursor, a reversed-label window, phase 8, silence on every
+other phase and with no module in the pool, and null/empty window bodies; **new
+`menu_ability_compile`** OK (0 bad) — the full list past the drawn rows, ids
+92..115, and declining any list it cannot trust; `menu_magic_compile` /
+`menu_junction_compile` / `menu_card_compile` / `menu_config_compile` /
+`menu_tutorial_compile` OK; `button_map_rescue_test` OK; `lint_seh` OK (95 files);
+`lint_xtu` OK (173 files); every source file inside the 80 KB guard.
+
+**BAT:** save over an existing block — the prompt must speak, and the option it
+reads must be the one Confirm will take. Then Magic → All between two characters,
+a GF with more than eleven abilities (Ability → the ability list), Status → Zell's
+limit page, and an item arrange that you **cancel**.
+
+## v0.28.1
+
+#87: **Two things the screenshots showed.**
+
+The v0.28.0 BAT log read clean end to end. Aaron: *"Be sure to check the
+screenshots I took as well. Make sure the info shown visually is being announced
+by the mod."* Two pages did not survive that.
+
+**1. The Battle Report is a table.**
+
+The screenshot shows two columns: Walked / Battles / Won / Escaped down the left
+in green, 109751 / 41 / 35 / 6 down the right in white. The mod read it as
+*"Walked 109751 Battles 41 Won 35 Escaped 6"* — four labels and four numbers with
+nothing saying which belongs to which.
+
+**A run of spaces inside a line is a column, not a gap.** FF8 pads label/value
+tables out with literal spaces to align them, so a run now becomes a comma and
+the row is terminated with a stop: *"Walked, 109751. Battles, 41."*
+
+Three guards make this safe where v0.27.0's line-length heuristic was not:
+
+* the run must be **real source spaces**, two or more;
+* the character already emitted before it must be a **letter or a digit** — so
+  sentence spacing ("…disabled in battle.  Death is KO…") is left alone, and so
+  is an indented continuation, which follows the space a line break emitted;
+* the run must have **a word after it on the same line**. 12 of the 2,926 line
+  breaks in the Information corpus have trailing padding, and a comma there lands
+  at a *wrap* — precisely the failure that killed the earlier attempt.
+
+The magic pages benefit too: *"Target, Single. Effect, Fire damage."*
+
+**2. An empty page has to say so.**
+
+"Select name" under Person is nothing but story-gated links. Until you have met
+somebody the game draws a blank window, and the mod announced the title and then
+fell silent — which is indistinguishable from the mod having failed. It now says
+*"Nothing here yet"*.
+
+Both of these were sitting in the v0.28.0 log — `"Select name. "` and
+`"...your party Walked 109751 Battles 41..."` — and I had read that log and
+called it clean. **Neither was legible as a defect until the screenshot said
+what the screen actually looks like.** A log tells you what the mod said; only
+the screen tells you what it should have said.
+
+Revalidated across all three corpora with no regressions: 300 exam questions,
+25 magazine pages, 425 Information records. `menu_sim` and
+`menu_tutorial_compile` OK (0 bad), with the column rule, sentence spacing,
+indented continuations, trailing padding and the empty page all pinned.
+`lint_seh` / `lint_xtu` OK.
+
+## v0.28.0
+
+#87: **Information — the nested page browser.**
+
+The last unspoken screen in the Tutorial section, and the largest body of writing
+in the game's menus: **425 records** across mngrp sections 128–133. It is the
+glossary — what Status means, how the ATB works, every location in the world,
+every command in the menu.
+
+Dispatch 21, update `0x004D5F10`, 22 states, **steady state 7 only** and for once
+no slide state reads input either.
+
+**The links are enumerated, not guessed.** `0x004D6B20` expands a record into the
+body buffer at `0x01D7EC48` and — exactly like the exam's answer labels — does
+not copy the `0x0B` link markers into it. It diverts each into a position array
+at `0x01D85658` as `{u16 penX, u16 penY, u16 target}`, and copies the link's
+*label* through as ordinary text. The pen advances `0x10` per line break, so
+`penY / 0x10` is the line the label sits on.
+
+I checked that against all 425 records before relying on it: **not one page puts
+two links on the same line.** So a link's line *is* its label, exactly, with no
+inference. That is the structure the magazine pages could not offer — where no
+threshold separated a list item from a wrapped line and the attempt was reverted
+in v0.27.0.
+
+What it says:
+
+* **Arrival** — the title, whatever prose the page has, then "10 topics" and the
+  one under the cursor. Not all ten; a page of links read out in full is a wall.
+* **Moving** — the link alone, with its position.
+* **Key 2 — every topic on the page, in order.** This is the thing a sighted
+  player gets for free, a column of headings taken in at a glance, and the one a
+  blind player would otherwise have to arrow through to discover even exists.
+* **Key 1 — every route out**, including the two the game marks only as a "1/2"
+  buried in the title: Left and Right move between sibling pages, and Cancel
+  climbs to the parent, or leaves entirely at the root.
+* Key 0 reads the page again.
+
+The cursor is stored **per record** by the game itself (`0x01D83E4C + record`),
+so backing out of a topic and returning puts you back on the link you left from.
+The mod reads that table rather than tracking its own, which is why it agrees
+with the cursor actually on screen.
+
+Validated by rendering all 425 records offline: 49 link pages, 376 prose pages,
+no empty title, no unlabelled link, nothing overflowed, no label truncated.
+
+**Two log fixes from the last BAT**, folded in rather than given a build of their
+own: the `[TutorialTTS]` line now reports the Online Help cursor instead of the
+seven-row one — every Help line read `row=1` while the help cursor was the thing
+moving — and magazine lines widened from 200 to 400 characters, so "Last page" is
+checkable in the menu log rather than only in the TTS log.
+
+**That leaves only the nine Online Help guided demos**, which the list already
+announces as undescribed.
+
+Verified: `menu_tutorial_compile` and `menu_sim` OK (0 bad) — the probe pins that
+only state 7 of 22 speaks, that the Tutorial module underneath never speaks over
+the page, and that a prose page's sibling note does not double its full stop.
+Fuzz covers out-of-range cursors and link counts. `lint_seh` / `lint_xtu` OK, and
+every other menu probe green.
+
+## v0.27.0
+
+#86: **The rest of the Tutorial section.**
+
+Aaron, with a screenshot of the seven-row list: *"Take a look at that and all the
+options / submenus it contains. We need to make sure we account for and make all
+of these accessible."*
+
+Seven rows. TEST and Review were done in #85. This is four of the remaining five.
+
+**Battle Operation, Card Game Rules and Icon Explanation are one module.** Their
+three creators are byte-for-byte the same call — `0x004BE540(0x004C9060,
+0x004C9330)` — and the only thing that distinguishes them is the record range the
+Tutorial preloads into `0x01D7D3A5/A6` beforehand: 43–50, 51–63, 64–67. So the
+mod names the topic from the record range, not from the module.
+
+Steady state 9, and for once **no slide state samples input at all** — unlike the
+Card album, whose page slides queue further flips and cost a build to learn.
+There is no cursor and nothing selectable; Left and Right turn pages, Confirm
+turns and then leaves past the last one, Cancel leaves. The last page says so,
+because Confirm silently changes meaning there and nothing on screen mentions it.
+
+Each page is 3–4 absolutely positioned text blocks — heading, "Battle Tutorial
+1/8", body — read straight out of the raw section, since this module has **no
+pre-processing buffer**: the draw fn renders the stored bytes as-is. All 25 pages
+were expanded and read end to end before shipping.
+
+**Online Help is not a module either.** Row 1's action byte is `0xFF`, which sets
+state 24 inside the Tutorial module itself, so the list is a second panel with
+its own cursor at `+0x35` and its own length at `+0x36`. Its nine topics are
+filtered by story progress, and the module writes the survivors' descriptor
+indices into `+0x39..` — which is what the mod reads, rather than reproducing a
+savemap flag bitmap for nothing. Three of the rows are named after a party
+member and use the player's own name.
+
+**The element and status symbols are now named.** Fire, Ice, Thunder, Earth,
+Poison, Wind, Water, Holy; Death through Drain. Same authority as the ability
+icons in #85 — the game's own Icon Explanation pages draw each sprite and write
+its name beside it. Reading that page aloud is therefore slightly circular
+("Fire symbol, Fire") and that is exactly the point: the page *is* the legend for
+everywhere else the sprite appears. Also added: the four directions, the junction
+marker and the Limit Break marker.
+
+`0x38` and `0x3B` still say "a button". They are the two the Customize screen
+refuses to rebind — Start and Select — and which is which is not established.
+Both of their sentences say what the button does, so nothing is lost but a guess.
+
+**A heuristic tried and reverted, which is the interesting part.** The Icon
+Explanation stats page is a column — "Hit Points", "Strength", "Vitality" — and
+as spaces it reads as one run-on breath. So line breaks after a short line became
+commas. Against the real corpus that produced *"Same Wall uses Battle, Area
+wall"* and *"Wall is assumed to have, 'A' value"*: a wrapped line can be 21
+characters and a list item 16, and no threshold separates them. **A wrong comma
+is a lie about the text; a flat list is only flat.** Reverted, and the sim now
+pins both sentences so it cannot come back. When the Information browser lands,
+its lists are *links*, which are enumerated from the game's own position array
+rather than guessed at from line lengths.
+
+One real fix out of the same pass: the possessive rule that closes up
+"Squall 's" was also eating the space in "have 'A' value". A possessive is
+followed by a lower-case letter and an opening quote is not, which is the whole
+discriminator.
+
+**Still unspoken, and the list now says so out loud** rather than leaving the
+player pressing Confirm into silence: the Information page browser (menutips, 425
+linked records) and the nine Online Help guided demos.
+
+Verified: `menu_tutorial_compile` and `menu_sim` OK (0 bad) — the probe pins that
+the magazine module wins the pool walk over the Tutorial module beneath it, that
+only state 9 speaks of its 17, that only 4, 7 and 27 speak of the Tutorial's 34,
+and that an Online Help row maps through `+0x39` rather than through its own
+index. All 25 magazine pages and all 300 exam questions re-expanded clean.
+`lint_seh` / `lint_xtu` OK.
+
+## v0.26.2
+
+#85: **Three things the log said.**
+
+Aaron, BAT: *"I think the SeeD test quiz is good to go unless there is something
+you see which we missed in the log."* Three things. He hit none of them in that
+session, and he would have hit all three.
+
+**1. The answer words are not always Yes then No.**
+
+Section 95 string 7 — the **"Really?"** confirmation the exam shows before it
+commits you — is stored as `{slot 0}NO      {slot 1}YES`. **NO is first.** The
+hard-coded Yes/No would have named the exact opposite of what the cursor was on,
+on the one screen whose entire job is to double-check the player. Other screens
+offer `END` and `GO BACK`, which it would have called "Yes".
+
+The words now come off the screen's own answer line. `0x004D4A80` does not copy
+the `0x0B` markers into the drawn buffer, so the labels arrive as ordinary words
+in the region below the cut — split on a **run** of two or more spaces, which is
+what keeps `GO BACK` one answer and `YES     NO` two.
+
+They are title-cased on the way out. That is the mod's only editorialising, and
+it earns it: a synthesiser handed a short all-capital token like `NO` is liable
+to spell it out, and "N. O." in answer to a question the player is trying to
+answer is worse than useless.
+
+**2. `0xB5` was being dropped on the floor.**
+
+It is the only byte above `0xAF` anywhere in the exam corpus. It occurs three
+times, and all three sit exactly where a pause belongs:
+
+> "…won't go any higher⟨B5⟩ will you still take the written test?"
+> "…GFs have levels⟨B5⟩ the higher…"
+> "…must be set⟨B5⟩ otherwise…"
+
+The glyph is **not** established — it is not the `0x3C` comma, and the shapes
+live in the font rather than the exe — but dropping it runs two clauses together
+in all three. It is now a comma, which is the right reading whichever mark it
+actually draws.
+
+**3. SUBMON is gated off.**
+
+The auto submenu cursor monitor wrote **5,399 of the 6,217 lines in the BAT log —
+87% of the file.** It is a *discovery* tool: it hunts for the cursor offset of a
+submenu nobody has reverse-engineered yet, and there is nothing left in the main
+menu to discover. Item, Junction, Magic, GF, Status, Save, Card, Config, and now
+Tutorial and the exam are all built out.
+
+Gated behind `SUBMON_DIAG`, not deleted, per that file's own convention — the
+Information pages are still unexplored and this is the tool that would find their
+cursor. One line to flip it back.
+
+**Not a bug, but worth recording so nobody chases it:** the pass screen reads
+*"Your scored 100%."* That typo is FF8's own — mngrp section 95 string 2,
+verbatim.
+
+Verified: `menu_tutorial_compile` and `menu_sim` OK (0 bad), with the reversed
+"Really?" line and the two-word `GO BACK` label both pinned; all 300 live exam
+questions re-expanded clean; `lint_seh` / `lint_xtu` OK; every other menu probe
+green.
+
+## v0.26.1
+
+#85: **The exam's message windows were reading the footer.**
+
+Aaron, BAT: *"the screen at the start of the exam and the screen with the results
+are not reading out as expected."* Both announced **"the Confirm button to quit"**
+and nothing else — which is the hint line along the bottom of the window, not the
+message in it.
+
+`module+0x20` is that footer. The text the game actually draws is the
+**pre-processed buffer at `0x01D7DAB8`**: `0x004D4A80` expands whichever string
+the current state selected into it — names, GF names and **numbers** already
+substituted — and NUL-terminates it (`0x004D4CF5`); the draw fn renders from
+there (`0x004D596C`).
+
+Reading the stored string would not have been enough either. *"Your score was
+80"* is a `{0A}` variable, and the score exists **only** in that buffer. So
+questions and messages now share one text path, and it is the one the game draws.
+
+**Cutting the answer labels needed new arithmetic.** `0x004D4A80` does not copy
+the `0x0B` answer markers into the buffer — it diverts them to a position array
+at `0x01D7EB40` (8 bytes each, `{u16 x, u16 y, u16 slot}`) and copies
+`YES     NO` and `END` straight through as ordinary words. The pen advances
+exactly `0x10` per line break (`0x004D4CD3`), so **the first choice's y divided
+by the line height is the line the labels begin on**, and everything from there
+down is a label rather than a sentence.
+
+So the result screen now reads *"Your score was 80. You failed. Better luck next
+time."* and stops, and the offer screen reads its question and then the answer
+the cursor is on.
+
+Also fixed: the poll deduped the speech but not the log, so a message window —
+which never changes — wrote a `[TutorialTTS]` line **every frame**. Forty
+identical entries inside one second of Aaron's log, burying whatever came next.
+
+**The probe was built around the same wrong belief the code was**, which is why
+it was green through all of this: it staged a question blob and read
+`module+0x20` because that is what the implementation did. It now drives the real
+buffer, and both of Aaron's screenshots are fixtures in it — the offer window
+with its YES/NO, and the result window with its score and its END.
+
+Verified: `menu_tutorial_compile` and `menu_sim` OK (0 bad); all 300 live exam
+questions re-expanded straight out of mngrp with none empty, no unnamed symbol
+and exactly two answer slots each; `lint_seh` / `lint_xtu` OK; every other menu
+probe unchanged and green.
+
+## v0.26.0
+
+#85: **The Tutorial menu, and the SeeD written exam.**
+
+Last of the three Aaron asked for. He was specific about the hard part: *"There
+is a lot of information in the Tutorial section so be sure to understand
+everything that is in there. In particular we need to make the SeeD Exam Quiz
+and its questions accessible - including the symbols it sometimes displays in
+various questions."*
+
+**Two modules, not one.** Tutorial is main-menu dispatch 20 (update
+`0x004C9CB0`, 34 states). Choosing TEST or Review does not change its state --
+state 17 **pushes** the exam module (dispatch 23, update `0x004D4D30`, 28
+states) and then parks in state 18 until it pops. So both are in the module pool
+at the same time, and a poll that found the Tutorial one first would read a stale
+menu over a live question. The exam is checked first, unconditionally.
+
+Steady states: Tutorial **4** (the seven-row list) and **7** (the review picker);
+exam **21** (the answer input) and the six message windows 5, 8, 11, 13, 16, 23 --
+three of which share a single handler. Tutorial states 9 and 11 read Left/Right
+**mid-slide** to queue another page flip, exactly like the Card album's 7 and 9.
+Reading input is still not the test.
+
+The list names both gates the game enforces **in silence**: TEST needs
+`0x004C3090() >= 0`, Review needs at least one test passed. Confirming a gated row
+only beeps, and a keypress answered by nothing is indistinguishable from a hang.
+It also says which test comes next and what your SeeD rank is -- the thing the
+whole exam is for, since it sets the salary, and which no screen states plainly.
+
+**The exam.** Questions live in mngrp section `96 + testIndex`, loaded to
+`[0x00B86D30] + 0x1F000`: a u16 count, u16 offsets, and **the byte at each offset
+is the answer key**, with the text starting one past it (`0x004D5475`). All ten
+questions must be right (`0x004D55E4` compares the score against 10).
+
+That last fact drove two decisions:
+
+* **The running score is never spoken.** The game does not show it and a sighted
+  player cannot know whether the answer they just gave was right. Speaking it
+  would be extra information, which is a different thing from equal access to the
+  same information.
+* **The symbols had to be named.** Six questions read "⟨icon⟩ signifies Junction
+  Ability". Speaking the icon's true name turns a recognition test into a string
+  comparison -- but leaving it unnamed does not make those tests harder, it makes
+  six of the thirty **unpassable except by luck.**
+
+**The symbols**, which is what Aaron asked for. 29 of the 300 live questions
+carry one.
+
+* `0x05 0x4x` -- the six ability icons. **The names are the game's own**, read off
+  its Icon Explanation page (section 89, string 54), and every one is confirmed
+  independently by the stored answer key of the question it appears in. Two of the
+  six are traps whose correct answer is No; the mod names them truthfully.
+* `0x05 0x2x` -- a button, chosen through the player's own map (`0x004A2DF0`), so
+  it is spoken as **what it does** rather than as a shape that moves when the
+  controls do. The function names are the ones `menu_config_model.inl` already
+  uses, from the Config Customize row table.
+* `0x05 0x38` -- one of the two buttons the Customize screen refuses to rebind,
+  Start or Select, and **which one is not provable from the exe**. It stays "a
+  button". Its one question reads correctly without the name, so a guess would
+  buy nothing and could mislead.
+* `0x03` and `0x0C` -- character and GF names, read from the savemap, so a player
+  who renamed Ifrit hears the name they gave it.
+
+**Two defects that only real data found.** Both passed a fixture and failed the
+corpus:
+
+* A line break is a **wrap, not a sentence end.** As a full stop it split the
+  game's own sentences in half -- test 4 question 9 came out *"Squall's gunblade
+  causes more damage. by pressing the first Escape button at the right time."*
+* **Everything after the first `0x0B` is answer labels, not the question.** Every
+  stored question ends `...YES     NO`, so emitting past that point made all
+  three hundred read *"...the Gauntlet. YES NO"* before the mod then said
+  *"Answer Yes"*.
+
+A third, smaller one: each question's stored text opens with its own "Question
+N", so the position label strips it rather than saying the number twice.
+
+Verified by expanding **all 300 live questions** straight out of mngrp: none
+empty, none with an unnamed symbol, every one with exactly two answer slots, and
+all 29 symbol questions read as English. `menu_sim` and the new
+`menu_tutorial_compile` OK (0 bad) -- the probe asserts the answer-key byte is
+skipped and that the exam wins the pool walk. Fuzz covers 20,000 random byte
+strings including control codes truncated at the end of the buffer.
+`lint_seh` / `lint_xtu` OK; every other menu probe unchanged and green.
+
+**Not in this build:** the Information pages. Sections 128-133 hold 425 records
+with parent/prev/next links and inline `0x0B` links to other records -- a nested
+browser, not a list. It needs its own screen model and it is v0.26.1.
+
+## v0.25.2
+
+#84: **The way out was on screen the whole time.**
+
+Aaron, still stuck after v0.25.1: *"It is still not back to the original
+controls. I confirmed it was set to Normal on the screen. I also tried the Alt K
+shortcut, but still the controls are not back to default. Take a look at the
+screenshot to see if you can spot the reset option on the customize screen."*
+
+It was in the footer of the Button assignment window:
+
+> **S** to end,  **F** to default
+
+One press of F fixed it. **The game has always offered a one-key reset and the
+mod never read the line out** — which is the entire defect. Two builds went into
+reproducing a recovery the screen was already offering, because the screen was
+never being listened to.
+
+**The Customize screen now speaks for itself.** On arrival, in this order:
+
+* the warning Aaron asked for — *"changing the game's defaults could conflict
+  with keys used by the mod"* — and it is worse than a conflict, since the mod's
+  shortcuts are letter keys and every letter pressed in here is a reassignment;
+* the way out, built from the two bits state 7 actually tests: `0x0100` restores
+  every button (`0x004EE007`), `0x0800` leaves (`0x004EE03E`). Cancel is not
+  among them, which is the trap;
+* the page, then the row under the cursor.
+
+Moving the cursor speaks the row alone — repeating the warning on every press
+would bury the one thing that changed. Labels come from mngrp section 1 bank 2 at
+entry `row + 10 * (page + 2)`, doubled because every entry in that bank is a pair,
+so the same key reads "Walk or Cancel" on the field page and "Cancel" in battle.
+
+**The Customize branch deliberately bypasses the whole-line repeat guard.** Four
+rows of the field page read "not used"; a guard keyed on the text would go silent
+exactly where the player most needs to hear that the cursor moved at all.
+`(page, row)` is the correct key, and the probe pins both rows speaking.
+
+**Alt+K never fired, and that — not the map — was the real v0.25.1 bug.** There
+is not one `[BTNMAP]` line in any log from that session. The poll runs from the
+game's frame loop, and **holding Alt puts a Win32 window into menu-modal mode**,
+which can stall that loop for as long as the combo is held. The modifier chosen
+to make the shortcut feel deliberate was the one that guaranteed it could never
+be observed. A shortcut that cannot fire is worse than none, because it answers
+"did you try the rescue" with a yes.
+
+The rescue is now **Shift+F9**, matching the mod's existing Shift+F3 / Shift+F4
+idiom. Bare F9 was rejected — `field_nav_handlekeys.inl` binds it to the Garden
+battle SKIP, and an unscoped key that sometimes lands on a scoped one is a BAT
+waiting to happen. F10 and Alt were rejected for the same reason as each other.
+
+The Controller row's warning is now **unconditional**. v0.25.1 gated it on the
+row already reading Customize, reasoning that a warning firing when nothing is
+wrong is noise. That was wrong: a warning about a one-way door is only useful on
+the side of it you can still turn back from.
+
+**One thing is deliberately still missing.** The key letters are drawn as font
+glyphs — the draw path is `char = 0x004A2DF0(logical) + 0x80` — so they exist as
+pixels and appear nowhere in the exe or in mngrp as text. Until they are read off
+a screenshot at a known map, every caller degrades to naming Shift+F9 rather than
+guessing. **A wrong key on this screen is worse than no key**: acting on it
+presses something that gets reassigned.
+
+Verified: `menu_sim` and `menu_config_compile` OK (0 bad), including a fuzz pass
+over button maps that are not permutations — a logical button appearing twice or
+not at all, which is what a mid-swap frame looks like. `lint_seh` / `lint_xtu` OK.
+
+## v0.25.1
+
+#84: **Alt+K — a way out of the Customize screen.**
+
+Aaron, testing v0.25.0: *"I think I inadvertently switched the controls. I tried
+to switch the option back to Normal but it still doesn't seem correct. For
+example X is no longer Confirm, Z is."*
+
+**The mod walked him up to a one-way door and did not mention it was one.** The
+Config screen's Controller row has two settings; the second, Customize, opens a
+screen where **Cancel is not handled at all** and where the Steam port arms a
+"press the button you want" rebinder. A blind player feeling for the way out
+remaps a control with every press, and the documented exit is a button whose
+keyboard equivalent is written down nowhere in the game.
+
+**Alt+K restores FF8's stock controls, from anywhere** — field, menu or battle.
+It reproduces the game's own defaults action (`0x004EE007`): write `map[i] = i+1`
+for all twelve, clear the analog-swap bit — and *also* clears the Controller bit,
+because `0x004A2D60`, the function every button read passes through, returns the
+input word **completely untouched** unless that bit is set. Its first two
+instructions are `test byte [0x1CFE73C], 0x20 / jne`. So clearing the bit is on
+its own sufficient; the map rewrite is belt and braces, since a player in this
+situation should not have to trust one of the two.
+
+Unrelated flags survive — ATB, Cursor and Scan are left exactly as they were, and
+the probe asserts it.
+
+The Config screen now warns **before** the door as well as after:
+
+* Sitting on `Controller, Customize` → *"Confirm here opens button assignment,
+  where Cancel does not work. Alt K restores defaults at any time."*
+* A non-stock map, **even with the row reading Normal** → *"Buttons have been
+  remapped. Press Alt K to restore defaults."* That is precisely the state Aaron
+  was left in, and it is the case a warning attached to the Customize row alone
+  would have missed.
+* Inside Customize → the warning leads, because by then Cancel has already
+  failed once.
+
+A stock pad on Normal says nothing extra; a warning that fires when nothing is
+wrong is noise, and the gate asserts that too.
+
+Verified: `button_map_rescue: OK (0 bad)` — swapped maps, the Customize bit on
+its own, unrelated flags preserved, edge-triggered so it cannot fire every frame.
+`menu_sim` / `menu_config_compile` / `menu_card_compile` /
+`menu_junction_compile` / `menu_magic_compile` OK; `lint_seh: OK (93 files)`;
+all world-map tests and harnesses green.
+
+**Build fix, same version** — this build never compiled, so it was never pushed.
+MSVC rejected it:
+
+```
+menu_tts_config.inl(83): error C2653: 'ButtonMapRescue': is not a class or namespace name
+menu_tts_config.inl(83): error C3861: 'IsDefault': identifier not found
+```
+
+`ButtonMapRescue` is defined in `src/button_map_rescue.inl`, which **dinput8.cpp**
+includes; the Config row that calls it is part of **menu_tts.cpp**. Two
+translation units, one name, nothing declaring it across the gap — and
+`IsDefault()` was `static`, so even a declaration would have moved the failure to
+link time rather than fixed it. Now non-static, with
+`namespace ButtonMapRescue { bool IsDefault(); }` forward-declared in menu_tts.cpp
+beside the existing Log/ScreenReader/Config declarations.
+
+**Neither host probe could have caught this, which is the part worth keeping.**
+`menu_config_compile` stubs `ButtonMapRescue` because it does not own it;
+`button_map_rescue_test` stubs the menu side for the same reason. Both were
+green. **A stub is a statement about an interface, not evidence the interface is
+reachable** — each probe was individually right and the program still did not
+build. New gate `tests/lint_xtu.py` closes it: find every namespace defined only
+in `.inl` files (never declared in a `.h`), work out which `.cpp` textually
+includes each one, and fail when a different TU uses the name with no forward
+declaration. Comments are stripped first, so mentioning a namespace in prose is
+not a call. Verified by running it against the broken tree — it reports exactly
+the line MSVC rejected — and `lint_xtu: OK` on the fixed tree, 169 files scanned.
+
+## v0.25.0
+
+#84: **the Config screen.**
+
+Second of the three. **Every value on this screen is invisible to a screen reader
+by design** — the four toggles draw both words side by side and show which is
+active *only* by palette, and the five bars have no numeric readout at all. So
+unlike the other menus, where the mod adds context to text that is at least
+present, here it is speaking the entire state of the screen.
+
+```
+Controller, Normal
+Cursor, Memory
+ATB, Active. Enhanced Wait Mode is on. Press O in battle to toggle it
+Battle speed, 5 of 5, fastest
+Sound, 100 percent. Volume is controlled by the mod: F7 and F8 for music, F5 and F6 for effects
+```
+
+**The two rows the mod has taken over**, as Aaron asked. A blind player who turns
+the game's Sound slider down and hears nothing change would reasonably conclude
+the setting is broken — it is not, the mod's own mixer is what they are hearing.
+And the game's ATB bit is a much narrower thing than the mod's Enhanced Wait
+Mode: it only freezes the battle clock while a command or target menu is open,
+so which of the two is on is the useful fact rather than the bit. Both notes are
+spoken **every time the row is selected**, not once per visit — the whole point
+is that the row does not do what its name says.
+
+**The bars run the opposite way to their stored byte.** The value is 0..4 with
+**0 meaning the FULL bar**, and Right *decreases* it. Speaking the raw byte would
+tell the player that 0 is the most and 4 the least, which is backwards from both
+the bar in front of them and from any guide. The spoken number is the bar length,
+1..5, with the two ends named — and "fastest" on the speed rows becomes "most" on
+Camera movement, which shares the widget but not the meaning.
+
+Identification double-confirmed the same way Card was: the main menu's
+`{textEntry, action}` table at `0x00B87FE0` pairs text entry 9 ("Config" /
+"Configuration Menu") with action byte **8**, and dispatch index 8's overlay is
+`menucfg.ovl`, which no other index uses. Update `0x004EDE90`, 14 states, 9 rows
+at `0x00B88970`, settings block `0x01CFE738`.
+
+**Steady states are 3 and 7 — and state 2 falls THROUGH into state 3's body**, so
+the first interactive frame reports 2. Gating on 3 alone would have dropped the
+arrival line whenever the poll landed on that frame, which is an intermittent.
+Both are speakable. States 5 and 11 are the list/Customize slides and, unlike the
+Card album's page slides, read no input at all.
+
+**Left/Right change a value without moving the cursor or the state**, so the
+dedup key is the whole composed line. Keyed on the row instead, adjusting a
+slider would have been silent — the one thing this screen must never be.
+
+**Cancel does not work in the Customize sub-screen.** State 7 tests only the
+`0x0800` edge bit; the Cancel bit is not read at all, so a player who presses it
+gets nothing and has every reason to think the game has hung. Sighted players see
+the on-screen legend. That warning now leads the Customize announcement.
+
+Keys: **0** every setting in one pass, **1** position, **2** the game's own help
+line for the row.
+
+Verified: `menu_sim: OK (0 bad)` — all four toggles both ways, both overridden
+rows including the mod-state-versus-game-bit independence, the bar inversion, the
+camera row's different meaning, the nine-setting readout, and 20,000 randomised
+views. `menu_config_compile: OK (0 bad)` — the module walk, the 14-state gate
+including the fall-through, a value change with the cursor stationary, and the
+Customize warning. All other gates green; `lint_seh: OK (92 files)`.
+
+Not done: the Customize screen's per-row button assignments (page and exit are
+spoken; the ten action rows are not). Recorded in
+`docs/CONFIG_MENU_FINDINGS.md`. Tutorial next.
+
+## v0.24.2
+
+#83: **the fifth number needed a name.**
+
+Aaron: *"you hear a card's name followed by its values and then the quantity you
+have of that card. The trick is you hear the values immediately followed by the
+quantity number without context. e.g. Bit Bug 1 3 5 2 4 - that 4 at the end is
+actually the quantity, not one of the values."*
+
+Exactly right, and it is a failure of the terse format rather than a bug in it.
+**Four bare numbers are unambiguous precisely because there are always four of
+them** — the ear counts them off and stops. A fifth number silently joins the
+set, and there is nothing in the sound to say it is not a left-hand value.
+
+```
+Bite Bug, 1 3 3 5, quantity 4
+Ifrit, 9 6 2 8, Fire, quantity 2
+```
+
+One word, and it is the same word the Magic and Junction lists already use, so
+there is now one term for "how many of these you have" across the whole menu.
+Unchanged: a quantity of exactly 1 is still not spoken, and "not held" still
+covers the only other case.
+
+Verified: `menu_sim: OK (0 bad)` — including Aaron's own example card;
+`menu_card_compile: OK (0 bad)` — the labelled count through the real offsets;
+`menu_junction_compile` / `menu_magic_compile` OK; `lint_seh: OK (91 files)`;
+entryaim / trigwalk / trigseg / pathdecimate / vehsig OK; catalog_story and
+garden_aboard 0 failures; all harnesses compile.
+
+## v0.24.1
+
+#83: **two panels the screenshot caught.**
+
+Aaron BAT'd the album clean — the log has 64 `[CardTTS]` lines and zero errors —
+and sent an F11 screenshot with Ifrit selected. **The screenshot showed the four
+numbers as 9 / 8 / 6 / 2 in their diamond, which is exactly what the mod said
+("Ifrit, 9 6 2 8"), so the generated table is confirmed against the rendered
+screen and not just against the exe.** It also showed two panels the mod was
+reading none of.
+
+**The summary panel.** Down the right-hand side, permanently: `MONSTER 9 / BOSS 0
+/ GF 2 / PLAYER 0 / TOTAL 11`. The game computes those itself at album open into
+module `+0x32..+0x3A`, and key 0 now speaks them in the screen's own order before
+the two numbers the screen does *not* show:
+
+```
+Monster 9, boss 0, GF 2, player 0, total 11. 77 different of 110, 77 seen
+```
+
+v0.24.0's key 0 recomputed its own totals, which is worse than useless — they
+would not have matched what a guide or a sighted player was looking at.
+
+**The bottom info line, on new key 3.** The screenshot's bottom bar reads
+`AREA … Squall`, and that line changes with the cursor:
+
+* For the **77 common cards** it is labelled `MONSTER` and names the monster that
+  carries the card, or the pair that play it from level 5 up — *"Carried by Snow
+  Lion, Funguar"*. Static table at `[0x00B96500]`, so it is generated into
+  `menu_card_data.inl` alongside the rest.
+* For the **33 rares** it is labelled `AREA` and is **dynamic**: it names whoever
+  is holding the card right now. `0xF0` is you, `0x00` is "used up", and anything
+  else is an NPC resolved through `0x00B96878` into the loaded `areames` bank —
+  reproduced exactly as `0x004C0660` does it, two reads and a bounds check, no
+  file parsing and no calling into the game from the mod's thread.
+
+**For a rare card that line is the only thing in the game that tells you where to
+go and find it**, and it was invisible. It is on a key rather than in the list
+line because it is a sentence and the list line is meant to be four numbers you
+can move through.
+
+Both are gated: with no `areames` bank loaded the reader stays **silent** rather
+than speaking whatever a null pointer dereferences to, and the probe asserts that
+— the host has no SEH, so it also had to be taught to map the pages the mod is
+allowed to fault on.
+
+Verified: `menu_card_compile: OK (0 bad)` — the two fixed owner codes, the
+common-card source including a level-5 pair, the null-bank silence, the unseen
+card, and the summary panel read from the module's own counters.
+`menu_sim: OK (0 bad)`; `menu_junction_compile` / `menu_magic_compile` OK;
+`lint_seh: OK (91 files)`; entryaim / trigwalk / trigseg / pathdecimate / vehsig
+OK; catalog_story and garden_aboard 0 failures; all harnesses compile.
+
+Kept as-is deliberately: a quantity of exactly 1 is still not spoken (the screen
+shows "1" in its NUM column, but "not held" already covers the only distinction
+that matters, and 110 rows is a lot of ones).
+
+## v0.24.0
+
+#83: **the Card album.**
+
+First of the three menus left on the main menu (Card, Config, Tutorial), and the
+first screen the mod had never spoken a single word of.
+
+```
+Level 1, Monster. Geezard, 1 4 1 5
+Ifrit, 9 6 2 8, Fire, 2
+Bahamut, A 8 2 6
+Geezard, 1 4 1 5, not held
+Card 7, not seen
+```
+
+Aaron: *"announce each card's values in the order of Top, Right, Down, Left...
+just announce each number with a clear space between rather than saying 'Top 5,
+Right 2, Bottom 3, Left 4' as that is verbose and will get old."* So the list
+line is four bare numbers clockwise from the top, and the labelled form lives
+behind a key for when you have stopped moving and want to be sure which one was
+the left. **Ten is spoken as "A"** — that is what the card shows and what every
+Triple Triad guide, opponent and rule discussion calls it; "ten" would be a
+private vocabulary matching nothing the player can look up.
+
+**Identification was a trap, and the disassembly caught it.** Indices 20, 22 and
+30 all use text group 13 and all look like the card menu — their group 13 is a
+different mngrp SECTION, because their overlay is `menututo.ovl`. The album is
+**dispatch index 7** (`creator 0x004EF020`, update `0x004EF6F0`, draw
+`0x004EF750`, 13 states), confirmed twice: the dispatch pair's second dword is
+the text-overlay id and index 7's is 12 = `menucrd.ovl`, and the main menu's own
+`{textEntry, action}` table at `0x00B87FE0` pairs "Card" / "Look at cards" with
+action byte 7.
+
+**State 5 is the only steady state — and the usual test does not find it.**
+States 7 and 9 are the page-slide animations and they *do* read the input word,
+because they queue a further left/right flip mid-slide. On Junction "does this
+state read input" would have been enough; here it is not. The test that works is
+whether the player can sit still in it.
+
+**The two savemap encodings share one byte.** For the 77 common cards
+`0x01CFEF38 + id` is `0x80 | count`, and `0x00` means *never seen* — not zero
+held. For the 33 rares the same byte is an **owner code** (`0xF0` you hold it,
+`0x00` used up, anything else an NPC has it) and "have you ever seen it" is a
+separate bit at `0x01CFEFA6`. So `0x00` means two different things depending on
+which side of card 77 you are on, and the mod reproduces `0x00534950` rather
+than calling into the game from its own thread.
+
+**Unobtained cards are conveyed by dimming, unseen ones by a blank row** — both
+invisible to a screen reader, both now spoken. A never-seen card is *not* named:
+the blanks are the point of a collection record, and naming one would leak the
+album.
+
+**The 110-card table is GENERATED, not typed** (`offline/gen_cards.py` →
+`src/menu_card_data.inl`), from `0x00C74D00` (stride 8, `[0]=Top [1]=Bottom
+[2]=Left [3]=Right [4]=element`) and the name table at `0x00C75074`. The
+generator refuses to emit unless every card passes three checks — all four powers
+in 1..10, at most one element bit, and byte `+5` (the game's own AI rating)
+equal to `(T²+B²+L²+R²)/2`, which is an independent confirmation that those four
+bytes really are the four powers. Nine published card values are a hard gate on
+top, chosen so most have four *distinct* numbers: the arithmetic check squares
+and sums all four, so only a card whose numbers differ can catch a transposition.
+
+Number keys, matching the Status and Junction screens: **0** the collection
+(held, different, seen — the game's own summary counts duplicates and stops
+there), **1** position, **2** the card in full with labels.
+
+Verified: `menu_sim: OK (0 bad)` — nine published cards pinned, every name and
+power range-checked, the terse and labelled lines, the dimmed and blank rows,
+"A" for ten, the category boundaries, and 20,000 randomised views including
+out-of-range cursors. `menu_card_compile: OK (0 bad)` — the module walk in all
+ten pool slots, both savemap encodings, the 13-state gate, the page-turn header.
+`menu_sim` / `menu_junction_compile` / `menu_magic_compile` / `lint_seh`
+(91 files) all OK; entryaim / trigwalk / trigseg / pathdecimate / vehsig OK;
+catalog_story and garden_aboard 0 failures; all harnesses compile.
+
+Config and Tutorial next, one at a time. See `docs/CARD_MENU_FINDINGS.md` for the
+full disassembly, including the complete 110-card table.
+
+## v0.23.3
+
+#82: **the character switch, and two things the log said.**
+
+Aaron: *"That worked well. Check the logs for any bugs or issues we may have
+missed. The only thing I noticed is that Junction here doesn't announce the name
+of the new selected character when Q and E are pressed to switch between
+characters."*
+
+**L1/R1 swaps the character and nothing said so.** The switch is a change in
+`pMenuStateA + 0x261`, the state machine's own character field, so it is watched
+from **any** state — which matters, because the log caught it at the ACTION ROW,
+not the grid (`17:40:25  [SUBMON] +0x261: 2 -> 0`, with nothing spoken). The
+complication: **confirming out of character select changes the same byte**
+(`17:39:22  +0x261: 0 -> 2`), and there the char-select screen has just said
+"Irvine, Level 19, HP 522 of 1837". The two cases are two seconds apart either
+way, so recency cannot separate them — but the **value** can: a confirm lands on
+the character char-select just named, a switch never does. The marker is
+**consumed** on use, so switching away and back announces both times, which a
+recency test would have swallowed. In the grid and the magic list the name goes
+into the header instead, so the switch and the new line are one utterance:
+*"Squall. HP, Life, 2370"*. The grid header names the character on arrival too —
+every line on that screen differs per character and none of them say whose it is.
+
+**The character select announced itself twice.** Not audible enough to report,
+but the log has two identical `CharSelect: Irvine…` lines in the same second,
+twice over. The "force a re-announce when returning from deeper" reset lived at
+the END of the poll, so the arrival frame announced with the stale cursor still
+matching and the next frame announced again after the reset. Doing the reset
+BEFORE the announce block makes the arrival frame the only one that speaks.
+
+**The log claimed a solved screen was unhandled** — `Unhandled focus=52` fourteen
+times, `=59` eleven, plus 49/54/56/57/58/61/62/63. Those are the grid, the magic
+list and their slide and scroll states, owned by `PollJunctionStats` since
+v0.23.0; the diagnostic predates it and now skips 49..62.
+
+**Noted, not a bug: the eligibility mask lags a column change.** The game
+recomputes `+0x24A` in state 58 and in state 52's input block, but not in the
+page-scroll states 53..56, so a grid line read on the frame after a column change
+carries the previous column's mask. Nothing on the grid uses it and the "None of
+your magic affects this row" header is only composed in state 59 where state 58
+has just rebuilt it — so every readout was correct. But a stale number in a log
+invites a bug hunt, so it is now printed only where it means something.
+
+Also confirmed working by the log: the v0.23.2 trade on both attack rows
+(*"Thunder, quantity 90, Ice 46 to 0 percent, Thunder 0 to 45 percent"*,
+*"Berserk, quantity 11, Berserk 0 to 11 percent, Slow 41 to 0 percent"*),
+v0.23.1's assembled status mask, and "locked" on two characters with different
+junction abilities. Zero errors in 1,169 lines.
+
+Verified: `menu_junction_compile: OK (0 bad)` — the switch named on the action
+row, folded into the header on the grid, silent on a char-select confirm, and
+speaking again after switching away and back. `menu_sim: OK (0 bad)`;
+`menu_magic_compile: OK (0 bad)`; `lint_seh: OK (90 files)`; entryaim / trigwalk
+/ trigseg / pathdecimate / vehsig OK; catalog_story and garden_aboard 0 failures;
+all harnesses compile.
+
+**Confirmed in the BAT, and pinned in the exe: the swap is only accepted on the
+action row.** `+0x43` is written at exactly two instructions (`0x004DBCF2`,
+`0x004DBF68`, the state 4 and 6 handlers) and those two states are dispatched
+from one place only — state 3. The watcher stays state-agnostic regardless,
+since reading the field is cheaper than depending on the game's input routing;
+the grid/magic header branch is now marked as the defensive path it is.
+
+⚠ The confirmation turned up a near-miss: **the swap also calls `0x004BE790`**,
+the auto-junction routine the Auto-confirm hardware breakpoint watches. That
+detector is only correct because it gates on `+0x22E == 11`. Without the gate,
+every character switch would announce "Junctioned automatically for …", and only
+after an Auto submenu had been opened at some point — an intermittent that would
+have cost a BAT cycle to pin down. Noted in the code and in
+`docs/JUNCTION_MENU.md`.
+
+See `docs/changelog_23_3.md`.
+
+## v0.23.2
+
+#82: **a junction is a trade, and only one side was spoken.**
+
+Aaron's v0.23.1 BAT: *"it is only announcing the one value when in fact two or
+more may change... the mod said Confuse 8% or similar, but neglected to mention
+the drop in the Stop status. A sighted player can see both effects. Make sure
+this fix applies to elements and other magic junctions as well where increasing
+one value decreases another."*
+
+**The cause was a design note I wrote in v0.23.1 and was wrong about:** *"an
+attack row is a SET plus one percentage... naming the outgoing set as well would
+double the sentence for no gain, since the grid line already said it."* It is not
+no gain. Junctioning Confuse over Stop **raises Confuse and drops Stop**, and on
+screen both arrows are visible at once — saying only the rise describes a trade
+as though it were a gift. The grid line does not cover it either, because the
+grid line describes the row *before* you started choosing.
+
+**The fix generalises rather than special-cases.** An attack row is now turned
+into the same per-entry before/after table the defence rows already were — an
+entry's percentage is `(mask has it) ? row percentage : 0` — and every row type
+goes through one collector and one emitter, so there is no longer a code path
+that *can* report one side of a change.
+
+```
+Confuse, quantity 8, Stop 40 to 0 percent, Confuse 0 to 8 percent
+Fire, quantity 22, Thunder 80 to 0 percent, Fire 0 to 50 percent
+```
+
+The outgoing side has to come off the **baseline** block (`0x01D8B3B0`) and be
+assembled from *its own* `+0x1B4` and `+0x18C`; reading the live block for both
+halves reports no drop at all, so `menu_junction_compile` plants a different
+spell in each block and asserts both clauses appear.
+
+**The flat cap of four is gone** — it could truncate exactly the drop that was
+missing. Deltas are **grouped by their (from, to) pair** instead, which is the
+shape junction changes actually have (a whole set moving `0 → N` or `M → 0`), so
+ten statuses arriving together are one clause naming ten statuses rather than
+four clauses and a shrug: *"Poison, Petrify, Darkness, Silence, Berserk, Sleep,
+Slow, Stop 0 to 20 percent"*. The remaining caps exist only so a pathological
+state cannot overflow the buffer, and anything dropped is still admitted with
+", and more" — a silent truncation would read as completeness, which is the
+failure this whole change is about. Order follows the table rather than the
+direction of the change, so the preview and the on-demand readout agree.
+
+Verified: `menu_sim: OK (0 bad)` — Aaron's exact case, the same-set-lower-
+percentage case, a three-status spell displacing a one-status spell, the
+elemental-attack and defence swaps, the ten-status grouping with its admitted
+tail, and 20,000 randomised views that now randomise **both** halves of every
+attack and defence table. `menu_junction_compile: OK (0 bad)`;
+`menu_magic_compile: OK (0 bad)`; `lint_seh: OK (90 files)`; entryaim / trigwalk
+/ trigseg / pathdecimate / vehsig OK; catalog_story and garden_aboard 0 failures;
+all harnesses compile.
+
+**Method note: three of the last four Junction defects were a sentence I wrote
+asserting that something did not need saying.** A comment that justifies an
+omission is the first place to look when a BAT says something is missing.
+
+See `docs/changelog_23_2.md`.
+
+## v0.23.1
+
+#82: **the status-attack row was reading half a mask.**
+
+Aaron's v0.23.0 BAT: *"Junctioning to ST-Atk doesn't seem to announce any value.
+Regardless of which spell I selected for it I heard ST-Atk would have no effect"*
+and *"as I moved through the page of spells to junction I heard repetitive
+announcement on each page."*
+
+**The status-attack mask is ASSEMBLED, not stored.** v0.23.0 read it as a u16 at
+block `+0x1B4` and the percentage as a u16 at `+0x1B6`. `0x004E0FA0` takes seven
+bits from `+0x1B4` and six more out of the status word at `+0x18C` — Sleep(7),
+Slow(8), Stop(9), Curse(10), Confuse(11), Drain(12) — which is FF8's real
+two-word status bitfield folded into the thirteen entries the screen shows.
+**Six of the thirteen live entirely in the second word, Sleep among them**, so
+the old read returned zero for about the most likely ST-Atk junction there is.
+Wrong in the direction that produces SILENCE rather than a wrong number, which is
+why the row presented as unhooked. The percentage is offset too — `0x004E0C7D`
+does `sub eax, 0x64` on `+0x1B6`, while the elemental attack percentage next door
+is absolute. New `JuncAssembleStatusMask()` mirrors the game, and menu_sim pins
+all thirteen bits individually plus the requirement that the whole set is
+reachable; a two-bit spot check would have passed on the broken version.
+
+**"No effect here" on every spell was CORRECT, and still the wrong thing to
+say.** `0x004C2E50` reads the spell's kernel entry, and for ST-Atk that is the
+status mask at `entry + 0x26` — **only thirteen spells in the game have a
+non-zero one**, exactly one per junctionable status. So on ST-Atk almost
+everything a player is carrying really does nothing. Hearing it thirty-two times
+sounds like a hook that has given up; it is now said once on arrival — *"Choose
+magic for Status attack. None of your magic affects this row"* — with the
+per-spell qualifier kept for the mixed case. An empty inventory does not trigger
+it, because that would blame the row for the player having no magic.
+
+**The two attack rows previewed as "no change".** The delta walk only covered the
+defence arrays, so on Elem-Atk and ST-Atk — where what the row would BECOME is
+the whole question — every candidate read as doing nothing. An attack row is a
+set plus one percentage, not a per-entry table, so the line now says the
+resulting set: *"Sleep, quantity 30, Sleep 30 percent"*.
+
+**The page-turn repeat is the v0.22.1 Magic bug again.** Paging the spell list is
+**59 → 60 → 59** (state 60 at `0x004DED18` is page-left, 62 page-right); the poll
+recorded the transient state, so coming back looked like a fresh arrival and
+re-announced the header. Same fix as then: remember the last state SPOKEN IN,
+never the last state seen. The dedup key now carries the cursor positions as
+well, so a page turn onto an identically-worded entry still speaks. The compile
+probe **replays the real chain** seven times — replaying the transition rather
+than constructing its endpoints, which is the rule the last three of these bugs
+have earned.
+
+Free confirmation: kernel.bin's per-spell ST-Atk masks give exactly one spell per
+bit, each the spell of that name, so the 13-status ordering now agrees from three
+unrelated directions.
+
+Verified: `menu_sim: OK (0 bad)`; `menu_junction_compile: OK (0 bad)`;
+`menu_magic_compile: OK (0 bad)`; `lint_seh: OK (90 files)`; entryaim / trigwalk /
+trigseg / pathdecimate / vehsig OK; catalog_story and garden_aboard 0 failures;
+all harnesses compile.
+
+See `docs/changelog_23_1.md` and `docs/JUNCTION_MENU.md`.
+
+## v0.23.0
+
+#82: **finishing the Junction menu.**
+
+The junction grid, the magic list with the game's own live preview, the character
+ability list, the always-on party abilities, and number-key readouts. Same split
+as the Magic submenu — `src/menu_junction_model.inl` holds the wording as pure
+functions of a `JunctionView`, `src/menu_tts_junction_stats.inl` holds only
+addresses, and `tests/menu_sim.cpp` drives the wording offline.
+
+```
+Strength, Curaga, 68
+Speed, locked
+Elemental defence 2 of 4, Blizzaga, Ice resists 50 percent
+Choose magic for Strength. Curaga, quantity 47, Str 42 to 68
+Meltdown, quantity 3, no effect here
+```
+
+**Not overwhelming was the design brief, and it is the design.** Eight elements
+and thirteen statuses on every cursor move would be unusable and a zero is not
+news, so resistance rows name only what is non-zero, the preview reports only
+what *moves* (capped at four, with ", and more"), and the full 21-entry picture
+lives behind key 9 on demand.
+
+**Three things the disassembly corrected.**
+
+**(1) State 37 is a slide-in animation, not the grid.** The first draft polled
+there; `0x004DB008` walks `+0x40` from 0 to `0x1000` and only then hands over, so
+the grid would have been announced at most once per visit, on whichever frame the
+poll landed — a flaky hook, not an obviously wrong constant. The steady grid state
+is **52** (`0x004DB29F`). Same shape as the v0.22.5 latch bug, so it gets a gate:
+`menu_junction_compile` walks all 74 states and asserts exactly two speak.
+
+**(2) The character-ability cursor moves with the list.** `0x004DAE12` addresses
+it as `module[0x52 + kind]` — commands at `+0x271`, character abilities at
+`+0x272`. The mod read `+0x271` unconditionally, which is exactly why *"command
+abilities are hooked already"* and character abilities were not: it was browsing
+a cursor that had stopped moving. The list contents now come from the game's own
+arrays (`0x01D8B258` / `0x01D8B280`, built by `0x004E0110`) rather than from
+`BuildAbilityRightPanel`'s reconstruction — **a reconstruction can agree on
+membership and still disagree on order, and order is the only thing a cursor
+index means.**
+
+**(3) The elemental and status rows are locked by the same mask as the stats.**
+`0x004DE531` gates them by `0x200` / `0x400` / `0x6800` / `0x19000`, which land
+on exactly ability ids 10 / 11 / 12,14,15 / 13,16,17 once you subtract one — five
+independent agreements. Without it a character with no Elem-Def-J heard
+"Elemental defence 1, empty" forever and never learned why.
+
+**Eligibility is the Magic screen's problem again.** `pMenuStateA + 0x24A` is a
+mask the game builds itself (`0x004DE485`, asking `0x004C2E50(spellId, slot)`)
+over the 32 stock entries; ineligible spells are drawn **dim**, which is
+invisible to a screen reader. The list now says "no effect here" — distinct from
+"no change", which means the spell is legal and merely does not help.
+
+**Elements and statuses are derived from kernel.bin, not looked up.** The labels
+on this screen are sprites, so unlike the Magic menu there is no in-game string
+to read back and a wrong ordering would be undetectable in play. Every bit is
+pinned by a spell whose own name states it (Quake → Earth, Break → Petrify, Pain
+→ Poison/Darkness/Silence/Curse, which fixes bit 10). `menu_tts_status.inl`
+reached the same orders from live junctions and now shares the tables.
+
+Also: the grid cursor is **not** the slot number — it indexes a 20-byte table at
+`0x00B88604`, and cell 15 is the blank the game itself skips.
+
+Verified: `menu_sim: OK (0 bad)`; `menu_junction_compile: OK (0 bad)`;
+`menu_magic_compile: OK (0 bad)`; `lint_seh: OK (90 files)` — and it caught a
+C2712 in `JunctionNumberKeys` before the build did. entryaim / trigwalk /
+trigseg / pathdecimate / vehsig OK; catalog_story and garden_aboard 0 failures;
+all harnesses compile. **Fixed en route: `tests/catalog_harness.cpp` has not
+compiled since v0.20.29** — it keeps its own copy of `CapturedTriggerLine` and
+`isCameraTransition` was never added to it.
+
+See `docs/changelog_23_0.md` and `docs/JUNCTION_MENU.md`.
+
 ## v0.22.5
 
 #81: **the latch was disarmed by the very frames it had to survive.**

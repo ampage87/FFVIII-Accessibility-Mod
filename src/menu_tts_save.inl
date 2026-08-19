@@ -898,6 +898,111 @@ static void ScanForSaveHeaders()
 // SEH-protected block cursor poller — announces "Block N" on cursor change
 static DWORD s_blockCursorLastPoll = 0;
 
+// ---------------------------------------------------------------------------
+// v0.29.0 (#88): "Data exists.  Overwrite?"
+//
+// **This dialog was completely silent, and it decides whether the save happens.**
+// Choosing an occupied block puts it up (state 0x36, 0x004E3B0E): phase +0x48
+// = 4, the two-option cursor +0x4F is preset to **1**, and the text is group 5
+// entry 5. State 0x37 (0x004E4C1E) runs `0x004C0A30(edge, 2, [esi+0x4F])` and on
+// Confirm does `neg dl / sbb edx,edx / and edx,0xFFFFFFE8 / add 0x38` -- cursor
+// 0 goes to state 0x38 and writes the save, anything else goes to 0x20 and
+// abandons it.
+//
+// So a blind player pressed Confirm on a block, heard nothing, pressed Confirm
+// again on the default, and was returned to the block list **believing he had
+// saved**. Nothing about that is recoverable later.
+//
+// The wording and the option labels come from the window itself (menu_dialog.inl)
+// rather than from a string here, because the same window is shared across the
+// menu and this mod has already been caught once assuming an option order.
+// The module is found by WALKING THE POOL for the update function the Save
+// creator installed (0x004E6740 -> 0x004BE540(0x004E3090, 0x004E5550)), not by
+// assuming a slot. Every other Save reader in this mod still uses the fixed
+// pMenuStateA+0x1A6 ("mode 1") / +0x21E ("mode 6") aliases, which is exactly the
+// bug class that made the Magic screen read a stranger's bytes in v0.22.x. For a
+// dialog that decides whether the save happens, a wrong base is worse than
+// silence: it can speak "Overwrite?" over a screen that has no dialog on it.
+static const uintptr_t SAVE_POOL_BASE  = 0x01D76BC8;
+static const uintptr_t SAVE_POOL_END   = 0x01D77078;   // base + 10 * 0x78
+static const uintptr_t SAVE_LIST_HEAD  = 0x01D76B48;
+static const uint32_t  SAVE_STATE_FN   = 0x004E3090;
+
+static const int SDO_PHASE      = 0x48;   // draw/step id
+static const int SDO_DLG_CURSOR = 0x4F;   // the 2-option cursor, 0 = first option
+
+// The save module opens the shared window in exactly two places -- there are
+// only two calls to 0x004C2B10 in 0x004E3090..0x004E5550:
+//   0x004E3B26  phase 4, cursor preset 1, text = 0x004BD630(1, 5, 5, 0)
+//               ("Data exists.  Overwrite?"); state 0x37 at 0x004E4C1E runs the
+//               cursor and on Confirm does neg/sbb/and 0xFFFFFFE8/add 0x38, so
+//               cursor 0 -> state 0x38 (write the save) and anything else ->
+//               state 0x20 (abandon it). Cancel (0x10) also goes to 0x20.
+//   0x004E4FD9  phase 8, cursor preset 1, text = 0x004BD630(1, 5, slot+0x0B, 0)
+//               (the unformatted-folder prompt); state 0x29 at 0x004E4FF9 runs
+//               the same 2-option cursor.
+// Both preset the cursor to 1 -- the SECOND option -- so a player who hears
+// nothing and presses Confirm gets "no". That is the whole defect: he pressed
+// Confirm on a block, heard nothing, pressed Confirm again, was returned to the
+// block list, and believed he had saved.
+static const int SAVE_PHASE_OVERWRITE = 4;
+static const int SAVE_PHASE_FORMAT    = 8;
+
+static char s_saveDlgLast[320] = {0};
+
+static uint8_t* FindSaveModule()
+{
+    __try {
+        uint8_t* m = *(uint8_t* volatile*)SAVE_LIST_HEAD;
+        for (int i = 0; i < 12 && m; i++) {
+            const uintptr_t a = (uintptr_t)m;
+            if (a < SAVE_POOL_BASE || a >= SAVE_POOL_END) break;
+            if ((a - SAVE_POOL_BASE) % 0x78 != 0) break;     // not a pool slot
+            if (*(uint32_t*)(m + 0x08) == SAVE_STATE_FN) return m;
+            m = *(uint8_t* volatile*)m;                       // ->next
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+    return nullptr;
+}
+
+static bool SaveReadDlgState(uint8_t* mod, int& phase, int& cursor)
+{
+    phase = cursor = 0;
+    __try {
+        phase  = (int)*(volatile uint8_t*)(mod + SDO_PHASE);
+        cursor = (int)*(volatile uint8_t*)(mod + SDO_DLG_CURSOR);
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+    return true;
+}
+
+// Safe to call every frame from anywhere: it self-gates on the module actually
+// being in the pool and on the phase byte, so it costs a short list walk and
+// says nothing when no dialog is up.
+static void PollSaveConfirmDialog()
+{
+    uint8_t* mod = FindSaveModule();
+    if (!mod) { s_saveDlgLast[0] = '\0'; return; }
+
+    int phase = 0, cursor = 0;
+    if (!SaveReadDlgState(mod, phase, cursor)) return;
+
+    if (phase != SAVE_PHASE_OVERWRITE && phase != SAVE_PHASE_FORMAT) {
+        s_saveDlgLast[0] = '\0';
+        return;
+    }
+
+    char dlg[320];
+    if (!MenuDialogCompose(cursor, dlg, sizeof(dlg))) return;
+    if (strcmp(dlg, s_saveDlgLast) == 0) return;   // sitting still says nothing
+
+    ScreenReader::Speak(dlg, true);
+    snprintf(s_saveDlgLast, sizeof(s_saveDlgLast), "%s", dlg);
+    Log::Menu("[MenuTTS] Save confirm dialog phase=%d cur=%d: \"%s\"",
+              phase, cursor, dlg);
+}
+
 static void PollBlockCursor(int offset)
 {
     DWORD now = GetTickCount();

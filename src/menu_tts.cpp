@@ -39,6 +39,11 @@
 namespace Log { void Menu(const char* format, ...); }
 namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); bool IsSpeaking(); }
 namespace Config { void Load(); int GetInt(const char* key, int defaultValue); void SetInt(const char* key, int value); const char* GetPath(); }
+// v0.25.1 (#84): defined in src/button_map_rescue.inl, which dinput8.cpp owns.
+// The Config screen's Controller row reports whether FF8's own 12-button map is
+// still stock, so it can say "Buttons have been remapped. Press Alt K" even when
+// the row itself reads Normal.
+namespace ButtonMapRescue { bool IsDefault(); }
 
 using namespace FF8Addresses;
 
@@ -330,7 +335,8 @@ static DWORD    s_pendingActionTime = 0;            // GetTickCount when pending
 
 // v0.08.62: Item sub-flow state tracking
 // Use target: focus==14, +0x276 party cursor. Rearrange: focus~97, +0x272. Sort: focus flash 79. Battle: focus~30, +0x285.
-static uint8_t  s_prevTargetCursor = 0xFF;          // tracks +0x276 during Use target selection
+static uint8_t  s_prevTargetCursor = 0xFF;          // v0.30.0: the target SLOT (bit index), not a packed position
+static bool     s_prevTargetIsGF   = false;         // v0.30.0: which half of the target mask was showing
 static uint8_t  s_prevTargetCharIdx = 0xFF;         // v0.18.2.7 (#10): char whose HP the Use-target poll is tracking
 static uint16_t s_prevTargetHP = 0xFFFF;            // v0.18.2.7 (#10): last announced Use-target curHP (re-announce on change)
 static uint8_t  s_prevBattleItemCursor = 0xFF;      // tracks +0x285 during Battle items
@@ -354,6 +360,36 @@ static uint8_t  s_batDestDiagSnap[32] = {};              // diagnostic: snapshot
 // ============================================================================
 static const int JUNC_FOCUS_OFFSET        = 0x22E;  // focus state indicator
 static const int JUNC_ACTIVE_OFFSET       = 0x1E8;  // 17=Junction active, 255=inactive
+// v0.24.0 (#83): the Card album's dispatch index. The pair at 0x00B87ED8 + 7*8
+// is {creator 0x004EF020, overlay 12 = menucrd.ovl}, and the main menu's own
+// {textEntry, action} table at 0x00B87FE0 pairs text entry 6 ("Card" / "Look at
+// cards") with action byte 7 -- two independent confirmations, which this needed
+// because indices 20/22/30 ALSO use text group 13 and look like the card menu
+// until you notice their overlay is menututo.ovl and their group 13 is a
+// different SECTION.
+static const int CARD_SUBSYSTEM_ID        = 7;
+// v0.25.0 (#84): Config. Confirmed the same two ways Card was -- the main menu's
+// {textEntry, action} table at 0x00B87FE0 pairs text entry 9 ("Config" /
+// "Configuration Menu") with action byte 8, and dispatch index 8's overlay is 1
+// = menucfg.ovl, which no other index uses.
+static const int CONFIG_SUBSYSTEM_ID      = 8;
+// v0.26.0 (#85): Tutorial, and the SeeD exam it launches. The main menu's
+// {textEntry, action} table at 0x00B87FE0 -- stride 2, 0xFF-terminated, eleven
+// rows -- pairs text entry 0x37 with action byte 0x14, and 0x14 & 0x1F = 20;
+// dispatch index 20's overlay is 13 = menututo.ovl. **The exam is NOT a state of
+// that module.** Tutorial state 17 PUSHES dispatch 23 (creator 0x004D4960,
+// overlay 16 = menutest.ovl) and then parks in state 18 until it pops, so both
+// modules sit in the pool together and the poll has to prefer the exam.
+static const int TUTORIAL_SUBSYSTEM_ID    = 20;
+static const int SEEDTEST_SUBSYSTEM_ID    = 23;
+// v0.27.0 (#86): the Tutorial's other four rows. Battle Operation, Card Game
+// Rules and Icon Explanation are three dispatch ids sharing ONE module
+// (0x004C9060) -- their creators are identical and only the record range the
+// Tutorial preloads tells them apart. Information is the menutips page browser.
+static const int MAGAZINE_SUBSYSTEM_A     = 25;   // Battle Operation
+static const int MAGAZINE_SUBSYSTEM_B     = 26;   // Card Game Rules
+static const int MAGAZINE_SUBSYSTEM_C     = 31;   // Icon Explanation
+static const int TIPS_SUBSYSTEM_ID        = 21;   // Information (v0.28.0)
 static const int JUNC_CHARSEL_CURSOR_OFF  = 0x1E9;  // character select cursor (party formation index)
 static const int JUNC_ACTION_CURSOR_OFF   = 0x26C;  // action menu cursor (0-3)
 
@@ -367,127 +403,7 @@ static const int JUNC_GF_TOGGLE_OFF        = 0x27F;  // GF junction toggle (0=un
 
 static const char* JUNC_SUBOPTION_NAMES[] = { "GF", "Magic" };
 
-// v0.09.43: Unified Ability ID → Name table (IDs 0–115)
-// Source: kernel.bin sections 11–17, confirmed via deep research
-static const char* ABILITY_NAMES[] = {
-    "None",              //   0
-    "HP-J",              //   1
-    "Str-J",             //   2
-    "Vit-J",             //   3
-    "Mag-J",             //   4
-    "Spr-J",             //   5
-    "Spd-J",             //   6
-    "Eva-J",             //   7
-    "Hit-J",             //   8
-    "Luck-J",            //   9
-    "Elem-Atk-J",        //  10
-    "ST-Atk-J",          //  11
-    "Elem-Def-J",        //  12
-    "ST-Def-J",          //  13
-    "Elem-Def-J x2",     //  14
-    "Elem-Def-J x4",     //  15
-    "ST-Def-J x2",       //  16
-    "ST-Def-J x4",       //  17
-    "Ability x3",        //  18
-    "Ability x4",        //  19
-    "Magic",             //  20
-    "GF",                //  21
-    "Draw",              //  22
-    "Item",              //  23
-    "Empty",             //  24
-    "Card",              //  25
-    "Doom",              //  26
-    "Mad Rush",          //  27
-    "Treatment",         //  28
-    "Defend",            //  29
-    "Darkside",          //  30
-    "Recover",           //  31
-    "Absorb",            //  32
-    "Revive",            //  33
-    "LV Down",           //  34
-    "LV Up",             //  35
-    "Kamikaze",          //  36
-    "Devour",            //  37
-    "MiniMog",           //  38
-    "HP plus 20%",       //  39
-    "HP plus 40%",       //  40
-    "HP plus 80%",       //  41
-    "Str plus 20%",      //  42
-    "Str plus 40%",      //  43
-    "Str plus 60%",      //  44
-    "Vit plus 20%",      //  45
-    "Vit plus 40%",      //  46
-    "Vit plus 60%",      //  47
-    "Mag plus 20%",      //  48
-    "Mag plus 40%",      //  49
-    "Mag plus 60%",      //  50
-    "Spr plus 20%",      //  51
-    "Spr plus 40%",      //  52
-    "Spr plus 60%",      //  53
-    "Spd plus 20%",      //  54
-    "Spd plus 40%",      //  55
-    "Eva plus 30%",      //  56
-    "Luck plus 50%",     //  57
-    "Mug",               //  58
-    "Med Data",          //  59
-    "Counter",           //  60
-    "Return Damage",     //  61
-    "Cover",             //  62
-    "Initiative",        //  63
-    "Move-HP Up",        //  64
-    "HP Bonus",          //  65
-    "Str Bonus",         //  66
-    "Vit Bonus",         //  67
-    "Mag Bonus",         //  68
-    "Spr Bonus",         //  69
-    "Auto-Protect",      //  70
-    "Auto-Shell",        //  71
-    "Auto-Reflect",      //  72
-    "Auto-Haste",        //  73
-    "Auto-Potion",       //  74
-    "Expend x2-1",       //  75
-    "Expend x3-1",       //  76
-    "Ribbon",            //  77
-    "Alert",             //  78
-    "Move-Find",         //  79
-    "Enc-Half",          //  80
-    "Enc-None",          //  81
-    "Rare Item",         //  82
-    "SumMag plus 10%",   //  83
-    "SumMag plus 20%",   //  84
-    "SumMag plus 30%",   //  85
-    "SumMag plus 40%",   //  86
-    "GFHP plus 10%",     //  87
-    "GFHP plus 20%",     //  88
-    "GFHP plus 30%",     //  89
-    "GFHP plus 40%",     //  90
-    "Boost",             //  91
-    "Haggle",            //  92
-    "Sell-High",         //  93
-    "Familiar",          //  94
-    "Call Shop",         //  95
-    "Junk Shop",         //  96
-    "T Mag-RF",          //  97
-    "I Mag-RF",          //  98
-    "F Mag-RF",          //  99
-    "L Mag-RF",          // 100
-    "Time Mag-RF",       // 101
-    "ST Mag-RF",         // 102
-    "Supt Mag-RF",       // 103
-    "Forbid Mag-RF",     // 104
-    "Recov Med-RF",      // 105
-    "ST Med-RF",         // 106
-    "Ammo-RF",           // 107
-    "Tool-RF",           // 108
-    "Forbid Med-RF",     // 109
-    "GFRecov Med-RF",    // 110
-    "GFAbl Med-RF",      // 111
-    "Mid Mag-RF",        // 112
-    "High Mag-RF",       // 113
-    "Med LV Up",         // 114
-    "Card Mod",          // 115
-};
-static const int ABILITY_NAME_COUNT = 116;
+#include "menu_ability_names.inl"
 
 static const char* GetAbilityName(uint8_t id)
 {
@@ -498,6 +414,12 @@ static const char* GetAbilityName(uint8_t id)
 // Helper: Decode GCW buffer to a char array (isolates std::string from __try functions)
 
 // --- GCW decoder, junction TTS (extracted v0.12.18) ---
+// --- The shared yes/no window (#88, v0.29.0). Every confirmation dialog in the
+//     main menu goes through one opener and stores its text in three globals;
+//     this reads them, so no screen has to guess at the wording or the order of
+//     the options. Must precede every screen that puts one up. ---
+#include "menu_dialog.inl"
+
 #include "menu_tts_junction.inl"
 
 // --- Save screen TTS (extracted v0.12.18) ---
@@ -533,6 +455,14 @@ void MenuTTS::Initialize()
 #include "menu_tts_diagnostics.inl"
 
 // --- Item submenu TTS (extracted v0.12.18) ---
+// v0.30.0 (#89): the Item screen's Use-target list can be GFs, and it names them
+// from the savemap the same way the GF screen does. menu_tts_gf.inl is included
+// further down this same translation unit, so a declaration is all that is
+// needed -- lint_xtu's rule is about crossing TUs, and this does not.
+static void DecodeGFName(int idx, char* out, int outSize);
+
+#include "menu_submon.inl"
+#include "menu_item_swap_model.inl"
 #include "menu_tts_item.inl"
 
 // --- Help bar + hotkeys (extracted v0.12.18) ---
@@ -547,8 +477,25 @@ void MenuTTS::Initialize()
 //     copy -- that copy was correct to id 37 and wrong from 38 on. ---
 #include "menu_magic_model.inl"
 
+// --- Junction screen announcement logic (#82, v0.23.0). Pure functions of a
+//     JunctionView, shared verbatim with tests/menu_sim.cpp. Needs the magic
+//     model above for MagicSpellName / MagicSlotView. ---
+#include "menu_junction_model.inl"
+
+// --- The refine screen's shape, from its own state machine (#91, v0.33.0) ---
+#include "menu_refine_model.inl"
+#include "menu_card_data.inl"   // CARD_DEFS[110] -- Card Mod names its rows from it
+
 // --- Main-menu Ability screen TTS (#42, v0.18.1) ---
 #include "menu_tts_ability.inl"
+
+// --- Item shops and Junk Shops (#92, v0.34.0) ---
+// After the ability file on purpose: the Junk Shop's character picker indexes
+// the SET BITS of a mask exactly as the refine screen's does, and reuses
+// AbilCharAtPickerRow() and REFINE_CHAR_NAMES rather than growing a second copy
+// of a thing this project has already got wrong once.
+#include "menu_shop_model.inl"
+#include "menu_tts_shop.inl"
 
 // --- Status screen limit-break page TTS (#49, v0.18.2.27) ---
 #include "menu_tts_status.inl"
@@ -559,6 +506,26 @@ void MenuTTS::Initialize()
 // --- Magic submenu TTS (#81, v0.22.0). After junction.inl (roster + the
 //     dream-party name rule) and after the model above. ---
 #include "menu_tts_magic.inl"
+
+// --- Junction grid / magic-choice / ability readouts (#82, v0.23.0). After
+//     the model (wording), after junction.inl (GetJuncSelectedCharIdx and the
+//     JUNC_* offsets) and after magic.inl (MagicCharName, MagicTextToGlyphs). ---
+#include "menu_tts_junction_stats.inl"
+
+// --- Card album (#83, v0.24.0). Model first (wording, shared with menu_sim),
+//     then the memory layer. After magic.inl for the module-pool constants. ---
+#include "menu_card_model.inl"
+#include "menu_tts_card.inl"
+
+// --- Config screen (#84, v0.25.0). ---
+#include "menu_config_model.inl"
+#include "menu_tts_config.inl"
+
+// --- Tutorial menu and the SeeD written exam (#85, v0.26.0). Model first, then
+//     the memory layer, same as every screen since Magic. ---
+#include "menu_magazine_art.inl"
+#include "menu_tutorial_model.inl"
+#include "menu_tts_tutorial.inl"
 
 void MenuTTS::Update()
 {
@@ -629,7 +596,12 @@ void MenuTTS::Update()
         // re-read the help of the ability under the cursor instead (#3); the
         // helper returns false off that list so the normal help bar still works.
         if (GetAsyncKeyState(VK_OEM_2) & 1) {
-            if (!GFSpeakSelectedAbilityHelp() && !AbilitySpeakSelectedHelp() && !JunctionAutoSpeakHelp() && !StatusLimitSpeakSelectedHelp())
+            // v0.31.0 (#90): on a Weapons Monthly page, "/" describes the
+            // picture. Claimed FIRST because the magazine covers the screen --
+            // nothing underneath it has a help bar to read.
+            if (!MagazineSpeakArt() && !GFSpeakSelectedAbilityHelp() &&
+                !AbilitySpeakSelectedHelp() && !JunctionAutoSpeakHelp() &&
+                !StatusLimitSpeakSelectedHelp())
                 AnnounceHelpText();
         }
     }
@@ -741,7 +713,11 @@ void MenuTTS::Update()
             PollMenuCursor();
             CaptureMenuGcwText();  // v0.08.22: log rendered help text
 
-            // v0.08.28: Auto submenu cursor discovery
+            // v0.08.28: Auto submenu cursor discovery.
+            // v0.26.2: gated off -- see SUBMON_DIAG in menu_tts_diagnostics.inl.
+            // It is a discovery tool with nothing left to discover in this menu,
+            // and it was writing 87% of the BAT log.
+#if SUBMON_DIAG
             if (s_prevCursor != prevCursorBeforePoll) {
                 // Cursor just changed
                 if (prevCursorBeforePoll != 0xFF && s_submonActive) {
@@ -760,6 +736,7 @@ void MenuTTS::Update()
             }
             // Poll the monitor
             SubmonPoll();
+#endif // SUBMON_DIAG
 
             // v0.08.29: Item submenu TTS
             PollItemSubmenu();
@@ -767,9 +744,36 @@ void MenuTTS::Update()
             // v0.08.89: Junction submenu TTS
             if (s_prevCursor == 0 && !s_itemSubmenuActive) {
                 PollJunctionSubmenu();
+                // v0.23.0 (#82): the grid, the magic-choice list with its live
+                // stat preview, and the number-key readouts. Self-gating on the
+                // state word, and deliberately AFTER PollJunctionSubmenu so the
+                // older screens keep first claim on any state they both see.
+                PollJunctionStats();
+                JunctionNumberKeys();
             } else if (s_prevCursor != 0) {
                 if (s_juncActive) ResetJunctionState();
+                ResetJunctionStats();
             }
+
+            // v0.24.0 (#83): the Card album. Gated on the subsystem id rather
+            // than the top-level cursor, because the album is also reachable
+            // from places other than the main menu's Card entry.
+            PollCardMenu();
+            CardNumberKeys();
+
+            // v0.25.0 (#84): the Config screen. Every value on it is invisible
+            // to a reader -- the toggles show their setting only by palette and
+            // the bars have no readout at all.
+            PollConfigMenu();
+            ConfigNumberKeys();
+
+            // v0.26.0 (#85): the Tutorial menu and the SeeD written exam. Aaron
+            // singled the exam out: *"we need to make the SeeD Exam Quiz and its
+            // questions accessible -- including the symbols it sometimes
+            // displays in various questions."* Ten questions, and all ten must
+            // be right, which is why the symbols cannot be left unnamed.
+            PollTutorialMenu();
+            TutorialNumberKeys();
 
             // v0.18.0 (#41): GF screen TTS / discovery (top-level cursor == 4)
             if (s_prevCursor == 4 && !s_itemSubmenuActive) {
@@ -954,6 +958,27 @@ void MenuTTS::Update()
     if (!isMenuMode) {
         PollSaveScreen();
     }
-    
+
+    // v0.29.0 (#88): the save module's two confirmation dialogs. Called from
+    // OUTSIDE both the mode-1 and mode-6 blocks on purpose -- it finds the
+    // module by walking the pool, so it does not care which path opened the
+    // save screen, and it is silent whenever that module is not in the pool.
+    // Before this, "Data exists.  Overwrite?" was announced as nothing at all
+    // on either path, and its cursor defaults to No.
+    PollSaveConfirmDialog();
+
+    // v0.34.0 (#92): item shops and Junk Shops. Also OUTSIDE both mode blocks,
+    // and for a stronger reason than the save dialog: **a shop is opened from
+    // the FIELD, not from the main menu**, so gating this on mode 6 would have
+    // left it silent in the only place it is ever used. Both readers find their
+    // module by walking the pool and say nothing when it is not there.
+    PollShops((int)mode);
+
+    // "/" inside a shop: the item's description, or the weapon's material list
+    // in a Junk Shop. The menu-mode "/" chain above cannot serve this -- it only
+    // runs in mode 6 -- so the key is bound again here and claimed only while a
+    // shop module is actually open.
+    if (GetAsyncKeyState(VK_OEM_2) & 1) ShopSpeakDetail();
+
     s_wasMenuMode = isMenuMode;
 }
