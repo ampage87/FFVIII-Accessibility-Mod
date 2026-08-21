@@ -261,7 +261,7 @@ static void EWM_PollToggle()
     EWM_SaveConfig();
     // If disabling, immediately release cap
     if (!s_ewmEnabled) {
-        s_ewmShouldCap = false;
+        EWM_SetFreeze(false);
         s_ewmFreezing = false;
         s_ewmCapExcludeSlot = 0xFF;
         s_ewmCapGF = false;

@@ -8,22 +8,63 @@
 //
 // We diff savemap GF "exists" flags before/after to detect when the engine
 // just acquired a GF as part of the handler's switch-table writes. If so,
-// we announce the GF name via TTS. We also announce the character name for
-// non-GF calls (param 0-7 = character index).
+// we announce the GF name via TTS.
 //
 // v04.35 ASM analysis revealed:
 //   - 0x01CE490B = UI-open flag
-//   - 0x47E480(charIdx) = GF junction init -- handled by the original
+//   - 0x47E480(idx) = GF "obtained" flag -- handled by the original
 // v0.09.05: Full handler call restored (was previously bypassed entirely,
 // which broke the infirmary scene by skipping character-junction init).
 // We only suppress the UI flags, not the handler itself.
+//
+// v0.38.1 (#98): WHAT THE PARAMETER MEANS. Eleven versions of this file read
+// the script parameter as a party-member index and spoke
+// {Squall, Zell, Irvine, Quistis, Rinoa, Selphie, Seifer, Edea}[param] for
+// params 0..7, saying nothing at all for 8..20. The switch at 0x00521DA0 says
+// otherwise: params 3..18 each `push <gf>` and `call 0x0047E480`, which is
+// `savemap[0x4C + gf*0x44 + 0x11] |= 1` -- the GF obtained flag -- so those
+// sixteen parameters are GF namings and the pushed value is the GF index. The
+// classroom study panel, which names Quezacotl and Shiva, was therefore
+// announcing "Quistis" and "Rinoa"; the old comment here even explained the
+// symptom away as "Quistis/Rinoa at study panel" instead of checking it.
+// The full derivation, including the jump table's two transposed pairs, is in
+// field_menuname_model.inl and is decoded from engine bytes by
+// tests/menuname_compile.cpp.
 
 // v0.09.05: Restored FULL v04.35 bypass including enableGF calls.
-// enableGF(charIdx) at 0x47E480 does essential character junction init --
-// without it, subsequent scripts malfunction (infirmary scene breaks).
-// The enableGF calls DO mark GFs 0-5 as obtained in savemap, even before
+// enableGF(gfIdx) at 0x47E480 marks GFs as obtained in savemap, even before
 // the player earns them. This is handled at the TTS layer by reading the
 // game's own displayed GF list rather than filtering by savemap exists flags.
+
+// v0.38.1: the sixteen GF names, indexed exactly as 0x0047E480's argument.
+static const char* s_menunameGfNames[16] = {
+    "Quezacotl", "Shiva", "Ifrit", "Siren", "Brothers", "Diablos",
+    "Carbuncle", "Leviathan", "Pandemona", "Cerberus", "Alexander",
+    "Doomtrain", "Bahamut", "Cactuar", "Tonberry", "Eden"
+};
+
+// Speak the live savemap name behind a 0x03 name id, the same way every other
+// screen in the mod resolves one (v0.38.0). Returns false when the decoder
+// could not expand it, so the caller can log rather than speak a placeholder.
+//
+// Its own function on purpose: the hook below contains __try blocks and MSVC
+// C2712 forbids any object with a destructor anywhere in such a function --
+// std::string included, wherever it is declared (tests/lint_seh.py).
+static bool MenunameSpeakNameId(int nameId)
+{
+    if (nameId <= 0 || nameId > 0xFF) return false;
+    const uint8_t encoded[3] = { 0x03, (uint8_t)nameId, 0x00 };
+    std::string name = FF8TextDecode::Decode(encoded, sizeof(encoded));
+    if (name.empty() || name.find("[Name") != std::string::npos) {
+        Log::Dialog("FieldDialog: [MENUNAME] name id 0x%02X did not resolve (\"%s\")",
+                    nameId, name.c_str());
+        return false;
+    }
+    ScreenReader::Speak(name.c_str(), false);
+    Log::Dialog("FieldDialog: [MENUNAME] Naming %s (name id 0x%02X)", name.c_str(), nameId);
+    return true;
+}
+
 static int __cdecl Hook_opcode_menuname(int entityPtr)
 {
     const char* fieldName = FF8Addresses::pCurrentFieldName ?
@@ -43,16 +84,6 @@ static int __cdecl Hook_opcode_menuname(int entityPtr)
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         Log::Dialog("FieldDialog: [MENUNAME] SEH reading param");
     }
-
-    // Character names (0-7) and GF names (8-23)
-    static const char* s_charNames[] = {
-        "Squall", "Zell", "Irvine", "Quistis", "Rinoa", "Selphie", "Seifer", "Edea"
-    };
-    static const char* s_gfNames[] = {
-        "Quezacotl", "Shiva", "Ifrit", "Siren", "Brothers", "Diablos",
-        "Carbuncle", "Leviathan", "Pandemona", "Cerberus", "Alexander",
-        "Doomtrain", "Bahamut", "Cactuar", "Tonberry", "Eden"
-    };
 
     // v0.09.19: Snapshot GF exists flags BEFORE calling original handler.
     // The original's switch table writes GF data to savemap. By diffing
@@ -84,18 +115,13 @@ static int __cdecl Hook_opcode_menuname(int entityPtr)
     // v0.09.19: Check for new GF acquisitions (exists flag 0->non-zero)
     bool gfAcquired = false;
     {
-        static const char* GF_NAMES_LOCAL[] = {
-            "Quezacotl", "Shiva", "Ifrit", "Siren", "Brothers", "Diablos",
-            "Carbuncle", "Leviathan", "Pandemona", "Cerberus", "Alexander",
-            "Doomtrain", "Bahamut", "Cactuar", "Tonberry", "Eden"
-        };
         uint8_t* sm = (uint8_t*)SAVEMAP_BASE_ADDR;
         for (int g = 0; g < GF_COUNT_LOCAL; g++) {
             uint8_t after = sm[0x4C + g * GF_STRUCT_SIZE_LOCAL + 0x11];
             if (gfBefore[g] == 0 && after != 0) {
                 gfAcquired = true;
                 char buf[128];
-                sprintf(buf, "GF %s acquired", GF_NAMES_LOCAL[g]);
+                sprintf(buf, "GF %s acquired", s_menunameGfNames[g]);
                 ScreenReader::Speak(buf, false);  // queue after any dialog
                 Log::Dialog("FieldDialog: [MENUNAME] %s (idx=%d, flag 0x%02X)",
                            buf, g, (unsigned)after);
@@ -103,16 +129,38 @@ static int __cdecl Hook_opcode_menuname(int entityPtr)
         }
     }
 
-    // v0.09.21: Announce character name only when no GF was acquired.
-    // When the original handler writes GF data (e.g. Quistis/Rinoa at study panel),
-    // the GF announcement is sufficient -- the character name is noise.
-    // Squall (param 0) always announces because no GFs are given with him.
-    if (param >= 0 && param <= 7 && !gfAcquired) {
-        ScreenReader::Speak(s_charNames[param], false);
-        Log::Dialog("FieldDialog: [MENUNAME] Character: %s", s_charNames[param]);
-    } else if (param >= 0 && param <= 7) {
-        Log::Dialog("FieldDialog: [MENUNAME] Character: %s (suppressed, GF acquired)", s_charNames[param]);
+    // v0.38.1: announce what is actually being named.
+    const int gfIdx = FieldMenunameModel::MenunameGfIndex(param);
+    const int nameId = FieldMenunameModel::MenunameNameId(param);
+    Log::Dialog("FieldDialog: [MENUNAME] param=%d -> kind=0x%02X gf=%d nameId=0x%02X",
+                param, FieldMenunameModel::MenunameKind(param), gfIdx, nameId);
+
+    if (gfIdx >= 0 && gfIdx < GF_COUNT_LOCAL) {
+        // A GF naming. When the flag diff already spoke, the GF name has been
+        // said once and saying it again is noise.
+        if (!gfAcquired) {
+            ScreenReader::Speak(s_menunameGfNames[gfIdx], false);
+            Log::Dialog("FieldDialog: [MENUNAME] Naming GF %s (index %d)",
+                        s_menunameGfNames[gfIdx], gfIdx);
+        } else {
+            Log::Dialog("FieldDialog: [MENUNAME] Naming GF %s (index %d, suppressed -- already announced as acquired)",
+                        s_menunameGfNames[gfIdx], gfIdx);
+        }
+    } else if (nameId != 0) {
+        if (!MenunameSpeakNameId(nameId)) {
+            Log::Dialog("FieldDialog: [MENUNAME] param=%d resolved to no name -- said nothing", param);
+        }
+    } else if (FieldMenunameModel::MenunameParamValid(param)) {
+        // Params 19 and 20 are Boko and Griever in an order the executable does
+        // not settle (the naming screen's destination lives in a menu.fs
+        // overlay). Silence beats a coin flip; this log line is what identifies
+        // them the first time one is hit.
+        Log::Dialog("FieldDialog: [MENUNAME] param=%d is Boko or Griever -- mapping UNSETTLED, said nothing. "
+                    "Note which name the game shows next and pin it down.", param);
+    } else {
+        Log::Dialog("FieldDialog: [MENUNAME] param=%d is outside the engine's 0..20 range -- said nothing", param);
     }
+
     Log::Dialog("FieldDialog: [MENUNAME] UI suppressed, returning %d", result);
     return result;
 }

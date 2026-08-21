@@ -189,6 +189,26 @@ static std::string Say(const MagicView& v)
     return std::string(buf);
 }
 
+// A stand-in for the game's name ladder. The mod's real one lives in
+// FF8TextDecode and reads the savemap; this is the probe's INPUT, not a second
+// copy of the logic under test -- TutExpand's job is to ASK, and the thing being
+// checked is that it asks for the right id and uses what comes back.
+static const char* TutNameFixture(unsigned char nameId)
+{
+    switch (nameId) {
+        case 0x30: return "Squall";
+        case 0x31: return "Zell";
+        case 0x32: return "Irvine";
+        case 0x33: return "Quistis";
+        case 0x34: return "Rinoa";
+        case 0x35: return "Selphie";
+        case 0x40: return "Angelo";
+        case 0x50: return "Griever";
+        case 0x60: return "Boko";
+        default:   return 0;
+    }
+}
+
 int main()
 {
     char buf[256];
@@ -2063,6 +2083,46 @@ int main()
         // raw parameter and not to nothing.
         TutExpand(t, n, 0, 0, b, sizeof(b), &info, -1);
         expect(b, "the GF can learn F Mag-RF.", "and without the savemap it degrades to a neutral noun");
+
+        // ------------------------------------------------------------------
+        // v0.38.2 (#98): "It's called... THE CHARACTER Strike!"
+        //
+        // These are not invented bytes. They are the tail of Pet Pals Vol.1 as
+        // it sits in mngrp.bin -- `06 25 03 40 20 "Strike" 06 27 2E` -- and
+        // `03 40` is ANGELO. The old lookup was `names[id - 0x30]` over eight
+        // party slots, so 0x40 fell straight past it into the placeholder, and
+        // Aaron heard the magazine say "the character Strike!". A fixture built
+        // out of party ids alone would never have caught it; this one is the
+        // game's own bytes.
+        {
+            const unsigned char petPals[] = {
+                0x06, 0x25, 0x03, 0x40, 0x20, 0x57, 0x72, 0x70, 0x67, 0x69, 0x63,
+                0x06, 0x27, 0x2E, 0x00
+            };
+            TutExpand(petPals, (int)sizeof(petPals), NAMES, GFS,
+                      b, sizeof(b), &info, -1, TutNameFixture);
+            expect(b, "Angelo Strike!", "0x03 0x40 is Angelo, not a party index");
+
+            // Without a resolver the party table still answers for party ids,
+            // and an id it has never heard of degrades to a noun rather than to
+            // a bracketed code or a wrong name.
+            TutExpand(petPals, (int)sizeof(petPals), NAMES, GFS,
+                      b, sizeof(b), &info, -1);
+            expect(b, "the character Strike!",
+                   "and with no resolver it degrades to a noun -- this is the bug's own output");
+        }
+
+        // The ladder is not only about the dog. Party slots past index 4 come
+        // from the kernel table, which the eight-entry array never carried
+        // either, so they were reading as "the character" too.
+        {
+            unsigned char q[16];
+            int qn = 0;
+            q[qn++] = 0x03; q[qn++] = 0x33;          // party id 3
+            qn = Enc::put(q, qn, " uses Blue Magic."); q[qn++] = 0;
+            TutExpand(q, qn, 0, 0, b, sizeof(b), &info, -1, TutNameFixture);
+            expect(b, "Quistis uses Blue Magic.", "a party id past the savemap pair resolves too");
+        }
 
         // Colour codes carry nothing a listener can hear, and the answer slots
         // are structure rather than words.

@@ -22,6 +22,14 @@
 #include <string>
 #include <sys/mman.h>
 
+// v0.38.2: TutLookupName resolves a 0x03 name id through the REAL decoder, so
+// this probe links it (src/ff8_text_decode.cpp) rather than stubbing it. With no
+// savemap pointer set the decoder falls back to its built-in table, which is
+// exactly what the mod does when the read fails -- so the fallback path is the
+// one under test here, and tests/text_decode_compile.cpp owns the live path.
+#include "ff8_text_decode.h"
+
+
 typedef unsigned long  DWORD;
 typedef unsigned short WORD;
 typedef unsigned char  BYTE;

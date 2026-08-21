@@ -15,8 +15,10 @@
 //              TgtDiag_TakeSnapshot, GF_BP_PollKey, GF_ScanForFunctionEntry)
 //   atb_hook → HookedATBUpdate + EWM lifecycle (EWM_LoadConfig, EWM_SaveConfig,
 //              EWM_PollToggle, EWM_InstallHook)
-//   dispatch → sub_483470 + sub_482F80 hooks (HookedProcessReady,
-//              HookedActionExecute, installers, EWM_LogDispatchStats)
+//   status_timers → sub_483470 hook (HookedStatusTimers, installer, the
+//              per-second [STATUS-TIMER] diagnostic). v0.37.0: sub_483470 is
+//              the TIMED-STATUS TIMER, not the turn dispatcher v0.13.55 took
+//              it for, and its hook had never been installed at all.
 //   ffnx     → FFNx GF loading counter hook (HookedFFNxBattleUpdate,
 //              FindFFNxModuleBase, ScanModuleForSignature,
 //              ScanAllModulesForSignature, FindFunctionEntry,
@@ -31,7 +33,7 @@
 #include "battle_tts_ewm_gf_effect.inl"
 #include "battle_tts_ewm_bp_diag.inl"
 #include "battle_tts_ewm_atb_hook.inl"
-#include "battle_tts_ewm_dispatch.inl"
+#include "battle_tts_ewm_status_timers.inl"
 #include "battle_tts_ewm_ffnx.inl"
 #include "battle_tts_ewm_diag.inl"
 #include "battle_tts_ewm_update.inl"

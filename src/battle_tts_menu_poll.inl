@@ -102,9 +102,26 @@ static void PollTurnAndCommands()
             s_limitBreakActive = (initToggle == 64);
             s_lastLimitToggle = initToggle;
             
-            // Announce "[Name]'s turn. [First command]." (or Limit Break if toggle=64)
+            // Announce "[Name]'s turn. [First command]."
+            //
+            // v0.38.3 (#99): when the toggle is set, row 0 is NOT "Attack" and
+            // it is not a generic "Limit Break" either -- the game scrolls the
+            // character's own limit command there, and 0x004BCEFC reads that id
+            // out of 0x01CFF02E + slot*464 and names it with 0x0047EBD0. Say
+            // what the player is looking at: "Renzokuken", "Duel", "Shot",
+            // "Fire Cross", "Sorcery". The literal string stays as the fallback
+            // for a slot that will not read, because a turn line that says
+            // nothing is worse than one that says something general.
             const char* name = GetBattleCharName(activeChar);
-            const char* cmd = s_limitBreakActive ? "Limit Break" : GetCommandName(s_turnCharCommands[0]);
+            char limitCmd[64];
+            const char* cmd;
+            if (s_limitBreakActive &&
+                LimitCommandNameForSlot((int)activeChar, limitCmd, sizeof(limitCmd)) &&
+                limitCmd[0]) {
+                cmd = limitCmd;
+            } else {
+                cmd = s_limitBreakActive ? "Limit Break" : GetCommandName(s_turnCharCommands[0]);
+            }
             char buf[128];
             snprintf(buf, sizeof(buf), "%s's turn. %s.", name, cmd);
 
@@ -417,7 +434,20 @@ static void PollTurnAndCommands()
                         //     only ever heard the "Item" exit announce.
                         // For both, we rely on the cmdCursor change handler for real exit
                         // detection (user presses cancel -> cursor returns to cmd menu).
-                        if (s_submenuCommandId == 0x16 || s_submenuCommandId == 0x17) {
+                        // v0.36.1: and a THIRD case, from the 2026-08-19 BAT.
+                        // Opening a limit submenu looks like leaving one to this
+                        // handler -- the engine drops submenuMode to 0xFE as the
+                        // limit window takes over -- so it announced the command
+                        // it thought we were returning to. The log is explicit:
+                        //   [LIMIT]   open ... -> "Shot. Normal Ammo, 20 left"
+                        //   [SUBMENU] Exit announce: Attack
+                        // spoken with interrupt=true ~10 ms later, so "Attack"
+                        // is the only thing the player actually heard. Exactly
+                        // the v0.14.37 Item shape, one screen over.
+                        if (LimitMenuIsOpenNow()) {
+                            s_inSubmenu = false;
+                            Log::Battle("BattleTTS: [SUBMENU] Suppressed exit announce -- a limit window is open");
+                        } else if (s_submenuCommandId == 0x16 || s_submenuCommandId == 0x17) {
                             Log::Battle("BattleTTS: [SUBMENU] Suppressed false exit for %s (mode 0x%02X->0xFE, transient cursor flip)",
                                        GetCommandName(s_submenuCommandId),
                                        (unsigned)s_prevSubmenuMode);
@@ -485,7 +515,11 @@ static void PollTurnAndCommands()
                 // when the engine is actually in a limit submenu (e.g. Quistis'
                 // Blue Magic spell list). The limit-submenu path in PollLimitDiag
                 // owns the announcement for those cursor moves.
-                if (s_inLimitSubmenu) {
+                // v0.36.1: ALSO ask the engine directly. `s_inLimitSubmenu` is
+                // set by PollLimitDiag, which runs AFTER this function, so on
+                // the frame the limit submenu opens it is still false -- which
+                // is the one frame this guard exists for.
+                if (s_inLimitSubmenu || LimitMenuIsOpenNow()) {
                     s_turnSubmenuCursor = subCursor;
                 } else
                 if (!s_inSubmenu && s_turnCmdCursor < 4) {

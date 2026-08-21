@@ -313,7 +313,7 @@ static int __cdecl Hook_opcode_ask(int entityPtr)
     }
 
     EnterCriticalSection(&s_cs);
-    ScanAndSpeakChoiceWindows("ASK");
+    ScanAndSpeakChoiceWindows("ASK", (uintptr_t)(uint32_t)entityPtr);
     LeaveCriticalSection(&s_cs);
     ::ChaseDiag::OnAskOpcodeFired("ASK");  // v0.15.1: chase-diag template snapshot
     return result;
@@ -333,7 +333,7 @@ static int __cdecl Hook_opcode_aask(int entityPtr)
     int result = s_origAask(entityPtr);
 
     EnterCriticalSection(&s_cs);
-    ScanAndSpeakChoiceWindows("AASK");
+    ScanAndSpeakChoiceWindows("AASK", (uintptr_t)(uint32_t)entityPtr);
     LeaveCriticalSection(&s_cs);
     ::ChaseDiag::OnAskOpcodeFired("AASK");  // v0.15.1: chase-diag template snapshot
     return result;

@@ -771,14 +771,15 @@ static void PollLimitDiag()
         menuPhaseDw == 0x004C7CD0 && s_limitDiagPrevMenuDword != 0x004C7CD0) {
         s_inLimitSubmenu = true;
 
-        // Per-character submenu name. Quistis = Blue Magic; others get a
-        // generic title until we have BAT data for them.
-        const char* announceText = "Limit Break submenu";
-        if (charIdx == 3) announceText = "Blue Magic";
-
-        BattleSpeak(announceText, PRIO_MENU, true);
-        Log::Battle("BattleTTS: [LIMIT-DIAG] Submenu OPENED for %s (charIdx=%u) — announcing: %s",
-                   name, (unsigned)charIdx, announceText);
+        // v0.36.0: this used to speak "Blue Magic" for Quistis and
+        // "Limit Break submenu" for everyone else, because in v0.14.13 that was
+        // all that could be said -- the spell list itself had never been
+        // located. PollLimitMenus() now names the command out of the engine's
+        // own table AND reads the row under the cursor in the same utterance,
+        // so announcing here would step on it with a title it already said.
+        // The tracking stays; only the speech moved.
+        Log::Battle("BattleTTS: [LIMIT-DIAG] Submenu OPENED for %s (charIdx=%u) — PollLimitMenus reads it",
+                   name, (unsigned)charIdx);
 
         // v0.14.14: Snapshot cursor + memory baselines for the new submenu
         // session. The cursor baseline keeps the first per-frame check from
@@ -805,50 +806,31 @@ static void PollLimitDiag()
                     name, s_limitDiagPrevMenuDword, menuPhaseDw);
     }
 
-    // v0.14.23: EXTENSIVE DIAGNOSTIC LOGGING for cursor→spell ID relationship
-    // Need to understand why spells announce backwards despite fixed ID mappings
+    // ========================================================================
+    // v0.37.3 (#96): THE "ELECTROCUTE" ANNOUNCER IS GONE.
+    // ========================================================================
+    //
+    // v0.14.23 put a diagnostic here that SPOKE: on every limit-submenu cursor
+    // move it read a byte at 0x01D76860, looked it up in a scanned "auto-built"
+    // Blue Magic table, and announced whatever came back. The 2026-08-20 BAT:
+    //
+    //   [LIMIT-DIAG-CURSOR] spellId at 0x01D76860: 0x00
+    //   [LIMIT-DIAG-CURSOR]   ID 0x00 -> 'Electrocute'
+    //   [LIMIT-DIAG-CURSOR]   ID 0x00 -> 'Scatter Shot'
+    //   [LIMIT-DIAG-CURSOR]   ID 0x00 -> 'Dark Shot'      ... and six more
+    //   [LIMIT-NAV] DIAGNOSTIC sub 3->7 id=0x00 | announce='Electrocute'
+    //
+    // **Nine of its ten entries have id 0x00**, so the lookup always returned
+    // the first: Electrocute, on every move, including onto empty cells. That
+    // is Aaron's *"I kept hearing Electrocute repeat"* and *"empty slots just
+    // read as Electrocute"*, and where the real reader also spoke he heard
+    // both -- *"sometimes the correct spell name alongside Electrocute"*.
+    //
+    // v0.36.0 retired this file's submenu-OPEN announce when PollLimitMenus
+    // took over and left the cursor-MOVE one behind. **Half a retirement is
+    // worse than none: the surviving half was wrong and now had a correct
+    // voice to argue with.** The tracking below stays; only the speech goes.
     if (s_inLimitSubmenu && subCursor != s_limitSubCursorPrev) {
-        char announceBuf[64] = {};
-        uint8_t spellId = 0xFF;
-
-        // Read spell ID from the engine
-        __try {
-            spellId = *(uint8_t*)0x01D76860;
-        } __except(EXCEPTION_EXECUTE_HANDLER) { spellId = 0xFF; }
-
-        // v0.14.23: DIAGNOSTIC LOGGING to understand cursor→spell ID relationship
-        Log::Battle("BattleTTS: [LIMIT-DIAG-CURSOR] === CURSOR MOVE DETECTED ===");
-        Log::Battle("BattleTTS: [LIMIT-DIAG-CURSOR] subCursor: %u -> %u", 
-                   (unsigned)s_limitSubCursorPrev, (unsigned)subCursor);
-        Log::Battle("BattleTTS: [LIMIT-DIAG-CURSOR] spellId at 0x01D76860: 0x%02X", (unsigned)spellId);
-        
-        // Show what our current mapping table contains
-        Log::Battle("BattleTTS: [LIMIT-DIAG-CURSOR] Known mappings in auto-builder:");
-        for (int i = 0; i < s_autoBuiltSpellCount; i++) {
-            AutoBlueMagicFoundEntry& entry = s_autoBuiltSpells[i];
-            if (entry.isValid) {
-                Log::Battle("BattleTTS: [LIMIT-DIAG-CURSOR]   ID 0x%02X -> '%s' at 0x%08X", 
-                           entry.spellId, entry.name, entry.runtimeAddr);
-            }
-        }
-
-        // Try auto-building scanner with detailed logging
-        if (FindBlueMagicSpellName(spellId, announceBuf, sizeof(announceBuf))) {
-            Log::Battle("BattleTTS: [LIMIT-DIAG-CURSOR] AUTO-BUILDER FOUND: spellId 0x%02X -> '%s'", 
-                       (unsigned)spellId, announceBuf);
-        } else {
-            Log::Battle("BattleTTS: [LIMIT-DIAG-CURSOR] AUTO-BUILDER FAILED: spellId 0x%02X not found, using fallback", 
-                       (unsigned)spellId);
-            snprintf(announceBuf, sizeof(announceBuf),
-                     "Spell %u", (unsigned)(subCursor + 1));
-        }
-
-        BattleSpeak(announceBuf, PRIO_MENU, true);
-
-        Log::Battle("BattleTTS: [LIMIT-NAV] DIAGNOSTIC sub %u->%u id=0x%02X | announce='%s'",
-                    (unsigned)s_limitSubCursorPrev, (unsigned)subCursor,
-                    (unsigned)spellId, announceBuf);
-
         s_limitSubCursorPrev = subCursor;
     }
 

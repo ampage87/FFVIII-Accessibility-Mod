@@ -254,6 +254,110 @@ size_t ResolveWord(uint8_t code, uint8_t param, uint8_t* out, size_t outSize)
 }
 
 // ============================================================================
+// v0.38.0 (#97): THE NAMEABLE NAMES -- ANGELO, GRIEVER, BOKO, SQUALL, RINOA
+// ============================================================================
+//
+// Aaron: *"when Rinoa's limit triggers it is saying 'Name 40' instead of
+// Angelo... I think it also said Name 40 in the magazine viewer with Pet Pals."*
+// `[Name40]` is this file's own placeholder for a `0x03` name code whose id
+// falls outside the fourteen-entry party table.
+//
+// The engine's dispatch for `0x03 xx` is a ladder, and it is explicit about
+// which names come out of the SAVEMAP:
+//
+//   004B8D94  cmp ecx, 0x30 / jl  ->  004B8D99  cmp ecx, 0x3f / jg
+//   004B8D9E  add ecx, -0x10 / and ecx, 0x1F
+//   004B8DA5  call 0x0049A840  ->  0x0047EB50(idx):
+//                idx 0  -> 0x01CFDC70     Squall   (renameable)
+//                idx 4  -> 0x01CFDC7C     Rinoa    (renameable)
+//                else   -> kernel table 0x01CF75EC + idx*36
+//   004B8DAC  cmp ecx, 0x40 / je  ->  eax = 0x01CFDC88     <- ANGELO
+//   004B8DB1  cmp ecx, 0x50 / je  ->  eax = 0x01CFE754     <- GRIEVER
+//   004B8DB6  cmp ecx, 0x60 / je  ->  eax = 0x01CFDC94     <- BOKO
+//   004B8DBB  otherwise           ->  eax = 0x01D76624     (scratch)
+//
+// All five addresses read back exactly those names from Aaron's own save file,
+// which is what turns a plausible ladder into a settled one:
+//
+//   0x01CFDC70 "Squall"   0x01CFDC7C "Rinoa"   0x01CFDC88 "Angelo"
+//   0x01CFE754 "Griever"  0x01CFDC94 "Boko"
+//
+// So `[Name40]` was never a party member at a missing index -- **0x40 is not an
+// index into that table at all.** It is a separate branch of the ladder, and so
+// are 0x50 and 0x60, which would have read as `[Name50]` and `[Name60]` the
+// moment a Griever or Boko line came up.
+//
+// **These five are read live**, not hardcoded, because they are precisely the
+// names a player can change; the other ten come from a kernel table and stay on
+// the built-in list. `SetNameTableBase()` lets the probe point the same code at
+// a fixture, the way `SetWordTableBase()` already does for namedic.
+// ============================================================================
+
+// savemap-relative so the probe can supply one block instead of five addresses.
+static const uintptr_t FF8_SAVEMAP_BASE = 0x01CFDC5C;
+static const int NAME_OFF_SQUALL  = 0x14;   // 0x01CFDC70
+static const int NAME_OFF_RINOA   = 0x20;   // 0x01CFDC7C
+static const int NAME_OFF_ANGELO  = 0x2C;   // 0x01CFDC88
+static const int NAME_OFF_BOKO    = 0x38;   // 0x01CFDC94
+static const int NAME_OFF_GRIEVER = 0xAF8;  // 0x01CFE754
+
+static const uint8_t* s_nameTableBase = nullptr;   // probe override
+
+void SetNameTableBase(const void* base)
+{
+    s_nameTableBase = (const uint8_t*)base;
+}
+
+// Byte offset from the savemap base for a 0x03 name id, or -1 when the id is
+// not one of the five the player can change.
+static int NameOffsetFor(uint8_t nameId)
+{
+    switch (nameId) {
+        case 0x30: return NAME_OFF_SQUALL;
+        case 0x34: return NAME_OFF_RINOA;
+        case 0x40: return NAME_OFF_ANGELO;
+        case 0x50: return NAME_OFF_GRIEVER;
+        case 0x60: return NAME_OFF_BOKO;
+        default:   return -1;
+    }
+}
+
+// SEH-guarded, no object with a destructor (MSVC C2712 -- tests/lint_seh.py).
+static size_t ResolveNameBytes(uint8_t nameId, uint8_t* out, size_t outSize)
+{
+    size_t written = 0;
+    if (!out || outSize == 0) return 0;
+    out[0] = 0x00;
+
+    const int off = NameOffsetFor(nameId);
+    if (off < 0) return 0;
+
+    const uint8_t* base = s_nameTableBase;
+#if defined(_WIN32)
+    if (!base) base = (const uint8_t*)FF8_SAVEMAP_BASE;
+#else
+    if (!base) return 0;      // host probes: only the override is available
+#endif
+
+#if defined(_WIN32)
+    __try {
+#endif
+        const uint8_t* p = base + off;
+        for (; written + 1 < outSize; written++) {
+            const uint8_t b = p[written];
+            if (b == 0x00) break;
+            out[written] = b;
+        }
+#if defined(_WIN32)
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        written = 0;
+    }
+#endif
+    if (written < outSize) out[written] = 0x00;
+    return written;
+}
+
+// ============================================================================
 // Internal: decode a single byte, appending to result.
 // Returns how many additional bytes were consumed (0 for single-byte chars,
 // 1+ for multi-byte sequences). Returns -1 to signal end of string.
@@ -284,14 +388,33 @@ static int DecodeByte(const uint8_t* data, size_t pos, size_t maxBytes,
     // Character name substitution: 0x03 + id byte
     if (b == 0x03) {
         if (pos + 1 < maxBytes) {
-            uint8_t nameId = data[pos + 1];
-            int index = (int)nameId - NAME_ID_BASE;
+            const uint8_t nameId = data[pos + 1];
+
+            // v0.38.0: the five names the player can change come out of the
+            // savemap, exactly where the engine's ladder points (see above).
+            // Angelo is 0x40 -- NOT an index into the party table, which is why
+            // it used to read as "[Name40]".
+            uint8_t nameBytes[32];
+            const size_t n = ResolveNameBytes(nameId, nameBytes, sizeof(nameBytes));
+            if (n > 0) {
+                for (size_t k = 0; k < n; k++) {
+                    const uint8_t nb = nameBytes[k];
+                    if (nb >= 0x20 && s_charTable[nb]) result += s_charTable[nb];
+                }
+                return 1;
+            }
+
+            const int index = (int)nameId - NAME_ID_BASE;
             if (index >= 0 && index < s_charNameCount) {
                 result += s_charNames[index];
             } else {
+                // Still not a name we can resolve. Say so rather than inventing
+                // one -- but count it, so a caller that reads the line aloud
+                // knows it is incomplete.
                 char buf[16];
                 snprintf(buf, sizeof(buf), "[Name%02X]", nameId);
                 result += buf;
+                if (dropped) (*dropped)++;
             }
         }
         return 1;
@@ -361,6 +484,15 @@ static int DecodeByte(const uint8_t* data, size_t pos, size_t maxBytes,
     // Name codes 0x10-0x1F: the engine resolves these through sub_49A860 with
     // (code & 0x1F) and consumes NO param byte (0x004B8D2D onward).
     if (b >= 0x10 && b <= 0x1F) { if (dropped) (*dropped)++; return 0; }
+
+    // v0.40.0 (#101): 0xAE / 0xAF are an EMPHASIS PAIR, not text and not a
+    // loss. They wrap a highlighted term -- `{AE}Save Point{AF}`,
+    // `{AE}CONFIRM EQUIPMENT{AF}`, `{AE}missile launcher{AF}` -- and the Deling
+    // grid has them blank because they draw no glyph. Counting them as dropped
+    // made every one of those strings report two lost bytes, which is what a
+    // caller like the shop reader uses to decide it is holding a fragment. They
+    // are consumed silently, the way colour and icon codes already are.
+    if (b == 0xAE || b == 0xAF) return 0;
 
     // Standard character table lookup. Since v0.35.0 the table is derived from
     // the sysfnt glyph grid (glyph = byte - 0x20), so the accented letters,

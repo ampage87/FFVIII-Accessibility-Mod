@@ -6,6 +6,1307 @@ The version in the top heading **must** match `FF8OPC_VERSION` in `src/ff8_acces
 
 Older entries (pre-v0.15.12.0) are preserved in `CHANGELOG_HISTORY.md`.
 
+## v0.42.0
+
+#103: **The password counter was counting frames — and SET TARGET answers in a
+picture.**
+
+Two things from the 2026-08-20 BAT of v0.41.0. The terminal itself was right:
+the boot summary, "Running simulation" and its report, "Uploading… please wait"
+and "Coordinate data uploaded." all read, and each label read once.
+
+**The password counter counted the wrong thing.** v0.41.0 advanced the position
+once per ASK/AASK *opcode firing*, on the assumption that an opcode fires once
+per question. The log settles it: forty `[REPEAT]` lines in three seconds,
+cycling "Letter 1 of 4" through "Letter 4 of 4" over and over while not one
+letter had been entered, and the run-position line firing on every single one.
+What was being counted was **frames**.
+
+A blocking field opcode re-runs from the same instruction every frame, and the
+engine's own dispatcher says so in four instructions (`0x0052A621`):
+
+```
+mov  cx, [esi + 0x176]        ; IP = dword index of THIS instruction
+call [0x00B8DE94 + op*4]      ; the handler
+test al, 2
+je   +0x19                    ; <- skip the increment
+inc  word ptr [esi + 0x176]   ; only advance when the handler says so
+```
+
+and AASK's waiting path (`0x00529755`, out of `execute_opcode_table[0x6F] =
+0x005296C0`) is `mov eax, 5 / ret`. **5 & 2 == 0**, so while the dialog is up
+the IP does not move and the same instruction fires again next frame.
+
+So the discriminator is the **instruction pointer**, not the count of firings.
+Same `(context, IP)` as last time is the same question still waiting for an
+answer — say nothing, count nothing. A different IP means the script advanced.
+Position is then *where that IP sits in the order the sites were first seen*,
+which makes a retry come out right for free: a wrong password jumps back to the
+first AASK, whose IP is already site 1, so it says "Letter 1 of 4" again rather
+than "Letter 5 of 4". **Nothing about the four call sites is written down** —
+the script's own addresses are the table.
+
+`tests/repeat_prompt_compile.cpp` decodes all three fragments out of FF8_EN.exe
+rather than trusting the paragraph above — both `[esi+disp32]` displacements are
+decoded from the instruction bytes, and the `B8 imm32` in AASK's epilogue is read
+and its bit 1 checked. Its fake VM contexts take the IP at the **literal** offset
+`0x176`, because a fixture that wrote it through `REPEAT_PROMPT_IP_OFFSET` would
+agree with the constant under test by construction. Mutations: counting firings
+fails it **40** ways, a wrong offset **8**, ignoring the context **1**.
+
+**And SET TARGET refuses in a picture.** Aaron: *"No announcement of the error
+that appears when you try to set target."* `settarget::targetmenu` cursor 0 plus
+confirm is `REQ(seigyo, 344)`, and script 344 — `seigyo::settargetselect` — is
+forty-six dwords whose entire visible effect is `REQ(caution, 101)` / `WAIT 90`
+/ `REQ(caution, 102)`: raise the CAUTION layer for ninety frames, take it down.
+There is no window and no message — none of `gmmoni1.msd`'s thirty-five strings
+is that text, because it is baked into the background graphic. So the player
+picks the one item the scene is named after, the thing the party came here to
+do, and the game answers silently. It now reads:
+
+> Caution. Authorization required. This control panel is only available to the
+> System Administrator or Commander Okamoto. Enter the password now, or you can
+> not use this system.
+
+Transcribed from the F11 capture, the same standing as the boot screen and the
+simulation report: a layer with no branches behind it cannot say anything else.
+Keyed on the **rising edge** of confirm with the submenu already open, because
+`targetmenu` clears `var[1029]` *after* its blocking REQ rather than before it
+(the main menu does the opposite) — confirm therefore stays 1 for the whole
+eight seconds the layer is up, and a level test would fire on every frame of it.
+The same edge is also how the mod learns the submenu opened at all, since it
+opens with its cursor already at 0 and a player who confirms straight away moves
+no cursor for the screen tracker to see.
+
+Changed: `src/field_repeat_prompt.inl`, `src/field_dialog_scan.inl`,
+`src/field_dialog_opcodes.inl`, `src/field_dialog_lifecycle.inl`,
+`src/field_missile_terminal.inl`, `tests/repeat_prompt_compile.cpp`.
+All twenty-one gates.
+
+## v0.41.0
+
+#102: **The Missile Base password — and the one path where it said nothing at
+all.**
+
+The password is not a keyboard. It is **four ordinary AASK choice dialogs in a
+row**, all on one message (`gmtika4.msd` #23):
+
+```
+{3F}Please enter / your password.{3E} / A / B / C / D / E / F
+```
+
+`AASK(win 0, msg 23, firstLine 2, lastLine 7, default 2, cancel 2, 20, 20)` — so
+the six choices are lines 2-7 and the value returned is the 0-based choice index.
+The script (dwords 2189-2320) checks **4, 3, 4, 0** over A-F: **E, D, E, A**, the
+password the Wounded Soldier gives once in message 19 before it starts.
+
+AASK is already hooked, so the prompt and the six letters read. Two things were
+missing.
+
+**Position.** Four identical prompts with nothing to say which letter is being
+entered. `src/field_repeat_prompt.inl` counts consecutive opcode-driven openings
+of the same prompt and prefixes "Letter 1 of 4." … "Letter 4 of 4.". The count
+comes from the script — four AASK calls — not from a guess, and a wrong password
+restarts the run at one rather than counting on to "Letter 5 of 4".
+
+**And on one path the mod said nothing whatsoever.** The four AASKs reuse the
+same window without closing it, so the scanner sees the same prompt each time
+with the cursor reset to the default — line 2, **"A"**. Its dedup is
+`prompt == lastChoicePrompt && curChoice == lastSpokenChoice`, so **choosing A
+for any letter makes the next prompt byte-for-byte the state it just spoke, and
+it says nothing** — no prompt, no letter, no cue that a new entry has begun. The
+password ends in **A**, so the last letter of the only password in the game hits
+that path every time. The position line is now spoken on that branch too, which
+is why the counter is a prefix owned by its own file rather than a tweak inside
+the dedup.
+
+**Scope.** It fires only for a `(field, prompt substring)` pair in a table — one
+entry, `gmtika4` + "password" — and only when an ASK/AASK **opcode** fired, not
+on the poll rescan, which would re-count the same dialog every frame. Every
+other choice dialog in the game is untouched, and the probe checks that: the
+same prompt on another field, an unrelated prompt on the same field, and no
+field name at all all yield no prefix.
+
+`tests/repeat_prompt_compile.cpp` drives four openings and the restart, and pins
+that taking the prefix consumes it so it can never attach to a second utterance.
+Three mutations — never resetting at the end, not consuming the prefix, dropping
+the field scope — fail it one, two and three ways.
+
+New: `src/field_repeat_prompt.inl`, `tests/repeat_prompt_compile.cpp`. The
+`field_dialog.cpp` include chain is now ordered by dependency, with a note
+saying so. All twenty-one gates.
+
+BAT: this rides along with the terminal. At the control panel, the password
+prompt should read "Letter 1 of 4" through "Letter 4 of 4" — and **A should
+still speak**, which is the case that was silent.
+
+## v0.40.1
+
+#101: **The three silent screens — and the labels were being said twice.**
+
+Aaron BAT'd the whole control panel. Everything the terminal *does* read
+correctly (four main labels, the submenu, the percentage climbing 4 → 100 and
+"maximum" at −150, both outcomes, the yes/no). Three screens said nothing:
+the boot self-check, the simulation, and the upload progress bars.
+
+**All three are background layers with baked-in text — there is no window to
+read.** But all three are also *fixed*, and the scripts prove it:
+
+```
+script 336 (simulation)  153 dwords, 0 branches, 0 variable reads
+script 359 (upload)       96 dwords, 0 branches, 0 variable reads
+```
+
+Not one conditional and not one variable between them, so neither screen can
+vary with anything the player did. Aaron's own capture confirms it from the
+other side: he ran the simulation with the error ratio at **100%** and the
+report still read **"Error Ratio 65~80%"**. It is a canned demo, not a
+calculation — which is what makes a fixed transcription honest here rather than
+a guess, and the only reason these strings are allowed to be literals.
+
+* **Boot screen** — spoken on entering the terminal: the ID/BIOS/memory/network/
+  safety-unit check and "Welcome to HTMS".
+* **Upload** — `control::uploader`'s Yes branch is `WINCLOSE / REQ(seigyo, 359) /
+  if (var[484] & 1) var[484] |= 2 / var[1029] = 0`, and **that REQ blocks for the
+  whole animation**, so `var[1029]` stays 1 for its entire duration — twenty-five
+  seconds in the BAT. It is the one persistent signal either animation offers,
+  and it now says "Uploading coordinate data to three units. Please wait."
+* **Simulation** — here `var[1029]` is cleared *before* the REQ, so it is only a
+  start signal. "Running simulation. Please wait." rides on that; the report is
+  anchored instead to the game's own **"End simulation"** prompt, which is the
+  one thing on that screen that is a real window and therefore the one moment
+  the report is certainly on display. The same confirm both starts the run and
+  dismisses it, so the end prompt being absent is what separates the two.
+
+**And the menu labels are no longer spoken here.** v0.40.0 said them on the
+theory that a readout depending on another subsystem catching the window works
+by luck. The log settled it — `[AMES] win[1] Speaking: "SET TARGET"`,
+`"CONFIRM EQUIPMENT"`, `"SIMULATION"`, `"EXIT"`, `"DATA UPLOAD"` on every cursor
+move — so the second copy was redundant, and since AMES speaks with interrupt
+while this file queues, the copy was being discarded anyway. The cursors are
+still tracked, because they are what identifies the screen; only the speech is
+gone, along with the `SnapshotWindowsAsSpoken` call it needed.
+
+BAT: the terminal again. Boot summary on arrival, "Running simulation" then the
+report, "Uploading… please wait" then "Coordinate data uploaded.", and each
+label exactly once.
+
+## v0.40.0
+
+#101: **The Galbadia Missile Base terminal — five screens, and three of them
+have no text at all.**
+
+Aaron: *"there is a scene where the player must interact with a computer
+terminal and set the error ratio to maximum."*
+
+The terminal is field `gmmoni1`, and it is built entirely out of field entities
+and background layers — no menu module is involved, which is why nothing in the
+mod could see it. Every screen is a loop over **field variables** at
+`0x01CFE9B8 + index`:
+
+| screen (the script's own name) | cursor | address | values |
+|---|---|---|---|
+| `Director::default` — main menu | `var[1024]` | `0x01CFEDB8` | 0 Set target · 1 Confirm equipment · 2 Simulation · 3 Exit |
+| `settarget::targetmenu` | `var[1025]` | `0x01CFEDB9` | 0 Set target · 1 Set error ratio · 2 Data upload · 3 Exit |
+| `control::errorratioset` | `var[482]` **signed word** | `0x01CFEB9A` | 0 … −156, step 6 |
+| `control::uploader` — the yes/no | `var[1028]` | `0x01CFEDBC` | 0 No · 1 Yes |
+| `control::equipment` | `var[1028]` | `0x01CFEDBC` | 0–3 items · 4 exit |
+
+**Cursor value equals message id on both menus** — each block ends in
+`MES(win 1, msg n, 16, 160)` where n is the cursor — so the readout is a table
+lookup and not an interpretation. `tests/missile_terminal_compile.cpp` proves it
+the only way worth proving: it holds the **encoded bytes of messages 0–5 out of
+`gmmoni1.msd`**, decodes them with the real decoder, and requires
+`MAIN_LABELS[i]` to equal message *i* and `SUB_LABELS[i]` to equal message
+`{0,4,5,3}[i]`. Reading that .msd with its first dword as a count instead of an
+offset — the mistake that turns "SET TARGET" into "CONFIRM EQUIPMENT" — fails it.
+
+**Three things have no text, which is what made the terminal unusable:**
+
+* **the ratio bar** is a sprite position, 27 of them, with no number anywhere;
+* **the upload yes/no** is two sprites lit by `upbyesno`, no window;
+* **the outcome of confirming is silent.** `control::errorratioset` does
+  `if (var[482] <= -150) var[484] |= 1;` and **otherwise nothing at all** — a
+  refused ratio looks exactly like an accepted one. `control::uploader` does
+  `if (var[484] & 1) var[484] |= 2;`, so choosing Yes before the ratio is set
+  also does nothing, silently. And SET TARGET's EXIT refuses to leave until both
+  bits are set.
+
+So the mod reads the bar as a percentage (throttled to one readout per 250 ms,
+because holding the button walks 27 positions — **except** the step that crosses
+into acceptable, which is never throttled), says "maximum" the moment
+`var[482] <= -150`, names the yes/no by **what confirming does** rather than by
+a sprite it cannot see, and reports the outcome on leaving each screen by
+comparing `var[484]` against what it was on entry — so a bit set on an earlier
+visit is not claimed twice.
+
+`/` reads back the screen, the value, and both progress flags. It is bound only
+while `gmmoni1` is loaded, so it collides with nothing.
+
+**Which screen owns `var[1028]`** is the one ambiguity: the uploader and the
+equipment screen share it. A value of 2 or more settles it outright (the
+uploader has two options); below that the path decides, since the uploader is
+reached from SET TARGET item 2 and the equipment screen from main-menu item 1.
+
+**One decoder change, and it is not cosmetic.** `0xAE`/`0xAF` are an emphasis
+pair — `{AE}Save Point{AF}`, `{AE}CONFIRM EQUIPMENT{AF}` — blank in the Deling
+grid because they draw no glyph. They were being counted as two *lost* bytes on
+every such string, and `dropped` is exactly the signal a caller like the shop
+reader uses to decide it is holding a fragment. They are now consumed silently,
+the way colour and icon codes already are.
+
+The reader is polled from the **top** of `PollWindows`, before the window scan,
+and marks what it says as already-spoken — so the labels read deterministically
+instead of depending on the scan happening to catch the window, and are never
+said twice.
+
+New: `src/missile_terminal_model.inl`, `src/field_missile_terminal.inl`,
+`tests/missile_terminal_compile.cpp`. All twenty gates.
+
+BAT: the Missile Base terminal. Walk the four main items, go into Set target,
+set the error ratio to maximum (listen for the percentage climbing and for
+"maximum"), upload the data, and try Exit before doing either so the refusals
+read. `/` at any point should say where you are.
+
+Worth reporting on the same trip: the **password** screen in `gmtika4` is four
+ordinary AASK choice dialogs on "Please enter your password. A B C D E F"
+(the answer is E, D, E, A), and AASK is already hooked — so it may already read.
+If it does, the only thing missing is knowing which of the four letters you are
+on.
+
+## v0.39.0
+
+#100: **"Move right" — and the audio description will stop talking over the
+game.**
+
+Aaron BAT'd the prison escape. Two findings, and the log carried both.
+
+**1. The moment is settled.** It could not be settled from the executable —
+`gpexit2` has no button polling and the movie player never reads the pad — but
+the BAT's own timeline pins it to the second:
+
+```
+22:25:44  field 'gpexit2' loads
+22:25:48  disc01_02h plays (3 audio-description cues)
+22:26:10  RAMESW: Rinoa -- "Squall!!!  Hold on!  Over here!  Hurry!"
+22:26:10  disc01_03h starts                       <- the window opens here
+22:26:12  Aaron's F11 shot, "when the player should start moving right"
+22:26:40  disc01_03h ends
+22:26:45  MAPJUMP from (3817,115) -> 'gppark1'    <- he made it
+```
+
+So the trigger is **field `gpexit2` plus movie `disc01_03h`** — two facts the mod
+already has to hand, both already logged, neither inferred.
+
+`src/field_urgent_prompt.inl` is new, and it is a table so the next scene like
+this is data rather than code:
+
+```c
+{ "gpexit2", "disc01_03h", 2500, 2500, 60000, "Move right" }
+//  field     arms on      delay repeat  cap
+```
+
+**The cue arms on the movie and lives on the field.** `disc01_03h` ends five
+seconds before the map jump and Aaron was still walking, so a cue that died with
+the movie would go quiet exactly when it was still needed. The movie only arms
+it; the field keeps it; leaving the field — which is what success looks like —
+ends it, as does a sixty-second cap. And it is polled at the **top** of
+`PollWindows`, deliberately above that function's FMV early-out: the tail, where
+it naturally wanted to go, is the one place it could never fire.
+
+**2. The audio description was cutting the game off mid-sentence.** From the same
+log, one second apart:
+
+```
+22:26:10  TTS "Rinoa "Squall!!!  Hold on!  Over here!  Hurry!""
+22:26:11  TTS "High angles look down the prison's giant drill-leg."  (interrupt)
+```
+
+`FmvAudioDesc` spoke every cue with `interrupt=true`. **A cue at 0.0 s always
+lands on top of whatever dialogue triggered the movie**, so this was never a
+one-scene accident — it is every FMV that follows a line of dialogue, and Aaron
+has been losing the end of those lines the whole time. Cues now queue
+(`interrupt=false`) and log when they queue behind speech already in progress.
+The description is the mod's words and the dialogue is the game's; the game's
+win.
+
+The prompt follows the same rule from the other side: besides never
+interrupting, it skips its slot outright while anything else is speaking, so it
+cannot do to Rinoa what the description did.
+
+**The probe is the BAT.** `tests/urgent_cue_compile.cpp` replays that timeline in
+milliseconds and requires: silence through the head start, silence at +3 s
+*while Rinoa is still speaking*, speech at +3 s once she is not, still live at
++30 s when the movie ends, dead the instant the field becomes `gppark1`, dead at
+the cap, and all of it correct across a `GetTickCount` wrap. It also pins the
+near-misses — `disc01_02h` (the preceding cutscene) must not arm it, nor
+`gpexit1`, nor `gpexit20`, nor `disc01_03h.avix`. Two mutations — making the cue
+die with the movie, and letting it talk over speech — fail it four ways and one
+way respectively.
+
+New: `src/field_urgent_prompt.inl`, `tests/urgent_cue_compile.cpp`.
+
+BAT: the prison escape again, if it is convenient — expect "Move right" a couple
+of seconds after Rinoa, repeating until the map changes, and expect to hear all
+of Rinoa's line first. The audio-description fix is worth listening for anywhere
+an FMV follows dialogue; it does not need the prison.
+
+## v0.38.3
+
+#99: **Seifer and Edea, settled out of the shipped files — and the turn line now
+says which limit it is.**
+
+Aaron: *"Seifer is No Mercy and Edea is Ice Strike... They are harder to BAT —
+Seifer is very early in the game and Edea I haven't reached the point where she
+is playable, so hoping you can verify without me having to BAT those two."*
+
+Every link is readable statically, so it is read:
+
+**1. The commands.** Kernel section 0 is 312 bytes = 39 records of 8, and the
+menu-kind byte at +5 reads `0x87` for exactly five of them:
+
+```
+17  Fire Cross   Seifer     20  Limit  Laguna
+18  Sorcery      Edea       21  Limit  Kiros
+                            22  Limit  Ward
+```
+
+Five commands, five characters. (The model's comment previously wrote this set
+as "20-22" — right characters, wrong ids: 17 and 18 are Fire Cross and Sorcery,
+and 19 in between is Rinoa's Combine.)
+
+**2. The dispatch.** `0x87 & 0x1F` = 7 with bit `0x20` clear, so `0x004BC7EA`
+jumps to `[0x004BCA58 + 7*4]` = `0x004C8190`, which is six pushes and
+`call 0x004C7D00` with **`push 0`** for the kind. `0x004C7D00` then installs
+`[0x01D768D4] = 0x0047E6B0` and `[0x01D768D8] = 0x0047E6E0` — the pair this
+codebase has called kind 0 since v0.36.0.
+
+**3. The names.** `0x0047E6B0(i)` is `ax = word[0x01CF82C8 + i*24]` — kernel
+section 18, stride 24. Section 18 is 120 bytes = 5 records; its text is section
+48 at file offset `0x89C0`. Resolving the five name offsets against that base:
+
+```
+0  0x0000  No Mercy        Damage all enemies      <- SEIFER
+1  0x0018  Ice Strike      Damage one enemy        <- EDEA
+2  0x002F  Desperado       Damage all enemies
+3  0x0048  Blood Pain      Damage one enemy
+4  0x005F  Massive Anchor  Damage all enemies
+```
+
+and searching `kernel.bin` for the encoded bytes of each name lands on
+`0x89C0 / 0x89D8 / 0x89EF / 0x8A08 / 0x8A1F` — the same five offsets, arrived at
+from the other direction.
+
+**4. Nothing in the reader is kind-0-specific**, which is why this could be
+settled without a battle: a one-row kind-0 list is a one-row instance of the
+list that already reads Quistis's Blue Magic and Rinoa's Combine. **But a
+one-row list is exactly the shape that broke v0.14.13** — Quistis had one Blue
+Magic spell and the reader announced the command and stopped, for twenty-two
+builds — and one row is Seifer's and Edea's permanent case, so it is now the
+first thing `tests/battle_limit_compile.cpp` checks. The probe plants **kernel
+section 18's actual bytes**, not re-encoded ASCII, because the descriptions are
+full of `>= 0xE8` pair codes: "Damage all enemies" is eighteen characters out of
+fourteen bytes, and a reader that lost the pair table could not fake it. The
+bank entries go in at literal indices 0 and 1 and the command byte is written to
+a literal address, so swapping `LIMIT_KIND0_SEIFER` and `_EDEA`, or moving
+`LIMIT_CMD_ORIGIN`, fails the probe instead of moving the fixture with it
+(verified: eight failures between the two mutations).
+
+**And the turn line stops saying "Limit Break".** When the toggle at
+`0x01D7684A` is set the game does not draw "Attack" on row 0 — `0x004BCE80`
+takes the alternate branch and `0x004BCEFC` does `mov al, [ebx] / call
+0x0047EBD0` where `ebx = [0x01D76838]`, and `0x004BB77E` sets that pointer to
+`slot*464 + 0x01CFF02E`. **The character's limit command is one byte, and the
+engine's own resolver names it.** So the mod now says "Squall's turn.
+Renzokuken.", "Zell's turn. Duel.", "Seifer's turn. Fire Cross." — what the
+player is looking at — with the old literal kept only as the fallback for a slot
+that will not read.
+
+That last part is the answer to "verify without me having to BAT those two":
+**Squall stands in for Seifer.** The byte, the resolver and the sentence are the
+same three steps for both, so hearing "Renzokuken" instead of "Limit Break" on
+Squall's turn exercises the path Seifer's Fire Cross takes.
+
+BAT: any battle with a full limit gauge. The turn line should name the actual
+limit command instead of "Limit Break".
+
+## v0.38.2
+
+#98: **The magazine's "the character Strike!" was the same name ladder, read by
+a second table that only knew the party.**
+
+Aaron: *"I did not hear the name Angelo when reading the Pet Pals magazine. It
+instead said 'Character' in its place."* The battle side was fixed in v0.38.0;
+this one was not, and the log said why in one line:
+
+```
+[TutorialTTS] item magazine id=189 page 33 ... "It's called.. the character Strike!"
+```
+
+**The bytes are the game's own.** Pet Pals Vol.1 sits in `mngrp.bin` and its
+last line is
+
+```
+06 25  03 40  20 57 72 70 67 69 63  06 27 2E
+ col   NAME   " S  t  r  i  k  e"    col  !
+```
+
+`03 40` — the identical name insert the field and battle text use, and 0x40 is
+Angelo. **But the tutorial/magazine expander has never gone through the mod's
+name ladder.** `TutExpand` had its own lookup, `names[id - 0x30]` over an
+eight-entry party array, and `TutBuildNames` only ever filled slots 0 and 4
+(Squall and Rinoa — the two the savemap holds directly). So `0x03 0x40` fell
+past the end of the array into the placeholder, and so did **Griever (0x50),
+Boko (0x60), and party slots 1, 2, 3, 5, 6, 7** — Zell, Irvine, Quistis,
+Selphie, Seifer and Edea have been reading as "the character" in tutorial and
+magazine text for as long as that path has existed.
+
+**One ladder, not a second table.** `TutExpand` now takes a resolver the view
+supplies, and the view implements it with `FF8TextDecode::Decode({03, id, 00})`
+— the same call every other screen makes, so the five renameable names come out
+of the savemap live and the other ten come off the kernel-table list. The
+eight-entry array stays only as the fallback when no resolver is passed (the
+name-buffer decoding inside `TutBuildNames` itself, which contains no inserts).
+
+**The regression test is the game's bytes, not mine.** `tests/menu_sim.cpp` now
+feeds `06 25 03 40 20 "Strike" 06 27 2E` through `TutExpand` and requires
+"Angelo Strike!", and separately requires that with no resolver it still comes
+out as "the character Strike!" — the bug's own output, pinned so the fallback is
+a documented degrade rather than an accident. A fixture built out of party ids
+would have passed both before and after; this one fails the moment the resolver
+is ignored (verified: two failures). `tests/menu_tutorial_compile.cpp` links the
+real decoder now instead of compiling without it.
+
+BAT: open Pet Pals Vol.1 and Vol.2 in the magazine viewer. Both should name
+Angelo — "Angelo Strike" and "Angelo Recover".
+
+## v0.38.1
+
+#98: **The naming-screen bypass has been reading the wrong table for eleven
+versions — `opcode_menuname`'s parameter is not a party index.**
+
+Chasing Aaron's *"identify all cases where Name 40 may come up"* one step past
+the decoder led straight into `Hook_opcode_menuname`, the second place in the
+mod that turns a number into a name. It reads the script parameter as a party
+member and speaks
+`{Squall, Zell, Irvine, Quistis, Rinoa, Selphie, Seifer, Edea}[param]` for
+params 0..7, and says nothing at all for 8..20.
+
+**The switch says otherwise.** `opcode_menuname` is `0x00521DA0`:
+
+```
+0x00521DC6  cmp edx, 0x14
+0x00521DC9  ja  0x00521FB0                 <- default: sets no kind at all
+0x00521DCF  jmp dword ptr [edx*4 + 0x00521FB8]
+```
+
+Twenty-one cases. Sixteen of them do this before returning:
+
+```
+0x00521E03  push 0
+0x00521E05  mov word ptr [0x01CE4762], 5
+0x00521E0E  call 0x0047E480
+```
+
+and `0x0047E480` is nine instructions:
+`lea eax, [ecx*4 + 0x01CFDCB9] / or cl, 1 / mov [eax], cl`, where `0x01CFDCB9`
+is savemap + `0x4C` + `0x11` and the scale is 68 — the GF record stride. **That
+is the GF "obtained" flag, so its argument is a GF INDEX, 0..15, and params
+3..18 are GF namings.** The classroom study panel, which names Quezacotl and
+Shiva, was announcing **"Quistis" and "Rinoa"** — and the comment in the old
+code had already rationalised the symptom (*"Quistis/Rinoa at study panel"*)
+rather than checking it against the switch. Eleven of the sixteen GF namings
+announced nothing whatsoever.
+
+**Kind is GF index + 5 for all sixteen, without exception. The jump table is
+what is irregular:** it transposes two pairs —
+
+```
+param  8 -> 0x00521E99  push 6    kind 0x0B   Carbuncle
+param  9 -> 0x00521E80  push 5    kind 0x0A   Diablos
+param 14 -> 0x00521F2F  push 0xC  kind 0x11   Bahamut
+param 15 -> 0x00521F16  push 0xB  kind 0x10   Doomtrain
+```
+
+The handlers sit in kind order; the table entries do not. Reading the handlers
+in address order and assuming the parameter follows gets Diablos/Carbuncle and
+Doomtrain/Bahamut backwards. **So `tests/menuname_compile.cpp` does not contain
+a transcription of the model** — it contains 480 bytes of `FF8_EN.exe` (the
+twenty-one handlers at `0x00521DD6..0x00521FB6`) plus the 84-byte jump table,
+copied verbatim, and decodes `push imm8` / `mov word [0x01CE4762], imm16` /
+`call 0x0047E480` out of the real machine code to derive every parameter before
+comparing. A fixture retyped from the model would have copied the transposition
+along with it; this one catches it. Swapping params 8 and 9 in the model makes
+the probe report exactly two failures.
+
+**The five that are not GFs are closed as a set and open as an order.** Params
+0, 1, 2 (kinds 2, 3, 4) and 19, 20 (kinds 0x1B, 0x1C) make no GF call. FF8 has
+exactly five player-changeable non-GF names — Squall, Rinoa, Angelo, Boko,
+Griever — and 16 + 5 = 21 = the case count, so those five parameters are those
+five names. **Which is which is settled only for param 0** (Squall, from the
+mod's own field logs). Kinds 2/3/4 are contiguous immediately below kind 5 =
+GF 0 and follow the savemap's own name-slot order (Squall +0x14, Rinoa +0x20,
+Angelo +0x2C, stride 12), so params 1 and 2 are Rinoa and Angelo **by
+inference** — the naming screen's destination buffer lives in a `menu.fs`
+overlay, not in `FF8_EN.exe`, and cannot be pinned down from the executable
+alone. It is labelled INFERRED in the model and the hook logs the parameter
+beside the name it spoke, so one field visit confirms or refutes it. **Params 19
+and 20 are Boko and Griever in an order this build does not claim: they resolve
+to name id 0 and the hook stays silent rather than speaking a coin flip**, and
+log a line naming itself as the thing to pin down.
+
+Names now come out of the savemap through the v0.38.0 path — the hook builds
+`03 <id> 00` and hands it to `FF8TextDecode::Decode` — so a renamed Squall is
+announced by the name the player gave him, not by a string baked into the mod.
+The wrong eight-name table is gone.
+
+New: `src/field_menuname_model.inl`, `tests/menuname_compile.cpp`.
+
+BAT: nothing to force. Next time a naming screen goes by — a GF, or the Timber
+train — the log line `[MENUNAME] param=N -> kind=0xKK gf=G nameId=0xII` next to
+what was spoken is the confirmation.
+
+## v0.38.0
+
+#97: **`[Name40]` is Angelo — and it was never a party member at a missing
+index.**
+
+Aaron: *"when the limit triggers it is saying 'Name 40' instead of Angelo... I
+think it also said Name 40 in the magazine viewer with Pet Pals. Let's try to
+identify all cases where Name 40 may come up."*
+
+`[Name%02X]` has exactly one producer in the whole mod —
+`FF8TextDecode::DecodeByte`'s `0x03` branch — so every screen that showed it
+showed it for the same reason, and one fix covers all of them.
+
+### The engine's dispatch is a ladder, not a table
+
+```
+004B8D94  cmp ecx, 0x30 / jl   ->  004B8D99  cmp ecx, 0x3f / jg
+004B8D9E  add ecx, -0x10 / and ecx, 0x1F
+004B8DA5  call 0x0049A840  ->  0x0047EB50(idx):
+             idx 0  -> 0x01CFDC70     Squall   (renameable)
+             idx 4  -> 0x01CFDC7C     Rinoa    (renameable)
+             else   -> kernel table 0x01CF75EC + idx*36
+004B8DAC  cmp ecx, 0x40 / je  ->  0x01CFDC88     ANGELO
+004B8DB1  cmp ecx, 0x50 / je  ->  0x01CFE754     GRIEVER
+004B8DB6  cmp ecx, 0x60 / je  ->  0x01CFDC94     BOKO
+004B8DBB  otherwise           ->  0x01D76624     (scratch)
+```
+
+All five addresses read back exactly those names from Aaron's own save file,
+which is what turns a plausible ladder into a settled one:
+
+| address | reads |
+|---|---|
+| `0x01CFDC70` | Squall |
+| `0x01CFDC7C` | Rinoa |
+| `0x01CFDC88` | **Angelo** |
+| `0x01CFE754` | Griever |
+| `0x01CFDC94` | Boko |
+
+So `0x40` is **not an index into the party table** — it is a separate branch,
+and so are `0x50` and `0x60`, which would have read as `[Name50]` and
+`[Name60]` the moment a Griever or Boko line came up. Subtracting
+`NAME_ID_BASE` from any of them was always going to produce a placeholder.
+
+### Read live, not hardcoded
+
+These five are exactly the names a player can change, so they come from the
+savemap every time; the other ten come from a kernel table and stay on the
+built-in list. A renamed Angelo reads as the player named it — the probe
+asserts that by renaming one.
+
+### Where this shows up
+
+Rinoa's Combine row (kernel section 24 entry 0 is literally the bytes `03 40`),
+the magazine viewer's Pet Pals pages, and any field or battle line that names
+the dog. **And one more, unasked for:** `field_dialog_scan.inl` treats a
+`[NameXX]` literal as an immediate disqualifier for garbage text, so a field
+message mentioning Angelo was being thrown away as noise. It no longer contains
+one.
+
+An id in no branch of the ladder still reads as `[NameXX]` rather than an
+invented name — and now **counts itself as dropped**, so a caller reading the
+line aloud knows it is incomplete.
+
+**All seventeen gates.** Verified by removing the `0x40` case: the probe reports
+three failures instead of passing.
+
+**BAT:** Rinoa's limit, and a Pet Pals page in the magazine viewer. Both should
+say Angelo.
+
+## v0.37.4
+
+#96: **The learn notice, read off the screen — and v0.37.3's guess about where
+it lived was wrong.**
+
+Aaron: *"Both issues fixed in this build. No announcement of the confirmation
+message that appears after using a blue magic item on Quistis though."*
+
+### v0.37.3 assumed; the BAT refuted it
+
+v0.37.3 wired the notice to `menu_dialog.inl` on the strength of two calls to
+`0x004C2B10` inside the item module. The reader fired **zero times**. Those two
+call sites are other messages. **Two call sites in the right module is a lead,
+not an identification** — the same mistake shape as `sub_483470` being named the
+turn dispatcher because it sat next to one.
+
+### What the BAT did establish
+
+```
+[MenuTTS] Item focus: 11 -> 111        <- the notice state
+[MenuGCW] "...TutorialSaveQuistis learned Electrocute!!!Quistis can learn..."
+[MenuTTS] Item focus: 111 -> 4         <- and it closes
+```
+
+The sentence is **composed, not stored**: mngrp holds the template
+`<03 33> learned <0A 29>...` — a character-name code, the word, a value insert
+and "!!!" — so there is no menu-text id to resolve and the finished sentence
+exists only in the draw path. That is exactly the case the project's own rule is
+for: **hook the display pipeline, never infer from upstream memory.** The GCW
+buffer is that pipeline, it is already captured for the magazine reader, and the
+log above is it.
+
+### The first frame is a trap, and the log caught it
+
+```
+"Quistis learned !!!Junction..."         <- frame 1, spell not substituted yet
+"...SaveQuistis learned Electrocute!!!"  <- frame 2
+```
+
+A candidate whose middle is empty is rejected and the scan carries on — the same
+pre-write frame that made the refine quantity screen read "0" (v0.33.1) and the
+Slot announce a spell of id 0 (v0.36.0).
+
+### The buffer has no separators
+
+"TutorialSave" runs straight into "Quistis", so walking back over letters
+swallows the whole tab row — which the first attempt did. Two boundaries fix it,
+and both describe what the buffer *is* rather than what this screen happens to
+contain: the last `"Save"` (the final main-menu tab, always drawn immediately
+before this window) and the last lower-to-upper transition (one drawn string
+ending, the next beginning). No character-name table, so a renamed character
+still works.
+
+### Scope, stated plainly
+
+This reads the **learn** notice, keyed on the word the template itself contains.
+Other notices in state 111 — the "cannot learn" message, for instance — are not
+covered, and rather than invent a general shape for a window family nobody has
+surveyed, an uncovered notice **logs its drawn text** so the next one can be
+added from evidence.
+
+`menu_item_compile` now asserts the extraction against **the BAT's own two GCW
+frames, verbatim**, plus the pre-substitution frame and a buffer with no notice
+in it.
+
+**All seventeen gates.**
+
+**BAT:** use a Blue Magic item on Quistis — the notice should read once. If some
+other item puts up a notice this does not cover, the log line says so with the
+drawn text beside it.
+
+## v0.37.3
+
+#96: **Three root causes, all read out of the exe, all confirmed by Aaron's
+screenshots.**
+
+### 1. "Electrocute" was a diagnostic that never stopped talking
+
+v0.14.23 left a diagnostic in `battle_tts_diagnostics.inl` that **spoke** on
+every limit-submenu cursor move: it read a byte at `0x01D76860`, looked it up in
+a scanned "auto-built" Blue Magic table, and announced the result. The BAT:
+
+```
+[LIMIT-DIAG-CURSOR] spellId at 0x01D76860: 0x00
+[LIMIT-DIAG-CURSOR]   ID 0x00 -> 'Electrocute'
+[LIMIT-DIAG-CURSOR]   ID 0x00 -> 'Scatter Shot'
+[LIMIT-DIAG-CURSOR]   ID 0x00 -> 'Dark Shot'      ... and six more
+[LIMIT-NAV] DIAGNOSTIC sub 3->7 id=0x00 | announce='Electrocute'
+```
+
+**Nine of its ten entries carry id `0x00`**, so the lookup always returned the
+first: Electrocute, on every move, including onto empty cells. That is
+*"Electrocute repeats"*, *"empty slots just read as Electrocute"*, and — where
+the real reader also spoke — *"the correct spell name alongside Electrocute"*.
+
+v0.36.0 retired this file's submenu-OPEN announce and left the cursor-MOVE one
+behind. **Half a retirement is worse than none: the surviving half was wrong and
+now had a correct voice to argue with.** The speech is gone; the tracking stays.
+
+### 2. Empty cells on the last page now say "Empty"
+
+The screenshot shows the window titled **"SPECIAL P. 1"** with Laser Eye / Ultra
+Waves / Electrocute / LV?Death in **one column**, and the geometry log agrees:
+`rows=5 vis=4 pages=2 last=4`. Down from row 3 took the cursor to **7**, and
+Left walked it 7 → 6 → 5 → 4, where 4 is Gatling Gun. So `cursor = page*4 +
+rowWithinPage`, and page 2 of a five-spell list has three cells that exist on
+screen and hold nothing. They read as "Empty" — silence there is
+indistinguishable from the mod having broken, which is the v0.28.1 lesson, and
+it is exactly the gap the stray "Electrocute" was filling with a wrong answer.
+
+### 3. The Use-target cursor is a PACKED POSITION for characters
+
+v0.30.0 read `+0x58` as the bit index for both halves of the mask. For GFs that
+is right. For characters it is not, and `0x004F88EC` says so in three
+instructions:
+
+```
+004F88EC  movsx eax, word ptr [esi + 0x58]   ; the cursor
+004F88F0  mov   ecx, dword ptr [esi + 0x38]  ; the mask
+004F88F5  call  0x004ABC40                   ; <- Nth SET BIT of the mask
+004F88FD  mov   byte ptr [esi + 0x62], al    ; the resolved character id
+```
+
+`0x004ABC40` is the same Nth-set-bit helper the refine screen and the Junk Shop
+pickers use. The GF branch a few instructions earlier is the other shape
+entirely (`cursor + 0x10`, shift, test). **Characters are compacted; GFs are
+not.** `0x004F8920` shifts `+0x62` into the action's target mask, so it is what
+the game acts on, not a display artefact.
+
+The screenshot confirms it: mask `0x08` (bit 3 alone — `0x004F86A2` is literally
+`and ebp, 8` for that item class), cursor 0, and a NAME panel containing exactly
+one row, Quistis, cursor on her. Position 0 of a compacted list.
+
+**v0.37.2 made this worse, and the lesson is the point.** It patched the
+*arrival* announcement to fall back to the first set bit and left the
+cursor-move path on the old model, so the entry line said "Use on Quistis" and
+was overwritten by "Squall, not available" from the very next poll — which is
+what Aaron heard. *Patching one of two callers of a wrong model makes it wrong
+AND inconsistent.* The model is fixed once now, where both callers read it. The
+move is detected on the raw cursor; the name comes from the resolved id.
+
+### 4. The learn notice is the shared dialog
+
+"Quistis learned Electrocute!!!" is not a window of its own:
+
+```
+004F8497  call 0x004BD630(1, 9, 8, 0, 0x64)   ; the body text
+004F84A0  call 0x004C2B10                     ; the SHARED dialog opener
+004F84B2  mov  eax, 0x18                      ; -> the notice state
+```
+
+`0x004C2B10` is exactly the opener whose three globals `menu_dialog.inl` has
+read since v0.29.0 — this was one of the sixteen call sites the #88 audit listed
+as still unwired. Announced on a change of the composed body, because those
+globals keep their contents after the window closes; options are not spoken,
+because this window has none and the option globals still hold the last
+dialog's.
+
+**All seventeen gates.** The item probe's gapped-mask assertions were rewritten
+against the exe rather than against the old implementation, and it now includes
+the real `menu_dialog.inl` instead of stubbing it.
+
+**BAT:** Blue Magic in battle — walk both pages, including the empty cells on
+page 2 (they should say "Empty", and nothing should say "Electrocute"). Then a
+Blue Magic item from the Item menu: it should say Quistis once, stay saying
+Quistis, and read the notice afterwards.
+
+## v0.37.2
+
+#96: **Two Quistis bugs — one fixed at the root, one half-known and now
+instrumented rather than guessed at.**
+
+Aaron: *"Tested Irvine and Quistis... Irvine's is now good to go."* Confirmed —
+`"Shot. Normal Ammo, 20 left"`, then `"15 left"` after a round, no "Miss", no
+"Attack" over it. Still untested with more than one ammo type.
+
+### 1. The Use-target list named a character who was not on screen
+
+Teaching Quistis a Blue Magic from the Item menu:
+
+```
+Use target entered [slot2]: char slot 0 avail=0 mask=0x00000008
+  -> "Use on Squall, not available"
+```
+
+**The mask is right.** `0x004F86A2` is literally `and ebp, 8` — when the item
+carries flag bit `0x40` and `[0x01CFE97A] & 1` is clear, the target mask is
+ANDed down to bit 3 alone, Quistis. One row on screen, and it is hers.
+
+**The cursor is what is not right.** `+0x58` is initialised from
+`0x004ABC40`/`0x004ABC70` at `0x004F8710` — but only when the item's flag bit
+`0x20` is set; `0x004F86C2` jumps the whole block otherwise. For this item the
+block is skipped, so `+0x58` keeps whatever was in it: zero. The mod named bit
+0, found it clear, and said "Squall, not available" about a row that is not
+drawn at all.
+
+On **arrival only**, a cursor sitting on a clear bit now falls back to the first
+set bit. That is not a guess about where the engine keeps its highlight — it is
+the observation that the engine cannot be highlighting a row whose bit is clear,
+and with a single-bit mask there is exactly one row it can be on. **Where the
+highlight really lives while `+0x58` is stale has not been found**, so every
+cursor MOVE keeps the v0.30.0 behaviour untouched, including saying "not
+available" on a slot the player genuinely moved onto. The log line now carries
+the raw cursor beside the resolved one.
+
+### 2. Blue Magic paging — what the log actually shows
+
+Every row Quistis has read correctly, by name and description, including the one
+on the second page (`Gatling Gun` at cursor 4 of 5). The engine's own geometry
+says the list is paged four rows at a time: `0x004FF170` computes
+`[0x01D768F1] = (lastUsable + 4) / 4` pages and hands the renderer
+`[0x01D768E5] = min(count,4)` visible rows, while the row drawers at
+`0x004C8000` / `0x004C8090` index the list by the **absolute** row
+(`listBase + row*5`) and use `row & 3` only for the Y position. So the cursor
+being the absolute entry index is right.
+
+What the log DOES show is a real robustness defect: `0x01D768EC` read **5 with
+five rows**. v0.36 refused the whole view on an out-of-range cursor, which tore
+the session down — so the next readable frame re-announced the **title** instead
+of the row, in the middle of walking the list. Identification and cursor
+validity are different questions; the view now survives, the row is simply not
+named, and the probe asserts the session lives through it.
+
+**What is not claimed:** that this is the whole of the paging problem. The
+`[LIMIT]` lines now carry `col`, `vis`, `pages`, `last` and `inRange`, and an
+unreadable cursor logs itself instead of vanishing — so a BAT on a Quistis with
+more Blue Magic settles the rest from the log rather than from a third theory
+about this screen.
+
+**All seventeen gates.**
+
+**BAT:** the Blue Magic list with as many spells as you can give her, walking
+onto and around the later pages — send the `[LIMIT]` lines whether it sounds
+right or not, the geometry is the point. Then a Blue Magic item from the Item
+menu: it should say Quistis. And Irvine with a second ammo type if you can buy
+one.
+
+## v0.37.1
+
+#95: **The status hold works, and "Miss on Irvine" was never a miss.**
+
+### The v0.37.0 fix, measured
+
+The BAT's own numbers, at the moment Aura was up on two characters:
+
+```
+[STATUS-TIMER] calls=962 held=849 ran=113 hold=1 | Aura s0=272 s1=-1111 s2=162
+[STATUS-TIMER] calls=962 held=849 ran=113 hold=1 | Aura s0=272 s1=-1111 s2=162
+[STATUS-TIMER] calls=962 held=849 ran=113 hold=1 | Aura s0=272 s1=-1111 s2=162
+```
+
+**849 of 962 ticks held**, and the two live Aura counters stand still across
+three consecutive seconds while the freeze is on. (`-1111` is `0xFBA9` read as a
+signed word — the engine's "no timer" sentinel, so slot 1 simply had no Aura.)
+That is the predicted signature exactly, and Aaron got both limits tested on the
+same Aura.
+
+Both limit readers came out clean too: *"Slot. Thundara, 1 time. Do over"*,
+*"Cast"* on the other option, *"Shot. Normal Ammo, 20 left"*.
+
+### text_id 0xED is a limit-break trigger, not a miss
+
+v0.13.71 adopted `tid == 0xED` as the miss sprite. The BAT put eight "Miss on
+Irvine" announcements on him while every round of Shot was landing:
+
+```
+[POPUP] retaddr=0x0048341F slot=0 text_id=0xED value=0x0
+[POPUP-MISS] Miss on Irvine. (slot=0)
+[HP-TRACK] Thrustaevis takes 104 damage.
+```
+
+Six shots, six damage events, six "Miss"es — then two more after the enemy was
+already dead.
+
+A byte-scan of the whole image for a pushed `0xED` settles it. In the battle
+code there is **exactly one producer**:
+
+```
+00485220  eax = arg0 / test eax, eax / jne 0x48526E
+00485242  push 0xED          <- the arg0 == 0 branch
+00485289  push 0xEE          <- the arg0 != 0 branch
+```
+
+and `0x00485220` is called from exactly two places, `0x004ADA9C` and
+`0x004ADB20`, both inside the state machine on `[0x01D7675A]` that reads the
+input bits and plays a sound on each press — the trigger-driven part of a limit
+break. **So this popup cannot ever have been a miss.** It fires once per trigger
+pull.
+
+### Deleted, not re-pointed
+
+The real miss text id is **not known**. The damage path builds its popups from a
+queued record (`0x00485933` passes `[esi+1]` as the text id), so it cannot be
+enumerated from the call site, and substituting a second guess is how the first
+one survived eleven versions. The announcement is gone; a throttled
+`[POPUP-SHOT]` line now carries the return address on every `0xED`, so the next
+BAT that contains a **real** miss identifies the true id from the log rather
+than from a theory.
+
+Nothing is lost. Since `0xED` only ever came from the limit-break trigger, no
+real miss has ever been announced by it.
+
+**All seventeen gates.**
+
+**BAT:** Irvine's Shot again — the shots should be silent apart from the damage
+lines, with no "Miss". Quistis and Rinoa are still unexercised by any BAT if you
+want to swap them in.
+
+## v0.37.0
+
+#95: **Enhanced Wait Mode was ageing every buff while it held the ATB.**
+
+Aaron: *"when I cast Aura twice it ended before the character's ATB gauge
+filled... I am curious if the Enhanced Wait Mode system might not be accounting
+for status effects / buffs."* He was right, and it is a single flag.
+
+### The engine keeps the ATB and the status timers on one clock
+
+```
+004842BD  mov byte ptr [0x01D28DEB], 0   ; ATB update, on entry / early-out
+004842EE  mov byte ptr [0x01D28DEB], 1   ; set only when the ATB loops really run
+0047D7CD  mov al, byte ptr [0x01D28DEB]  ; battle state machine, state 4
+0047D7D4  test al, al / je -> skip
+0047D7F1  call 0x00483470                ; the timed-status timers
+```
+
+Those four are the **only** references to `0x01D28DEB` in the executable. In
+vanilla, when the ATB does not advance — Wait mode with a menu open, an action
+in progress — statuses do not age either.
+
+**EWM broke the lockstep.** `HookedATBUpdate` saves every gauge, calls the
+original, and restores the saved values. The gauges do not move — but the
+original ran, so it set the flag, and the engine downstream aged every timed
+status on a frame where no ATB progress happened at all.
+
+A blind player spends far longer in the menus than a sighted one: reading a
+magic list, walking a target row, hearing a description. Every one of those
+seconds was charged to Aura, Haste, Protect, Shell, Regen and Reflect while the
+gauges stood still.
+
+### `sub_483470` is the status timer, not the turn dispatcher
+
+The mod has hooked this address since v0.13.55 as `HookedProcessReady`,
+described in its own comment as *"process ready characters / dispatch turns"*.
+The instruction stream disagrees: it walks all seven entities and, for each,
+**fourteen `int16` durations at entity+0x4C**, indexed by the bit position of
+the timed-status flag at entity+0x00.
+
+```
+0048348E  lea eax, [ebp - 0x2c]        ; entity + 0x4C
+0048349C  cmp dx, 0xFBA9               ; the "no timer" sentinel
+004834AE  test dx, dx / jg              ; >0 tick, <=0 expired
+004836C1  sub word ptr [eax], si       ; the decrement (2, or 3 Haste / 1 Slow)
+004835E7  not ebx / and edx, ebx       ; the flag clear at entity+0x00
+004836D0  cmp ecx, 0x0E                ; fourteen per entity
+```
+
+Bit 4 queues a periodic heal (Regen), bit 10 queues a death on expiry (Doom),
+bit 12 sets Petrify (Gradual Petrify). There is no turn dispatch in it anywhere.
+**v0.13.55's own BAT already refuted the reading** — it blocked 6 of 6 calls and
+the enemy attack landed anyway — and the conclusion drawn was "hook `sub_482F80`
+as well" rather than "this is not the dispatcher".
+
+### And the hook was never installed
+
+`EWM_InstallProcessReadyHook()` and `EWM_InstallActionExecuteHook()` were
+defined in v0.13.56 and **called from nowhere**. No shipped build has ever had
+either. The log proves it: the startup banner lists the ATB and GF hooks and
+nothing else, and there is not one `[DISPATCH]` line in 344 KB of battle log.
+`s_blockProcessReady` was maintained faithfully for eleven versions gating a
+hook that did not exist.
+
+### The fix
+
+While the mod holds the ATB, hold the status timers too — the same shape as the
+ATB freeze and the GF-loading freeze already beside it. `EWM_SetFreeze()` is now
+the only thing that may write either flag, and **`tests/lint_freeze.py` fails the
+build if anything else does**. The failure it guards is not this fix being
+wrong; it is the two flags drifting apart later, which is exactly what happened
+to `s_blockProcessReady`.
+
+**Deliberately not done:** `0x01D28DEB` is not cleared. That would be the
+faithful "the ATB did not advance" signal, but the same gate guards
+`sub_482F80` on the very next instruction and what that does has not been read
+out of the exe. Blocking a function nobody has read, on a frame where the active
+character's gauge *is* advancing, is how turns get stuck. The `sub_482F80` hook
+is deleted rather than left dormant — dead code carrying an unverified belief is
+worse than no code.
+
+### Measurable, not just asserted
+
+A new per-second line reports it directly:
+
+```
+[STATUS-TIMER] calls=N held=H ran=R hold=1 | Aura s0=.. s1=.. s2=..
+```
+
+If `held` climbs while the Aura counters stand still, the hold works.
+
+**Not claimed:** that Aura's intended duration is longer than the fifteen
+seconds measured. Its base-duration table at `0x01CF8B14` and multiplier at
+`0x01CFE738` are populated at runtime and unreadable from the file. What is
+established is that time was being charged to it while the battle stood still.
+
+**All seventeen gates.** New: `tests/lint_freeze.py`, `docs/EWM_STATUS_TIMERS.md`.
+Renamed: `battle_tts_ewm_dispatch.inl` -> `battle_tts_ewm_status_timers.inl`.
+
+**BAT:** any battle. Cast Aura (or Haste/Protect) and then take your time in the
+menus — the buff should survive the reading. Grep `[STATUS-TIMER]`. Then check
+nothing else regressed: turns still come round, enemies still act, GF summons
+still work.
+
+## v0.36.2
+
+#94: **Both screens are clean; the Slot was reading each option's explanation
+instead of its name.**
+
+The 2026-08-19 BAT: **Irvine is done** — *"Shot. Normal Ammo, 20 left"* straight
+into *"All enemies"*, with nothing announcing "Attack" over it and not one
+competing `[SUBMENU]` line in the window. **Selphie's Slot reads** — it opened,
+walked both options, and announced fourteen re-rolls by spell and count, all
+named correctly (Sleep, Blizzard, Wall, Thundaga, Full-Cure).
+
+### One defect: two call sites, one step apart
+
+```
+[LIMIT-SLOT] open ... -> "Slot. Sleep, 2 times. Turn the slot again"
+[LIMIT-SLOT] option 1 -> "Use indicated magic"
+```
+
+Those are the *descriptions*. Kernel section 30 stores each option's name and
+its explanation two entries apart — **66 "Cast" / 68 "Use indicated magic"**,
+**67 "Do over" / 69 "Turn the slot again"** — and the engine has two call sites
+that differ by exactly that:
+
+```
+0x004C7A92  the ROW DRAWER:  label = 0x0047EC70(id)         <- no offset
+0x004C7538  the HELP LINE:   help  = 0x0047EC70(id + 2)  -> 0x01D76860
+```
+
+v0.36.1 read `id + 2` for the label — I had traced the help-line call and taken
+it for the drawer — so every option announced its own explanation, and `/` ran
+two further on into "AP received". The label is the entry id itself.
+
+The BAT also settled which row is which: the player picked cursor 1 and the
+popup carried `value=0x33`, Full-Cure, so **cursor 1 is Cast and cursor 0 is
+Do over**; the list holds 67 at entry 1 and 66 at entry 2.
+
+### The probe passed the bug, and why
+
+Its fixture planted entry ids 64/65 and asserted the resolver was asked for
+66/67 — **numbers chosen to match the code rather than the game.** A fixture
+written from the implementation tests only that the implementation is
+self-consistent. It now uses the real section-30 indices and the entry order the
+BAT observed, so it is a statement about FF8. Verified by re-introducing the
+bug: `SlotOptionLabelIndex(id) = id + 2` turns a clean run into two failures.
+
+### Also
+
+*"Wall, 1 times"* is now *"Wall, 1 time"*. A screen reader gives you no
+punctuation to soften that one.
+
+**All sixteen gates.**
+
+**BAT:** Selphie's Slot only — the two options should now say "Cast" and
+"Do over", with `/` giving "Use indicated magic" / "Turn the slot again", and a
+single-cast roll should read "1 time". Quistis and Rinoa are still unexercised
+by any BAT if you want to swap them in. Grep `[LIMIT-SLOT]`.
+
+## v0.36.1
+
+#94: **Two defects, and the log had both of them in plain sight.**
+
+Aaron: *"Did just Irvine and Selphie in this test. Neither limit announced
+correctly."* Right on both counts, for two different reasons.
+
+### 1. The index is a PARTY SLOT, not a character index
+
+Irvine's Shot did open, and read correctly:
+
+```
+[LIMIT] open kind=3 char=0 cmd=14 rows=1 cursor=0 -> "Shot. Normal Ammo, 20 left"
+```
+
+`char=0` — with Irvine, whose savemap character index is **2**. And one line
+above it, the mod's own diagnostic had already printed the answer:
+
+```
+[LIMIT-DIAG] BASELINE turn=Selphie slot=2 charIdx=5
+```
+
+`0x01D768EB` (and `0x01D768D9` for the Slot) is the **battle party slot, 0–2**,
+and `0x004C7CD0` takes that slot. The formula was never wrong — Selphie sat in
+slot 2 and the engine stored `0x01CFF3D2`, which is `0x01CFF032 + 2 × 464`
+exactly. What was fed into it was wrong.
+
+**So the Slot window was refused every single time it opened**, because
+v0.36.0 tested the slot byte against Selphie's character index: `slot == 5` can
+never be true. Her whole limit was silent, and the log shows it — not one
+`[LIMIT-SLOT]` line in the entire run.
+
+*A field whose meaning you have assumed is not a field you have identified.*
+The value that exposed it was in the mod's own log all along, one line up.
+
+The Slot now identifies itself from **three** creator-written fields that have
+to agree: the stored pointer equals `0x01CFF032 + slot × 464` for the slot byte
+beside it, and `0x01D768E0` holds command 16 (Slot) — which matters, because
+that byte is shared with another menu (eleven writers in `0x004AExxx`), so on
+its own it proves nothing.
+
+### 2. The command menu talked over the limit menu
+
+Ten milliseconds after the ammo line, from the same run:
+
+```
+[LIMIT]   open ... -> "Shot. Normal Ammo, 20 left"
+[SUBMENU] Exit detected via submenu mode 0x01->0xFE
+[SUBMENU] Exit announce: Attack (cursor=0, was cmd 0x01)
+```
+
+Opening a limit submenu looks exactly like *leaving* a submenu to the generic
+handler — the engine drops `submenuMode` to `0xFE` as the limit window takes
+over — so it announced the command it thought we were returning to, with
+`interrupt=true`. **"Attack" is the only thing Aaron actually heard.** This is
+the v0.14.37 Item bug's shape, one screen over.
+
+v0.14.14 already had a guard for the *entry* path, and it did not fire, because
+it tested `s_inLimitSubmenu` — a flag `PollLimitDiag` sets **after**
+`PollTurnAndCommands` has already run. **A flag written later in the same frame
+cannot gate something that runs earlier in it.** Both paths now call
+`LimitMenuIsOpenNow()`, which asks the engine and is therefore true the moment
+the window exists, whatever the poll order. The limit `.inl` files moved ahead
+of `battle_tts_menu_poll.inl` so it can.
+
+### Not a defect
+
+`rows=1` and "Normal Ammo, 20 left" are both correct — the save holds exactly
+one ammo type, twenty Normal Ammo. The BAT note in v0.36.0 said "only Shotgun
+Ammo", which was **my** error: I indexed `FF8_ITEM_NAMES` directly while the
+real `GetItemName()` treats index 0 as empty, so I named every item one place
+off. The engine's own resolver, which the reader uses, was right.
+
+### The probe now fails on the shipped bug
+
+Verified by re-introducing it: restore the `slot == 5` test and
+`battle_limit_compile` reports three failures instead of passing. It plants the
+BAT's actual party — Irvine slot 0, Squall slot 1, Selphie slot 2 — asserts the
+slot→character mapping, refuses a slot byte that disagrees with the pointer,
+refuses a window opened by some other command, and checks `LimitMenuIsOpenNow()`
+is true while a window is up **before anything has polled**.
+
+**All sixteen gates.**
+
+**BAT:** same as before — Aura, Limit, and this time Selphie's Slot should read
+"Slot. *spell*, N times. Cast", the two options on Up/Down, and the whole line
+again after a Do over. Irvine should read his ammo with nothing saying "Attack"
+over it. Grep `[LIMIT]` and `[LIMIT-SLOT]`; the open lines now carry both the
+slot and the character.
+
+## v0.36.0
+
+#94: **The four menu limit breaks, read out of the command dispatch.**
+
+Aaron: *"let's work on adding support for character limit breaks... focus on
+Selphie, Quistis, Irvine, and Rinoa."*
+
+### There are only three shapes, not six
+
+A battle command's kernel record carries a **menu-kind byte at +5**.
+`0x004BC7EA` masks it with `0x1F` and, when bit `0x20` is clear, jumps through
+the 9-entry table at `0x004BCA58`:
+
+```
+0xA0  Attack, Renzokuken(5), Duel(11), Mug, Cast, Stock   bit 0x20 SET -> NO SUBMENU
+0x84  Shot (14)        -> 0x004C8220 -> kind 3   IRVINE, ammunition
+0x85  Slot (16)        -> 0x004C7920             SELPHIE, its own UI
+0x86  Blue Magic (15)  -> 0x004C81C0 -> kind 1   QUISTIS
+0x88  Combine (19)     -> 0x004C81F0 -> kind 2   RINOA
+```
+
+**Squall and Zell have no submenu at all** — Renzokuken and Duel both carry
+`0xA0`, so choosing the command goes straight to targeting. That is why "just
+let me pick it from the command menu" was the whole job for those two: there is
+nothing else there, and the v0.10.22 toggle announce already names it.
+
+The other four are **one list menu** (`0x004C7D00` → `0x004FF0C0`) that differs
+only in which pair of name/description resolvers it installs — plus Selphie,
+who is genuinely different.
+
+### The list, and what it is made of
+
+Rows live at `0x004C7CD0(charIdx)` = `charIdx * 464 + 0x01CFF032`, stride 5:
+`+0` id, `+1` stock, `+4` flags. Cursor at `0x01D768EC + [0x01D768F6]`, count at
+`0x01D768F4`. `0x004FE2A5` computes what is left as `stock − queuedThisTurn`
+(`0x01D76904[row]`), and `0x004FE2BD` refuses a row whose flag bit 1 is set.
+
+Decoded from the shipped `kernel.bin`, the four kinds are exactly what they
+should be: **Quistis's sixteen Blue Magic** (Laser Eye … Shockwave Pulsar),
+**Rinoa's two options**, **Irvine's ammunition** (through the item resolvers the
+shop already uses), and the five temporary-character limits.
+
+**Rinoa's first row has no kernel name at all** — `0x0047E4F0` special-cases
+index 0 and returns the savemap pointer `0x01CFDC88`, so the row reads as the
+dog's name and its description is "Fight together with *name*". The mod gets
+that for free, because it calls the engine's resolvers rather than indexing the
+kernel sections itself (the #78 rule: calling the game's own function cannot get
+the table math wrong).
+
+### Selphie's Slot
+
+One rolled spell, a count, and a two-row menu — no timer, as Aaron said. Phase 0
+rolls (`0x0048CBB0(&0x01D768DC, &0x01D768DD)`, the **only** call site, so the
+spell changes on a deliberate re-roll and never on an animation frame); phase 2
+is the input state; the cursor at `0x01D768D8` walks 0↔1.
+
+The two labels are the game's own strings, reached exactly the way `0x004C7538`
+reaches them — `0x0047EC70(listBase[(cursor+1)*5] + 2)` — landing on kernel
+section 30 entries **66 "Cast"** and **67 "Do over"**, with **68 "Use indicated
+magic"** and **69 "Turn the slot again"** as their explanations.
+
+### Two identifications that must agree
+
+The scratch block at `0x01D768D0` is a **union**: `0x01D768D4` is the executing
+party slot during a Draw, a signed cursor in the Slot, and a function pointer in
+a limit list. So nothing is read until two creator-written fields agree —
+`[0x01D768D0] == 0x004C7CD0` **and** `[0x01D768D4]` being the resolver for
+`[0x01D768E6]`'s kind. The first is not merely plausible but **unique**: the only
+four dword references to `0x004C7CD0` in the whole executable are the four limit
+cases of the dispatch. v0.14.12 found that pointer empirically; this is why it
+works.
+
+For the Slot: `[0x01D768D0] != 0x004C7CD0`, `[0x01D768D9] == 5`, and the pointer
+equals the list base for that same character byte.
+
+### What v0.14.13 could not have done
+
+That build announced "Blue Magic" and stopped, and stayed stopped for
+twenty-two versions, because **Quistis had exactly one Blue Magic spell at the
+time and one row cannot reveal a cursor**. `tests/battle_limit_compile.cpp`
+plants sixteen and walks them.
+
+The probe **maps executable pages at the engine's own resolver addresses and
+writes real machine code into them**, so the reader has to actually call
+`0x004C7CD0` and the installed resolvers to pass — and the base-address stub
+records that it was called, so a later "simplification" that re-derives
+`charIdx * 464` fails the test instead of quietly passing it.
+
+### Spoken
+
+Open reads the command's own name (`0x0047EBD0`) plus the row under the cursor
+in one utterance — a separate title line gets interrupted by the row that
+follows it (v0.33.3), and battle has an ATB clock. Cursor moves read the row.
+`/` reads its description. Ammunition reads a count ("Normal Ammo, 30 left") —
+it is the only kind whose stock is a quantity the player spends. A row that
+cannot be chosen says so. A name the engine will not give up is **not invented**
+(the Card Mod rule).
+
+**All sixteen gates.** New: `src/battle_limit_model.inl`,
+`src/battle_tts_limit.inl`, `tests/battle_limit_compile.cpp`,
+`docs/LIMIT_BREAKS.md`.
+
+**BAT — and your save says where to start.** `slot2_save30.ff8` has the party as
+**Irvine, Squall, Rinoa**, so those are testable without a swap; Quistis and
+Selphie need swapping in. Two things to know going in: you hold **only Shotgun
+Ammo (20)** — no Normal Ammo — so if Irvine's list turns out to show only what
+you own it will be one row, which is the exact trap that stalled v0.14.13, and a
+few hundred gil of Normal Ammo from a shop removes it. Cast Aura, take Limit,
+then walk each list end to end and press `/` on a row. Grep `[LIMIT]` and
+`[LIMIT-SLOT]` — the open line carries kind, charIdx, command id, row count and
+cursor.
+
 ## v0.35.0
 
 #93: **The preprocessor has a name — `sub_4B8B30` — and its table is `namedic.bin`.**

@@ -506,11 +506,11 @@ static PopupSpriteFunc_t s_origPopupSprite = nullptr;
 static bool s_popupSpriteHookInstalled = false;
 static const uint32_t POPUP_SPRITE_ADDR = 0x0048D200;
 
-// Miss dedup — independent from the sub_483400 hook's dedup because the two
-// hooks operate at different pipeline layers and we never want to gate the
-// canonical announcement behind the diagnostic hook's state.
-static DWORD s_lastPopupMissAnnounceTick[BATTLE_TOTAL_SLOTS] = {};
-static const DWORD POPUP_MISS_DEDUP_MS = 500;
+// v0.37.1 (#95): text_id 0xED is the limit-break TRIGGER popup, not the miss
+// sprite v0.13.71 took it for. Named here so the next reader meets the evidence
+// (the block in the popup hook below) before the number.
+static const uint8_t POPUP_TID_LIMIT_SHOT = 0xED;
+static DWORD s_lastLimitShotLogTick = 0;
 
 // Per-battle diagnostic dedup for text_ids.
 // v0.13.71: expanded to include caller return address so we can distinguish
@@ -610,31 +610,53 @@ static uint32_t __cdecl HookedPopupSprite(uint32_t slot, uint32_t text_id,
                         (uint32_t)callerRA, slot, tid, tid, value, extra1, extra2);
         }
 
-        // --- Miss announcement (text_id == 0xED) ---
-        if (tid == 0xED && slot < BATTLE_TOTAL_SLOTS) {
+        // ====================================================================
+        // v0.37.1 (#95): text_id 0xED IS NOT "MISS". IT IS A LIMIT-BREAK SHOT.
+        // ====================================================================
+        //
+        // v0.13.71 adopted `tid == 0xED` as the miss sprite and announced
+        // "Miss on <slot>". The 2026-08-20 BAT put eight of those on Irvine
+        // while every one of his Shot rounds was landing:
+        //
+        //   [POPUP] retaddr=0x0048341F slot=0 text_id=0xED value=0x0
+        //   [POPUP-MISS] Miss on Irvine. (slot=0)
+        //   [HP-TRACK] Thrustaevis takes 104 damage.
+        //
+        // Six shots, six damage events, six "Miss"es, then two more after the
+        // enemy was already dead.
+        //
+        // A byte-scan of the whole image for a pushed 0xED settles it. In the
+        // battle code there is **exactly one producer**: `0x00485242`, inside
+        //
+        //   00485220  eax = arg0 / test eax, eax / jne 0x48526E
+        //   00485242  push 0xED            <- arg0 == 0 branch
+        //   00485289  push 0xEE            <- arg0 != 0 branch
+        //
+        // and `0x00485220` is called from exactly two places, `0x004ADA9C` and
+        // `0x004ADB20`, both inside the state machine on `[0x01D7675A]` that
+        // reads the input bits and plays a sound on each press -- the
+        // trigger-driven part of a limit break. **So this popup cannot ever
+        // have been a miss.** It fires once per trigger pull.
+        //
+        // The announcement is DELETED rather than re-pointed at another id.
+        // The real miss text id is NOT KNOWN: the damage path builds its
+        // popups from a queued record (`0x00485933` passes `[esi+1]` as the
+        // text id), so it cannot be enumerated from the call site, and
+        // substituting a guess here is how the wrong id survived eleven
+        // versions in the first place. The diagnostic below now carries the
+        // return address on every 0xED, so the next BAT that contains a REAL
+        // miss identifies the true one from the log instead of from a theory.
+        //
+        // Nothing is lost by removing it: since 0xED only ever came from the
+        // limit-break trigger, no real miss has ever been announced by it.
+        if (tid == POPUP_TID_LIMIT_SHOT) {
             DWORD now = GetTickCount();
-            if (now - s_lastPopupMissAnnounceTick[slot] > POPUP_MISS_DEDUP_MS) {
-                s_lastPopupMissAnnounceTick[slot] = now;
-
-                char name[64] = {};
-                if (slot < BATTLE_ALLY_SLOTS) {
-                    const char* charName = GetBattleCharName((int)slot);
-                    if (charName) strncpy(name, charName, sizeof(name) - 1);
-                } else {
-                    GetEnemyName((int)slot, name, sizeof(name));
-                }
-
-                char buf[128];
-                if (name[0])
-                    snprintf(buf, sizeof(buf), "Miss on %s.", name);
-                else
-                    snprintf(buf, sizeof(buf), "Miss.");
-
-                // v0.13.79: Validate BEFORE speaking. Non-blocking enqueue —
-                // safe to call from game-thread hook body.
-                Validate_AnnounceEvent("miss-popup", (int)slot, 0, buf, "immediate");
-                BattleSpeakEvent(buf, false);
-                Log::Battle("BattleTTS: [POPUP-MISS] %s (slot=%u)", buf, slot);
+            if (now - s_lastLimitShotLogTick > 250) {
+                s_lastLimitShotLogTick = now;
+                Log::Battle("BattleTTS: [POPUP-SHOT] limit-break trigger popup "
+                            "(text_id=0x%02X slot=%u retaddr=0x%08X) -- NOT a miss, "
+                            "see the block in battle_tts_sprite.inl",
+                            tid, slot, (uint32_t)callerRA);
             }
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {
@@ -791,7 +813,7 @@ static void ResetSpriteSpawnState()
     // sufficient since sizeof(s_popupLogDedup) includes the retaddr field now)
     s_popupLogDedupCount = 0;
     memset(s_popupLogDedup, 0, sizeof(s_popupLogDedup));
-    memset(s_lastPopupMissAnnounceTick, 0, sizeof(s_lastPopupMissAnnounceTick));
+    s_lastLimitShotLogTick = 0;   // v0.37.1
     // v0.13.67: sub_4877F0 kind=4 Miss dedup
     memset(s_lastSpellMissAnnounceTick, 0, sizeof(s_lastSpellMissAnnounceTick));
     // v0.14.74.2: Scan-cast popup tick. Defense-in-depth — without this

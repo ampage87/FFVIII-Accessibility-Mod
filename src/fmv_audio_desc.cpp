@@ -27,7 +27,7 @@
 
 // Forward declarations for cross-module namespaces (restored in v0.14.29 build recovery).
 namespace Log { void Mod(const char* format, ...); }
-namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); }
+namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); bool IsSpeaking(); }
 #include <sstream>
 #include <algorithm>
 #include <cctype>
@@ -617,7 +617,20 @@ namespace FmvAudioDesc
                     elapsed, g_nextCueIndex, cue.text.c_str(),
                     g_suppressed ? "   [SUPPRESSED -- the mod holds the channel]" : "");
 
-                if (!g_suppressed) ScreenReader::Speak(cue.text.c_str(), true);
+                // v0.39.0 (#100): QUEUE, do not interrupt. The 2026-08-20 BAT
+                // caught what interrupt=true costs: the prison escape's own
+                // line -- Rinoa, "Squall!!!  Hold on!  Over here!  Hurry!" --
+                // was spoken at 22:26:10, disc01_03h started, and this cue
+                // fired at 22:26:11 and cut her off mid-sentence. A cue at 0.0s
+                // ALWAYS lands on top of whatever dialogue triggered the movie,
+                // so this is not a one-scene accident. The description is the
+                // mod's words; the dialogue is the game's, and the game's win.
+                if (!g_suppressed) {
+                    const bool busy = ScreenReader::IsSpeaking();
+                    ScreenReader::Speak(cue.text.c_str(), false);
+                    if (busy) Log::Mod("[FMV_AD] cue %d queued behind speech in progress",
+                                       g_nextCueIndex);
+                }
 
                 g_nextCueIndex++;
             }

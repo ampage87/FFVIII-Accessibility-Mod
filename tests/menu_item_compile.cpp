@@ -126,6 +126,10 @@ static void SubmonStop() {}
 static void SubmonPoll() {}
 
 #include "menu_item_swap_model.inl"
+// v0.37.3 (#96): the learn notice goes through the SHARED dialog window, so
+// the probe includes the real reader rather than stubbing it (the v0.34.2
+// lesson). Its three globals are mapped in main() alongside the rest.
+#include "menu_dialog.inl"
 #include "menu_tts_item.inl"
 
 static int bad = 0;
@@ -251,34 +255,60 @@ int main()
         }
     }
 
-    // --- 2. **A GAP.** The exact shape the old code got wrong ---------------
-    // Mask {0, 2, 5} -- the three-member formation case ([0x01CFE97A] & 1).
-    // Packed-and-sorted, position 1 is Irvine; by slot, slot 1 is Zell and he is
-    // NOT a target. The screen shows a gap there; the mod used to read the next
-    // name down and shift every row below it.
-    SetSel(m, (1u<<0)|(1u<<2)|(1u<<5), 2, 0);
-    ItemReadTargetSel(14, sel);
-    check(sel.slot == 2 && sel.available, "slot 2 is Irvine and he IS a target");
-    ItemFormatTarget(sel, false, buf, sizeof(buf));
-    check(strncmp(buf, "Irvine", 6) == 0, "a gapped mask must still name by slot");
-
+    // --- 2. **A GAP.** v0.30.0 read the cursor as a BIT INDEX here. -------
+    // v0.37.3 (#96): it is a PACKED POSITION for characters. `0x004F88F5`
+    // calls `0x004ABC40(mask, cursor)` -- the Nth-set-bit helper -- and stores
+    // the answer in +0x62, which `0x004F8920` then shifts into the action's
+    // target mask. GFs keep the bit-index shape (`0x004F88CF`: cursor + 0x10,
+    // shift, test), so the two halves genuinely differ.
+    //
+    // These numbers come from the exe and from Aaron's 2026-08-20 screenshot,
+    // not from what this file used to do: mask 0x08 (one bit, Quistis) with the
+    // cursor at 0 drew a NAME panel containing exactly one row, hers, cursor on
+    // it. Position 0 of a compacted list.
     SetSel(m, (1u<<0)|(1u<<2)|(1u<<5), 1, 0);
     ItemReadTargetSel(14, sel);
-    check(!sel.available, "slot 1 is not in the mask");
+    check(sel.slot == 2 && sel.available,
+          "**position 1 of {0,2,5} is Irvine**, not Zell -- the list is compacted");
     ItemFormatTarget(sel, false, buf, sizeof(buf));
-    check(strcmp(buf, "Zell, not available") == 0,
-          "an unavailable slot must be named and marked, not skipped over");
+    check(strncmp(buf, "Irvine", 6) == 0, "and it is named as Irvine");
 
-    SetSel(m, (1u<<0)|(1u<<2)|(1u<<5), 5, 0);
+    SetSel(m, (1u<<0)|(1u<<2)|(1u<<5), 2, 0);
     ItemReadTargetSel(14, sel);
     ItemFormatTarget(sel, false, buf, sizeof(buf));
-    check(strncmp(buf, "Selphie", 7) == 0, "the last of a gapped mask is still by slot");
+    check(strncmp(buf, "Selphie", 7) == 0, "position 2 is the last of the three");
 
-    // A mask that starts above zero -- there is nothing special about slot 0.
-    SetSel(m, (1u<<6)|(1u<<7), 6, 0);
+    SetSel(m, (1u<<0)|(1u<<2)|(1u<<5), 3, 0);
+    ItemReadTargetSel(14, sel);
+    check(!sel.available, "position 3 is past the end of a three-target list");
+
+    // **THE BAT CASE.** A Blue Magic item masks the targets down to bit 3 alone
+    // (`0x004F86A2` is literally `and ebp, 8`), and the engine leaves the cursor
+    // at 0 because the init at `0x004F8710` is gated on a flag this item lacks.
+    // v0.30.0 said "Squall, not available" about a row that is not drawn.
+    SetSel(m, (1u<<3), 0, 0);
+    ItemReadTargetSel(14, sel);
+    check(sel.slot == 3 && sel.available,
+          "**a single-target Blue Magic item resolves to Quistis at cursor 0**");
+    ItemFormatTarget(sel, false, buf, sizeof(buf));
+    check(strncmp(buf, "Quistis", 7) == 0, "and says Quistis, not Squall");
+
+    // A mask that starts above zero -- position 0 is the first SET bit.
+    SetSel(m, (1u<<6)|(1u<<7), 0, 0);
     ItemReadTargetSel(14, sel);
     ItemFormatTarget(sel, false, buf, sizeof(buf));
-    check(strncmp(buf, "Seifer", 6) == 0, "a mask starting at slot 6 names Seifer");
+    check(strncmp(buf, "Seifer", 6) == 0, "a mask of {6,7} names Seifer at position 0");
+    SetSel(m, (1u<<6)|(1u<<7), 1, 0);
+    ItemReadTargetSel(14, sel);
+    ItemFormatTarget(sel, false, buf, sizeof(buf));
+    check(strncmp(buf, "Edea", 4) == 0, "and Edea at position 1");
+
+    // The model on its own, both halves.
+    check(ItemResolveTargetId(0x0000000Cu, 0, false) == 2, "Nth set bit: position 0 of {2,3}");
+    check(ItemResolveTargetId(0x0000000Cu, 1, false) == 3, "position 1 of {2,3}");
+    check(ItemResolveTargetId(0x0000000Cu, 2, false) == -1, "position 2 of {2,3} is nothing");
+    check(ItemResolveTargetId(0x00080000u, 3, true) == 3, "GFs keep the bit-index shape");
+    check(ItemResolveTargetId(0x00080000u, 2, true) == -1, "a clear GF bit is nothing");
 
     // --- 3. **GFs**, which the old reader could not express at all ----------
     // High half of the mask, kind byte 1. Every one of these used to be read out
@@ -374,8 +404,42 @@ int main()
                "agree with the live state\n");
     }
 
-    printf("use target: named by SLOT across gapped masks, both halves of the "
-           "mask, unavailable rows marked, and refusals on out-of-range input\n");
+    // --- 5. THE LEARN NOTICE, off the drawn-text buffer --------------------
+    // The two strings below are the 2026-08-20 BAT's own GCW frames, verbatim.
+    // The first is the trap: the game has drawn the template but not yet
+    // substituted the spell, so "Quistis learned !!!" appears BEFORE the real
+    // sentence in the same buffer.
+    {
+        char nb[192];
+        struct { const char* in; const char* want; } CASES[] = {
+            { "Quistis learned !!!JunctionItemMagicStatusGFAbilitySwitchCardConfig"
+              "TutorialSaveQuistis learned Electrocute!!!Quistis can learn Blue Magic",
+              "Quistis learned Electrocute!!!" },
+            { "JunctionItemMagicStatusGFAbilitySwitchCardConfigTutorialSave"
+              "Quistis learned Electrocute!!!Quistis can learn",
+              "Quistis learned Electrocute!!!" },
+            { "SaveZell learned Mighty Guard!!!Zell can", "Zell learned Mighty Guard!!!" },
+        };
+        for (size_t i = 0; i < sizeof(CASES)/sizeof(CASES[0]); i++) {
+            const bool ok = ItemExtractLearnNotice(CASES[i].in, nb, sizeof(nb));
+            if (!ok || strcmp(nb, CASES[i].want) != 0) {
+                bad++;
+                printf("  BAD: notice case %d\n        got  \"%s\"\n        want \"%s\"\n",
+                       (int)i, ok ? nb : "(none)", CASES[i].want);
+            }
+        }
+        // **The pre-substitution frame on its own must produce nothing.** The
+        // same shape that made the refine quantity screen read "0" (v0.33.1)
+        // and the Slot announce a spell of id 0 (v0.36.0).
+        check(!ItemExtractLearnNotice("Quistis learned !!!", nb, sizeof(nb)),
+              "a template with nothing substituted into it is refused");
+        check(!ItemExtractLearnNotice("nothing here at all", nb, sizeof(nb)),
+              "and text with no notice in it is refused");
+    }
+
+    printf("use target: characters resolve by PACKED POSITION and GFs by SLOT, both halves of the "
+           "mask, unavailable rows marked, refusals on out-of-range input, and the learn "
+           "notice pulled out of the BAT's own drawn-text frames\n");
 
     printf("menu_item_compile: %s (%d bad)\n", bad ? "FAILED" : "OK", bad);
     return bad ? 1 : 0;

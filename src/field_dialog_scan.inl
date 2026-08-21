@@ -270,7 +270,7 @@ static void ScanAndSpeakAllWindows(const char* opcodeLabel)
 // (called at the end) naturally deduplicates against choice windows.
 // ============================================================================
 
-static void ScanAndSpeakChoiceWindows(const char* opcodeLabel)
+static void ScanAndSpeakChoiceWindows(const char* opcodeLabel, uintptr_t entityPtr /* = 0 */)
 {
     if (!FF8Addresses::pWindowsArray) return;
 
@@ -339,23 +339,51 @@ static void ScanAndSpeakChoiceWindows(const char* opcodeLabel)
         int choiceIndex = (int)curChoice - (int)firstQ;
         int numChoices = (int)(lastQ - firstQ + 1);
 
+        // v0.41.0 (#102): a run of identical prompts -- the Missile Base
+        // password is four AASKs on one message. Counted only when an OPCODE
+        // fired; the poll rescan has no VM context and therefore no instruction
+        // pointer to tell one question from the next.
+        // v0.42.0: the ENTITY POINTER is what makes this work. A blocking
+        // opcode re-runs from the same instruction every frame, so the count
+        // has to key on where in the script the question is, not on how many
+        // times the handler ran -- see field_repeat_prompt.inl.
+        const bool fromOpcode = opcodeLabel && entityPtr &&
+            (strcmp(opcodeLabel, "ASK") == 0 || strcmp(opcodeLabel, "AASK") == 0);
+        if (fromOpcode) RepeatPromptOnOpcode(dialog.prompt, entityPtr);
+
         // Same dialog, same choice = skip (do nothing)
-        if (dialog.prompt == ws.lastChoicePrompt && curChoice == ws.lastSpokenChoice)
+        if (dialog.prompt == ws.lastChoicePrompt && curChoice == ws.lastSpokenChoice) {
+            // ...unless a run is in progress. The four password prompts reuse
+            // one window and reset the cursor to "A", so picking A makes the
+            // next prompt identical to the state just spoken and this branch
+            // swallows it whole. The position is then the ONLY thing that says
+            // a new entry has begun, so it is said on its own.
+            if (RepeatPromptHasPrefix()) {
+                std::string only = RepeatPromptTakePrefix();
+                if (choiceIndex >= 0 && choiceIndex < (int)dialog.choices.size())
+                    only += dialog.choices[choiceIndex];
+                Log::Dialog("FieldDialog: [%s] win[%d] run position on an otherwise silent repeat -> \"%s\"",
+                            opcodeLabel, i, only.c_str());
+                ScreenReader::Speak(only.c_str(), true);
+            }
             continue;
+        }
 
         // Same dialog, different choice = interrupt with new choice text
         if (dialog.prompt == ws.lastChoicePrompt && curChoice != ws.lastSpokenChoice) {
             ws.lastSpokenChoice = curChoice;
 
+            std::string prefix = RepeatPromptTakePrefix();
             if (choiceIndex >= 0 && choiceIndex < (int)dialog.choices.size()) {
+                std::string say = prefix + dialog.choices[choiceIndex];
                 Log::Dialog("FieldDialog: [%s] win[%d] Choice changed -> %d: \"%s\"",
-                           opcodeLabel, i, choiceIndex + 1,
-                           dialog.choices[choiceIndex].c_str());
-                ScreenReader::Speak(dialog.choices[choiceIndex].c_str(), true);
+                           opcodeLabel, i, choiceIndex + 1, say.c_str());
+                ScreenReader::Speak(say.c_str(), true);
             } else {
                 char buf[64];
                 snprintf(buf, sizeof(buf), "Choice %d of %d", choiceIndex + 1, numChoices);
-                ScreenReader::Speak(buf, true);
+                std::string say = prefix + buf;
+                ScreenReader::Speak(say.c_str(), true);
             }
             continue;
         }
@@ -368,7 +396,7 @@ static void ScanAndSpeakChoiceWindows(const char* opcodeLabel)
         Log::Dialog("FieldDialog: [%s] win[%d] Parsed %d choices (firstQ=%u lastQ=%u curChoice=%u)",
                    opcodeLabel, i, (int)dialog.choices.size(), firstQ, lastQ, curChoice);
 
-        std::string fullText = dialog.prompt;
+        std::string fullText = RepeatPromptTakePrefix() + dialog.prompt;
         if (!dialog.choices.empty()) {
             for (int c = 0; c < (int)dialog.choices.size(); c++) {
                 fullText += ". ";

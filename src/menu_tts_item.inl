@@ -274,6 +274,7 @@ static const uint32_t  ITEM_STATE_FN  = 0x004F81F0;   // creator 0x004F8010
 
 static const int ITMO_TARGET_MASK = 0x38;   // u32: low 16 = characters, high 16 = GFs
 static const int ITMO_TARGET_CUR  = 0x58;   // i16, the BIT INDEX under the cursor
+static const int ITMO_TARGET_ID   = 0x62;   // i8, THE RESOLVED id (0xFF = none)
 static const int ITMO_TARGET_KIND = 0x64;   // 0 = characters, 1 = GFs
 
 static const int ITEM_TARGET_MAX_SLOT = 16;
@@ -296,7 +297,8 @@ static uint8_t* FindItemModule()
 struct ItemTargetSel
 {
     bool     isGF;        // which half of the mask this screen is showing
-    int      slot;        // the bit index under the cursor == character id / GF id
+    int      slot;        // the character id / GF id under the cursor
+    int      resolvedId;  // what the engine put at +0x62, -1 when nothing
     bool     available;   // is that slot's bit actually set
     uint32_t mask;
     int      rawCursor;   // for the log, so a bad read is diagnosable
@@ -379,6 +381,66 @@ static uint8_t* ItemTargetBase(int expectState, const char** how)
     return ItemModuleBaseInStates(expectState, expectState, how);
 }
 
+// ===========================================================================
+// v0.37.3 (#96): +0x58 IS A PACKED POSITION FOR CHARACTERS AND A SLOT FOR GFs.
+// ===========================================================================
+//
+// v0.30.0 read `+0x58` as the bit index for both halves of the mask. For GFs
+// that is right. **For characters it is not**, and `0x004F88EC` says so in
+// three instructions:
+//
+//   004F88EC  movsx eax, word ptr [esi + 0x58]   ; the cursor
+//   004F88F0  mov   ecx, dword ptr [esi + 0x38]  ; the mask
+//   004F88F5  call  0x004ABC40                   ; <- Nth SET BIT of the mask
+//   004F88FD  mov   byte ptr [esi + 0x62], al    ; the resolved character id
+//
+// `0x004ABC40` is the same Nth-set-bit helper the refine screen and the Junk
+// Shop character pickers use. The GF branch a few instructions earlier is the
+// other shape entirely:
+//
+//   004F88CF  mov cl, byte ptr [esi + 0x58]
+//   004F88D5  add cl, 0x10                       ; GFs live in the high half
+//   004F88DD  mov edx, 1 / shl edx, cl
+//   004F88DF  mov byte ptr [esi + 0x62], cl
+//   004F88E2  test eax, edx / jne ok
+//   004F88E6  mov byte ptr [esi + 0x62], 0xFF    ; the bit was clear
+//
+// So **characters are COMPACTED and GFs are not**, and `+0x62` is the engine's
+// own answer either way: the resolved id, or 0xFF when there is nothing there.
+// `0x004F8920` then does `1 << [esi+0x62]` to build the action's target mask,
+// so +0x62 is not a display artefact -- it is what the game acts on.
+//
+// THE BAT THAT FORCED THIS. Aaron used a Blue Magic item on Quistis. The mask
+// was `0x00000008` -- bit 3 alone, because `0x004F86A2` is literally
+// `and ebp, 8` for that item class -- and the cursor was 0. Under the old
+// model that read "Squall, not available"; the screenshot shows a NAME panel
+// with exactly one row in it, Quistis, cursor on her. Position 0 of a
+// compacted list. v0.37.2 patched the ARRIVAL announcement to fall back to the
+// first set bit and left the cursor-MOVE path alone, so the entry line said
+// "Use on Quistis" and was immediately overwritten by "Squall, not available"
+// from the very next poll. **Patching one of two callers of a wrong model
+// makes it worse, not better: now it is wrong AND inconsistent.** The model is
+// fixed here instead, once, where both callers read it.
+// ===========================================================================
+
+// The engine's own resolution, mirrored so the probe can exercise it: for
+// characters the cursor selects the Nth SET BIT; for GFs it is the slot.
+// Returns -1 for "nothing there", which is what 0xFF at +0x62 means.
+static int ItemResolveTargetId(uint32_t mask, int cursor, bool isGF)
+{
+    if (cursor < 0 || cursor >= ITEM_TARGET_MAX_SLOT) return -1;
+    if (isGF) {
+        return (mask & (1u << (cursor + 16))) ? cursor : -1;
+    }
+    int seen = 0;
+    for (int bit = 0; bit < 16; bit++) {
+        if (!(mask & (1u << bit))) continue;
+        if (seen == cursor) return bit;
+        seen++;
+    }
+    return -1;
+}
+
 static bool ItemReadTargetSel(int expectState, ItemTargetSel& sel)
 {
     memset(&sel, 0, sizeof(sel));
@@ -390,13 +452,27 @@ static bool ItemReadTargetSel(int expectState, ItemTargetSel& sel)
         const uint32_t mask = *(volatile uint32_t*)(m + ITMO_TARGET_MASK);
         const int      cur  = (int)*(volatile int16_t*)(m + ITMO_TARGET_CUR);
         const int      kind = (int)*(volatile uint8_t*)(m + ITMO_TARGET_KIND);
+        const int resolved = (int)*(volatile int8_t*)(m + ITMO_TARGET_ID);
         sel.rawCursor = cur;
         sel.rawKind   = kind;
         if (cur < 0 || cur >= ITEM_TARGET_MAX_SLOT) return false;
         sel.mask      = mask;
         sel.isGF      = (kind != 0);
-        sel.slot      = cur;
-        sel.available = (mask & (1u << (cur + (sel.isGF ? 16 : 0)))) != 0;
+
+        // TWO ANSWERS THAT MUST AGREE. The model above mirrors the engine's own
+        // call (0x004F88F5 -> 0x004ABC40 for characters, the shift-and-test at
+        // 0x004F88CF for GFs); +0x62 is where the engine PUT its answer. The
+        // model is primary because it needs no assumption about when +0x62 was
+        // last written -- the v0.34.5 lesson, where a field the creator had not
+        // filled in yet silenced a whole screen. +0x62 is read anyway and
+        // logged when the two differ, so a disagreement shows up in a BAT
+        // instead of being resolved by whichever this file happened to trust.
+        const int id = ItemResolveTargetId(mask, cur, sel.isGF);
+        int engineId = (resolved >= 0 && resolved < 32) ? resolved : -1;
+        if (sel.isGF && engineId >= 16) engineId -= 16;
+        sel.resolvedId = engineId;
+        sel.slot       = (id >= 0) ? id : cur;
+        sel.available  = (id >= 0);
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
@@ -554,12 +630,143 @@ static void AnnounceBattleItemAtCursor(uint8_t cursor)
                (unsigned)cursor, (unsigned)itemId, (unsigned)itemQty, page, itemNum, buf);
 }
 
+
+// ===========================================================================
+// v0.37.4 (#96): THE LEARN NOTICE, READ OFF THE SCREEN
+// ===========================================================================
+//
+// v0.37.3 assumed this window went through `0x004C2B10`, the shared yes/no
+// opener, because two call sites in the item module use it. It does not: the
+// reader fired zero times in the 2026-08-20 BAT. **Two call sites in the right
+// module is a lead, not an identification** -- those two are other messages.
+//
+// What the BAT DID establish, twice over:
+//
+//   [MenuTTS] Item focus: 11 -> 111        <- the notice state
+//   [MenuGCW] "...TutorialSaveQuistis learned Electrocute!!!Quistis can learn..."
+//   [MenuTTS] Item focus: 111 -> 4         <- and it closes
+//
+// The text is composed, not a static string: mngrp holds the template
+// `<03 33> learned <0A 29>...` -- a character-name code, the word, a value
+// insert, and "!!!" -- so there is no menu-text id to resolve and the finished
+// sentence exists only in the draw path. **That is exactly the case the
+// project's own rule is for: hook the display pipeline, never infer from
+// upstream memory.** The GCW buffer is that pipeline, it is already captured
+// for the magazine reader, and the log above is it.
+//
+// THE FIRST FRAME IS A TRAP, and the log caught it:
+//
+//   "Quistis learned !!!Junction..."        <- frame 1, spell not substituted yet
+//   "...SaveQuistis learned Electrocute!!!" <- frame 2
+//
+// so a candidate whose middle is empty is rejected and the scan carries on --
+// the same pre-write frame that made the refine quantity screen read "0"
+// (v0.33.1) and the Slot announce a spell of id 0 (v0.36.0).
+//
+// SCOPE, STATED PLAINLY: this reads the LEARN notice, keyed on the word the
+// template itself contains. Other notices in state 111 (the "cannot learn"
+// message, for instance) are NOT covered, and rather than invent a general
+// shape for a window family that has not been surveyed, an uncovered notice
+// logs its GCW text so the next one can be added from evidence.
+// ===========================================================================
+
+static const uint8_t ITEM_FOCUS_NOTICE = 111;   // observed, 2026-08-20 BAT
+static uint8_t s_itemNoticeFocus = 0xFF;
+static char  s_itemNoticeLast[192] = {};
+static bool  s_itemNoticeOpen = false;
+
+// Pull "<name> learned <thing>!!!" out of the drawn-text buffer. Returns false
+// when there is no complete one -- including the frame where the game has drawn
+// the template but not yet the thing.
+static bool ItemExtractLearnNotice(const std::string& gcw, char* out, size_t n)
+{
+    static const char* KEY = " learned ";
+    const size_t klen = strlen(KEY);
+    size_t from = 0;
+    while (true) {
+        const size_t k = gcw.find(KEY, from);
+        if (k == std::string::npos) return false;
+        from = k + 1;
+
+        // The name: letters immediately before the key. **The GCW buffer is
+        // concatenated drawn strings with no separators** -- "TutorialSave"
+        // runs straight into "Quistis" -- so walking back over letters alone
+        // swallows the whole tab row. Two boundaries put it right, and both
+        // describe what the buffer actually is rather than what this screen
+        // happens to contain: the last "Save" (the final main-menu tab, always
+        // drawn immediately before this window) and the last lower-to-upper
+        // transition (one drawn string ending, the next beginning).
+        size_t b = k;
+        while (b > 0) {
+            const char c = gcw[b - 1];
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) b--;
+            else break;
+        }
+        if (b == k) continue;                       // no name in front of it
+
+        const std::string run = gcw.substr(b, k - b);
+        size_t cut = 0;
+        const size_t sv = run.rfind("Save");
+        if (sv != std::string::npos) cut = sv + 4;
+        for (size_t i = cut + 1; i < run.size(); i++) {
+            const char prev = run[i - 1], cur = run[i];
+            if (prev >= 'a' && prev <= 'z' && cur >= 'A' && cur <= 'Z') cut = i;
+        }
+        b += cut;
+        if (b >= k) continue;                       // nothing left to name
+
+        // The thing learned, up to and including its run of '!'.
+        size_t e = k + klen;
+        const size_t mid = e;
+        while (e < gcw.size() && gcw[e] != '!') e++;
+        if (e == mid) continue;                     // **the pre-substitution frame**
+        while (e < gcw.size() && gcw[e] == '!') e++;
+
+        snprintf(out, n, "%.*s", (int)(e - b), gcw.c_str() + b);
+        return out[0] != '\0';
+    }
+}
+
+static void PollItemNotice(uint8_t focusState)
+{
+    if (focusState != ITEM_FOCUS_NOTICE) {
+        s_itemNoticeOpen = false;
+        s_itemNoticeLast[0] = '\0';
+        return;
+    }
+
+    uint8_t gcwBuf[2048];
+    const int gcwLen = FieldDialog::SnapshotGcwBuffer(gcwBuf, sizeof(gcwBuf));
+    if (gcwLen <= 0) return;
+    const std::string gcw = FF8TextDecode::DecodeMenuText(gcwBuf, gcwLen);
+    if (gcw.empty()) return;
+
+    char text[192];
+    if (!ItemExtractLearnNotice(gcw, text, sizeof(text))) {
+        if (!s_itemNoticeOpen) {
+            s_itemNoticeOpen = true;
+            Log::Menu("[MenuTTS] Item notice open (focus %u) but no learn sentence in "
+                      "the drawn text -- not covered yet: \"%.200s\"",
+                      (unsigned)focusState, gcw.c_str());
+        }
+        return;
+    }
+    if (strcmp(text, s_itemNoticeLast) == 0) return;
+
+    snprintf(s_itemNoticeLast, sizeof(s_itemNoticeLast), "%s", text);
+    s_itemNoticeOpen = true;
+    ScreenReader::Speak(s_itemNoticeLast, true);
+    Log::Menu("[MenuTTS] Item notice -> \"%s\"", s_itemNoticeLast);
+}
+
 static void PollItemSubmenu()
 {
     if (!pMenuStateA) return;
     // Only poll when top-level cursor is on Item (index 1)
     if (s_prevCursor != 1) {
         if (s_itemSubmenuActive) ResetItemSubmenuState();
+        s_itemNoticeLast[0] = '\0';   // v0.37.4: forget the last notice
+        s_itemNoticeOpen = false;
         return;
     }
 
@@ -568,6 +775,7 @@ static void PollItemSubmenu()
         uint8_t focusState = *(base + ITEM_FOCUS_STATE_OFFSET);  // 3=action, 5=items, 14=use target, etc.
         uint8_t actionCur  = *(base + SUBMENU_ACTION_CURSOR_OFFSET);
         uint8_t listCur    = *(base + SUBMENU_LIST_CURSOR_OFFSET);
+        s_itemNoticeFocus  = focusState;   // v0.37.4: read outside the SEH block
 
         // Submenu just became active (top-level cursor landed on Item)
         if (!s_itemSubmenuActive) {
@@ -649,15 +857,18 @@ static void PollItemSubmenu()
                 // from the module now -- see ItemReadTargetSel's header.
                 ItemTargetSel sel;
                 if (ItemReadTargetSel((int)focusState, sel)) {
-                    s_prevTargetCursor = (uint8_t)sel.slot;
+                    // v0.37.3: no arrival special-case any more -- the model
+                    // itself is right now, so entry and cursor-move agree.
+                    const int rawSlot = sel.rawCursor;
+                    s_prevTargetCursor = (uint8_t)sel.rawCursor;
                     s_prevTargetIsGF   = sel.isGF;
                     char buf[256];
                     ItemFormatTarget(sel, true, buf, sizeof(buf));
                     ScreenReader::Speak(buf, true);
-                    Log::Menu("[MenuTTS] Use target entered [%s]: %s slot %d avail=%d "
-                              "mask=0x%08X -> \"%s\"",
-                              sel.how, sel.isGF ? "GF" : "char", sel.slot,
-                              (int)sel.available, (unsigned)sel.mask, buf);
+                    Log::Menu("[MenuTTS] Use target entered [%s]: %s id %d (cursor %d, "
+                              "+0x62=%d) avail=%d mask=0x%08X -> \"%s\"",
+                              sel.how, sel.isGF ? "GF" : "char", sel.slot, rawSlot,
+                              sel.resolvedId, (int)sel.available, (unsigned)sel.mask, buf);
                     uint16_t initCur = 0, initMax = 0;
                     const uint8_t charIdx = sel.isGF ? 0xFF : (uint8_t)sel.slot;
                     if (!sel.isGF) GetCharacterHP(charIdx, initCur, initMax);
@@ -827,7 +1038,11 @@ static void PollItemSubmenu()
                 const uint8_t charIdx = sel.isGF ? 0xFF : (uint8_t)sel.slot;
                 uint16_t curHP = 0, maxHP = 0;
                 if (!sel.isGF) GetCharacterHP(charIdx, curHP, maxHP);
-                const bool moved = (sel.slot != (int)s_prevTargetCursor) ||
+                // v0.37.3: the MOVE is detected on the raw cursor, which is what
+                // the player actually changes; the NAME comes from the resolved
+                // id. Mixing the two is what made the entry line and the very
+                // next poll disagree in v0.37.2.
+                const bool moved = (sel.rawCursor != (int)s_prevTargetCursor) ||
                                    (sel.isGF != s_prevTargetIsGF);
                 // v0.18.2.7 (#10): the cursor stays put through a use, so the
                 // move check alone never re-reads the healed HP.
@@ -838,12 +1053,13 @@ static void PollItemSubmenu()
                     char buf[256];
                     ItemFormatTarget(sel, false, buf, sizeof(buf));
                     ScreenReader::Speak(buf, true);
-                    Log::Menu("[MenuTTS] Use target [%s]: %s slot %d avail=%d hp=%u/%u "
-                              "mask=0x%08X -> \"%s\"%s",
-                              sel.how, sel.isGF ? "GF" : "char", sel.slot, (int)sel.available,
+                    Log::Menu("[MenuTTS] Use target [%s]: %s id %d (cursor %d, +0x62=%d) "
+                              "avail=%d hp=%u/%u mask=0x%08X -> \"%s\"%s",
+                              sel.how, sel.isGF ? "GF" : "char", sel.slot, sel.rawCursor,
+                              sel.resolvedId, (int)sel.available,
                               (unsigned)curHP, (unsigned)maxHP, (unsigned)sel.mask, buf,
                               hpChanged ? " (HP changed)" : "");
-                    s_prevTargetCursor  = (uint8_t)sel.slot;
+                    s_prevTargetCursor  = (uint8_t)sel.rawCursor;
                     s_prevTargetIsGF    = sel.isGF;
                     s_prevTargetCharIdx = charIdx;
                     s_prevTargetHP      = sel.isGF ? 0xFFFF : curHP;
@@ -890,6 +1106,11 @@ static void PollItemSubmenu()
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         Log::Menu("[MenuTTS] SEH exception in PollItemSubmenu");
     }
+
+    // v0.37.4 (#96): the learn notice. OUTSIDE the SEH block above, because it
+    // decodes into a std::string and __try may not share a function with
+    // anything that unwinds (MSVC C2712 -- tests/lint_seh.py).
+    PollItemNotice(s_itemNoticeFocus);
 }
 
 // ============================================================================

@@ -547,7 +547,7 @@ static void OnBattleEnter()
     
     // Reset EWM cap state for new battle
     s_ewmFreezing = false;
-    s_ewmShouldCap = false;
+    EWM_SetFreeze(false);
     s_ewmCapExcludeSlot = 0xFF;
     s_ewmCapGF = false;
     s_ewmLastActiveChar = 0xFF;
@@ -859,6 +859,10 @@ void Initialize()
     
     EWM_InstallHook();
     EWM_InstallGFHook();
+    // v0.37.0 (#95): the other half of the freeze. Without this the ATB is held
+    // and every buff still ages -- which is what made Aura expire before the
+    // caster's own gauge came round.
+    EWM_InstallStatusTimerHook();
 
     s_gfVEHHandle = AddVectoredExceptionHandler(1, GF_BP_VectoredHandler);
     Log::Battle("BattleTTS: [GF-BP] VEH registered: handle=0x%08X", (uint32_t)(uintptr_t)s_gfVEHHandle);
@@ -1008,8 +1012,18 @@ void Update()
         PollLimitDiag();
     }
 
+    // v0.36.0 (#94): the limit-break submenus themselves -- Quistis's Blue
+    // Magic, Irvine's ammunition, Rinoa's Combine/Angel Wing and Selphie's
+    // Slot. Runs right after the diagnostic that latches limit mode, and
+    // BEFORE PollTargetSelection so a list that has just closed hands over to
+    // the target reader in the same frame.
+    if (s_initAnnounceDone && s_enemyAnnounceDone) {
+        PollLimitMenus();
+    }
+
     if (s_inBattle && s_initAnnounceDone) {
         EWM_UpdateBattle();
+        EWM_LogStatusTimerStats();   // v0.37.0 (#95)
     }
     if (s_inBattle && s_ewmCapGF) {
         __try {

@@ -20,7 +20,7 @@ static void EWM_UpdateBattle()
 {
     if (!s_ewmEnabled || !s_ewmHookInstalled) {
         if (s_ewmFreezing) {
-            s_ewmShouldCap = false;
+            EWM_SetFreeze(false);
             s_ewmCapExcludeSlot = 0xFF;
             s_ewmCapGF = false;
             s_ewmFreezing = false;
@@ -113,12 +113,16 @@ static void EWM_UpdateBattle()
 
     bool damageOrActionActive = postTurnGraceActive || anyActiveNow || postActionCooldown;
 
-    // v0.13.55: Update dispatch-block flag. HookedProcessReady reads this
-    // on the game thread and returns early when set, preventing sub_483470
-    // from dispatching new turns / enemy actions. Matches the cap conditions
-    // plus "player is deciding" — anything the cap was supposed to block
-    // at the queuing layer, this blocks at the dispatch layer as a backstop.
-    s_blockProcessReady = damageOrActionActive || (activeChar < 3);
+    // v0.37.0 (#95): HOLD THE STATUS TIMERS EXACTLY WHEN THE ATB IS HELD.
+    // (This replaced a v0.13.55 comment describing `s_blockProcessReady`, a
+    // flag maintained faithfully for eleven versions to gate a hook that was
+    // never installed, on a function that was never the dispatcher it was
+    // named after. See battle_tts_ewm_state.inl.)
+    // The engine keeps the two on one clock (0x01D28DEB, set by the ATB update
+    // and read by the gate at 0x0047D7CD); EWM broke that by letting the ATB
+    // function run and then undoing its work, so every frozen frame still aged
+    // every buff. This is the other half of the freeze, and it is assigned
+    // BELOW, once s_ewmShouldCap has been decided for this frame.
 
     // If any transition-hold signal is active AND nobody is deciding yet,
     // force the cap on EVERY slot (excludeSlot=0xFF). If a player was already
@@ -129,7 +133,7 @@ static void EWM_UpdateBattle()
         s_ewmCapGF = true;
         EWM_ClampGFState();
         s_ewmCapExcludeSlot = 0xFF;
-        s_ewmShouldCap = true;
+        EWM_SetFreeze(true);
         if (!s_ewmFreezing) {
             s_ewmFreezing = true;
             Log::Battle("BattleTTS: [EWM] ATB capped during transition (grace=%d cooldown=%d tts=%d hp=%d anim=%d engAnim=%d engAct=%u)",
@@ -189,7 +193,7 @@ static void EWM_UpdateBattle()
             // menuPhase may still be 34 from the previous character's execution.
             s_ewmFreezing = true;
             s_ewmCapExcludeSlot = activeChar;
-            s_ewmShouldCap = true;
+            EWM_SetFreeze(true);
             s_ewmNewTurnGrace = true;  // suppress phase-based release until non-executing phase seen
             s_ewmDiagCount = 0;  // reset diagnostic counter for new cap session
             s_ewmDiagLastTick = 0;
@@ -214,19 +218,19 @@ static void EWM_UpdateBattle()
                                (int)activeChar, (unsigned)menuPhase);
                 }
                 s_ewmCapExcludeSlot = activeChar;
-                s_ewmShouldCap = true;
+                EWM_SetFreeze(true);
                 EWM_DiagLogATB("cap");  // v0.10.57: log ATB values while capped
             } else {
                 // Phase says executing — but check grace period first
                 if (s_ewmNewTurnGrace) {
                     // Still in grace period: phase=34 is STALE from previous character.
                     // Keep cap active until we see a non-executing phase.
-                    s_ewmShouldCap = true;
+                    EWM_SetFreeze(true);
                 } else {
                     // Action executing (no grace) — release cap
                     if (s_ewmFreezing) {
                         s_ewmFreezing = false;
-                        s_ewmShouldCap = false;
+                        EWM_SetFreeze(false);
                         s_ewmCapExcludeSlot = 0xFF;
                         s_ewmCapGF = false;
                         EWM_RestoreGFPatch();
@@ -252,7 +256,7 @@ static void EWM_UpdateBattle()
         }
         if (s_ewmFreezing) {
             s_ewmFreezing = false;
-            s_ewmShouldCap = false;
+            EWM_SetFreeze(false);
             s_ewmCapExcludeSlot = 0xFF;
             Log::Battle("BattleTTS: [EWM] ATB cap released (no turn active, gfLoading=%d)",
                        (int)gfIsLoading);

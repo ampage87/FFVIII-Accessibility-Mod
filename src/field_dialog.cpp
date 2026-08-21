@@ -17,6 +17,8 @@
 //                                  GetWinOpenCloseTransition), text helpers
 //                                  (TrimDecoded, IsSuffixOrSubstring,
 //                                  fnv1a_prefix), CreateDetourHook.
+//   - field_repeat_prompt.inl      position within a run of identical choice
+//                                  dialogs (the Missile Base password)
 //   - field_dialog_scan.inl        the central TTS-speak path:
 //                                  ScanAndSpeakAllWindows,
 //                                  ScanAndSpeakChoiceWindows,
@@ -37,8 +39,15 @@
 //                                  (menu_draw_text, update_field_entities),
 //                                  Hook_get_character_width + CheckGcwBuffer,
 //                                  DiagRawWindowDump.
+//   - field_menuname_model.inl     the opcode_menuname parameter table (pure,
+//                                  probed by tests/menuname_compile.cpp)
 //   - field_dialog_menuname.inl    Hook_opcode_menuname -- the naming-screen
 //                                  bypass with GF-diff-on-acquire detection.
+//   - missile_terminal_model.inl   the Missile Base terminal, as field variables
+//   - field_missile_terminal.inl   its reader; polled before the window scan
+//   - field_urgent_prompt.inl      repeated prompts for scenes that kill you
+//                                  silently (the prison escape). Polled from
+//                                  the tail of PollWindows.
 //   - field_dialog_lifecycle.inl   Initialize, Shutdown, PollWindows. Last
 //                                  in the include chain because it references
 //                                  every hook function and the helpers from
@@ -131,6 +140,7 @@
 #include "ff8_addresses.h"
 #include "ff8_text_decode.h"
 #include "config.h"          // v0.18.3.14: train_guard_mode (Manual freeze) read from INI (#58)
+#include "fmv_skip.h"       // v0.39.0 (#100): the prison cue arms on an AVI name
 #include "battle_tts.h"       // v0.10.112: GetLastDrawerName() for draw result announcements
 #include "field_archive.h"    // v0.18.3.2: DumpTrainCodeScripts() for the #56 JSM dump diagnostic
 #include "minhook/include/MinHook.h"
@@ -143,7 +153,7 @@ namespace Log {
     void Write(const char* format, ...);
     void Field(const char* format, ...);   // v0.18.3.2: ff8_field.log sink, for TrainCodeJsmDump (#56)
 }
-namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); }
+namespace ScreenReader { bool Speak(const char* text, bool interrupt = false); bool IsSpeaking(); }
 // v0.14.63: ScanTTS::IsScreenActive() lets us know when the Scan UI window
 // is currently open. We suppress the show_dialog speak path during that window
 // (and only that window) because the rendered scan text duplicates the
@@ -223,12 +233,19 @@ namespace FieldDialog {
 #include "field_dialog_helpers.inl"
 // v0.18.3.239 (#77): must sit AFTER helpers.inl (needs TrimDecoded + s_cs) and
 // BEFORE scan/show_dialog/opcodes (they call DecodeDialogWithExpansion).
+// v0.39.0-v0.41.0: self-contained helpers, ordered by what uses what.
+// field_urgent_prompt.inl defines UrgentSameName, which the other two use.
+#include "field_urgent_prompt.inl"
+#include "field_repeat_prompt.inl"
 #include "field_dialog_expand.inl"
 #include "field_dialog_scan.inl"
 #include "field_dialog_show_dialog.inl"
 #include "field_dialog_opcodes.inl"
 #include "field_dialog_diag.inl"
+#include "field_menuname_model.inl"
 #include "field_dialog_menuname.inl"
+#include "missile_terminal_model.inl"
+#include "field_missile_terminal.inl"
 #include "field_dialog_lifecycle.inl"
 
 // ============================================================================

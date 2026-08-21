@@ -495,6 +495,18 @@ static void SnapshotWindowsAsSpoken(bool withExpansion)
 void PollWindows()
 {
     if (!s_initialized || !FF8Addresses::pWindowsArray) return;
+
+    // v0.39.0 (#100): urgent prompts run FIRST, and deliberately before the FMV
+    // early-out below. The prison cue's whole job is to speak WHILE a movie is
+    // playing -- putting it at the tail of this function would have been the
+    // one place it could never fire.
+    PollUrgentPrompt();
+
+    // v0.40.0 (#101): the Missile Base terminal, also above the window scan --
+    // it speaks the menu labels and then marks the windows spoken, so the scan
+    // does not say them a second time.
+    PollMissileTerminal();
+
     // v04.17: Also poll during MODE_TUTO (thoughts/tutorials)
     if (!FF8Addresses::IsOnField() && !FF8Addresses::IsOnTuto()) return;
 
@@ -592,7 +604,7 @@ void PollWindows()
     // were silent. The choice scanner's firstQ/lastQ sentinels (0/0, 0xFF,
     // inverted) skip non-choice windows, and it falls through to
     // ScanAndSpeakAllWindows internally, so plain-text polling is preserved.
-    ScanAndSpeakChoiceWindows("POLL");
+    ScanAndSpeakChoiceWindows("POLL", 0);
     CheckPendingTexts();  // v04.16: Speak deferred getstr texts
     // v04.24: Disabled GCW speak -- was diagnostic from v04.20, now causes
     // garbled "-G'" speech from character naming screen menu glyphs.

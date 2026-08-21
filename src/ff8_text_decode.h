@@ -72,6 +72,11 @@ size_t ResolveWord(uint8_t code, uint8_t param, uint8_t* out, size_t outSize);
 // own pointer at 0x01D2B80C. Host probes use this; the game never calls it.
 void SetWordTableBase(const void* base);
 
+// Point the nameable-name lookup (Squall, Rinoa, Angelo, Griever, Boko) at a
+// savemap image instead of 0x01CFDC5C. Host probes use this; the game never
+// calls it.
+void SetNameTableBase(const void* base);
+
 // Decode raw FF8-encoded bytes into separate lines (split on 0x02 newlines).
 // Each element is one line of dialog text, trimmed of whitespace.
 std::vector<std::string> DecodeLines(const uint8_t* data, size_t maxBytes = 1024);

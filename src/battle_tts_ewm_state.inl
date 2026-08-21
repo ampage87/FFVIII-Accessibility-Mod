@@ -87,26 +87,60 @@ static bool s_ewmConfigLoaded = false;    // config file has been read
 static bool s_ewmOKeyWasDown = false;     // edge detection for O key
 
 // ----------------------------------------------------------------------------
-// Dispatch-layer hooks (v0.13.55/56) — sub_483470 and sub_482F80. See
-// dispatch.inl for the hook bodies and installers.
+// v0.37.0 (#95): sub_483470 IS THE TIMED-STATUS TIMER, NOT A TURN DISPATCHER.
+//
+// v0.13.55 named it "process ready characters / dispatch turns" and that was a
+// guess. The instruction stream says otherwise, and unambiguously: it walks all
+// SEVEN entities (`ebp` from 0x01D27B90 = entity+0x78, stride 0xD0, end
+// 0x01D28140) and, for each, fourteen 16-bit timers at entity+0x4C:
+//
+//   0048348E  lea eax, [ebp - 0x2c]      ; entity + 0x4C -- the timer array
+//   00483499  mov dx, word ptr [eax]     ; this status's remaining duration
+//   0048349C  cmp dx, 0xFBA9             ; the "permanent / no timer" sentinel
+//   004834AC  shl ebx, cl                ; ebx = 1 << bitIndex
+//   004834AE  test dx, dx / jg 0x483640  ; >0 -> tick it; <=0 -> it just expired
+//   00483643  esi = 2, or 3 with Haste, or 1 with Slow
+//   004836C1  sub word ptr [eax], si     ; THE DECREMENT
+//   004835E7  not ebx / and / mov        ; THE FLAG CLEAR at entity+0x00
+//   004836D0  cmp ecx, 0x0E              ; fourteen timers per entity
+//
+// Bit index = the bit's position in the timed-status dword at entity+0x00, so
+// Aura (byte +0x01, bit 0x01 -> bit 8) has its counter at entity+0x5C. The
+// per-bit side effects corroborate the mapping: bit 4 queues a periodic heal
+// (Regen), bit 10 queues a death on expiry (Doom), bit 12 sets Petrify in
+// entity+0x78 on expiry (Gradual Petrify).
+//
+// v0.13.55's own BAT already contained the refutation -- it blocked 6 of 6
+// calls and the enemy attack landed anyway -- and the conclusion drawn was
+// "hook sub_482F80 as well" rather than "this is not the dispatcher".
+//
+// AND THE HOOK WAS NEVER INSTALLED. EWM_InstallProcessReadyHook() and
+// EWM_InstallActionExecuteHook() were defined in v0.13.56 and called from
+// nowhere; no shipped build has ever had either. The 2026-08-19 log proves it:
+// the startup banner lists the ATB and GF hooks and no `[DISPATCH]` line, and
+// there is not one dispatch stats line in 344 KB of battle log.
 // ----------------------------------------------------------------------------
-static const uint32_t PROCESS_READY_FUNC_ADDR = 0x00483470;
-typedef void (__cdecl *ProcessReadyFn)(void);
-static ProcessReadyFn s_originalProcessReady = nullptr;
-static bool s_processReadyHookInstalled = false;
-static volatile bool s_blockProcessReady = false;
-static volatile LONG s_processReadyCalls = 0;
-static volatile LONG s_processReadyBlocks = 0;
-static volatile LONG s_processReadyPasses = 0;
-static DWORD s_processReadyLogTick = 0;
+static const uint32_t STATUS_TIMER_FUNC_ADDR = 0x00483470;
+typedef void (__cdecl *StatusTimerFn)(void);
+static StatusTimerFn s_originalStatusTimers = nullptr;
+static bool s_statusTimerHookInstalled = false;
+static volatile bool s_holdStatusTimers = false;
+static volatile LONG s_statusTimerCalls = 0;
+static volatile LONG s_statusTimerHolds = 0;
+static volatile LONG s_statusTimerPasses = 0;
+static DWORD s_statusTimerLogTick = 0;
 
-static const uint32_t ACTION_EXECUTE_FUNC_ADDR = 0x00482F80;
-typedef void (__cdecl *ActionExecuteFn)(void);
-static ActionExecuteFn s_originalActionExecute = nullptr;
-static bool s_actionExecuteHookInstalled = false;
-static volatile LONG s_actionExecuteCalls  = 0;
-static volatile LONG s_actionExecuteBlocks = 0;
-static volatile LONG s_actionExecutePasses = 0;
+// Where a timed status's remaining duration lives, for the diagnostic.
+static const uint32_t BENT_STATUS_TIMERS = 0x4C;   // 14 x int16, indexed by bit
+static const int      STATUS_TIMER_COUNT = 14;
+static const uint16_t STATUS_TIMER_PERMANENT = 0xFBA9;
+
+// v0.37.0: the sub_482F80 hook is GONE, not left dormant. It was added in
+// v0.13.56 on the same wrong premise as the sub_483470 one, was never installed
+// either, and what 0x00482F80 actually does has not been read out of the exe --
+// it consults the battle-config byte at 0x01CFE97A and queues actions, and that
+// is as far as the evidence goes. Dead code carrying an unverified belief is
+// worse than no code: the next person to need this reads the disassembly.
 
 // ----------------------------------------------------------------------------
 // FFNx GF loading counter hook (v0.10.77). See ffnx.inl for module scan
@@ -154,3 +188,13 @@ static bool     s_turnCountPrevInBattle = false;
 static DWORD s_ewmDiagLastTick = 0;
 static int s_ewmDiagCount = 0;
 static const int EWM_DIAG_MAX = 40;  // max samples per cap session
+
+// v0.37.0: one place decides whether battle time is held. Every assignment to
+// s_ewmShouldCap goes through here so the status hold cannot drift out of step
+// with the ATB freeze -- the exact failure mode that made two of them disagree
+// in the first place.
+static void EWM_SetFreeze(bool freeze)
+{
+    s_ewmShouldCap    = freeze;
+    s_holdStatusTimers = freeze;
+}

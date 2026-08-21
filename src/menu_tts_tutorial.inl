@@ -215,6 +215,28 @@ static bool TutCopyRaw(TutRawText& raw)
     return true;
 }
 
+// Resolve a `0x03 nn` name id for TutExpand, through the one ladder the mod
+// has (v0.38.0's savemap-backed decoder). This is the whole reason the Pet Pals
+// pages said *"It's called... the character Strike!"*: the raw bytes there are
+// `06 25 03 40 20 <Strike> 06 27 2E`, and `03 40` is ANGELO, which is not a
+// party index at all -- the old lookup only understood `id - 0x30` over eight
+// party slots, so Angelo, Griever, Boko and party slots 1,2,3,5,6,7 all came out
+// as the placeholder.
+//
+// The returned pointer is valid until the next call; TutExpand consumes it
+// immediately, one name at a time.
+static const char* TutLookupName(unsigned char nameId)
+{
+    static char s_name[40];
+    const uint8_t encoded[3] = { 0x03, nameId, 0x00 };
+    std::string decoded = FF8TextDecode::Decode(encoded, sizeof(encoded));
+    // An id the ladder does not know still reads as "[NameXX]"; hand back
+    // nothing so the caller says "the character" rather than a bracketed code.
+    if (decoded.empty() || decoded.find("[Name") != std::string::npos) return 0;
+    snprintf(s_name, sizeof(s_name), "%s", decoded.c_str());
+    return s_name;
+}
+
 // Decode the name buffers and hand back the two arrays the expander wants.
 // Names are ordinary FF8 text, so they go through the same glyph table as
 // everything else -- a player who renamed Ifrit to "Bob" hears Bob.
@@ -361,7 +383,7 @@ static void FillMagazineTextFrom(const MagRawText& raw, char* out, size_t n)
         if (raw.blockLen[b] <= 0) continue;
         memset(&info, 0, sizeof(info));
         TutExpand(raw.block[b], raw.blockLen[b], ns.charPtr, ns.gfPtr,
-                  piece, sizeof(piece), &info, -1);
+                  piece, sizeof(piece), &info, -1, TutLookupName);
         if (!piece[0]) continue;
         if (out[0]) TutAppend(out, n, " ");
         TutAppend(out, n, piece);
@@ -463,7 +485,7 @@ static void FillTipsText(TipsView& v)
     memset(&info, 0, sizeof(info));
     if (raw.titleLen > 0)
         TutExpand(raw.title, raw.titleLen, ns.charPtr, ns.gfPtr,
-                  v.title, sizeof(v.title), &info, -1);
+                  v.title, sizeof(v.title), &info, -1, TutLookupName);
 
     v.linkCount = raw.linkCount;
     if (v.cursor < 0 || v.cursor >= v.linkCount) v.cursor = 0;
@@ -480,7 +502,7 @@ static void FillTipsText(TipsView& v)
         if (len > 0) {
             memset(&info, 0, sizeof(info));
             TutExpand(raw.body + start, len, ns.charPtr, ns.gfPtr,
-                      piece, sizeof(piece), &info, -1);
+                      piece, sizeof(piece), &info, -1, TutLookupName);
             if (piece[0]) {
                 int slot = -1;
                 for (int k = 0; k < raw.linkCount; k++)
@@ -571,7 +593,7 @@ static void FillSeedExamText(SeedExamView& v)
     memset(&info, 0, sizeof(info));
     if (raw.messageLen > 0) {
         TutExpand(raw.message, raw.messageLen, ns.charPtr, ns.gfPtr,
-                  v.text, sizeof(v.text), &info, raw.cutAtLine);
+                  v.text, sizeof(v.text), &info, raw.cutAtLine, TutLookupName);
         snprintf(v.message, sizeof(v.message), "%s", v.text);
         // The answer words come off the screen's own answer line, because they
         // are not always YES then NO -- the "Really?" confirmation lists NO

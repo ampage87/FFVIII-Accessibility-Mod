@@ -20,4 +20,15 @@
 #include "battle_tts_menu_state.inl"
 #include "battle_tts_menu_lists.inl"
 #include "battle_tts_menu_helpers.inl"
+// v0.36.0 (#94): the limit-break submenus. The model first (pure, probe-driven),
+// then the reader, which needs DecodeFF8String / BattleSpeak / GetMagicName from
+// the files above.
+//
+// v0.36.1: these come BEFORE menu_poll, not after. The generic command-submenu
+// handler in menu_poll has to be able to ask "is a limit window on screen right
+// now?" -- and it has to ask the ENGINE, because the flag it used to test is
+// set later in the same frame than the code that reads it.
+#include "battle_limit_model.inl"
+#include "battle_tts_limit.inl"
+
 #include "battle_tts_menu_poll.inl"

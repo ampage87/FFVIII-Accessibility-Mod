@@ -375,6 +375,18 @@ static void TutTidy(char* s)
     }
 }
 
+// Resolve a `0x03 nn` name id to a UTF-8 name, or null when there is none.
+//
+// v0.38.2 (#98): the magazine's Pet Pals pages carry the bytes `03 40`, and 0x40
+// is ANGELO -- a separate branch of the engine's name ladder, not an index into
+// the party (see ff8_text_decode.cpp). The old `names[id - 0x30]` lookup covered
+// eight party slots and nothing else, so Angelo, Griever, Boko and every party
+// member past index 4 all fell through to "the character": *"It's called... the
+// character Strike!"* The model cannot read the savemap, so the view supplies
+// this and FF8TextDecode does the resolving -- **one ladder, not a second table
+// that drifts from it.**
+typedef const char* (*TutNameLookup)(unsigned char nameId);
+
 // `names` is 8 character names, `gfNames` is 16 GF names; either may be null,
 // in which case the code degrades to a neutral word rather than a wrong one.
 // `cutAtLine` is the line the ANSWER LABELS start on, or -1 for "no labels".
@@ -389,7 +401,8 @@ static void TutTidy(char* s)
 // begin on and everything from there down is a label.
 static void TutExpand(const unsigned char* txt, int len,
                       const char* const* names, const char* const* gfNames,
-                      char* out, size_t n, TutTextInfo* info, int cutAtLine)
+                      char* out, size_t n, TutTextInfo* info, int cutAtLine,
+                      TutNameLookup lookup = 0)
 {
     if (!out || n == 0) return;
     out[0] = '\0';
@@ -453,13 +466,18 @@ static void TutExpand(const unsigned char* txt, int len,
             continue;
         }
 
-        if (b == 0x03) {                       // character name
+        if (b == 0x03) {                       // a name
             const unsigned char p = (i + 1 < len) ? txt[++i] : 0;
-            const int id = (int)p - 0x30;
-            if (names && id >= 0 && id < 8 && names[id] && names[id][0])
-                TutAppendWord(out, n, names[id]);
-            else
-                TutAppendWord(out, n, "the character");
+            // The resolver first: it knows the whole ladder, including 0x40
+            // Angelo, 0x50 Griever and 0x60 Boko, which are not party indices.
+            const char* nm = lookup ? lookup(p) : 0;
+            if (!nm || !nm[0]) {
+                const int id = (int)p - 0x30;
+                if (names && id >= 0 && id < 8 && names[id] && names[id][0])
+                    nm = names[id];
+            }
+            if (nm && nm[0]) TutAppendWord(out, n, nm);
+            else             TutAppendWord(out, n, "the character");
             continue;
         }
         if (b == 0x0C) {                       // GF name

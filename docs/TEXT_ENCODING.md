@@ -200,6 +200,33 @@ BAT-able decision — but the loss is no longer passed off as a whole sentence.
 
 ---
 
+## 4a. `0x03 xx` — the name codes, and which come from the savemap (v0.38.0)
+
+The engine's dispatch for a `0x03` name code is a ladder, not a table:
+
+```
+004B8D94  cmp ecx, 0x30 / jl   ->  004B8D99  cmp ecx, 0x3f / jg
+004B8D9E  add ecx, -0x10 / and ecx, 0x1F
+004B8DA5  call 0x0049A840  ->  0x0047EB50(idx):
+             idx 0  -> 0x01CFDC70     Squall   (renameable)
+             idx 4  -> 0x01CFDC7C     Rinoa    (renameable)
+             else   -> kernel table 0x01CF75EC + idx*36
+004B8DAC  cmp ecx, 0x40 / je  ->  0x01CFDC88     ANGELO
+004B8DB1  cmp ecx, 0x50 / je  ->  0x01CFE754     GRIEVER
+004B8DB6  cmp ecx, 0x60 / je  ->  0x01CFDC94     BOKO
+004B8DBB  otherwise           ->  0x01D76624     (scratch)
+```
+
+All five savemap addresses read back exactly those names from a real save.
+**`0x40` is not an index into the party table at all** — which is why it used to
+come out as `[Name40]`, and why `0x50` and `0x60` would have done the same the
+moment a Griever or Boko line came up.
+
+Those five are read **live**, because they are precisely the names a player can
+change. The other ten come from a kernel table and stay on the built-in list.
+
+---
+
 ## 5. Knowing when the text is a fragment
 
 `FF8TextDecode::Decode()` takes an optional `int* droppedOut`: the number of
@@ -264,3 +291,108 @@ same bytes.
 | `src/field_dialog_expand.inl` | pre-expands `0x04`/`0x0C`/`0x0D`/`0x0E` for field dialog; calls `ResolveWord()` |
 | `src/menu_tts_shop.inl` | reads `droppedOut` to decide "description" vs "Partial description" |
 | `tests/text_decode_compile.cpp` | the real decoder driven with the real 408 bytes of `namedic.bin` |
+
+---
+
+## 8. The naming screen: what `opcode_menuname`'s parameter selects (v0.38.1, #98)
+
+Names reach the player through two paths, not one. The `0x03 xx` ladder above
+covers every *printed* name. The other path is the naming screen itself, which
+the mod bypasses (`Hook_opcode_menuname`) and announces on the engine's behalf.
+
+`opcode_menuname` is `0x00521DA0`. It sets menu mode 5, pops one parameter, and
+dispatches:
+
+```
+0x00521DC6  cmp edx, 0x14
+0x00521DC9  ja  0x00521FB0                 ; default: writes no kind at all
+0x00521DCF  jmp dword ptr [edx*4 + 0x00521FB8]
+```
+
+Twenty-one cases. Sixteen carry a GF call:
+
+```
+0x00521E03  push 0                          ; GF index
+0x00521E05  mov word ptr [0x01CE4762], 5    ; screen kind
+0x00521E0E  call 0x0047E480
+```
+
+`0x0047E480` resolves to `savemap[0x4C + gf*0x44 + 0x11] |= 1` — the GF
+"obtained" flag, stride 68 — so **its argument is a GF index, 0..15**, and
+params 3..18 are GF namings. The parameter is *not* a party-member index; a hook
+that read it as one announced "Quistis" and "Rinoa" at the classroom study
+panel, which actually names Quezacotl and Shiva.
+
+**`kind == gf + 5` holds for all sixteen. The jump table is what is irregular:**
+
+| param | handler | pushes | kind | GF |
+|---|---|---|---|---|
+| 0, 1, 2 | — | — | 0x02, 0x03, 0x04 | none |
+| 3..7 | 0x00521E03.. | 0..4 | 0x05..0x09 | Quezacotl … Brothers |
+| **8** | 0x00521E99 | **6** | 0x0B | **Carbuncle** |
+| **9** | 0x00521E80 | **5** | 0x0A | **Diablos** |
+| 10..13 | | 7..10 | 0x0C..0x0F | Leviathan … Alexander |
+| **14** | 0x00521F2F | **0xC** | 0x11 | **Bahamut** |
+| **15** | 0x00521F16 | **0xB** | 0x10 | **Doomtrain** |
+| 16..18 | | 13..15 | 0x12..0x14 | Cactuar, Tonberry, Eden |
+| 19, 20 | 0x00521F93, 0x00521FA7 | — | 0x1B, 0x1C | none |
+
+The handlers are laid out in kind order; the table entries for 8/9 and 14/15 are
+transposed. Reading the handlers in address order and assuming the parameter
+follows gets two pairs backwards, which is why `tests/menuname_compile.cpp`
+embeds the real 480 bytes of code and the real 84-byte table and decodes them
+rather than trusting a transcription.
+
+**The five non-GF parameters.** FF8 has exactly five names a player can change
+that are not GFs — Squall, Rinoa, Angelo, Boko, Griever — and 16 + 5 = 21 = the
+case count, so params 0, 1, 2, 19, 20 are those five. Which is which is settled
+only for param 0 (Squall, from field logs). Kinds 2/3/4 are contiguous below
+kind 5 and follow the savemap's own slot order (+0x14, +0x20, +0x2C, stride 12),
+so params 1 and 2 are Rinoa and Angelo **by inference** — the naming screen's
+destination buffer lives in a `menu.fs` overlay, not in `FF8_EN.exe`, so it
+cannot be pinned down from the executable. Params 19 and 20 are Boko and Griever
+in an order the mod does not claim; they announce nothing and log instead.
+
+Default names are written once at new-game init by `0x004E43FC`:
+
+| dest | source | decodes to |
+|---|---|---|
+| `0x01CFDC70` | `0x00B887A8` | Squall |
+| `0x01CFDC7C` | `0x00B887B0` | Rinoa |
+| `0x01CFDC88` | `0x00B887B8` | Angelo |
+| `0x01CFDC94` | `0x00B887C0` | Boko |
+| `0x01CFE754` | `0x00B887C8` | Griever |
+
+which is why the bypass is safe: suppressing the UI leaves the default in place
+rather than leaving the slot empty.
+
+| file | what it holds |
+|---|---|
+| `src/field_menuname_model.inl` | the parameter → (kind, GF, name id) tables and the derivation |
+| `src/field_dialog_menuname.inl` | `Hook_opcode_menuname` — the bypass and the announcement |
+| `tests/menuname_compile.cpp` | 480 bytes of `FF8_EN.exe` + the real jump table, decoded |
+
+---
+
+## 9. The tutorial / magazine path shares the `0x03` ladder (v0.38.2, #98)
+
+Tutorial pages, the SeeD exam and the item magazines are drawn by
+`0x004D6DA0` / `0x004D4AF0` from raw `mngrp.bin` text, and the mod expands that
+text itself in `TutExpand` (`src/menu_tutorial_model.inl`). That encoding uses
+its own control codes for icons (`0x05`), colour (`0x06`), variables (`0x0A`),
+choice slots (`0x0B`) and GF names (`0x0C nn`, where `nn - 0x60` is the GF
+index) — **but `0x03 nn` is the same name insert as the field and battle paths,
+with the same ids.** Pet Pals Vol.1 ends:
+
+```
+06 25   03 40   20 57 72 70 67 69 63   06 27 2E
+colour  Angelo  " Strike"              colour !
+```
+
+Until v0.38.2 `TutExpand` resolved that with its own `names[id - 0x30]` array of
+eight party slots, of which only 0 and 4 were ever filled, so **0x40 (Angelo),
+0x50 (Griever), 0x60 (Boko) and party slots 1, 2, 3, 5, 6, 7 all degraded to the
+placeholder "the character"**. It now takes a `TutNameLookup` from its view,
+which calls `FF8TextDecode::Decode` — so there is one ladder for `0x03`, not
+two. If a new screen ever needs to expand a name, it asks the decoder; it does
+not build a table.

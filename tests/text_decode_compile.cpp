@@ -239,6 +239,92 @@ int main()
         }
     }
 
+    // --- the nameable names (v0.38.0, #97) ---------------------------------
+    // Aaron's Rinoa limit read "Name 40" instead of Angelo. 0x40 is not an index
+    // into the party table at all -- the engine's ladder at 0x004B8DAC sends it
+    // to a savemap pointer, and so do 0x50 and 0x60. The offsets below are the
+    // five addresses that branch names, verified against Aaron's own save.
+    {
+        static uint8_t SAVEMAP[0xB00] = {0};
+        auto put = [](int off, const char* s) {
+            for (int i = 0; s[i]; i++) SAVEMAP[off + i] = Enc(s[i]);
+        };
+        put(0x14,  "Squall");
+        put(0x20,  "Rinoa");
+        put(0x2C,  "Angelo");
+        put(0x38,  "Boko");
+        put(0xAF8, "Griever");
+        FF8TextDecode::SetNameTableBase(SAVEMAP);
+
+        const uint8_t angelo[]  = { 0x03, 0x40, 0x00 };
+        const uint8_t griever[] = { 0x03, 0x50, 0x00 };
+        const uint8_t boko[]    = { 0x03, 0x60, 0x00 };
+        const uint8_t squall[]  = { 0x03, 0x30, 0x00 };
+        const uint8_t rinoa[]   = { 0x03, 0x34, 0x00 };
+        int dropped = -1;
+        checkStr(FF8TextDecode::Decode(angelo, sizeof(angelo), &dropped), "Angelo",
+                 "**0x03 0x40 is Angelo**, not \"[Name40]\"");
+        check(dropped == 0, "and nothing is reported lost");
+        checkStr(FF8TextDecode::Decode(griever, sizeof(griever)), "Griever", "0x50 is Griever");
+        checkStr(FF8TextDecode::Decode(boko, sizeof(boko)), "Boko", "0x60 is Boko");
+        checkStr(FF8TextDecode::Decode(squall, sizeof(squall)), "Squall",
+                 "0x30 comes from the savemap too -- Squall is renameable");
+        checkStr(FF8TextDecode::Decode(rinoa, sizeof(rinoa)), "Rinoa",
+                 "and so is Rinoa at 0x34");
+
+        // A RENAMED pet must read as the player named it. This is the whole
+        // reason these five are read live instead of hardcoded.
+        memset(SAVEMAP + 0x2C, 0, 12);
+        put(0x2C, "Rex");
+        checkStr(FF8TextDecode::Decode(angelo, sizeof(angelo)), "Rex",
+                 "a renamed Angelo reads as the player named it");
+        memset(SAVEMAP + 0x2C, 0, 12);
+        put(0x2C, "Angelo");
+
+        // The ten that are NOT renameable still come from the built-in table.
+        const uint8_t zell[] = { 0x03, 0x31, 0x00 };
+        checkStr(FF8TextDecode::Decode(zell, sizeof(zell)), "Zell",
+                 "a kernel-table name still resolves from the built-in list");
+
+        // And an id that is neither says so, and counts itself as lost.
+        const uint8_t bogus[] = { 0x03, 0x7F, 0x00 };
+        dropped = 0;
+        checkStr(FF8TextDecode::Decode(bogus, sizeof(bogus), &dropped), "[Name7F]",
+                 "an id in no branch of the ladder is still marked, not invented");
+        check(dropped == 1, "and counted, so a caller knows the line is incomplete");
+
+        // With no savemap at all, the built-in table still covers the ten.
+        FF8TextDecode::SetNameTableBase(nullptr);
+        checkStr(FF8TextDecode::Decode(zell, sizeof(zell)), "Zell",
+                 "no savemap -> the built-in list still answers for Zell");
+        FF8TextDecode::SetNameTableBase(SAVEMAP);
+    }
+
+    // v0.40.0 (#101): the emphasis pair. These bytes wrap a highlighted term
+    // -- `{AE}Save Point{AF}` -- draw no glyph, and are blank in the Deling
+    // grid. Before this they counted as two lost bytes on every such string,
+    // which is exactly the signal a caller uses to decide it is speaking a
+    // fragment.
+    {
+        // The first twelve bytes of gproof2.msd message 1, verbatim:
+        // "{AE}Save Point{AF}". Typed out by hand the first time, which put an
+        // 'L' where the 'P' belongs and made the probe fail for the wrong
+        // reason -- the bytes now come from the archive, like every other
+        // fixture in this file.
+        const unsigned char emph[] = { 0xAE, 0x57, 0x5F, 0x74, 0x63, 0x20, 0x54,
+                                       0x6D, 0x67, 0x6C, 0x72, 0xAF, 0x00 };
+        int dropped = -1;
+        std::string out = FF8TextDecode::Decode(emph, sizeof(emph), &dropped);
+        if (out != "Save Point") {
+            printf("  BAD: emphasis pair -- got \"%s\", want \"Save Point\"\n", out.c_str());
+            bad++;
+        }
+        if (dropped != 0) {
+            printf("  BAD: emphasis pair counted %d dropped byte(s), want 0\n", dropped);
+            bad++;
+        }
+    }
+
     printf(bad ? "FAILED: %d\n" : "OK\n", bad);
     return bad ? 1 : 0;
 }
