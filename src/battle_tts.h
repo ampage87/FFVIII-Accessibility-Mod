@@ -124,6 +124,12 @@ void RequestScreenshotAsync(const char* basePath, int frameDelay = 0);
 // CreateDirectoryA on this path), so callers don't need to.
 const char* GetScreenshotDir();
 
+// v0.107.0 (#megaflare): hand every decoded BATTLE window text to BattleTTS.
+// Currently one job: arm a run of screenshots when Bahamut's Mega Flare starts
+// charging, so the countdown Aaron can see and the mod cannot can be found.
+// A cheap strstr and an early return for everything else.
+void NoteBattleWindowText(const char* text);
+
 }  // namespace BattleTTS
 
 // ============================================================================

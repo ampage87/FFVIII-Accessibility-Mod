@@ -88,6 +88,238 @@ static int __cdecl HookedSetline(int entityPtr)
 // along with the F12 trigger and supporting state.
 // ============================================================================
 
+#include "ladder_cue.inl"
+
+// The player's own entity block, or 0 when it cannot be read.
+static uint32_t PlayerEntityBlockAddr()
+{
+    if (!FF8Addresses::pFieldStateOthers || s_playerEntityIdx < 0) return 0;
+    uint8_t* base = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+    if (!base) return 0;
+    return (uint32_t)(uintptr_t)(base + ENTITY_STRIDE * s_playerEntityIdx);
+}
+
+// v0.124.0 (#centra): the climb sound, polled rather than hooked.
+//
+// v0.123.0 hooked the four ladder-move opcodes and played a cue on each. The
+// engine's own step routine is better than a cue AND better than a hook: the
+// movement mode byte at +0x23C is the engine's own statement that a ladder move
+// is in progress, so a poll needs no timer to guess how long a climb lasts and
+// no debounce to survive one climb firing several opcodes. Steps play while the
+// mode says climbing and stop the frame it clears.
+static bool s_ladderClimbingPrev = false;
+
+// v0.126.0-v0.127.0 carried a MODE-WATCH trace here: a first-sighting bitmask
+// over every movement mode the engine played a ladder step in, and a table of
+// every mode-to-mode transition that was not a climb. It existed to answer one
+// question -- what mode does crroof1's descent set? -- and v0.128.0 answered it
+// by reading the script instead: **none**, because the descent runs no ladder
+// opcode at all. v0.131.8 removes the trace. It had nothing left to say, and it
+// was saying it on the engine's step path.
+
+// The player's movement mode, or -1 when the entity block cannot be read. Used
+// by the poll below and by the step hook, which has to know whether the step it
+// just intercepted was part of a climb or an ordinary footfall on a floor.
+static int PlayerMovementMode(uint32_t block)
+{
+    int mode = -1;
+    __try { mode = (int)*(volatile const unsigned char*)(uintptr_t)(block + 0x23C); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+    return mode;
+}
+
+// v0.125.0 (#centra): the engine's own step routine, hooked to be MEASURED.
+//
+// Two jobs, and the second one only exists because the first made it possible.
+// It times the gaps between the game's own ladder steps so the mod can replay
+// that cadence on the ladders the game leaves silent -- Aaron's "very fast"
+// against a 260 ms number this project guessed. And because it sees those steps
+// happen, it also tells the poll below to shut up while they are happening,
+// which stops v0.124.0 from laying a second set of steps over crtower3's and
+// crtower1's ladders that already sound.
+//
+// Only the player's own steps count, and only while the movement mode says a
+// ladder: an NPC walking past, or the player crossing a floor, is a different
+// rhythm entirely and would poison the sample.
+static LadderStepSoundFn s_originalLadderStep = nullptr;
+static void __cdecl HookedLadderStepSound(int entityPtr, int foot, int volume, int pan)
+{
+    const uint32_t block = PlayerEntityBlockAddr();
+    if (block != 0 && (uint32_t)entityPtr == block) {
+        const int mode = PlayerMovementMode(block);
+        if (LadderModeIsClimb(mode)) {
+            const unsigned folded = LadderNoteEngineStep((unsigned)GetTickCount());
+            if (folded != 0)
+                Log::Field("FieldNavigation: [LADDER] engine step, gap %u ms -> %u ms "
+                           "(x%u) -> cadence now %u ms [v0.127.0]",
+                           s_ladderLastRawGapMs, folded, s_ladderLastFoldN,
+                           s_ladderIntervalMs);
+            else if (s_ladderLastRawGapMs != 0)
+                Log::Field("FieldNavigation: [LADDER] engine step, gap %u ms folds to "
+                           "nothing plausible against %u ms -- not learned from "
+                           "[v0.127.0]", s_ladderLastRawGapMs, s_ladderIntervalMs);
+        }
+    }
+    if (s_originalLadderStep) s_originalLadderStep(entityPtr, foot, volume, pan);
+}
+
+// Signature-checked BEFORE the hook goes in, because MinHook overwrites the very
+// prologue bytes the check reads. This hook only listens -- the cue itself calls
+// sub_0046B2A0 directly (v0.131.0) -- so a failed check costs the cadence
+// measurement and nothing else: the cue still plays at the measured default.
+static void InstallLadderStepHook()
+{
+    if (!LadderStepSigMatches((uintptr_t)LADDER_STEP_ADDR)) {
+        Log::Field("FieldNavigation: [LADDER] step routine @ 0x%08X failed its "
+                   "signature check — cadence stays at the %u ms default "
+                   "[v0.131.8]", LADDER_STEP_ADDR, s_ladderIntervalMs);
+        return;
+    }
+    MH_STATUS st = MH_CreateHook((LPVOID)(uintptr_t)LADDER_STEP_ADDR,
+                                 (LPVOID)HookedLadderStepSound,
+                                 (LPVOID*)&s_originalLadderStep);
+    if (st == MH_OK) st = MH_EnableHook((LPVOID)(uintptr_t)LADDER_STEP_ADDR);
+    Log::Field("FieldNavigation: [LADDER] step routine hook @ 0x%08X — %s "
+               "(default cadence %u ms) [v0.125.0]",
+               LADDER_STEP_ADDR, MH_StatusToString(st), s_ladderIntervalMs);
+}
+
+// v0.130.0: the game's own statement that a ladder move is running.
+//
+// PREQEW (opcode 0x019, handler 0x0051D530) is what crroof1's ladder lines run
+// once BTNTEST says the button is down, and it is a WAIT -- it returns 3 while
+// the requested party method is still going, so the interpreter calls it again
+// on the very next frame, and returns 1 only when that method has finished. Its
+// first argument is the calling entity: the line itself.
+//
+// The hook does as little as possible on that hot path -- stamp the caller and
+// the tick into a small ring -- and every decision about whether that caller is
+// a ladder is made on the mod side, below.
+typedef int (__cdecl* PreqewHandler_t)(int entityPtr, int param);
+static PreqewHandler_t s_originalPreqew = nullptr;
+
+static volatile uint32_t s_preqewEnt[LADDER_PREQEW_SLOTS] = { 0 };
+static volatile uint32_t s_preqewMs [LADDER_PREQEW_SLOTS] = { 0 };
+static volatile int      s_preqewNext = 0;
+static volatile bool     s_preqewEver = false;
+
+static int __cdecl HookedPreqew(int entityPtr, int param)
+{
+    const uint32_t now = (uint32_t)GetTickCount();
+    int slot = -1;
+    for (int i = 0; i < LADDER_PREQEW_SLOTS; i++)
+        if (s_preqewEnt[i] == (uint32_t)entityPtr) { slot = i; break; }
+    if (slot < 0) {
+        slot = s_preqewNext;
+        s_preqewNext = (s_preqewNext + 1) % LADDER_PREQEW_SLOTS;
+        s_preqewEnt[slot] = (uint32_t)entityPtr;
+    }
+    s_preqewMs[slot] = now;
+    s_preqewEver = true;
+    return s_originalPreqew ? s_originalPreqew(entityPtr, param) : 1;
+}
+
+static void InstallLadderPreqewHook()
+{
+    if (FF8Addresses::pExecuteOpcodeTable == nullptr) {
+        Log::Field("FieldNavigation: [LADDER] no opcode table — PREQEW hook skipped [v0.130.0]");
+        return;
+    }
+    const uint32_t addr = FF8Addresses::pExecuteOpcodeTable[0x19];
+    if (addr == 0) return;
+    MH_STATUS st = MH_CreateHook((LPVOID)(uintptr_t)addr, (LPVOID)HookedPreqew,
+                                 (LPVOID*)&s_originalPreqew);
+    if (st == MH_OK) st = MH_EnableHook((LPVOID)(uintptr_t)addr);
+    Log::Field("FieldNavigation: [LADDER] PREQEW hook @ 0x%08X — %s [v0.130.0]",
+               addr, MH_StatusToString(st));
+}
+
+// The ladder line whose move is running right now, or null. Matching is by the
+// line's ENTITY ADDRESS, so a catalog refresh mid-move (the descent teleports
+// the player into the other camera zone, which re-filters the catalog) cannot
+// drop the match: once armed, the address is remembered until the heartbeat
+// stops.
+static uint32_t s_ladderCueLineAddr = 0;
+
+static const char* LadderPreqewLineRunning(unsigned nowMs)
+{
+    for (int c = 0; c < s_catalogCount; c++) {
+        if (!LadderNameIsLadder(s_catalog[c].name)) continue;
+        int slot = -1;
+        if (!LadderCatalogIsTriggerLine(s_catalog[c].entityIdx, s_capturedLineCount, &slot))
+            continue;
+        const uint32_t addr = s_capturedLines[slot].entityAddr;
+        for (int i = 0; i < LADDER_PREQEW_SLOTS; i++) {
+            if (s_preqewEnt[i] != addr) continue;
+            if (LadderPreqewIsRecent(nowMs, s_preqewMs[i], s_preqewEver)) {
+                s_ladderCueLineAddr = addr;
+                return s_catalog[c].name;
+            }
+        }
+    }
+    return 0;
+}
+
+static bool LadderPreqewStillRunning(unsigned nowMs)
+{
+    if (s_ladderCueLineAddr == 0) return false;
+    for (int i = 0; i < LADDER_PREQEW_SLOTS; i++) {
+        if (s_preqewEnt[i] != s_ladderCueLineAddr) continue;
+        return LadderPreqewIsRecent(nowMs, s_preqewMs[i], s_preqewEver);
+    }
+    return false;
+}
+
+static void PollLadderClimbSound()
+{
+    const uint32_t block = PlayerEntityBlockAddr();
+    if (block == 0) return;
+    const int mode = PlayerMovementMode(block);
+    if (mode < 0) return;
+    const unsigned nowMs = (unsigned)GetTickCount();
+
+    // v0.130.0: the cue is exactly as long as the game's own PREQEW wait.
+    {
+        if (!s_ladderScriptCue) {
+            const char* lineName = LadderPreqewLineRunning(nowMs);
+            if (lineName != 0) {
+                s_ladderScriptCue = true;
+                Log::Field("FieldNavigation: [LADDER] scripted ladder move running on '%s' "
+                           "(the script's own PREQEW wait) [v0.130.0]", lineName);
+            }
+        } else if (!LadderPreqewStillRunning(nowMs)) {
+            s_ladderScriptCue   = false;
+            s_ladderCueLineAddr = 0;
+            Log::Field("FieldNavigation: [LADDER] scripted ladder move finished -- the "
+                       "script stopped waiting [v0.130.0]");
+        }
+    }
+
+    const bool climbing = LadderIsClimbing(mode);
+    if (climbing != s_ladderClimbingPrev) {
+        if (climbing) {
+            LadderClimbBegin(nowMs);
+            Log::Field("FieldNavigation: [LADDER] climb started -- %s on ent 0x%08X, "
+                       "cadence %u ms (%s) [v0.128.0]",
+                       LadderModeIsClimb(mode) ? "engine movement mode"
+                                               : "scripted move, no movement mode",
+                       block, s_ladderIntervalMs,
+                       s_ladderLearned ? "measured from the game" : "default, not yet measured");
+        } else {
+            Log::Field("FieldNavigation: [LADDER] climb ended, %d mod steps, engine %s "
+                       "[v0.128.0]", s_ladderStepIndex,
+                       s_ladderEngineEver ? "sounded it itself" : "was silent");
+        }
+        s_ladderClimbingPrev = climbing;
+    }
+
+    if (LadderStepPoll((int)block, mode, nowMs)) {
+        Log::Field("FieldNavigation: [LADDER] step -- the game's own ladder sound "
+                   "0x%02X, played directly (mode %d, %u ms cadence) [v0.131.0]",
+                   LADDER_SOUND_ID, mode, s_ladderIntervalMs);
+    }
+}
+
 static int __cdecl HookedLineon(int entityPtr)
 {
     int result = s_originalLineon(entityPtr);

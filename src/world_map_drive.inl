@@ -106,9 +106,27 @@ static void UpdateAutoDrive()
     // entry-time vehicle id was found by exe disassembly at DWORD 0x020409E0
     // (community enum: 33=exam car, 48=Garden, 50=Ragnarok); it is DUMPED in
     // .257 ([VEHDUMP]) and will be wired here once one live BAT confirms it.
-    bool isOnFoot = !s_driveVehicleSig &&
-                    ((s_lastVehicle < 0) ||
-                     (GetVehicleType((uint8_t)s_lastVehicle) == VEH_ON_FOOT));
+    // v0.56.0 (#118): the LOCOMOTION VERDICT, not the raw byte.
+    //
+    // This selects the whole steering law -- the camera-write executor lives
+    // behind `} else if (isOnFoot) {` in world_map_drive_exec.inl -- and on
+    // 2026-08-21 it picked the wrong one for three drives in a row. A single
+    // noisy read of locomotion=3 (Ship) latched through the entry-debounce
+    // snapshot, and every drive after it took the VEHICLE branch while Aaron
+    // was on foot in Esthar: no camera write, no closed-loop trim, four-way
+    // probe arrows against a camera nothing was steering. Because the world
+    // map's arrows are screen-relative and the camera follows the character,
+    // that is a feedback loop, and the log's 554 position samples orbit a fixed
+    // point at radius ~1400 with the heading advancing -32 degrees a sample --
+    // a circle, once every nine seconds, until he cancelled. The `[CAMW]` trim
+    // lines simply stop, which is that branch never being entered again.
+    //
+    // The verdict latches on foot MOTION and makes a vehicle claim earn its
+    // place, so a stale byte can no longer choose the law. `s_driveVehicleSig`
+    // (the per-drive physics discriminator, which measures the actual motion
+    // response and fired 24/24 in the .256 BAT) still overrides everything: it
+    // is evidence from this drive, and it is what catches the reverse case.
+    bool isOnFoot = !s_driveVehicleSig && LocoIsFoot();
 
     // v0.18.3.258 Part D (#79): engine vehicle id, VEHICLE-POSITIVE ONLY. When
     // the DWORD at 0x020409E0 names a known vehicle (car family 32-40, chocobo
@@ -129,6 +147,78 @@ static void UpdateAutoDrive()
                            vehId);
                 s_vidLastLogged = vehId;
             }
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // #RAGNAROK: THE ARRIVAL THAT HAS NO FIELD LOAD.
+    //
+    // Every other drive here ends when the game-mode watcher sees MODE_FIELD,
+    // which is why there is no distance arrival test in this function. Flying
+    // does not end that way: the ship arrives ABOVE a piece of ground and
+    // nothing happens until the player sets it down. For a pad the field would
+    // eventually load and the ordinary path would cope, but for the other
+    // thirty-seven destinations the drive would simply keep pressing UP over
+    // the spot forever.
+    //
+    // And it does NOT land for him. Aaron: "Let's not have auto-drive
+    // automatically land and instead prompt the player to land just like we do
+    // with Garden." The Garden has parked and told him to get off since
+    // v0.20.79 for the same reason -- the last act of arriving is the player's.
+    // ------------------------------------------------------------------------
+    if (s_ragFlying && !s_sweepActive) {
+        const RagArrive what = RagArriveDecide(true, s_ragLanding != nullptr,
+                                               s_ragLanding ? s_ragLanding->kind : RAG_WALK,
+                                               dist,
+                                               s_ragLanding ? (double)s_ragLanding->arrive
+                                                            : RAG_ARRIVE_DIST);
+        if (what != RAG_FLY_ON) {
+            char rb[256];
+            RagArrivalLine(what, s_driveTargetName,
+                           s_ragLanding ? s_ragLanding->walk : 0,
+                           // GdCompass is a plain bearing-to-word helper that
+                           // happens to live in the Garden file; nothing in it
+                           // is Garden-specific.
+                           GdCompass(px, py, s_driveTargetX, s_driveTargetY),
+                           rb, sizeof rb);
+            // v0.83.0: THE ONE NUMBER NOBODY HAS EVER MEASURED, LOGGED AT THE
+            // MOMENT IT MATTERS. The engine's own live ground height sits at
+            // 0x0203FE30 and the mod already validates its own reader against
+            // it; the row carries the height of the polygon it was generated
+            // from. If the ship is over the landing point those two agree. The
+            // 10:08 BAT's failures would have shown it outright -- the Esthar
+            // stop read -100 on a cliff face against a row height of -1349 --
+            // so if a landing still refuses after this build, this line says
+            // whether the ship was in the wrong PLACE or at the wrong HEIGHT.
+            // A diagnostic, deliberately not a gate: a gate that disagreed with
+            // the data would leave the drive with no way to end.
+            // Read exactly the way the four other sites in this file do, so
+            // there is one convention for this address and not two.
+            int32_t engH = 0, shipZ = 0;
+            __try {
+                engH  = *(volatile int32_t*)0x0203FE30;
+                shipZ = *(volatile int32_t*)WM_POS_Z;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            Log::World("WorldMap: [RAG] over %s at (%d,%d), %.0f from the target "
+                       "(%d,%d) -- %s; %d units to walk after; radius %d, "
+                       "groundH engine=%d row=%d (%s); shipZ=%d, |shipZ-groundH|=%d "
+                       "vs the engine's own 200 set-down gate",
+                       s_driveTargetName, px, py, dist,
+                       s_driveTargetX, s_driveTargetY,
+                       what == RAG_OVER_PAD    ? "a pad"
+                     : what == RAG_OVER_MARKER ? "the marker, with no landing row"
+                                               : "the closest landable ground",
+                       (int)RagWalkAfterLanding(s_ragLanding),
+                       s_ragLanding ? (int)s_ragLanding->arrive : (int)RAG_ARRIVE_DIST,
+                       (int)engH,
+                       s_ragLanding ? (int)s_ragLanding->groundH : 0,
+                       (s_ragLanding &&
+                        abs((int)engH - (int)s_ragLanding->groundH) < 200)
+                           ? "agree -- the ship is over the landing point"
+                           : "DISAGREE -- the ship is not where the row says",
+                       (int)shipZ, (int)abs((int)shipZ - (int)engH));
+            StopAutoDrive(rb);
+            return;
         }
     }
 
@@ -306,7 +396,102 @@ static void UpdateAutoDrive()
     } else
     if (now - s_driveStuckCheckTime >= DRIVE_STUCK_CHECK_INTERVAL_MS) {
         double moved = CalculateWrappedDistance(s_driveStuckX, s_driveStuckY, px, py);
-        if (moved < DRIVE_STUCK_THRESHOLD) {
+        // #RAGNAROK: A TURN IS NOT A WEDGE. The controls are tank-style, so a
+        // vehicle swinging onto a new bearing does not translate at all, and
+        // this detector measures translation. On foot and in the car the turn
+        // is quick enough to disappear inside the 3-second window; the airship
+        // is not, and the 23:04 BAT shows the successful Sorceress Memorial
+        // drive spending one of its six lives on a heading change before it
+        // moved an inch. Scoped to flight deliberately: the foot and car
+        // thresholds are BAT-tuned over many builds and this does not touch
+        // them.
+        const int  hdgDelta = DriveHeadingDelta((int)heading, (int)s_driveStuckHdg);
+        const bool turning  = DriveTurnExcusesStall(s_ragFlying, hdgDelta,
+                                                    s_driveTurnPasses, DRIVE_TURN_PASS_MAX);
+        s_driveStuckHdg = heading;
+        const bool strike = RagStuckStrike(s_ragFlying, moved, DRIVE_STUCK_THRESHOLD,
+                                          dist, s_driveStuckDist, DRIVE_STUCK_THRESHOLD);
+
+        // v0.88.0: BLOCKED IS NOT THE SAME AS STUCK, AND IT GETS ITS OWN ANSWER.
+        //
+        // The 15:15 BAT repeated one line sixteen times -- dist frozen at 1806,
+        // heading frozen at 2255, aimed well inside the cone, and keys=U---. The
+        // mod asked the ship to go forward and it did not go, 1,806 units short
+        // of the Fisherman's Horizon pad. No polygon is closed to this hull, so
+        // what stopped it is not in the polygon mask at all: it is a structure
+        // standing up off the ground, and FH is the largest one on the map.
+        // Aaron cleared it by climbing.
+        //
+        // Two strikes, not six. The ordinary six exist because a car's stall is
+        // ambiguous; "asked to go and did not go" is not ambiguous, and eighteen
+        // seconds of pressing into a wall helps nobody.
+        const bool blocked = RagBlockedStrike(s_ragFlying, s_ragGasTicks,
+                                              moved, DRIVE_STUCK_THRESHOLD);
+        const int  gasWas  = s_ragGasTicks;
+        s_ragGasTicks = 0;
+        if (blocked) {
+            s_ragBlockedCount++;
+            Log::World("WorldMap: [RAG] BLOCKED %d/%d: forward commanded on %d tick(s) and the "
+                       "ship moved %.0f units, %.0f from the target -- something is standing in "
+                       "the way that no polygon describes",
+                       s_ragBlockedCount, RAG_BLOCKED_MAX, gasWas, moved, dist);
+            if (s_ragBlockedCount >= RAG_BLOCKED_MAX) {
+                // v0.96.0: AND THE ADVICE DEPENDS ON WHY. A ship that is commanded
+                // forward and does not move is either against a structure -- climb
+                // -- or sitting on the ground, which needs the opposite action.
+                // The 19:38 BAT was the second: the screenshot shows it PARKED ON
+                // THE FISHERMAN'S HORIZON PAD, and "gain altitude" would have been
+                // the wrong thing to tell him.
+                int32_t bZ = 0, bE = 0;
+                bool    bOk = true;
+                __try {
+                    bZ = *(volatile int32_t*)WM_POS_Z;
+                    bE = *(volatile int32_t*)0x0203FE30;
+                } __except (EXCEPTION_EXECUTE_HANDLER) { bOk = false; }
+                int  bOwn = 0; bool bOwnOk = false;
+                if (bOk && !RagGroundReadable(bE)) {
+                    const int h = WorldGroundHeightLocal(px, py);
+                    if (h != WGH_NO_GROUND) { bOwn = h; bOwnOk = true; }
+                }
+                const int bG   = RagGroundHeight((int)bE, bOwn, bOwnOk);
+                const int bGap = bZ > bG ? bZ - bG : bG - bZ;
+                const RagStillWhy why =
+                    RagWhyNotMoving(bOk && (RagGroundReadable(bE) || bOwnOk),
+                                    bGap, RAG_SETDOWN_GATE);
+                Log::World("WorldMap: [RAG] not moving: shipZ=%d groundH=%d gap=%d -> %s",
+                           (int)bZ, bG, bGap,
+                           why == RAG_STILL_GROUNDED ? "ON THE GROUND"
+                         : why == RAG_STILL_BLOCKED  ? "airborne, so something is in the way"
+                                                     : "no ground reading; cannot tell");
+                StopAutoDrive(
+                    why == RAG_STILL_GROUNDED
+                        ? "The Ragnarok is on the ground. Take off first, then press "
+                          "backslash to fly on."
+                    : why == RAG_STILL_BLOCKED
+                        ? "The Ragnarok is blocked by something ahead. Gain altitude, "
+                          "then press backslash to fly on."
+                        : "The Ragnarok is not moving. Take off or gain altitude, then "
+                          "press backslash to fly on.");
+                return;
+            }
+        } else {
+            s_ragBlockedCount = 0;
+        }
+
+        if (turning) {
+            s_driveTurnPasses++;
+            Log::World("WorldMap: [DRIVE] no strike %d/%d: turning %d units of heading in "
+                       "the window (moved %.0f) -- tank controls do not translate while "
+                       "rotating", s_driveTurnPasses, DRIVE_TURN_PASS_MAX, hdgDelta, moved);
+        } else if (strike) {
+            // v0.85.0: FOR FLIGHT THE STRIKE IS SCORED ON PROGRESS.
+            //
+            // The 12:57 BAT ran "Stuck check 1/6, 2/6, 1/6, 2/6" for fifty-eight
+            // seconds and never reached six, because the counter resets on
+            // MOVEMENT and a ship in orbit is moving beautifully -- three
+            // thousand units a window. v0.84.0 fixed exactly this for the turn
+            // budget and left the give-up counter alone, which was half a lesson
+            // learned. An orbit cannot fake distance closed.
             s_driveStuckCount++;
             Log::World("WorldMap: [DRIVE] Stuck check %d/%d (moved %.0f units in %dms window)",
                        s_driveStuckCount, DRIVE_STUCK_MAX, moved, DRIVE_STUCK_CHECK_INTERVAL_MS);
@@ -348,7 +533,14 @@ static void UpdateAutoDrive()
             // fire each stuck check (~3s) while there's give-up headroom; the
             // progress watermark renews the budget once a reverse gets him
             // closer, else it escalates to re-plan / give-up below.
-            if (!s_drivePathWorld && dist >= DRIVE_FINAL_APPROACH_DIST && s_driveStuckCount < DRIVE_STUCK_MAX) {
+            // v0.84.0: ...and never for the Ragnarok. 0x53E6B0 falls through to
+            // `return 1` for vehicle 0x32, so no polygon on the map is closed to
+            // it and it cannot have driven into anything to back out of. The
+            // 12:37 BAT is a burst firing at a ship that was never stuck, undoing
+            // the progress it had made, keeping net displacement small, and so
+            // firing the next burst -- thirteen of them, self-sustaining.
+            if (!s_drivePathWorld && RagWedgeAllowed(s_ragFlying) &&
+                dist >= DRIVE_FINAL_APPROACH_DIST && s_driveStuckCount < DRIVE_STUCK_MAX) {
                 // v0.18.3.165: reverse-burst recovery is for the OLD fine-cell path only. On the
                 // native 128u path it fires constantly and shoves the character backward (screen-
                 // relative DOWN), overriding the sequential+probe executor (the .164 run: keys all
@@ -488,7 +680,17 @@ static void UpdateAutoDrive()
             }
         } else {
             s_driveStuckCount = 0;
+            // v0.84.0: PROGRESS refunds the turn budget, not motion. v0.80.0
+            // refunded on movement, and the 12:37 BAT shows what that is worth:
+            // a ship being shoved backward and forward by un-wedge bursts moves
+            // a great deal while getting nowhere, so "no strike 1/3, 2/3, 3/3"
+            // was reached and reset five times over and the bound that makes the
+            // excuse safe never bound anything. Distance to the target is the
+            // one measure motion cannot fake.
+            if (RagDriveMadeProgress(dist, s_driveStuckDist, DRIVE_STUCK_THRESHOLD))
+                s_driveTurnPasses = 0;
         }
+        s_driveStuckDist = dist;
         s_driveStuckX         = px;
         s_driveStuckY         = py;
         s_driveStuckCheckTime = now;
@@ -738,11 +940,17 @@ static void UpdateAutoDrive()
     // steer to the real destination coordinate.
     int32_t steerX = s_driveTargetX;
     int32_t steerY = s_driveTargetY;
+
     // v0.18.3.221: FIRING-AREA ESCAPE overrides all other steering. Drive
     // straight for the escape point until the character is clear of the area,
     // then hand back to the normal route (which had its leading in-area
     // waypoints skipped when the escape was armed).
-    if (s_driveEscapeActive) {
+    // v0.94.0: and never in flight. ArmFiringAreaEscape refuses to arm for the
+    // airship now, but this is the site that MOVES THE AIM, and a latch left over
+    // from a drive that started on foot would move it just the same. The 18:42
+    // BAT is what that looks like from the cockpit: told to turn away from a
+    // bearing the ship was already dead on.
+    if (s_driveEscapeActive && !s_ragFlying) {
         // v0.18.3.223: hold while the character is inside the steer-arm box OR the
         // straight line to the on-route target still crosses it -- i.e. until the
         // character has rounded the area and can head to the route unobstructed.
@@ -995,4 +1203,37 @@ static void UpdateAutoDrive()
 // v0.18.3.225: UpdateAutoDrive body continues in world_map_drive_exec.inl
 // (split to keep each .inl under the 80 KB CI size guard; textual include,
 //  byte-identical to the pre-split single function).
+    // v0.95.0: THE INVARIANT -- see world_rag_drive.inl.
+    //
+    // Everything above this line is machinery for vehicles that touch the ground:
+    // the firing-area escape, the bridge steer, the LOS clamp, the corner cap,
+    // the path follower. Four of them have been caught steering the airship in
+    // five builds, each found by its own BAT, and the fifth of those builds was a
+    // guard that had been sitting in the wrong place all along. So rather than a
+    // fifth guard, the invariant is asserted once, HERE, after every override has
+    // had its turn: WHEN THE AIRSHIP IS FLYING, THE AIM IS THE DESTINATION.
+    //
+    // Whatever moved it is undone. A subsystem nobody has found yet is covered by
+    // the same line as the four that have been.
+    if (RagFlightOwnsDrive()) {
+        static const LocationEntry* s_tears = nullptr;
+        if (s_tears == nullptr) {
+            for (int i = 0; i < LOCATION_COUNT; i++)
+                if (strcmp(s_locations[i].name, "Tears' Point") == 0) { s_tears = &s_locations[i]; break; }
+        }
+        const int32_t wasX = steerX, wasY = steerY;
+        int32_t clampLen = s_drivePathLen;
+        RagFlightClampAim(px, py, s_driveTargetX, s_driveTargetY,
+                          &steerX, &steerY, s_tears, &clampLen);
+        s_drivePathLen = clampLen;
+        if (wasX != steerX || wasY != steerY) {
+            static DWORD s_clampLog = 0;
+            if (now - s_clampLog >= 2000) {
+                s_clampLog = now;
+                Log::World("WorldMap: [RAG] aim clamped: ground machinery had it at (%d,%d); "
+                           "flying, so it is (%d,%d)", wasX, wasY, steerX, steerY);
+            }
+        }
+    }
+
 #include "world_map_drive_exec.inl"

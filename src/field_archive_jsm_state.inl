@@ -48,7 +48,7 @@ struct MethodMapjump {
 // v0.07.84: Per-entity REQ call targets. Recorded when REQ/REQSW/REQEW fires
 // with at least 3 stack values (entity_id, method_id, priority); used by the
 // indirect-MAPJUMP post-pass and the Line REQ-following pass.
-struct ReqCallInfo { int targetEntity; int targetMethod; };
+struct ReqCallInfo { int targetEntity; int targetMethod; int srcMethod; int srcRel; };  // v0.62.2/.3
 struct EntityReqs  { ReqCallInfo calls[MAX_REQ_PER_ENTITY]; int count; };
 
 // v0.07.87: Per-entity POPM_W writes (memory addresses written to). Used by
@@ -85,6 +85,10 @@ static bool s_hasExtDispatchArr[128]; // 0x1C extended dispatch in any method
 // reqResolved=0). The director-gate keeps a promoted "Object" only if it is a real REQ
 // target; a director-promoted entity that no one REQs has no interaction path at all.
 static bool s_isReqTarget[128];
+// v0.62.0 (#123): this Line's OWN init calls LINEOFF (0x3B, handler 0x0051DD00,
+// which writes 0 to the line object's enable flag at +0x194). A line the field
+// deliberately switches off at load is gated content, not a passive tripwire.
+static bool s_lineInitOff[128];
 
 // ---------- Forward declarations ----------
 

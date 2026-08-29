@@ -36,6 +36,23 @@
 //                          the internal T-key handler)
 //   ToggleFreeze()      — toggle the freeze flag (called by the
 //                          internal Shift+T handler)
+//   SetHold()           — v0.63.1 (#111): a PROGRAMMATIC freeze request,
+//                          for a module that needs the clock to stop while
+//                          it holds the player still. Aaron, on the space
+//                          rescue's Game Controls screen: "The controls
+//                          should essentially pause everything until the
+//                          player hits Enter to proceed." The hold uses the
+//                          same rewrite-every-frame machinery Shift+T uses,
+//                          but silently, and it SURVIVES DETECTION ORDER:
+//                          the space scene's clock is not detected until
+//                          about two seconds after the field loads, so a
+//                          hold placed before then is remembered and applied
+//                          the instant the timer goes ACTIVE.
+//   IsHeldFrozen()      — true only while a SetHold(true) is actually
+//                          pinning the value. A caller that is waiting on
+//                          the clock being stopped must be able to tell the
+//                          difference between "held" and "asked to hold a
+//                          timer that does not exist yet".
 
 #pragma once
 
@@ -46,4 +63,6 @@ namespace CountdownTimer {
     bool IsActive();
     void AnnounceRemaining();
     void ToggleFreeze();
+    void SetHold(bool on, const char* reason);
+    bool IsHeldFrozen();
 }

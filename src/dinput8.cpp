@@ -15,6 +15,8 @@
 #include "chase_detector.h"
 #include "chase_ask_overlay.h"
 #include "train_mode_ask_overlay.h"
+#include "bahamut_light_overlay.h"
+#include "centra_code_overlay.h"   // v0.115.0: Centra Ruins code panel (#centra)
 #include "chase_auto_pilot.h"
 #include "chase_battle_freeze.h"
 #include "chase_keyboard.h"
@@ -569,6 +571,8 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     ChaseDiag::Initialize();
     ChaseAskOverlay::Initialize();
     TrainModeAskOverlay::Initialize();   // v0.18.3.23: Timber train guard-mode ASK (#60)
+    BahamutLightOverlay::Initialize();   // v0.98.0: DSRC blue-light puzzle (#bahamut-light)
+    CentraCodeOverlay::Initialize();     // v0.115.0: Centra Ruins code panel (#centra)
     ChaseAutoPilot::Initialize();
     ChaseKaniFreeze::Initialize();
     ChaseBattleFreeze::Initialize();
@@ -621,6 +625,8 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
         ChaseDetector::Update();
         ChaseAskOverlay::Update();
         TrainModeAskOverlay::Update();   // v0.18.3.23: Timber train guard-mode ASK (#60)
+        BahamutLightOverlay::Update();   // v0.98.0: DSRC blue-light puzzle (#bahamut-light)
+        CentraCodeOverlay::Update();     // v0.115.0: Centra Ruins code panel (#centra)
         ChaseAutoPilot::Update();
         ChaseKaniFreeze::Update();
         ChaseDiag::Update();
@@ -789,6 +795,8 @@ DWORD WINAPI AccessibilityThread(LPVOID lpParam)
     ChaseKaniFreeze::Shutdown();
     ChaseAskOverlay::Shutdown();
     TrainModeAskOverlay::Shutdown();   // v0.18.3.23: Timber train guard-mode ASK (#60)
+    BahamutLightOverlay::Shutdown();   // v0.98.0: DSRC blue-light puzzle (#bahamut-light)
+    CentraCodeOverlay::Shutdown();     // v0.115.0: Centra Ruins code panel (#centra)
     ChaseDiag::Shutdown();
     ChaseDetector::Shutdown();
     GameAudio::Shutdown();

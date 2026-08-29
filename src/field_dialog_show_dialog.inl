@@ -132,8 +132,91 @@ static char __cdecl Hook_show_dialog(int32_t window_id, uint32_t state, int16_t 
     s_sdLastTextPtr[window_id] = textPtr;
     s_sdLastHash[window_id] = hash;
 
-    std::string decoded = DecodeDialogWithExpansion(textPtr, 512);  // v0.18.3.239 (#77)
-    if (decoded.empty() || (int)decoded.length() < MIN_TEXT_LENGTH) return result;
+    // ONE PAGE, NOT THE REST OF THE REPORT. See DecodeDialogPage in
+    // field_dialog_expand.inl -- v0.70.0 put this limit here and nowhere else,
+    // which fixed the reader that was already being suppressed and left the two
+    // paths that were actually speaking alone.
+    std::string decoded = DecodeDialogPage(textPtr, 512);  // v0.18.3.239 (#77)
+
+    // ------------------------------------------------------------------
+    // v0.109.0 (#megaflare): THE COUNTDOWN, AND THE BYTES BEHIND IT
+    // ------------------------------------------------------------------
+    // Aaron: "the countdown timer is displayed in a regular FF8 text box, same
+    // as spell names when cast or GF names when summoned." This is that box --
+    // the 2026-08-26 log has 39 [SHOW_DIALOG-TEXT] lines and ZERO [GETSTR]
+    // lines, so every battle string the mod ever sees arrives right here.
+    //
+    // Both halves of the gate below sit above the log line, which is how ten
+    // seconds of Bahamut's charge came to leave no trace at all: a one-
+    // character page dies on the length half, and a page whose whole content is
+    // a control code the decoder emits nothing for dies on the empty half.
+    // So this runs FIRST, on the raw bytes as well as the decoded string, and
+    // the [BTL-WIN-RAW] line prints what was actually in the window whether or
+    // not anything could be made of it.
+    if (currentMode == DLG_MODE_BATTLE) {
+        uint8_t rawBuf[64];
+        size_t  rawLen = 0;
+        if (SafeCopyEngineText(textPtr, rawBuf, sizeof(rawBuf))) {
+            while (rawLen < sizeof(rawBuf) && rawBuf[rawLen] != 0x00) rawLen++;
+        }
+
+        static unsigned s_btlRawLogged = 0;
+        if (s_btlRawLogged < 400) {
+            s_btlRawLogged++;
+            Log::Dialog("FieldDialog: [BTL-WIN-RAW] win[%d] len=%u decoded=\"%s\" bytes=%s",
+                        window_id, (unsigned)rawLen, decoded.c_str(),
+                        FF8TextDecode::HexDump(rawBuf, rawLen).c_str());
+        }
+
+        const int cd = BwcCountdownValue(decoded.c_str(), rawBuf, rawLen);
+        static int   s_bwcLastValue = BWC_NONE;
+        static DWORD s_bwcLastTick  = 0;
+        DWORD nowTick = GetTickCount();
+        if (BwcShouldAnnounce(cd, s_bwcLastValue,
+                              (unsigned)(nowTick - s_bwcLastTick))) {
+            s_bwcLastValue = cd;
+            s_bwcLastTick  = nowTick;
+
+            char msg[64];
+            BwcAnnounceText(msg, sizeof(msg), cd);
+            Log::Dialog("FieldDialog: [COUNTDOWN-BOX] win[%d] value=%d -- \"%s\"",
+                        window_id, cd, msg);
+
+            // Aaron: "This also needs to be assertive and interrupt any other
+            // text so it can't be missed."
+            ScreenReader::Speak(msg, true);
+
+            // Claim the text so the ordinary reader below does not follow the
+            // alert with a bare "5" a moment later.
+            s_sdLastDecoded[window_id] = decoded;
+            return result;
+        }
+        if (cd != BWC_NONE) {
+            // Recognised, but too soon to say again -- still claim it.
+            s_sdLastDecoded[window_id] = decoded;
+            return result;
+        }
+    }
+
+    // v0.107.0 (#megaflare): THE GATE, AND -- FOR THE FIRST TIME -- A RECORD OF
+    // WHAT IT THROWS AWAY. This return used to be silent and it sat above the
+    // [SHOW_DIALOG-TEXT] line, so a one- or two-character window text left no
+    // trace anywhere: not spoken, not logged, not countable. See
+    // dialog_short_text_model.inl for why battle digits now come through and
+    // why nothing else does.
+    if (!DlgTextPassesLengthGate(decoded.c_str(), decoded.length(),
+                                 currentMode, MIN_TEXT_LENGTH)) {
+        static unsigned s_shortDropLogged = 0;
+        if (DlgShortDropWorthLogging(decoded.c_str(), decoded.length(),
+                                     currentMode, MIN_TEXT_LENGTH) &&
+            DlgShortLogAllowed(s_shortDropLogged)) {
+            s_shortDropLogged++;
+            Log::Dialog("FieldDialog: [SHOW_DIALOG-SHORT] win[%d] mode=%u len=%u dropped=\"%s\"",
+                        window_id, currentMode, (unsigned)decoded.length(),
+                        decoded.c_str());
+        }
+        return result;
+    }
 
     // Dedup against last decoded for this window in show_dialog
     if (decoded == s_sdLastDecoded[window_id]) return result;
@@ -152,6 +235,13 @@ static char __cdecl Hook_show_dialog(int32_t window_id, uint32_t state, int16_t 
     // Cheap strncmp filter inside; opens the chase ASK when it sees Squall's
     // "Forget it!  Let's go!" trigger MES in a chase field. Outside of chase
     // context this is a near-no-op (single string compare + early return).
+    // v0.107.0 (#megaflare): forward battle-window text to BattleTTS, which
+    // owns the screenshot burst it may arm. The string it looks for lives next
+    // to the capture code rather than here.
+    if (currentMode == DLG_MODE_BATTLE) {
+        ::BattleTTS::NoteBattleWindowText(decoded.c_str());
+    }
+
     if (currentMode == 1 /* MODE_FIELD */) {
         ::ChaseAskOverlay::OnDialogText(decoded.c_str());
         // v0.18.3.23: same forward for the Timber train guard-mode ASK (#60).
@@ -187,11 +277,39 @@ static char __cdecl Hook_show_dialog(int32_t window_id, uint32_t state, int16_t 
         }
     }
 
+    // v0.69.0: A SCROLLING WINDOW, which neither test above can see. See
+    // ContinuationTail for the Ragnarok terminal that proved it. `decoded` is
+    // replaced by whatever part of it has not been read out yet, so a long
+    // passage is spoken once, in order, across however many scrolls the engine
+    // takes to show it.
+    std::string scrollWhole;   // set when a scroll was detected; see below
+    if (!alreadySpoken && !ws.lastSpokenText.empty()) {
+        const std::string tail = ContinuationTail(ws.lastSpokenText, decoded);
+        if (tail.empty()) {
+            alreadySpoken = true;
+            Log::Dialog("FieldDialog: [SHOW_DIALOG-SCROLL] win[%d] adds nothing new "
+                        "-- the window scrolled, the words are already said", window_id);
+        } else if (tail.length() != decoded.length()) {
+            Log::Dialog("FieldDialog: [SHOW_DIALOG-SCROLL] win[%d] scrolled: speaking "
+                        "the %u new characters, not the %u it re-rendered",
+                        window_id, (unsigned)tail.length(), (unsigned)decoded.length());
+            // The window's record has to keep EVERYTHING said so far, not the
+            // fragment: the next scroll is measured against the whole passage.
+            scrollWhole = ws.lastSpokenText + tail;
+            decoded = tail;
+        }
+    }
+
     if (!alreadySpoken) {
         s_lastTutoText = decoded;
         s_lastTutoSpeakTime = GetTickCount();
         ws.lastSpokenText = decoded;
         ws.lastRawText = decoded;
+        if (!scrollWhole.empty()) {
+            // Remember the passage, not the fragment of it we just read out.
+            ws.lastSpokenText = scrollWhole;
+            ws.lastRawText    = scrollWhole;
+        }
         ws.skipLogged = false;
 
         MarkPendingAsSpoken(decoded);

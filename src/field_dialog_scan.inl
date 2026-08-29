@@ -71,6 +71,8 @@
 // edit-tool issues with the dollar-sign source character):
 //   0x2A '*'   0x25 '%'   0x23 '#'   0x24 dollar   0x2B '+'
 //   0x3D '='   0x26 '&'   0x5F '_'   0x2F '/'
+#include "dialog_ellipsis.inl"   // v0.50.0 (#108) IsEllipsisOnly / ApplyEllipsisFix
+
 static bool IsGarbledText(const std::string& text)
 {
     const int len = (int)text.length();
@@ -186,7 +188,10 @@ static void ScanAndSpeakAllWindows(const char* opcodeLabel)
         }
 
         // v0.18.3.239 (#77): expanded text ({Var} numeric inserts) when available.
-        std::string decoded = DecodeDialogWithExpansion(text1, 512);
+        // v0.71.0: ONE PAGE. text1 is +0x08, the current page, not the message --
+        // see DecodeDialogPage. This is the line that read the Ragnarok terminal
+        // out four times.
+        std::string decoded = DecodeDialogPage(text1, 512);
         if (decoded.empty()) continue;
 
         // v04.16: Skip very short text fragments (stale data, control codes)
@@ -228,7 +233,12 @@ static void ScanAndSpeakAllWindows(const char* opcodeLabel)
         // (updating ws.lastSpokenText + the pending queue) so subsequent
         // poll ticks don't re-detect and re-log the same garbage. Only
         // the ScreenReader::Speak call is suppressed.
-        if (IsGarbledText(decoded)) {
+        // v0.117.0 (#centra): a message the expander BUILT is not a leftover.
+        // "Code:9 8 9 3 9" is 26% letters and the filter's letter-ratio rule
+        // rejected it -- see dialog_expanded_trust_model.inl.
+        const int decodeInserts = DialogLastDecodeInsertCount();
+        if (DetShouldRunGarbleFilter(decodeInserts) &&
+            !IsEllipsisOnly(decoded) && IsGarbledText(decoded)) {
             ws.lastSpokenText = decoded;
             ws.lastRawText = decoded;
             ws.skipLogged = false;
@@ -253,6 +263,7 @@ static void ScanAndSpeakAllWindows(const char* opcodeLabel)
         // the example code 3124) plus a "/" reminder. No-op on every other line.
         std::string toSpeak = decoded;
         ApplyTrainCodeKeyFix(toSpeak);
+        ApplyEllipsisFix(toSpeak);
 
         Log::Dialog("FieldDialog: [%s] win[%d] Speaking: \"%s\"",
                    opcodeLabel, i, toSpeak.c_str());
@@ -406,7 +417,7 @@ static void ScanAndSpeakChoiceWindows(const char* opcodeLabel, uintptr_t entityP
             }
         }
 
-        std::string rawNow = DecodeDialogWithExpansion(text1, 512);  // v0.18.3.239 (#77)
+        std::string rawNow = DecodeDialogPage(text1, 512);  // v0.18.3.239 (#77), page v0.71.0
 
         // v0.18.3.254 (#81): QUIET INIT. When the poll first sees a choice
         // window whose PLAIN text was already spoken by another path (the
@@ -577,6 +588,12 @@ static void CheckPendingTexts()
         // of rawPtr; the .250 snapshot is the fallback if the live read
         // faults (e.g. the buffer went away on a field transition).
         std::string toSpeak = s_pending[i].decoded;
+        // v0.117.0 (#centra): the exemption only applies to a decode THIS pass
+        // performed. s_pending[i].decoded was produced somewhere else, and the
+        // module-level insert count from that decode is long gone, so the
+        // default is 0 -- filter as before -- and only the live re-decode below
+        // is allowed to raise it.
+        int toSpeakInserts = 0;
         {
             uint8_t liveBuf[512];
             bool haveLive = SafeCopyEngineText(s_pending[i].rawPtr,
@@ -631,6 +648,7 @@ static void CheckPendingTexts()
                                    toSpeak.c_str(), fresh.c_str());
                     }
                     toSpeak = fresh;
+                    toSpeakInserts = DialogLastDecodeInsertCount();
                 }
             }
         }
@@ -718,10 +736,13 @@ static void CheckPendingTexts()
             // The deferred path can also receive stale-buffer garbage via
             // field_get_dialog_string fetches that happened during a
             // tutorial overlay teardown.
-            if (IsGarbledText(toSpeak)) {
+            // v0.117.0 (#centra): same exemption as the window scanner.
+            if (DetShouldRunGarbleFilter(toSpeakInserts) &&
+                !IsEllipsisOnly(toSpeak) && IsGarbledText(toSpeak)) {
                 Log::Dialog("FieldDialog: [GETSTR-DEFERRED] msgId=%d REJECTED garbled: \"%s\"",
                            s_pending[i].messageId, toSpeak.c_str());
             } else {
+                ApplyEllipsisFix(toSpeak);
                 Log::Dialog("FieldDialog: [GETSTR-DEFERRED] msgId=%d Speaking: \"%s\"",
                            s_pending[i].messageId, toSpeak.c_str());
                 ScreenReader::Speak(toSpeak.c_str(), false);

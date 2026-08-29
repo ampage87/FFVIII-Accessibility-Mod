@@ -208,4 +208,20 @@ bool GetGatewayNearestCluster(int32_t* outX, int32_t* outY,
                               int32_t* outLineX1, int32_t* outLineY1,
                               int32_t* outLineX2, int32_t* outLineY2);
 
+// v0.106.0 (#bahamut-light): THE MOD'S GAME CONTROLS BOX, for modules that live
+// in another translation unit.
+//
+// Every mini-game that has one of these -- the space rescue, the Garden battle,
+// the dragon -- opens it the same way: `GardenBattle::OpenBriefDialog` puts the
+// text in FF8'S OWN dialog window, which is what makes it look like the rest of
+// the game rather than like a mod, and `FieldOverlay::Show` is the fallback for
+// the build or the moment where that window will not open. Both of those live
+// inside field_navigation.cpp's .inl chain and are static, so a module outside
+// it cannot reach them; this pair is that same sequence behind one name.
+//
+// Returns true if the game's own window took it, false if the overlay did.
+// Either way something is on the screen unless both refused.
+bool OpenControlsBox(const char* text);
+void CloseControlsBox();
+
 }  // namespace FieldNavigation

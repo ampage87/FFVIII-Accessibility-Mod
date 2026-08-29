@@ -38,6 +38,13 @@ struct FiEntry {
 // Module state
 // ============================================================================
 static bool s_initialized = false;
+
+#ifdef FF8OPC_ARCHIVE_TEST_SEAM
+// v0.59.0: the offline scanner harness feeds field files through
+// TestExtractInnerFile, so the archive itself is never opened -- but every entry
+// point guards on s_initialized. This is the only way to set it in that build.
+void ForceInitializedForTest() { s_initialized = true; }
+#endif
 static std::string s_gamePath;        // e.g. "C:\...\FINAL FANTASY VIII\"
 static std::string s_archivePath;     // e.g. "C:\...\Data\lang-en\"
 
@@ -295,8 +302,17 @@ static size_t FindOuterIndex(const char* fieldName, const char* extension)
 // innerExt:  e.g. ".sym" or ".inf"
 // out: receives the extracted file data
 // ============================================================================
-static bool ExtractInnerFile(const char* fieldName, const char* innerExt,
-                             std::vector<uint8_t>& out)
+// v0.59.0: a seam for the offline scanner harness. The archive reader itself
+// needs the game's field.fs; the harness feeds already-extracted per-field files
+// instead, so ScanJSMScripts can be run and diffed on the build host across all
+// 892 fields rather than only inside the game. Written as two whole functions
+// rather than an #ifdef inside one so the braces stay balanced in both builds.
+#ifdef FF8OPC_ARCHIVE_TEST_SEAM
+bool TestExtractInnerFile(const char* fieldName, const char* innerExt,
+                          std::vector<uint8_t>& out);
+#endif
+static bool ExtractInnerFileFromArchive(const char* fieldName, const char* innerExt,
+                                        std::vector<uint8_t>& out)
 {
     // Step 1: Find the 3 outer entries for this field.
     size_t outerFiIdx = FindOuterIndex(fieldName, ".fi");
@@ -430,6 +446,16 @@ static bool ExtractInnerFile(const char* fieldName, const char* innerExt,
     }
 
     return !out.empty();
+}
+
+static bool ExtractInnerFile(const char* fieldName, const char* innerExt,
+                             std::vector<uint8_t>& out)
+{
+#ifdef FF8OPC_ARCHIVE_TEST_SEAM
+    return TestExtractInnerFile(fieldName, innerExt, out);
+#else
+    return ExtractInnerFileFromArchive(fieldName, innerExt, out);
+#endif
 }
 
 // ============================================================================
@@ -1149,13 +1175,14 @@ bool LoadWalkmesh(const char* fieldName, WalkmeshData& outMesh)
 
     for (uint32_t t = 0; t < numTri; t++) {
         const int16_t* verts = (const int16_t*)(raw + vertSectionStart + t * 24);
-        float sumX = 0, sumY = 0;
+        float sumX = 0, sumY = 0, sumZ = 0;   // v0.119.0: Z too
         for (int v = 0; v < 3; v++) {
             int16_t vx = verts[v * 4 + 0]; // X
             int16_t vy = verts[v * 4 + 1]; // Y
             int16_t vz = verts[v * 4 + 2]; // Z
             sumX += vx;
             sumY += vy;
+            sumZ += vz;   // v0.119.0 (#centra)
             // Deduplicate: find existing vertex with same coords.
             int foundIdx = -1;
             for (int i = 0; i < outMesh.numVertices; i++) {
@@ -1178,6 +1205,7 @@ bool LoadWalkmesh(const char* fieldName, WalkmeshData& outMesh)
         }
         outMesh.triangles[t].centerX = sumX / 3.0f;
         outMesh.triangles[t].centerY = sumY / 3.0f;
+        outMesh.triangles[t].centerZ = sumZ / 3.0f;   // v0.119.0 (#centra)
 
         // Access section: 6 bytes per triangle (3 × int16 neighbor).
         const int16_t* access = (const int16_t*)(raw + accessSectionStart + t * 6);

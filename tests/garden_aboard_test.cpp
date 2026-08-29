@@ -62,9 +62,12 @@ static const uint32_t WM_STORY_FLAG = 0x02036BDE;
 static const int WMX_SEG_ROWS = 24, WMX_SEG_COLS = 32;
 static uint8_t s_segmentRegionMap[WMX_SEG_ROWS][WMX_SEG_COLS];
 static bool s_segmentRegionLoaded = false;
+#include "wm_distance_pure.inl"
 #include "world_garden_dump.inl"
 #include "world_garden_grid.inl"
 #include "world_garden_berths.inl"
+#include "world_garden_inlets.inl"   // v0.55.0: struct GardenDock moved here at v0.53.0;
+                                   // without it this test stopped compiling and nobody noticed.
 #include "world_garden_plan.inl"
 #include "world_garden_probe.inl"
 #include "world_garden.inl"

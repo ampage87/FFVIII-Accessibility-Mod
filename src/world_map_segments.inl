@@ -92,41 +92,31 @@ static void GetWorldMapPosition_Active(int32_t* x, int32_t* y, int32_t* z)
     // Default to foot DWORDs.
     GetWorldMapPosition(x, y, z);
 
-    // v0.18.3.217: FOOT-MOTION OVERRIDE. The engine's per-frame integrator
-    // updates the foot DWORDs ONLY while the player IS the foot character
-    // (they freeze when a vehicle is mounted -- the documented basis of this
-    // whole function). Therefore: if the foot DWORDs are actively changing,
-    // the player is on foot RIGHT NOW and any non-foot s_lastVehicle byte is
-    // stale/garbage. Observed live (BAT .216, 21:40:22): walking out of
-    // Dollet committed locomotion=33 (VEH_CAR) on a foot-only save; every
-    // _Active read then returned the savemap car_pos (26319,-30537) on the
-    // Balamb continent -- poisoning the drive-start distance (55 km instead
-    // of 35), the ROUTENET hop-on (declined: wrong continent), the resume
-    // replan (A* burned its 10s budget ocean-routing), the learned trigger
-    // circle, and the off-target field identification ("Balamb Garden").
-    static int32_t s_fmPrevX = INT32_MIN, s_fmPrevY = 0;
-    static DWORD   s_fmLastMoveTick = 0;
-    DWORD fmNow = GetTickCount();
-    if (s_fmPrevX == INT32_MIN) {                 // first sample this session
-        s_fmPrevX = *x; s_fmPrevY = *y; s_fmLastMoveTick = fmNow;
-    } else if (*x != s_fmPrevX || *y != s_fmPrevY) {
-        s_fmPrevX = *x; s_fmPrevY = *y; s_fmLastMoveTick = fmNow;
-    }
-    bool footAlive = (fmNow - s_fmLastMoveTick) < 2000;
-
-    // Determine current vehicle from the debounced state. Use s_lastVehicle
-    // (the committed locomotion byte) rather than a fresh GetLocomotionMode
-    // read, so transient byte cycling during AD doesn't flip us between
-    // sources mid-drive. GetVehicleType maps the byte to VehicleType.
-    if (s_lastVehicle < 0) return;   // not yet sampled → keep foot DWORDs
+    // v0.18.3.217 / v0.56.0 (#118): WHICH SOURCE IS THE PLAYER.
+    //
+    // The engine's per-frame integrator updates the foot DWORDs ONLY while the
+    // player IS the foot character -- they freeze when a vehicle is mounted,
+    // which is the documented basis of this whole function. So a non-foot
+    // locomotion byte is only believable while nothing contradicts it.
+    //
+    // v0.18.3.217 tested that with `footAlive = (now - lastFootMove) < 2000`,
+    // and that window is open exactly when it is needed least. On 2026-08-21
+    // Aaron cancelled a drive, pressed the catalog key twice, and started the
+    // next drive four seconds later without moving; the window had closed, a
+    // stale locomotion=3 (Ship) went unchallenged, and the Tears' Point drive
+    // read its start position from the Balamb Garden mirror 70 km away --
+    // `dist=72125 units (72 km)` for a target 25 km off, planned from
+    // Fisherman's Horizon. Standing still is not evidence of being mounted.
+    //
+    // The verdict in world_map_locomotion.inl replaces the window: it latches
+    // on foot MOTION, requires corroboration for any vehicle claim, and holds
+    // its last answer when there is no evidence either way.
+    if (s_lastVehicle < 0) return;   // not yet sampled -> keep foot DWORDs
     VehicleType veh = GetVehicleType((uint8_t)s_lastVehicle);
-
-    if (veh != VEH_ON_FOOT && footAlive) {
-        // Foot DWORDs are integrating => player is the foot character.
-        // Transition-only forensic log (same pattern as VEH-POS-FALLBACK).
+    if (veh != VEH_ON_FOOT && LocoIsFoot()) {
         static int s_fmLastLoggedVehicle = -1;
         if (s_lastVehicle != s_fmLastLoggedVehicle) {
-            Log::World("WorldMap: [VEH-POS-OVERRIDE] foot DWORDs are moving; "
+            Log::World("WorldMap: [VEH-POS-OVERRIDE] the locomotion verdict is FOOT; "
                        "ignoring stale locomotion=%d and using foot pos (%d,%d)",
                        s_lastVehicle, *x, *y);
             s_fmLastLoggedVehicle = s_lastVehicle;
@@ -304,6 +294,10 @@ static void DumpVehicleState(const char* why)
                        VD_NAME[a], (uint32_t)VD_ADDR[a]);
         }
     }
+
+    // v0.52.0 (#109): and all eight WORLDMAP slots, four of which have never
+    // been identified. See world_map_wmslots.inl for why they matter now.
+    WmDumpWorldmapSlots();
 
     // Hex window 0x020409D0..0x02040ACF: covers the vehicle id + camera-lock +
     // tri-bias block BELOW the animation byte (the .255 window started at

@@ -476,9 +476,13 @@ static void SnapshotWindowsAsSpoken(bool withExpansion)
         if (*(const uint8_t*)text1 == 0x00) continue;
         // v0.18.3.239 (#77): must match what the scanner produces, or the
         // "already spoken" dedup misses and the text re-speaks anyway.
+        // v0.71.0: page-limited, for the reason the comment above already gives --
+        // this snapshot exists to match what the scanner produces, and the
+        // scanner now reads one page.
         std::string decoded = withExpansion
-            ? DecodeDialogWithExpansion(text1, 512)
-            : TrimDecoded(FF8TextDecode::Decode((const uint8_t*)text1, 512));
+            ? DecodeDialogPage(text1, 512)
+            : TrimDecoded(FF8TextDecode::Decode((const uint8_t*)text1,
+                                                DialogPageBytes((const uint8_t*)text1, 512)));
         if (decoded.empty()) continue;
         s_winState[i].lastSpokenText = decoded;
         s_winState[i].lastRawText    = decoded;

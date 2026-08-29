@@ -520,6 +520,80 @@ static const EntryAimInfo s_entryAims[] = {
     { "Trabia Garden",      49096, -59393,  48128,  50176, -60416, -58368, true  },   // 366 tris across segs 149+150, margin 737 -- prog 3 dest 19 unconditional, prog 4 dest 19 where Yoff>4096
     { "Winhill",           -51071,   6326, -51199, -50679,   6200,   6464, true  },   //   6 tris, margin 126 -- prog 24 dest 14, HIGH side of the Xoff 6144 split (bbox from vertices: Xoff 6145..6665)
     { "Great Salt Lake",    48248,  -2174,  48128,  48640,  -2294,  -2050, true  },   //  46 tris, margin 120 -- prog 21 dest 24, story>=1600 so untestable at story 912
+    // ------------------------------------------------------------------------
+    // v0.56.0 (#118): ESTHAR. FIVE MARKERS THAT COULD NEVER HAVE OPENED ANYTHING.
+    //
+    // Aaron reached disc 3 and drove to Lunar Gate. The walk worked -- 31 km,
+    // arrived, `[DRIVE] Entered final approach zone (dist=982)` -- and then:
+    //
+    //     [TRIGWALK] tick seg=410 -- no entry program covers this square
+    //
+    // He was standing within 10 units of the catalog marker (88021,7865) and
+    // segment 410 has no entry program at all. Checked against the shipped
+    // polygons, ALL FIVE Esthar markers stand on ZERO foot-walkable entry
+    // triangles; the five aims below each stand on exactly one. The old
+    // coordinates were never measured -- their digits give them away
+    // (...521/...021, ...865/...135) -- and three of them are not even in a
+    // segment that has a door.
+    //
+    // WORLDMAP_ENTRY_POLYGONS.md listed all five under "no foot-walkable entry
+    // polygon anywhere near them, which is correct -- they are not walked into".
+    // **That conclusion was wrong.** Every one of them has a real patch; they
+    // are 3.7-12.1 km from the markers, which is simply further than that scan
+    // looked. The doc is corrected.
+    //
+    // Bound the same way v0.21.7 bound Deling City and the rest: a patch sits in
+    // a SEGMENT, a segment has one entry PROGRAM, and that program names its
+    // destinations. Two are facts (marker and patch in the same segment); three
+    // are argued, and the argument is written down rather than hidden:
+    //
+    //   Sorceress Memorial  seg 441  prog 29  dest 30  story>=1750   FACT: the
+    //     marker is in seg 441 and seg 441 has exactly one program. 248 walkable
+    //     entry tris of 248 -- all of them, which is unusually clean.
+    //   Tears' Point        seg 506  prog 32  dest 31  story>=1750   FACT: same
+    //     shape. 24 tris in FOUR bars around a hollow centre; the aim is the
+    //     SOUTH bar only, because the game's own arrival record for dest 31 sits
+    //     272 units due south of it -- the approach the engine expects. The
+    //     whole-ring bbox is 47% hole and is deliberately not what ships.
+    //   Esthar City         segs 406/407/438/439, progs 25-28, all dest 26.
+    //     ARGUED, and strongly: those four segments are a contiguous 2x2 block
+    //     holding eight door patches in mirror pairs about the 406/407|438/439
+    //     seam -- one structure straddling four squares, which is exactly why it
+    //     needs four programs, and exactly what a city with four gates looks
+    //     like. The aim is the seg-438 gate, the one the engine's own arrival
+    //     record 26 sits 263 units north of.
+    //   Lunatic Pandora Lab seg 378  prog 23  dest 28  story>=1750
+    //   Lunar Gate          seg 443  prog 30  dest 29  story>=1750
+    //     ARGUED. Segment/marker co-location settles the first three, leaving
+    //     two names and two doors, and no single-segment fact pins which is
+    //     which. Four independent arguments agree, and the fourth is the one
+    //     worth the ink: the FIELD NAMES. Destination 28's fields are `edlabo*`
+    //     and `edmoor*` -- laboratory, and the mooring Lunatic Pandora sits in.
+    //     Destination 29's are `escont1`, `escouse*`, `esform1`, `esfreez1` --
+    //     and the Lunar Gate is where you are sealed into a cryogenic capsule
+    //     before launch. The other three arguments are displacement (7.4/7.7 km
+    //     this way, 11.4/25.5 km swapped -- larger than any wrong marker ever
+    //     found in this project), the relative orientation of the two markers
+    //     being preserved in both axes, and segment adjacency.
+    //
+    //     IF THE PAIR IS SWAPPED, ONE BAT SAYS SO AND THE FIX IS TWO LINES: the
+    //     `[DRIVE] Arrival via game-mode` line prints fieldName. `edlabo`/
+    //     `edmoor`/`edview` is the Laboratory; `escont`/`escouse`/`esform`/
+    //     `esfreez`/`esview` is the Gate. The geometry is right either way --
+    //     only the two labels would move.
+    //
+    // Story: all five programs are gated story>=1750 and Aaron is at 2000, so
+    // all five are live now. The clause selected changes at 2500 (Tears' Point),
+    // 3000 (Lab, Gate, Memorial) and 3900 (Esthar City), but the SEGMENTS AND
+    // DOOR POLYGONS DO NOT MOVE, so these aims stay valid past those boundaries.
+    //
+    // footOnly is derived by the v0.21.7 rule (a vehicle-132 FOOT_ALT clause
+    // makes a door car-enterable): only Esthar City has one.
+    { "Esthar City",        56965,   9788,  56773,  57130,   9628,  10350, false },   //   4 tris, margin 136 -- prog 27 dest 26, marker was 12,083u out (seg 374, no polygons)
+    { "Lunatic Pandora Lab",83966,  -3199,  83706,  84213,  -3435,  -3072, true  },   //   4 tris, margin 116 -- prog 23 dest 28, marker was  7,416u out (seg 345, no program)
+    { "Lunar Gate",         95460,   9956,  95232,  97280,   9728,  10752, true  },   //  28 tris, margin 228 -- prog 30 dest 29, marker was  7,727u out (seg 410, the "no entry program covers this square" square)
+    { "Sorceress Memorial", 77820,  12162,  76800,  78848,  10752,  13257, true  },   // 248 tris, margin 315 -- prog 29 dest 30, marker was  3,713u out
+    { "Tears' Point",       86020,  25836,  85170,  86861,  25716,  26249, true  },   //   8 tris, margin 120 -- prog 32 dest 31, south bar of a four-bar ring, marker was 6,734u out
 };
 // ----------------------------------------------------------------------------
 // v0.21.8: THREE THINGS THE 2026-08-16 BAT SAID.

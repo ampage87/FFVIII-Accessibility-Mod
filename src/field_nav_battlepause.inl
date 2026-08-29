@@ -30,6 +30,13 @@ static void PollBattlePauseResume()
     // watchdog is called from HERE, above them. No-op unless frozen.
     GardenBattle::FreezeWatchdog();
 
+    // v0.64.0 (#111): and the field freeze's own watchdog, for the same reason
+    // and in the same place. The space rescue puts a RET over field_main while
+    // its Game Controls screen is up; if that module ever stops being called,
+    // THIS is what puts the byte back. It has to sit above the on-field early
+    // returns because a frozen field may not look like a field at all.
+    FieldPause::Watchdog();
+
     // Live battle mode value is 3 (see chase_detector.cpp MODE_BATTLE_VAL and
     // the 2026-07-12 log edges "game-mode 0x0001 -> 0x0003").
     static const uint16_t MODE_BATTLE_LIVE = 3;

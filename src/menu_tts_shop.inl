@@ -794,6 +794,13 @@ static void PollJunkShop(const JunkView& v)
         // (0x004EA990 calls 0x004ABC40) -- the same shape as the refine screen's
         // picker, and the same way to get it wrong.
         const int cid = AbilCharAtPickerRow(v.mask, v.charCur);
+        // v0.49.0: deliberately still the raw table, NOT RefinePartyName. The
+        // junk shop is a Balamb/Esthar counter and no Laguna dream reaches one,
+        // so there is no dream to be wrong about -- and routing it through the
+        // resolver would put a hand-written twin of that resolver into
+        // tests/menu_shop_compile.cpp, which has no savemap to read. If a dream
+        // ever does reach a junk counter, this is the line, and #107's fix in
+        // menu_tts_ability.inl is the shape to copy.
         const int nNames = (int)(sizeof(REFINE_CHAR_NAMES) / sizeof(REFINE_CHAR_NAMES[0]));
         char out[96];
         if (cid >= 0 && cid < nNames) snprintf(out, sizeof(out), "%s%s", lead, REFINE_CHAR_NAMES[cid]);

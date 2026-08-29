@@ -194,6 +194,84 @@ int main()
                "inside their own marker's segment\n");
     }
 
+    // 5c-2. v0.56.0 (#118): ESTHAR. Every aim must be in the segment whose
+    //       program grants it. For Sorceress Memorial and Tears' Point that is
+    //       also the MARKER's segment, which makes those two bindings facts of
+    //       the same class as Deling City's. The other three are argued in
+    //       world_map_trigger_data.inl; here we pin the segment each one claims,
+    //       so an edit that drifts an aim into a neighbouring square -- which
+    //       would silently change which program owns it -- fails.
+    {
+        struct { const char* name; int seg; bool markerSameSeg; int32_t mx, my; } E[] = {
+            { "Esthar City",        438, false, 57011,  -2295 },
+            { "Lunatic Pandora Lab",378, false, 79521,  -9135 },
+            { "Lunar Gate",         443, false, 88021,   7865 },
+            { "Sorceress Memorial", 441, true,  81521,  11865 },
+            { "Tears' Point",       506, true,  83021,  31865 },
+        };
+        for (unsigned k = 0; k < sizeof(E)/sizeof(E[0]); k++) {
+            const int i = FindEntryAim(E[k].name);
+            if (i < 0) { bad++; printf("  BAD: %s has no firing area\n", E[k].name); continue; }
+            const EntryAimInfo& e = s_entryAims[i];
+            const int as = SegIndex(e.aimX, e.aimY);
+            if (as != E[k].seg) {
+                bad++;
+                printf("  BAD: %s aims in segment %d, but its entry program is in %d\n",
+                       E[k].name, as, E[k].seg);
+            }
+            // The aim must be inside its own bbox -- a generated row whose aim
+            // fell outside its area would steer the drive at a point the mow
+            // logic then refuses to visit.
+            if (!(e.aimX >= e.x0 && e.aimX <= e.x1 && e.aimY >= e.y0 && e.aimY <= e.y1)) {
+                bad++; printf("  BAD: %s aim is outside its own bbox\n", E[k].name);
+            }
+            // Where the marker shares the segment, say so -- that is the
+            // evidence class, and losing it would matter.
+            if (E[k].markerSameSeg && SegIndex(E[k].mx, E[k].my) != E[k].seg) {
+                bad++;
+                printf("  BAD: %s marker was supposed to be in segment %d\n", E[k].name, E[k].seg);
+            }
+            // **AND THE OLD MARKER MUST NOT BE INSIDE THE NEW AREA.** Every one
+            // of these five markers stands on ZERO entry triangles -- that is
+            // the whole finding -- so if a future edit produced an area that
+            // contained the old marker, the area would be describing ground the
+            // engine does not fire on.
+            if (E[k].mx >= e.x0 && E[k].mx <= e.x1 && E[k].my >= e.y0 && E[k].my <= e.y1) {
+                bad++;
+                printf("  BAD: %s's dead marker (%d,%d) is inside its new firing area\n",
+                       E[k].name, E[k].mx, E[k].my);
+            }
+        }
+        printf("Esthar's five aims each sit in the segment whose program grants them, "
+               "inside their own bbox, and none contains the dead marker it replaces\n");
+    }
+
+    // 5c-3. The Esthar retarget is a big move, and a big move is exactly where a
+    //       transcription slip hides. Pin the measured distances.
+    {
+        struct { const char* name; int32_t mx, my; double lo, hi; } D[] = {
+            { "Sorceress Memorial", 81521,  11865,  3600,  3800 },
+            { "Tears' Point",       83021,  31865,  6600,  6800 },
+            { "Lunatic Pandora Lab",79521,  -9135,  7300,  7500 },
+            { "Lunar Gate",         88021,   7865,  7600,  7800 },
+            { "Esthar City",        57011,  -2295, 12000, 12200 },
+        };
+        for (unsigned k = 0; k < sizeof(D)/sizeof(D[0]); k++) {
+            const int i = FindEntryAim(D[k].name);
+            if (i < 0) continue;
+            const EntryAimInfo& e = s_entryAims[i];
+            const double dx = (double)e.aimX - D[k].mx, dy = (double)e.aimY - D[k].my;
+            const double d  = std::sqrt(dx*dx + dy*dy);
+            if (d < D[k].lo || d > D[k].hi) {
+                bad++;
+                printf("  BAD: %s moved %.0fu from its marker, expected %.0f-%.0f\n",
+                       D[k].name, d, D[k].lo, D[k].hi);
+            }
+        }
+        printf("the five Esthar retargets moved 3.7-12.1 km, each within 100u of "
+               "the measured value\n");
+    }
+
     // 5d. **THE BAT POSITIONS**, and an honest measurement of what they are.
     //
     //     Where the game actually let him through is the only ground truth this

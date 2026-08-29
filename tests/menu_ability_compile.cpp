@@ -836,6 +836,51 @@ int main()
                "speaks over it on the poll after -- driven through PollAbilityItemList()\n");
     }
 
+    // =====================================================================
+    // v0.49.0 (#107) -- THE REFINE PICKER NAMES THE DREAM PARTY
+    //
+    // The 2026-08-21 screenshot of L Mag-RF shows Laguna / Ward / Kiros in the
+    // NAME panel and the mod said Squall / Irvine / Selphie. The ids were
+    // right; the names came from indexing the table by the id instead of by
+    // the character record's MODEL byte, which is what says who is loaded into
+    // that slot during a Laguna dream. This is that log's exact mapping --
+    // char 0 model 8, char 2 model 10, char 5 model 9 -- written into a real
+    // savemap and read back through the shipped function.
+    // =====================================================================
+    if (haveSavemap) {
+        uint8_t* chars = (uint8_t*)(SAVEMAP_BASE + REFINE_CHARS_OFF);
+        for (int i = 0; i < 11; i++)
+            chars[i * REFINE_CHAR_STRIDE + REFINE_CHAR_MODEL] = (uint8_t)i;   // normal play
+
+        check(strcmp(RefinePartyName(0), "Squall") == 0 &&
+              strcmp(RefinePartyName(2), "Irvine") == 0 &&
+              strcmp(RefinePartyName(5), "Selphie") == 0,
+              "outside a dream the picker names the regular party, unchanged");
+
+        chars[0 * REFINE_CHAR_STRIDE + REFINE_CHAR_MODEL] = 8;    // Laguna
+        chars[2 * REFINE_CHAR_STRIDE + REFINE_CHAR_MODEL] = 10;   // Ward
+        chars[5 * REFINE_CHAR_STRIDE + REFINE_CHAR_MODEL] = 9;    // Kiros
+        check(strcmp(RefinePartyName(0), "Laguna") == 0 &&
+              strcmp(RefinePartyName(2), "Ward")   == 0 &&
+              strcmp(RefinePartyName(5), "Kiros")  == 0,
+              "**and in the dream it names the dream party** -- the ids 0/2/5 "
+              "that read Squall/Irvine/Selphie under the L Mag-RF panel");
+
+        // The log two runs earlier had the SAME three characters in different
+        // slots (0/8, 2/9, 5/10), so the slot order is not something to lean on.
+        chars[2 * REFINE_CHAR_STRIDE + REFINE_CHAR_MODEL] = 9;
+        chars[5 * REFINE_CHAR_STRIDE + REFINE_CHAR_MODEL] = 10;
+        check(strcmp(RefinePartyName(2), "Kiros") == 0 &&
+              strcmp(RefinePartyName(5), "Ward")  == 0,
+              "and it follows the model byte when the slots swap between saves");
+
+        check(RefinePartyName(-1) == nullptr && RefinePartyName(11) == nullptr,
+              "an id outside the table names nobody rather than reading past it");
+
+        for (int i = 0; i < 11; i++)
+            chars[i * REFINE_CHAR_STRIDE + REFINE_CHAR_MODEL] = (uint8_t)i;   // leave it clean
+    }
+
     printf("menu_ability_compile: %s (%d bad)\n", bad ? "FAILED" : "OK", bad);
     return bad ? 1 : 0;
 }

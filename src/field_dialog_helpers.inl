@@ -117,6 +117,18 @@ static bool IsSuffixOrSubstring(const std::string& fullText, const std::string& 
 }
 
 // ============================================================================
+// SCROLLING WINDOWS (v0.69.0)
+// ============================================================================
+// The arithmetic lives in its own file so the probe can compile the same
+// definitions this build uses -- the same split field_overlay_pure.inl uses,
+// and for the same reason: field_dialog_helpers.inl is a fragment of
+// field_dialog.cpp and drags in MinHook, the engine address table and the
+// logger, none of which a string function needs.
+#include "dialog_scroll_pure.inl"
+
+
+
+// ============================================================================
 // Helper: trim whitespace and leading/trailing periods
 // ============================================================================
 

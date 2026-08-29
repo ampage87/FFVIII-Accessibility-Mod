@@ -110,7 +110,25 @@ static char* __cdecl Hook_field_get_dialog_string(char* msgBase, int dialogId)
     // v0.18.3.239 (#77): substitutes the engine's expanded text when the
     // message carries a {Var} numeric insert (e.g. the Tomb student ID).
     std::string decoded = DecodeDialogWithExpansion(result, 512);
-    if (decoded.empty() || (int)decoded.length() < MIN_TEXT_LENGTH) return result;
+
+    // v0.107.0 (#megaflare): same gate, same reasons, and the same record of
+    // what it drops. See dialog_short_text_model.inl.
+    {
+        uint32_t gsMode = FF8Addresses::pGameMode ? *FF8Addresses::pGameMode : 0xDEAD;
+        if (!DlgTextPassesLengthGate(decoded.c_str(), decoded.length(),
+                                     gsMode, MIN_TEXT_LENGTH)) {
+            static unsigned s_getstrShortLogged = 0;
+            if (DlgShortDropWorthLogging(decoded.c_str(), decoded.length(),
+                                         gsMode, MIN_TEXT_LENGTH) &&
+                DlgShortLogAllowed(s_getstrShortLogged)) {
+                s_getstrShortLogged++;
+                Log::Dialog("FieldDialog: [GETSTR-SHORT] dialogId=%d mode=%u len=%u dropped=\"%s\"",
+                            dialogId, gsMode, (unsigned)decoded.length(),
+                            decoded.c_str());
+            }
+            return result;
+        }
+    }
 
     // Skip if identical to last fetch (opcodes call this multiple times)
     if (decoded == s_lastGetstrText) return result;

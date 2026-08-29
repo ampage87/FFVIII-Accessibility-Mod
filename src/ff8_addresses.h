@@ -66,6 +66,15 @@ extern uint32_t* pMode0LoopHandler;
 extern uint32_t* pGameLoopMainLoop;
 
 // Known function addresses for comparison with *pMode0LoopHandler.
+// v0.64.0 (#111): field_main (0x00471F70 on the US build), resolved from
+// field_main_loop+0x148. field_main_loop calls it ONLY when [0x01CE4A68] and
+// [0x01CD2EBC] are both zero, and everything after that call -- the frame
+// present, sound, input -- runs regardless, so "field_main is not called" is a
+// state the engine is designed to sit in (it is what its own pause menu does).
+// It takes no arguments, which is what makes a one-byte RET at its entry a
+// complete and stack-safe field freeze. See src/field_pause.inl.
+extern uint32_t field_main_fn;
+extern uint32_t field_main_loop_fn;
 extern uint32_t pubintro_main_loop;
 extern uint32_t credits_main_loop;
 

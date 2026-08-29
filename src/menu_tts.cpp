@@ -503,6 +503,13 @@ static void DecodeGFName(int idx, char* out, int outSize);
 // --- Switch submenu TTS (#65, v0.18.3.35) ---
 #include "menu_tts_switch.inl"
 
+// --- v0.43.0 (#104): the Laguna junction-party screen. NOT the Switch Member UI
+//     above -- its own menu module (creator 0x004E8A30, update 0x004E8B50),
+//     opened by field opcode 0x109 with menu id 0x16 -> screen id 0x0D. Found by
+//     walking the module pool, so it needs no game-mode gate. ---
+#include "laguna_switch_model.inl"
+#include "menu_tts_laguna_switch.inl"
+
 // --- Magic submenu TTS (#81, v0.22.0). After junction.inl (roster + the
 //     dream-party name rule) and after the model above. ---
 #include "menu_tts_magic.inl"
@@ -534,6 +541,11 @@ void MenuTTS::Update()
 
     // #66: forced party-select (game mode 10 — Rinoa join, etc.). Self-gates on mode; runs before the menu-mode gate.
     PollForcedPartySelect();
+
+    // #104: the Laguna junction-party screen. Opened from a field script, so it
+    // never enters menu mode 6 and must not be gated on it; the poll is self-
+    // gating on its module being in the pool.
+    PollLagunaSwitch();
 
 #if FORCED_PSEL_DIAG
     PollForcedPselDiag();   // forced party-select discovery probe (now off; gate, don't delete)

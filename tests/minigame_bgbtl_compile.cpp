@@ -75,6 +75,16 @@ static bool MapEngineePages()
     // a real measurement instead of being stubbed out at the C++ level.
     void* win = mmap((void*)0x0049F000, 0x3000, PROT_READ | PROT_WRITE | PROT_EXEC,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+    // v0.67.3: the WINDOW STATE ARRAY at 0x01D2B330 + winId*0x3C. The dialog
+    // now reads every other window's rectangle out of it so the controls box can
+    // avoid whatever the scene already has on screen -- so the probe has to have
+    // one to read. Zeroed means "nothing else is open", which is the Garden
+    // battle's own case.
+    void* wins = mmap((void*)0x01D2B000, 0x2000, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (wins != (void*)0x01D2B000) { std::printf("FATAL: window state mmap\n"); std::exit(2); }
+    std::memset(wins, 0, 0x2000);
+
     void* gauge = mmap((void*)0x01D9C000, 0x2000, PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
     void* ctxp = mmap((void*)0x00B8E000, 0x2000, PROT_READ | PROT_WRITE,

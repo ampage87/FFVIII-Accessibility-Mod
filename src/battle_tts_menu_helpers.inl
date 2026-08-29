@@ -52,7 +52,7 @@ static const char* GetBattleCharName(uint8_t partySlot) {
         if (actorKind == 10) return "Ward";
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     __try {
-        uint8_t charIdx = *(uint8_t*)(SAVEMAP_PARTY_FORMATION + partySlot);
+        uint8_t charIdx = BattleSlotCharIdx(partySlot, 0, 0);
         if (charIdx < 8) return CHAR_NAMES[charIdx];
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     return "???";
@@ -86,8 +86,12 @@ static void BuildCharCommandList(uint8_t partySlot) {
     // because the char struct here does not carry the dream display name and
     // CHAR_NAMES[formation[slot]] would mis-name the dream party. Commands and
     // names are independent lookups.
+    // v0.45.0 (#106): through BattleSlotCharIdx, which prefers the actor kind's
+    // own character record over the formation byte when they disagree. The note
+    // above is still right that the DREAM PARTY'S DATA lives in the regular
+    // array -- it was wrong only that the formation byte always points at it.
     __try {
-        uint8_t charIdx = *(uint8_t*)(SAVEMAP_PARTY_FORMATION + partySlot);
+        uint8_t charIdx = BattleSlotCharIdx(partySlot, 0, 0);
         if (charIdx >= 8) return;
         
         uint8_t* charBase = (uint8_t*)(SAVEMAP_CHAR_DATA_BASE + charIdx * SAVEMAP_CHAR_STRIDE);

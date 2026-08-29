@@ -158,7 +158,7 @@ static uint8_t Enc(char c)
         case '-': return 0x32; case '=': return 0x33; case '*': return 0x34;
         case '&': return 0x35; case '(': return 0x38; case ')': return 0x39;
         case '.': return 0x3B; case ',': return 0x3C; case '~': return 0x3D;
-        case '\'': return 0x3A; case '"': return 0x3E; case '#': return 0x41;
+        case '\'': return 0x43; case '"': return 0x3E; case '#': return 0x41;   // v0.117.0: the apostrophe is 0x43, not 0x3A
         case '$': return 0x42; case '_': return 0x44;
         default:  return 0x20;
     }

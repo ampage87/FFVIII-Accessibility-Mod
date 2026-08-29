@@ -574,6 +574,50 @@ static bool RouteNetPlan(int32_t startX, int32_t startY);
 
 static bool PlanDrivePath(int32_t startX, int32_t startY)
 {
+    // v0.95.0: AND IT IS THE FIRST THING THIS FUNCTION DOES, WHICH v0.87.0 WAS NOT.
+    //
+    // That build fixed the vehicle RESOLUTION and left the bail thirty-five lines
+    // down -- BELOW RouteNetPlan and PlanPathGrid, which both plan and return
+    // true. So for every destination the grid planner could serve, the guard was
+    // never reached at all. The 18:58 BAT is the 13:41 BAT again, unchanged:
+    // ten seconds of frozen game on 151,552 A* expansions and a 302-cell WALKING
+    // path handed to an airship, which then chased fine-grid waypoints 180 units
+    // ahead of itself for a minute and stalled 24 km short of Esthar.
+    //
+    // A guard that runs after the thing it guards is not a guard.
+    //
+    // v0.87.0: THE BAIL BELOW HAS BEEN RIGHT SINCE v0.78.0 AND NEVER FIRED.
+    //
+    // `veh` came from s_lastVehicle -- the locomotion byte's committed verdict --
+    // and that byte has never once seen the Ragnarok in any BAT recorded. Every
+    // [PLAN] line in the 13:41 log reads `veh=0`: on foot, the whole time he was
+    // flying. So the planner ran, spent TEN SECONDS of frozen game on 157,696 A*
+    // expansions, and handed the airship a 302-cell WALKING ROUTE to follow --
+    // which is why it crawled and pivoted its way across Esthar at a tenth of
+    // flying speed. The engine vehicle id read 50 throughout, as it always does.
+    //
+    // Same resolution the catalog has used since v0.18.3.258 and the same shared
+    // predicate it now calls, so the two cannot drift apart again.
+    const int   vid   = GetActiveVehicleId();
+    VehicleType veh   = (VehicleType)WmResolveVehicle(
+                            (s_lastVehicle < 0) ? (int)VEH_ON_FOOT
+                                                : (int)GetVehicleType((uint8_t)s_lastVehicle),
+                            vid,
+                            (int)GetVehicleType((uint8_t)(vid > 0 ? vid : 0)),
+                            (int)VEH_ON_FOOT);
+    uint16_t    story = GetCurrentStoryFlag();
+
+    // And belt-and-braces: s_ragFlying is latched at StartAutoDrive from
+    // RagIsFlying(), which asks BOTH sources. If the id read fails mid-drive the
+    // latch still knows what he is riding, and a flying drive must never plan --
+    // the airship has nothing to route around, so the straight line IS the route.
+    if (veh == VEH_RAGNAROK || s_ragFlying) {
+        Log::World("WorldMap: [PLAN] Ragnarok mode \u2014 skipping planner "
+                   "(catalog-center steering); byteVeh=%d engineId=%d flying=%d",
+                   s_lastVehicle, vid, (int)s_ragFlying);
+        return false;
+    }
+
     s_drivePathWorld = false;   // v0.18.3.163: only PlanPathGrid fills the 128u world path; others use fine cells
     s_drivePathLen      = 0;
     s_drivePathIdx      = 0;
@@ -597,15 +641,6 @@ static bool PlanDrivePath(int32_t startX, int32_t startY)
 
     if (!s_segmentRegionLoaded) {
         Log::World("WorldMap: [PLAN] Region map not loaded \u2014 fallback to catalog-center steering");
-        return false;
-    }
-
-    VehicleType veh   = (s_lastVehicle < 0) ? VEH_ON_FOOT
-                                            : GetVehicleType((uint8_t)s_lastVehicle);
-    uint16_t    story = GetCurrentStoryFlag();
-
-    if (veh == VEH_RAGNAROK) {
-        Log::World("WorldMap: [PLAN] Ragnarok mode \u2014 skipping planner (catalog-center steering)");
         return false;
     }
 

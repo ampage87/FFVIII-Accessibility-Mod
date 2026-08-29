@@ -180,6 +180,9 @@ static void UpdateAutoDrive()
         StopAutoDrive("Target lost.");
         return;
     }
+    // v0.118.0: drive_bridge_target_model.inl -- a bridge IS the target.
+    BridgeDriveTarget(s_driveBridgeActive, s_driveBridgeLineIdx,
+                      s_driveBridgeX, s_driveBridgeY, tx, tz, &tx, &tz);
     // v0.18.3.307 (#112): capture the target BEFORE the trigger-line branch
     // below offsets tx/tz 300 units "past the line". That offset is applied
     // along the direction from the player's CURRENT position, so it moves as
@@ -264,9 +267,22 @@ static void UpdateAutoDrive()
             }
         }
     }
+    // v0.120.0 (#centra): a line the player must PRESS something on is not a
+    // doorway. button_mask_model.inl.
+    const bool buttonLine = BtnMaskIsActionable(s_driveButtonMask);
+    // v0.122.0 (#centra): and whether the player is ALONGSIDE it rather than
+    // past an end. Defaults true for every drive that is not a button line, so
+    // nothing else changes. button_mask_model.inl.
+    bool buttonAlongside = !buttonLine;
     if (gotCrossLine) {
         float tdx = tlx2 - tlx1;
         float tdy = tly2 - tly1;
+        // v0.122.0 (#centra): decided ONCE, here, before either arrival test
+        // reads it -- the crossing check below runs first and must see the same
+        // answer the proximity check does.
+        const float tbRaw = BtnLineParam(px, pz, tlx1, tly1, tlx2, tly2);
+        if (buttonLine) { buttonAlongside = BtnLineIsAlongside(tbRaw);
+                          s_driveButtonAlongT = tbRaw; }
         float crossNow = tdx * (pz - tly1) - tdy * (px - tlx1);
         // v0.18.3.319 (#114): within SEG_AIM_ENGAGE_DIST of the active segment,
         // steer at its middle half (not the funnel heading, which routed the .318
@@ -312,8 +328,11 @@ static void UpdateAutoDrive()
                 // NOT the end -- the descent/crossing must actually fire. Keep
                 // steering through; the completion detection (floor/field change,
                 // top of UpdateAutoDrive) ends the drive with the real outcome.
-                if (!s_driveTrigTarget) {
-                    StopAutoDrive("Arrived.");
+                // v0.130.0: and NEAR IT -- see DriveButtonLineArrival().
+                const bool flipNear = DriveButtonLineArrival(
+                    px, pz, tbRaw, tlx1, tly1, tlx2, tly2, s_driveArriveDist, true);
+                if (!s_driveTrigTarget || (buttonLine && buttonAlongside && flipNear)) {
+                    DriveArriveAtButtonLine(tbRaw);
                     return;
                 }
             }
@@ -326,15 +345,35 @@ static void UpdateAutoDrive()
                            tParam, px, pz, tlx1, tly1, tlx2, tly2);
             }
         }
-        // Also offset the target 300 units past the line center
-        // so the heading aims through the line, not just to its center.
-        float dirLen = sqrtf(dx*dx + dz*dz);
-        if (dirLen > 1.0f) {
-            tx += (dx / dirLen) * 300.0f;
-            tz += (dz / dirLen) * 300.0f;
+        if (buttonLine) {
+            // v0.120.0 (#centra): AIM AT THE LINE, NOT THROUGH IT. There is no
+            // walkmesh past a ladder, so the 300-unit push below aims at a point
+            // in mid-air -- the 19:36:54 stall was parked 15 units from the
+            // ladder still steering at something 300 units beyond it. Take the
+            // nearest point ON the segment instead, which is also where the
+            // engine's own touch test wants the player standing.
+            // v0.122.0: past an end is not on the line. The aim point is still
+            // the clamped endpoint, so walking to it brings tbRaw back into
+            // range; the arrival just waits until it does.
+            float tb = tbRaw;
+            if (tb < 0.0f) tb = 0.0f;
+            if (tb > 1.0f) tb = 1.0f;
+            tx = tlx1 + tdx * tb;
+            tz = tly1 + tdy * tb;
             dx = tx - px;
             dz = tz - pz;
             dist = sqrtf(dx*dx + dz*dz);
+        } else {
+            // Also offset the target 300 units past the line center
+            // so the heading aims through the line, not just to its center.
+            float dirLen = sqrtf(dx*dx + dz*dz);
+            if (dirLen > 1.0f) {
+                tx += (dx / dirLen) * 300.0f;
+                tz += (dz / dirLen) * 300.0f;
+                dx = tx - px;
+                dz = tz - pz;
+                dist = sqrtf(dx*dx + dz*dz);
+            }
         }
     }
     // v0.18.3.318 (#114): a transition target must NOT "Arrive" by mere proximity
@@ -342,8 +381,15 @@ static void UpdateAutoDrive()
     // of the stairs threshold in the .317 BAT. Transition drives end only via the
     // completion detection (floor/field change) at the top of UpdateAutoDrive; up
     // to then they steer through the trigger (bounded by driveMaxTicks / stuck).
-    if (dist < s_driveArriveDist && !s_driveTrigTarget) {
-        StopAutoDrive("Arrived.");
+    // v0.130.0: a button line wants the player ON it, not past its end.
+    bool buttonArrivalOk = buttonAlongside;
+    if (buttonLine && gotCrossLine)
+        buttonArrivalOk = DriveButtonLineArrival(px, pz, s_driveButtonAlongT,
+                                                 tlx1, tly1, tlx2, tly2,
+                                                 s_driveArriveDist, false);
+    if (dist < s_driveArriveDist && (!s_driveTrigTarget || buttonLine) &&
+        buttonArrivalOk) {
+        DriveArriveAtButtonLine(s_driveButtonAlongT);
         return;
     }
 
@@ -367,6 +413,7 @@ static void UpdateAutoDrive()
             // Chain-advance: skip past all waypoints we're already close to.
             float wpArriveDist = s_usingFunnel ? FUNNEL_ARRIVE_DIST : WAYPOINT_ARRIVE_DIST;
             int prevWpIdx = s_waypointIdx;
+            int overshootsThisTick = 0;   // v0.131.5: an inference, once per tick
             while (s_waypointIdx < s_waypointCount - 1) {
                 float wpDx = s_waypoints[s_waypointIdx][0] - px;
                 float wpDy = s_waypoints[s_waypointIdx][1] - pz;
@@ -378,7 +425,9 @@ static void UpdateAutoDrive()
                     // through the waypoint zone at dist~192 but FUNNEL_ARRIVE_DIST=60
                     // never triggers.
                     if (s_usingFunnel && s_wpMinDist < WP_OVERSHOOT_CLOSE &&
-                        wpDist > s_wpMinDist * WP_OVERSHOOT_RATIO + WP_OVERSHOOT_MARGIN) {
+                        wpDist > s_wpMinDist * WP_OVERSHOOT_RATIO + WP_OVERSHOOT_MARGIN &&
+                        DriveOvershootAdvanceAllowed(overshootsThisTick)) {
+                        overshootsThisTick++;
                         Log::Field("FieldNavigation: [drive] wp %d/%d overshoot (dist=%.0f, minDist=%.0f), advancing",
                                    s_waypointIdx, s_waypointCount, wpDist, s_wpMinDist);
                         NavLog::DriveWaypoint(s_waypointIdx, s_waypointCount, px, pz, dist, s_driveTotalTicks);
@@ -563,68 +612,18 @@ static void UpdateAutoDrive()
     dx = steerX - px;
     dz = steerY - pz;
 
-    // v06.17: Wall-avoidance steering bias. DISABLED in v06.20 (pushed players
-    // OUT of narrow corridors; corridor steering + recovery handles it better).
-    // Retained for potential re-enabling with better narrow-space logic.
-    if (false && s_walkmesh.valid) {
-        uint16_t nowTri2 = 0xFFFF;
-        {
-            uint8_t* base2 = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
-            if (base2)
-                nowTri2 = *(uint16_t*)(base2 + ENTITY_STRIDE * s_playerEntityIdx + 0x1FA);
-        }
-        if (nowTri2 != 0xFFFF && nowTri2 < (uint16_t)s_walkmesh.numTriangles) {
-            const auto& tri = s_walkmesh.triangles[nowTri2];
-            static const float WALL_BIAS_DIST = 40.0f;   // activate when within this distance
-            static const float WALL_BIAS_STRENGTH = 0.25f; // blend factor (0=no bias, 1=full perpendicular)
-            // v06.19: Check if corridor is narrow (walls on multiple edges).
-            // If so, reduce bias to avoid ping-ponging between walls.
-            int wallEdgeCount = 0;
-            for (int ec = 0; ec < 3; ec++)
-                if (tri.neighbor[ec] == 0xFFFF) wallEdgeCount++;
-            float effectiveStrength = WALL_BIAS_STRENGTH;
-            if (wallEdgeCount >= 2) effectiveStrength *= 0.3f; // very narrow, minimal bias
-            for (int e = 0; e < 3; e++) {
-                if (tri.neighbor[e] != 0xFFFF) continue; // not a wall edge
-                // Wall edge e spans vertices e and (e+1)%3.
-                // v0.18.3.308 (#113): corrected to the v0.17.9.14 convention while
-                // this block was DISABLED, so re-enabling doesn't resurrect the bug.
-                int wvi1 = tri.vertexIdx[e];
-                int wvi2 = tri.vertexIdx[(e + 1) % 3];
-                if (wvi1 >= s_walkmesh.numVertices || wvi2 >= s_walkmesh.numVertices) continue;
-                float wx1 = (float)s_walkmesh.vertices[wvi1].x;
-                float wy1 = (float)s_walkmesh.vertices[wvi1].y;
-                float wx2 = (float)s_walkmesh.vertices[wvi2].x;
-                float wy2 = (float)s_walkmesh.vertices[wvi2].y;
-                // Distance from player to this edge (point-to-line-segment).
-                float edx = wx2 - wx1, edy = wy2 - wy1;
-                float edLenSq = edx*edx + edy*edy;
-                if (edLenSq < 1.0f) continue;
-                float t = ((px - wx1)*edx + (pz - wy1)*edy) / edLenSq;
-                if (t < 0) t = 0; if (t > 1) t = 1;
-                float closestX = wx1 + t * edx;
-                float closestY = wy1 + t * edy;
-                float wallDx = px - closestX;
-                float wallDy = pz - closestY;
-                float wallDist = sqrtf(wallDx*wallDx + wallDy*wallDy);
-                if (wallDist < WALL_BIAS_DIST && wallDist > 0.1f) {
-                    // Blend steering away from wall. Stronger when closer.
-                    float factor = effectiveStrength * (1.0f - wallDist / WALL_BIAS_DIST);
-                    float awayX = wallDx / wallDist; // unit vector away from wall
-                    float awayY = wallDy / wallDist;
-                    float steerMag = sqrtf(dx*dx + dz*dz);
-                    dx = dx * (1.0f - factor) + awayX * factor * steerMag;
-                    dz = dz * (1.0f - factor) + awayY * factor * steerMag;
-                }
-            }
-        }
-    }
+    // v06.17 wall-avoidance bias, DISABLED since v06.20 -- parked in its own
+    // file in v0.118.0 because this one hit the 80 KB cap. Unchanged.
+#include "field_nav_wallbias_disabled.inl"
 
     // v06.17: Trigger-line proximity check. If the current heading would carry
     // the player across a NON-target trigger line within ~200u, redirect steering
     // parallel to it. Skips the target line (s_driveSkipTrigIdx) and NPC targets
     // the A* path legitimately routes across.
-    if (s_capturedLineCount > 0) {
+    // v0.131.1: oscillating or pinned? DriveProgressTick decides, and suspends
+    // the avoidance below when the avoidance is what is doing it.
+    const bool trigOff = DriveProgressTick(px, pz);
+    if (s_capturedLineCount > 0 && !trigOff) {
         float steerLen = sqrtf(dx*dx + dz*dz);
         if (steerLen > 1.0f) {
             float projDist = 200.0f;
@@ -660,6 +659,8 @@ static void UpdateAutoDrive()
             }
         }
     }
+
+    DriveProbeApply(px, pz, &dx, &dz);   // v0.131.1: sweep the heading off a wall
 
     // v05.62: Max drive time safety cutoff.
     // v0.15.9.2.2: chase-drive uses an extended timeout because chase
@@ -893,24 +894,7 @@ static void UpdateAutoDrive()
     }
 
     // v0.17.6.1: [drive-vec] per-tick steering pipeline diagnostic.
-    // Logs the intermediate values at each stage of the steering pipeline so
-    // we can see WHICH STAGE produced the wrong direction when the drive gets
-    // stuck. Fires every DRIVE_VEC_LOG_INTERVAL ticks (~0.5 s at 60 Hz) -- the
-    // existing 120-tick [drive] tick log was too sparse to catch transient
-    // steering inversions (e.g. the v0.17.6.0 BAT showed lX=-840/lY=-542 for
-    // multiple consecutive log windows, but the per-tick values likely jumped
-    // around between recovery cycles). Format:
-    //   t  = total ticks since drive start
-    //   tri = engine-reported walkmesh triangle (read from entity +0x1FA)
-    //   pp = player world position
-    //   wpRaw = chosen funnel waypoint or final target (pre-corridor override)
-    //   corOverride/corSteer = corridor steering wrote new steer to this edge midpoint
-    //   trigRedir/finalDelta = trigger-line proximity rewrote dx/dz parallel
-    //   lX/lY = analog values written by SetAnalogFromVector (camera-projected)
-    //   kb = heading bitmask derived from analog (post v0.17.6.0 unified logic)
-    //   wig/phase = wiggle tick counter / recovery phase counter
-    // To disable, raise DRIVE_VEC_LOG_INTERVAL; the per-tick cost otherwise
-    // is one mod-by-constant and an int compare.
+    // Field key: see DRIVE_VEC_LOG_FORMAT in field_nav_autodrive_helpers.inl.
     static const int DRIVE_VEC_LOG_INTERVAL = 30;
     if ((s_driveTotalTicks % DRIVE_VEC_LOG_INTERVAL) == 0) {
         uint16_t vecTri = 0xFFFF;
@@ -997,7 +981,8 @@ static void UpdateAutoDrive()
                     rpGot = GetEntityPos(ei, rpTx, rpTz);
                 }
                 if (rpGot) {
-                    int rpGoal = FindNearestTriangle(rpTx, rpTz);
+                    int rpGoal = s_driveGoalZValid ? FindNearestTriangle3D(rpTx, rpTz, s_driveGoalZ)
+                                                   : FindNearestTriangle(rpTx, rpTz);
                     if (rpGoal >= 0 && (int)nowTri != rpGoal) {
                         int oldWp = s_waypointIdx;
                         int oldTotal = s_waypointCount;
@@ -1155,7 +1140,8 @@ static void UpdateAutoDrive()
                 // Was `tx, tz`, which carries the per-tick "+300 past the
                 // line" offset -- see the rawTx capture comment above.
                 float rpTx = rawTx, rpTz = rawTz;
-                int rpGoal = FindNearestTriangle(rpTx, rpTz);
+                int rpGoal = s_driveGoalZValid ? FindNearestTriangle3D(rpTx, rpTz, s_driveGoalZ)
+                                                   : FindNearestTriangle(rpTx, rpTz);
 
                 if ((s_driveWigglePhase % 2) == 0) {
                     // Even phase: perpendicular nudge to break wall contact.

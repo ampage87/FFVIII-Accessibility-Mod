@@ -119,6 +119,34 @@ static int s_initialSec = 0;
 // each frame.
 static uint16_t s_frozenRawValue = 0;
 
+// v0.63.1 (#111) — THE PROGRAMMATIC HOLD.
+//
+// s_hold is a REQUEST, s_holdFroze is the fact. They are separate because the
+// space rescue asks for the hold on the frame the field loads and the engine
+// does not write a classifiable value into 0x01CFE92C for another two seconds
+// (Aaron's 2026-08-22 log: field at 16:10:53, "ENTER ACTIVE: rawValue=88" at
+// 16:10:56). A request that could only be honoured against an already-detected
+// timer would have missed the only three seconds that mattered, so the request
+// is remembered and EnterActive applies it.
+//
+// The hold never speaks. Shift+T announces because Aaron pressed it; this
+// fires underneath a Game Controls screen that is already talking.
+static bool s_hold      = false;   // somebody has asked for the clock to stop
+static bool s_holdFroze = false;   // ...and we are actually pinning it
+
+// v0.65.4 (#112): a detection that happened UNDER a hold owes the player an
+// announcement, but not yet. Aaron, 2026-08-24: "the game timer interrupts the
+// announcement of the game controls when the controls initially appear." It
+// does: the space rescue asks for the hold before the scene's clock exists, the
+// clock appears two frames later, and EnterActive's interrupting "Timer
+// detected" lands straight on top of a nine-sentence brief the player has to
+// hear. It is also a lie the moment it is spoken -- the hold is applied on the
+// line above, so the clock being announced is already standing still. So the
+// announcement is DEFERRED, not dropped: it is spoken when the hold is
+// released, queued behind whatever the releasing module says, which is exactly
+// the moment the number starts being true.
+static bool s_holdDeferredAnnounce = false;
+
 // Bitmap of which scheduled-announcement boundaries have fired this
 // session. Bit indices map to BOUNDARY_SEC[] below.
 static uint32_t s_announcedMask = 0;
@@ -383,6 +411,25 @@ static void SpeakBoundary(int boundarySec)
 // State transitions
 // ============================================================================
 
+// The "Timer detected" line, in one place, because it is now spoken from two:
+// at detection when nothing is holding the clock, and at hold-release when
+// something was. Reads s_remainingSec rather than s_initialSec so the deferred
+// case reports what is actually left rather than what was there when the engine
+// first wrote the global.
+static void SpeakDetected(bool interrupt)
+{
+    char msg[96];
+    int mins = s_remainingSec / 60;
+    int secs = s_remainingSec % 60;
+    if (secs == 0) {
+        snprintf(msg, sizeof(msg), "Timer detected. %d minutes remaining.", mins);
+    } else {
+        snprintf(msg, sizeof(msg),
+                 "Timer detected. %d minutes %d seconds remaining.", mins, secs);
+    }
+    ScreenReader::Speak(msg, interrupt);
+}
+
 static void EnterActive(uint16_t firstRaw)
 {
     Units units = ClassifyUnits(firstRaw);
@@ -415,17 +462,23 @@ static void EnterActive(uint16_t firstRaw)
              (unsigned)firstRaw, UnitsName(units), s_initialSec,
              s_initialSec / 60, s_initialSec % 60, s_announcedMask);
 
-    // Initial announcement.
-    char msg[96];
-    int mins = s_initialSec / 60;
-    int secs = s_initialSec % 60;
-    if (secs == 0) {
-        snprintf(msg, sizeof(msg), "Timer detected. %d minutes remaining.", mins);
-    } else {
-        snprintf(msg, sizeof(msg),
-                 "Timer detected. %d minutes %d seconds remaining.", mins, secs);
+    // v0.63.1: a hold placed before the timer existed is applied the moment it
+    // does.
+    if (s_hold) {
+        s_state = State::FROZEN;
+        s_frozenRawValue = firstRaw;
+        s_holdFroze = true;
+        Log::Mod("[CountdownTimer] HOLD applied at detection: raw=%u "
+                 "(pinning 0x%08X each frame).",
+                 (unsigned)firstRaw, (uint32_t)LIVE_TIMER_ADDR);
+        // v0.65.4 (#112): and therefore NOT spoken now. See s_holdDeferredAnnounce.
+        s_holdDeferredAnnounce = true;
+        Log::Mod("[CountdownTimer] initial announcement DEFERRED: the clock was "
+                 "held at detection; it will be spoken when the hold releases.");
+        return;
     }
-    ScreenReader::Speak(msg, true);
+
+    SpeakDetected(true);
 }
 
 static void EnterInactive(const char* reason)
@@ -438,6 +491,11 @@ static void EnterInactive(const char* reason)
     s_lastRawValue = 0;
     s_announcedMask = 0;
     s_frozenRawValue = 0;
+    // The REQUEST survives: if this scene's clock comes back (a battle, a
+    // scene transition), the caller still wants it stopped. The FACT does not.
+    s_holdFroze = false;
+    // A timer that ended before the hold released owes nobody an announcement.
+    s_holdDeferredAnnounce = false;
     Log::Mod("[CountdownTimer] ENTER INACTIVE: prev=%d reason=%s",
              (int)prev, reason);
 }
@@ -545,8 +603,17 @@ void Update()
 #endif
 
         // Log any change in raw value, rate-limited to 50ms.
+        //
+        // v0.63.3: NOT WHILE FROZEN. A freeze is the engine decrementing and
+        // this module writing the value straight back, so the global genuinely
+        // oscillates -- Aaron's 2026-08-23 log has "raw=87 ... raw=88" twice a
+        // second for the entire sixty-three seconds the space rescue's Game
+        // Controls screen was up, a hundred and thirty lines saying nothing but
+        // "the freeze is working". The value is pinned by definition; the
+        // transition into and out of FROZEN is already logged.
         bool changed = ((int)raw != s_lastLoggedRaw);
         bool firstObservation = (s_lastLoggedRaw == -1);
+        if (s_state == State::FROZEN) { changed = false; firstObservation = false; }
         if ((changed && (now - s_lastLogTickMs) >= 50) || firstObservation) {
             Log::Mod("[CountdownTimer] live raw=%u (prev=%d) state=%d "
                      "tickMs=%lu", (unsigned)raw, s_lastLoggedRaw,
@@ -702,6 +769,64 @@ void AnnounceRemaining()
     }
 }
 
+// v0.63.1 (#111). See countdown_timer.h.
+void SetHold(bool on, const char* reason)
+{
+    if (on == s_hold) return;
+    s_hold = on;
+    if (on) {
+        if (s_state == State::ACTIVE) {
+            s_state = State::FROZEN;
+            s_frozenRawValue = s_lastRawValue;
+            s_holdFroze = true;
+            Log::Mod("[CountdownTimer] HOLD on (%s): raw=%u remainingSec=%d "
+                     "(pinning 0x%08X each frame).",
+                     reason ? reason : "?", (unsigned)s_frozenRawValue,
+                     s_remainingSec, (uint32_t)LIVE_TIMER_ADDR);
+        } else {
+            Log::Mod("[CountdownTimer] HOLD on (%s): no timer yet -- it will be "
+                     "applied when one is detected.", reason ? reason : "?");
+        }
+        return;
+    }
+    // Release. Only give the clock back if WE were the ones holding it: a
+    // Shift+T freeze the player asked for must outlive somebody else's hold.
+    if (s_holdFroze && s_state == State::FROZEN) {
+        s_state = State::ACTIVE;
+        s_frozenRawValue = 0;
+        // The stall watch measures time since the value last changed, and it
+        // has not changed for as long as we were holding it. Without this the
+        // very next Update would call an eight-second freeze a dead sequence.
+        s_lastDecrementTickMs = GetTickCount();
+        Log::Mod("[CountdownTimer] HOLD off (%s): resumed at raw=%u remainingSec=%d.",
+                 reason ? reason : "?", (unsigned)s_lastRawValue, s_remainingSec);
+    } else {
+        Log::Mod("[CountdownTimer] HOLD off (%s): nothing was being held.",
+                 reason ? reason : "?");
+    }
+    s_holdFroze = false;
+    // v0.65.4 (#112): the debt from a detection that happened under this hold.
+    // Queued, never an interrupt -- the module that just released the clock is
+    // usually mid-sentence about having done so, and cutting that in half to
+    // announce a timer would be the same bug pointing the other way.
+    if (s_holdDeferredAnnounce) {
+        s_holdDeferredAnnounce = false;
+        if (s_state == State::ACTIVE || s_state == State::FROZEN) {
+            Log::Mod("[CountdownTimer] speaking the deferred detection "
+                     "announcement: remainingSec=%d.", s_remainingSec);
+            SpeakDetected(false);
+        } else {
+            Log::Mod("[CountdownTimer] deferred detection announcement dropped: "
+                     "the timer is gone (state=%d).", (int)s_state);
+        }
+    }
+}
+
+bool IsHeldFrozen()
+{
+    return s_holdFroze && s_state == State::FROZEN;
+}
+
 void ToggleFreeze()
 {
     if (s_state == State::INACTIVE) {
@@ -718,6 +843,9 @@ void ToggleFreeze()
                  (uint32_t)LIVE_TIMER_ADDR);
         ScreenReader::Speak("Timer frozen.", true);
     } else { // FROZEN
+        // If the player unfreezes by hand, the programmatic hold is over too --
+        // otherwise its release would later "resume" a clock nobody was holding.
+        s_holdFroze = false;
         s_state = State::ACTIVE;
         Log::Mod("[CountdownTimer] FREEZE released at raw=%u remainingSec=%d.",
                  (unsigned)s_lastRawValue, s_remainingSec);

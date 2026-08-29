@@ -424,6 +424,20 @@ static uint8_t GetEntitySetpc(int entityIdx)
     return 0xFE;
 }
 
+// v0.63.0: the live model id, read the same guarded way. -1 is the engine's own
+// "no model" sentinel, so a failed read is indistinguishable from an entity
+// with nothing to draw -- which is the safe direction for every caller.
+static int16_t GetEntityModelId(int entityIdx)
+{
+    if (entityIdx < 0 || entityIdx >= MAX_ENTITIES) return -1;
+    if (!FF8Addresses::pFieldStateOthers) return -1;
+    __try {
+        uint8_t* base = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+        if (base) return *(int16_t*)(base + ENTITY_STRIDE * entityIdx + 0x218);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    return -1;
+}
+
 // v05.80: Check if a walkmesh triangle center is blocked by any NPC's push radius.
 // Used by A* to route around NPC collision bodies. Skips the player and the
 // target entity (we want to path TO the target, not avoid them).
@@ -531,6 +545,29 @@ static const FieldArchive::JSMEntityInfo* FindJSMBySym(const char* symName)
     }
     return nullptr;
 }
+
+// v0.58.0: the EXACT join between a live entity block and its script.
+//
+// The catalog scan walks pFieldStateOthers slot by slot. field_scripts_init
+// (0x0052C270) fills those slots from the JSM's Other groups in order, so slot i
+// is JSM group (nLines + nDoors + nBackgrounds + i) and nothing else. The scanner
+// records that as JSMEntityInfo::runtimeSlot.
+//
+// Matching by SYM NAME -- what every caller did before -- is a guess dressed as a
+// lookup: names repeat within a field ('light1'..'light5', two 'Squall's on a
+// Laguna map), and until the ordering fix landed the name attached to a script
+// was frequently the wrong one anyway. Matching by walkmesh TRIANGLE, which the
+// item-pickup relabel used, is worse: two entities standing on one triangle swap
+// identities, which is exactly the "NPC read out as an Item" Aaron reported.
+static const FieldArchive::JSMEntityInfo* FindJSMByRuntimeSlot(int slot)
+{
+    if (slot < 0) return nullptr;
+    for (int j = 0; j < s_jsmEntityCount; j++)
+        if (s_jsmEntities[j].runtimeSlot == slot) return &s_jsmEntities[j];
+    return nullptr;
+}
+
+#include "field_live_join.inl"
 
 // v0.07.73: Map JSM entity type to catalog EntityType.
 static EntityType JSMTypeToCatalogType(FieldArchive::JSMEntityType jt)

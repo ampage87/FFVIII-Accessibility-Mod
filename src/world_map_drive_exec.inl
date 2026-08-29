@@ -822,7 +822,8 @@
         // check (proven to fire) rather than the hard-wedge vibration detector,
         // which never fired across the .68/.69/.70 BATs.
         wantDown = true;
-    } else if (hardWedge && dist >= FINAL_APPROACH_FORWARD_DIST &&
+    } else if (hardWedge && RagWedgeAllowed(s_ragFlying) &&
+               dist >= FINAL_APPROACH_FORWARD_DIST &&
                s_driveWedgeReverseCount < MAX_WEDGE_REVERSE) {
         // Vestigial fast-path: net-displacement hard-wedge (rarely trips).
         // DOWN-only, same as above; the stuck-check trigger is primary.
@@ -831,6 +832,74 @@
         wantDown = true;
         Log::World("WorldMap: [DRIVE] Hard wedge -> reverse un-wedge burst %d/%d (off=%d, dist=%.0f)",
                    s_driveWedgeReverseCount, MAX_WEDGE_REVERSE, off, dist);
+    } else if (s_ragFlying) {
+        // v0.89.0: THE AIRSHIP GETS ITS OWN BRANCH, FOR ALL DISTANCES.
+        //
+        // Aaron: "You ascend and descend using the up and down arrow keys." So
+        // wantUp was never a throttle here, and every branch below spends it as
+        // one. The 15:15 log proves the rest: dist 1806 -> 1471 -> 1037 with
+        // keys=---- and nothing pressed at all. THE SHIP FLIES FORWARD BY
+        // ITSELF. Left and right point it; up and down take it up and down.
+        //
+        // Which means the two axes are independent and both are commanded here:
+        // steer with LEFT/RIGHT alone, and spend UP/DOWN on altitude only.
+        const int cone = RagSteerCone(true, dist, STEER_FWD_CONE);
+        if (off > cone) {
+            if (err >= 0) wantRight = true;
+            else          wantLeft  = true;
+        }
+
+        int32_t zNow = 0, gNow = 0;
+        bool    zOk  = true;
+        __try {
+            zNow = *(volatile int32_t*)WM_POS_Z;
+            gNow = *(volatile int32_t*)0x0203FE30;
+        } __except (EXCEPTION_EXECUTE_HANDLER) { zOk = false; }
+        const int gap = (int)(gNow > zNow ? gNow - zNow : zNow - gNow);
+
+        // Climb the whole cruise -- Aaron: "make sure the airship ascends to max
+        // altitude when doing auto-drive so it doesn't get stuck against things
+        // on land." Holding UP outside the approach is also, exactly, what the
+        // old code did BY ACCIDENT on the long haul, which is why 151 km
+        // crossings sailed over everything while the final approach flew into
+        // the Fisherman's Horizon towers.
+        const RagAlt alt = RagAltitudeWant(true);
+        s_flyCmdClimb   = (alt == RAG_ALT_CLIMB);
+        s_flyCmdDescend = (alt == RAG_ALT_DESCEND);
+
+        // v0.90.0: AND THE THROTTLE IS ITS OWN FLAG NOW. A is forward, the arrow
+        // is the climb, and SetDriveKeys could only say both at once. The ship
+        // flies forward whenever it is aimed -- turning under power is what a
+        // wide arc is made of, and rotation here is free, so it is cheaper to
+        // stop, turn, and go than to sweep round.
+        s_flyCmdFwd = RagForwardWant(true, off, cone);
+        wantUp = wantDown = false;   // the car's pedal is not used in flight
+
+        {
+            static DWORD s_ragSteerLog = 0;
+            if (now - s_ragSteerLog >= 1000) {
+                s_ragSteerLog = now;
+                // v0.94.0: AND THE AIM IT IS ACTUALLY CHASING. The 18:42 crawl took
+                // hand-computing bearings from position lines to find, because the
+                // log recorded the ERROR without recording what the error was
+                // measured against -- and the firing-area escape had quietly moved
+                // it. steer(x,y) beside the target names that in one glance: when
+                // the two differ, something has taken the aim.
+                Log::World("WorldMap: [RAGSTEER] dist=%.0f hdg=%u off=%d err=%d cone=%d "
+                           "steer(%d,%d) tgt(%d,%d)%s "
+                           "shipZ=%d groundH=%d gap=%d alt=%s keys=%c%c%c%c",
+                           dist, (unsigned)heading, off, err, cone,
+                           steerX, steerY, s_driveTargetX, s_driveTargetY,
+                           (steerX != s_driveTargetX || steerY != s_driveTargetY)
+                               ? " <-- AIM OVERRIDDEN" : "",
+                           (int)zNow, (int)gNow, gap,
+                           alt == RAG_ALT_CLIMB   ? "CLIMB"
+                         : alt == RAG_ALT_DESCEND ? "DESCEND" : "hold",
+                           s_flyCmdFwd ? 'A' : '-',
+                           s_flyCmdClimb ? '^' : (s_flyCmdDescend ? 'v' : '-'),
+                           wantLeft ? 'L' : '-', wantRight ? 'R' : '-');
+            }
+        }
     } else if (dist < VEH_FINAL_APPROACH_DIST) {
         // v0.18.3.259 (#68): VEHICLE FINAL APPROACH -- inside the car's turning
         // circle (~1200u > measured turn radius ~1043u), never stop to pivot: a
@@ -875,7 +944,20 @@
         // marks the navmesh-walkable .81-box / false-coast cells blocked). On the
         // navmesh path the corridor is trusted; the guard only runs on the
         // fine-grid path / vehicles off-navmesh.
-        if (!s_driveNavmeshPath) {
+        // #RAGNAROK: and the guard means nothing at all in flight. 0x53E6B0
+        // falls through to `return 1` for vehicle 0x32 -- the airship crosses
+        // ocean, mountain and forest alike -- so a fine-grid cell marked blocked
+        // ahead of it is not an obstacle, it is scenery.
+        //
+        // THE TEST IS FLYING, NOT "HAS A LANDING ROW". v0.79.0 keyed it on
+        // s_ragLanding and the 23:05 BAT ran the controlled experiment inside
+        // one session: Sorceress Memorial (a row, so the guard was off) flew
+        // 53 km and arrived; Mobile Balamb Garden (no row -- its coordinate is
+        // live, so it can never have one) got the guard back and the position
+        // trace decays 355, 339, 270, 209, 148, 88, 27, 6, 0 -- the ship
+        // coasting to a stop because the guard presses LEFT/RIGHT and withholds
+        // UP. Six stuck checks later the drive gave up 53 km short.
+        if (!s_driveNavmeshPath && !s_ragFlying) {
             double th   = (double)heading / 4096.0 * 6.283185307179586;
             double dirX = sin(th), dirY = -cos(th);   // heading 0=N(-Y), clockwise; +X=E
             int32_t aheadX = px + (int32_t)(dirX * 1024.0);   // one fine cell ahead
@@ -908,6 +990,18 @@
         }
     }
 
+    // v0.88.0: how many ticks this window the mod actually ASKED the airship to
+    // go forward. A ship that is pivoting has not been asked and is not blocked;
+    // a ship that has been asked and has not moved is against something.
+    // v0.96.0: s_flyCmdFwd, NOT wantUp. v0.90.0 split the airship's throttle off
+    // the car's welded pedal and moved it to s_flyCmdFwd -- and left this counter
+    // reading the flag it had just stopped setting. Line 876 above sets
+    // `wantUp = wantDown = false` for flight outright, so THE BLOCKED DETECTOR HAS
+    // COUNTED ZERO ON EVERY FLIGHT SINCE. That is why the 19:38 stall spent
+    // eighteen seconds reaching "Stuck. Cannot reach destination." instead of six
+    // saying something he could act on.
+    if (s_ragFlying && s_flyCmdFwd) s_ragGasTicks++;
+
     // #67 v0.18.3.66/.68: heading-VERIFICATION trace. hdg should rotate toward
     // tgtBrg while PIVOTing/REVERSE, err should shrink, off small on STRAIGHT.
     // Set DRIVE_STEER_DIAG=false before the #67 push.
@@ -936,7 +1030,15 @@
     }
     }  // end vehicle (else) heading-based steering
 
-    SetDriveKeys(wantUp, wantLeft, wantRight, wantDown);
+    // v0.90.0: the airship's six controls, or the car's four. Never both -- they
+    // share the A key and the arrows, and s_ragFlying is latched for the whole
+    // drive, so there is no tick on which the mode changes underneath this.
+    if (s_ragFlying) {
+        SetFlightKeys(s_flyCmdFwd, false, s_flyCmdClimb, s_flyCmdDescend,
+                      wantLeft, wantRight);
+    } else {
+        SetDriveKeys(wantUp, wantLeft, wantRight, wantDown);
+    }
 
     // #67 v0.18.3.74: record this tick's keys + position for the next-tick
     // on-foot basis refresh (the live screen->world calibration).

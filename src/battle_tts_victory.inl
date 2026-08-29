@@ -48,14 +48,6 @@ static int s_announcedItemCount = 0;
 // GF phase state
 static bool s_gfAPAnnounced = false;
 
-// v0.13.46: Naming bypass state for battle-drawn GFs
-static bool s_namingBypassActive = false;
-static bool s_namingBypassAnnounced = false;
-static bool s_namingPatchApplied = false;
-static uint8_t s_namingOrigBytes1[9] = {};  // stores 9 bytes of original MOV instruction
-static uint8_t s_namingOrigBytes2[2] = {};  // unused, kept for compat
-static const uint32_t NAMING_PATCH_ADDR1 = 0x00470AB2;  // THE mode-11 write instruction
-static const uint32_t NAMING_PATCH_ADDR2 = 0x00470A72;  // unused, kept for compat
 
 // v0.13.30: ABILITY + GF_LEVELUP phase state and entity name capture
 static bool s_abilityAnnounced   = false;
@@ -1047,6 +1039,11 @@ static void LogVictoryCrossRefData()
 // Victory TTS reset
 // ============================================================================
 
+// v0.99.0 (#naming-bypass): the GF-naming-screen bypass, split out when this
+// file passed the 80 KB CI cap. Must precede ResetVictoryTTS (which clears the
+// bypass flags) and the victory thread (which calls into it).
+#include "battle_tts_naming_bypass.inl"
+
 static void ResetVictoryTTS()
 {
     s_victoryTTSActive = false;
@@ -1137,6 +1134,14 @@ static DWORD WINAPI VictoryScreenThreadFunc(LPVOID)
         uint16_t mode = 0;
         __try { mode = *FF8Addresses::pGameMode; } __except(EXCEPTION_EXECUTE_HANDLER) { continue; }
 
+        // v0.99.0 (#naming-bypass): remember where the party is standing. During
+        // a battle the mode is 3/4/5/11/100 and this is left alone, so at victory
+        // it still holds the mode the battle was entered FROM -- which is the mode
+        // the naming bypass has to return to. The 2026-08-25 log had this in it
+        // all along (`Mode: 2 -> 3` at 22:42:13, the world map into Jumbo Cactuar)
+        // and the bypass wrote a constant 1 anyway.
+        NamingBypassSampleMode(mode);
+
         // Log mode transitions
         if (mode != prevMode) {
             Log::Battle("BattleTTS: [VICTORY-THREAD] Mode: %u -> %u", prevMode, mode);
@@ -1177,138 +1182,12 @@ static DWORD WINAPI VictoryScreenThreadFunc(LPVOID)
                 ResetVictoryTTS();
             }
             
-            // v0.13.46: Auto-bypass naming screen for battle-drawn GFs.
-            // When a GF is drawn during battle, the naming screen fires as mode 11
-            // directly from the battle system — NOT through the MENUNAME field opcode.
-            // Strategy: detect new GF during victory (mode 4), then continuously
-            // clear the naming flag every frame so the naming screen never opens.
-            // Also clear when mode 11 fires as a safety net.
-            
-            if (mode == 4 && prevMode != 4) {
-                // Reset bypass state on victory entry
-                s_namingBypassActive = false;
-                s_namingBypassAnnounced = false;
-                // Check if a new GF was acquired during this battle
-                if (s_preBattleGFSnapValid) {
-                    __try {
-                        for (int g = 0; g < 16; g++) {
-                            uint8_t preBattleExists = s_preBattleGFStructs[g][0x11];
-                            uint8_t* gfNow = (uint8_t*)(SAVEMAP_GF_BASE + g * SAVEMAP_GF_STRIDE);
-                            uint8_t nowExists = gfNow[0x11];
-                            if (preBattleExists == 0 && nowExists != 0) {
-                                s_namingBypassActive = true;
-                                Log::Battle("BattleTTS: [NAME-BYPASS] New GF detected (idx=%d), bypass armed", g);
-                                break;
-                            }
-                        }
-                    } __except(EXCEPTION_EXECUTE_HANDLER) {}
-                }
-            }
-            
-            // Mode 11 fallback: if the naming screen still appears despite flag clearing,
-            // log it for diagnostic purposes.
-            if (mode == 11 && (prevMode == 4 || prevMode == 100 || prevMode == 5)) {
-                Log::Battle("BattleTTS: [NAME-BYPASS] WARNING: Mode 11 still appeared despite flag clearing!");
-                if (!s_namingBypassAnnounced) {
-                    s_namingBypassAnnounced = true;
-                    ScreenReader::Speak("Naming screen appeared.", true);
-                }
-            }
-            
-            // Deactivate bypass when we leave victory/naming (mode 4→1 or 11→1)
-            if (s_namingBypassActive && (prevMode == 11 || prevMode == 4) && mode == 1) {
-                // Announce AFTER victory sequence completes
-                if (!s_namingBypassAnnounced && s_preBattleGFSnapValid) {
-                    s_namingBypassAnnounced = true;
-                    static const char* GF_NM2[] = {
-                        "Quezacotl", "Shiva", "Ifrit", "Siren", "Brothers", "Diablos",
-                        "Carbuncle", "Leviathan", "Pandemona", "Cerberus", "Alexander",
-                        "Doomtrain", "Bahamut", "Cactuar", "Tonberry", "Eden"
-                    };
-                    for (int g = 0; g < 16; g++) {
-                        uint8_t pre = s_preBattleGFStructs[g][0x11];
-                        uint8_t* gfNow = (uint8_t*)(SAVEMAP_GF_BASE + g * SAVEMAP_GF_STRIDE);
-                        if (pre == 0 && gfNow[0x11] != 0) {
-                            char gfName[64] = {};
-                            DecodeFF8String(gfNow, gfName, sizeof(gfName));
-                            if (gfName[0] == '\0') strncpy(gfName, GF_NM2[g], 63);
-                            char buf3[128];
-                            snprintf(buf3, sizeof(buf3), "GF %s acquired.", gfName);
-                            ScreenReader::Speak(buf3, false);
-                            Log::Battle("BattleTTS: [NAME-BYPASS] %s (idx=%d)", buf3, g);
-                        }
-                    }
-                }
-                s_namingBypassActive = false;
-                Log::Battle("BattleTTS: [NAME-BYPASS] Bypass deactivated (mode %u->%u)", prevMode, mode);
-            }
+            NamingBypassOnModeChange(prevMode, mode);
         }
         
         // v0.14.45: F12 victory step capture removed (diagnostic complete).
 
-        // v0.13.46: Naming bypass via CODE PATCH.
-        // Change the immediate value in the ONLY instruction that writes mode=11:
-        //   0x00470AB2: mov word ptr [0x1cd8fc6], 0xb
-        //   Encoding: 66 C7 05 [C6 8F CD 01] [0B] 00
-        //   Patch byte at 0x00470AB9 from 0x0B to 0x01 (mode=field instead of naming)
-        // This preserves the full control flow — mode transitions from 4 to 1 (field)
-        // instead of 4 to 11 (naming screen).
-        static const uint32_t MODE11_PATCH_BYTE = 0x00470AB9;  // the 0x0B immediate
-        
-        if (s_namingBypassActive && !s_namingPatchApplied) {
-            Log::Battle("BattleTTS: [NAME-BYPASS] Applying code patch: mode-11 -> mode-1");
-            DWORD oldProt;
-            if (VirtualProtect((LPVOID)MODE11_PATCH_BYTE, 1, PAGE_EXECUTE_READWRITE, &oldProt)) {
-                s_namingOrigBytes1[0] = *(uint8_t*)MODE11_PATCH_BYTE;
-                *(uint8_t*)MODE11_PATCH_BYTE = 0x01;  // mode 1 (field) instead of 0x0B (naming)
-                VirtualProtect((LPVOID)MODE11_PATCH_BYTE, 1, oldProt, &oldProt);
-                Log::Battle("BattleTTS: [NAME-BYPASS] Patched 0x%08X: %02X -> 01",
-                           MODE11_PATCH_BYTE, s_namingOrigBytes1[0]);
-            } else {
-                Log::Battle("BattleTTS: [NAME-BYPASS] VirtualProtect FAILED (err=%u)", GetLastError());
-            }
-            s_namingPatchApplied = true;
-            // Announcement deferred to mode 4->1 transition (after victory completes)
-        }
-        
-        // Restore patch when bypass deactivates
-        if (s_namingPatchApplied && !s_namingBypassActive) {
-            DWORD oldProt;
-            if (VirtualProtect((LPVOID)MODE11_PATCH_BYTE, 1, PAGE_EXECUTE_READWRITE, &oldProt)) {
-                *(uint8_t*)MODE11_PATCH_BYTE = s_namingOrigBytes1[0];
-                VirtualProtect((LPVOID)MODE11_PATCH_BYTE, 1, oldProt, &oldProt);
-            }
-            s_namingPatchApplied = false;
-            Log::Battle("BattleTTS: [NAME-BYPASS] Patch restored");
-            
-            // v0.13.47: Fire the bypass announcement here instead of the deactivation block.
-            // The deactivation condition (s_namingBypassActive && prevMode==4 && mode==1) has a 
-            // race/caching issue where s_namingBypassActive reads as false on the 4->1 transition.
-            // This patch restore block is proven to fire correctly.
-            if (!s_namingBypassAnnounced && s_preBattleGFSnapValid) {
-                s_namingBypassAnnounced = true;
-                static const char* GF_NM3[] = {
-                    "Quezacotl", "Shiva", "Ifrit", "Siren", "Brothers", "Diablos",
-                    "Carbuncle", "Leviathan", "Pandemona", "Cerberus", "Alexander",
-                    "Doomtrain", "Bahamut", "Cactuar", "Tonberry", "Eden"
-                };
-                for (int g = 0; g < 16; g++) {
-                    uint8_t pre = s_preBattleGFStructs[g][0x11];
-                    __try {
-                        uint8_t* gfNow = (uint8_t*)(SAVEMAP_GF_BASE + g * SAVEMAP_GF_STRIDE);
-                        if (pre == 0 && gfNow[0x11] != 0) {
-                            char gfName[64] = {};
-                            DecodeFF8String(gfNow, gfName, sizeof(gfName));
-                            if (gfName[0] == '\0') strncpy(gfName, GF_NM3[g], 63);
-                            char buf3[128];
-                            snprintf(buf3, sizeof(buf3), "GF %s acquired.", gfName);
-                            ScreenReader::Speak(buf3, false);
-                            Log::Battle("BattleTTS: [NAME-BYPASS] %s (idx=%d)", buf3, g);
-                        }
-                    } __except(EXCEPTION_EXECUTE_HANDLER) {}
-                }
-            }
-        }
+        NamingBypassTick();
         // v0.14.45: F12 step-capture polling removed.
 
         // Phase-based victory TTS (driven by BTXT hook phase detection)

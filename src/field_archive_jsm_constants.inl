@@ -78,6 +78,11 @@ static const uint16_t JSM_OP_MES           = 0x047;  // display dialog
 static const uint16_t JSM_OP_ASK           = 0x04A;  // display dialog with choices
 static const uint16_t JSM_OP_AMES          = 0x065;  // auto-position message
 static const uint16_t JSM_OP_AASK          = 0x06F;  // auto-position choices
+// v0.120.0 (#centra): BTNTEST. Handler 0x0051DA50 -- pops the mask, ANDs it
+// with the live pad word at [0x01CE48B0] and leaves 1 or 0 in the script's
+// local 0, which is why the idiom always reads `PSHN_L <mask>; BTNTEST;
+// PSHL 0; PSHN_L 1; OPER ==; JPF`. See button_mask_model.inl.
+static const uint16_t JSM_OP_BTNTEST       = 0x06D;  // is one of these buttons held?
 static const uint16_t JSM_OP_BATTLE        = 0x069;  // trigger battle
 static const uint16_t JSM_OP_MOVE          = 0x03E;  // move entity to position
 static const uint16_t JSM_OP_REQ           = 0x014;  // invoke script on other entity

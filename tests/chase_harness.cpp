@@ -56,6 +56,11 @@ static volatile bool s_chaseDriveActive = false;
 static bool IsTriangleBlockedByNPC(float x, float y, int targetEntityIdx);
 
 #include "../src/field_nav_pathfinding.inl"
+// v0.55.0: EdgeCrossesScreenBound is forward-declared above and was defined
+// only in field_navigation.cpp, so this harness had stopped linking and was
+// out of the gate set entirely. It now lives in an .inl the game and this
+// harness share -- the A* barrier rule under test is the shipped one.
+#include "../src/field_nav_geometry.inl"
 
 static bool IsTriangleBlockedByNPC(float, float, int) { return false; }
 static bool IsSeparatedByTriggerLine(float, float, float, float, int) { return false; }

@@ -129,6 +129,10 @@ static int GetBfsRuleClass(VehicleType v)
     return 0;  // VEH_ON_FOOT, VEH_CHOCOBO, VEH_CAR all share land-only rules
 }
 
+// Foot and Selphie-foot. A foot claim is the one locomotion value that never
+// needs corroborating, so world_map_locomotion.inl asks this first.
+static inline bool IsFootLocomotion(uint8_t mode) { return mode == 0 || mode == 6; }
+
 static bool IsCanonicalLocomotion(uint8_t mode)
 {
     return mode == 0 || mode == 3 || mode == 6 ||

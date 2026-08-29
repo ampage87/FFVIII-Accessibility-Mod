@@ -23,6 +23,14 @@
 // 0x4B (LEFT), 0x4D (RIGHT), all extended-key scancodes. v0.14.102 added
 // the 'extended' parameter so A (gas pedal) and W (reverse) can be sent as
 // non-extended keys per the v0.11.14 design.
+// v0.84.0: the distance to the target at the previous stuck check. The turn
+// budget is refunded on PROGRESS, not on motion -- see rag_ground_pure.inl.
+static double s_driveStuckDist = -1.0;
+// v0.88.0: ticks this stuck window in which flight was COMMANDED FORWARD. A ship
+// that was asked to go and did not go is against something.
+static int    s_ragGasTicks     = 0;
+static int    s_ragBlockedCount = 0;
+
 static void PressKey(BYTE vk, BYTE scan, bool extended = true)
 {
     keybd_event(vk, scan, extended ? KEYEVENTF_EXTENDEDKEY : 0, 0);
@@ -44,6 +52,58 @@ static void ReleaseAllDriveKeys()
 }
 
 // Idempotent press/release: only generates events on state changes.
+// v0.90.0: THE RAGNAROK HAS SIX AXES AND SetDriveKeys CAN ONLY EXPRESS FOUR.
+//
+// Aaron, giving the full scheme: "you go forward and backward using A and W just
+// like the Garden does. You ascend and descend using the up/down arrow keys. You
+// embark/disembark using X. You turn left/right using the left and right arrow
+// keys."
+//
+// Read SetDriveKeys below against that. Its `up` presses the UP ARROW **and** the
+// A key -- one flag, deliberately, because for a car those are the same pedal
+// (v0.14.102: "gas pedal mirrors UP arrow"). For the airship they are two
+// different controls on two different axes: A IS THE THROTTLE AND THE UP ARROW
+// IS THE CLIMB. The drive has never been able to say "go forward" without also
+// saying "go up", or "climb" without also saying "go forward".
+//
+// That is why the evidence has been so hard to read. v0.88.0 concluded UP was
+// the throttle (true -- A was being pressed with it). v0.89.0 concluded UP was
+// the altitude (also true -- the arrow was being pressed with it). BOTH WERE
+// HALF RIGHT BECAUSE THE FLAG WAS DOING BOTH THINGS.
+//
+// So flight gets a setter with one flag per control. The car keeps its own, with
+// its own pedal, untouched: nothing here changes a key that foot, car or Garden
+// has ever been driven with.
+// What the flight branch decided this tick, read by the dispatch at the end of
+// the executor. Three flags rather than one, which is the whole point.
+static bool s_flyCmdFwd = false, s_flyCmdClimb = false, s_flyCmdDescend = false;
+static bool s_flyFwdHeld = false, s_flyBackHeld = false;
+static bool s_flyUpHeld  = false, s_flyDownHeld = false;
+static bool s_flyLeftHeld = false, s_flyRightHeld = false;
+
+static void SetFlightKeys(bool fwd, bool back, bool climb, bool descend,
+                          bool left, bool right)
+{
+    // A (scan 0x1E, NOT extended) -- the same key the car's gas pedal uses.
+    if (fwd  && !s_flyFwdHeld)  { PressKey('A', 0x1E, false); s_flyFwdHeld  = true; }
+    if (!fwd &&  s_flyFwdHeld)  { ReleaseKey('A', 0x1E, false); s_flyFwdHeld = false; }
+    // W (scan 0x11, NOT extended) -- reverse. Unused today; the airship has no
+    // reason to back up, and v0.84.0 established it can never be wedged. It is
+    // here so the axis exists rather than being rediscovered later.
+    if (back  && !s_flyBackHeld) { PressKey('W', 0x11, false); s_flyBackHeld  = true; }
+    if (!back &&  s_flyBackHeld) { ReleaseKey('W', 0x11, false); s_flyBackHeld = false; }
+    if (climb  && !s_flyUpHeld)   { PressKey(VK_UP, 0x48);   s_flyUpHeld   = true; }
+    if (!climb &&  s_flyUpHeld)   { ReleaseKey(VK_UP, 0x48); s_flyUpHeld   = false; }
+    if (descend  && !s_flyDownHeld) { PressKey(VK_DOWN, 0x50);   s_flyDownHeld = true; }
+    if (!descend &&  s_flyDownHeld) { ReleaseKey(VK_DOWN, 0x50); s_flyDownHeld = false; }
+    if (left  && !s_flyLeftHeld)  { PressKey(VK_LEFT, 0x4B);   s_flyLeftHeld  = true; }
+    if (!left &&  s_flyLeftHeld)  { ReleaseKey(VK_LEFT, 0x4B); s_flyLeftHeld  = false; }
+    if (right  && !s_flyRightHeld) { PressKey(VK_RIGHT, 0x4D);   s_flyRightHeld = true; }
+    if (!right &&  s_flyRightHeld) { ReleaseKey(VK_RIGHT, 0x4D); s_flyRightHeld = false; }
+}
+
+static void ReleaseFlightKeys() { SetFlightKeys(false, false, false, false, false, false); }
+
 static void SetDriveKeys(bool up, bool left, bool right, bool down = false)
 {
     if (up    && !s_keyUpHeld)    { PressKey(VK_UP,    0x48); s_keyUpHeld    = true; }
@@ -241,6 +301,23 @@ static void CamwLearnBlock(int32_t cpx, int32_t cpy, int bearingAu)
 // ============================================================================
 static void StopAutoDrive(const char* reason)
 {
+    // #RAGNAROK: a landing belongs to ONE drive. Nothing reads this outside
+    // UpdateAutoDrive and every start clears it, so a stale row cannot be seen
+    // today -- but a stale row is exactly the shape of the bug that would turn
+    // off the on-foot forward-collision guard and end a walk with "land the
+    // Ragnarok", so it is cleared where the drive ends as well as where it
+    // begins.
+    // v0.90.0: release the airship's own keys before s_ragFlying goes false, or
+    // the A key and the arrows stay down after the drive ends -- the executor
+    // only reaches SetFlightKeys while flying, so nothing else would let go.
+    ReleaseFlightKeys();
+    s_flyCmdFwd = s_flyCmdClimb = s_flyCmdDescend = false;
+
+    s_ragLanding = nullptr;
+    s_ragFlying  = false;
+    s_ragGasTicks     = 0;
+    s_ragBlockedCount = 0;
+
     if (!s_driveActive) return;
     ReleaseAllDriveKeys();
     s_driveActive = false;
@@ -427,6 +504,39 @@ static void ComputeEscapePoint(int ai, int32_t px, int32_t py, int32_t* ex, int3
 
 static void ArmFiringAreaEscape(int32_t px, int32_t py)
 {
+    // v0.94.0: NOT IN FLIGHT. THE FOURTH PIECE OF CAR MACHINERY FOUND STEERING
+    // THE AIRSHIP.
+    //
+    // This exists so a walker or a car does not blunder into a world-map entry
+    // trigger's firing area on the way past and load a field it did not want. An
+    // airship at 1,481 units cannot trip an entry trigger at all -- the game's own
+    // evaluator says so every tick of every flight: "[TRIGEVAL] ... vehId=50 ...
+    // NO PROGRAM IS EVALUATED".
+    //
+    // The 18:42 BAT is what it costs. Aaron boarded the Ragnarok where it was
+    // parked -- beside Sorceress Memorial, inside its firing area -- and flew for
+    // Esthar. The escape armed on the spot and EscapeSteerAround spent the next
+    // minute swinging the aim round the Sorceress Memorial box while the drive
+    // dutifully chased it:
+    //
+    //   [18:43:01] hdg=3200 off=573 err=-573 keys=A^--
+    //   [18:43:02] hdg=3317 off=656 err=+656 keys=-^-R
+    //
+    // The true bearing to Esthar from there is 3210 and the ship was pointing at
+    // 3200 -- DEAD ON -- and was told to turn away. One second later the aim had
+    // swung 118 degrees the other way. The position trace is that argument: ten
+    // seconds frozen, then hops of 950 and 2,150 units separated by crawling and
+    // backtracking. And none of it appeared in the log, because the [ESCAPE] line
+    // that would have named it is gated behind DRIVE_STEER_DIAG, which is false.
+    //
+    // Same shape as the forward-collision guard (v0.80.0), the un-wedge bursts
+    // (v0.84.0) and the planner (v0.87.0): machinery written for a vehicle that
+    // touches the ground, applied to one that does not.
+    if (s_ragFlying) {
+        s_driveEscapeActive  = false;
+        s_driveEscapeAreaIdx = -1;
+        return;
+    }
     s_driveEscapeActive  = false;
     s_driveEscapeAreaIdx = -1;
 
@@ -534,7 +644,102 @@ static void StartAutoDrive(int catIdx)
     // target lies INSIDE the firing area: keep the refined/proven coordinate when it
     // already does (Timber's seed, G-Garden's ggview1 entrance...), else retarget to the
     // validated aim point. This replaces marker-guessing with the engine's own geometry.
-    s_driveEntryAim = FindEntryAim(s_driveTargetName);
+    // #RAGNAROK: THE AIRSHIP GOES WHERE IT CAN LAND, NOT WHERE A WALKER GETS IN.
+    //
+    // Everything below this point -- the refined entry coordinate, the decoded
+    // firing area, the aim retarget -- exists to make a DOOR fire. A door is the
+    // wrong target for a vehicle that arrives from above and cannot enter
+    // anything until it has set down. So when the player is flying, the landing
+    // table replaces the lot, and the entry-aim machinery is skipped outright
+    // rather than left free to move the target back onto a footpath.
+    // Seed the turn watermark from the CURRENT heading, or the first check
+    // compares against the last drive's and reports a turn that never happened.
+    s_driveStuckHdg   = GetWorldMapHeading();
+    s_driveTurnPasses = 0;
+
+    s_ragLanding = nullptr;
+    s_ragFlying  = RagIsFlying();
+    s_driveStuckDist  = -1.0;
+    s_ragGasTicks     = 0;
+    s_ragBlockedCount = 0;
+
+    // v0.84.0: IS THE SHIP ACTUALLY IN THE AIR?
+    //
+    // The 12:37 BAT: Aaron boarded the Ragnarok where he had parked it and drove
+    // for Esthar without ever taking off. A sighted player sees the ship sitting
+    // on the rock; he cannot, and nothing told him. The drive covered about
+    // 2,500 units in 64 seconds where the Fisherman's Horizon FLIGHT covered
+    // 63,283 in 35 -- forty-six times slower -- and the whole landing table, the
+    // pads, the arrival radii all assume a ship that flies.
+    //
+    // Both numbers come from the engine. The slot dump at 12:37:08 reads the
+    // character's altitude as -544 and the engine's live ground height at that
+    // position as -544: on the ground, the altitude IS the ground. The 200-unit
+    // threshold is the engine's own, from the set-down predicate at 0x54B860.
+    if (s_ragFlying) {
+        int32_t shipZ = 0, engineH = 0;
+        bool readsOk = true;
+        __try {
+            shipZ   = *(volatile int32_t*)WM_POS_Z;
+            engineH = *(volatile int32_t*)0x0203FE30;
+        } __except (EXCEPTION_EXECUTE_HANDLER) { readsOk = false; }
+        // v0.96.0: a height test needs a height. The engine reads 0 -- NO GROUND --
+        // over water and over man-made platforms like the Fisherman's Horizon pad,
+        // and the 19:38 BAT measured a parked ship against that nothing, got
+        // exactly 200, and called it AIRBORNE by a single unit. The mod's own
+        // reader has a triangle where the engine has none and sits within 14 units
+        // of it across 3,852 ground-truth samples.
+        int      ownH  = 0;
+        bool     ownOk = false;
+        if (!RagGroundReadable(engineH)) {
+            int32_t gx = 0, gy = 0, gz = 0;
+            GetWorldMapPosition_Active(&gx, &gy, &gz);
+            const int h = WorldGroundHeightLocal(gx, gy);
+            if (h != WGH_NO_GROUND) { ownH = h; ownOk = true; }
+        }
+        const int32_t groundH = (int32_t)RagGroundHeight((int)engineH, ownH, ownOk);
+        const RagHeight h = RagHeightState(true, readsOk, (int)shipZ, (int)groundH);
+        Log::World("WorldMap: [RAG] height check: shipZ=%d groundH=%d (engine=%d%s) gap=%d -> %s",
+                   (int)shipZ, (int)groundH, (int)engineH,
+                   RagGroundReadable(engineH) ? ""
+                     : (ownOk ? ", NO GROUND -- using our own reader"
+                              : ", NO GROUND and our reader has none either"),
+                   (int)abs((int)shipZ - (int)groundH),
+                   h == RAG_AIRBORNE  ? "AIRBORNE"
+                 : h == RAG_ON_GROUND ? "ON THE GROUND"
+                                      : "unknown (altitude unreadable; proceeding as before)");
+        if (!RagDriveMayStart(h)) {
+            // Refuse only on a POSITIVE measurement -- unknown proceeds exactly
+            // as v0.83.0 did. And say the useful thing, not the true thing: what
+            // he needs is the next action, not a diagnosis.
+            ScreenReader::Speak("The Ragnarok is on the ground. Take off first, "
+                                "then start auto-drive.", true);
+            Log::World("WorldMap: [RAG] drive to %s REFUSED -- the ship is on the ground",
+                       dest.name);
+            return;
+        }
+    }
+
+    if (s_ragFlying) {
+        s_ragLanding = RagLandingFor(dest.name);
+        if (s_ragLanding != nullptr) {
+            s_driveTargetX = s_ragLanding->x;
+            s_driveTargetY = s_ragLanding->y;
+            Log::World("WorldMap: [RAG] %s -> landing (%d,%d), %s, %d units to walk after",
+                       dest.name, s_ragLanding->x, s_ragLanding->y,
+                       s_ragLanding->kind == RAG_PAD ? "a pad it lands ON"
+                                                     : "the nearest ground it can land on",
+                       (int)s_ragLanding->walk);
+        } else {
+            // NOT a hidden destination. The drive still flies to the marker;
+            // what is missing is only the mod's opinion about where to set down,
+            // and that is worth hearing rather than silently withholding.
+            Log::World("WorldMap: [RAG] %s has NO landing row -- flying to the catalog "
+                       "marker (%d,%d)", dest.name, s_driveTargetX, s_driveTargetY);
+        }
+    }
+
+    s_driveEntryAim = (s_ragLanding != nullptr) ? -1 : FindEntryAim(s_driveTargetName);
     s_mowTried      = 0;
     if (s_driveEntryAim >= 0) {
         const EntryAimInfo& ea = s_entryAims[s_driveEntryAim];
@@ -554,7 +759,17 @@ static void StartAutoDrive(int catIdx)
             Log::World("WorldMap: [ENTRYAIM] %s is FOOT-ONLY (no car-entry clause)", s_driveTargetName);
     }
 
-    double dist = CalculateWrappedDistance(px, py, dest.x, dest.y);
+    // v0.56.0 (#118): measure to WHERE THE DRIVE IS ACTUALLY GOING.
+    //
+    // The retarget above may have moved the target from the catalog marker to
+    // the decoded entry aim, and this distance is what the player HEARS at the
+    // start of the drive and what every "N kilometres to go" update counts down
+    // from. Measuring it to the marker while walking to the aim was harmless
+    // while every aim sat within 800 units of its marker. Esthar's five aims
+    // are 3.7 to 12.1 km from theirs, so it stops being a rounding difference
+    // and becomes the mod telling a blind player a number that is wrong by
+    // more than the length of some journeys. It counts to the aim now.
+    double dist = CalculateWrappedDistance(px, py, s_driveTargetX, s_driveTargetY);
     DWORD now = GetTickCount();
 
     s_driveActive            = true;

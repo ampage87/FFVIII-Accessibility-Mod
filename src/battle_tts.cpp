@@ -39,6 +39,7 @@
 #include "ff8_item_names.h"
 #include "ff8_text_decode.h"
 #include "minhook/include/MinHook.h"
+#include "field_overlay.h"   // v0.65.0 (#111): the SwapBuffers hook draws it
 
 // Forward declarations for namespaces used in .inl files
 namespace Log { void Battle(const char* format, ...); }
@@ -77,6 +78,11 @@ namespace ScanTTS {
     // v0.14.68-diag through v0.14.71).
     void HandleBattleText(int textId, const char* result);
 }
+
+// v0.99.0 (#naming-bypass): the pure model behind the GF-naming-screen bypass.
+// Global scope on purpose -- tests/naming_bypass_test.cpp compiles it in the
+// same scope, so the probe and the mod build the same program.
+#include "naming_bypass_model.inl"
 
 namespace BattleTTS {
 
@@ -296,6 +302,12 @@ static void NoEffect_RecordSnapshot(uint32_t targetMask);
 // --- EWM, GF fire prevention, ATB hook, FFNx hook (extracted v0.12.18) ---
 #include "battle_tts_ewm.inl"
 
+// --- v0.108.0 (#megaflare): the on-screen status countdown. The model is pure
+// and tested; the poller needs BENT_STATUS_TIMERS / STATUS_TIMER_COUNT out of
+// the EWM state above, so it lands here and not earlier. ---
+#include "battle_countdown_model.inl"
+#include "battle_tts_countdown.inl"
+
 // --- Turn/command menu, magic/GF/item/draw sub-menus (extracted v0.12.18) ---
 #include "battle_tts_menu.inl"
 
@@ -401,6 +413,10 @@ static bool s_preBattleExpSnapValid = false;
 // section so all consumers see the same value regardless of include order.
 static ULONG_PTR s_gdiplusToken = 0;
 
+// v0.107.0 (#megaflare): the burst schedule -- pure, tested, and included
+// ahead of the file that drives it from the frame hook.
+#include "battle_burst_capture_model.inl"
+
 // --- GL screenshot capture, memory diff, victory step diagnostics (extracted v0.13.45) ---
 #include "battle_tts_screenshot.inl"
 
@@ -415,6 +431,7 @@ static void OnBattleEnter()
 {
     s_inBattle = true;
     s_battleJustStarted = true;
+    Countdown_OnBattleEnter();   // v0.108.0 (#megaflare)
     s_battleEntryTime = GetTickCount();
     s_initAnnounceDone = false;
     s_enemyAnnounceDone = false;
@@ -1025,6 +1042,13 @@ void Update()
         EWM_UpdateBattle();
         EWM_LogStatusTimerStats();   // v0.37.0 (#95)
     }
+
+    // v0.108.0 (#megaflare): the digit that floats over an actor. Gated on
+    // nothing but being in a battle -- Mega Flare lands in the middle of an
+    // animation, which is exactly when the announce gates above are closed.
+    if (s_inBattle) {
+        Countdown_Poll();
+    }
     if (s_inBattle && s_ewmCapGF) {
         __try {
             for (int gs = 0; gs < BATTLE_ALLY_SLOTS; gs++) {
@@ -1204,6 +1228,42 @@ void RequestScreenshotAsync(const char* basePath, int frameDelay)
 // project tree. v0.14.65.1 hit exactly this issue — the scan_*.png file
 // landed in the FF8 install dir's Screenshots folder, where Claude has
 // no read access.
+// v0.107.0 (#megaflare): every decoded battle-window text passes through here.
+//
+// Aaron lost the Bahamut fight to a Mega Flare whose on-screen countdown the
+// mod never said: "There is a visible countdown that appears as Bahamut
+// prepares to do his Mega Flare... It is just displayed as a single digit and
+// very briefly." Bahamut's own battle text is not it -- c0m067.dat's eleven
+// strings are his dialogue and nothing else, and no monster file in the game
+// carries a bare digit -- and no popup render fired in the ten seconds
+// concerned.
+//
+// v0.108.0 found the renderer (`sub_50A500`, see battle_countdown_model.inl)
+// and the mod now reads its two possible sources every frame. This trigger
+// stays for the two things the reader cannot do by itself: arm the timer-array
+// sweep, and take the pictures that settle it if the sweep comes back empty.
+//
+// The match is on the ability name because that is the one moment the mod
+// reliably knows: it is already announcing "Mega Flare" from this same text.
+// Substring rather than equality because the window can carry padding.
+void NoteBattleWindowText(const char* text)
+{
+    if (text == nullptr || text[0] == '\0') return;
+    // v0.110.0: the WHOLE box, not a substring of it. See BurstTextTriggers --
+    // the substring form spent the 2026-08-27 run's burst on Bahamut's scan
+    // description, minutes before he could have cast anything.
+    if (!BurstTextTriggers(text, "Mega Flare")) return;
+    // v0.108.0 (#megaflare): dump every status timer for twenty seconds, so a
+    // digit on screen with nothing live in the dump proves the countdown is a
+    // texture in the effect rather than an engine number.
+    Countdown_ArmSweep(text);
+    if (!BurstArm(&s_burst, BURST_SHOTS, BURST_INTERVAL)) return;
+    strncpy(s_burstTag, "megaflare", sizeof(s_burstTag) - 1);
+    s_burstTag[sizeof(s_burstTag) - 1] = '\0';
+    Log::Battle("BattleTTS: [BURST] armed on \"%s\" -- %d shots, %d frames apart",
+                text, BURST_SHOTS, BURST_INTERVAL);
+}
+
 const char* GetScreenshotDir()
 {
     return KIND4_SCREENSHOT_DIR;

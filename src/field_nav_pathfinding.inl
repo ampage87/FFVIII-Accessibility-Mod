@@ -19,19 +19,40 @@
 
 // Find the walkmesh triangle whose center is closest to (x, y).
 // Returns triangle index, or -1 if walkmesh not loaded.
+#include "walkmesh_height_lookup_model.inl"
+
 static int FindNearestTriangle(float x, float y)
 {
     if (!s_walkmesh.valid || s_walkmesh.numTriangles == 0) return -1;
     int best = -1;
     float bestDist = 1e30f;
     for (int t = 0; t < s_walkmesh.numTriangles; t++) {
-        float dx = s_walkmesh.triangles[t].centerX - x;
-        float dy = s_walkmesh.triangles[t].centerY - y;
-        float d = dx*dx + dy*dy;
+        float d = WmSqDist2D(s_walkmesh.triangles[t].centerX,
+                             s_walkmesh.triangles[t].centerY, x, y);
         if (d < bestDist) { bestDist = d; best = t; }
     }
     return best;
 }
+
+// v0.119.0 (#centra): the same search with the height included. ONLY for a
+// caller that genuinely has a Z -- a SETLINE trigger line (z1/z2) or an INF
+// gateway (lineZ1/lineZ2). Everything else keeps the 2D form above, because a
+// wrong Z is worse than none. walkmesh_height_lookup_model.inl has the crtower1
+// numbers this exists for.
+static int FindNearestTriangle3D(float x, float y, float z)
+{
+    if (!s_walkmesh.valid || s_walkmesh.numTriangles == 0) return -1;
+    int best = -1;
+    float bestDist = 1e30f;
+    for (int t = 0; t < s_walkmesh.numTriangles; t++) {
+        float d = WmSqDist3D(s_walkmesh.triangles[t].centerX,
+                             s_walkmesh.triangles[t].centerY,
+                             s_walkmesh.triangles[t].centerZ, x, y, z);
+        if (d < bestDist) { bestDist = d; best = t; }
+    }
+    return best;
+}
+
 
 // v0.17.7.1: Point-in-triangle test for the walkmesh exclusion filter in
 // RefreshCatalog. Returns true if (x, y) lies inside any walkmesh triangle
@@ -176,11 +197,33 @@ struct CapturedTriggerLine {
     // SCREEN_BOUND so it walls the zone BFS and reaches the exit path, but the
     // catalog labels it "Camera transition" rather than a field destination.
     bool isCameraTransition;
+    // v0.62.3 (#123): this line's own touch script is gated on a story variable
+    // that currently reads false, so crossing it does nothing. An inert line is
+    // neither an exit nor a wall: it must not be offered, and it must not
+    // separate the player from anything. Recomputed every catalog refresh --
+    // the variable changes while you play.
+    bool gateClosed;
 };
 static const int MAX_CAPTURED_LINES = 32;
 static CapturedTriggerLine s_capturedLines[MAX_CAPTURED_LINES] = {};
 static int s_capturedLineCount = 0;
 static int s_setlineCallCount = 0;
+
+// v0.20.45 post-battle trigger-line preservation, hoisted out of RefreshCatalog
+// in v0.58.0 so it can be INVALIDATED. It used to be a function-local `static`
+// keyed only on the field id, which meant it outlived the visit that filled it:
+// leave a field, come back in a story state whose scripts run no SETLINE at all,
+// and the previous visit's lines were restored as exits and interactions that no
+// longer exist. That is a phantom generator, and it is also what made the
+// catalog harness emit a stray "Interaction 1" in every fixture after the first
+// one that declared a line. The backup is for ONE case -- the engine returning
+// from a battle into the same field, where field-scripts re-init clears the
+// table but SETLINE does not re-fire -- so it is now dropped the moment the
+// field name changes.
+static CapturedTriggerLine s_capBackup[MAX_CAPTURED_LINES] = {};
+static int      s_capBackupCount = 0;
+static uint16_t s_capBackupField = 0xFFFF;
+static void InvalidateCapturedLineBackup() { s_capBackupCount = 0; s_capBackupField = 0xFFFF; }
 
 // v05.93: Walkmesh line-of-sight check.
 // Walks through walkmesh triangles from startTri toward (goalX, goalY).

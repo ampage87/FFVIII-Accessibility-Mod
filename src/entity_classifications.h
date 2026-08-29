@@ -233,6 +233,155 @@ static const char* ENTITY_SKIP_NAMES[] = {
 };
 
 // ============================================================================
+// FIELD-SCOPED OVERRIDES (v0.65.0)
+// ============================================================================
+//
+// ENTITY_DISPLAY_NAMES below is keyed on the SYM alone, which is right when a
+// symbol means one thing everywhere. Some do not. `handle` is the Missile Base
+// valve wheel the player actually turns (bgmd1_4, gfcar1) AND the escape pod's
+// release lever, which no player ever touches -- squall's own script REQs it,
+// as `[REQ-TARGET] ent9 'squall' m=12 opcParam=7 -> target ent16 'handle'` in
+// Aaron's 2026-08-23 log records. One table cannot say both things.
+//
+// So this one is keyed on FIELD AND SYM, and it wins over everything: a NULL
+// display drops the thing from the catalog entirely; a non-NULL display names
+// it and, on an exit-bearing line, replaces the "Exit to <destination>" label
+// the destination would otherwise earn.
+//
+// The bar for adding a row is a specific observation, named in the comment. It
+// is deliberately not a rule: "an entity nothing can interact with" would also
+// describe things Aaron navigates to today, and there is no way to check that
+// across all 882 fields from here.
+struct FieldScopedEntity {
+    const char* field;    // internal field name, e.g. "sspod2"
+    const char* sym;      // the entity or line's SYM
+    const char* display;  // nullptr = drop it from the catalog entirely
+};
+
+static const FieldScopedEntity FIELD_SCOPED_ENTITIES[] = {
+    // Aaron, 2026-08-23, in the escape pod: "there is an empty capsule Squall
+    // has to enter and it is being identified as an exit to Desert. It should
+    // just read out as 'Capsule'."
+    //
+    // `pod` is line 0 of sspod2, a SCREEN_BOUND whose destination the scanner
+    // resolves to field 638 (Desert 1) -- correct, and useless: he is not
+    // walking to a desert, he is climbing into the capsule that eventually
+    // lands in one. It stays an exit, because stepping onto it is still how the
+    // scene proceeds; only the words change.
+    { "sspod2", "pod", "Capsule" },
+
+    // "There is another item in the catalog for 'handle' that is only
+    // interacted with by the scene automatically so it can be excluded."
+    //
+    // Confirmed in the script: sspod2's handle has no TALKRADIUS, no dialogue
+    // and no MAPJUMP -- its talk and push methods are animation opcodes only --
+    // and the 20:23:41 scan agrees: talk=0 push=0 jsmTalk=0 rtRad=0 talkable=0.
+    // sspod3's handle is the same shape. The Missile Base ones are NOT listed
+    // here and keep their name, which is the whole reason this table is keyed
+    // on the field.
+    { "sspod2", "handle", nullptr },
+    { "sspod3", "handle", nullptr },
+
+    // v0.112.0 (#dsrc): ddtower3 -- Level 3 -- has TWO terminals, and Aaron
+    // could not tell them apart: "there is an additional control panel to open
+    // the steam room. However, I couldn't seem to find it." Both were named
+    // "Terminal" by the SYM table below, so the catalog offered "Terminal 1 of
+    // 2" and "Terminal 2 of 2" with nothing to choose between them.
+    //
+    // The field's own text says the Steam Room costs exactly four:
+    //   msg 0  "The Steam Room and the left door are linked. 4 RSP will be
+    //           expended to enter the Steam Room."
+    // and of the two terminals only `Tanme2` speaks the four-unit family --
+    // its AASK ids are 2, 3 and 5, all "Expending 4" variants -- while `Tanme`
+    // carries the full twelve-value pressure ladder (ids 6-24) the level door
+    // needs. `Tanme2` is the shorter script by 400 dwords, which is the same
+    // story: one fixed cost against a whole ladder.
+    //
+    // That is an inference from the message sets, not a decode of the door it
+    // opens, so it is written down here to be confirmed or corrected by the
+    // next run rather than left implicit. If they turn out to be the other way
+    // round, swap these two lines and nothing else changes.
+    { "ddtower3", "Tanme2", "Steam Room Terminal" },
+    { "ddtower3", "Tanme",  "Level Terminal" },
+
+    // v0.115.0 (#centra): THE CENTRA RUINS LADDERS. Aaron: "look through the
+    // Centra Ruins fields to ensure all the entities needed to get around are
+    // properly reflected in the catalog." Every ladder, both eye statues, the
+    // power switch and the tower console are Line entities whose only dispatch
+    // is PREQEW (opcode 0x019), which the classifier does not recognise -- so
+    // all fourteen fell to the CAMERA_PAN silent default and the catalog hid
+    // them. See line_camera_pan_surface_model.inl for the decode and for why
+    // the naming table, not the classifier, is the thing that surfaces them.
+    //
+    // The direction on each ladder is not a guess. Every one of these lines
+    // PREQEWs a named party-member script, and Square's names are unambiguous:
+    // crtower1's leftlad0 -> `squall::p0_ladup0` (MAPJUMP3 to field 284,
+    // crtower2 -- up a floor); crtower2's leftlad0 -> `squall::leftdw0`
+    // (MAPJUMP3 to 283, crtower1 -- down a floor); leftlad1 -> `leftup1`;
+    // leftlad2 -> `leftdw1`; rightlad0 -> `rightdwpre0`; crtower3's ladup0 and
+    // laddw0 -> `squall::ladup0` / `squall::laddw0`. crroof1's lad0 runs
+    // `squall::lad0`, the one script in the set that contains a literal
+    // LADDERDOWN opcode; lad1 is its counterpart back up.
+    //
+    // `zou` is 像 -- statue. It and crtower3's `sw0` both run `squall::eye0`,
+    // which is the same interaction on both statues: the one on the roof shows
+    // the code, the one by the door asks for it. Naming them both "Eye Statue"
+    // is the truth and is what a player looking for "the statue with the eyes"
+    // will scan the catalog for.
+    // v0.116.0 (#centra): THESE TWO WERE THE WRONG WAY ROUND, and Aaron caught
+    // it: "the ladder up to the tip-top was announced as a ladder down when it
+    // should have been a ladder up. Once I got to the top and needed to climb
+    // back down, the ladder down was then announced as a ladder up."
+    //
+    // v0.115.0 named lad0 "Down" because `squall::lad0` is the one script in
+    // the whole set carrying a literal LADDERDOWN opcode. That opcode names the
+    // CLIMBING ANIMATION, not the direction of travel, and two independent
+    // pieces of evidence say so. The scripts' own destinations: lad0 ends at
+    // z=19496 and lad1 at z=18403, a thousand units lower. And the 2026-08-27
+    // log, which is decisive -- the player arrives on crroof1 at tri 38 in the
+    // lower camera zone and the ONLY line reachable there is lad0:
+    //
+    //   [refresh] zone-filter active: player tri=38, 65/80 triangles reachable
+    //   [refresh]   cat1 TRIGGER line0 center=(916,-896) name='Ladder Down'
+    //   [refresh] 'Ladder Up' filtered: another camera zone (unreachable)
+    //
+    // and after he climbs he is at tri 14 in a 9-triangle zone with lad1 and
+    // the statue. lad0 is the way UP; lad1 is the way back down. The same
+    // reversal is what made him report that the way down "wasn't in the
+    // catalog" on the statue field -- it was, under the opposite name.
+    //
+    // A LADDER opcode is not a direction. Where a name and a destination
+    // disagree, take the destination.
+    { "crroof1",  "lad0",      "Ladder Up" },
+    { "crroof1",  "lad1",      "Ladder Down" },
+    { "crroof1",  "zou",       "Eye Statue" },
+    { "crtower1", "leftlad0",  "Left Ladder Up" },
+    { "crtower1", "rightlad0", "Right Ladder Up" },
+    { "crtower1", "console0",  "Control Panel" },
+    { "crtower2", "leftlad0",  "Left Ladder Down" },
+    { "crtower2", "leftlad1",  "Left Ladder Up" },
+    { "crtower2", "leftlad2",  "Left Ladder Down" },
+    { "crtower2", "rightlad0", "Right Ladder Down" },
+    { "crtower3", "ladup0",    "Ladder Up" },
+    { "crtower3", "laddw0",    "Ladder Down" },
+    { "crtower3", "sw0",       "Eye Statue" },
+    { "crpower1", "sw0",       "Power Switch" },
+
+    { nullptr, nullptr, nullptr }
+};
+
+// Returns the row for this field+sym, or nullptr. Case-insensitive on both,
+// because SYMs and field names both arrive from the game in mixed case.
+static const FieldScopedEntity* FieldScopedFor(const char* field, const char* sym)
+{
+    if (!field || !field[0] || !sym || !sym[0]) return nullptr;
+    for (const FieldScopedEntity* r = FIELD_SCOPED_ENTITIES; r->field; r++) {
+        if (_stricmp(field, r->field) == 0 && _stricmp(sym, r->sym) == 0) return r;
+    }
+    return nullptr;
+}
+
+// ============================================================================
 // SYM name -> friendly display name for TTS.
 // 148 entries.
 // ============================================================================
@@ -248,6 +397,9 @@ static const EntityDisplayName ENTITY_DISPLAY_NAMES[] = {
     { "betunikun", "Student" },
     { "BGMonorail", "Monorail" },
     { "book", "Book" },
+    // v0.101.0 (#derived-pos): sdcore1's Bahamut trigger line. The catalog
+    // entry the player walks to; its coordinate comes from NAV_DERIVED_POS.
+    { "BossBattle", "Blue Light" },
     { "Boy1", "Boy" },
     { "Boy2", "Boy" },
     { "cameraman", "Cameraman" },
@@ -281,6 +433,14 @@ static const EntityDisplayName ENTITY_DISPLAY_NAMES[] = {
     { "edea3", "Edea" },
     { "edea4", "Edea" },
     { "elone", "Ellone" },
+    // v0.62.3 (#123): Piet is the Lunar Base technician you speak to on sscont1,
+    // sscont2, sspod2 and eapod1 -- four fields, one person, announced as "NPC"
+    // in the escape pod where he is one of three people in the room. `handle` is
+    // the pod's release lever (sspod2/sspod3) and the Missile Base valve wheel
+    // (bgmd1_4/gfcar1): it carries a model, so the catalog types it NPC, and a
+    // lever announced as a person is a person the player goes looking for.
+    { "piet", "Piet" },
+    { "handle", "Handle" },
     { "evl1", "Elevator" },
     { "Fish", "Fish" },
     { "Fish2", "Fish" },
@@ -310,6 +470,16 @@ static const EntityDisplayName ENTITY_DISPLAY_NAMES[] = {
     { "kiros", "Kiros" },
     { "knob", "Knob" },
     { "ladder", "Ladder" },
+    // v0.131.6 (#centra): Aaron, on Centra Ruins 7 -- "you have to walk onto an
+    // automated lift, but the lift was identified as an NPC". It was announced
+    // as "NPC" because nothing named it. `stone` is catalogued as an
+    // interactive entity on exactly two fields disc-wide -- crsphi1 and
+    // crtower1, the lift's two stops, both classified Map Exit by the scanner --
+    // and is a Background everywhere else it appears (crtower3, eccway12,
+    // gnroad1, tvglen2), which the catalog never surfaces. So this row names the
+    // lift and nothing else, which is the bar this project sets before trusting
+    // a SYM: checked against all 900 fields, not inferred from the word.
+    { "stone", "Lift" },
     // v0.18.3.290 (#85): the v0.18.3.288 'ladline0'-'ladline7' -> "Ladder"
     // mappings were REMOVED here. They were added purely because the SYM name
     // reads like "ladder", which directly violates this project's standing rule
@@ -343,6 +513,25 @@ static const EntityDisplayName ENTITY_DISPLAY_NAMES[] = {
     { "laguna02", "Laguna" },
     { "laguna99", "Laguna" },
     { "Lift", "Elevator" },
+    // v0.111.0 (#dsrc): the Deep Sea Research Center's own vocabulary. Aaron:
+    // "make sure everything - the terminals, the hatchways, the side rooms,
+    // etc. are supported." The hatchways are exits and now name themselves; the
+    // terminals were reading as "Interaction 1".
+    //
+    // 端末 tanmatsu is Japanese for a computer TERMINAL, and FF8's authors spelt
+    // it three ways across the six floors -- `Tanmatu` on ddtower2, `Tanme` and
+    // `Tanme2` on ddtower3 and ddtower4, `Tanma` on ddtower5, ddtower6,
+    // ddruins6 and ddsteam1. Every one is an Interactive Line, and a sweep of
+    // all 900 extracted fields finds these four symbols in the Research Center
+    // and nowhere else, which is what makes a SYM-keyed row safe here.
+    { "Tanma",   "Terminal" },
+    { "Tanmatu", "Terminal" },
+    { "Tanme",   "Terminal" },
+    { "Tanme2",  "Terminal" },
+    // 解説 kaisetsu, "explanation" -- ddtower1's briefing panel, the one thing
+    // in that room the catalog offered and called "Interaction 1". One field on
+    // the whole disc.
+    { "Kaisetu", "Information Panel" },
     { "Lifter", "Elevator" },
     { "majo", "Sorceress" },
     { "Man", "Man" },
@@ -508,3 +697,14 @@ static const EntityTypeEntry ENTITY_TYPE_TABLE[] = {
 //   card_game: 3 names
 //   npc: 2395 names
 //   Total classified: 2403 names
+
+// ============================================================================
+// v0.113.0 (#dsrc): the rule for naming a TRIGGER LINE from the two tables
+// above. It lives with the tables rather than beside its one caller, because
+// every translation unit that has the tables should have the rule that reads
+// them -- the catalog harness includes field_catalog.inl directly and would
+// otherwise miss it.
+// ============================================================================
+#include "line_display_name_model.inl"
+#include "line_gate_name_model.inl"
+#include "line_camera_pan_surface_model.inl"

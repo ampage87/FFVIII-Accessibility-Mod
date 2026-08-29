@@ -1,3 +1,24 @@
+// DRIVE_VEC_LOG_FORMAT -- the [drive-vec] per-tick steering diagnostic, moved
+// here in v0.131.1 to keep field_nav_autodrive.inl under the 80 KB gate.
+    // Logs the intermediate values at each stage of the steering pipeline so
+    // we can see WHICH STAGE produced the wrong direction when the drive gets
+    // stuck. Fires every DRIVE_VEC_LOG_INTERVAL ticks (~0.5 s at 60 Hz) -- the
+    // existing 120-tick [drive] tick log was too sparse to catch transient
+    // steering inversions (e.g. the v0.17.6.0 BAT showed lX=-840/lY=-542 for
+    // multiple consecutive log windows, but the per-tick values likely jumped
+    // around between recovery cycles). Format:
+    //   t  = total ticks since drive start
+    //   tri = engine-reported walkmesh triangle (read from entity +0x1FA)
+    //   pp = player world position
+    //   wpRaw = chosen funnel waypoint or final target (pre-corridor override)
+    //   corOverride/corSteer = corridor steering wrote new steer to this edge midpoint
+    //   trigRedir/finalDelta = trigger-line proximity rewrote dx/dz parallel
+    //   lX/lY = analog values written by SetAnalogFromVector (camera-projected)
+    //   kb = heading bitmask derived from analog (post v0.17.6.0 unified logic)
+    //   wig/phase = wiggle tick counter / recovery phase counter
+    // To disable, raise DRIVE_VEC_LOG_INTERVAL; the per-tick cost otherwise
+    // is one mod-by-constant and an int compare.
+
 // field_nav_autodrive_helpers.inl — Auto-drive low-level input + lifecycle helpers
 // Included from field_navigation.cpp. Do not compile independently.
 // Part of the FieldNavigation namespace.
@@ -329,6 +350,35 @@ static float s_drivePinnedPosX  = 0.0f;
 static float s_drivePinnedPosY  = 0.0f;
 static const float DRIVE_PIN_MOVE_EPS = 45.0f;   // v0.18.3.320 (#114): 12->45. The .319 stairs BAT wedged with a ~38u E-W wiggle that kept resetting the pin count (moved>12) so the escape never escalated though dist was frozen at 663. 45 treats an in-place wiggle as pinned; a genuinely advancing player still covers far more per nudge.
 
+// v0.120.0 (#centra): end the drive with the sentence the player needs. On an
+// ordinary target that is still "Arrived."; on a line the script gates behind a
+// BTNTEST it names the key they have to press, resolved through the engine's own
+// keymap so a keyboard player hears "Enter" and not "Cross". The mask usually
+// names two buttons because the game takes either -- the first one the engine
+// can put a key to wins, and the pad name is the fallback when it cannot put a
+// key to any of them. button_mask_model.inl.
+static void StopAutoDrive(const char* reason);
+static void DriveArriveAtButtonLine(float alongT = -99.0f)
+{
+    if (!BtnMaskIsActionable(s_driveButtonMask)) { StopAutoDrive("Arrived."); return; }
+    char key[32];  key[0] = '\0';
+    const char* keyName = nullptr;
+    const char* padName = nullptr;
+    for (int i = 0; i < 16; i++) {
+        const int b = BtnMaskNthButton(s_driveButtonMask, i);
+        if (b < 0) break;
+        if (padName == nullptr) padName = BtnPadName(b);
+        if (FF8TextDecode::ButtonKeyName(b, key, sizeof key) && key[0]) { keyName = key; break; }
+    }
+    char press[160];
+    BtnPressText(press, sizeof press, s_driveButtonLabel, keyName, padName,
+                 s_driveButtonLeadsTo);
+    Log::Field("FieldNavigation: [drive] arrived at a BTNTEST line 0x%04X alongside t=%.2f "
+               "-- \"%s\" [v0.122.0]",
+               (unsigned)s_driveButtonMask, alongT, press);
+    StopAutoDrive(press[0] ? press : "Arrived.");
+}
+
 static void StopAutoDrive(const char* reason)
 {
     if (!s_driveActive) return;
@@ -376,7 +426,15 @@ static void StopAutoDrive(const char* reason)
     s_driveCrossLineActive = false;
     s_driveCrossLineX1 = 0; s_driveCrossLineY1 = 0;
     s_driveCrossLineX2 = 0; s_driveCrossLineY2 = 0;
-    Log::Field("FieldNavigation: [drive] stopped: %s", reason);
+    // v0.118.0 (#centra): the island-bridge redirect ends with the drive.
+    s_driveBridgeActive  = false;
+    s_driveBridgeLineIdx = -1;
+    s_driveBridgeX = 0.0f; s_driveBridgeY = 0.0f;
+    s_driveGoalZ = 0.0f; s_driveGoalZValid = false;   // v0.119.0
+    s_driveButtonMask = 0; s_driveButtonLabel[0] = '\0';   // v0.120.0
+    s_driveButtonLeadsTo[0] = '\0';                        // v0.121.0
+    Log::Field("FieldNavigation: [drive] stopped: %s",
+               reason ? reason : "(silent -- field change or handoff)");
     // v0.15.9.2.1: Suppress SAPI announce when chase-drive owns the drive.
     // Internal stops during chase-drive (e.g., "No target." from stale
     // catalog state, "Stuck." from a wall, "Arrived." when path-finding
@@ -385,4 +443,184 @@ static void StopAutoDrive(const char* reason)
     // returning false (gated on s_driveActive) and disengages cleanly on
     // the next Update tick.
     if (reason && !s_chaseDriveActive) ScreenReader::Speak(reason);
+}
+
+// ============================================================================
+// v0.130.0 (#centra): A SIDE-FLIP IS NOT AN ARRIVAL, AND NEITHER IS PAST AN END
+// ============================================================================
+// Aaron: "auto-drive is unreliable and doesn't always take me to the ladder."
+// Two log lines say why.
+//
+// 17:58:25 -- "arrived at a BTNTEST line 0x00C0 alongside t=0.76 -- Ladder Down.
+// Press X to use it." The player was at (175,-329); crroof1's `lad1` runs
+// (444,-509) to (505,-385). That is **320 units away**. The arrival came from
+// the CROSSING path, where the player's side of the line's INFINITE extension
+// flips, and v0.18.3.304 bounded that with the projection parameter alone. t was
+// 0.76 -- perfectly inside the segment -- because t says WHERE ALONG the line
+// the foot falls and nothing whatever about how far off to the side the player
+// is. Walking parallel to a line three hundred units away sweeps t from 0 to 1
+// without ever approaching it.
+//
+// 18:15:04 and 18:21:22 -- "alongside t=1.02" and "t=1.03", both inside the
+// ±15% end margin, both announced, and both times the X press did nothing at
+// all: sixteen mod ladder steps played over eight seconds while NAV-OBSERVE
+// recorded him walking around with the arrow keys. The margin exists so a drive
+// that is nearly there is not told to keep walking forever. It was never a
+// statement about where the engine accepts the button.
+//
+// So both arrival paths now ask both questions -- inside the segment, and near
+// it. Being too strict is the safe failure: the aim point is the clamped point
+// ON the segment, so a drive that is not yet inside simply keeps walking and
+// arrives a moment later. Being too loose is the silent one, and it has now cost
+// four BATs.
+static bool DriveButtonLineArrival(float px, float pz, float t,
+                                   float x1, float y1, float x2, float y2,
+                                   float arriveDist, bool logWhenFar)
+{
+    const float dSq = BtnPointSegDistSq(px, pz, x1, y1, x2, y2);
+    const bool  ok  = BtnLineArrivalOk(t, dSq, arriveDist);
+    if (!ok && logWhenFar) {
+        static int s_flipFarLogged = 0;
+        if (s_flipFarLogged < 8) {
+            s_flipFarLogged++;
+            Log::Field("FieldNavigation: [drive] side-flip at t=%.2f, %.0f units from "
+                       "the segment -- NOT arrived, still walking [v0.130.0]",
+                       t, sqrtf(dSq));
+        }
+    }
+    return ok;
+}
+
+// ============================================================================
+// v0.131.1 (#centra): THE PROGRESS MONITOR, WIRED
+// ============================================================================
+// One call per drive tick decides which of the two failures is happening and
+// applies the matching remedy. drive_progress_model.inl carries the reasoning
+// and the thresholds; this is the state and the log.
+static DriveProgressTracker s_driveProg;
+static unsigned s_driveProgLastMs   = 0;    // v0.131.4: the window is 1.6 s, not 32 ticks
+static bool     s_driveProgSampled  = false;
+static int   s_driveRedirectSuppress = 0;   // ticks left with avoidance off
+static int   s_driveProbeIdx         = -1;  // -1 = not probing
+static int   s_driveProbeTicks       = 0;
+static float s_driveProbeStartX      = 0.0f;
+static float s_driveProbeStartY      = 0.0f;
+static int   s_driveProbeHold        = 0;   // v0.131.2: ticks left holding a winner
+static int   s_driveProbeHoldAngle   = 0;
+static int   s_driveProbeLastGoodIdx = -1;
+
+static void DriveProgressResetForNewDrive(float px, float pz)
+{
+    DriveProgressClear(&s_driveProg);
+    s_driveProgSampled      = false;
+    s_driveRedirectSuppress = 0;
+    s_driveProbeIdx         = -1;
+    s_driveProbeTicks       = 0;
+    s_driveProbeStartX      = px;
+    s_driveProbeStartY      = pz;
+    s_driveProbeHold        = 0;
+    s_driveProbeHoldAngle   = 0;
+    s_driveProbeLastGoodIdx = -1;
+}
+
+// Returns true while the trigger-line avoidance should stay out of the way.
+static bool DriveProgressTick(float px, float pz)
+{
+    if (s_driveRedirectSuppress > 0) s_driveRedirectSuppress--;
+
+    // v0.131.4: sample on the clock. A drive tick is not a game frame -- this
+    // loop outruns the renderer, so consecutive ticks routinely see the same
+    // position and thirty-two of them covered no time at all.
+    const unsigned nowMs = (unsigned)GetTickCount();
+    if (!DriveProgressDueForSample(nowMs, s_driveProgLastMs, s_driveProgSampled))
+        return s_driveRedirectSuppress > 0;
+    s_driveProgLastMs  = nowMs;
+    s_driveProgSampled = true;
+    DriveProgressPush(&s_driveProg, px, pz);
+
+    // OSCILLATION: moving hard, going nowhere. crroof1 tri 34, where the
+    // avoidance flipped the steer parallel to a line every other tick.
+    if (s_driveRedirectSuppress == 0 && s_driveProbeIdx < 0 &&
+        DriveIsOscillating(&s_driveProg)) {
+        s_driveRedirectSuppress = DRIVE_REDIRECT_SUPPRESS_TICKS;
+        Log::Field("FieldNavigation: [drive] oscillating -- %.0f units walked, %.0f "
+                   "units gained. Trigger-line avoidance off for %d ticks, steering "
+                   "straight at the waypoint [v0.131.1]",
+                   DriveProgressPath(&s_driveProg), DriveProgressNet(&s_driveProg),
+                   DRIVE_REDIRECT_SUPPRESS_TICKS);
+        DriveProgressClear(&s_driveProg);
+    }
+
+    // HARD PIN: not moving at all. crtower3 tri 89, seven seconds of moveDist=0.
+    if (s_driveProbeIdx < 0 && DriveIsStalled(&s_driveProg)) {
+        // v0.131.2: a pin that lands while the last winner is still being held is
+        // the same wall, so resume at the NEXT angle rather than re-trying one
+        // that already bought only half a second.
+        s_driveProbeIdx    = DriveProbeResumeIndex(s_driveProbeHold > 0,
+                                                   s_driveProbeLastGoodIdx);
+        s_driveProbeTicks  = 0;
+        s_driveProbeStartX = px;
+        s_driveProbeStartY = pz;
+        s_driveProbeHold   = 0;
+        Log::Field("FieldNavigation: [drive] pinned -- %.0f units walked in the last "
+                   "%d ms. Sweeping the heading from %d degrees [v0.131.4]",
+                   DriveProgressPath(&s_driveProg),
+                   DRIVE_PROG_SAMPLES * DRIVE_PROG_SAMPLE_MS,
+                   DriveProbeAngle(s_driveProbeIdx));
+        DriveProgressClear(&s_driveProg);
+    }
+    return s_driveRedirectSuppress > 0;
+}
+
+// Rotates the steering while a sweep is running, and ends the sweep the moment
+// the player actually moves -- keeping the angle that worked, so he slides along
+// the wall instead of turning straight back into it.
+static void DriveProbeApply(float px, float pz, float* dx, float* dz)
+{
+    if (dx == nullptr || dz == nullptr) return;
+
+    // v0.131.2: still riding the angle that got him moving. Dropping it the
+    // instant he moved is what made the 19:46 run pin seven times in ninety
+    // seconds -- he cleared the contact and steered straight back into the wall.
+    if (s_driveProbeIdx < 0) {
+        if (s_driveProbeHold > 0) {
+            s_driveProbeHold--;
+            float hx = 0.0f, hy = 0.0f;
+            DriveRotateSteer(*dx, *dz, s_driveProbeHoldAngle, &hx, &hy);
+            *dx = hx; *dz = hy;
+        }
+        return;
+    }
+
+    // v0.131.3: measured against the direction the drive WANTED, so a reversal
+    // can no longer report itself as an escape. *dx/*dz on entry is the
+    // un-rotated steer, which is exactly that direction.
+    const float mdx = px - s_driveProbeStartX, mdy = pz - s_driveProbeStartY;
+    if (DriveProbeMovedUsefully(mdx, mdy, *dx, *dz)) {
+        s_driveProbeHoldAngle   = DriveProbeAngle(s_driveProbeIdx);
+        s_driveProbeLastGoodIdx = s_driveProbeIdx;
+        s_driveProbeHold        = DRIVE_PROBE_HOLD_TICKS;
+        Log::Field("FieldNavigation: [drive] unpinned at %d degrees, %.0f units toward "
+                   "the target -- holding it for %d ticks [v0.131.3]",
+                   s_driveProbeHoldAngle, sqrtf(mdx * mdx + mdy * mdy),
+                   DRIVE_PROBE_HOLD_TICKS);
+        s_driveProbeIdx = -1;
+        return;
+    }
+
+    if (++s_driveProbeTicks >= DRIVE_PROBE_TICKS) {
+        s_driveProbeTicks  = 0;
+        s_driveProbeStartX = px;
+        s_driveProbeStartY = pz;
+        if (++s_driveProbeIdx >= DRIVE_PROBE_COUNT) {
+            Log::Field("FieldNavigation: [drive] heading sweep found nothing -- this is "
+                       "a pathing problem, handing back to recovery [v0.131.2]");
+            s_driveProbeIdx         = -1;
+            s_driveProbeLastGoodIdx = -1;
+            return;
+        }
+    }
+    float rx = 0.0f, ry = 0.0f;
+    DriveRotateSteer(*dx, *dz, DriveProbeAngle(s_driveProbeIdx), &rx, &ry);
+    *dx = rx; *dz = ry;
 }

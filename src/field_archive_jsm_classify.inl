@@ -36,8 +36,18 @@
             info.param = shopId;
         } else if (foundCardgame) {
             info.type = JSM_ENT_CARD_GAME;
-        } else if (foundLadder) {
-            info.type = JSM_ENT_LADDER;
+        // v0.59.0: opcodes 0x25-0x28 do NOT mark a ladder. Handler 0x00525900
+        // writes a movement mode into [ctx+0x23C] on the entity that RUNS the
+        // opcode -- i.e. on the character doing the climbing. Across the disc 244
+        // entities carry them and 113 are party characters; in glwater3 and
+        // glwater2, where the mod's ladder support was developed, the ladder
+        // objects themselves ('hasigo', 'hasigomodel', 'ladline0..7') carry NONE
+        // of them and only squall/zell/irvine/rinoa/selphie/quistis do. Under the
+        // old decode these words were read as literal pushes so the test almost
+        // never fired; with the decode corrected it would have started announcing
+        // party members as "Ladder". The ladder entries the catalog surfaces come
+        // from the curated ENTITY_DISPLAY_NAMES entry and the ladline trigger
+        // lines, neither of which is affected.
         } else if (foundMapjump) {
             info.type = JSM_ENT_MAP_EXIT;
             info.param = mapjumpDestField;
@@ -153,6 +163,8 @@
 
         // v0.12.24: Store ext dispatch flag for dual-purpose Line detection.
         info.hasExtDispatch = foundExtDispatch;
+        // v0.120.0 (#centra): what the player has to press once they get there.
+        info.touchButtonMask = touchBtnMask;
 
         // v0.17.7.1: Talk-setup flag for catalog walkmesh exclusion rule.
         // True when the script uses TALKRADIUS or TALKON, indicating the player
@@ -200,8 +212,29 @@
         // entities tripped foundNonInitVarWrite and got relabeled "Item N" over a real ladder
         // (Aaron: "one ladder was identified as an item"). foundLadder (LADDER-family opcode)
         // is authoritative for identity, so exclude it.
+        // v0.59.0: `foundNonInitVarWrite` on its own is not a collectible signal.
+        // Any NPC that remembers having been spoken to writes a savemap flag in a
+        // non-init method, and with the instruction decode corrected the test
+        // matched 876 entities across 400 fields -- Raijin, Fuujin, Cid, most of
+        // Balamb. What actually distinguishes a collectible is that it GATES
+        // ITSELF: init READS a variable to find out whether it has already been
+        // taken, and the interaction method WRITES that same variable, after which
+        // the entity hides. ADDITEM (0x125, exe-confirmed give-item, and now
+        // detectable exactly) is the other, independent path. Timber Maniacs
+        // (Urakata, var 304) and Weapons Monthly still match; the townsfolk do not.
+        bool selfGatedFlag = false;
+        for (int a = 0; a < nInitReadVars && !selfGatedFlag; a++)
+            for (int b = 0; b < nNonInitWriteVars; b++)
+                if (initReadVars[a] == nonInitWriteVars[b]) { selfGatedFlag = true; break; }
+        // A collectible is not talked to: TALKON/TALKRADIUS marks a person you
+        // press Confirm on, and an NPC whose conversation happens to hand you an
+        // item is still an NPC. Requiring its absence keeps Timber Maniacs, the
+        // Weapons Monthlies, 'hon', 'book' and the itemkun drops while dropping
+        // Cid, the Balamb card players and the shopkeepers.
         info.isItemPickup = foundSetmodel && !foundDialogOp && !foundLadder &&
-                            (foundNonInitVarWrite || sawLitAdditem);
+                            !foundTalkon && !foundTalkRad62 &&
+                            (foundAdditem || sawLitAdditem ||
+                             (selfGatedFlag && foundHide));
 
         // v0.12.20: Store persistent flags for Director/interaction detection.
         if (e < 128) {
@@ -210,29 +243,14 @@
             s_hasExtDispatchArr[e] = foundExtDispatch;
         }
 
-        // v0.07.84: REQ-following post-classification.
-        // If this entity is still unclassified (or just "background/unknown")
-        // and it calls REQ/REQSW/REQEW to a method that contains MAPJUMP,
-        // classify it as MAP_EXIT with that destination.
-        if ((info.type == JSM_ENT_UNKNOWN || info.type == JSM_ENT_BACKGROUND ||
-             info.type == JSM_ENT_NPC) && e < 128 && info.jsmCategory == 3) {
-            for (int r = 0; r < s_entityReqs[e].count; r++) {
-                int tgtEnt  = s_entityReqs[e].calls[r].targetEntity;
-                int tgtMeth = s_entityReqs[e].calls[r].targetMethod;
-                if (tgtEnt < 0 || tgtEnt >= totalEntities) continue;
-                // Convert entity-relative method index to global method index.
-                // Method 0 = init, method 1 = first interaction, etc.
-                int globalMethIdx = groups[tgtEnt].startMethodIdx + tgtMeth;
-                if (globalMethIdx < 0 || globalMethIdx >= MAX_METHOD_MAPJUMPS) continue;
-                if (s_methodMapjumps[globalMethIdx].found) {
-                    info.type = JSM_ENT_MAP_EXIT;
-                    info.param = s_methodMapjumps[globalMethIdx].destFieldId;
-                    Log::Field("FieldArchive: [JSMScan] REQ-follow: ent%d '%s' -> ent%d method%d has MAPJUMP dest=%d",
-                               e, info.symName, tgtEnt, tgtMeth, info.param);
-                    break;
-                }
-            }
-        }
+        // v0.07.84 REQ-following moved out of this fragment in v0.62.0.
+        // It ran per entity INSIDE the scan loop, so it could only see MAPJUMPs
+        // in entities scanned before this one -- an entity that REQs a jump in a
+        // higher-numbered entity (which is the usual direction: directors are
+        // declared last) never matched. sscont2's `ele`, the Lunar Base pod
+        // lift, REQs `director1` two groups later and was invisible. It is now a
+        // post-pass in field_archive_jsm_scan.inl, run once the whole field's
+        // methods are known.
 
         // v0.07.87: Variable-dispatch exit detection.
         // If this "Other" entity writes to a memory address (POPM_W) that a

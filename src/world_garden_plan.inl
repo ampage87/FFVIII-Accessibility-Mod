@@ -192,11 +192,8 @@ static bool Garden_CellReachable(int32_t gx, int32_t gy)
 // If a site's nose-in sweep comes up empty the run moves to the next one rather
 // than reporting failure, so one BAT settles the question instead of one site
 // per BAT.
-struct GardenDock {
-    const char* name;
-    int32_t approach_x, approach_y;      // Garden water the planner can reach
-    int32_t dock_x, dock_y;              // what the nose-in presses at
-};
+// struct GardenDock moved to world_garden_inlets.inl at v0.53.0 -- that file is
+// included first and needs it for the Centra inlet sweep.
 // v0.20.64: the ONE place the engine has a Garden field-entry clause.
 // Program 20 (locID 0x0172, top vehicle GARDEN, story 636..3899) gates on
 // region 0x0C, and Trabia Garden is the only catalog destination whose segment
@@ -215,6 +212,14 @@ static const int GARDEN_DOCK_COUNT = (int)(sizeof(s_gardenDocks) / sizeof(s_gard
 static const GardenDock* Garden_DockSite(const char* name, int n)
 {
     if (!name || n < 0) return nullptr;
+    // v0.53.0 (#109): the White SeeD Ship has no known coordinate, so its
+    // "dock sites" are the forty-one Centra inlets in world_garden_inlets.inl,
+    // nearest to Edea's House first. The nose-in exhaustion path already walks
+    // this list -- "another place the hull can touch? go there rather than
+    // reporting failure" -- so the sweep is the machinery that is already here,
+    // pointed at a list instead of at a guess.
+    if (strcmp(name, "White SeeD Ship") == 0)
+        return (n < WHITE_SEED_INLET_COUNT) ? &s_whiteSeedInlets[n] : nullptr;
     for (int i = 0; i < GARDEN_DOCK_COUNT; i++) {
         if (strcmp(s_gardenDocks[i].name, name) != 0) continue;
         if (n == 0) return &s_gardenDocks[i];

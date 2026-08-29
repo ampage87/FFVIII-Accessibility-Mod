@@ -986,9 +986,18 @@ static const char* RefineEntityTypeAndName(int i, int16_t modelId, uint8_t setpc
 // v0.07.73: Look up JSM classification by SYM name.
 // Overrides generic "NPC" with specific type (Save Point, Draw Point, etc.)
 const char* entName = "NPC";
-int symIdx = s_symOthersOffset + i;
-if (symIdx >= 0 && symIdx < s_symNameCount) {
-    const FieldArchive::JSMEntityInfo* jsm = FindJSMBySym(s_symNames[symIdx]);
+// v0.62.0: the SYM string reaches this fragment as the `symName` parameter,
+// resolved by the model join in the scan loop. The old `s_symOthersOffset + i`
+// index is gone -- it named the i-th script slot, and the live array this loop
+// walks is not indexed by slot.
+// v0.58.0: the script for runtime Others slot i is JSM group
+// (nLines + nDoors + nBackgrounds + i) -- an identity, not a name match. The
+// name lookup this replaced could land on any entity sharing the string, and
+// on the fields whose SYM order the scanner used to get wrong it landed on a
+// completely different one. Fall back to the name only if the scanner did not
+// record a runtime slot (an old archive path, or a field with no JSM).
+{
+    const FieldArchive::JSMEntityInfo* jsm = FindJSMByLiveEntity(i);   // v0.62.0
     if (jsm) {
         EntityType jsmType = JSMTypeToCatalogType(jsm->type);
         // v0.18.3.235: a SYM-derived JSM type must NOT downgrade a VISIBLE
@@ -1019,8 +1028,8 @@ if (symIdx >= 0 && symIdx < s_symNameCount) {
 // v0.12.10: Comprehensive SYM-name entity type classification.
 // Uses ENTITY_TYPE_TABLE from survey data, with pattern fallbacks.
 if (ei_info.type == ENT_NPC || ei_info.type == ENT_OBJECT || ei_info.type == ENT_UNKNOWN) {
-    if (symIdx >= 0 && symIdx < s_symNameCount) {
-        const char* sym = s_symNames[symIdx];
+    if (symName && symName[0]) {
+        const char* sym = symName;
         // First: check comprehensive type table from entity_classifications.h
         EntityClassificationType ecType = LookupEntityType(sym);
         if (ecType == EC_DRAW_POINT) {
@@ -1061,15 +1070,13 @@ if (ei_info.type == ENT_NPC || ei_info.type == ENT_OBJECT || ei_info.type == ENT
 // If this entity's JSM info shows it calls REQSW/REQEW to a draw point entity,
 // classify it as Draw Point. This is deterministic — no proximity heuristics.
 if (ei_info.type == ENT_NPC || ei_info.type == ENT_OBJECT || ei_info.type == ENT_UNKNOWN) {
-    if (symIdx >= 0 && symIdx < s_symNameCount) {
-        const FieldArchive::JSMEntityInfo* jsmDP = FindJSMBySym(s_symNames[symIdx]);
-        if (jsmDP && jsmDP->drawPointTriggerOf >= 0) {
-            ei_info.type = ENT_DRAW_POINT;
-            entName = "Draw Point";
-            Log::Field("FieldNavigation: [catalog] ent%d '%s' reclassified as Draw Point "
-                       "(triggers JSM draw point ent%d)",
-                       i, s_symNames[symIdx], jsmDP->drawPointTriggerOf);
-        }
+    const FieldArchive::JSMEntityInfo* jsmDP = FindJSMByLiveEntity(i);   // v0.62.0
+    if (jsmDP && jsmDP->drawPointTriggerOf >= 0) {
+        ei_info.type = ENT_DRAW_POINT;
+        entName = "Draw Point";
+        Log::Field("FieldNavigation: [catalog] ent%d '%s' reclassified as Draw Point "
+                   "(triggers JSM draw point ent%d)",
+                   i, jsmDP->symName, jsmDP->drawPointTriggerOf);
     }
 }
 // v0.07.79: Model-based save point detection.
@@ -1418,6 +1425,9 @@ static void InjectTriggerLineExits(EntityInfo* newCatalog, int& newCount)
                 for (int t = 0; t < s_capturedLineCount && newCount < MAX_CATALOG; t++) {
                     if (!s_capturedLines[t].active) continue;
                     if (s_capturedLines[t].lineType != FieldArchive::JSM_ENT_LINE_SCREEN_BOUND) continue;
+                    // v0.62.3 (#123): its own script is gated shut -- crossing it does
+                    // nothing, so it is not an exit yet.
+                    if (s_capturedLines[t].gateClosed) continue;
 
                     // v0.20.29: camera-view transition line (routed to SCREEN_BOUND in
                     // linetypes so it walls the zone BFS). Emit as a "Camera transition"
@@ -1425,10 +1435,52 @@ static void InjectTriggerLineExits(EntityInfo* newCatalog, int& newCount)
                     if (s_capturedLines[t].isCameraTransition) {
                         float ctcx = (float)(s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2.0f;
                         float ctcy = (float)(s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2.0f;
-                        if (s_zoneValid && !ZoneReachableLine(t) &&
+
+                        // v0.57.1 (#110): THE ONE LINE THE PLAYER MUST REACH.
+                        //
+                        // During the Lunatic Pandora run, six of these camera
+                        // lines ARE the boarding triggers -- walking through one
+                        // in its window is what takes you aboard. In the
+                        // 2026-08-22 BAT the mod correctly told Aaron to cross
+                        // eccway21's, and the catalog had already dropped it:
+                        //
+                        //   [refresh] camera-transition line0 filtered:
+                        //             not a boundary of player's zone [v0.20.29]
+                        //
+                        // He spent eight minutes bouncing between four fields
+                        // looking for an exit that was not in his catalog, and
+                        // missed contact point 1 entirely. In eccway41 the same
+                        // kind of line SURVIVED the filter, was listed (as
+                        // "Camera transition"), and he reached contact point 2
+                        // with the GPS on the first try. Same mechanism, and the
+                        // only difference was whether it was in the list.
+                        //
+                        // The zone filter is right in general -- it stops the
+                        // catalog offering camera lines you cannot walk to. It
+                        // is wrong about the objective of a timed minigame. So a
+                        // contact-point line is exempt while the run is live,
+                        // and it is named for what it is rather than "Camera
+                        // transition", which tells the player nothing.
+                        const EstharSite* epLine =
+                            EpContactLineAt(s_currentFieldName, (int)ctcx, (int)ctcy);
+                        char camName[48];
+                        if (epLine) {
+                            snprintf(camName, sizeof(camName), "Contact point %d",
+                                     epLine->cp + 1);
+                        } else {
+                            strncpy(camName, "Camera transition", sizeof(camName) - 1);
+                            camName[sizeof(camName) - 1] = '\0';
+                        }
+                        if (!epLine && s_zoneValid && !ZoneReachableLine(t) &&
                             !(t >= 0 && t < MAX_CAPTURED_LINES && s_zoneBoundaryLine[t])) {
                             Log::Field("FieldNavigation: [refresh] camera-transition line%d filtered: not a boundary of player's zone [v0.20.29]", t);
                             continue;
+                        }
+                        if (epLine && s_zoneValid && !ZoneReachableLine(t) &&
+                            !(t >= 0 && t < MAX_CAPTURED_LINES && s_zoneBoundaryLine[t])) {
+                            Log::Field("FieldNavigation: [refresh] line%d is Esthar contact point %d "
+                                       "-- KEPT despite the zone filter [v0.57.1 #110]",
+                                       t, epLine->cp + 1);
                         }
                         EntityInfo camExit = {};
                         camExit.entityIdx  = -200 - t;
@@ -1436,7 +1488,7 @@ static void InjectTriggerLineExits(EntityInfo* newCatalog, int& newCount)
                         camExit.triangleId = 0;
                         camExit.type       = ENT_EXIT;
                         camExit.gatewayIdx = -1;
-                        strncpy(camExit.name, "Camera transition", sizeof(camExit.name) - 1);
+                        strncpy(camExit.name, camName, sizeof(camExit.name) - 1);
                         camExit.name[sizeof(camExit.name) - 1] = '\0';
                         CatAudit("camera-transition", camExit, (int)ctcx, (int)ctcy, "-", s_capturedLines[t].name);
                         LiveGateLine("camera-transition", camExit, t);
@@ -1750,6 +1802,26 @@ static void InjectTriggerLineExits(EntityInfo* newCatalog, int& newCount)
                     }
                     exitName[sizeof(exitName) - 1] = '\0';
 
+                    // v0.65.0: ...unless this line is one the table renames.
+                    // Aaron, in the escape pod: "there is an empty capsule
+                    // Squall has to enter and it is being identified as an exit
+                    // to Desert. It should just read out as 'Capsule'." The
+                    // destination is not wrong -- field 638 IS Desert 1 -- it is
+                    // just not what he is walking towards. Line t pairs with
+                    // s_jsmEntities[t] (see [LINE-PAIR]), which carries the SYM.
+                    if (t >= 0 && t < s_jsmEntityCount) {
+                        const FieldScopedEntity* fs =
+                            FieldScopedFor(FF8Addresses::pCurrentFieldName,
+                                           s_jsmEntities[t].symName);
+                        if (fs && fs->display && fs->display[0]) {
+                            Log::Field("FieldNavigation: [refresh] line%d '%s' renamed "
+                                       "'%s' -> '%s' (field-scoped) [v0.65.0]",
+                                       t, s_jsmEntities[t].symName, exitName, fs->display);
+                            strncpy(exitName, fs->display, sizeof(exitName) - 1);
+                            exitName[sizeof(exitName) - 1] = '\0';
+                        }
+                    }
+
                     EntityInfo trigExit = {};
                     trigExit.entityIdx  = -200 - t;
                     trigExit.modelId    = -1;
@@ -1903,6 +1975,11 @@ static bool IsSignpostName(const char* sn)
     return false;
 }
 
+// v0.114.0 (#dsrc): defined below, beside the exit path that has used it since
+// v0.62.2. Declared here because an interaction line now asks the same
+// question an exit does, and it asks it earlier in the file.
+static bool JsmGateOpen(const FieldArchive::JSMEntityInfo& je, int32_t* outLive);
+
 static void InjectInteractionLines(EntityInfo* newCatalog, int& newCount)
 {
         if (s_capturedLineCount > 0) {
@@ -1935,11 +2012,62 @@ static void InjectInteractionLines(EntityInfo* newCatalog, int& newCount)
                     }
                 }
                 for (int t = 0; t < s_capturedLineCount && newCount < MAX_CATALOG; t++) {
-                    if (!s_capturedLines[t].active) continue;
                     // v0.20.30: camera-view transition lines are emitted as exits by
                     // InjectTriggerLineExits; never also list them here as interactions
                     // (that double-emission was the catalog instability Aaron saw).
                     if (s_capturedLines[t].isCameraTransition) continue;
+                    // v0.116.0 (#centra): the ACTIVE test used to sit above this and
+                    // took the line out before it could be named. It now sits just
+                    // below the naming block, because a NAMED line the engine has
+                    // switched off is worth listing as "not active" -- see
+                    // line_camera_pan_surface_model.inl. Everything unnamed still
+                    // leaves here exactly as it did.
+                    // v0.20.31 (Aaron): the classroom desk trigger line ('Cliant') is a
+                    // unique interaction -- label it "Desk" instead of a generic number.
+                    const char* lineCurated = nullptr;
+                    {
+                        int wIdx2 = t;     // v0.62.2: lines are group 0..nLines-1
+                        for (int j = 0; j < s_jsmEntityCount; j++) {
+                            if (s_jsmEntities[j].jsmCategory == 1 && s_jsmEntities[j].jsmIndex == wIdx2) {
+                                const char* csn = s_jsmEntities[j].symName;
+                                if (_stricmp(csn, "Cliant") == 0) lineCurated = "Desk";      // v0.20.31: Squall's desk
+                                else if (IsSignpostName(csn)) lineCurated = "Notice Board";  // v0.20.34: bulletin/notice signs
+                                else {
+                                    // v0.113.0 (#dsrc): ASK THE TABLES. Two hard-coded
+                                    // specials were the only names a trigger line could
+                                    // ever have, which is why v0.112.0's "Steam Room
+                                    // Terminal" never appeared on Level 3 and Aaron
+                                    // walked to "Interaction 1" instead. See
+                                    // line_display_name_model.inl -- 18 lines disc-wide.
+                                    const FieldScopedEntity* fsr =
+                                        FieldScopedFor(s_currentFieldName, csn);
+                                    const char* symName2 = nullptr;
+                                    for (const EntityDisplayName* mL2 = ENTITY_DISPLAY_NAMES;
+                                         mL2->sym != nullptr; mL2++) {
+                                        if (_stricmp(csn, mL2->sym) == 0) { symName2 = mL2->display; break; }
+                                    }
+                                    lineCurated = LineDisplayName(
+                                        (fsr && fsr->display) ? fsr->display : nullptr, symName2);
+                                    if (lineCurated) {
+                                        Log::Field("FieldNavigation: [refresh] line%d '%s' named "
+                                                   "'%s' from the %s table [v0.113.0]",
+                                                   t, csn, lineCurated,
+                                                   (fsr && fsr->display) ? "field-scoped" : "sym");
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    const bool lineIsCamPan =
+                        (s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_CAMERA_PAN);
+                    const bool lineEngineActive = s_capturedLines[t].active;
+                    if (!lineEngineActive) {
+                        if (!CameraPanLineSurfacesOffToo(lineIsCamPan, lineCurated)) continue;
+                        Log::Field("FieldNavigation: [refresh] line%d '%s' is LINEOFF -- kept and "
+                                   "labelled, the engine says crossing it does nothing [v0.116.0]",
+                                   t, lineCurated);
+                    }
                     // v0.17.7.1.2 / v0.17.7.5.4 / v0.17.7.5.5: Accept
                     // SCREEN_BOUND lines as Interactions in two cases:
                     //   1. hasDialogReqTarget=true (genuine dual-purpose,
@@ -1958,6 +2086,20 @@ static void InjectInteractionLines(EntityInfo* newCatalog, int& newCount)
                     // block and remain as Exits emitted by Block 1.
                     bool isInteractive =
                         (s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_INTERACTIVE);
+                    // v0.115.0 (#centra): A CAMERA_PAN line that the naming tables
+                    // have named is not a camera pan -- it is a ladder, a statue or a
+                    // switch whose only dispatch is PREQEW, which the classifier does
+                    // not read, so it fell to the silent default. Surfacing is gated on
+                    // the NAME, not on the opcode, so the blast radius is exactly the
+                    // symbols a human has looked at; 95 camera-pan lines disc-wide use
+                    // PREQEW and most of them are auto-firing story triggers a player
+                    // must never be steered into. See line_camera_pan_surface_model.inl.
+                    if (!isInteractive &&
+                        CameraPanLineSurfaces(lineIsCamPan, lineCurated)) {
+                        isInteractive = true;
+                        Log::Field("FieldNavigation: [refresh] line%d camera-pan surfaced as "
+                                   "'%s' (named in the tables) [v0.115.0]", t, lineCurated);
+                    }
                     // v0.18.3.303 (#91 R1): the prison-shaft staircase exemption
                     // has to be applied to BOTH branches below, not just the
                     // self-loop one. .302 guarded only the second, so the down
@@ -2017,7 +2159,18 @@ static void InjectInteractionLines(EntityInfo* newCatalog, int& newCount)
                     bool doorTrigger = false;
                     {
                         const char* doorSym = nullptr;
-                        int wIdxDoor = s_jsmDoors + t;
+                        // v0.62.2: captured line t is JSM GROUP t. field_scripts_init
+                        // consumes the group array Lines, Doors, Backgrounds, Others --
+                        // v0.58.0 established that and fixed the scanner, but these three
+                        // consumers kept the old Doors-first base and so read the DOOR
+                        // entity instead of the line on every field that has one. On
+                        // ssmedi1 (1 door, 1 line) that made the save-line lookup ask the
+                        // door whether it was a save line, the answer was no, and the save
+                        // point's own activation zone was catalogued beside it as
+                        // "Interaction 1". Aaron: "this build re-introduced a duplicate
+                        // 'interaction' at the save point location. It should just have
+                        // save point in the catalog."
+                        int wIdxDoor = t;
                         for (int j = 0; j < s_jsmEntityCount; j++) {
                             if (s_jsmEntities[j].jsmCategory == 1 &&
                                 s_jsmEntities[j].jsmIndex == wIdxDoor) {
@@ -2083,7 +2236,7 @@ static void InjectInteractionLines(EntityInfo* newCatalog, int& newCount)
                     // Map: captured line t -> JSM line entity jsmIndex (doors+t).
                     bool lineIsSave = false;
                     {
-                        int wantIdx = s_jsmDoors + t;
+                        int wantIdx = t;   // v0.62.2: lines are group 0..nLines-1
                         for (int j = 0; j < s_jsmEntityCount; j++) {
                             if (s_jsmEntities[j].jsmCategory == 1 &&
                                 s_jsmEntities[j].jsmIndex == wantIdx &&
@@ -2110,18 +2263,30 @@ static void InjectInteractionLines(EntityInfo* newCatalog, int& newCount)
                             continue;
                         }
                     }
-                    // v0.20.31 (Aaron): the classroom desk trigger line ('Cliant') is a
-                    // unique interaction -- label it "Desk" instead of a generic number.
-                    const char* lineCurated = nullptr;
+                    // v0.114.0 (#dsrc): is this line's script shut right now?
+                    // The gate is decoded at scan time (field_archive_jsm_linepass.inl)
+                    // and evaluated live here, the same way v0.62.2 evaluates an
+                    // exit's. An exit that is shut is dropped; a NAMED interaction
+                    // that is shut is kept and says so -- see line_gate_name_model.inl.
+                    bool lineGateOpen = true;
+                    bool lineHasGate  = false;
                     {
-                        int wIdx2 = s_jsmDoors + t;
-                        for (int j = 0; j < s_jsmEntityCount; j++) {
-                            if (s_jsmEntities[j].jsmCategory == 1 && s_jsmEntities[j].jsmIndex == wIdx2) {
-                                const char* csn = s_jsmEntities[j].symName;
-                                if (_stricmp(csn, "Cliant") == 0) lineCurated = "Desk";      // v0.20.31: Squall's desk
-                                else if (IsSignpostName(csn)) lineCurated = "Notice Board";  // v0.20.34: bulletin/notice signs
-                                break;
+                        for (int jg = 0; jg < s_jsmEntityCount; jg++) {
+                            if (s_jsmEntities[jg].jsmCategory != 1) continue;
+                            if (s_jsmEntities[jg].jsmIndex != t) continue;
+                            if (s_jsmEntities[jg].hasGate) {
+                                int32_t liveG = 0;
+                                lineHasGate  = true;
+                                lineGateOpen = JsmGateOpen(s_jsmEntities[jg], &liveG);
+                                Log::Field("FieldNavigation: [LINE-GATE] line%d '%s' gated on "
+                                           "var[%d]=%d op%d %d -> %s [v0.114.0]",
+                                           t, s_jsmEntities[jg].symName,
+                                           s_jsmEntities[jg].gateAddr, (int)liveG,
+                                           (int)s_jsmEntities[jg].gateOp,
+                                           s_jsmEntities[jg].gateValue,
+                                           lineGateOpen ? "open" : "SHUT");
                             }
+                            break;
                         }
                     }
                     EntityInfo intEntry = {};
@@ -2138,7 +2303,20 @@ static void InjectInteractionLines(EntityInfo* newCatalog, int& newCount)
                     } else {
                         intEntry.type = ENT_INTERACTION;
                         if (lineCurated) {
-                            snprintf(intEntry.name, sizeof(intEntry.name), "%s", lineCurated);
+                            // v0.114.0 (#dsrc): the name does NOT yet carry the
+                            // gate's state, and the reason is written down in
+                            // line_gate_name_model.inl: on ddtower3's `Tanme2`
+                            // the decoded guard is true on the branch that does
+                            // NOTHING. Saying "not ready" from it would be
+                            // exactly backwards. [LINE-GATE] logs the live value
+                            // so one run settles the polarity; until then the
+                            // name is the name.
+                            // v0.116.0 (#centra): ", not active" when the engine has
+                            // the line switched off. Unlike v0.114.0's decoded script
+                            // guard, LINEOFF has no polarity to get wrong -- it is the
+                            // engine saying this line does nothing right now.
+                            LineOffDisplayName(intEntry.name, sizeof(intEntry.name),
+                                               lineCurated, lineEngineActive);
                         } else if (soloName) {
                             snprintf(intEntry.name, sizeof(intEntry.name), "%s", soloName);
                         } else {
@@ -2453,7 +2631,22 @@ static void InjectJsmSpecials(EntityInfo* newCatalog, int& newCount, const Entit
                         // only when the slot's tri matches our own (the slot really belongs to us).
                         bool slotIsOurs = (je.posTriangle != 0) && (ltri == (uint16_t)je.posTriangle);
                         uint32_t lflags = *(uint32_t*)(blkP + 0x160);
-                        if (slotIsOurs && (lflags & 0x08) != 0) {
+                        // v0.75.0 (#112): AN INVISIBLE INTERACTION POINT IS NOT AN ABSENT
+                        // OBJECT. This filter was written for a prop the script has not
+                        // revealed yet -- the sewer's un-knocked ladder, a scene actor parked
+                        // off-stage -- and those hide themselves and say nothing. An entity
+                        // whose INIT calls HIDE and TALKON in the same breath is the opposite:
+                        // its picture is in the background art and the hidden model exists only
+                        // to carry the talk target. FF8 builds terminals, panels and signs this
+                        // way. rgguest2's `comp` is one, and it is the terminal that teaches
+                        // the Propagator pairing rule -- the single thing in that room worth
+                        // finding. Aaron: "the terminal is not appearing in the catalog."
+                        if (slotIsOurs && (lflags & 0x08) != 0 && je.invisibleTalkTarget) {
+                            Log::Field("FieldNavigation: [refresh] JSM object '%s' KEPT despite the "
+                                       "HIDE flag: its own init calls HIDE and TALKON together, so the "
+                                       "model is invisible on purpose and the thing you talk to is in "
+                                       "the background art [v0.75.0]", je.symName);
+                        } else if (slotIsOurs && (lflags & 0x08) != 0) {
                             Log::Field("FieldNavigation: [refresh] JSM object '%s' dropped: HIDE flag set "
                                        "(flags@0x160=0x%08X bit3) -- hidden/not shown [v0.20.36]",
                                        je.symName, (unsigned)lflags);
@@ -2653,6 +2846,98 @@ static void InjectJsmSpecials(EntityInfo* newCatalog, int& newCount, const Entit
                            je.symName);
                 continue;
             }
+            // v0.61.0: THE SAME ENTITY, TWICE.
+            //
+            // On the Lunar Base control room the catalog listed ten things for four
+            // people and two doors. Three of the ten were `rinoa`, `selphie` and
+            // `quistis` injected from here as objects, at their STATIC SET3
+            // positions -- (43,30) and (194,130) twice, one position for two
+            // different people -- while the very same entities were already in the
+            // catalog from the runtime scan, at their real live positions. Aaron:
+            // "it had quite an extensive list of NPCs but there seemed to be
+            // phantoms and duplicates among them."
+            //
+            // The live entity running this script and the script itself are one
+            // object, and the live one is the one with the true position.
+            // v0.62.0: which live entity that is comes from the MODEL join, not
+            // from the slot -- v0.61.0 compared entityIdx against runtimeSlot,
+            // which is exactly how the curated name "Quistis" landed on Piet. Drop this copy and hand its NAME to the live entry
+            // -- which is the other half of the fix, because the runtime scan calls
+            // everything "NPC" and Aaron also said "I couldn't find the NPC to let
+            // me talk to Quistis in this scene." The name only moves if it is a
+            // curated one from ENTITY_DISPLAY_NAMES; a generic type name teaches the
+            // live entry nothing.
+            //
+            // Specials are deliberately excluded: for a Save/Draw/Shop/Card point
+            // the JSM entry is the one carrying the meaning, and the co-located
+            // generic runtime entry is what the runtime-vs-special dedupe removes.
+            const int jeLive = LiveIndexForJSM(je);   // v0.62.0
+            if ((jt == ENT_OBJECT || jt == ENT_NPC) && jeLive >= 0) {
+                int liveDup = -1;
+                for (int c = 0; c < newCount; c++)
+                    if (newCatalog[c].entityIdx == jeLive) { liveDup = c; break; }
+                if (liveDup >= 0) {
+                    const char* curated = nullptr;
+                    if (je.symName[0]) {
+                        for (const EntityDisplayName* mN = ENTITY_DISPLAY_NAMES; mN->sym; mN++)
+                            if (_stricmp(je.symName, mN->sym) == 0) { curated = mN->display; break; }
+                    }
+                    if (curated && curated[0] &&
+                        strncmp(newCatalog[liveDup].name, "NPC", 3) == 0) {
+                        Log::Field("FieldNavigation: [refresh] JSM object '%s' is live ent%d, "
+                                   "already catalogued -- dropping the duplicate and naming the live "
+                                   "entry '%s' [v0.61.0/v0.62.0]", je.symName, jeLive, curated);
+                        strncpy(newCatalog[liveDup].name, curated,
+                                sizeof(newCatalog[liveDup].name) - 1);
+                        newCatalog[liveDup].name[sizeof(newCatalog[liveDup].name) - 1] = '\0';
+                    } else {
+                        Log::Field("FieldNavigation: [refresh] JSM object '%s' is live ent%d, "
+                                   "already catalogued -- dropping the duplicate [v0.61.0/v0.62.0]",
+                                   je.symName, jeLive);
+                    }
+                    continue;
+                }
+            }
+
+            // v0.61.0: a card player or a shopkeeper who is not in this scene.
+            // `piet` on the Lunar Base is a card opponent in a LATER scene; here his
+            // live entity reads model=-1 tri=0 pos=(0,0), exactly what the v0.20.31
+            // scene-actor test already drops -- but that test is gated on
+            // `jt == ENT_OBJECT`, so a special sailed past it and the catalog offered
+            // a Card Game at a static position with nobody standing there. Save and
+            // Draw points are NOT included: they are not people and are routinely
+            // script-only with no live entity at all (the Lunar Base infirmary save
+            // point is one), and the draw point has its own sparkle gate.
+            if (jt == ENT_CARD_GAME || jt == ENT_SHOP) {
+                bool absent = false;
+                if (jeLive < 0) {
+                    // v0.62.0: the script hands this person a model, and no live
+                    // entity in the scene is carrying it. That is a stronger
+                    // statement of "not here" than the unplaced-block test below,
+                    // and it is the one that actually catches `piet` in the Lunar
+                    // Base infirmary -- an absent actor's live block is not merely
+                    // unplaced, it does not exist.
+                    absent = (je.modelParam >= 0);
+                } else if (FF8Addresses::pFieldStateOthers &&
+                           FF8Addresses::pFieldStateOtherCount) {
+                    uint8_t* obC = *reinterpret_cast<uint8_t**>(FF8Addresses::pFieldStateOthers);
+                    int      ocC = (int)(*FF8Addresses::pFieldStateOtherCount);
+                    if (obC && jeLive < ocC) {
+                        uint8_t*  blkC = obC + ENTITY_STRIDE * jeLive;
+                        uint16_t  ltC  = *(uint16_t*)(blkC + 0x1FA);
+                        int32_t   lxC  = *(int32_t*)(blkC + 0x190);
+                        int32_t   lyC  = *(int32_t*)(blkC + 0x194);
+                        if (ltC == 0 && lxC == 0 && lyC == 0) absent = true;
+                    }
+                }
+                if (absent) {
+                    Log::Field("FieldNavigation: [refresh] JSM %s '%s' dropped: not present in "
+                               "this scene (live ent%d) [v0.61.0/v0.62.0]",
+                               EntityTypeName(jt), je.symName, jeLive);
+                    continue;
+                }
+            }
+
             EntityInfo jsmEntry = {};
             jsmEntry.entityIdx  = -300 - j;  // unique sentinel for JSM-injected entities
             jsmEntry.modelId    = -1;
@@ -2741,6 +3026,33 @@ static void InjectJsmSpecials(EntityInfo* newCatalog, int& newCount, const Entit
         }
 }
 
+// v0.62.2 (#123): read the live story variable this script is gated on and
+// answer the engine's own comparison. No gate, or a variable we cannot read, is
+// "open" -- absence of evidence never hides anything.
+static bool JsmGateOpen(const FieldArchive::JSMEntityInfo& je, int32_t* outLive)
+{
+    if (!je.hasGate) return true;
+    int32_t live = 0;
+    bool read = false;
+    __try {
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(0x01CFE9B8u) + je.gateAddr;
+        if      (je.gateWidth == 1) live = (int32_t)(*p);
+        else if (je.gateWidth == 2) live = (int32_t)(*(const uint16_t*)p);
+        else                        live = (int32_t)(*(const uint32_t*)p);
+        read = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { read = false; }
+    if (!read) return true;
+    if (outLive) *outLive = live;
+    return FieldArchive::JsmGateSatisfied(je.gateOp, je.gateValue, live);
+}
+
+// v0.62.2 (#123): JSM entities whose exit was suppressed because their trigger's
+// story gate is currently false. The live entity running such a script is a thing
+// that does nothing right now, so the dedupe drops it too -- otherwise closing the
+// gate simply puts the platform back in the catalog as a nameless "NPC", which is
+// the very thing Aaron walked to and reported.
+static bool s_jsmGateClosed[MAX_JSM_ENTITIES];
+
 // ============================================================================
 // 3e. JSM_ENT_MAP_EXIT injection  (was field_nav_catalog_mapexits.inl)
 // ============================================================================
@@ -2776,6 +3088,7 @@ static void InjectMapExits(EntityInfo* newCatalog, int& newCount, uint8_t* base,
 // captured SETLINE centre, then filtering dead/duplicate/off-screen exits.
 // ============================================================================
 
+        memset(s_jsmGateClosed, 0, sizeof(s_jsmGateClosed));   // v0.62.2
         // v0.07.83: Entity-based exits from JSM_ENT_MAP_EXIT "Other" entities.
         // These are interactive objects (elevators, doors, trigger zones) whose
         // scripts contain MAPJUMP. They have destination field IDs in param.
@@ -2783,6 +3096,109 @@ static void InjectMapExits(EntityInfo* newCatalog, int& newCount, uint8_t* base,
         for (int j = 0; j < s_jsmEntityCount && newCount < MAX_CATALOG; j++) {
             const FieldArchive::JSMEntityInfo& je = s_jsmEntities[j];
             if (je.type != FieldArchive::JSM_ENT_MAP_EXIT) continue;
+            // v0.63.0 (#123): A PERSON YOU TALK TO IS NOT A DOOR.
+            //
+            // Aaron, in the escape pod: "there were some catalog glitches along
+            // the way, most notably Ellone being identified as an exit." On
+            // sspod2 `elone` carries the MAPJUMP to Outer Space 4 in her OWN
+            // script -- talking to her is what starts the departure -- and she
+            // is talkable, with a model, standing in the room. The catalog
+            // listed "Exit to Outer Space 4" at her feet and (v0.62.1) dropped
+            // the live Ellone in its favour, so the one person he needed was
+            // announced as a door.
+            //
+            // The discriminator is provenance, not distance. A REQ-follow exit
+            // is a mechanism the player steps on or operates -- the Lunar Base
+            // pod lift, the Deling City buses -- and those keep working exactly
+            // as they did. An exit whose MAPJUMP is in the entity's own script,
+            // on an entity the player can talk to, is a conversation with a
+            // consequence: the person is the thing to go to, and the catalog
+            // already has them.
+            if (!je.exitFromReqFollow && je.hasTalkSetup) {
+                int jeTalk = LiveIndexForJSM(je);
+                if (jeTalk >= 0 && GetEntityModelId(jeTalk) >= 0) {
+                    Log::Field("FieldNavigation: [catalog] JSM exit '%s' dest=%d dropped: "
+                               "its MAPJUMP is in its own talk script and live ent%d is a "
+                               "character standing here -- go to the person, not a door "
+                               "[v0.63.0]", je.symName, je.param, jeTalk);
+                    continue;
+                }
+            }
+            // v0.76.0 (#112): AND A MONSTER IS NOT A DOOR EITHER.
+            //
+            // rgguest2's alien01 is the passenger-compartment Propagator. Its
+            // script ends in MAPJUMP3 to Aisle 2 -- because that is how the
+            // forced-battle cutscene finishes, by ejecting the player from the
+            // room -- so the scanner classified it JSM_ENT_MAP_EXIT and the
+            // catalog offered "Exit to Ragnarok - Aisle 2" standing at (0,-500),
+            // which is where the monster is. Worse, the v0.62.1 dedup then
+            // dropped the live "Yellow Propagator" as a duplicate of its own
+            // exit, so the room listed a door where the monster was and no
+            // monster at all. A blind player navigating to that exit walks into
+            // the thing the last four builds have been keeping him away from.
+            //
+            // The talk-script rule above does not catch it: that one needs
+            // hasTalkSetup, and a Propagator has no TALKON -- there is nothing
+            // to talk to. The provenance test is the same though. A MAPJUMP at
+            // the end of a battle cutscene is a consequence, not a route, and
+            // PG_LIST already knows exactly which eight entities those are.
+            //
+            // It self-corrects on death without this rule, which is what made it
+            // hard to see: once the yellow one is dead its script's story gate
+            // reads false and the exit is suppressed as LOCKED, the Propagator
+            // survives dedup, and the room's real INF gateway is offered. The
+            // room was only wrong while the monster was alive -- which is the
+            // whole time the player needs it to be right.
+            if (!je.exitFromReqFollow &&
+                PgIsPropagator(FF8Addresses::pCurrentFieldName, je.symName)) {
+                Log::Field("FieldNavigation: [catalog] JSM exit '%s' dest=%d dropped: it is a "
+                           "Propagator, and the MAPJUMP at the end of its script is how its "
+                           "battle cutscene ejects him from the room -- not a way out of it "
+                           "[v0.76.0]", je.symName, je.param);
+                continue;
+            }
+            // v0.62.2 (#123): AN EXIT THE STORY HAS NOT OPENED YET.
+            //
+            // Aaron, standing on the Lunar Base pod lift: "it said I arrived at it,
+            // but nothing happened even when I pressed the confirm button." Nothing
+            // was wrong with the exit or with getting there. `ele`'s script opens
+            //   PSHM_W var[256]; PSHN_L 2552; == ; JMPZ
+            // and does nothing at all unless the story word already reads 2552 --
+            // the value `elone`'s talk script writes to it when you speak to Ellone
+            // in Control Room 1. The lift is not broken; it is not open yet.
+            //
+            // Read the live variable and evaluate the engine's own comparison
+            // (operator table at 0x00B8DE4C). Scoped to REQ-follow exits, the only
+            // ones that carry a gate, and to the exact guard shape the scanner
+            // could decode -- everything else is unaffected.
+            if (je.hasGate) {
+                int32_t live = 0;
+                if (!JsmGateOpen(je, &live)) {
+                    Log::Field("FieldNavigation: [catalog] JSM exit '%s' dest=%d dropped: "
+                               "its trigger is gated on var[%d]=%d op%d %d, which is false "
+                               "right now -- not open yet [v0.62.2]",
+                               je.symName, je.param, je.gateAddr, live,
+                               (int)je.gateOp, je.gateValue);
+                    if (j >= 0 && j < MAX_JSM_ENTITIES) s_jsmGateClosed[j] = true;
+                    continue;
+                }
+            }
+            // v0.62.0 (#123): a party member is never a door. The v0.62.0
+            // REQ-follow attributes a scripted jump to whichever entity triggers
+            // it, which is right for a lift or a bus but wrong when the trigger
+            // is the leader's own script running a cutscene -- `Squall` on
+            // bchtl1a, `squall` on bg2f_31 and bgkote_2. The live entity's setpc
+            // says which characters those are, and the model join says which
+            // live entity this script is.
+            {
+                int jePc = LiveIndexForJSM(je);
+                if (jePc >= 0 && IsPartyCharacterSetpc(GetEntitySetpc(jePc))) {
+                    Log::Field("FieldNavigation: [catalog] JSM exit '%s' dest=%d dropped: "
+                               "its script belongs to party member ent%d, not to a door "
+                               "[v0.62.0]", je.symName, je.param, jePc);
+                    continue;
+                }
+            }
             // v0.20.8: drop a scripted map-exit to a WORLD-MAP STAGING field -- a wm* field
             // (id 0..79) that no INF gateway anywhere targets, so you only ever arrive there ON
             // the world map, never walk into it via a field exit. Real world-map view fields
@@ -2864,9 +3280,14 @@ static void InjectMapExits(EntityInfo* newCatalog, int& newCount, uint8_t* base,
                     if (lineEntAddr >= baseAddr &&
                         lineEntAddr < baseAddr + ENTITY_STRIDE * lim) {
                         int entIdx = (int)((lineEntAddr - baseAddr) / ENTITY_STRIDE);
-                        int symIdx = s_symOthersOffset + entIdx;
-                        if (symIdx >= 0 && symIdx < s_symNameCount &&
-                            _stricmp(s_symNames[symIdx], je.symName) == 0) {
+                        // v0.62.0: entIdx is a LIVE index, so it is compared
+                        // against the live index the model join found for this
+                        // script -- not against its slot, which v0.60.0 did and
+                        // which only coincides when the scene instantiates every
+                        // entity the field declares.
+                        const FieldArchive::JSMEntityInfo* jl = FindJSMByLiveEntity(entIdx);
+                        bool ownerMatches = (jl && jl->jsmIndex == je.jsmIndex);
+                        if (ownerMatches) {
                             exitX = (float)(s_capturedLines[t].x1 + s_capturedLines[t].x2) / 2.0f;
                             exitY = (float)(s_capturedLines[t].y1 + s_capturedLines[t].y2) / 2.0f;
                             hasPos = true;
@@ -2921,7 +3342,26 @@ static void InjectMapExits(EntityInfo* newCatalog, int& newCount, uint8_t* base,
             // setpc reads as a valid party character (0-7) -- a party member's
             // position is never a map exit's position.
             if (!hasPos && destResolved && je.jsmCategory == 3) {
-                int liveIdx = je.jsmIndex;
+                // v0.60.0: the runtime slot, not the group index. The comment above
+                // reasons that je.jsmIndex "maps 1:1 onto the runtime Others array
+                // index ... with NO subtraction", citing glprein1's 'irvine'
+                // (jsmIndex 2, seen as ent2) and glwater1's sakua/sakub/oku
+                // (jsmIndex 17/18/19). Both are coincidences of those fields:
+                // glprein1 has 2 background entities, so its first Other IS group 2
+                // and runtime slot 0 -- the 1:1 reading and the correct one give
+                // different answers there and only the log line was checked. glwater1
+                // has 5 lines and 4 backgrounds, so 17/18/19 are slots 8/9/10, which
+                // also removes the reason the comment gives for believing the
+                // unshifted reading (that they "sit past the old MAX_ENTITIES=16
+                // cap"). Reading the wrong slot fabricates a plausible position for a
+                // map exit out of some other entity's feet, which is a phantom exit
+                // by any definition. JSMEntityInfo::runtimeSlot is the identity.
+                // v0.62.0: runtimeSlot is a SLOT, and the live array is not
+                // indexed by slot -- ask the model join which live entity is
+                // running this script. -1 means it is not in the scene at all,
+                // which is the honest answer and stops the position being
+                // fabricated out of some other entity's feet.
+                int liveIdx = LiveIndexForJSM(je);
                 if (!IsPartyCharacterSetpc(GetEntitySetpc(liveIdx))) {
                     float rex = 0, rey = 0;
                     if (GetEntityPos(liveIdx, rex, rey)) {
@@ -3013,7 +3453,13 @@ static void InjectMapExits(EntityInfo* newCatalog, int& newCount, uint8_t* base,
             // v0.08.01: Bit31 marker check. PSHM_W-sourced MAPJUMP destinations
             // have bit31 set (negative values). Also check param > 982 for
             // the 0x00FFxx markers that survived before the bit31 change.
-            if (s_gatewayCount > 0 && (je.param < 0 || je.param > 982))
+            // v0.60.0: `param == -2` is the world map -- a fully resolved
+            // destination, not an unresolved runtime marker. It is negative, so the
+            // suppression below used to delete every world-map exit on any field
+            // that also has INF gateways, which is most of the fields that have one
+            // (a town gate, a garden entrance). INF gateways cannot cover it: a
+            // gateway's destination is a field id and the world map has none.
+            if (s_gatewayCount > 0 && je.param != -2 && (je.param < 0 || je.param > 982))
                 continue;
 
             // v0.12.08 Fix A: Filter JSM exit destinations against INF gateways.
@@ -3033,7 +3479,10 @@ static void InjectMapExits(EntityInfo* newCatalog, int& newCount, uint8_t* base,
             // VARBLOCK) destination that doesn't match is still treated as likely
             // stale, same as before (this is what the original bgryo2_1 'l1' fix
             // relied on, and stays intact).
-            if (s_gatewayCount > 0 && !je.paramFromInterp) {
+            // v0.60.0: same reasoning -- a world-map destination can never match an
+            // INF gateway's destination field id, so this filter would always reject
+            // it. Exempt it rather than have it fail a test it cannot pass.
+            if (s_gatewayCount > 0 && !je.paramFromInterp && je.param != -2) {
                 bool destMatchesGateway = false;
                 for (int gi = 0; gi < s_gatewayCount; gi++) {
                     if (s_gateways[gi].destFieldId == (uint16_t)je.param) {
@@ -3047,6 +3496,25 @@ static void InjectMapExits(EntityInfo* newCatalog, int& newCount, uint8_t* base,
                                je.symName, je.param);
                     continue;
                 }
+            }
+
+            // v0.131.7 (#centra): a party member's script is not a doorway, and an
+            // exit with no position cannot be walked to. See
+            // jsm_exit_surface_model.inl -- crtower2 listed the same exit four
+            // times and the fourth REFUSED the drive, four times over.
+            if (!JsmExitShouldSurface(IsPartyCharacterSym(je.symName),
+                                      (int)je.posTriangle, (int)je.posX, (int)je.posY)) {
+                // v0.131.8: once per field load, not once per refresh. The rule
+                // is a property of the field's script, so it produces exactly
+                // the same verdict every rebuild -- on crtower2 that was seven
+                // lines repeated four times in a few seconds.
+                if (!s_mapExitTraced)
+                    Log::Field("FieldNavigation: [catalog] JSM exit '%s' dest=%d dropped: "
+                               "%s [v0.131.7]", je.symName, je.param,
+                               IsPartyCharacterSym(je.symName)
+                                   ? "it is a party character's own transition code, not a doorway"
+                                   : "no position -- the drive would refuse it");
+                continue;
             }
 
             mapExit.entityIdx  = -300 - j;  // JSM-injected sentinel
@@ -3531,6 +3999,21 @@ static int CoLoRank(const EntityInfo& e)
     }
 }
 
+// v0.59.0: a pickup that is really a curated non-item (the glwater3 ladder) keeps
+// its curated name. Deliberately a plain function, not a lambda inside
+// DedupeCatalog: that function carries __try, and MSVC's C2712 forbids __try in
+// a function that needs object unwinding. A captureless lambda is very likely
+// fine, but "very likely" costs a build cycle to find out and Aaron is the only
+// person who can run one.
+static const char* CuratedNonItemName(const char* sym)
+{
+    if (!sym || !sym[0]) return nullptr;
+    for (const EntityDisplayName* mN = ENTITY_DISPLAY_NAMES; mN->sym != nullptr; mN++)
+        if (_stricmp(sym, mN->sym) == 0)
+            return (mN->display && strncmp(mN->display, "Item", 4) != 0) ? mN->display : nullptr;
+    return nullptr;
+}
+
 static void DedupeCatalog(EntityInfo* newCatalog, int& newCount)
 {
 // field_nav_catalog_dedupe.inl — v0.17.8.8 object/line dedupe + raw-SYM relabel.
@@ -3722,20 +4205,40 @@ static void DedupeCatalog(EntityInfo* newCatalog, int& newCount)
         // card point, an Irvine object, a gate, ...) can no longer hijack the NPC; the curated-name
         // adoption is kept ONLY for a pickup that is itself a curated non-item -- the glwater3 'hasigomodel'
         // ladder false-positive, which must read "Ladder", never "Item".
-        for (int j = 0; j < s_jsmEntityCount; j++) {
-            if (s_jsmEntities[j].posTriangle != newCatalog[a].triangleId) continue;
-            if (!s_jsmEntities[j].isItemPickup) continue;   // non-pickup entities never claim this NPC
-            isPickup = true;
-            if (s_jsmEntities[j].symName[0]) {
-                for (const EntityDisplayName* mN = ENTITY_DISPLAY_NAMES; mN->sym != nullptr; mN++) {
-                    if (_stricmp(s_jsmEntities[j].symName, mN->sym) == 0) {
-                        if (mN->display && strncmp(mN->display, "Item", 4) != 0)
-                            curatedName = mN->display;   // a pickup that is a curated non-item (Ladder)
-                        break;
-                    }
-                }
+        // v0.58.0: ask THIS entity's own script, not whatever script happens to
+        // stand on the same triangle.
+        //
+        // The triangle scan below was written when the runtime->script join was
+        // believed unreliable ("the runtime SYM is shifted"). It was -- but from a
+        // fixable ordering bug, not from anything about the engine, and the
+        // work-around had a failure mode of its own that Aaron has been hitting:
+        // two entities on one triangle swap identities. A character standing where
+        // a magazine lies gets announced as "Item", and the magazine, having been
+        // claimed, disappears. Runtime Others slot i is JSM group
+        // (nLines+nDoors+nBackgrounds+i) and nothing else, so ask that entity.
+        // v0.62.0: entityIdx is a LIVE index, so the join is the model one.
+        const FieldArchive::JSMEntityInfo* ownJsm =
+            FindJSMByLiveEntity(newCatalog[a].entityIdx);
+        if (ownJsm) {
+            if (ownJsm->isItemPickup) {
+                isPickup = true;
+                curatedName = CuratedNonItemName(ownJsm->symName);
             }
-            break;
+            if (!isPickup)
+                Log::Field("FieldNavigation: [dedup] ent%d tri=%d: own script "
+                           "'%s' is not an item pickup -- left as NPC [v0.58.0]",
+                           newCatalog[a].entityIdx, (int)newCatalog[a].triangleId,
+                           ownJsm->symName);
+        } else {
+            // No slot recorded for this entity (no JSM for the field, or a scan
+            // that failed): fall back to the pre-v0.58.0 triangle match.
+            for (int j = 0; j < s_jsmEntityCount; j++) {
+                if (s_jsmEntities[j].posTriangle != newCatalog[a].triangleId) continue;
+                if (!s_jsmEntities[j].isItemPickup) continue;
+                isPickup = true;
+                curatedName = CuratedNonItemName(s_jsmEntities[j].symName);
+                break;
+            }
         }
         if (curatedName) {
             Log::Field("FieldNavigation: [dedup] curated-name relabel: ent%d tri=%d 'NPC'->'%s' "
@@ -3813,26 +4316,85 @@ static void DedupeCatalog(EntityInfo* newCatalog, int& newCount)
         for (int b = 0; b < newCount; b++) {
             if (b == a) continue;
             int bi = newCatalog[b].entityIdx;
-            if (bi > -200 || bi <= -300) continue;   // B must be a trigger line
+            if (bi >= 0) continue;                   // B must not be a runtime entity
             if (!(newCatalog[b].type == ENT_SAVE_POINT ||
                   newCatalog[b].type == ENT_DRAW_POINT ||
                   newCatalog[b].type == ENT_SHOP ||
                   newCatalog[b].type == ENT_CARD_GAME))
                 continue;                            // ...with a specific meaning
-            int tb = -(bi + 200);
-            if (tb < 0 || tb >= s_capturedLineCount) continue;
-            float bx = (float)(s_capturedLines[tb].x1 + s_capturedLines[tb].x2) / 2.0f;
-            float by = (float)(s_capturedLines[tb].y1 + s_capturedLines[tb].y2) / 2.0f;
+            // v0.61.0: B used to have to be a captured TRIGGER LINE (-200..-299).
+            // On the Lunar Base infirmary the save point is JSM-INJECTED, not a
+            // line -- the log even shows the save LINE being folded into the JSM
+            // save point moments earlier -- so by the time this pass ran there was
+            // no line left to match against and the model standing on the save
+            // point stayed in the list as a third "NPC". Aaron, on the room his
+            // save loads into: "it said there were 3 NPCs, but there were really
+            // just two." Position now comes from CatalogEntryPos, which resolves
+            // every source the same way, so a special is a special wherever the
+            // catalog got it from.
+            float bx = 0, by = 0;
+            if (!CatalogEntryPos(newCatalog[b], bx, by)) continue;
             float ddx = ax - bx, ddy = ay - by;
             if (ddx*ddx + ddy*ddy > ENT_DUP_DIST*ENT_DUP_DIST) continue;
             entDupRemoved[a] = true;
             Log::Field("FieldNavigation: [dedup] dropped entity ent%d ('%s') at (%.0f,%.0f): "
-                       "same object as %s line%d at (%.0f,%.0f) [v0.18.3.233]",
+                       "same object as %s '%s' (idx %d) at (%.0f,%.0f) [v0.18.3.233 / v0.61.0]",
                        ai, newCatalog[a].name, ax, ay,
-                       EntityTypeName(newCatalog[b].type), tb, bx, by);
+                       EntityTypeName(newCatalog[b].type), newCatalog[b].name, bi, bx, by);
             break;
         }
     }
+    // v0.62.1 (#123): a live entity whose OWN script was injected as a JSM
+    // special or exit IS that object, not a second thing standing beside it.
+    // On sscont2 the lift platform `ele` was catalogued twice -- once from the
+    // runtime scan as a plain "NPC" and once as "Exit to Lunar Base - Pod 1" --
+    // and Aaron walked to the NPC: "There is also an NPC that I arrived at but
+    // didn't seem to do anything." This is not a distance test: the model join
+    // says outright which live entity runs which script, so the two entries are
+    // provably one object and the one that says what it does survives.
+    for (int a = 0; a < newCount; a++) {
+        int ai = newCatalog[a].entityIdx;
+        if (ai < 0 || ai == s_playerEntityIdx || entDupRemoved[a]) continue;
+        for (int b = 0; b < newCount; b++) {
+            if (b == a || entDupRemoved[b]) continue;
+            if (newCatalog[b].gatewayIdx >= 0) continue;      // INF gateway, not a JSM entry
+            int bi = newCatalog[b].entityIdx;
+            if (bi > -300) continue;                          // JSM-injected sentinel only
+            int bj = -300 - bi;
+            if (bj < 0 || bj >= s_jsmEntityCount) continue;
+            if (LiveIndexForJSM(s_jsmEntities[bj]) != ai) continue;
+            // (v0.63.0 considered exempting an own-script talk exit here too --
+            // the Ellone case -- and then deleted the exemption because no
+            // mutation of it could be made to fail: the injection guard above
+            // means such an exit never reaches the catalog for this rule to
+            // match against. A branch nothing can distinguish is not a
+            // safeguard. The rule that does the work is the one in
+            // InjectMapExits.)
+            entDupRemoved[a] = true;
+            Log::Field("FieldNavigation: [dedup] dropped entity ent%d ('%s'): it IS the %s "
+                       "'%s' already catalogued from its own script [v0.62.1]",
+                       ai, newCatalog[a].name, EntityTypeName(newCatalog[b].type),
+                       newCatalog[b].name);
+            break;
+        }
+    }
+
+    // v0.62.2 (#123): and the live entity running a script whose gate is shut is
+    // that same shut thing. Only entities the classifier had nothing else to say
+    // about ever get a REQ-follow exit, so this can only remove script objects.
+    for (int a = 0; a < newCount; a++) {
+        int ai = newCatalog[a].entityIdx;
+        if (ai < 0 || ai == s_playerEntityIdx || entDupRemoved[a]) continue;
+        const FieldArchive::JSMEntityInfo* jl = FindJSMByLiveEntity(ai);
+        if (!jl) continue;
+        int jj = (int)(jl - s_jsmEntities);
+        if (jj < 0 || jj >= MAX_JSM_ENTITIES || !s_jsmGateClosed[jj]) continue;
+        entDupRemoved[a] = true;
+        Log::Field("FieldNavigation: [dedup] dropped entity ent%d ('%s'): its script '%s' "
+                   "is the exit the story has not opened yet [v0.62.2]",
+                   ai, newCatalog[a].name, jl->symName);
+    }
+
     int ew = 0;
     for (int r = 0; r < newCount; r++) {
         if (!entDupRemoved[r]) {
@@ -4042,10 +4604,10 @@ static void RefreshCatalog()
         // entity address (stable per field), so the restore never doubles lines. Runs before
         // ComputePlayerZoneReachability (4274) and the trigger-line exit injection, which both read
         // s_capturedLines.
+        // v0.58.0: the backup now lives at file scope (field_nav_pathfinding.inl)
+        // and is dropped by HookedFieldScriptsInit on a real field change, so it
+        // can no longer resurrect a previous visit's lines.
         {
-            static CapturedTriggerLine s_capBackup[MAX_CAPTURED_LINES];
-            static int      s_capBackupCount = 0;
-            static uint16_t s_capBackupField = 0xFFFF;
             uint16_t curField = FF8Addresses::pCurrentFieldId ? *FF8Addresses::pCurrentFieldId : 0xFFFF;
             if (s_capturedLineCount > 0) {
                 int nb = (s_capturedLineCount <= MAX_CAPTURED_LINES) ? s_capturedLineCount : MAX_CAPTURED_LINES;
@@ -4140,6 +4702,62 @@ static void RefreshCatalog()
         DumpPuzzleDiagOnce();      // v0.18.3.267: glass/statue puzzle objects
         DumpCoordDiagOnce(base, lim);
 
+        // v0.63.0 (#111): the space rescue owns the screen while it runs. On
+        // ssspace3 the only thing in the catalog is Rinoa -- catalogued as
+        // "Exit to Outer Space 5", because her script carries the MAPJUMP the
+        // win path takes -- and Aaron's 14:54:22 log has auto-drive setting off
+        // toward it in the middle of the attempt he was flying. There is
+        // nothing to navigate to in open space.
+        if (SpaceRescueActive()) {
+            if (!s_scanTraced)
+                Log::Field("FieldNavigation: [refresh] catalog suppressed: the space "
+                           "rescue is running [v0.63.0]");
+            s_catalogCount = 0;
+            s_selectedCatalogIdx = -1;
+            return;
+        }
+
+        // v0.62.0 (#123): resolve every live entity to its script BEFORE the
+        // scan reads a single name or type. See BuildLiveJsmMap in
+        // field_nav_helpers.inl for why the live index is not the script slot.
+        BuildLiveJsmMap(base, (int)lim);
+        // v0.62.3 (#123): a trigger line whose own touch script is gated shut is
+        // inert -- it is not an exit and it is not a wall. On sspod2 the `pod`
+        // line's script opens `var[256] == 2556` and ends in MAPJUMPO 638, so
+        // before that point in the story the catalog was offering "Exit to
+        // Desert 1" AND letting the screen filter treat the line as a boundary,
+        // which put Ellone on the far side of it and removed her. Aaron: "only
+        // two of the three seemed to navigate correctly... There was also an
+        // unexpected exit to 'desert 1'." Re-evaluated every refresh, because
+        // the variable moves while you play.
+        for (int t = 0; t < s_capturedLineCount; t++) {
+            bool closed = false;
+            for (int jg = 0; jg < s_jsmEntityCount; jg++) {
+                if (s_jsmEntities[jg].jsmCategory != 1) continue;
+                if (s_jsmEntities[jg].jsmIndex != t) continue;
+                if (s_jsmEntities[jg].hasGate) {
+                    int32_t live = 0;
+                    closed = !JsmGateOpen(s_jsmEntities[jg], &live);
+                    if (closed && !s_scanTraced)
+                        Log::Field("FieldNavigation: [catalog] line%d '%s' inert: gated on "
+                                   "var[%d]=%d op%d %d [v0.62.3]", t,
+                                   s_jsmEntities[jg].symName, s_jsmEntities[jg].gateAddr,
+                                   live, (int)s_jsmEntities[jg].gateOp,
+                                   s_jsmEntities[jg].gateValue);
+                }
+                break;
+            }
+            s_capturedLines[t].gateClosed = closed;
+        }
+        if (!s_scanTraced) {
+            for (int i = 0; i < (int)lim && i < MAX_ENTITIES; i++) {
+                const FieldArchive::JSMEntityInfo* jl = FindJSMByLiveEntity(i);
+                Log::Field("FieldNavigation: [LIVE-JOIN] ent%d model=%d -> %s%s [v0.62.0]",
+                           i, (int)*(int16_t*)(base + ENTITY_STRIDE * i + 0x218),
+                           jl ? "sym=" : "UNRESOLVED", jl ? jl->symName : "");
+            }
+        }
+
         // Build set of currently-qualifying entity indices.
         bool qualifies[MAX_ENTITIES] = {};
         EntityInfo fresh[MAX_ENTITIES] = {};
@@ -4158,11 +4776,15 @@ static void RefreshCatalog()
             // v0.17.8.3: Resolve this entity's SYM name now (needed by the
             // party filter below). Same offset mapping used elsewhere in this
             // function for JSM lookups.
+            // v0.62.0: the SYM STRINGS were never the problem -- the index was.
+            // s_symNames[s_symOthersOffset + i] reads the i-th script slot's
+            // name, and the live array is not indexed by slot. Take the name
+            // off the entity the model join proved, and take NO name when
+            // nothing proved one.
             const char* symName = "";
             {
-                int symIdxFilt = s_symOthersOffset + i;
-                if (symIdxFilt >= 0 && symIdxFilt < s_symNameCount)
-                    symName = s_symNames[symIdxFilt];
+                const FieldArchive::JSMEntityInfo* jsmN = FindJSMByLiveEntity(i);
+                if (jsmN && jsmN->symName[0]) symName = jsmN->symName;
             }
 
             // v0.18.3.228: Race-free TALKABILITY signal. Runtime flags (talk
@@ -4174,11 +4796,8 @@ static void RefreshCatalog()
             // station attendant 'ekiin' and the 'gsm*' students.
             bool jsmTalk = false;
             {
-                int symIdxT = s_symOthersOffset + i;
-                if (symIdxT >= 0 && symIdxT < s_symNameCount) {
-                    const FieldArchive::JSMEntityInfo* jsmT = FindJSMBySym(s_symNames[symIdxT]);
-                    if (jsmT && jsmT->hasTalkSetup) jsmTalk = true;
-                }
+                const FieldArchive::JSMEntityInfo* jsmT = FindJSMByLiveEntity(i);  // v0.62.0
+                if (jsmT && jsmT->hasTalkSetup) jsmTalk = true;
             }
             // v0.18.3.235: talkability is STICKY per field. The talkonoff flag is
             // not just set late, it is TRANSIENT — on ggroom1 Quistis reads talk=1
@@ -4337,13 +4956,22 @@ static void RefreshCatalog()
             // "not-yet-recruited scene actor parked invisible pre-scene" gap.
             {
                 uint32_t entFlags = *(uint32_t*)(block + 0x160);
-                if ((entFlags & 0x08) != 0 && i != s_playerEntityIdx) {
+                // v0.75.0 (#112): the same exemption the JSM-injection path takes.
+                // HIDE + TALKON in one init is an invisible interaction point, not
+                // an object that is not there. See JSMEntityInfo::invisibleTalkTarget.
+                const FieldArchive::JSMEntityInfo* jeHide = FindJSMByLiveEntity(i);
+                const bool invisTalk = (jeHide && jeHide->invisibleTalkTarget);
+                if ((entFlags & 0x08) != 0 && i != s_playerEntityIdx && !invisTalk) {
                     if (!s_scanTraced)
                         Log::Field("FieldNavigation: [SCAN-DROP] ent%d sym='%s' hidden "
                                    "(flags@0x160=0x%08X bit3 set by HIDE) -- skipped",
                                    i, symName, (unsigned)entFlags);
                     continue;
                 }
+                if ((entFlags & 0x08) != 0 && invisTalk && !s_scanTraced)
+                    Log::Field("FieldNavigation: [SCAN-KEEP] ent%d sym='%s' hidden but its init "
+                               "calls HIDE and TALKON together -- an invisible interaction point, "
+                               "the picture is in the background art [v0.75.0]", i, symName);
             }
 
             // v0.17.7.1: Walkmesh exclusion rule.
@@ -4424,9 +5052,12 @@ static void RefreshCatalog()
             bool isPlaced = (triId > 0) || (hasModel && (fpX != 0 || fpY != 0));
             bool isSpecialJSM = false;
             if (!hasModel) {
-                int symIdx2 = s_symOthersOffset + i;
-                if (symIdx2 >= 0 && symIdx2 < s_symNameCount) {
-                    const FieldArchive::JSMEntityInfo* jsm2 = FindJSMBySym(s_symNames[symIdx2]);
+                {
+                    // v0.62.0: model join. A model-less entity has no model key,
+                    // so BuildLiveJsmMap's third pass matches it on its exact
+                    // static SET3 position instead -- which is how the Lunar Base
+                    // infirmary save point is recognised.
+                    const FieldArchive::JSMEntityInfo* jsm2 = FindJSMByLiveEntity(i);
                     if (jsm2 && (jsm2->type == FieldArchive::JSM_ENT_SAVE_POINT ||
                                  jsm2->type == FieldArchive::JSM_ENT_DRAW_POINT ||
                                  jsm2->type == FieldArchive::JSM_ENT_SHOP ||
@@ -4439,6 +5070,35 @@ static void RefreshCatalog()
                             isPlaced = true;
                         }
                     }
+                }
+            }
+            // v0.65.0: the field-scoped drop. `handle` is a valve wheel the
+            // player turns in the Missile Base and a lever nothing touches in
+            // the escape pod; the SYM alone cannot tell those apart, so the
+            // table is keyed on the field too. Placed BEFORE qualifies[i] is
+            // set, so a dropped entity is dropped rather than hidden later.
+            {
+                // v0.66.0 (#112): the Ragnarok's ninth alien. rgroad3 carries a
+                // second `alien01` whose default method is three words long and
+                // which can never be fought. Listing it would send the player
+                // across the ship to a Propagator that is not there.
+                if (PgCatalogDrop(FF8Addresses::pCurrentFieldName, symName)) {
+                    if (!s_scanTraced)
+                        Log::Field("FieldNavigation: [catalog] ent%d sym='%s' dropped: "
+                                   "the cutscene-only Propagator decoy in '%s' -- the "
+                                   "fightable one there is a different entity [v0.66.0]",
+                                   i, symName, FF8Addresses::pCurrentFieldName);
+                    continue;
+                }
+                const FieldScopedEntity* fs =
+                    FieldScopedFor(FF8Addresses::pCurrentFieldName, symName);
+                if (fs && !fs->display) {
+                    if (!s_scanTraced)
+                        Log::Field("FieldNavigation: [catalog] ent%d sym='%s' dropped: "
+                                   "field-scoped exclusion for '%s' -- the scene works "
+                                   "it, the player never does [v0.65.0]",
+                                   i, symName, fs->field);
+                    continue;
                 }
             }
             if (isPlaced && (hasModel || isSpecialJSM)) {
@@ -4456,6 +5116,52 @@ static void RefreshCatalog()
                 // hold this file under the 80 KB source-size CI guard. It declares
                 // `entName`, which is consumed immediately below.
                 const char* entName = RefineEntityTypeAndName(i, modelId, setpc, symName, talkable, ei_info);
+                // v0.62.0 (#123): a NAMED character, named from the entity the
+                // model join proved. Aaron: "I love the idea of the catalog
+                // identifying NPCs when it can." Until now the only path to a
+                // real name for a live entity was v0.61.0's duplicate-drop
+                // transfer, which needed a second JSM copy of the same person to
+                // exist -- and, joining on the slot, put "Quistis" on Piet.
+                // Only a CURATED name from ENTITY_DISPLAY_NAMES is used: a SYM
+                // that is not in the table is an internal dev symbol and must
+                // never be spoken (v0.18.3.291).
+                if (ei_info.type == ENT_NPC && symName[0]) {
+                    for (const EntityDisplayName* mL = ENTITY_DISPLAY_NAMES; mL->sym; mL++) {
+                        if (_stricmp(symName, mL->sym) != 0) continue;
+                        if (mL->display && mL->display[0]) {
+                            entName = mL->display;
+                            Log::Field("FieldNavigation: [catalog] ent%d named '%s' from its own "
+                                       "script '%s' (model join) [v0.62.0]", i, entName, symName);
+                        }
+                        break;
+                    }
+                }
+                // v0.66.0 (#112): THE FIELD-SCOPED NAME. Some symbols mean
+                // different things in different rooms, and `alien01` is the
+                // extreme case -- eight Propagators across eight fields, four
+                // colours, and the colour IS the puzzle. Aaron: "we want the NPC
+                // in the catalog to say 'Red Propagator', 'Purple Propagator',
+                // etc." This runs last so it outranks both the generic type name
+                // and the curated SYM name above; the colours come from PG_LIST,
+                // which is also what the pair logic reasons about, so the name
+                // spoken and the name reasoned about cannot drift apart.
+                // v0.76.0 (#112): and the things in those rooms that are not
+                // monsters. rgguest2's `comp` was catalogued correctly from
+                // v0.75.0 and announced as "NPC", which is a name for nothing.
+                if (const char* pgObj = PgObjectName(FF8Addresses::pCurrentFieldName, symName)) {
+                    entName = pgObj;
+                    Log::Field("FieldNavigation: [catalog] ent%d named '%s' -- "
+                               "field-scoped object, from the Propagator table [v0.76.0]",
+                               i, entName);
+                }
+                char pgName[32];
+                if (PgCatalogName(FF8Addresses::pCurrentFieldName, symName,
+                                  pgName, sizeof pgName)) {
+                    entName = pgName;
+                    Log::Field("FieldNavigation: [catalog] ent%d named '%s' -- "
+                               "field-scoped, from the Propagator table [v0.66.0]",
+                               i, entName);
+                }
                 strncpy(ei_info.name, entName, sizeof(ei_info.name) - 1);
                 ei_info.name[sizeof(ei_info.name) - 1] = '\0';
                 fresh[i] = ei_info;
@@ -4647,6 +5353,7 @@ static void RefreshCatalog()
         // newCount and the surrounding scan state. Pure textual move — no logic
         // change. See that file for the full logic.
         InjectMapExits(newCatalog, newCount, base, lim);
+        s_mapExitTraced = true;   // v0.131.8: its drop lines are said once per field
 
         // v0.07.94 INF gateway exit injection. Extracted to
         // field_nav_catalog_gateways.inl (v0.18.3.276) to bring this file back

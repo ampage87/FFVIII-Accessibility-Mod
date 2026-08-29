@@ -66,9 +66,11 @@ static const uint32_t WM_STORY_FLAG = 0x02036BDE;
 static const int WMX_SEG_ROWS = 24, WMX_SEG_COLS = 32;
 static uint8_t s_segmentRegionMap[WMX_SEG_ROWS][WMX_SEG_COLS];
 static bool s_segmentRegionLoaded = false;
+#include "wm_distance_pure.inl"
 #include "world_garden_dump.inl"
 #include "world_garden_grid.inl"
 #include "world_garden_berths.inl"
+#include "world_garden_inlets.inl"
 #include "world_garden_plan.inl"
 #include "world_garden_probe.inl"
 #include "world_garden.inl"
@@ -166,6 +168,173 @@ int main(int argc, char** argv)
                                    : "*** UNEXPECTED ***");
             if (raw || !berth) bad++;
         }
+    }
+
+    // v0.51.0 (#109): THE WHITE SEED SHIP IS A DRIVE-IN ON OPEN WATER.
+    //
+    // Its berth is the marker, wmsetus record 17, and the marker is deep ocean.
+    // Three things have to hold and all three are asked of the REAL grid built
+    // above from the real wmx.obj, not of the offline model:
+    //   1. the cell is Garden-traversable at all (it is water the hull may
+    //      occupy: byte 0x0F bit 5 set, bit 7 clear),
+    //   2. it is in the flood from the places Aaron actually starts -- his
+    //      Garden's position in the current save, and both starts from the
+    //      2026-08-21 BAT that failed,
+    //   3. the planner returns a route, not just a reachability yes.
+    // The old berth (2944,53376) satisfied 1-3 too, which is the point: it was
+    // reachable and it was the wrong place. See world_catalog.inl.
+    {
+        const GardenPark* ws = Garden_ParkFor("White SeeD Ship");
+        if (!ws || !ws->reachable || !ws->drive_in || ws->walk_units != 0) {
+            printf("White SeeD Ship berth is not a reachable drive_in *** UNEXPECTED ***\n");
+            bad++;
+        } else {
+            static const struct { int32_t x, y; const char* label; } WS_START[] = {
+                { -20798,  64150, "his Garden now (slot2_save05)" },
+                { -21020,  63113, "BAT 23:10 start" },
+                {  17890,  40048, "BAT 23:11 start" },
+                {  20271, -24355, "Balamb" },
+            };
+            for (unsigned k = 0; k < sizeof(WS_START) / sizeof(WS_START[0]); k++) {
+                s_gdBeachGoalIdx = -1;
+                Garden_ComputeReach(WS_START[k].x, WS_START[k].y);
+                const bool reach = Garden_BerthReachable(ws);
+                const bool okPlan = reach && Garden_Plan(WS_START[k].x, WS_START[k].y,
+                                                         ws->park_x, ws->park_y);
+                printf("White SeeD Ship from %-30s reach=%d plan=%s (%d waypoints)  %s\n",
+                       WS_START[k].label, (int)reach, okPlan ? "OK" : "FAILED",
+                       s_drivePathLen, (reach && okPlan) ? "OK" : "*** FAIL ***");
+                if (!reach || !okPlan) bad++;
+            }
+        }
+    }
+
+    // v0.52.0 (#109): A SHORELINE PATROL NEEDS A SHORELINE.
+    //
+    // The 2026-08-21 BAT drove the hull onto the White SeeD Ship's marker and
+    // then "searched the shore" of a bay it was floating in the middle of --
+    // ninety seconds of `dist to White SeeD Ship 5` with the heading spinning.
+    // GdDockIsAfloat is what stops that, and it has to say yes for the ship and
+    // no for the one other drive_in, which docks against land.
+    {
+        const GardenPark* ws = Garden_ParkFor("White SeeD Ship");
+        const bool offWhenNotDriveIn = GdDockIsAfloat(false, ws->park_x, ws->park_y);
+        printf("GdDockIsAfloat is a drive_in question only: %d  %s\n",
+               (int)offWhenNotDriveIn, !offWhenNotDriveIn ? "OK" : "*** FAIL ***");
+        if (offWhenNotDriveIn) bad++;
+
+        const bool shipAfloat = GdDockIsAfloat(true, ws->park_x, ws->park_y);
+        printf("White SeeD Ship dock (%d,%d) is open water: %d  %s\n",
+               ws->park_x, ws->park_y, (int)shipAfloat, shipAfloat ? "OK" : "*** FAIL ***");
+        if (!shipAfloat) bad++;
+
+        // The other drive_in presses at a coordinate on LAND -- Mobile Galbadia
+        // Garden, terrain 7 -- and must NOT be called afloat, so nothing about
+        // the shoreline patrol changes for it.
+        const GardenPark* mg = Garden_ParkFor("Mobile Galbadia Garden");
+        const bool mgAfloat = GdDockIsAfloat(true, mg->park_x, mg->park_y);
+        printf("Mobile Galbadia Garden dock (%d,%d) is open water: %d  %s\n",
+               mg->park_x, mg->park_y, (int)mgAfloat, !mgAfloat ? "OK (still patrols)" : "*** FAIL ***");
+        if (mgAfloat) bad++;
+
+        // And the failure says what the player can do about it.
+        const char* hint = GdMissingHint("White SeeD Ship");
+        const bool hintOk = hint && strstr(hint, "Edea") != nullptr;
+        printf("missing hint names the prerequisite: \"%s\"  %s\n",
+               hint ? hint : "(null)", hintOk ? "OK" : "*** FAIL ***");
+        if (!hintOk) bad++;
+    }
+
+    // v0.53.0 (#109): EVERY INLET IN THE SWEEP MUST BE REACHABLE AND PLANNABLE.
+    //
+    // A sweep site the hull cannot get to is a stop that fails for the wrong
+    // reason, and forty-one of them is too many to eyeball. Asked of the REAL
+    // grid, from the Garden's position in the current save.
+    {
+        s_gdBeachGoalIdx = -1;
+        Garden_ComputeReach(-20798, 64150);
+        int okI = 0, badI = 0;
+        for (int i = 0; i < WHITE_SEED_INLET_COUNT; i++) {   // includes site 0
+            const GardenDock& d = s_whiteSeedInlets[i];
+            const bool reach = Garden_CellReachable(d.approach_x, d.approach_y);
+            const bool plan  = reach && Garden_Plan(-20798, 64150, d.approach_x, d.approach_y);
+            if (reach && plan) okI++;
+            else { badI++; printf("  inlet %d (%d,%d) reach=%d plan=%d *** FAIL ***\n",
+                                  i, d.approach_x, d.approach_y, (int)reach, (int)plan); }
+        }
+        printf("Centra inlet sweep: %d of %d reachable and plannable  %s\n",
+               okI, WHITE_SEED_INLET_COUNT, badI ? "*** FAIL ***" : "OK");
+        if (badI) bad++;
+
+        // And the sweep is walked by the machinery that already exists: site 0
+        // must be the first row, and site N-1 the last, with nothing after it.
+        const GardenDock* s0 = Garden_DockSite("White SeeD Ship", 0);
+        const GardenDock* sN = Garden_DockSite("White SeeD Ship", WHITE_SEED_INLET_COUNT - 1);
+        const GardenDock* sOver = Garden_DockSite("White SeeD Ship", WHITE_SEED_INLET_COUNT);
+        const bool walkOk = s0 == &s_whiteSeedInlets[0] &&
+                            sN == &s_whiteSeedInlets[WHITE_SEED_INLET_COUNT - 1] &&
+                            sOver == nullptr;
+        printf("Garden_DockSite walks the inlet list and ends: %s\n", walkOk ? "OK" : "*** FAIL ***");
+        if (!walkOk) bad++;
+
+        // Trabia Garden's own dock row must still be found -- the White SeeD
+        // branch returns early and must not shadow the real table.
+        const GardenDock* tg = Garden_DockSite("Trabia Garden", 0);
+        printf("Trabia Garden dock row still resolves: %s\n", tg ? "OK" : "*** FAIL ***");
+        if (!tg) bad++;
+
+        // Site 0 is the known boarding point and gets a full press; a search
+        // stop gets the short one; every other destination is unaffected.
+        const bool phaseOk = GdNosePhases("White SeeD Ship", 0) == GD_NOSE_PHASES &&
+                             GdNosePhases("White SeeD Ship", 1) == GD_NOSE_SWEEP_PHASES &&
+                             GdNosePhases("Fisherman's Horizon", 0) == GD_NOSE_PHASES &&
+                             GD_NOSE_SWEEP_PHASES < GD_NOSE_PHASES;
+        printf("phases: ship site0=%d, sweep site1=%d, FH=%d  %s\n",
+               GdNosePhases("White SeeD Ship", 0), GdNosePhases("White SeeD Ship", 1),
+               GdNosePhases("Fisherman's Horizon", 0), phaseOk ? "OK" : "*** FAIL ***");
+        if (!phaseOk) bad++;
+
+        // ------------------------------------------------------------------
+        // v0.54.0: THE BOARDING POINT, AND THE THING THAT MADE 773 UNITS FATAL.
+        //
+        // The BAT captured (-17974,47006) as the hull's position on the frame
+        // field 853 loaded. Site 0 must aim there, from an approach that is a
+        // DIFFERENT point -- when park and dock are the same coordinate the
+        // hull arrives on the mark, the bearing to the dock is noise, and the
+        // nose-in's lateral sweep goes nowhere. That is exactly how v0.51.0
+        // and v0.52.0 pressed 773 units away from a ship that was there.
+        // ------------------------------------------------------------------
+        const GardenDock* site0 = Garden_DockSite("White SeeD Ship", 0);
+        const bool dockOk = site0 && site0->dock_x == -17974 && site0->dock_y == 47006;
+        printf("site 0 presses at the BAT-captured boarding point (%d,%d)  %s\n",
+               site0 ? site0->dock_x : 0, site0 ? site0->dock_y : 0,
+               dockOk ? "OK" : "*** FAIL ***");
+        if (!dockOk) bad++;
+
+        const double sep = site0 ? CalculateWrappedDistance(site0->approach_x, site0->approach_y,
+                                                            site0->dock_x, site0->dock_y) : 0.0;
+        const bool sepOk = sep >= 600.0;
+        printf("approach stands off the dock by %.0f units  %s\n", sep,
+               sepOk ? "OK (the hull drives through it)" : "*** FAIL: park==dock is the v0.51 bug ***");
+        if (!sepOk) bad++;
+
+        // Both ends Garden-navigable, and the line between them too -- the
+        // nose-in drives it with the wall guard off and must not be steering
+        // into anything.
+        bool lineOk = site0 && Garden_CellReachable(site0->approach_x, site0->approach_y);
+        if (site0) {
+            for (int t = 0; t <= 10 && lineOk; t++) {
+                const int32_t lx = site0->approach_x + (site0->dock_x - site0->approach_x) * t / 10;
+                const int32_t ly = site0->approach_y + (site0->dock_y - site0->approach_y) * t / 10;
+                if (!GdWalk(GdRow(ly), GdCol(lx))) lineOk = false;
+            }
+        }
+        printf("approach -> boarding point is Garden water end to end  %s\n",
+               lineOk ? "OK" : "*** FAIL ***");
+        if (!lineOk) bad++;
+
+        // (The catalog marker is checked in tests/catalog_story_test.cpp, which
+        // is the probe that compiles world_catalog.inl.)
     }
 
     // v0.20.97: Shumi Village is an ORDINARY berth now -- the marker was moved

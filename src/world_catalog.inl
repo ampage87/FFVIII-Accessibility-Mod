@@ -132,7 +132,55 @@ static const LocationEntry s_locations[] = {
     // from their edge: 140 units of margin in every direction. The matching
     // firing-area row in world_map_trigger_data.inl carries the bbox.
     {"Edea's House",              -29459,   69772},
-    {"White SeeD Ship",             4887,   51285},
+    // v0.51.0 (#109): THE OLD COORDINATE WAS NEVER MEASURED, AND IT WAS THE
+    // CENTRA RUINS MOVED BY A ROUND NUMBER.
+    //
+    // (4887, 51285) is (6887, 55285) minus exactly (2000, 4000) -- the Centra
+    // Ruins marker two lines below, nudged. It put the ship 4,205 units inland
+    // on terrain 7, on a foot landmass the player cannot reach, and the
+    // 2026-08-21 BAT is what that costs: the Garden parked at (2899,53093) and
+    // announced *"White SeeD Ship is 27 hundred units north-east. Leave the
+    // Garden and press backslash to walk the rest."* There is nothing there.
+    // WORLDMAP_CATALOG_STORY_WINDOWS.md had already flagged it -- *"the
+    // coordinate came from the original research document and has never been
+    // driven to"* -- and the audit measured it as 4.5 km from any wmsetus
+    // record. It was.
+    //
+    // THE REAL ONE IS wmsetus.obj SECTION 8, RECORD 17. That section is the
+    // location-marker table this catalog is built from: 12-byte records of
+    // int32 X, int32 Y, int16 Z, int16 flags at file offset 5580. Record 16 is
+    // the Centra Ruins at (6887,55285) and record 18 is Edea's House at
+    // (-29425,69458) -- both already in this file, both BAT-confirmed -- so the
+    // base and the stride are not assumed, they are pinned by neighbours.
+    //
+    // Record 17 is (-17350, 46550), **Z = 0**, and it is the only record in the
+    // whole table that sits at sea level on deep ocean (terrain 33). A ship
+    // floats at zero. It carries no foot entry flag -- byte 0x0E bit 3 is clear
+    // on every polygon within 2,600 units -- so it cannot be walked to at all,
+    // and byte 0x0F reads 0x30: the Garden mask (0x20) is set and foot (0x80)
+    // is not.
+    //
+    // The walkthroughs agree with the data on both counts. Position: *"a small,
+    // U-shaped island north and slightly east of Edea's House"*, *"in a little
+    // bay surrounded by mountainous terrain"* -- record 17 is 22,908 north and
+    // 12,075 east of Edea's House, in a bay the terrain dump draws as exactly
+    // that U. Method: *"run into it to board the White SeeD ship."*
+    //
+    // So it is a drive_in, like Fisherman's Horizon and Mobile Galbadia Garden:
+    // the hull goes to the coordinate itself and there is no walk. See the
+    // berth row in world_garden_berths.inl.
+    // v0.54.0: THE SHIP, MEASURED. (-17974,47006) is the hull's position on the
+    // frame the world map handed off to field 853 `se\sefront1` -- the White
+    // SeeD Ship's deck -- during the v0.53.1 inlet sweep. Not derived, not
+    // inferred: the coordinate the transition fired at. Aaron: *"The ship always
+    // appears in the same place so these coordinates will be the same for all
+    // players."*
+    //
+    // The two failed markers, for the record. (4887,51285) was the Centra Ruins
+    // minus a round (2000,4000) and was never measured at all. (-17350,46550),
+    // wmsetus record 17, was the real marker and **773 units short** -- see
+    // world_garden_inlets.inl for why 773 was enough to miss.
+    {"White SeeD Ship",           -17974,   47006},
     {"Great Salt Lake",            49888,   -2683},
     {"Esthar City",                57011,   -2295},
     {"Lunatic Pandora Lab",        79521,   -9135},
@@ -375,19 +423,26 @@ static bool WmGalbadiaGardenPresent()
 // did at slot2_save28.
 //
 // So unlike Galbadia Garden, NEITHER EDGE HERE IS A GUESS.
+// v0.81.0: ...AND THE OTHER HALF, WHICH IS THE ONE HE ACTUALLY HITS.
+// The slot above is the ship's PARKED position and reads zero while he is
+// inside it -- see wm_story_pure.inl for the two log lines that prove it. Being
+// aboard is the least ambiguous proof of ownership there is, so it is asked
+// first and the slot is only consulted when he is not flying.
 static bool WmHaveRagnarok()
 {
     int32_t rx = 0, ry = 0;
-    if (!WmSafeReadBytes(WM_RAGNAROK_POS_ADDR + WMS_VEHPOS_X_OFF, &rx, 4)) return false;
-    if (!WmSafeReadBytes(WM_RAGNAROK_POS_ADDR + WMS_VEHPOS_Y_OFF, &ry, 4)) return false;
-    return (rx != 0 || ry != 0) &&
-           rx > -131072 && rx < 131072 && ry > -98304 && ry < 98304;
+    bool slotLive = false;
+    if (WmSafeReadBytes(WM_RAGNAROK_POS_ADDR + WMS_VEHPOS_X_OFF, &rx, 4) &&
+        WmSafeReadBytes(WM_RAGNAROK_POS_ADDR + WMS_VEHPOS_Y_OFF, &ry, 4)) {
+        slotLive = (rx != 0 || ry != 0) &&
+                   rx > -131072 && rx < 131072 && ry > -98304 && ry < 98304;
+    }
+    return WmRagnarokHeldPure(RagIsFlying(), slotLive);
 }
 
 static bool WmWhiteSeedShipPresent()
 {
-    if (WmCurrentDisc() < 3) return false;         // not available before disc 3
-    return !WmHaveRagnarok();                      // gone once you have the Ragnarok
+    return WmWhiteSeedPresentPure(WmCurrentDisc(), WmHaveRagnarok());
 }
 
 // One predicate, asked in every place the catalog is assembled. The v0.20.88
@@ -406,6 +461,48 @@ static bool WmStoryRetired(const char* name)
 // ============================================================================
 // Catalog management
 // ============================================================================
+// v0.82.0: the vehicle rule class the LIVE catalog was built for, derived from
+// the engine vehicle id alone. -1 = nothing built yet. See
+// wm_catalog_refresh_pure.inl for why this is id-only rather than the builder's
+// byte-then-id resolution.
+static int s_catalogVehIdClass = -1;
+static int s_pendingVehIdClass = -1;
+static int s_pendingVehIdCount = 0;
+static const int VEHID_DEBOUNCE_POLLS = 4;
+
+
+// v0.82.0: the live-vehicle entries (the mobile Garden, and now the parked
+// Ragnarok) are appended AFTER the reachability filter has run, in distance
+// order, so the list the player pages through stays sorted. Both used to inline
+// the same insertion; a second copy of a shift-right loop is how off-by-ones get
+// in, so there is one.
+static int WmInsertCatalogByDistance(const char* name, int32_t x, int32_t y,
+                                     int32_t px, int32_t py)
+{
+    if (s_catalogCount >= MAX_LOCATIONS) return -1;
+    const double d = CalculateWrappedDistance(px, py, x, y);
+    int at = s_catalogCount;
+    for (int i = 0; i < s_catalogCount; i++) {
+        if (CalculateWrappedDistance(px, py, s_catalog[i].x, s_catalog[i].y) > d) {
+            at = i; break;
+        }
+    }
+    for (int i = s_catalogCount; i > at; i--) s_catalog[i] = s_catalog[i - 1];
+    LocationEntry e;
+    e.name = name; e.x = x; e.y = y;
+    s_catalog[at] = e;
+    s_catalogCount++;
+    return at;
+}
+
+// The vehicle rule class implied by the ENGINE VEHICLE ID alone. Deliberately
+// not the builder's byte-then-id resolution -- see wm_catalog_refresh_pure.inl.
+static int WmVehIdClass(int vid)
+{
+    if (vid <= 0) return GetBfsRuleClass(VEH_ON_FOOT);
+    return GetBfsRuleClass(GetVehicleType((uint8_t)vid));
+}
+
 static void BuildDistanceCatalog()
 {
     int32_t px, py, pz;
@@ -492,11 +589,15 @@ static void BuildDistanceCatalog()
         // unknown, or unreadable ids leave the legacy byte-derived class as-is.
         // The raw id is logged every build for the #79 confirmation record.
         {
+            // v0.87.0: through the shared predicate now. The rule is unchanged;
+            // what changed is that the PLANNER asks the same function, after the
+            // 13:41 BAT found it resolving the vehicle from the locomotion byte
+            // alone and planning a 302-cell walking route for an airship.
             int vid = GetActiveVehicleId();
-            if (vid > 0 && vid != 6) {
-                VehicleType vt = GetVehicleType((uint8_t)vid);
-                if (vt != VEH_ON_FOOT) veh = vt;
-            }
+            veh = (VehicleType)WmResolveVehicle(
+                      (int)veh, vid,
+                      (int)GetVehicleType((uint8_t)(vid > 0 ? vid : 0)),
+                      (int)VEH_ON_FOOT);
             Log::World("WorldMap: [BFS] engine vehicleId=%d -> catalog vehicle type %d (class %d)",
                        vid, (int)veh, GetBfsRuleClass(veh));
         }
@@ -591,32 +692,67 @@ static void BuildDistanceCatalog()
         int32_t bx = 0, by = 0;
         if (!WmSafeReadBytes(WM_BGU_POS_ADDR + WMS_VEHPOS_X_OFF, &bx, 4)) bx = 0;
         if (!WmSafeReadBytes(WM_BGU_POS_ADDR + WMS_VEHPOS_Y_OFF, &by, 4)) by = 0;
-        const bool plausible = (bx != 0 || by != 0) &&
-                               bx > -131072 && bx < 131072 && by > -98304 && by < 98304;
-        if (plausible && s_catalogCount < MAX_LOCATIONS) {
-            LocationEntry ge;
-            ge.name = "Mobile Balamb Garden";
-            ge.x = bx; ge.y = by;
-            const double gdist = CalculateWrappedDistance(px, py, bx, by);
-            int at = s_catalogCount;
-            for (int i = 0; i < s_catalogCount; i++) {
-                if (CalculateWrappedDistance(px, py, s_catalog[i].x, s_catalog[i].y) > gdist) {
-                    at = i; break;
-                }
-            }
-            for (int i = s_catalogCount; i > at; i--) s_catalog[i] = s_catalog[i - 1];
-            s_catalog[at] = ge;
-            s_catalogCount++;
-            Log::World("WorldMap: [GARDEN] added 'Mobile Balamb Garden' at (%d,%d), %.0f units away, catalog slot %d",
-                       bx, by, gdist, at);
-        } else if (bx != 0 || by != 0) {
+        const bool posOk = (bx != 0 || by != 0) &&
+                           bx > -131072 && bx < 131072 && by > -98304 && by < 98304;
+        // v0.81.0: not while flying. Aaron: "Mobile Balamb Garden should not be
+        // an option in the catalog when flying Ragnarok. To get to Garden you
+        // land at FH where Garden is parked." The rule and its evidence live in
+        // wm_story_pure.inl; the short version is that the Garden's live
+        // coordinate is 1,295 units from the FH landing pad, so FH is not a
+        // detour on the way to the Garden -- it IS the way to it, and unlike the
+        // Garden it is somewhere the airship can actually set down.
+        const bool flyingRag = RagIsFlying();
+        const bool plausible = WmOfferMobileGardenPure(posOk, flyingRag);
+        if (!plausible && posOk && flyingRag) {
+            Log::World("WorldMap: [GARDEN] 'Mobile Balamb Garden' (%d,%d) withheld -- "
+                       "flying the Ragnarok; land at Fisherman's Horizon, where the "
+                       "Garden is parked", bx, by);
+        }
+        if (plausible) {
+            const int at = WmInsertCatalogByDistance("Mobile Balamb Garden", bx, by, px, py);
+            if (at >= 0)
+                Log::World("WorldMap: [GARDEN] added 'Mobile Balamb Garden' at (%d,%d), %.0f units away, catalog slot %d",
+                           bx, by, CalculateWrappedDistance(px, py, bx, by), at);
+        } else if (!posOk && (bx != 0 || by != 0)) {
             Log::World("WorldMap: [GARDEN] bgu_pos (%d,%d) rejected as implausible", bx, by);
+        }
+
+        // v0.82.0: AND THE SHIP HE FLEW IN ON. Aaron: "There is no entry for the
+        // Ragnarok itself in the catalog once landed. Just like Mobile B-Garden,
+        // there needs to be an entry for the Ragnarok so the player can navigate
+        // to it and board it on the world map."
+        //
+        // Same slot the ownership test reads, and the property that made THAT
+        // test wrong is what makes this one easy: ragnarok_pos holds the PARKED
+        // position and is zero while he is inside it. A live coordinate means
+        // "yours, and not under you" -- exactly when a destination is useful.
+        //
+        // Appended after the reachability filter for the same reason the Garden
+        // is: it is his ride, not a place, and a walker who cannot reach it
+        // still needs to be told where it is.
+        int32_t rgx = 0, rgy = 0;
+        if (!WmSafeReadBytes(WM_RAGNAROK_POS_ADDR + WMS_VEHPOS_X_OFF, &rgx, 4)) rgx = 0;
+        if (!WmSafeReadBytes(WM_RAGNAROK_POS_ADDR + WMS_VEHPOS_Y_OFF, &rgy, 4)) rgy = 0;
+        const bool ragPosOk = (rgx != 0 || rgy != 0) &&
+                              rgx > -131072 && rgx < 131072 && rgy > -98304 && rgy < 98304;
+        if (WmOfferParkedRagnarokPure(ragPosOk, flyingRag)) {
+            const int at = WmInsertCatalogByDistance("Ragnarok", rgx, rgy, px, py);
+            if (at >= 0)
+                Log::World("WorldMap: [RAG] added 'Ragnarok' at (%d,%d), %.0f units away, catalog slot %d",
+                           rgx, rgy, CalculateWrappedDistance(px, py, rgx, rgy), at);
         }
     }
 
     if (s_catalogCount == 0) {
         Log::World("WorldMap: [BFS] WARNING — no reachable locations from current position");
     }
+
+    // v0.82.0: what this catalog was built FOR, so the watcher can tell when it
+    // has stopped being true. Recorded on every build, including the early
+    // returns' successors, so the two can never drift.
+    s_catalogVehIdClass = WmVehIdClass(GetActiveVehicleId());
+    s_pendingVehIdClass = -1;
+    s_pendingVehIdCount = 0;
 
     s_catalogBuilt = true;
     s_catalogIndex = 0;
@@ -651,7 +787,85 @@ static int     s_pendingVehicleCount = 0;
 static const DWORD WM_ENTRY_DEBOUNCE_MS = 3000;
 static DWORD s_wmEntryTick = 0;
 
-static inline bool IsFootLocomotion(uint8_t mode) { return mode == 0 || mode == 6; }
+// v0.56.0 (#118): IsFootLocomotion moved to world_map_geometry.inl, beside
+// IsCanonicalLocomotion. world_map_locomotion.inl needs it and is included
+// BEFORE this file, so defining it here was an MSVC-only build break --
+// caught by tests/catalog_story_test.cpp compiling the real include order.
+
+// v0.93.0: world_map_drive_helpers.inl is included five files later, so the
+// definition is not in scope here. A forward declaration rather than a reorder:
+// the include order in world_map.cpp is load-bearing and documented line by line
+// (locomotion before catalog, catalog before planner), and moving a file to
+// borrow one function is how that gets quietly broken.
+static void StopAutoDrive(const char* reason);
+
+// v0.82.0: THE SIGNAL THAT ACTUALLY MOVED WHEN HE BOARDED.
+//
+// CheckVehicleChange below watches the locomotion byte and, in the 09:22 BAT,
+// never saw the Ragnarok at all -- the one verdict logged reads "the locomotion
+// byte said -1", and there is no [VEH-REJECT] line, so it never even reached the
+// corroboration gate. The engine vehicle id read 50 cleanly throughout. The
+// result was a whole flight spent cycling the ELEVEN-entry on-foot catalog.
+//
+// This watcher's only power is to invalidate the cache. It never assigns
+// s_lastVehicle and never repoints the position source -- the two things that
+// made v0.56.0's Esthar failure expensive -- so a wrong answer costs one
+// redundant rebuild and nothing else. That is why the id may be trusted here on
+// terms that would be reckless twenty lines down.
+static void CheckVehicleIdChange()
+{
+    if (Garden_Active()) return;
+
+    // The world-map re-entry animation is exactly when a fresh catalog is being
+    // built anyway; leave it alone until the window closes.
+    if (s_wmEntryTick != 0) {
+        DWORD elapsed = GetTickCount() - s_wmEntryTick;
+        if (elapsed < WM_ENTRY_DEBOUNCE_MS) {
+            s_pendingVehIdClass = -1;
+            s_pendingVehIdCount = 0;
+            return;
+        }
+    }
+
+    const int live = WmVehIdClass(GetActiveVehicleId());
+    if (!WmCatalogStale(s_onWorldMap, s_catalogBuilt, s_catalogVehIdClass, live)) {
+        s_pendingVehIdClass = -1;
+        s_pendingVehIdCount = 0;
+        return;
+    }
+    if (!WmStaleDebounce(live, &s_pendingVehIdClass, &s_pendingVehIdCount,
+                         VEHID_DEBOUNCE_POLLS)) return;
+
+    Log::World("WorldMap: [VEHID] engine vehicle id now implies rule class %d, catalog was "
+               "built for class %d -- rebuilding (embark/disembark)",
+               live, s_catalogVehIdClass);
+
+    // v0.93.0: AND IF HE BOARDED OR STEPPED OFF MID-DRIVE, THE DRIVE IS OVER.
+    //
+    // Aaron: "If I am on the ground and auto-driving to Ragnarok, then press X
+    // within range, it needs to detect that I have boarded the ship, turn off
+    // auto-drive, update the catalog to reflect reachable locations by the ship,
+    // and stand by for the player to cycle the catalog to select a destination."
+    //
+    // Every latch StartAutoDrive took is now about the wrong vehicle -- the
+    // flying flag, the landing row, the arrival radius, which key set the
+    // executor presses -- so there is nothing worth carrying over. It stops, says
+    // what he is in, and hands the choice back.
+    if (WmDriveInvalidByVehicle(s_driveActive, true)) {
+        char msg[160];
+        snprintf(msg, sizeof msg,
+                 "%s Auto-drive stopped. Cycle the catalog to choose where to go.",
+                 live == 2 ? "Aboard the Ragnarok."
+               : live == 1 ? "Aboard the Garden."
+                           : "On foot.");
+        Log::World("WorldMap: [VEHID] the vehicle changed mid-drive -- stopping the drive; "
+                   "every latch it took (flying, landing row, arrival radius, key set) is "
+                   "about the vehicle he was in when it started");
+        StopAutoDrive(msg);
+    }
+
+    s_catalogBuilt = false;
+}
 
 static void CheckVehicleChange()
 {
@@ -681,12 +895,33 @@ static void CheckVehicleChange()
             s_pendingVehicleCount = 0;
             return;
         }
-        // Window expired this tick. Snapshot baseline silently.
+        // Window expired this tick. Snapshot baseline.
+        //
+        // v0.56.0 (#118): THIS PATH USED TO SKIP THE CORROBORATION GATE, and
+        // that is the whole of Aaron's 2026-08-21 Esthar failure. It assigned
+        // `s_lastVehicle = vehicle` outright, so one noisy read of 3 (Ship) at
+        // the instant the window expired was believed for the rest of the
+        // session -- repointing the drive's position source at the Balamb
+        // Garden mirror 70 km away AND flipping the steering law to the vehicle
+        // executor, which walks the player in circles on foot.
+        //
+        // The gate twenty lines below already existed and was already right.
+        // It was simply not on this path. A snapshot is a commit like any
+        // other, so it goes through the same door.
         if (IsCanonicalLocomotion(vehicle)) {
-            int prev = s_lastVehicle;
-            s_lastVehicle = vehicle;
-            Log::World("WorldMap: [WM-ENTRY-DEBOUNCE] Snapshot baseline locomotion=%u (was %d, suppressed %lums of byte noise)",
-                       vehicle, prev, (unsigned long)elapsed);
+            int32_t ppx = 0, ppy = 0, ppz = 0;
+            GetWorldMapPosition(&ppx, &ppy, &ppz);
+            int corrId = -1; double corrDist = -1.0;
+            if (LocoCorroborated(vehicle, ppx, ppy, &corrId, &corrDist)) {
+                int prev = s_lastVehicle;
+                s_lastVehicle = vehicle;
+                Log::World("WorldMap: [WM-ENTRY-DEBOUNCE] Snapshot baseline locomotion=%u (was %d, suppressed %lums of byte noise)",
+                           vehicle, prev, (unsigned long)elapsed);
+            } else {
+                Log::World("WorldMap: [WM-ENTRY-DEBOUNCE] Snapshot locomotion=%u (%s) NOT corroborated "
+                           "(engine id=%d, |P-mirror|=%.0f) -- keeping s_lastVehicle=%d",
+                           vehicle, GetVehicleName(vehicle), corrId, corrDist, s_lastVehicle);
+            }
         } else {
             Log::World("WorldMap: [WM-ENTRY-DEBOUNCE] Window expired with non-canonical locomotion=%u; keeping s_lastVehicle=%d",
                        vehicle, s_lastVehicle);
@@ -735,29 +970,13 @@ static void CheckVehicleChange()
     // that ARE about vehicles: the engine's in-motion id, or that vehicle's own
     // savemap position being where the player actually is.
     if (!IsFootLocomotion(vehicle)) {
-        const int  id      = GetActiveVehicleId();
-        const bool idAgrees = (id > 0 && GetVehicleType((uint8_t)id) == GetVehicleType(vehicle));
-        bool mirrorAgrees = false;
-        int32_t vpx = 0, vpy = 0, ppx = 0, ppy = 0, ppz = 0;
+        int32_t ppx = 0, ppy = 0, ppz = 0;
         GetWorldMapPosition(&ppx, &ppy, &ppz);
-        uintptr_t mirror = 0;
-        switch (GetVehicleType(vehicle)) {
-            case VEH_CAR:      mirror = WM_CAR_POS_ADDR;      break;
-            case VEH_GARDEN:   mirror = WM_BGU_POS_ADDR;      break;
-            case VEH_RAGNAROK: mirror = WM_RAGNAROK_POS_ADDR; break;
-            default:           mirror = 0;                    break;
-        }
-        if (mirror && (ppx || ppy) &&
-            WmSafeReadBytes(mirror + WMS_VEHPOS_X_OFF, &vpx, 4) &&
-            WmSafeReadBytes(mirror + WMS_VEHPOS_Y_OFF, &vpy, 4) && (vpx || vpy)) {
-            mirrorAgrees = CalculateWrappedDistance(ppx, ppy, vpx, vpy) < 600.0;
-        }
-        if (!idAgrees && !mirrorAgrees) {
+        int corrId = -1; double corrDist = -1.0;
+        if (!LocoCorroborated(vehicle, ppx, ppy, &corrId, &corrDist)) {
             Log::World("WorldMap: [VEH-REJECT] locomotion=%u (%s) not corroborated "
                        "(engine id=%d, |P-mirror|=%.0f) -- keeping s_lastVehicle=%d",
-                       vehicle, GetVehicleName(vehicle), id,
-                       (mirror && (vpx || vpy)) ? CalculateWrappedDistance(ppx, ppy, vpx, vpy) : -1.0,
-                       s_lastVehicle);
+                       vehicle, GetVehicleName(vehicle), corrId, corrDist, s_lastVehicle);
             return;
         }
     }

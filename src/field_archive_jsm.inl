@@ -33,8 +33,12 @@
 // and DumpEntityScript remain visible to field_archive.cpp callers
 // exactly as before the split.
 
+#include "field_archive_jsm_decode.inl"  // v0.59.0: the VM instruction encoding, read from the exe
+#include "field_archive_jsm_order.inl"   // v0.58.0: engine-verified group/slot/SYM ordering
 #include "field_archive_jsm_state.inl"
 #include "field_archive_jsm_constants.inl"
+// v0.111.0 (#dsrc): when a trigger line is a door. Pure, and tested.
+#include "jsm_line_exit_model.inl"
 #include "field_archive_jsm_helpers.inl"
 #include "field_archive_jsm_opnames.inl"
 #include "field_archive_jsm_director.inl"

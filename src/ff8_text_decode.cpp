@@ -94,7 +94,8 @@ static const char* s_menuGlyphTable[224] = {
 // so the raw encoding IS the sysfnt grid, shifted by 0x20. That was verified
 // against the two hand-built tables this file used to carry: of the ~90 bytes
 // both of them defined, they agreed on every one except five slots where the
-// Deling grid is blank (0x36/0x37/0x3E/0x3F quotes, 0x3A apostrophe) and two
+// Deling grid is blank (0x36/0x37/0x3E/0x3F quotes, 0x3A separator -- see the
+// v0.117.0 note at InitTable, which corrects the original "apostrophe" guess) and two
 // where it is blank for a compression pair (0xFA "EC", 0xFD "FE"). Those seven
 // are the override list below; everything else now comes from ONE table.
 //
@@ -105,6 +106,125 @@ static const char* s_menuGlyphTable[224] = {
 // as fragments (v0.34.8/.9). They are ordinary printable characters and the
 // grid has always known what they are.
 // ============================================================================
+
+// ============================================================================
+// BUTTON ICONS -> THE KEY THE PLAYER IS ACTUALLY HOLDING (v0.67.3)
+// ============================================================================
+// See the 0x05 branch below for why this exists and where the addresses come
+// from. Everything here is a read: one byte out of the live keymap, and a
+// lookup in a table of our own.
+
+static const uintptr_t BTN_KEYMAP_BASE   = 0x01CD0208;  // + device*0x20 + button
+static const uintptr_t BTN_DEVICE_FLAG   = 0x00B8600E;  // non-zero: a pad was last used
+static const uintptr_t BTN_REMAP_FLAGS   = 0x01CFE73C;  // bit 0x20: custom config in use
+static const uintptr_t BTN_REMAP_TABLE   = 0x01CFE740;  // 12 bytes, value = action + 1
+
+// DirectInput scancode -> something worth saying out loud. The engine's own
+// table is four characters wide and calls half of these "NONE".
+struct DikName { uint8_t code; const char* name; };
+static const DikName DIK_NAMES[] = {
+    {0x01,"Escape"},{0x02,"1"},{0x03,"2"},{0x04,"3"},{0x05,"4"},{0x06,"5"},
+    {0x07,"6"},{0x08,"7"},{0x09,"8"},{0x0A,"9"},{0x0B,"0"},{0x0C,"minus"},
+    {0x0D,"equals"},{0x0E,"Backspace"},{0x0F,"Tab"},
+    {0x10,"Q"},{0x11,"W"},{0x12,"E"},{0x13,"R"},{0x14,"T"},{0x15,"Y"},
+    {0x16,"U"},{0x17,"I"},{0x18,"O"},{0x19,"P"},
+    {0x1A,"left bracket"},{0x1B,"right bracket"},{0x1C,"Enter"},{0x1D,"left Control"},
+    {0x1E,"A"},{0x1F,"S"},{0x20,"D"},{0x21,"F"},{0x22,"G"},{0x23,"H"},
+    {0x24,"J"},{0x25,"K"},{0x26,"L"},{0x27,"semicolon"},{0x28,"apostrophe"},
+    {0x29,"backtick"},{0x2A,"left Shift"},{0x2B,"backslash"},
+    {0x2C,"Z"},{0x2D,"X"},{0x2E,"C"},{0x2F,"V"},{0x30,"B"},{0x31,"N"},{0x32,"M"},
+    {0x33,"comma"},{0x34,"full stop"},{0x35,"slash"},{0x36,"right Shift"},
+    {0x37,"numpad star"},{0x38,"left Alt"},{0x39,"Space"},{0x3A,"Caps Lock"},
+    {0x3B,"F1"},{0x3C,"F2"},{0x3D,"F3"},{0x3E,"F4"},{0x3F,"F5"},{0x40,"F6"},
+    {0x41,"F7"},{0x42,"F8"},{0x43,"F9"},{0x44,"F10"},
+    {0x47,"numpad 7"},{0x48,"numpad 8"},{0x49,"numpad 9"},{0x4A,"numpad minus"},
+    {0x4B,"numpad 4"},{0x4C,"numpad 5"},{0x4D,"numpad 6"},{0x4E,"numpad plus"},
+    {0x4F,"numpad 1"},{0x50,"numpad 2"},{0x51,"numpad 3"},{0x52,"numpad 0"},
+    {0x53,"numpad full stop"},{0x57,"F11"},{0x58,"F12"},
+    {0x9C,"numpad Enter"},{0x9D,"right Control"},{0xB5,"numpad slash"},
+    {0xB8,"right Alt"},{0xC7,"Home"},{0xC8,"Up arrow"},{0xC9,"Page Up"},
+    {0xCB,"Left arrow"},{0xCD,"Right arrow"},{0xCF,"End"},{0xD0,"Down arrow"},
+    {0xD1,"Page Down"},{0xD2,"Insert"},{0xD3,"Delete"},
+    {0,nullptr}
+};
+
+// ONE READ PATH, so a probe can supply the memory.
+//
+// Every byte this resolution needs lives at a fixed engine address, which makes
+// it exactly the sort of code that only ever gets checked by playing the game --
+// and this one decides what a blind player is told to press. The indirection
+// costs a null test and buys a test that can put a keymap in front of it and
+// assert the sentence that comes out.
+typedef uint8_t (*ButtonPeekFn)(uintptr_t);
+static ButtonPeekFn s_btnPeek = nullptr;
+
+static uint8_t BtnPeek(uintptr_t a)
+{
+    if (s_btnPeek) return s_btnPeek(a);
+#if defined(_WIN32)
+    __try { return *(volatile const uint8_t*)a; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+#else
+    (void)a;
+    return 0;      // off-Windows and unhooked: name nothing rather than crash
+#endif
+}
+
+void SetButtonPeekHook(ButtonPeekFn fn) { s_btnPeek = (ButtonPeekFn)fn; }
+
+// param -> pad button 0..15, or -1 when the parameter is not a button at all
+// (the 0x40+ range is ordinary picture icons; no field text uses it).
+static int ButtonForIconParam(uint8_t param)
+{
+    if (param >= 0x30 && param <= 0x3F) return param - 0x30;   // the button itself
+    if (param < 0x20 || param > 0x2F)   return -1;
+    const int action = param - 0x20;
+    const uint8_t flags = BtnPeek(BTN_REMAP_FLAGS);
+    if (!(flags & 0x20) || action >= 0x0C) return action;      // remap off: identity
+    for (int i = 0; i < 12; i++)
+        if (BtnPeek(BTN_REMAP_TABLE + (uintptr_t)i) == (uint8_t)(action + 1))
+            return i;
+    return -1;                                                // action is unassigned
+}
+
+// The whole resolution. False when there is nothing honest to say.
+// v0.120.0 (#centra): the second half of DecodeButtonKey, split out so a caller
+// that already HAS a button index can reach it. Auto-drive does: a Centra
+// ladder's BTNTEST mask names buttons 6 and 7 directly, with no 0x05 icon param
+// anywhere in sight, and telling a keyboard player to "press Cross" would be
+// useless. Same keymap, same fallbacks, same engine behaviour.
+bool ButtonKeyName(int b, char* out, size_t n)
+{
+    if (!out || n < 8) return false;
+    out[0] = '\0';
+    if (b < 0 || b > 15) return false;
+
+    const int dev = BtnPeek(BTN_DEVICE_FLAG) ? 1 : 0;
+    uint8_t code = BtnPeek(BTN_KEYMAP_BASE + (uintptr_t)dev * 0x20 + (uintptr_t)b);
+    if (!code)      // a pad button with no binding falls back to the keyboard,
+        code = BtnPeek(BTN_KEYMAP_BASE + (uintptr_t)b);        // as the engine does
+    if (!code) return false;
+
+    for (const DikName* d = DIK_NAMES; d->name; d++) {
+        if (d->code != code) continue;
+        snprintf(out, n, "%s", d->name);
+        return true;
+    }
+    // The joystick range, which the engine numbers B1..B28.
+    if (code >= 0xE0 && code <= 0xFB) { snprintf(out, n, "button %d", code - 0xE0 + 1); return true; }
+    if (code == 0xFC) { snprintf(out, n, "stick up");    return true; }
+    if (code == 0xFD) { snprintf(out, n, "stick down");  return true; }
+    if (code == 0xFE) { snprintf(out, n, "stick left");  return true; }
+    if (code == 0xFF) { snprintf(out, n, "stick right"); return true; }
+    return false;   // a scancode we have no word for: say nothing, count it lost
+}
+
+// The 0x05 icon path: an icon param names an ACTION, which the remap table
+// turns into a button, which ButtonKeyName above turns into a key.
+static bool DecodeButtonKey(uint8_t param, char* out, size_t n)
+{
+    return ButtonKeyName(ButtonForIconParam(param), out, n);
+}
 
 static const char* s_charTable[256] = {0};
 static bool s_tableInitialized = false;
@@ -123,7 +243,33 @@ static void InitTable()
     // not (Ifrit textformat.ifr, and the FF8 text this mod already reads).
     s_charTable[0x36] = "\"";   // Japanese opening quote -> standard quote
     s_charTable[0x37] = "\"";   // Japanese closing quote
-    s_charTable[0x3A] = "'";    // apostrophe inside contractions
+    // v0.117.0 (#centra): 0x3A IS NOT AN APOSTROPHE, AND NEVER WAS.
+    //
+    // Aaron, after the Centra Ruins: "the code [is] not reading out when I put
+    // both eyes in the top statue. When you do that it displays the code
+    // visually but isn't reading it." Half of why is here. crroof1 message 9 is
+    //
+    //   47 6d 62 63 2d  04 20  3A  04 21  3A  04 22  3A  04 23  3A  04 24
+    //   C  o  d  e  :   {n0}   ?   {n1}   ?   {n2}   ?   {n3}   ?   {n4}
+    //
+    // -- five numeric inserts with 0x3A between them, which under the old
+    // mapping spoke as "Code:9'8'9'3'9".
+    //
+    // This slot is one of the seven where the Deling grid is blank, so v04.01
+    // guessed, and the guess came with a justification -- "inside contractions"
+    // -- that the disc disproves. Across all 900 fields' .msd there are 83
+    // occurrences of 0x3A and NOT ONE is a contraction: 34 separate words in
+    // debug labels ("Ship?outside", "Norg?Angry", "Shaken?loop", "SEAL?tear?
+    // Centera"), 8 separate the Centra code digits, 7 separate debug label from
+    // id ("Agit4?0162"). Contractions use **0x43**, which v04.03 already fixed
+    // and which "don't" alone uses 822 times.
+    //
+    // Nor is it a colon: "Garden hit:Shaken?loop" carries a real colon (0x2D)
+    // and an 0x3A in the same string, doing different jobs. Every one of the 83
+    // reads correctly as a SPACE, and a space is the reading that cannot mislead
+    // a screen reader -- "Code: 9 8 9 3 9" rather than five digits glued
+    // together by punctuation.
+    s_charTable[0x3A] = " ";    // word/number separator (NOT an apostrophe)
     s_charTable[0x3E] = "\"";   // opening double quote
     s_charTable[0x3F] = "\"";   // closing double quote
     s_charTable[0xFA] = "EC";   // compression pair, blank in the grid
@@ -432,8 +578,53 @@ static int DecodeByte(const uint8_t* data, size_t pos, size_t maxBytes,
         return 0;
     }
 
-    // Icon codes: 0x05 + icon_id  (no text by design)
-    if (b == 0x05) return 1;
+    // ------------------------------------------------------------------
+    // 0x05 + param: THE BUTTON ICON, WHICH IS NOT "no text by design"
+    // ------------------------------------------------------------------
+    // Aaron, 2026-08-23, on the Trabia dragon's two legend windows: *"the legend
+    // doesn't announce the actual controls. Can we ensure as those legend items
+    // appear they also announce their respective control?"* They did not,
+    // because this decoder dropped the icon and left the sentence with no
+    // subject: `tvglen3` string 23 is `05 27` + " to defend!", and what he heard
+    // was "to defend!". A sighted player sees a green A there.
+    //
+    // This is not one scene. A scan of all 841 field .msd files finds 183 of
+    // these across the game -- "{Square} to defend!", "Press the {Select}",
+    // "{Start} to end concert", "{L1} to quit" -- every one of them a prompt
+    // whose whole content is the icon.
+    //
+    // HOW THE GAME RESOLVES IT (sub_49F930 / sub_4A2F80 / sub_468260):
+    //   param 0x20..0x2F   an ACTION index; remapped through the savemap
+    //   param 0x30..0x3F   the pad BUTTON directly
+    //   button b           0=L2 1=R2 2=L1 3=R1 4=Triangle 5=Circle 6=Cross
+    //                      7=Square 8=Select 9=L3 10=R3 11=Start
+    //                      12=Up 13=Right 14=Down 15=Left
+    //   key                byte [0x01CD0208 + device*0x20 + b], a DirectInput
+    //                      scancode; device 1 when a pad was last used
+    //                      ([0x00B8600E]), else 0, falling back to 0
+    //
+    // Verified against his screenshot: `05 24` is action 4 = Triangle, keymap
+    // 0x11 = W; `05 27` is action 7 = Square, keymap 0x1E = A. The box on screen
+    // read "W to attack!" and "A to defend!".
+    //
+    // WE NAME THE SCANCODE OURSELVES rather than reading the engine's name
+    // table at 0x00B86010. Two reasons, and the second is the important one:
+    // chasing a char* out of a table in the exe is a pointer dereference this
+    // decoder has no business making, and the engine's table is written for a
+    // four-character on-screen slot -- Escape is "ES", numpad 7 is "N7", and
+    // Enter, Space, Backspace and both Page keys are all literally "NONE".
+    // Reading "NONE to defend" to a blind player would be worse than the
+    // silence it replaces.
+    if (b == 0x05) {
+        if (pos + 1 >= maxBytes) return 1;      // truncated string: nothing to name
+        char key[32];
+        if (DecodeButtonKey(data[pos + 1], key, sizeof key) && key[0]) {
+            result += key;
+        } else if (dropped) {
+            (*dropped)++;      // an icon we could not name is still a loss
+        }
+        return 1;
+    }
 
     // Color codes: 0x06 + color_id  (no text by design)
     if (b == 0x06) return 1;

@@ -322,6 +322,15 @@ static const uintptr_t FIELD_VAR_TABLE_BASE = 0x01D2B4B0;  // dword[param]
 static const uint8_t   FIELD_VAR_PARAM_MIN  = 0x20;
 static const uint8_t   FIELD_VAR_PARAM_MAX  = 0x27;
 
+// v0.116.0 (#89): the slot rule, read out of sub_4B8E40 rather than inferred.
+// FIELD_VAR_TABLE_BASE above is range A's PRE-BIASED base -- it is indexed by
+// the raw param, so 0x20 already lands on slot 0 at 0x01D2B530. The model
+// states that in slot terms and adds range B, which is where every "stocked N"
+// and the prison floor number live. The two agree byte for byte on 0x20..0x27;
+// tests/field_var_insert_test.cpp asserts that rather than trusting it.
+#include "field_var_insert_model.inl"
+#include "dialog_expanded_trust_model.inl"
+
 // ============================================================================
 // v0.18.3.245 (#78): NAME / LOCATION inserts — control codes 0x0C and 0x0D.
 // ============================================================================
@@ -413,6 +422,12 @@ static const uintptr_t FIELD_NAME_RESOLVER_0D = 0x0047EA30;  // other names
 // simply finds nothing left to do -- there is no double substitution.
 
 // SEH-guarded dword read. No C++ objects (C2712).
+// v0.117.0 (#centra): the insert count of the most recent decode. Single
+// threaded, written by DecodeDialogWithExpansion and read by the speak paths on
+// the very next line; it carries evidence, not state.
+static int s_lastDecodeInserts = 0;
+static int DialogLastDecodeInsertCount() { return s_lastDecodeInserts; }
+
 static bool SafeReadDword(uintptr_t addr, uint32_t* out)
 {
     bool ok = false;
@@ -649,14 +664,26 @@ static int FieldExpandRawVars(const uint8_t* src, size_t srcLen,
         // --- 0x04 + param: numeric insert (sub_4B8E40, #77) ---
         if (b == 0x04 && i + 1 < srcLen) {
             uint8_t param = src[++i];
-            if (param < FIELD_VAR_PARAM_MIN || param > FIELD_VAR_PARAM_MAX) {
+            // v0.116.0 (#89): three ranges, one eight-dword table. See
+            // field_var_insert_model.inl for the disassembly this comes from.
+            const int slot = FviSlotForParam((int)param);
+            if (slot == FVI_NO_SLOT) {
+                if (FviParamIsNibbleFormat((int)param)) {
+                    // Range C is a real slot in a format we have never seen on
+                    // screen. Name it rather than lumping it in with garbage.
+                    Log::Dialog("FieldDialog: [VAR-NIBBLE] code=0x04 param=0x%02X is slot %d "
+                                "in the fixed-width nibble format -- still dropped, no sample "
+                                "has ever been observed [v0.116.0]",
+                                (unsigned)param, (int)param - 0x40);
+                    continue;
+                }
 #if FIELD_VAR_PROBE
                 FieldVarProbeDrop(param);  // v0.18.3.298 (#89): observe, don't act
 #endif
                 continue;  // out of range: engine renders nothing, param consumed
             }
             uint32_t value = 0;
-            if (!SafeReadDword(FIELD_VAR_TABLE_BASE + (uintptr_t)param * 4, &value)) {
+            if (!SafeReadDword(FviAddressForSlot(slot), &value)) {
                 continue;
             }
             char digits[16];
@@ -725,12 +752,21 @@ static int FieldExpandRawVars(const uint8_t* src, size_t srcLen,
 static std::string DecodeDialogWithExpansion(const void* raw,
                                              size_t maxBytes = 512)
 {
+    // v0.117.0: cleared here, not only set on success, so a decode that bails
+    // out early cannot leave the previous message's evidence standing.
+    s_lastDecodeInserts = 0;
     if (raw == nullptr) return std::string();
     // Callers already probe the pointer, but the copy is SEH-guarded anyway so
     // a text buffer that goes away mid-scan can't fault us.
-    uint8_t buf[512];
-    size_t cap = (maxBytes < sizeof(buf)) ? maxBytes : sizeof(buf);
-    if (!SafeCopyEngineText(raw, buf, cap)) return std::string();
+    // `maxBytes` is a LENGTH -- how many text bytes to decode. SafeCopyEngineText
+    // takes a BUFFER SIZE and spends one byte of it on the terminator, so the
+    // copy needs one more than the text. Passing the length straight through is
+    // what shortened every battle popup by a character from v0.71.0 onwards; see
+    // DialogCopyBytesFor in dialog_scroll_pure.inl.
+    uint8_t buf[513];
+    size_t cap = (maxBytes < 512) ? maxBytes : 512;
+    if (!SafeCopyEngineText(raw, buf, DialogCopyBytesFor(cap, sizeof(buf))))
+        return std::string();
 
     // v0.18.3.245 (#78): raw-byte capture ON THE SCAN PATH. The .244 hex diag
     // lived in the GETSTR hook, but Xu's briefing comes through the AMESW
@@ -774,6 +810,11 @@ static std::string DecodeDialogWithExpansion(const void* raw,
 
     uint8_t expBuf[640];
     int subs = FieldExpandRawVars(buf, cap, expBuf, sizeof(expBuf));
+    // v0.117.0 (#centra): remember how many inserts this decode resolved, so the
+    // caller can tell a built message from a stale buffer. Read it immediately
+    // after the DecodeDialogPage call that produced it -- see
+    // dialog_expanded_trust_model.inl and DialogLastDecodeInsertCount below.
+    s_lastDecodeInserts = subs;
 
     if (subs > 0) {
         std::string expanded = TrimDecoded(
@@ -805,4 +846,42 @@ static std::string DecodeDialogWithExpansion(const void* raw,
         return expanded;
     }
     return decoded;
+}
+
+// ONE PAGE OF IT, WHICH IS WHAT IS ON THE SCREEN (v0.71.0).
+//
+// Every caller below reads ff8_win_obj + 0x08, and that is NOT "the message":
+// it is the start of the CURRENT PAGE inside the message (written by
+// 0x004B9270), which the engine advances every time the player presses Confirm
+// on a page break. Decoding from it to the string terminator therefore yields
+// this page AND EVERY PAGE AFTER IT.
+//
+// Aaron, on the Ragnarok terminal: *"it seemed to repeat itself, like it was
+// loading parts of the message repeatedly."* The 11:11 log is that sentence in
+// evidence -- three consecutive utterances from the poll:
+//
+//   11:11:38  "We eliminated all the monsters ... The monsters are 3-6 meters
+//              tall ... They are fero"
+//   11:11:58  "The monsters are 3-6 meters tall ... They are ferocious
+//              carnivores ... There are 8 independent m"
+//   11:12:02  "They are ferocious carnivores ... There are 8 independent
+//              monsters ... The monsters can be kille"
+//
+// Each one starts at the page he had just turned to and runs two pages past it,
+// cut off mid-word at the decode limit. He heard the report four times over,
+// each time shifted along by one screenful.
+//
+// v0.70.0 fixed this in the show_dialog reader and missed the two paths that
+// were actually speaking: ScanAndSpeakAllWindows, which serves both the poll
+// and the AMESW/RAMESW opcode hooks. So the page limit stops being something a
+// call site remembers to apply and becomes the function they all call.
+static std::string DecodeDialogPage(const void* raw, size_t cap = 512)
+{
+    if (raw == nullptr) return std::string();
+    uint8_t probe[512];
+    size_t n = (cap < sizeof probe) ? cap : sizeof probe;
+    size_t pageBytes = n;
+    if (SafeCopyEngineText(raw, probe, n)) pageBytes = DialogPageBytes(probe, n);
+    if (pageBytes == 0) return std::string();
+    return DecodeDialogWithExpansion(raw, pageBytes);
 }

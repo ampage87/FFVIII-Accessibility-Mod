@@ -91,7 +91,31 @@ static const GardenPark s_gardenParks[] = {
     { "Fisherman's Horizon",             19584,   -2944,      0, true, true,      0,      0, false },
     { "Trabia Garden",                   51072,  -56960,   2405, true, false,     0,      0, false },
     { "Edea's House",                   -20864,   63872,   2405, true, false,     0,      0, false },
-    { "White SeeD Ship",                  2944,   53376,   2988, true, false,     0,      0, false },
+    // v0.51.0 (#109): A DRIVE-IN, AND IT NEVER COULD HAVE BEEN ANYTHING ELSE.
+    //
+    // The old row parked the hull at (2944,53376) and told the player to walk
+    // 2,988 units to a marker that was 4.2 km from the ship (world_catalog.inl
+    // has the whole story). With the marker corrected to wmsetus record 17,
+    // (-17350,46550), the destination is open ocean: there is no land to park
+    // on, no step-off, and nothing to walk. You board the White SeeD Ship by
+    // running Balamb Garden into it.
+    //
+    // Park IS the marker. The cell is Garden-traversable water (byte 0x0F bit 5
+    // set, bit 7 clear) and it is in the flood from everywhere that matters:
+    // 16 gexec3 routes -- four starts x four headings, including the exact
+    // Garden position in Aaron's current save and both starts from the failed
+    // BAT -- arrive with **zero replans**, ending 260-287 units out, inside
+    // GD_ARRIVE_DIST. Arrival then hands over to the nose-in, which presses
+    // straight at the dock point with the wall guard off, because here grinding
+    // into the target is the objective.
+    //
+    // dock 0,0 means "press at the location marker", which is the ship.
+    // v0.54.0: the approach point 1,100 units east of the boarding point, and
+    // the boarding point as the dock. Garden_StartDrive overrides both from
+    // Garden_DockSite(name, 0), which is the same pair -- they are written out
+    // here so the row reads as what it is rather than as a placeholder, and so
+    // the catalog's reachability test asks about the point the hull drives to.
+    { "White SeeD Ship",                -16874,   47006,      0, true, true, -17974,  47006, false },
     { "Great Salt Lake",                     0,       0,      0, false, false,     0,      0, false },
     { "Esthar City",                         0,       0,      0, false, false,     0,      0, false },
     { "Lunatic Pandora Lab",                 0,       0,      0, false, false,     0,      0, false },

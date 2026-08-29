@@ -30,10 +30,29 @@ static uint8_t  s_obsPrevArrows    = 0;        // arrow bitmask from previous ti
 static int      s_obsHoldTicks     = 0;        // ticks the current single arrow has been held
 static float    s_obsStartPosX     = 0.0f;     // player position when the current single arrow started
 static float    s_obsStartPosY     = 0.0f;
+// v0.77.0: THE FIELD THE WINDOW STARTED IN. A sample is a subtraction between
+// two player positions, and a field transition moves the player by teleport --
+// so a window that spans one measures the doorway, not the arrow. The 20:25 log
+// has two of these and they are the two worst readings in it: rgroad2 UP
+// reported DIVERGE=177deg (delta (81,-1841), i.e. the exact opposite of the
+// prediction) and rgexit1 LEFT reported 138deg, both timestamped on the second
+// the field changed. Nothing was wrong with either room. A metric that reads
+// like a total inversion whenever he walks through a door is a metric that
+// cannot report a real inversion.
+static uint16_t s_obsStartField    = 0xFFFF;
 static DWORD    s_obsLastLogTick   = 0;        // GetTickCount() of last sample logged (throttle)
 static const int   OBS_HOLD_THRESHOLD_TICKS = 18;     // ~300ms at 60fps; enough to settle
 static const float OBS_MOVE_THRESHOLD       = 50.0f;  // world units; below this is noise
 static const DWORD OBS_LOG_THROTTLE_MS      = 1500;   // 1.5s between consecutive samples
+
+// The RAW field id, which changes on the frame of the transition. v0.77.0.
+static uint16_t ObsFieldId()
+{
+    if (!FF8Addresses::pCurrentFieldId) return 0xFFFF;
+    return *FF8Addresses::pCurrentFieldId;
+}
+
+#include "nav_observe_window_pure.inl"
 
 // Returns popcount of an 8-bit bitmask.
 static int ObsBitCount(uint8_t v) {
@@ -986,18 +1005,24 @@ static void ObserveArrowResponse() {
     // prediction (UP+RIGHT moves at average of -camDown and +camRight, with
     // measured direction ambiguous between the two CA values), so we skip
     // them for clean per-axis data.
-    if (ObsBitCount(arrows) != 1) {
+    // v0.77.0: the window rule, in nav_observe_window_pure.inl. An arrow that
+    // changed starts a fresh window (the engine does not move the player
+    // instantly, so the first position read needs its own tick); so does a
+    // field that changed under it, because a transition is a teleport and a
+    // window spanning one measures the doorway rather than the arrow.
+    const uint16_t nowField = ObsFieldId();
+    const ObsWindow act = ObsWindowStep(ObsBitCount(arrows),
+                                        arrows != s_obsPrevArrows,
+                                        nowField != s_obsStartField);
+    if (act == OBS_WIN_SKIP) {
         s_obsHoldTicks  = 0;
         s_obsPrevArrows = arrows;
         return;
     }
-
-    // Arrow combination changed since last tick -- start a fresh hold window
-    // and record the start position. Need a separate tick to settle before
-    // the first position read (engine doesn't move the player instantly).
-    if (arrows != s_obsPrevArrows) {
+    if (act == OBS_WIN_ANCHOR) {
         s_obsHoldTicks  = 0;
         s_obsPrevArrows = arrows;
+        s_obsStartField = nowField;
         GetEntityPos(s_playerEntityIdx, s_obsStartPosX, s_obsStartPosY);
         return;
     }
@@ -1031,4 +1056,5 @@ static void ObserveArrowResponse() {
     s_obsHoldTicks  = 0;
     s_obsStartPosX  = px;
     s_obsStartPosY  = py;
+    s_obsStartField = ObsFieldId();
 }

@@ -22,6 +22,8 @@ uint32_t  main_loop = 0;
 uint32_t  go_to_main_menu = 0;
 uint32_t* pMode0LoopHandler = nullptr;
 uint32_t* pGameLoopMainLoop = nullptr;
+uint32_t  field_main_fn = 0;
+uint32_t  field_main_loop_fn = 0;
 uint32_t  pubintro_main_loop = 0;
 uint32_t  credits_main_loop = 0;
 uint32_t  pGameObjGlobal = 0;
@@ -515,6 +517,10 @@ bool Resolve()
 
             uint32_t sub_471F70 = get_relative_call(field_main_loop_addr, 0x148);
             Log::Mod("FF8Addresses:   sub_471F70 = 0x%08X", sub_471F70);
+            // v0.64.0 (#111): kept, because the space rescue freezes the field
+            // by putting a RET here while its Game Controls screen is up.
+            field_main_fn      = sub_471F70;
+            field_main_loop_fn = field_main_loop_addr;
 
             uint32_t sub_4767B0 = get_relative_call(sub_471F70, jp ? 0x4FE - 2 : 0x4FE);
             Log::Mod("FF8Addresses:   sub_4767B0 = 0x%08X", sub_4767B0);

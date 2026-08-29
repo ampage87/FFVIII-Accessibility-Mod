@@ -92,13 +92,43 @@ static uint8_t Enc(char c)
         case '-': return 0x32; case '=': return 0x33; case '*': return 0x34;
         case '&': return 0x35; case '(': return 0x38; case ')': return 0x39;
         case '.': return 0x3B; case ',': return 0x3C; case '~': return 0x3D;
-        case '\'': return 0x3A; case '"': return 0x3E; case '#': return 0x41;
+        // v0.117.0 (#centra): the apostrophe is 0x43, not 0x3A. This encoder
+        // used to say 0x3A because the decoder did, which made the "Don't!"
+        // assertion below circular -- it proved the two halves of one guess
+        // agreed with each other. The disc says 0x43: "don't" alone uses it
+        // 822 times across the 900 fields, and 0x3A is a separator in all 83
+        // of its occurrences ("Ship?outside", the Centra code digits).
+        case '\'': return 0x43; case '"': return 0x3E; case '#': return 0x41;
         case '$': return 0x42; case '_': return 0x44;
         default:  return 0x20;
     }
 }
 static size_t Put(uint8_t* p, const char* s)
 { size_t i = 0; for (; s[i]; i++) p[i] = Enc(s[i]); p[i] = 0; return i; }
+
+// The engine memory the button resolution reads. Laid out exactly as the game
+// does: keymap at 0x01CD0208 + device*0x20 + button, config flags, remap table.
+// Bindings are the ones from Aaron's own machine, read off his screenshot:
+// Triangle = W, Square = A, and Start on Space to exercise the name the
+// engine's own table gives up on.
+static int g_fakeDevice = 0;    // 0 = keyboard was last used, 1 = a pad was
+
+static unsigned char FakeKeymap(uintptr_t a)
+{
+    // The pad's own slots, deliberately EMPTY: Aaron plays on the keyboard, and
+    // a pad that is merely plugged in and nudged flips the device flag without
+    // ever being bound to anything.
+    if (a >= 0x01CD0208 + 0x20 && a < 0x01CD0208 + 0x40) return 0x00;
+    switch (a) {
+        case 0x01CFE73C: return 0x00;   // remap flags: custom config NOT in use
+        case 0x00B8600E: return (unsigned char)g_fakeDevice;
+        case 0x01CD0208 + 4:  return 0x11;   // Triangle -> DIK W
+        case 0x01CD0208 + 7:  return 0x1E;   // Square   -> DIK A
+        case 0x01CD0208 + 11: return 0x39;   // Start    -> DIK Space
+        case 0x01CD0208 + 9:  return 0x00;   // L3       -> unbound
+        default: return 0x00;
+    }
+}
 
 int main()
 {
@@ -202,7 +232,7 @@ int main()
 
         Put(buf, "Don't!");
         checkStr(FF8TextDecode::Decode(buf, sizeof(buf)), "Don't!",
-                 "apostrophe override survives the derived table");
+                 "the apostrophe (0x43) survives the derived table");
 
         const uint8_t ell[] = { 0x30, 0x00 };
         checkStr(FF8TextDecode::Decode(ell, sizeof(ell)), "...", "0x30 is still an ellipsis");
@@ -323,6 +353,94 @@ int main()
             printf("  BAD: emphasis pair counted %d dropped byte(s), want 0\n", dropped);
             bad++;
         }
+    }
+
+    // =======================================================================
+    // BUTTON ICONS (v0.67.3) -- the key the player is actually holding.
+    // =======================================================================
+    // Aaron, on the Trabia dragon's legend windows: "the legend doesn't announce
+    // the actual controls." It could not: text code 0x05 draws the button icon,
+    // and this decoder threw it away as "no text by design", leaving him with
+    // "to defend!" and no subject. 183 prompts across 841 field files are the
+    // same shape.
+    //
+    // The resolution reads the live keymap at fixed engine addresses, so the
+    // probe supplies the memory and asserts the sentence that comes out.
+    {
+        FF8TextDecode::SetButtonPeekHook(FakeKeymap);
+        // tvglen3 string 23: {05 27} " to defend!" -- action 7 = Square = A.
+        const uint8_t defend[] = { 0x05,0x27,0x20,0x72,0x6d,0x20,0x62,0x63,
+                                   0x64,0x63,0x6c,0x62,0x2e,0x00 };
+        checkStr(FF8TextDecode::Decode(defend, sizeof(defend)), "A to defend!",
+                 "**the legend names its key** -- this is the whole request");
+        // tvglen3 string 24: {05 24} " to attack!" -- action 4 = Triangle = W.
+        const uint8_t attack[] = { 0x05,0x24,0x20,0x72,0x6d,0x20,0x5f,0x72,
+                                   0x72,0x5f,0x61,0x69,0x2e,0x00 };
+        checkStr(FF8TextDecode::Decode(attack, sizeof(attack)), "W to attack!",
+                 "and so does the other one");
+
+        // The DIRECT button range 0x30..0x3F must land on the same buttons as
+        // the ACTION range 0x20..0x2F when no remap is in force -- which is what
+        // test14's two keypad strings prove in the game's own data.
+        const uint8_t direct[] = { 0x05,0x37,0x00 };
+        checkStr(FF8TextDecode::Decode(direct, sizeof(direct)), "A",
+                 "0x37 is Square directly, and Square is still A");
+
+        // Names the engine's own four-character table cannot give. Start is
+        // bound to Space here, which that table calls "NONE".
+        const uint8_t start[] = { 0x05,0x2B,0x00 };
+        checkStr(FF8TextDecode::Decode(start, sizeof(start)), "Space",
+                 "**and a key the game itself renders as \"NONE\" is still named** "
+                 "-- reading \"NONE to end concert\" would be worse than silence");
+
+        // An unbound action says nothing rather than something wrong, and the
+        // loss is counted rather than passed off as a complete sentence.
+        int dropped = 0;
+        const uint8_t unbound[] = { 0x05,0x29,0x00 };
+        checkStr(FF8TextDecode::Decode(unbound, sizeof(unbound), &dropped), "",
+                 "an unbound button names nothing");
+        check(dropped == 1, "and the loss is counted");
+
+        // A truncated string must not read past its end.
+        const uint8_t cut[] = { 0x05 };
+        checkStr(FF8TextDecode::Decode(cut, sizeof(cut)), "",
+                 "a string that ends on the code reads no further");
+
+        // A PAD TOUCHED ONCE MUST NOT SILENCE EVERY PROMPT. The engine picks
+        // the device slot from whatever was last used, and a controller that is
+        // plugged in and nudged flips that flag with no bindings behind it. The
+        // engine falls back to the keyboard slot in that case and so must this,
+        // or every button prompt in the game goes quiet for the rest of the
+        // session and nothing says why.
+        g_fakeDevice = 1;
+        checkStr(FF8TextDecode::Decode(defend, sizeof(defend)), "A to defend!",
+                 "**an unbound pad falls back to the keyboard binding**");
+        g_fakeDevice = 0;
+
+        FF8TextDecode::SetButtonPeekHook(nullptr);
+    }
+
+    // ------------------------------------------------------------------
+    // v0.117.0 (#centra): 0x3A is a SEPARATOR, not an apostrophe.
+    // ------------------------------------------------------------------
+    // crroof1 message 9 -- "Code:" and five numeric inserts with 0x3A between
+    // them -- spoke as "Code:9'8'9'3'9" and the garble filter then killed it.
+    // Across all 900 fields there are 83 occurrences of 0x3A and not one is a
+    // contraction; contractions use 0x43, which "don't" alone uses 822 times.
+    {
+        // "Code" + ':' + '9' 0x3A '8' 0x3A '9'  -- the shape of the tomb code
+        // once the inserts have been expanded to digits.
+        const uint8_t code[] = { 0x47,0x6D,0x62,0x63,0x2D,
+                                 0x2A,0x3A,0x29,0x3A,0x2A, 0x00 };
+        std::string out = FF8TextDecode::Decode(code, sizeof(code) - 1);
+        checkStr(out, "Code:9 8 9", "0x3A between digits reads as a space");
+    }
+    {
+        // The contraction byte is 0x43 and is untouched by this change --
+        // "don't". d=0x62 o=0x6D n=0x6C 0x43 t=0x72
+        const uint8_t dont[] = { 0x62,0x6D,0x6C,0x43,0x72, 0x00 };
+        std::string out = FF8TextDecode::Decode(dont, sizeof(dont) - 1);
+        checkStr(out, "don't", "0x43 is still the apostrophe");
     }
 
     printf(bad ? "FAILED: %d\n" : "OK\n", bad);

@@ -688,6 +688,36 @@ static const char* REFINE_CHAR_NAMES[] = {
     "Selphie", "Seifer", "Edea", "Laguna", "Kiros", "Ward"
 };
 
+// v0.49.0 (#107): **INDEXING THAT TABLE BY THE RAW ID IS WRONG IN A DREAM.**
+// The 2026-08-21 screenshot of L Mag-RF has Laguna / Ward / Kiros in the NAME
+// panel; the mod said "Squall" / "Irvine" / "Selphie". The character ids (0, 2,
+// 5) were right -- during a Laguna dream the dream member's record is loaded
+// into char-data[id], and it is the record's MODEL byte that says who that is.
+// Every other party list in the mod already knows this (Junction v0.17.8.17.7,
+// Item, the battle magic list v0.45.0); the refine picker was the last one
+// reading the table straight.
+//
+// The offsets are spelled out here rather than borrowed from
+// ResolveDreamAwareCharId, which is the same rule in menu_tts_diagnostics.inl:
+// tests/menu_ability_compile.cpp maps a real savemap and can therefore check
+// THIS function, and menu_tts_junction.inl makes the same local copy for the
+// same kind of reason. If a third copy ever appears, they belong in one file.
+static const int REFINE_CHARS_OFF   = 0x48C;   // savemap -> character records
+static const int REFINE_CHAR_STRIDE = 0x98;
+static const int REFINE_CHAR_MODEL  = 0x08;    // the record's model id
+
+static const char* RefinePartyName(int charId)
+{
+    if (charId < 0 || charId > 10) return nullptr;
+    int nameId = charId;
+    __try {
+        const uint8_t modelId = *((uint8_t*)SAVEMAP_BASE + REFINE_CHARS_OFF
+                                  + charId * REFINE_CHAR_STRIDE + REFINE_CHAR_MODEL);
+        if (modelId >= 8 && modelId <= 10) nameId = modelId;   // Laguna/Kiros/Ward
+    } __except(EXCEPTION_EXECUTE_HANDLER) { }
+    return REFINE_CHAR_NAMES[nameId];
+}
+
 // FF8 magic spell names by spell id (kernel.bin Section 1 order). Maps the refine-
 // result magic name (parsed from the preview, e.g. "Waters") back to its spell id
 // so the recipient's stock can be located in their savemap magic array. Water=10
@@ -791,10 +821,10 @@ static void PollRefineCharPicker(int charId, int slot, const char* what)
         s_abilRecipSettleAt    = GetTickCount();
         s_abilRecipStockSpoken = false;
 
-        const int nNames = (int)(sizeof(REFINE_CHAR_NAMES) / sizeof(REFINE_CHAR_NAMES[0]));
+        const char* nm = RefinePartyName(charId);
         char out[64];
-        if (charId >= 0 && charId < nNames) snprintf(out, sizeof(out), "%s", REFINE_CHAR_NAMES[charId]);
-        else                                snprintf(out, sizeof(out), "Character %d", charId);
+        if (nm) snprintf(out, sizeof(out), "%s", nm);
+        else    snprintf(out, sizeof(out), "Character %d", charId);
         ScreenReader::Speak(out, true);
         Log::Menu("[MenuTTS] Refine %s: id=%d slot=%d \"%s\"", what, charId, slot, out);
     }

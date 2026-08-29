@@ -73,6 +73,7 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
     // are kept — but RefreshCatalog runs about once a second, so tracing every
     // rebuild would flood the log. Once per field is enough to diagnose.
     s_scanTraced         = false;
+    s_mapExitTraced      = false;  // v0.131.8: same rule for InjectMapExits' drops
     s_coordDiagDumped    = true;   // v0.12.11: DISABLED — coordinate diagnostic served its purpose
     s_puzzleDiagDumped   = false;  // v0.18.3.267: re-arm the [PUZZLE-DIAG] dump per field
     s_partyDiagDumped    = false;  // v0.14.107: re-arm the [party-state] dump for this field load
@@ -218,6 +219,16 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
             FieldArchive::LoadINFGateways(fieldName, s_gateways, MAX_GATEWAYS, s_gatewayCount);
             // v0.20.7: precompute duplicated-room phantom-exit suppression for this field.
             ComputeDupRoomSuppression(fieldName);
+            // v0.58.0: a REAL field change invalidates the post-battle trigger-line
+            // backup. Returning from a battle re-inits the same field and keeps it,
+            // which is the one case it exists for.
+            if (strncmp(s_currentFieldName, fieldName, 63) != 0) {
+                if (s_capBackupCount > 0)
+                    Log::Field("FieldNavigation: [fieldload] dropped %d backed-up trigger lines "
+                               "on the move from '%s' to '%s' [v0.58.0]",
+                               s_capBackupCount, s_currentFieldName, fieldName);
+                InvalidateCapturedLineBackup();
+            }
             strncpy(s_currentFieldName, fieldName, 63); s_currentFieldName[63] = '\0';  // v0.20.9 diag
 
             // v05.49: SYM offset = 0.
@@ -771,6 +782,39 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                 if (trigOverridden > 0)
                     Log::Field("FieldNavigation: [INF-TRIG-POS] %d JSM positions overridden from %d trigger zones",
                                trigOverridden, s_triggerCount);
+            }
+
+            // v0.101.0 (#derived-pos): the same three fields again, for entities
+            // whose position is derivable from the field's OWN SCRIPT but is in
+            // none of the files the mod parses. sdcore1's `BossBattle` -- the
+            // trigger line that starts the Bahamut scene -- has no SETLINE, no
+            // .inf trigger zone and no gateway, so the catalog had nothing to
+            // steer Aaron to. The script does: all five party `hanno` methods
+            // turn to face (-250, -1161, 550), which lands inside walkmesh
+            // triangle 232. See field_nav_derived_pos.inl for the derivation.
+            {
+                int derivedApplied = 0;
+                for (int j2 = 0; j2 < s_jsmEntityCount; j2++) {
+                    const NavDerivedPos* row =
+                        NavDerivedPosFor((uint16_t)fieldId, s_jsmEntities[j2].symName);
+                    if (!NavDerivedShouldApply(s_jsmEntities[j2].hasPosition, row)) continue;
+                    s_jsmEntities[j2].posX = row->x;
+                    s_jsmEntities[j2].posY = row->y;
+                    s_jsmEntities[j2].hasPosition = true;
+                    // Same reasoning as the INF trigger zone above: this is a
+                    // definite walk-into interaction target, so it keeps its
+                    // place through the junk-gate.
+                    s_jsmEntities[j2].hasNearbyInteractionZone = true;
+                    derivedApplied++;
+                    Log::Field("FieldNavigation: [DERIVED-POS] ent%d '%s' type=%s "
+                               "pos -> (%d,%d) for field %u (derived from the field's own script)",
+                               s_jsmEntities[j2].jsmIndex, s_jsmEntities[j2].symName,
+                               FieldArchive::JSMEntityTypeName(s_jsmEntities[j2].type),
+                               (int)row->x, (int)row->y, (unsigned)fieldId);
+                }
+                if (derivedApplied > 0)
+                    Log::Field("FieldNavigation: [DERIVED-POS] %d JSM position(s) supplied for field %u",
+                               derivedApplied, (unsigned)fieldId);
             }
 
             // v0.12.17: SETLINE trigger line position override for PSHM_W entities.

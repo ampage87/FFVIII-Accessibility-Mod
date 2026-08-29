@@ -125,6 +125,9 @@ static int      s_gdDockIdx = 0;                       // which dock site is bei
 static bool     s_gdPatrol  = false;                   // last-resort shoreline search
 static DWORD    s_gdPatrolSince = 0;
 static const DWORD GD_PATROL_MS = 90000;
+
+// GdDockIsAfloat / GdMissingHint moved to world_garden_inlets.inl at v0.53.0
+// for the 80 KB guard; both are pure questions about a destination.
 static bool     s_gdOffGrid = false;                   // hull is on a cell the grid calls blocked
 static DWORD    s_gdOffGridSince = 0;
 // v0.20.60: the NOSE-IN phase. Reaching the approach point is not the docking --
@@ -140,7 +143,6 @@ static bool     s_gdNoseIn     = false;
 static DWORD    s_gdNoseSince  = 0;
 static int      s_gdNosePhase  = 0;
 static const DWORD GD_NOSE_PHASE_MS = 4000;   // per press position
-static const int   GD_NOSE_PHASES   = 7;      // centre, then +-384, +-768, +-1152
 static const int   GD_NOSE_LATERAL  = 384;
 // A press that does not take leaves the hull JAMMED against the shore, and a
 // jammed hull cannot re-aim: simulated on the engine grid, phases 1..6 moved it
@@ -396,11 +398,14 @@ static void Garden_Park(int32_t px, int32_t py, bool onPark, const char* how)
     if (!canGetOff) {
         // Do NOT say "arrived". Report the truth and give the player the range
         // and bearing they would need if they had another way in.
-        snprintf(buf, sizeof(buf),
-                 "Balamb Garden stopped %d hundred units %s of %s, but there is "
-                 "nowhere here to leave the Garden. The hull cannot get closer.",
-                 (int)((walk + 50.0) / 100.0),
-                 GdCompass(px, py, s_gdDestX, s_gdDestY), s_gdDestName);
+        {
+            char wsay[48];
+            WmSayDistance(walk, wsay, sizeof wsay);
+            snprintf(buf, sizeof(buf),
+                     "Balamb Garden stopped %s %s of %s, but there is "
+                     "nowhere here to leave the Garden. The hull cannot get closer.",
+                     wsay, GdCompass(px, py, s_gdDestX, s_gdDestY), s_gdDestName);
+        }
     } else if (walk < 200.0) {
         snprintf(buf, sizeof(buf), "Balamb Garden parked at %s. Leave the Garden to go in.",
                  s_gdDestName);
@@ -415,11 +420,14 @@ static void Garden_Park(int32_t px, int32_t py, bool onPark, const char* how)
                  s_gdDestName, walk / 1000.0,
                  GdCompass(px, py, s_gdDestX, s_gdDestY));
     } else {
-        snprintf(buf, sizeof(buf),
-                 "Balamb Garden parked as close as it can get. %s is %d hundred "
-                 "units %s. Leave the Garden and press backslash to walk the rest.",
-                 s_gdDestName, (int)((walk + 50.0) / 100.0),
-                 GdCompass(px, py, s_gdDestX, s_gdDestY));
+        {
+            char wsay[48];
+            WmSayDistance(walk, wsay, sizeof wsay);
+            snprintf(buf, sizeof(buf),
+                     "Balamb Garden parked as close as it can get. %s is %s %s. "
+                     "Leave the Garden and press backslash to walk the rest.",
+                     s_gdDestName, wsay, GdCompass(px, py, s_gdDestX, s_gdDestY));
+        }
     }
     Log::World("WorldMap: [GARDEN] parked (%s) at (%d,%d) parkBit=%d canDisembark=%d "
                "stepOff=(%d,%d) walk=%.0f to %s, %d replans",
@@ -830,8 +838,9 @@ static void Garden_Update()
     // decoded, so the honest thing is to sweep it and log where.
     if (s_gdNoseIn) {
         const DWORD elapsed = now - s_gdNoseSince;
+        const int phases = GdNosePhases(s_gdDestName, s_gdDockIdx);
         const int phase = (int)(elapsed / GD_NOSE_PHASE_MS);
-        if (phase != s_gdNosePhase && phase < GD_NOSE_PHASES) {
+        if (phase != s_gdNosePhase && phase < phases) {
             s_gdNosePhase = phase;
             Log::World("WorldMap: [GARDEN] nose-in site %d phase %d at (%d,%d)",
                        s_gdDockIdx, phase, px, py);
@@ -845,7 +854,7 @@ static void Garden_Update()
                        s_gdDockIdx, px, py, heading,
                        (int)CalculateWrappedDistance(px, py, s_gdDockX, s_gdDockY));
         }
-        if (elapsed > GD_NOSE_MS) {
+        if (elapsed > (DWORD)phases * GD_NOSE_PHASE_MS) {
             Log::World("WorldMap: [GARDEN] nose-in exhausted %d phases at (%d,%d) on dock site %d for %s",
                        GD_NOSE_PHASES, px, py, s_gdDockIdx, s_gdDestName);
             // v0.20.62: another place the hull can touch this landmass? Go there
@@ -864,7 +873,9 @@ static void Garden_Update()
                 Log::World("WorldMap: [GARDEN] moving to dock site %d, approach (%d,%d) press (%d,%d)",
                            s_gdDockIdx, next->approach_x, next->approach_y,
                            next->dock_x, next->dock_y);
-                ScreenReader::Speak("No dock here. Trying the other side.", true);
+                char sb[96];
+                GdSiteAdvanceLine(s_gdDestName, s_gdDockIdx, sb, sizeof(sb));
+                ScreenReader::Speak(sb, true);
                 SetDriveKeys(false, false, false, false);
                 return;
             }
@@ -877,7 +888,17 @@ static void Garden_Update()
             // there is no world-map proximity trigger for this destination and
             // the search moves into the world-map event scripts -- and the trace
             // is the evidence for saying so.
-            if (!s_gdPatrol) {
+            // v0.52.0 (#109): A SHORELINE PATROL NEEDS A SHORELINE.
+            //
+            // The patrol hugs whatever blocks the bow. On open water nothing
+            // does, so it aims at a dock point it is already sitting on and
+            // turns on the spot. The 2026-08-21 log is ninety seconds of it:
+            // every trace line reads `dist to White SeeD Ship 5` while the
+            // heading walks 0..4095 and the position moves by ten units. That
+            // is not a search, it is a wait with the engine running.
+            //
+            // A dock point on water gets the nose-in and nothing after it.
+            if (!s_gdPatrol && !GdDockIsAfloat(s_gdDriveIn, s_gdDockX, s_gdDockY)) {
                 s_gdPatrol = true; s_gdPatrolSince = now;
                 s_gdNoseIn = false; s_gdNosePhase = 0;
                 s_gdGuardOn = false; s_gdGuardDir = 0; s_gdGuardFrames = 0;
@@ -887,10 +908,28 @@ static void Garden_Update()
                 SetDriveKeys(false, false, false, false);
                 return;
             }
+            if (!s_gdPatrol)
+                Log::World("WorldMap: [GARDEN] dock point (%d,%d) is open water -- no shore to "
+                           "patrol, stopping here", s_gdDockX, s_gdDockY);
             char b2[256];
-            snprintf(b2, sizeof(b2),
-                     "Balamb Garden could not dock at %s. Tried every point on its shore the hull can reach.",
-                     s_gdDestName);
+            // v0.52.0 (#109): SAY WHAT IS ACTUALLY WRONG.
+            //
+            // For a dock point on open water the hull has been driven onto the
+            // exact coordinate and nothing happened, which does not mean it
+            // could not get there -- the 2026-08-21 log has it sitting five
+            // units from the mark. It means the thing is not there to be hit.
+            // For the White SeeD Ship that is a known prerequisite and the
+            // player can do something about it, so say it rather than making
+            // "could not dock" sound like a navigation failure.
+            if (GdDockIsAfloat(s_gdDriveIn, s_gdDockX, s_gdDockY)) {
+                snprintf(b2, sizeof(b2),
+                         "Balamb Garden is right on the spot for %s and nothing is there. "
+                         "%s", s_gdDestName, GdMissingHint(s_gdDestName));
+            } else {
+                snprintf(b2, sizeof(b2),
+                         "Balamb Garden could not dock at %s. Tried every point on its shore the hull can reach.",
+                         s_gdDestName);
+            }
             Garden_Stop(b2);
             return;
         }
@@ -1008,10 +1047,12 @@ static void Garden_Update()
                        (int)gate2, goalDist, s_gdBeachClosest);
             s_gdBeachRun = false;
             char bmsg[192];
+            char bsay[48];
+            WmSayDistance(goalDist, bsay, sizeof bsay);
             snprintf(bmsg, sizeof(bmsg),
-                     "Balamb Garden could not get up the beach at %s. It is %.0f hundred units "
+                     "Balamb Garden could not get up the beach at %s. It is %s "
                      "away across the water. Stopping here.",
-                     s_gdDestName, (goalDist + 50.0) / 100.0);
+                     s_gdDestName, bsay);
             Garden_Stop(bmsg);
             return;
         }

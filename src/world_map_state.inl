@@ -325,6 +325,32 @@ static bool s_destPlannerEligible[MAX_LOCATIONS];
 // ============================================================================
 // Navigation state
 // ============================================================================
+// #RAGNAROK: the landing row this drive is flying to, or nullptr when the
+// player is not in the airship. A pointer into the static generated table, so
+// it stays valid for the life of the process.
+struct RagLanding;
+static const RagLanding* s_ragLanding = nullptr;
+// ...and whether this drive is FLYING AT ALL, which is a different question.
+// v0.79.0 conflated the two and the 23:05 BAT paid for it: Mobile Balamb Garden
+// has no static landing row (its coordinate is live), so the airship got the
+// CAR's forward-collision guard back and coasted to a halt 53 km short. Every
+// Ragnarok drive is flying; only some of them know where to set down.
+static bool s_ragFlying = false;
+// The heading at the last stuck check, so a TURN is not mistaken for a wedge.
+// The world map's controls are tank-style -- LEFT/RIGHT rotate, UP moves the
+// facing -- so a vehicle swinging onto a new bearing genuinely does not
+// translate, and the stuck detector measures translation. The Sorceress
+// Memorial drive in the 23:04 BAT burned one of its six lives on exactly this
+// before flying 53 km and arriving.
+static uint16_t s_driveStuckHdg = 0;
+// ...and how many checks in a row a turn has excused. An un-wedge burst changes
+// the heading too, so an unbounded excuse would mean a drive that spins in one
+// place forever and never gives up -- which is worse than giving up early,
+// because at least a give-up says so.
+static int s_driveTurnPasses = 0;
+static const int DRIVE_TURN_PASS_MAX = 3;
+#include "drive_turn_pure.inl"
+
 static struct LocationEntry s_catalog[MAX_LOCATIONS];  // distance-sorted working copy
 static int  s_catalogCount = 0;        // v0.14.85: post-filter count (≤ LOCATION_COUNT, MAX_LOCATIONS)
 static bool s_catalogBuilt = false;
@@ -1087,6 +1113,10 @@ struct GardenPark {
     // for.
     bool        beach_climb;
 };
+// v0.52.0 (#109): defined in world_map_wmslots.inl, which is included after
+// world_map_segments.inl (it needs WmSafeReadBytes) and called from inside it.
+static void WmDumpWorldmapSlots();
+
 static const GardenPark* Garden_ParkFor(const char* name);
 // v0.20.89: ask about a BERTH, not a coordinate. A beach_climb berth is only
 // reachable with its own exception in force, and v0.20.88 armed that exception
@@ -1108,3 +1138,34 @@ static const uint32_t WMS_VEHPOS_X_OFF   = 0;    // int32
 static const uint32_t WMS_VEHPOS_Y_OFF   = 4;    // int32
 static const uint32_t WMS_VEHPOS_Z_OFF   = 8;    // int16
 static const uint32_t WMS_VEHPOS_ROT_OFF = 10;   // int16
+
+// ============================================================================
+// v0.56.0 (#118): THE LOCOMOTION VERDICT -- what the player is ACTUALLY riding.
+// ============================================================================
+// State for world_map_locomotion.inl. That module is included after
+// world_map_segments.inl (it needs GetWorldMapPosition / WmSafeReadBytes /
+// GetActiveVehicleId), but segments.inl's GetWorldMapPosition_Active asks it a
+// question, so LocoIsFoot is forward-declared here.
+//
+// The full account of why the animation byte cannot be trusted, and why a
+// two-second "did the player move" window is a timer rather than a
+// discriminator, is in world_map_locomotion.inl.
+enum LocoVerdictKind { LOCO_UNKNOWN = 0, LOCO_FOOT = 1, LOCO_VEHICLE = 2 };
+static LocoVerdictKind s_locoVerdict      = LOCO_UNKNOWN;
+static int32_t         s_locoFootX        = 0;
+static int32_t         s_locoFootY        = 0;
+static bool            s_locoHadFoot      = false;
+static int             s_locoLastRejected = -999;
+
+// How close a vehicle's savemap mirror has to be to the player's foot position
+// for it to second that vehicle's claim. 600 is the v0.20.56 value, kept: a
+// parked vehicle sits beside the boarding point the frozen foot DWORDs hold,
+// and a stale claim misses by tens of thousands of units (Aaron's 2026-08-21
+// Ship claim missed by ~70,000), so nothing here is near the boundary.
+static const double LOCO_MIRROR_AGREE_UNITS = 600.0;
+
+static bool LocoIsFoot();
+static void LocoTick();
+static void LocoReset();
+static bool LocoCorroborated(uint8_t vehicle, int32_t footX, int32_t footY,
+                             int* outId, double* outMirrorDist);

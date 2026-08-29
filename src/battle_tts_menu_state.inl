@@ -29,6 +29,63 @@ static const char* CHAR_NAMES[8] = {
     "Rinoa", "Selphie", "Seifer", "Edea"
 };
 
+// v0.45.0 (#106): **THE PARTY FORMATION IS STALE IN A DREAM BATTLE, AND THREE
+// LISTS WERE READ THROUGH IT.**
+//
+// Aaron, on the Trabia Canyon dream: *"I rearranged Ward's magic but the
+// rearrangement wasn't properly reflected in the battle menu, resulting in my
+// casting spells which I did not intend."*
+//
+// `GetBattleCharName` has known since v0.17.8.17.2 that `SAVEMAP_PARTY_FORMATION`
+// is stale here -- its own comment records a dream where the array read
+// `[05 00 01]` (Selphie/Squall/Zell) while the live actors were Ward, Laguna and
+// Kiros -- and it works around that with the actor-kind byte at compStats
+// `+0x1C3`. But `BuildMagicList`, `BuildGFList` and `BuildCharCommandList` all
+// index the savemap character array through that same stale byte, so in a dream
+// they can build **another character's list** and the cursor position the player
+// hears has nothing to do with the spell that gets cast.
+//
+// The bridge between the two is the character record's MODEL byte at `+0x08`.
+// The menu side already relies on it (`menu_tts_junction.inl` logs
+// `roster[0]=5 modelId=9` and names that character Kiros), so during a dream the
+// savemap array holds the dream members with their model bytes set to 8, 9, 10.
+// Given the actor kind, the character index is the record whose model matches.
+//
+// **This changes nothing in a normal battle.** Actor kinds there are 0-7, so the
+// override never triggers and the formation byte is used exactly as before. It
+// also changes nothing in a dream where the formation already happens to agree
+// -- the search returns the same index. It differs only where the two disagree,
+// which is the bug.
+static const int SAVEMAP_CHAR_MODEL = 0x08;   // char record -> model id
+
+static uint8_t BattleSlotCharIdx(uint8_t partySlot, uint8_t* outKind, bool* outOverride)
+{
+    uint8_t charIdx = 0xFF, kind = 0xFF;
+    bool over = false;
+    __try { charIdx = *(uint8_t*)(SAVEMAP_PARTY_FORMATION + partySlot); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { charIdx = 0xFF; }
+    __try {
+        kind = *(uint8_t*)(BATTLE_COMP_STATS_BASE
+                           + partySlot * BATTLE_COMP_STATS_STRIDE + 0x1C3);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { kind = 0xFF; }
+
+    if (kind >= 8 && kind <= 10) {
+        __try {
+            for (int i = 0; i < 8; i++) {
+                const uint8_t model = *(uint8_t*)(SAVEMAP_CHAR_DATA_BASE
+                                                  + i * SAVEMAP_CHAR_STRIDE + SAVEMAP_CHAR_MODEL);
+                if (model != kind) continue;
+                over = (i != (int)charIdx);
+                charIdx = (uint8_t)i;
+                break;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) { }
+    }
+    if (outKind)     *outKind = kind;
+    if (outOverride) *outOverride = over;
+    return charIdx;
+}
+
 // Savemap stores GF ABILITY IDs for equipped commands, not battle command IDs.
 // Ability IDs = battle command IDs + 0x12.
 // Slot 0 is always Attack (hardcoded, not stored in savemap).

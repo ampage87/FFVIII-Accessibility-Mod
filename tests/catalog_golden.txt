@@ -1,162 +1,283 @@
-# catalog_harness logic-integrity dump  (fixtures=33)
+# catalog_harness logic-integrity dump  (fixtures=60)
 
 ### FIXTURE empty_field
 count=0 nonplayer=0 player=-1 selected=0
 
 ### FIXTURE players_and_npcs
 count=4 nonplayer=4 player=0 selected=0
-  [0] idx=1 type=NPC model=15 tri=11 gw=-1 name="NPC"
-  [1] idx=2 type=NPC model=12 tri=12 gw=-1 name="NPC"
-  [2] idx=3 type=NPC model=20 tri=13 gw=-1 name="NPC"
-  [3] idx=4 type=NPC model=8 tri=14 gw=-1 name="NPC"
+  [0] idx=1 type=NPC model=15 tri=11 gw=-1 pos=(200,150) name="NPC"
+  [1] idx=2 type=NPC model=12 tri=12 gw=-1 pos=(-100,200) name="NPC"
+  [2] idx=3 type=NPC model=20 tri=13 gw=-1 pos=(300,-50) name="NPC"
+  [3] idx=4 type=NPC model=8 tri=14 gw=-1 pos=(50,300) name="NPC"
 
 ### FIXTURE leader_not_squall
 count=2 nonplayer=2 player=1 selected=0
-  [0] idx=0 type=NPC model=0 tri=10 gw=-1 name="Squall"
-  [1] idx=2 type=NPC model=15 tri=12 gw=-1 name="NPC"
+  [0] idx=0 type=NPC model=0 tri=10 gw=-1 pos=(100,100) name="Squall"
+  [1] idx=2 type=NPC model=15 tri=12 gw=-1 pos=(-80,200) name="NPC"
 
 ### FIXTURE assembly_and_partyfilter
 count=3 nonplayer=3 player=0 selected=0
-  [0] idx=1 type=NPC model=2 tri=11 gw=-1 name="Irvine"
-  [1] idx=2 type=NPC model=4 tri=12 gw=-1 name="Rinoa"
-  [2] idx=3 type=NPC model=15 tri=13 gw=-1 name="NPC"
+  [0] idx=1 type=NPC model=2 tri=11 gw=-1 pos=(200,120) name="Irvine"
+  [1] idx=2 type=NPC model=4 tri=12 gw=-1 pos=(-80,200) name="Rinoa"
+  [2] idx=3 type=NPC model=15 tri=13 gw=-1 pos=(40,-100) name="NPC"
 
 ### FIXTURE walkmesh_exclusion
 count=2 nonplayer=2 player=0 selected=0
-  [0] idx=2 type=NPC model=20 tri=12 gw=-1 name="NPC"
-  [1] idx=3 type=NPC model=20 tri=13 gw=-1 name="NPC"
+  [0] idx=2 type=NPC model=20 tri=12 gw=-1 pos=(9999,100) name="NPC"
+  [1] idx=3 type=NPC model=20 tri=13 gw=-1 pos=(200,200) name="NPC"
 
 ### FIXTURE hidden_and_pushonly
 count=2 nonplayer=2 player=0 selected=0
-  [0] idx=3 type=NPC model=15 tri=13 gw=-1 name="NPC"
-  [1] idx=4 type=Draw Point model=-1 tri=14 gw=-1 name="Draw Point"
+  [0] idx=3 type=NPC model=15 tri=13 gw=-1 pos=(40,-100) name="NPC"
+  [1] idx=4 type=Draw Point model=-1 tri=14 gw=-1 pos=(300,300) name="Draw Point"
+
+### FIXTURE invisible_talk_target
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=1 type=NPC model=15 tri=11 gw=-1 pos=(200,100) name="NPC"
 
 ### FIXTURE naming_paths
 count=5 nonplayer=5 player=0 selected=0
-  [0] idx=1 type=Card Game model=15 tri=11 gw=-1 name="Card Player"
-  [1] idx=2 type=Draw Point model=15 tri=12 gw=-1 name="Draw Point"
-  [2] idx=3 type=Save Point model=24 tri=13 gw=-1 name="Save Point"
-  [3] idx=4 type=Save Point model=15 tri=14 gw=-1 name="Save Point"
-  [4] idx=5 type=Save Point model=15 tri=15 gw=-1 name="Save Point"
+  [0] idx=1 type=Card Game model=15 tri=11 gw=-1 pos=(200,100) name="Card Player"
+  [1] idx=2 type=Draw Point model=16 tri=12 gw=-1 pos=(-100,120) name="Draw Point"
+  [2] idx=3 type=Save Point model=24 tri=13 gw=-1 pos=(40,-100) name="Save Point"
+  [3] idx=4 type=Save Point model=17 tri=14 gw=-1 pos=(300,300) name="Save Point"
+  [4] idx=5 type=Save Point model=18 tri=15 gw=-1 pos=(-300,-300) name="Save Point"
 
 ### FIXTURE trigline_exits
 count=3 nonplayer=3 player=0 selected=0
-  [0] idx=-200 type=Exit model=-1 tri=0 gw=-1 name="Exit to testbl14"
-  [1] idx=-201 type=Exit model=-1 tri=0 gw=-1 name="Exit to World Map"
-  [2] idx=-202 type=Exit model=-1 tri=0 gw=-1 name="Exit to B-Garden - Headmaster's Office 2"
+  [0] idx=-200 type=Exit model=-1 tri=0 gw=-1 pos=(-400,1100) name="Exit to testbl14"
+  [1] idx=-201 type=Exit model=-1 tri=0 gw=-1 pos=(1100,-400) name="Exit to World Map"
+  [2] idx=-202 type=Exit model=-1 tri=0 gw=-1 pos=(2000,200) name="Exit to B-Garden - Headmaster's Office 2"
 
 ### FIXTURE trigline_event
 count=1 nonplayer=1 player=0 selected=0
-  [0] idx=-201 type=Object model=-1 tri=0 gw=-1 name="Event"
+  [0] idx=-201 type=Object model=-1 tri=0 gw=-1 pos=(300,0) name="Event"
 
 ### FIXTURE trigline_interaction
 count=2 nonplayer=2 player=0 selected=0
-  [0] idx=-200 type=Interaction model=-1 tri=0 gw=-1 name="Interaction 1"
-  [1] idx=-201 type=Interaction model=-1 tri=0 gw=-1 name="Interaction 2"
+  [0] idx=-200 type=Interaction model=-1 tri=0 gw=-1 pos=(300,0) name="Interaction 1"
+  [1] idx=-201 type=Interaction model=-1 tri=0 gw=-1 pos=(-300,0) name="Interaction 2"
+
+### FIXTURE camera_pan_named
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=-200 type=Interaction model=-1 tri=0 gw=-1 pos=(300,0) name="Ladder"
+
+### FIXTURE camera_pan_lineoff
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=-200 type=Interaction model=-1 tri=0 gw=-1 pos=(300,0) name="Ladder, not active"
 
 ### FIXTURE trigline_solo_statue
 count=1 nonplayer=1 player=0 selected=0
-  [0] idx=-200 type=Interaction model=-1 tri=0 gw=-1 name="Statue"
+  [0] idx=-200 type=Interaction model=-1 tri=0 gw=-1 pos=(300,0) name="Statue"
 
 ### FIXTURE jsm_specials
 count=5 nonplayer=5 player=0 selected=0
-  [0] idx=-300 type=Save Point model=-1 tri=14 gw=-1 name="Save Point"
-  [1] idx=-301 type=Draw Point model=-1 tri=14 gw=-1 name="Draw Point"
-  [2] idx=-302 type=Shop model=-1 tri=14 gw=-1 name="Shop"
-  [3] idx=-303 type=Card Game model=-1 tri=14 gw=-1 name="Card Game"
-  [4] idx=-304 type=Object model=-1 tri=14 gw=-1 name="Directory"
+  [0] idx=-300 type=Save Point model=-1 tri=14 gw=-1 pos=(300,250) name="Save Point"
+  [1] idx=-301 type=Draw Point model=-1 tri=1 gw=-1 pos=(-300,250) name="Draw Point"
+  [2] idx=-302 type=Shop model=-1 tri=14 gw=-1 pos=(300,-250) name="Shop"
+  [3] idx=-303 type=Card Game model=-1 tri=14 gw=-1 pos=(-300,-250) name="Card Game"
+  [4] idx=-304 type=Object model=-1 tri=14 gw=-1 pos=(50,50) name="Directory"
 
 ### FIXTURE jsm_drawpoint_consolidation
-count=2 nonplayer=2 player=0 selected=0
-  [0] idx=1 type=NPC model=15 tri=11 gw=-1 name="NPC"
-  [1] idx=-300 type=Draw Point model=-1 tri=14 gw=-1 name="Draw Point"
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=1 type=Draw Point model=15 tri=11 gw=-1 pos=(500,250) name="Draw Point"
 
 ### FIXTURE mapexits
 count=2 nonplayer=2 player=0 selected=0
-  [0] idx=-300 type=Exit model=-1 tri=14 gw=-1 name="Exit to Balamb Harbor 1"
-  [1] idx=-400 type=Exit model=-1 tri=0 gw=0 name="Exit"
+  [0] idx=-300 type=Exit model=-1 tri=14 gw=-1 pos=(400,0) name="Exit to Balamb Harbor 1"
+  [1] idx=-400 type=Exit model=-1 tri=0 gw=0 pos=(3000,0) name="Exit"
 
 ### FIXTURE duproom_phantom
 count=1 nonplayer=1 player=0 selected=0
-  [0] idx=-301 type=Exit model=-1 tri=14 gw=-1 name="Exit to Deling City - Club 1"
+  [0] idx=-301 type=Exit model=-1 tri=14 gw=-1 pos=(200,200) name="Exit to Deling City - Club 1"
 
 ### FIXTURE gateways_merge
 count=1 nonplayer=1 player=0 selected=0
-  [0] idx=-400 type=Exit model=-1 tri=0 gw=0 name="Exit to Deep Sea Research Center - Levels 1"
+  [0] idx=-400 type=Exit model=-1 tri=0 gw=0 pos=(125,110) name="Exit to Deep Sea Research Center - Steam Room"
 
 ### FIXTURE gateways_ring_split
 count=2 nonplayer=2 player=0 selected=0
-  [0] idx=-400 type=Exit model=-1 tri=0 gw=0 name="Top crossing"
-  [1] idx=-401 type=Exit model=-1 tri=0 gw=1 name="Bottom crossing"
+  [0] idx=-400 type=Exit model=-1 tri=0 gw=0 pos=(0,2000) name="Top crossing"
+  [1] idx=-401 type=Exit model=-1 tri=0 gw=1 pos=(0,-2000) name="Bottom crossing"
 
 ### FIXTURE dedupe_object_line
 count=2 nonplayer=2 player=0 selected=0
-  [0] idx=-300 type=Object model=-1 tri=14 gw=-1 name="Object"
-  [1] idx=-301 type=Object model=-1 tri=14 gw=-1 name="Directory"
+  [0] idx=-300 type=Object model=-1 tri=14 gw=-1 pos=(300,0) name="Object"
+  [1] idx=-301 type=Object model=-1 tri=14 gw=-1 pos=(-300,0) name="Directory"
 
 ### FIXTURE dedupe_entity_special
 count=1 nonplayer=1 player=0 selected=0
-  [0] idx=-200 type=Save Point model=-1 tri=0 gw=-1 name="Save Point"
+  [0] idx=-200 type=Save Point model=-1 tri=0 gw=-1 pos=(50,50) name="Save Point"
 
 ### FIXTURE sentinel_overlap
 count=2 nonplayer=2 player=0 selected=0
-  [0] idx=-400 type=Object model=-1 tri=14 gw=-1 name="Object"
-  [1] idx=-400 type=Exit model=-1 tri=0 gw=0 name="Exit to bvboat_1"
+  [0] idx=-400 type=Object model=-1 tri=14 gw=-1 pos=(200,0) name="Object"
+  [1] idx=-400 type=Exit model=-1 tri=0 gw=0 pos=(500,0) name="Exit to bvboat_1"
 
 ### FIXTURE prison_stairs
 count=2 nonplayer=2 player=0 selected=0
-  [0] idx=-200 type=Exit model=-1 tri=0 gw=-1 name="Stairs down to Floor 5"
-  [1] idx=-201 type=Exit model=-1 tri=0 gw=-1 name="Stairs up to Floor 7"
+  [0] idx=-200 type=Exit model=-1 tri=0 gw=-1 pos=(-2150,-98) name="Stairs down to Floor 5"
+  [1] idx=-201 type=Exit model=-1 tri=0 gw=-1 pos=(-2276,334) name="Stairs up to Floor 7"
 
 ### FIXTURE state_exclusion
-count=2 nonplayer=2 player=0 selected=0
-  [0] idx=-301 type=Object model=-1 tri=14 gw=-1 name="Object"
-  [1] idx=-302 type=Object model=-1 tri=14 gw=-1 name="Gate 3"
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=-302 type=Object model=-1 tri=14 gw=-1 pos=(0,200) name="Gate 3"
 
 ### FIXTURE lateres_centroid
 count=1 nonplayer=1 player=0 selected=0
-  [0] idx=-300 type=Object model=-1 tri=1 gw=-1 name="Gate 1"
+  [0] idx=-300 type=Object model=-1 tri=1 gw=-1 pos=(-1333,1333) name="Gate 1"
 
 ### FIXTURE lateres_bg
 count=1 nonplayer=1 player=0 selected=0
-  [0] idx=-300 type=Interaction model=-1 tri=0 gw=-1 name="Interaction 1"
+  [0] idx=-300 type=Interaction model=-1 tri=0 gw=-1 pos=(700,350) name="Interaction 1"
 
 ### FIXTURE crossing_filter
 count=0 nonplayer=0 player=0 selected=0
 
 ### FIXTURE rebuild_retain
 count=2 nonplayer=2 player=0 selected=1
-  [0] idx=1 type=NPC model=15 tri=11 gw=-1 name="NPC"
-  [1] idx=2 type=NPC model=15 tri=12 gw=-1 name="NPC"
+  [0] idx=1 type=NPC model=15 tri=11 gw=-1 pos=(200,150) name="NPC"
+  [1] idx=2 type=NPC model=15 tri=12 gw=-1 pos=(-100,200) name="NPC"
 
 ### FIXTURE screen_filter
 count=1 nonplayer=1 player=0 selected=0
-  [0] idx=-200 type=Exit model=-1 tri=0 gw=-1 name="Exit"
+  [0] idx=-200 type=Exit model=-1 tri=0 gw=-1 pos=(300,0) name="Exit"
 
 ### FIXTURE jsm_controller_skip
 count=0 nonplayer=0 player=0 selected=0
 
 ### FIXTURE drawpoint_nopos
-count=1 nonplayer=1 player=0 selected=0
-  [0] idx=1 type=Draw Point model=15 tri=11 gw=-1 name="Draw Point"
+count=2 nonplayer=2 player=0 selected=0
+  [0] idx=1 type=NPC model=15 tri=11 gw=-1 pos=(200,100) name="NPC"
+  [1] idx=-300 type=Draw Point model=-1 tri=0 gw=-1 pos=(500,250) name="Draw Point"
 
 ### FIXTURE ladder_nav
 count=1 nonplayer=1 player=0 selected=0
-  [0] idx=-300 type=Object model=-1 tri=14 gw=-1 name="Ladder"
+  [0] idx=-300 type=Object model=-1 tri=14 gw=-1 pos=(250,175) name="Ladder"
 
 ### FIXTURE ladder_unnamed
 count=1 nonplayer=1 player=0 selected=0
-  [0] idx=-300 type=Object model=-1 tri=14 gw=-1 name="Ladder"
+  [0] idx=-300 type=Object model=-1 tri=14 gw=-1 pos=(250,175) name="Ladder"
 
 ### FIXTURE item_pickup
 count=2 nonplayer=2 player=0 selected=0
-  [0] idx=1 type=Object model=10 tri=12 gw=-1 name="Item 1"
-  [1] idx=2 type=NPC model=20 tri=13 gw=-1 name="NPC"
+  [0] idx=1 type=Object model=10 tri=12 gw=-1 pos=(200,200) name="Item 1"
+  [1] idx=2 type=NPC model=20 tri=13 gw=-1 pos=(300,-50) name="NPC"
 
 ### FIXTURE director_gate
-count=4 nonplayer=4 player=0 selected=0
-  [0] idx=-301 type=Object model=-1 tri=12 gw=-1 name="Object"
-  [1] idx=-302 type=Object model=-1 tri=13 gw=-1 name="Directory"
-  [2] idx=-303 type=Object model=-1 tri=15 gw=-1 name="Object"
-  [3] idx=-304 type=Object model=-1 tri=16 gw=-1 name="Object"
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=-302 type=Object model=-1 tri=13 gw=-1 pos=(-200,200) name="Directory"
+
+### FIXTURE drawpoint_absent
+count=0 nonplayer=0 player=0 selected=0
+
+### FIXTURE item_vs_npc_identity
+count=2 nonplayer=2 player=0 selected=0
+  [0] idx=1 type=NPC model=10 tri=12 gw=-1 pos=(200,200) name="NPC"
+  [1] idx=2 type=Object model=11 tri=12 gw=-1 pos=(260,200) name="Item 1"
+
+### FIXTURE worldmap_exit_line
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=-200 type=Exit model=-1 tri=0 gw=-1 pos=(0,40) name="Exit to World Map"
+
+### FIXTURE worldmap_exit_with_gateways
+count=2 nonplayer=2 player=0 selected=0
+  [0] idx=-300 type=Exit model=-1 tri=14 gw=-1 pos=(212,-772) name="Exit to World Map"
+  [1] idx=-400 type=Exit model=-1 tri=0 gw=0 pos=(3000,0) name="Exit"
+
+### FIXTURE mapexit_live_slot
+count=2 nonplayer=2 player=0 selected=0
+  [0] idx=2 type=NPC model=13 tri=12 gw=-1 pos=(-900,-400) name="NPC"
+  [1] idx=-302 type=Exit model=-1 tri=0 gw=-1 pos=(700,300) name="Exit to Deling City - Club 1"
+
+### FIXTURE jsm_dup_runtime_slot
+count=3 nonplayer=3 player=0 selected=0
+  [0] idx=1 type=NPC model=8 tri=11 gw=-1 pos=(600,300) name="Quistis"
+  [1] idx=2 type=NPC model=9 tri=12 gw=-1 pos=(-600,300) name="NPC"
+  [2] idx=-302 type=Object model=-1 tri=14 gw=-1 pos=(300,-300) name="Directory"
+
+### FIXTURE jsm_special_unplaced
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=-301 type=Save Point model=-1 tri=14 gw=-1 pos=(-400,-400) name="Save Point"
+
+### FIXTURE dedupe_entity_jsmsave
+count=2 nonplayer=2 player=0 selected=0
+  [0] idx=2 type=NPC model=16 tri=12 gw=-1 pos=(-559,-882) name="NPC"
+  [1] idx=-300 type=Save Point model=-1 tri=14 gw=-1 pos=(559,-882) name="Save Point"
+
+### FIXTURE live_join_passes
+count=7 nonplayer=7 player=0 selected=0
+  [0] idx=1 type=NPC model=21 tri=11 gw=-1 pos=(400,400) name="Quistis"
+  [1] idx=2 type=NPC model=22 tri=12 gw=-1 pos=(-600,100) name="Irvine"
+  [2] idx=3 type=NPC model=22 tri=13 gw=-1 pos=(600,100) name="Selphie"
+  [3] idx=4 type=NPC model=23 tri=14 gw=-1 pos=(-300,700) name="Galbadian Soldier"
+  [4] idx=5 type=NPC model=23 tri=15 gw=-1 pos=(300,700) name="Galbadian Soldier"
+  [5] idx=6 type=Save Point model=-1 tri=16 gw=-1 pos=(900,-900) name="Save Point"
+  [6] idx=7 type=NPC model=77 tri=17 gw=-1 pos=(-900,900) name="NPC"
+
+### FIXTURE mapexit_party_member
+count=2 nonplayer=2 player=0 selected=0
+  [0] idx=1 type=NPC model=20 tri=11 gw=-1 pos=(500,200) name="Quistis"
+  [1] idx=-301 type=Exit model=-1 tri=12 gw=-1 pos=(-500,200) name="Exit to Deling City - Club 1"
+
+### FIXTURE saveline_with_door
+count=3 nonplayer=3 player=0 selected=0
+  [0] idx=1 type=Save Point model=9 tri=11 gw=-1 pos=(559,-882) name="Save Point"
+  [1] idx=-203 type=Exit model=-1 tri=0 gw=-1 pos=(1418,-3444) name="Exit to Deling City - Club 1"
+  [2] idx=-201 type=Interaction model=-1 tri=0 gw=-1 pos=(200,300) name="Desk"
+
+### FIXTURE mapexit_story_gate
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=-301 type=Exit model=-1 tri=12 gw=-1 pos=(-500,200) name="Exit to Deling City - Club 1"
+
+### FIXTURE line_story_gate
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=1 type=NPC model=5 tri=64 gw=-1 pos=(117,459) name="Ellone"
+
+### FIXTURE talk_exit_is_a_person
+count=3 nonplayer=3 player=0 selected=0
+  [0] idx=1 type=NPC model=20 tri=11 gw=-1 pos=(117,459) name="Ellone"
+  [1] idx=-301 type=Exit model=-1 tri=12 gw=-1 pos=(-500,200) name="Exit to glclub3"
+  [2] idx=-302 type=Exit model=-1 tri=13 gw=-1 pos=(900,-900) name="Exit to Deling City - Club 2"
+
+### FIXTURE space_rescue_silences_catalog
+count=0 nonplayer=0 player=0 selected=-1
+
+### FIXTURE field_scoped_pod
+count=2 nonplayer=2 player=0 selected=0
+  [0] idx=2 type=NPC model=21 tri=12 gw=-1 pos=(300,100) name="Piet"
+  [1] idx=-200 type=Exit model=-1 tri=0 gw=-1 pos=(-123,452) name="Capsule"
+
+### FIXTURE field_scoped_elsewhere
+count=2 nonplayer=2 player=0 selected=0
+  [0] idx=1 type=NPC model=20 tri=11 gw=-1 pos=(40,-96) name="Handle"
+  [1] idx=-200 type=Exit model=-1 tri=0 gw=-1 pos=(-123,452) name="Exit to Desert 1"
+
+### FIXTURE propagator_named
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=1 type=NPC model=40 tri=11 gw=-1 pos=(300,900) name="Red Propagator"
+
+### FIXTURE propagator_decoy
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=2 type=NPC model=41 tri=12 gw=-1 pos=(500,600) name="Red Propagator"
+
+### FIXTURE propagator_elsewhere
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=1 type=NPC model=40 tri=11 gw=-1 pos=(300,900) name="NPC"
+
+### FIXTURE propagator_not_a_door
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=1 type=NPC model=40 tri=11 gw=-1 pos=(0,-500) name="Yellow Propagator"
+
+### FIXTURE propagator_not_a_door_ctl
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=-300 type=Exit model=-1 tri=11 gw=-1 pos=(0,-500) name="Exit to Ragnarok - Aisle 2"
+
+### FIXTURE propagator_terminal_named
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=1 type=NPC model=43 tri=11 gw=-1 pos=(0,-178) name="Terminal"
+
+### FIXTURE propagator_terminal_else
+count=1 nonplayer=1 player=0 selected=0
+  [0] idx=1 type=NPC model=43 tri=11 gw=-1 pos=(0,-178) name="NPC"
 

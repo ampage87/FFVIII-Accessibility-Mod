@@ -113,4 +113,26 @@ std::string HexDump(const uint8_t* data, size_t count);
 // Repeated spaces are collapsed. Unknown glyphs are skipped.
 std::string DecodeMenuText(const uint8_t* data, size_t len);
 
+// v0.67.3: TEST SEAM for the button-icon resolution.
+//
+// Text code 0x05 draws the key the player has bound to a game action, and the
+// mod now speaks it (see the 0x05 branch in ff8_text_decode.cpp). Resolving it
+// means reading the live keymap at 0x01CD0208 and two config bytes -- fixed
+// engine addresses, which is to say code that would otherwise only ever be
+// checked by playing the game. Installing a reader lets a probe put a keymap in
+// front of it and assert the sentence that comes out. Null (the default) is the
+// real thing.
+typedef unsigned char (*ButtonPeekFn)(uintptr_t addr);
+void SetButtonPeekHook(ButtonPeekFn fn);
+
+// v0.120.0 (#centra): the key the player has bound to pad BUTTON `b`
+// (0..15, the order in button_mask_model.inl), written into `out` as a word a
+// screen reader can say -- "Enter", "Space", "button 2". False when the engine
+// has nothing bound, in which case the caller should fall back to the pad's own
+// name rather than inventing one.
+//
+// The 0x05 icon codes reach the same resolver through an action index; a
+// BTNTEST mask names buttons directly, so it comes in here.
+bool ButtonKeyName(int b, char* out, size_t n);
+
 }  // namespace FF8TextDecode

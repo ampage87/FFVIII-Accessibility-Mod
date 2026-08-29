@@ -81,13 +81,24 @@ namespace WorldMap {
 //   - keys.inl last: calls StartAutoDrive + StopAutoDrive (drive.inl)
 //     and AnnounceLocation + AnnounceBearing (announce.inl).
 #include "world_map_vehsig.inl"          // v0.21.0 (#79): the foot/vehicle discriminator's policy, unit-tested
+#include "wm_distance_pure.inl"       // v0.97.0: distance as the player hears it -- one convention for every announcer, so the five cannot drift apart again.
 #include "world_map_state.inl"
 #include "world_map_geometry.inl"
 #include "world_map_navmesh.inl"
 #include "world_map_segments.inl"
+#include "world_map_wmslots.inl"      // v0.52.0 (#109): all eight WORLDMAP position slots, dumped -- four have never been identified. AFTER segments.inl, which owns WmSafeReadBytes; segments calls it through the forward declaration in state.inl.
+#include "world_map_locomotion.inl"   // v0.56.0 (#118): the locomotion verdict. AFTER segments.inl (GetWorldMapPosition / WmSafeReadBytes / GetActiveVehicleId), BEFORE world_catalog.inl and world_map_drive.inl, which both ask it what the player is riding.
 #include "world_map_trigger_data.inl"
 #include "world_map_trigeval.inl"        // v0.21.2 (#79): the entry trigger, evaluated the way the GAME evaluates it
 #include "world_map_trigwalk.inl"        // v0.21.5 (#79): the whole program set, walked live -- a known-good and a known-bad through identical code
+#include "rag_landing_model.inl"       // #RAGNAROK: where the airship may set down -- generated from wmx.obj poly[14] bit 7 and the wmsetus location table. BEFORE world_catalog.inl, which attaches a landing to each destination.
+#include "world_rag_arrival.inl"       // #RAGNAROK: the arrival that has no field load, because flying ends above a place rather than in it
+#include "wm_vehicle_resolve_pure.inl" // v0.87.0: which vehicle the mod acts on -- the engine id wins when it names one. BEFORE world_catalog.inl and world_map_planner2.inl, which both ask it.
+#include "rag_ground_pure.inl"        // v0.84.0: aboard is not airborne, and a hull the engine waves through every polygon is never wedged. BEFORE world_map_drive*.inl.
+#include "rag_approach_pure.inl"
+#include "rag_nofly_pure.inl"          // v0.89.0: the Lunatic Pandora, which is the one obstruction altitude cannot answer.      // v0.85.0: you cannot land at cruise speed -- the braked final approach and the progress-scored strike.
+#include "wm_catalog_refresh_pure.inl" // v0.82.0: is the catalog he is cycling the catalog for the vehicle he is riding? BEFORE world_catalog.inl, which owns the watcher.
+#include "wm_story_pure.inl"          // v0.81.0: which destinations the story has taken off the map -- unit-tested. AFTER world_rag_arrival.inl (RagIsFlying), BEFORE world_catalog.inl, which asks all three questions.
 #include "world_catalog.inl"
 #include "world_map_announce.inl"
 #include "world_map_planner.inl"
@@ -97,9 +108,11 @@ namespace WorldMap {
 #include "world_garden_dump.inl"         // #80 diagnostic: runtime world-map polygon dump (gated off)
 #include "world_garden_grid.inl"         // #80: mobile Balamb Garden -- the traversability grid and its build (v0.20.63 split)
 #include "world_garden_berths.inl"       // #80: the berth (park-point) table -- split out of world_garden.inl at v0.20.74 for the 80 KB CI guard
+#include "world_garden_inlets.inl"      // v0.53.0 (#109): the Centra inlet sweep -- the White SeeD Ship's coordinate is not in the shipped data, so the Garden searches for it
 #include "world_garden_plan.inl"         // #80: reachability, docks, aboard latch, A* -- split out of world_garden.inl at v0.20.84 for the same guard
 #include "world_garden_probe.inl"        // #80: collision probes -- split out at v0.20.94
 #include "world_garden.inl"              // #80: reachability, planner, dock tables and executor; runs only when the engine vehicle id is 0x30
+#include "world_rag_drive.inl"        // v0.95.0: the airship's drive takes nothing from the vehicles that touch the ground -- ONE invariant instead of a guard per subsystem. AFTER drive_helpers (s_driveActive/s_ragFlying) and rag_nofly_pure.inl, BEFORE world_map_drive.inl, which asserts it.
 #include "world_map_drive.inl"           // UpdateAutoDrive (textually includes world_map_drive_exec.inl mid-body)
 #include "world_map_heading_scan.inl"
 #include "world_map_camera_scan.inl"
@@ -194,6 +207,9 @@ void Poll()
         s_onWorldMap = false;
         s_catalogBuilt = false;
         Log::World("WorldMap: Exited world map");
+        // v0.56.0 (#118): a locomotion verdict must not survive into a
+        // context where none of the evidence that produced it still applies.
+        LocoReset();
 
 #if HEADING_SCAN_DIAG
         HScanPause();   // #67: pause a running heading scan (encounter / field entry)
@@ -292,7 +308,16 @@ void Poll()
         }
     }
 
+    // v0.56.0 (#118): the locomotion verdict, updated BEFORE anything asks it
+    // what the player is riding. Foot motion is sampled here once a tick, so
+    // the answer is never older than one frame.
+    LocoTick();
     CheckVehicleChange();
+    // v0.82.0: and the engine vehicle id, which is the signal that actually
+    // moved when he boarded the Ragnarok. CheckVehicleChange watches the
+    // locomotion byte and could not see it. This one only ever invalidates the
+    // catalog cache -- it never commits a vehicle -- so it may trust the id.
+    CheckVehicleIdChange();
     // v0.21.2 (#79): once a second, what the GAME's own entry test is seeing --
     // segment index, whose position it is using, the story word and the UNK21
     // bit. Read-only. See the note at the top of world_map_trigeval.inl.

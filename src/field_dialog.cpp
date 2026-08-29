@@ -230,6 +230,11 @@ namespace FieldDialog {
 //   - lifecycle.inl LAST: Initialize / Shutdown / PollWindows wire up every
 //     hook function declared in earlier .inls.
 #include "field_dialog_state.inl"
+// v0.107.0 (#megaflare): the length gate's rule, pure and tested. Included
+// before every path that applies it so the call sites cannot drift.
+#include "dialog_short_text_model.inl"
+// v0.109.0 (#megaflare): recognising a bare number in a battle text box.
+#include "battle_window_countdown_model.inl"
 #include "field_dialog_helpers.inl"
 // v0.18.3.239 (#77): must sit AFTER helpers.inl (needs TrimDecoded + s_cs) and
 // BEFORE scan/show_dialog/opcodes (they call DecodeDialogWithExpansion).

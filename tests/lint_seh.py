@@ -27,6 +27,13 @@ UNWINDING = re.compile(
     r'ostringstream|istringstream|stringstream)|'
     r'std::to_string|std::move)\b')
 
+# v0.59.0: a LAMBDA in the same function as __try. A captureless lambda has a
+# trivial destructor and MSVC very probably accepts it -- but "very probably"
+# is a build cycle to verify and Aaron is the only person who can run one, so
+# this is flagged and the fix is always the same: hoist it to a plain function.
+# Matches `[](`, `[&](`, `[=](`, `[x](` at the start of a lambda introducer.
+LAMBDA = re.compile(r'=\s*\[[^\]]*\]\s*\(')
+
 # A function body opener at file scope: "static <stuff> Name(...)\n{"
 FUNC = re.compile(r'^[ \t]*(?:static\s+|inline\s+)*[A-Za-z_][\w:<>*&\s]*?'
                   r'\b(\w+)\s*\([^;]*\)\s*(?:const\s*)?\{?\s*$', re.M)
@@ -89,6 +96,9 @@ def main():
                 hit = UNWINDING.search(code)
                 if hit:
                     bad.append((path, line, name, hit.group(0)))
+                lam = LAMBDA.search(code)
+                if lam:
+                    bad.append((path, line, name, 'a lambda -- hoist it to a plain function'))
 
     print("lint_seh: scanned %d file(s) containing __try" % scanned)
     for path, line, name, what in bad:

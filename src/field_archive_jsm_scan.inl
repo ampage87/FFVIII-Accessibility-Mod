@@ -90,6 +90,23 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         groups[e].startMethodIdx = (int)(entry >> 7);    // bits 7-15 = label
     }
 
+    // v0.58.0: build the engine's own ordering map from the group words. Every
+    // category test and SYM lookup below goes through this instead of the old
+    // "Door, Line, Bg, Other" index arithmetic, which the exe disagrees with.
+    JSMOrderMap order;
+    {
+        int gs[128];
+        for (int e = 0; e < totalEntities; e++) gs[e] = groups[e].startMethodIdx;
+        BuildJSMOrderMap(countDoors, countLines, countBg, countOthers,
+                         totalEntities, gs, order);
+    }
+    if (!order.valid) {
+        Log::Field("FieldArchive: [JSMORDER] '%s' could not build order map "
+                   "(D=%d L=%d B=%d O=%d total=%d) -- scan aborted",
+                   fieldName, countDoors, countLines, countBg, countOthers, totalEntities);
+        return false;
+    }
+
     // (Entity group boundary diagnostics logged below after SYM names are loaded.)
 
     // Script entry point table: from posFirst to posScripts-1.
@@ -141,41 +158,30 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
     int symCount = 0;
     LoadSYMNames(fieldName, symNames, 128, symCount);
 
-    // v0.20.26: SYM name order != JSM group order in some fields (bgroom_1 lists
-    // models first, then lines, then backgrounds; group order is Door,Line,Bg,Other).
-    // Categorize each SYM entity by method signature and remap per-category so names
-    // land on the correct group entities. Guarded: applied only when per-category
-    // counts match the JSM header, so SYM-order==group-order fields are unchanged.
-    int  symCats[128] = {};
-    int  symCatCount = 0;
-    int  symLineIdx[128], symBgIdx[128], symOthIdx[128];
-    int  nSymLine = 0, nSymBg = 0, nSymOth = 0;
-    bool symRemap = false;
-    if (LoadSYMCategories(fieldName, symCats, 128, symCatCount)) {  // symCatCount may be < symCount (SYM name table has a trailing repeat)
-        for (int sIdxC = 0; sIdxC < symCatCount; sIdxC++) {  // v0.20.28: symCatCount (36), NOT symCount (37 w/ trailing repeat)
-            if (symCats[sIdxC] == 1)      { if (nSymLine < 128) symLineIdx[nSymLine++] = sIdxC; }
-            else if (symCats[sIdxC] == 2) { if (nSymBg   < 128) symBgIdx[nSymBg++]     = sIdxC; }
-            else                          { if (nSymOth  < 128) symOthIdx[nSymOth++]   = sIdxC; }
-        }
-        int othersHdr = totalEntities - countDoors - countLines - countBg;
-        symRemap = (nSymLine == countLines && nSymBg == countBg && nSymOth == othersHdr);
-        Log::Field("FieldArchive: [SYMREMAP] '%s' symLine=%d symBg=%d symOth=%d "
-                   "hdr(L=%d B=%d O=%d) -> remap=%d",
-                   fieldName, nSymLine, nSymBg, nSymOth,
-                   countLines, countBg, othersHdr, symRemap ? 1 : 0);
-    }
+    // v0.58.0: the v0.20.26 SYMREMAP heuristic (categorize each SYM name by
+    // whether it declares an "across"/"talk"/"push" method, then remap per
+    // category) is gone. It guessed, and on the three biggest Esthar fields --
+    // ecenter1, ecmway1, ecoway1 -- it guessed wrong, fell back to
+    // `symIdx = e - countDoors`, and put every single name on the wrong entity.
+    // JSMOrderMap::symIdx is derived from the group words themselves and needs
+    // no heuristic. Logged so a BAT can still see the mapping.
+    Log::Field("FieldArchive: [JSMORDER] '%s' D=%d L=%d B=%d O=%d -- group array is "
+               "L,D,B,O; runtime table is O,L,B,D; SYM bare list is O,L,B (no doors) "
+               "[v0.58.0 exe 0x0052BC00]",
+               fieldName, countDoors, countLines, countBg, countOthers);
 
     // Diagnostic: log entity group boundaries with SYM names.
     for (int e = 0; e < totalEntities; e++) {
-        // SYM excludes doors. Current assumption: entities are ordered
-        // Door[0..D-1], Line[D..D+L-1], Bg[D+L..D+L+B-1], Other[D+L+B..total-1]
-        // so symIdx = e - countDoors.
-        int symIdx = e - countDoors;
+        int symIdx = order.symIdx[e];
         const char* sym = (symIdx >= 0 && symIdx < symCount) ? symNames[symIdx] : "(door)";
+        static const char* kCat[4] = { "Door", "Line", "Bg", "Other" };
         if (e < 15 || groups[e].methodCount > 0) {
-            Log::Field("FieldArchive: [JSMScan] grp[%d] raw=0x%04X methods=%d startIdx=%d sym='%s'",
+            Log::Field("FieldArchive: [JSMScan] grp[%d] raw=0x%04X methods=%d startIdx=%d "
+                       "cat=%s slot=%d sym='%s'",
                        e, (unsigned)groups[e].rawEntry, groups[e].methodCount,
-                       groups[e].startMethodIdx, sym);
+                       groups[e].startMethodIdx,
+                       (order.cat[e] >= 0 && order.cat[e] < 4) ? kCat[order.cat[e]] : "?",
+                       (int)order.slot[e], sym);
         }
     }
 
@@ -193,6 +199,7 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
     memset(s_initVarMaps,       0, sizeof(s_initVarMaps));
     memset(s_reqOpcodeCount,    0, sizeof(s_reqOpcodeCount));
     memset(s_isReqTarget,       0, sizeof(s_isReqTarget));  // v0.19.7 (#5): field-wide REQ-target set
+    memset(s_lineInitOff,       0, sizeof(s_lineInitOff));  // v0.62.0 (#123)
 
     // --- Scan each entity ---
     for (int e = 0; e < totalEntities && outCount < maxEntities; e++) {
@@ -200,33 +207,26 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         memset(&info, 0, sizeof(info));
         info.jsmIndex = e;
         info.param = -1;
+        info.modelParam = -1;   // v0.62.0: no SETMODEL seen yet
+        info.hasGate    = false;  // v0.62.2
+        info.exitFromReqFollow = false;  // v0.63.0
 
-        // Determine JSM category from index ranges.
-        // Order: Door[0..D-1], Line[D..D+L-1], Bg[D+L..D+L+B-1], Other[D+L+B..total-1]
+        // v0.58.0: category and SYM index both come from JSMOrderMap, which is
+        // read out of field_scripts_init rather than assumed. The group array is
+        // Lines, Doors, Backgrounds, Others -- the old code had Door and Line the
+        // wrong way round, so on every field carrying both (79 of them) real
+        // trigger Lines were typed JSM_ENT_DOOR and never scanned as lines.
         int catStart = 0;
-        if (e < countDoors) {
-            info.jsmCategory = 0;  // Door
-            info.type = JSM_ENT_DOOR;
-        } else if (e < countDoors + countLines) {
-            info.jsmCategory = 1;  // Line
-            info.type = JSM_ENT_LINE_TRIGGER;
-        } else if (e < countDoors + countLines + countBg) {
-            info.jsmCategory = 2;  // Background
-            info.type = JSM_ENT_BACKGROUND;
-        } else {
-            info.jsmCategory = 3;  // Other
-            info.type = JSM_ENT_UNKNOWN;  // will be classified by opcodes
+        info.jsmCategory = order.cat[e];
+        switch (info.jsmCategory) {
+            case 0:  info.type = JSM_ENT_DOOR; break;
+            case 1:  info.type = JSM_ENT_LINE_TRIGGER; break;
+            case 2:  info.type = JSM_ENT_BACKGROUND; break;
+            default: info.type = JSM_ENT_UNKNOWN; break;  // Other: classified by opcodes
         }
+        info.runtimeSlot = (e >= 0 && e < JSM_ORDER_MAX) ? (int)order.slot[e] : -1;
 
-        // Map to SYM name. SYM excludes doors: SYM[i] = JSM entity[i + countDoors].
-        // v0.20.26: when SYM order != group order, use the per-category remap.
-        int symIdx = e - countDoors;
-        if (symRemap) {
-            if (e < countDoors)                             symIdx = -1;  // door: not in SYM
-            else if (e < countDoors + countLines)           symIdx = symLineIdx[e - countDoors];
-            else if (e < countDoors + countLines + countBg) symIdx = symBgIdx[e - countDoors - countLines];
-            else                                            symIdx = symOthIdx[e - countDoors - countLines - countBg];
-        }
+        int symIdx = order.symIdx[e];
         if (symIdx >= 0 && symIdx < symCount) {
             strncpy(info.symName, symNames[symIdx], 31);
             info.symName[31] = '\0';
@@ -266,6 +266,13 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         bool foundSetmodelInit = false;  // v0.12.20: SETMODEL specifically in method 0 (init)
         bool foundTalkon       = false;
         bool foundTalkradius   = false;  // v0.17.7.1: TALKRADIUS opcode in this entity's scripts
+        // v0.75.0 (#112): the SAME two opcodes, but scoped to the INIT method.
+        // "Hides itself somewhere" and "hides itself as it sets up, and enables
+        // talking in the same breath" are different objects. The second is an
+        // invisible interaction point -- a terminal, a panel, a sign whose
+        // picture is in the background art. See JSMEntityInfo::invisibleTalkTarget.
+        bool hideInInit        = false;
+        bool talkOnInInit      = false;
         bool foundHide         = false;  // v0.19.4 diag: entity's own script HIDEs itself (0x061) -- a pickup self-hides on collect; a real/silent NPC does not. Log-only, reported in [MODELSIG].
         bool foundTalkRad62    = false;  // v0.19.8 RE: real TALKRADIUS (0x62) -> entity talk radius 0x1F8
         bool foundPushRad63    = false;  // v0.19.8 RE: real PUSHRADIUS (0x63) -> entity push radius 0x1F6
@@ -275,6 +282,16 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         bool foundDoorline     = false;
         bool foundParticleon   = false;
         bool foundAdditem      = false;
+        // v0.59.0: the self-gating signature of a collectible -- its init method
+        // READS a savemap variable (to decide whether it has already been taken)
+        // and one of its interaction methods WRITES that same variable. A story NPC
+        // that sets a "talked to" flag writes one but never reads it back in init,
+        // and the old test (any non-init write at all) could not tell them apart:
+        // it flagged 876 entities across 400 fields as collectibles, Raijin, Fuujin
+        // and half the Balamb townsfolk among them.
+        static const int MAX_SELFGATE = 24;
+        int16_t initReadVars[MAX_SELFGATE];  int nInitReadVars  = 0;
+        int16_t nonInitWriteVars[MAX_SELFGATE]; int nNonInitWriteVars = 0;
         int  mapjumpDestField  = -1;
         int  drawpointId       = -1;
         int  shopId            = -1;
@@ -284,8 +301,20 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         bool foundScroll       = false;  // any DSCROLL/LSCROLL/CSCROLL/SETCAMERA
         bool foundEventOp      = false;  // SHOW/HIDE/USE/UNUSE/MES/ASK/BATTLE/MOVE/REQ
         bool foundDialogOp     = false;  // v0.07.98: MES/ASK/AMES/AASK specifically (for interactive object detection)
-        bool foundExtDispatch  = false;  // v0.07.98: 0x1C fired with PSHM_W value (runtime-dispatched extended opcode)
+        // v0.59.0: opcode 0x1C is a two-instruction no-op (0x0051D710), not a prefix
+        // for extended dispatch -- opcodes above 0xFF are encoded directly as bare
+        // words. It occurs in 92.8% of all entities on the disc, so the old flag was
+        // very nearly a constant, and every consumer used it as `hasDialogAny ||
+        // hasExtDispatch` -- a fallback for "this entity might talk". With the decode
+        // corrected, MES/ASK/AMES/AASK are visible directly and hasDialogAny is the
+        // real answer. Kept as a permanent false so the field, the struct and the log
+        // lines stay put rather than rippling a removal through six files.
+        const bool foundExtDispatch = false;
         bool foundBattle       = false;  // BATTLE specifically
+        // v0.120.0 (#centra): the BTNTEST mask this entity waits on, 0 = none.
+        // First one wins; the init method is excluded because a BTNTEST there
+        // is not the thing the player has to press when they arrive.
+        uint16_t touchBtnMask  = 0;
         bool foundSetline     = false;  // SETLINE interaction zone
         int16_t setlineX1 = 0, setlineY1 = 0, setlineZ1 = 0;
         int16_t setlineX2 = 0, setlineY2 = 0, setlineZ2 = 0;
@@ -311,6 +340,7 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
             // v0.07.84: Per-method MAPJUMP tracking for REQ-following.
             bool methodHasMapjump = false;
             int  methodMapjumpDest = -1;
+            int  methodMapjumpRel  = -1;   // v0.62.3: index of the jump within the method
 
             // v0.07.87: Per-method PSHM_W address tracking for variable-dispatch.
             int32_t methodPshmAddrs[MAX_PSHM_PER_METHOD] = {};
@@ -345,184 +375,134 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                 // v0.07.75: SVDUMP diagnostic logging disabled — position extraction confirmed.
                 bool detailDump = false;
 
-                if (highByte == 0) {
-                    // Push literal: value = full dword (high byte is 0, so max 0x00FFFFFF)
-                    int32_t pushVal = (int32_t)word;
-                    // v0.17.8.8: note literal pushes of the save-enable opcodes so a
-                    // save line whose 0x1C dispatch is runtime-supplied is still seen.
-                    if (pushVal == (int32_t)JSM_OP_MENUSAVE)        sawLitMenusave   = true;
-                    else if (pushVal == (int32_t)JSM_OP_SAVEENABLE) sawLitSaveenable = true;
-                    else if (pushVal == (int32_t)JSM_OP_PHSENABLE)  sawLitPhsenable  = true;
-                    else if (pushVal == (int32_t)JSM_OP_ADDITEM)    sawLitAdditem    = true;  // v0.19.5: item-pickup grant (exe-confirmed give-item)
-                    if (detailDump) {
-                        Log::Field("FieldArchive: [SVDUMP] ent=%d m=%d ip=%d PUSH 0x%X (%d) stk=%d",
-                                   e, m, ip, (unsigned)pushVal, (int)pushVal, pushCount + 1);
-                    }
+                // ------------------------------------------------------------------
+                // v0.59.0: the engine's own decoder, from 0x00530760.
+                //
+                //   w = code[ip]
+                //   if ((w & 0xFF000000) == 0)  opcode = w         ; NO parameter
+                //   else                        opcode = w >> 24   ; param = sext24(w)
+                //   call opcodeTable[opcode]                       ; table @ 0x00B8DE94
+                //
+                // A word whose high byte is zero is an OPCODE, not a literal push --
+                // that is simply how opcodes above 0xFF are encoded (MENUSAVE 0x12E,
+                // ADDITEM 0x125, SETDRAWPOINT 0x155, DRAWPOINT 0x137, ...). Reading
+                // them as literal pushes is what made the old "0x1C pops the extended
+                // opcode off the stack" model necessary; opcode 0x1C is in fact a
+                // two-instruction no-op (0x0051D710) and appears in 92.8% of all
+                // entities, so hasExtDispatch was very nearly a constant.
+                //
+                // Literals reach the VM stack only through a push opcode. Walking every
+                // handler in the table and counting writes to the stack pointer at
+                // [ctx+0x184] gives the complete push set:
+                //   0x07 PSHN_L 0x0051C990  pushes the INLINE PARAM        -- literal
+                //   0x13        0x0051CD30  pushes the INLINE PARAM        -- literal
+                //   0x08 PSHL   0x0051CAB0  local  [ctx + n*4 + 0x140]
+                //   0x0A/0x0C/0x0E          field var bank 0x01CFE9B8 (byte/word/long)
+                //   0x10 0x11 0x12          push, value not statically known
+                //   0x04 CALL   0x0051C530  pushes the return IP    -- NOT an argument
+                //   0x05        0x0051C570  pushes all EIGHT locals -- NOT an argument
+                //
+                // The previous model had 0x07 as PSHM_W and turned every NON-NEGATIVE
+                // param into a fake "from memory" marker. 8289 of the 8625 SET3
+                // placements on the disc have at least one non-negative coordinate, so
+                // 96% of every entity position in the game was discarded as unresolvable
+                // -- which is what the triangle-centroid, late-resolve and struct-scan
+                // fallbacks have all been compensating for. Reading it correctly puts
+                // 4539 of 4593 entity positions (98.8%) strictly INSIDE the walkmesh
+                // triangle their own SET3 names, which is an independent check: the
+                // triangle is the opcode's inline param and the coordinates are popped
+                // values, so they agree only if both are read right.
+                //
+                // ARGUMENTS come from the contiguous run of push opcodes immediately
+                // before the consumer -- the shape the compiler emits -- so the stack is
+                // cleared after every non-push opcode below and pushStack[pushCount-N]
+                // is correct by construction rather than by luck.
+                // ------------------------------------------------------------------
+                const JsmInsn insn = JsmDecodeWord(word);
+                const uint16_t opcode   = insn.opcode;
+                const int32_t  opcParam = insn.param;
+                const bool     bareWord = insn.bare;
+
+                if (detailDump) {
+                    Log::Field("FieldArchive: [SVDUMP] ent=%d m=%d ip=%d OP 0x%03X param=%d bare=%d stk=%d word=0x%08X",
+                               e, m, ip, (int)opcode, (int)opcParam, bareWord ? 1 : 0, pushCount, word);
+                }
+
+                // --- push opcodes: extend the current argument run -------------------
+                if (JsmIsArgPush(insn)) {
+                    const int32_t v = JsmIsLiteralPush(insn) ? opcParam
+                                                             : JsmRuntimeMarker(opcParam);
                     if (pushCount < PUSH_STACK_MAX) {
-                        pushStack[pushCount++] = pushVal;
+                        pushStack[pushCount++] = v;
                     } else {
-                        for (int s = 0; s < PUSH_STACK_MAX - 1; s++)
-                            pushStack[s] = pushStack[s + 1];
-                        pushStack[PUSH_STACK_MAX - 1] = pushVal;
+                        for (int sft = 0; sft < PUSH_STACK_MAX - 1; sft++)
+                            pushStack[sft] = pushStack[sft + 1];
+                        pushStack[PUSH_STACK_MAX - 1] = v;
+                    }
+                    // v0.07.87: record variable-bank reads for variable-dispatch
+                    // detection. These are the REAL memory reads (0x0A/0x0C/0x0E),
+                    // not 0x07 -- which is a literal and never touched memory.
+                    if (opcode == 0x0A || opcode == 0x0C || opcode == 0x0E) {
+                        if (methodPshmCount < MAX_PSHM_PER_METHOD) {
+                            bool dupR = false;
+                            for (int d = 0; d < methodPshmCount; d++)
+                                if (methodPshmAddrs[d] == opcParam) { dupR = true; break; }
+                            if (!dupR) methodPshmAddrs[methodPshmCount++] = opcParam;
+                        }
+                        // v0.59.0: init-method reads, for the self-gating test.
+                        if (m <= 0 && nInitReadVars < MAX_SELFGATE) {
+                            bool dupI = false;
+                            for (int d = 0; d < nInitReadVars; d++)
+                                if (initReadVars[d] == (int16_t)opcParam) { dupI = true; break; }
+                            if (!dupI) initReadVars[nInitReadVars++] = (int16_t)opcParam;
+                        }
                     }
                     continue;
                 }
+                // CALL's return address and the prologue's saved locals are pushes,
+                // but they are never arguments -- they end the run instead.
+                if (JsmIsNonArgPush(insn)) { pushCount = 0; continue; }
 
-                // Opcode: high byte = primary opcode index (0x01-0xFF).
-                // Low 24 bits = param (sign-extended if bit 23 set).
-                uint16_t opcode = (uint16_t)highByte;
-                int32_t opcParam = (int32_t)(word & 0x00FFFFFF);
-                if (word & 0x00800000) opcParam |= (int32_t)0xFF000000;  // sign extend
+                // v0.17.8.8 kept: these used to be spotted as "literal pushes" of the
+                // opcode number, which under the corrected decode is the opcode itself.
+                // Downstream save-line logic reads the sawLit* flags, so keep feeding them.
+                if (opcode == JSM_OP_MENUSAVE)        sawLitMenusave   = true;
+                else if (opcode == JSM_OP_SAVEENABLE) sawLitSaveenable = true;
+                else if (opcode == JSM_OP_PHSENABLE)  sawLitPhsenable  = true;
+                else if (opcode == JSM_OP_ADDITEM)    sawLitAdditem    = true;
 
-                if (detailDump) {
-                    Log::Field("FieldArchive: [SVDUMP] ent=%d m=%d ip=%d OP 0x%02X param=%d stk=%d word=0x%08X",
-                               e, m, ip, (int)opcode, (int)opcParam, pushCount, word);
-                }
-
-                // Extended opcodes: primary 0x1C is a prefix for extended dispatch.
-                // The engine's 0x1C handler POPS the extended opcode index from the
-                // script VM stack (pushed by a preceding PSHN_L), then calls table[popped].
-                if (opcode == 0x1C && pushCount > 0) {
-                    // Extended dispatch: the 0x1C handler POPS the extended opcode
-                    // index from the stack (NOT from the instruction param).
-                    // The preceding PSHN_L pushed the dispatch table index.
-                    int32_t extOp = pushStack[--pushCount];  // pop
-                    // v0.07.75: 0x1C expansion logging disabled — opcode dispatch confirmed.
-                    // (Was limited to 100 per field for diagnostic purposes.)
-                    if (extOp >= 0 && extOp < 0x200) {
-                        opcode = (uint16_t)extOp;
-                    } else if (((uint32_t)extOp & 0xFFFF0000u) == 0x80000000u) {
-                        // v0.07.98/v0.08.00/v0.08.13: Value came from PSHM_W (runtime memory push).
-                        // Tightened: only 0x8000xxxx pattern, not negative passthrough literals.
-                        // We can't resolve the actual opcode statically, but this
-                        // entity uses runtime-dispatched extended opcodes — which
-                        // often include MES/ASK for interactive objects.
-                        foundExtDispatch = true;
+                // v0.59.0: savemap writes. The engine's pop-to-variable-bank opcodes
+                // are 0x0B POPM_B (0x0051CCA0), 0x0D POPM_W (0x0051CCD0) and 0x0F
+                // POPM_L (0x0051CD00) -- each stores the popped value at
+                // [param + 0x01CFE9B8], the field variable bank. The previous code
+                // watched 0x08 and 0x0B; 0x08 is PSHL, a PUSH of a local, so half the
+                // var-write record was reading the wrong opcode and the other half was
+                // missing POPM_W and POPM_L entirely. foundNonInitVarWrite is one of the
+                // item-pickup signals, so this fed straight into NPC-vs-Item.
+                if (JsmIsVarBankPop(insn)) {
+                    if (e < 128 && pushCount > 0 &&
+                        ((uint32_t)pushStack[pushCount-1] & 0x80000000u) == 0 &&
+                        s_initVarMaps[e].count < 64) {
+                        s_initVarMaps[e].writes[s_initVarMaps[e].count].addr  = opcParam;
+                        s_initVarMaps[e].writes[s_initVarMaps[e].count].value = pushStack[pushCount-1];
+                        s_initVarMaps[e].count++;
                     }
-                } else if (opcode == 0x1C && pushCount == 0) {
-                    // Stack empty when 0x1C fires — our simulation lost track.
-                    // The dispatch index was pushed but consumed by an unmodeled opcode.
-                    // v0.07.98: Still counts as extended dispatch usage for interactive
-                    // object detection — entities using 0x1C with lost stack likely call
-                    // MES/ASK via runtime variable dispatch.
-                    foundExtDispatch = true;
-                    static int s_emptyCount = 0;
-                    if (s_emptyCount < 5) {
-                        Log::Field("FieldArchive: [JSMScan] 0x1C EMPTY STACK: ent=%d method=%d", e, m);
-                        s_emptyCount++;
+                    if (e < 128 && s_entityPopms[e].count < MAX_POPM_PER_ENTITY) {
+                        bool dupW = false;
+                        for (int d = 0; d < s_entityPopms[e].count; d++)
+                            if (s_entityPopms[e].addrs[d] == opcParam) { dupW = true; break; }
+                        if (!dupW) s_entityPopms[e].addrs[s_entityPopms[e].count++] = opcParam;
                     }
-                }
-
-                // Model stack effects of known primary opcodes instead of
-                // flushing the entire stack. The old flush-all approach caused
-                // 0x1C to always hit EMPTY STACK for save/draw point entities
-                // whose dispatch index comes from PSHM_W (runtime memory push).
-                //
-                // For opcodes where we know the stack effect, model it.
-                // For unknown opcodes, leave the stack untouched.
-                // This is less precise but FAR better than flushing everything.
-                if (highByte != 0 && opcode != 0x1C) {
-                    switch (highByte) {
-                        // Push opcodes: push 1 value from game memory onto VM stack.
-                        // We push the param (memory address) as a placeholder.
-                        case 0x07: // PSHM_W - push word from memory
-                        case 0x09: // PSHM_B - push byte from memory
-                        case 0x0A: // PSHM_L - push long from memory
-                        case 0x0C: // PSHSM_W - push from special memory
-                        case 0x0D: // PSHSM_B - push byte from special memory
-                        {
-                            // Push a marker: bit 31 flags it as "from memory".
-                            // v0.08.00: Changed from 0x00FF0000 to bit 31. The old
-                            // 0x00FF pattern collided with negative literal values
-                            // (e.g. push of -1484 = 0x00FFFA34 matched the marker).
-                            // Literal pushes max at 0x00FFFFFF, never setting bit 31.
-                            //
-                            // v0.08.13: PSHM_W negative-param passthrough.
-                            // Deep research confirmed: negative PSHM_W params cannot be
-                            // valid varblock offsets (unsigned). The engine returns them
-                            // as literal coordinate values. Each axis is resolved
-                            // independently, so one SET3 can mix varblock + passthrough.
-                            // Treat negative params as literals (like PSHN_L push).
-                            int32_t marker;
-                            if (highByte == 0x07 && opcParam < 0) {
-                                // Passthrough: negative param IS the coordinate value.
-                                // Push as literal (no bit31 marker) so SET3 extraction
-                                // treats it as a resolved coordinate.
-                                marker = opcParam;
-                            } else {
-                                marker = (int32_t)(0x80000000u | (uint32_t)(opcParam & 0xFFFF));  // bit31 + mem addr
-                            }
-                            if (pushCount < PUSH_STACK_MAX)
-                                pushStack[pushCount++] = marker;
-                            // v0.07.87: Record PSHM_W reads for variable-dispatch detection.
-                            if (highByte == 0x07 && methodPshmCount < MAX_PSHM_PER_METHOD) {
-                                // Deduplicate: only add if not already tracked.
-                                bool dup = false;
-                                for (int d = 0; d < methodPshmCount; d++)
-                                    if (methodPshmAddrs[d] == opcParam) { dup = true; break; }
-                                if (!dup)
-                                    methodPshmAddrs[methodPshmCount++] = opcParam;
-                            }
-                            break;
+                    // v0.19.5: a savemap write from a NON-init method to a real
+                    // variable is the collectible's "already picked up" flag.
+                    if (m >= 1 && opcParam >= 8) {
+                        foundNonInitVarWrite = true;
+                        if (nNonInitWriteVars < MAX_SELFGATE) {
+                            bool dupW2 = false;
+                            for (int d = 0; d < nNonInitWriteVars; d++)
+                                if (nonInitWriteVars[d] == (int16_t)opcParam) { dupW2 = true; break; }
+                            if (!dupW2) nonInitWriteVars[nNonInitWriteVars++] = (int16_t)opcParam;
                         }
-                        // Pop 1 opcodes:
-                        case 0x02: // JPF - conditional jump, pops condition
-                        case 0x08: // POPM_W - pop to memory word
-                        case 0x0B: // POPM_L - pop to memory long
-                            // v0.12.20: Record PUSH+POPM_W pairs in init method for Director variable maps.
-                            // Must capture BEFORE the pop. Only record literal values (no PSHM markers).
-                            // v0.17.7.3: Dropped the `m == 0` gate so writes from ANY method get
-                            // recorded. Reason: v0.17.7.2 BAT confirmed bghall_2/3/5 SCREEN_BOUND
-                            // Lines read MAPJUMP destinations from varblock addresses (e.g. 0x01F6,
-                            // 0x023A) that NO field-wide init-method write touches. Either the
-                            // Lines themselves write the destination in their walk-on method
-                            // (likely), or some other entity does it in a story-dispatch method
-                            // reached via REQ from init. Either way, capturing all-method writes
-                            // lets the v0.17.7.4 resolver cross-reference unresolved markers
-                            // against the Line's own bytecode. Empirically harmless to other
-                            // consumers: director.inl uses s_initVarMaps only for diagnostic
-                            // logging, no decision logic depends on the m==0 restriction.
-                            if ((highByte == 0x08 || highByte == 0x0B) && e < 128 &&
-                                pushCount > 0 && ((uint32_t)pushStack[pushCount-1] & 0x80000000u) == 0 &&
-                                s_initVarMaps[e].count < 64) {
-                                s_initVarMaps[e].writes[s_initVarMaps[e].count].addr = opcParam;
-                                s_initVarMaps[e].writes[s_initVarMaps[e].count].value = pushStack[pushCount-1];
-                                s_initVarMaps[e].count++;
-                            }
-                            if (pushCount > 0) pushCount--;
-                            // v0.07.87: Record POPM_W writes for variable-dispatch detection.
-                            if ((highByte == 0x08 || highByte == 0x0B) && e < 128) {
-                                if (s_entityPopms[e].count < MAX_POPM_PER_ENTITY) {
-                                    bool dup = false;
-                                    for (int d = 0; d < s_entityPopms[e].count; d++)
-                                        if (s_entityPopms[e].addrs[d] == opcParam) { dup = true; break; }
-                                    if (!dup)
-                                        s_entityPopms[e].addrs[s_entityPopms[e].count++] = opcParam;
-                                }
-                            }
-                            // v0.19.5: a POPM (savemap write) in a NON-init method (m>=1)
-                            // to a real var (addr>=8, skipping scratch/temp) is a
-                            // "collected/read" flag write -- the item-pickup signature.
-                            // Both known pickups write their flag in method[2] (Urakata
-                            // var304, saveline0 var450); silent NPCs have empty
-                            // interaction methods.
-                            if ((highByte == 0x08 || highByte == 0x0B) && m >= 1 && opcParam >= 8)
-                                foundNonInitVarWrite = true;
-                            break;
-                        // No stack effect (control flow only):
-                        case 0x01: // JMP
-                        case 0x03: // JMPB
-                        case 0x04: // JMPF variant
-                        case 0x05: // LBL
-                        case 0x06: // RET
-                            break;
-                        // All other primary opcodes: unknown stack effect.
-                        // Don't flush — leave stack as-is. Some opcodes pop args
-                        // and push results, but we can't model them all. Leaving
-                        // the stack alone gives 0x1C the best chance of finding
-                        // its dispatch index.
-                        default:
-                            break;
                     }
                 }
 
@@ -748,6 +728,7 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                     opcode == JSM_OP_WORLDMAPJUMP) {
                     foundMapjump = true;
                     methodHasMapjump = true;  // v0.07.84: per-method tracking
+                    if (methodMapjumpRel < 0) methodMapjumpRel = ip - (int)scriptStart;
                     // Destination field ID is the deepest (first) push in the sequence.
                     // For MAPJUMP: stack has FieldID, X, Y, TriID (4 pushes).
                     // For MAPJUMP3: stack has FieldID, X, Y, Z, TriID (5 pushes).
@@ -758,8 +739,13 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                         mapjumpDestField = pushStack[pushCount - 5];
                     else if (opcode == JSM_OP_DISCJUMP && pushCount >= 5)
                         mapjumpDestField = pushStack[pushCount - 5];
-                    else if (opcode == JSM_OP_MAPJUMPO && pushCount >= 4)
-                        mapjumpDestField = pushStack[pushCount - 4];
+                    // v0.59.0: MAPJUMPO (0x0052 1C30) pops only TWO -- the entrance id
+                    // into 0x01CE476C and then the destination field into 0x01CE4762 --
+                    // so the destination is the deeper of two, not of four. Measured
+                    // across the disc: every one of the 1037 MAPJUMPOs is preceded by a
+                    // run of exactly two pushes.
+                    else if (opcode == JSM_OP_MAPJUMPO && pushCount >= 2)
+                        mapjumpDestField = pushStack[pushCount - 2];
                     else if (opcode == JSM_OP_WORLDMAPJUMP)
                         mapjumpDestField = -2;  // sentinel: goes to world map
                     else if (pushCount >= 1)
@@ -768,7 +754,12 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                 }
 
                 // Model assignment / talk.
-                if (opcode == JSM_OP_SETMODEL) foundSetmodel = true;
+                if (opcode == JSM_OP_SETMODEL) {
+                    foundSetmodel = true;
+                    // v0.62.0: keep the inline param -- the chara.one model index.
+                    if (info.modelParam < 0 && !bareWord && opcParam >= 0)
+                        info.modelParam = (int)opcParam;
+                }
                 if (opcode == JSM_OP_SETMODEL && m == 0) {
                     foundSetmodelInit = true;  // v0.12.20
                     // v0.17.8.15: chara.one slot capture removed. v0.17.8.11-.14
@@ -781,6 +772,10 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                     // `jsmCategory == 3 && foundSetmodelInit` instead --
                     // exposed via info.hasSetmodelInit below.
                 }
+                // v0.62.0 (#123): LINEOFF in the init. Exe-confirmed: opcode 0x3A
+                // writes 1 and 0x3B writes 0 to the line object's enable byte at
+                // +0x194 (handlers 0x0051DCE0 / 0x0051DD00).
+                if (opcode == 0x03B && m == 0 && e < 128) s_lineInitOff[e] = true;
                 if (opcode == JSM_OP_TALKON)   foundTalkon = true;
                 if (opcode == JSM_OP_TALKRADIUS) foundTalkradius = true;  // v0.17.7.1
                 // v0.19.8 RE (#5): the ACTUAL interaction opcodes, by exe-confirmed
@@ -900,7 +895,18 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                     opcode == JSM_OP_REQ || opcode == JSM_OP_REQSW || opcode == JSM_OP_REQEW)
                     foundEventOp = true;
                 if (opcode == JSM_OP_HIDE) foundHide = true;  // v0.19.4 diag: self-hide signal for pickup detection
+                if (opcode == JSM_OP_HIDE   && m == 0) hideInInit   = true;   // v0.75.0
+                if (opcode == JSM_OP_TALKON && m == 0) talkOnInInit = true;   // v0.75.0
                 if (opcode == JSM_OP_BATTLE) foundBattle = true;
+                // v0.120.0 (#centra): BTNTEST consumes ONE argument, so the mask
+                // is the top of the current push run by construction -- the same
+                // property every other argument read here relies on. A Centra
+                // ladder records 192, Cross|Square.
+                if (opcode == JSM_OP_BTNTEST && m >= 1 && pushCount >= 1 &&
+                    touchBtnMask == 0) {
+                    const int32_t maskV = pushStack[pushCount - 1];
+                    if (maskV > 0 && maskV <= 0xFFFF) touchBtnMask = (uint16_t)maskV;
+                }
 
                 // v0.07.98: Track dialog opcodes specifically (MES/ASK/AMES/AASK).
                 // foundEventOp is too broad (includes SHOW/HIDE/MOVE/REQ) and would
@@ -921,9 +927,18 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                 // BAT-confirmed on bghall_1: 'elelight' REQs resolve to seito3/seito4.
                 // The director junk-gate keeps a promoted Object only if it is a REQ
                 // target; one that nothing REQs has no interaction path and is dropped.
+                // v0.58.0: opcParam is a RUNTIME SLOT (the REQ handler at
+                // 0x0051CD8D indexes the 0x01D9D020 object table with it), and
+                // that table is ordered Others, Lines, Backgrounds, Doors -- so
+                // it is not a group index. s_isReqTarget[] is read back by group,
+                // so translate. Before this, on any field with a non-Other entity
+                // the whole set was off by nLines+nBackgrounds and the director
+                // gate kept and dropped essentially arbitrary entities.
                 if ((opcode == JSM_OP_REQ || opcode == JSM_OP_REQSW || opcode == JSM_OP_REQEW) &&
-                    opcParam >= 0 && opcParam < 128)
-                    s_isReqTarget[opcParam] = true;
+                    opcParam >= 0 && opcParam < JSM_ORDER_MAX) {
+                    int tgtGroup = order.groupOfSlot[opcParam];
+                    if (tgtGroup >= 0 && tgtGroup < 128) s_isReqTarget[tgtGroup] = true;
+                }
                 // v0.19.6 [REQ-TARGET] diagnostic (director-gate): exe RE of the REQ handlers
                 // (0x14/0x15/0x16 @ 0x51CD60/CED0/D060) shows the TARGET entity is the opcode's
                 // INLINE PARAM (arg2 -> entityPtrTable[param]), NOT a stack value -- which is
@@ -933,38 +948,81 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                 // directory). If so, the director gate reads targets STATICALLY from opcParam
                 // and no runtime VM hook is needed. Log-only; zero classification change.
                 if (opcode == JSM_OP_REQ || opcode == JSM_OP_REQSW || opcode == JSM_OP_REQEW) {
-                    int tgtIdx = opcParam;
+                    int tgtIdx = (opcParam >= 0 && opcParam < JSM_ORDER_MAX)
+                                 ? order.groupOfSlot[opcParam] : -1;
                     const char* tgtName = "?";
-                    if (tgtIdx >= 0 && (tgtIdx - countDoors) >= 0 && (tgtIdx - countDoors) < symCount)
-                        tgtName = symNames[tgtIdx - countDoors];
+                    if (tgtIdx >= 0 && order.symIdx[tgtIdx] >= 0 &&
+                        order.symIdx[tgtIdx] < symCount)
+                        tgtName = symNames[order.symIdx[tgtIdx]];
                     int st1 = (pushCount >= 1) ? pushStack[pushCount - 1] : -999;
                     int st2 = (pushCount >= 2) ? pushStack[pushCount - 2] : -999;
                     Log::Field("FieldArchive: [REQ-TARGET] ent%d '%s' m=%d opcParam=%d -> "
                                "target ent%d '%s' | stackTop=%d stack2=%d pushCount=%d",
                                e, info.symName, m, opcParam, tgtIdx, tgtName, st1, st2, pushCount);
                 }
-                // REQ pops 3 values: entity_id, method_id, priority.
-                // We record the target so we can check if it contains MAPJUMP.
+                // v0.62.0 (#123): REQ, recorded from what the opcode actually takes.
+                //
+                // The old read wanted THREE stack values (entity, method,
+                // priority) and took the target entity off the stack. REQ takes
+                // two: the compiler emits `PSHN_L priority; PSHN_L methodId;
+                // REQ <entity>` and the TARGET IS THE INLINE PARAM -- the handler
+                // at 0x0051CD8D indexes the object table at 0x01D9D020 with it.
+                // Since v0.59.0 clears the push run after every non-push opcode,
+                // pushCount at a REQ is exactly 2, so `pushCount >= 3` was never
+                // true and s_entityReqs has been EMPTY on every field since. The
+                // scanner's own [REQ-TARGET] diagnostic has been printing the
+                // right answer beside it the whole time ("stackTop=48 stack2=2").
+                //
+                // The method id is the top push, and it indexes the entry-point
+                // table exactly as `methodIdx` does below -- the same number the
+                // method's own prologue (0x05) carries. That is what makes
+                // s_methodMapjumps[targetMethod] a legal lookup.
+                //
+                // The inline param is a RUNTIME SLOT, so it goes through
+                // order.groupOfSlot the same way s_isReqTarget does.
                 if ((opcode == JSM_OP_REQ || opcode == JSM_OP_REQSW || opcode == JSM_OP_REQEW) &&
-                    pushCount >= 3 && e < 128) {
-                    int reqTargetEnt  = pushStack[pushCount - 3];
-                    int reqTargetMeth = pushStack[pushCount - 2];
-                    // Validate: target entity must be a valid JSM index, method must be non-negative.
+                    e < 128) {
+                    int reqTargetEnt  = (opcParam >= 0 && opcParam < JSM_ORDER_MAX)
+                                        ? order.groupOfSlot[opcParam] : -1;
+                    int reqTargetMeth = (pushCount >= 1) ? pushStack[pushCount - 1] : -1;
                     if (reqTargetEnt >= 0 && reqTargetEnt < totalEntities &&
-                        reqTargetMeth >= 0 && reqTargetMeth < 100 &&
+                        reqTargetMeth >= 0 && reqTargetMeth < MAX_METHOD_MAPJUMPS &&
                         s_entityReqs[e].count < MAX_REQ_PER_ENTITY) {
                         s_entityReqs[e].calls[s_entityReqs[e].count].targetEntity = reqTargetEnt;
                         s_entityReqs[e].calls[s_entityReqs[e].count].targetMethod = reqTargetMeth;
+                        s_entityReqs[e].calls[s_entityReqs[e].count].srcMethod    = methodIdx;
+                        s_entityReqs[e].calls[s_entityReqs[e].count].srcRel       = ip - (int)scriptStart;
                         s_entityReqs[e].count++;
                     }
-                    // Model stack effect: REQ pops 3 values.
-                    if (pushCount >= 3) pushCount -= 3;
+                    if (pushCount >= 2) pushCount -= 2;
                 }
 
-                // v0.07.72: Removed the old pushCount=0 flush here.
-                // Stack effects are now modeled per-opcode above.
-                // The old flush wiped the dispatch index for 0x1C calls
-                // that followed PSHM_W (runtime memory push) instructions.
+                // v0.59.0: end of a non-push opcode -- the argument run it consumed is
+                // finished. Clearing here is what makes pushStack[pushCount - N] mean
+                // "the N arguments immediately before this opcode", which is exactly how
+                // the compiler emits them. The old code carried a simulated stack across
+                // the whole method and modelled pops opcode by opcode, so the depth
+                // drifted and an extraction could read a value belonging to some earlier
+                // statement. Every consumer above has already read what it needed.
+                pushCount = 0;
+            }
+            // v0.62.3 (#123): if THIS method carries the MAPJUMP, its own leading
+            // guard is the gate on the exit. sspod2's `pod` line is the case:
+            // its touch script opens `var[256] == 2556` and ends in MAPJUMPO 638,
+            // so before the story reaches 2556 the line is inert -- and the
+            // catalog was both offering it as "Exit to Desert 1" and letting the
+            // screen filter treat it as a wall, which is what hid Ellone.
+            if (methodHasMapjump && !info.hasGate &&
+                scriptStart < scriptDataDwords) {
+                JsmGate g = JsmDecodeGate(&scriptData[scriptStart],
+                                          (int)(scriptDataDwords - scriptStart));
+                if (g.ok && methodMapjumpRel >= 0 && methodMapjumpRel < g.skipTo) {
+                    info.hasGate   = true;
+                    info.gateAddr  = g.addr;
+                    info.gateWidth = g.width;
+                    info.gateOp    = g.op;
+                    info.gateValue = g.value;
+                }
             }
             // v0.07.84: Record per-method MAPJUMP for REQ-following.
             if (methodHasMapjump && methodIdx >= 0 && methodIdx < MAX_METHOD_MAPJUMPS) {
@@ -986,6 +1044,11 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
         // Pure textual move -- no logic change.
         #include "field_archive_jsm_classify.inl"
 
+        // v0.75.0 (#112): hidden AND talk-enabled by its own init is an invisible
+        // interaction point, not an absent object. See JSMEntityInfo for why the
+        // catalog's HIDE filter has to know the difference.
+        info.invisibleTalkTarget = (hideInInit && talkOnInInit);
+
         // v0.19.4 [MODELSIG] (#pickup-vs-silent-npc): one compact ground-truth line per
         // model-bearing "Other" entity -- the full interaction-signal set + final producer
         // type. Lets v0.19.5 design the pickup-vs-real-NPC-vs-silent-NPC discriminator from
@@ -994,7 +1057,7 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
             Log::Field("FieldArchive: [MODELSIG] ent%d '%s' type=%s pos=%d(%d,%d) "
                        "talkon=%d talkrad056=%d dialog=%d extdisp=%d additem=%d hide=%d "
                        "setline=%d reqcount=%d setmodelInit=%d nonInitWr=%d additemLit=%d pickup=%d "
-                       "talkrad62=%d pushrad63=%d prox5B=%d",
+                       "talkrad62=%d pushrad63=%d prox5B=%d invisTalk=%d",
                        e, info.symName, JSMEntityTypeName(info.type),
                        info.hasPosition ? 1 : 0, (int)info.posX, (int)info.posY,
                        foundTalkon ? 1 : 0, foundTalkradius ? 1 : 0,
@@ -1005,50 +1068,14 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
                        foundSetmodelInit ? 1 : 0,
                        foundNonInitVarWrite ? 1 : 0, sawLitAdditem ? 1 : 0,
                        (foundSetmodel && !foundDialogOp && (foundNonInitVarWrite || sawLitAdditem)) ? 1 : 0,
-                       foundTalkRad62 ? 1 : 0, foundPushRad63 ? 1 : 0, foundProxChk5B ? 1 : 0);
+                       foundTalkRad62 ? 1 : 0, foundPushRad63 ? 1 : 0, foundProxChk5B ? 1 : 0,
+                       info.invisibleTalkTarget ? 1 : 0);
         }
 
         outCount++;
     }
 
-    // v0.12.09: Draw point trigger cross-reference.
-    // For each entity that calls REQSW/REQEW to a draw point entity,
-    // mark it as a draw point trigger. This deterministically links the
-    // visible interaction entity (with talkonoff/model) to the invisible
-    // draw point script entity (with DRAWPOINT opcode).
-    for (int e2 = 0; e2 < outCount; e2++) {
-        outEntities[e2].drawPointTriggerOf = -1;  // initialize
-        int jsmIdx = outEntities[e2].jsmIndex;
-        if (jsmIdx >= 128) continue;
-        for (int r = 0; r < s_entityReqs[jsmIdx].count; r++) {
-            int tgtEnt = s_entityReqs[jsmIdx].calls[r].targetEntity;
-            // Find the target entity in our output array.
-            for (int t = 0; t < outCount; t++) {
-                if (outEntities[t].jsmIndex == tgtEnt &&
-                    outEntities[t].type == JSM_ENT_DRAW_POINT) {
-                    outEntities[e2].drawPointTriggerOf = tgtEnt;
-                    Log::Field("FieldArchive: [JSMScan] Draw point trigger: ent%d '%s' "
-                               "calls draw point ent%d '%s'",
-                               jsmIdx, outEntities[e2].symName,
-                               tgtEnt, outEntities[t].symName);
-                    break;
-                }
-            }
-            if (outEntities[e2].drawPointTriggerOf >= 0) break;
-        }
-    }
-
-    // v0.19.7 (#5): propagate the field-wide REQ-target set onto each output
-    // entity. s_isReqTarget[] was filled during the per-entity opcode scan from
-    // every REQ/REQSW/REQEW inline param, so it is only complete now that the
-    // whole field has been scanned. The director junk-gate (consumer) reads
-    // je.isReqTarget to decide whether a director-promoted Object has any
-    // interaction path at all.
-    for (int ri = 0; ri < outCount; ri++) {
-        int rji = outEntities[ri].jsmIndex;
-        outEntities[ri].isReqTarget = (rji >= 0 && rji < 128) ? s_isReqTarget[rji] : false;
-    }
-
+#include "field_archive_jsm_reqpass.inl"
     // v0.16.3: Director-dispatched interaction detection (extracted to director.inl).
     // See field_archive_jsm_director.inl for the full implementation. This call
     // replaces the inline DIAGNOSTIC + Director-detection-post-pass blocks that
@@ -1099,78 +1126,7 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
     // (v0.07.89), and the INF-gateway dump (v0.07.93). All were dead code
     // (guarded by `if (false)`) and are recoverable from git history if needed.
 
-    // v0.12.24 / v0.17.7.5.4: REQ-following for Line entity interaction detection.
-    // If a Line entity REQs another entity that has dialog opcodes or ext dispatch,
-    // the Line is dual-purpose (exit + interaction). Mark it with hasDialogReqTarget
-    // so the catalog can distinguish this from the (much more common) case where
-    // a Line uses extended dispatch in its OWN script for non-dialog purposes
-    // (sound, particle effects, animation). v0.17.7.5.4 split the previous unified
-    // hasExtDispatch flag into two: hasExtDispatch (own 0x1C usage, set in opcode
-    // scan) and hasDialogReqTarget (dialog REQ target, set HERE). The catalog uses
-    // hasDialogReqTarget for the dual-purpose check.
-    //
-    // The previous `if (outEntities[i].hasExtDispatch) continue;` early-exit was
-    // dropped: we now run REQ-following for ALL Line entities regardless of own
-    // ext-dispatch usage, so lines like bgroad_5 squalls (own 0x1C true, REQ
-    // target dialog false) get correctly classified as pure exits.
-    for (int i = 0; i < outCount; i++) {
-        if (outEntities[i].jsmCategory != 1) continue;  // Line entities only
-        int e = outEntities[i].jsmIndex;
-        if (e >= 128) continue;
-        // Check if this Line entity REQs any entity with dialog/ext dispatch.
-        // First try resolved REQ targets.
-        bool reqsInteractive = false;
-        for (int r = 0; r < s_entityReqs[e].count && !reqsInteractive; r++) {
-            int tgt = s_entityReqs[e].calls[r].targetEntity;
-            if (tgt >= 0 && tgt < 128) {
-                if (s_hasDialogAny[tgt] || s_hasExtDispatchArr[tgt])
-                    reqsInteractive = true;
-            }
-        }
-        // Fallback: if entity has unresolved REQ opcodes (stack lost track),
-        // check if ANY Interactive Object entity exists on this field.
-        // Interactive Objects are specifically the targets of dual-purpose Line
-        // entity interactions (dormitory bed/desk/wardrobe, etc.).
-        if (!reqsInteractive && s_reqOpcodeCount[e] > 0 && s_entityReqs[e].count == 0) {
-            for (int ii = 0; ii < outCount && !reqsInteractive; ii++) {
-                if (outEntities[ii].type == JSM_ENT_INTERACTIVE_OBJECT)
-                    reqsInteractive = true;
-            }
-        }
-        if (reqsInteractive) {
-            outEntities[i].hasDialogReqTarget = true;
-            Log::Field("FieldArchive: [JSMScan] REQ-interact: Line ent%d '%s' REQs interactive entity -> hasDialogReqTarget=1",
-                       e, outEntities[i].symName);
-        }
-
-        // v0.17.8.8: Save-line detection, signal (b) -- REQ to a save point.
-        // A Line that REQs an entity classified SAVE_POINT (or with a save*/svpt
-        // SYM name, in case that entity was classified MAP_EXIT because its
-        // script also contains a MAPJUMP -- e.g. bghall_1 'saveline0') is the
-        // walk-on trigger that opens the save menu. Flag the Line so the catalog
-        // labels it "Save Point". The Line already has a position (its SETLINE
-        // center), so no save-point positioning is needed.
-        if (!outEntities[i].isSaveLine) {
-            for (int r = 0; r < s_entityReqs[e].count && !outEntities[i].isSaveLine; r++) {
-                int tgt = s_entityReqs[e].calls[r].targetEntity;
-                for (int t2 = 0; t2 < outCount; t2++) {
-                    if (outEntities[t2].jsmIndex != tgt) continue;
-                    bool tgtIsSave = (outEntities[t2].type == JSM_ENT_SAVE_POINT) ||
-                                     (_strnicmp(outEntities[t2].symName, "save", 4) == 0) ||
-                                     (_strnicmp(outEntities[t2].symName, "svpt", 4) == 0);
-                    if (tgtIsSave) {
-                        outEntities[i].isSaveLine = true;
-                        outEntities[i].hasDialogReqTarget = true;  // ensure it surfaces
-                        Log::Field("FieldArchive: [JSMScan] save-line(req): Line ent%d '%s' "
-                                   "REQs save point ent%d '%s' -> isSaveLine=1 [v0.17.8.8]",
-                                   e, outEntities[i].symName, tgt, outEntities[t2].symName);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
+#include "field_archive_jsm_linepass.inl"
     // v0.17.8.8: Save-point wiring diagnostic. For every entity classified as a
     // Save Point, report whether it resolved a navigable position (so it can be
     // injected as a standalone "Save Point") and whether any Line was flagged as

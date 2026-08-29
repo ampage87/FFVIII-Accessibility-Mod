@@ -2,6 +2,75 @@
 // Included from field_navigation.cpp. Do not compile independently.
 // v0.12.18: Extracted from field_navigation.cpp for readability.
 
+// v0.119.0 (#centra): the mid-height of a captured trigger line -- the Z its
+// centre actually sits at. Lives here rather than beside FindNearestTriangle3D
+// because the captured-line array does; the chase harness includes the
+// pathfinding header without it. See walkmesh_height_lookup_model.inl.
+static float CapturedLineMidZ(int t)
+{
+    if (t < 0 || t >= s_capturedLineCount) return 0.0f;
+    return (float)(s_capturedLines[t].z1 + s_capturedLines[t].z2) / 2.0f;
+}
+
+// v0.120.0 (#centra): what captured line `t` waits on, 0 if nothing. The scan
+// records it per JSM entity; lines are cat 1, group index t (v0.62.2).
+static uint16_t LineTouchButtonMask(int t)
+{
+    for (int j = 0; j < s_jsmEntityCount; j++) {
+        if (s_jsmEntities[j].jsmCategory == 1 && s_jsmEntities[j].jsmIndex == t)
+            return s_jsmEntities[j].touchButtonMask;
+    }
+    return 0;
+}
+
+// The name the catalog is already using for that line, so the arrival says
+// "Left Ladder Up" and not a second, differently-worded label.
+static const char* CatalogNameForLine(int t)
+{
+    for (int c = 0; c < s_catalogCount; c++) {
+        if (s_catalog[c].entityIdx == (-200 - t) && s_catalog[c].name[0])
+            return s_catalog[c].name;
+    }
+    return nullptr;
+}
+
+// Record the button a drive target waits on, with the label to say beside it.
+static void DriveSetButtonTarget(int lineIdx, const char* fallbackName,
+                                 const char* leadsTo)
+{
+    s_driveButtonMask = 0;
+    s_driveButtonLabel[0] = '\0';
+    s_driveButtonLeadsTo[0] = '\0';
+    if (lineIdx < 0) return;
+    const uint16_t mask = LineTouchButtonMask(lineIdx);
+    if (!BtnMaskIsActionable(mask)) return;
+    s_driveButtonMask = mask;
+    const char* nm = CatalogNameForLine(lineIdx);
+    if (!nm || !nm[0]) nm = fallbackName;
+    if (nm && nm[0]) {
+        strncpy(s_driveButtonLabel, nm, sizeof(s_driveButtonLabel) - 1);
+        s_driveButtonLabel[sizeof(s_driveButtonLabel) - 1] = '\0';
+    }
+    if (leadsTo && leadsTo[0]) {
+        strncpy(s_driveButtonLeadsTo, leadsTo, sizeof(s_driveButtonLeadsTo) - 1);
+        s_driveButtonLeadsTo[sizeof(s_driveButtonLeadsTo) - 1] = '\0';
+    }
+    // A line the player has to press something on is one to stop ON, not 300
+    // units past -- and 300 was the non-entity default.
+    //
+    // v0.121.0 (#centra): 60, not 30. The 2026-08-28 log has the drive parked at
+    // **dist=31** against the ladder base with moveDist=0, burning four
+    // recoveries and five seconds to close a single unit it could not close --
+    // the player had already stopped moving. 60 is the figure this codebase
+    // already uses for "close enough to interact" (the talk-radius floor in this
+    // same function, and the direction-drive default), and he climbed the ladder
+    // from 42 units away in that very log.
+    s_driveArriveDist = 60.0f;
+    Log::Field("FieldNavigation: [drive] target line%d waits on BTNTEST 0x%04X "
+               "('%s') -- arriving on it, not through it [v0.120.0]",
+               lineIdx, (unsigned)mask, s_driveButtonLabel);
+}
+
 static void HandleKeys()
 {
     // Only handle nav keys when on the field.
@@ -192,6 +261,9 @@ static void HandleKeys()
                                       ? s_catalog[s_selectedCatalogIdx] : s_catalog[0];
             {
             float _px = 0, _pz = 0, _tx = 0, _tz = 0;
+            // v0.119.0 (#centra): the target's HEIGHT, when the target is a kind
+            // that has one. Only trigger lines and INF gateways do.
+            float _goalZ = 0.0f; bool _haveGoalZ = false;
             bool drValid = false;
             if (drTgt.entityIdx != s_playerEntityIdx &&
                 GetEntityPos(s_playerEntityIdx, _px, _pz)) {
@@ -248,6 +320,7 @@ static void HandleKeys()
                 s_drivePinnedCount = 0;          // v0.18.3.309 (#114): fresh pin-escape state per drive
                 s_drivePinnedPosX  = _px;
                 s_drivePinnedPosY  = _pz;
+                DriveProgressResetForNewDrive(_px, _pz);  // v0.131.1 (#centra)
 
                 // v06.14: Start heading calibration if not yet calibrated for this field.
                 // v0.17.6.0: F9 path-finding auto-drive NEVER runs CALIB. It uses the
@@ -308,6 +381,17 @@ static void HandleKeys()
                 if (drTgt.type == ENT_SAVE_POINT) {
                     s_driveArriveDist = 30.0f;
                     Log::Field("FieldNavigation: [drive] Save Point target -> arriveDist=30 (walk-onto)");
+                } else if (drTgt.type == ENT_EXIT && drTgt.gatewayIdx < 0 &&
+                           drTgt.entityIdx <= -300) {
+                    // v0.62.1 (#123): a SCRIPTED exit -- a lift platform, a
+                    // trapdoor, a bus. It has no gateway line to cross and no
+                    // talk radius to stop at, so it fell to the 300-unit
+                    // non-entity default and auto-drive announced "Arrived" a
+                    // room away from it. You get onto a lift the same way you
+                    // get onto a save point: by standing on it.
+                    s_driveArriveDist = 30.0f;
+                    Log::Field("FieldNavigation: [drive] scripted exit '%s' -> arriveDist=30 "
+                               "(walk-onto) [v0.62.1]", drTgt.name);
                 } else if (drTgt.entityIdx >= 0 && drTgt.entityIdx < MAX_ENTITIES) {
                     // NPC, Object, or runtime-entity Draw Point. Read the
                     // engine-set talkRadius and clamp to a 60-unit floor so
@@ -350,6 +434,13 @@ static void HandleKeys()
                 s_driveCrossLineActive = false;
                 s_driveCrossLineX1 = 0; s_driveCrossLineY1 = 0;
                 s_driveCrossLineX2 = 0; s_driveCrossLineY2 = 0;
+                // v0.120.0 (#centra): and with no button to press.
+                s_driveButtonMask = 0; s_driveButtonLabel[0] = '\0';
+                s_driveButtonLeadsTo[0] = '\0';
+                // v0.118.0 (#centra): every drive starts with no bridge redirect.
+                s_driveBridgeActive  = false;
+                s_driveBridgeLineIdx = -1;
+                s_driveBridgeX = 0.0f; s_driveBridgeY = 0.0f;
                 if (drTgt.entityIdx <= -400) {
                     // v0.17.6.0: Exit gateway target. The dedup catalog entry covers
                     // 1..N raw INF gateways with the same destination field; pick the
@@ -382,6 +473,14 @@ static void HandleKeys()
                             }
                         }
                         if (bestRawIdx >= 0) {
+                            // v0.119.0 (#centra): the gateway's own height. The 2D
+                            // lookup put crtower2's exit to crtower3 on the right-
+                            // ladder platform (tri 73, z=14060) instead of the floor
+                            // under it (tri 91, z=14984) and invented an island
+                            // crossing. walkmesh_height_lookup_model.inl.
+                            _goalZ = (float)(s_gateways[bestRawIdx].lineZ1 +
+                                             s_gateways[bestRawIdx].lineZ2) / 2.0f;
+                            _haveGoalZ = true;
                             s_driveTrigTarget = true;
                             s_driveCrossLineX1 = s_gateways[bestRawIdx].lineX1;
                             s_driveCrossLineY1 = s_gateways[bestRawIdx].lineY1;
@@ -406,7 +505,11 @@ static void HandleKeys()
                 } else if (drTgt.entityIdx <= -200) {
                     int trigIdx = -(drTgt.entityIdx + 200);
                     if (trigIdx >= 0 && trigIdx < s_capturedLineCount) {
+                        // v0.119.0 (#centra): SETLINE has carried z1/z2 since v05.58.
+                        _goalZ = CapturedLineMidZ(trigIdx);
+                        _haveGoalZ = true;
                         s_driveTrigTarget = true;
+                        DriveSetButtonTarget(trigIdx, drTgt.name, nullptr);
                         float tlx1 = (float)s_capturedLines[trigIdx].x1;
                         float tly1 = (float)s_capturedLines[trigIdx].y1;
                         float tlx2 = (float)s_capturedLines[trigIdx].x2;
@@ -429,7 +532,41 @@ static void HandleKeys()
                     } else {
                         startTri = FindNearestTriangle(_px, _pz);
                     }
-                    int goalTri  = FindNearestTriangle(_tx, _tz);
+                    // v0.131.6 (#centra): AN ENTITY KNOWS WHICH TRIANGLE IT IS
+                    // STANDING ON -- ASK IT INSTEAD OF SEARCHING FOR ONE.
+                    //
+                    // Aaron: "an earlier field where you have to walk onto an
+                    // automated lift, but the lift was identified as an NPC and
+                    // auto-drive wouldn't actually trigger it." crsphi1, the
+                    // 21:01:06 drive, and the log names the failure exactly:
+                    // "startTri 71 and goalTri 122 are on disconnected walkmesh
+                    // islands; straight-line fallback", then "A* No path from
+                    // tri 64 to tri 122", and it parked him 400 units short.
+                    //
+                    // THE LIFT IS FOUR TRIANGLES. crsphi1 has five walkmesh
+                    // islands and four of them share one XY footprint at
+                    // different heights -- tri 131 at z 942, tri 149 at 1561,
+                    // tri 122 at 2231, tri 140 at 2949. That is the lift drawn
+                    // once per stop. A coordinate search over (-4,-206) can
+                    // return any of them, and it returned the one two thousand
+                    // units up, on an island the player cannot reach. tri 131
+                    // is on the player's own island and was always walkable.
+                    //
+                    // The mod already had the right answer and threw it away:
+                    // the catalog reads the entity's live triangle every refresh
+                    // and logged it in the same second -- "[dedup] ent3 tri=131".
+                    // The engine's own statement of where a thing is standing
+                    // beats any search over its coordinates, and it costs a read.
+                    int goalTri = -1;
+                    if (DriveGoalTriFromEntity(drTgt.entityIdx, drTgt.triangleId,
+                                               s_walkmesh.numTriangles, &goalTri)) {
+                        Log::Field("FieldNavigation: [drive] goal tri %d from the "
+                                   "entity's own placement, not a coordinate search "
+                                   "[v0.131.6]", goalTri);
+                    } else {
+                        goalTri = _haveGoalZ ? FindNearestTriangle3D(_tx, _tz, _goalZ)
+                                             : FindNearestTriangle(_tx, _tz);
+                    }
 
                     if (startTri >= 0 && goalTri >= 0) {
                         // v05.93: Check line-of-sight first. If the walkmesh has
@@ -457,7 +594,8 @@ static void HandleKeys()
                                 float tdy = tcy - _pz;
                                 float tdist = sqrtf(tdx*tdx + tdy*tdy);
                                 // Must be reachable from player's island
-                                int trigTri = FindNearestTriangle(tcx, tcy);
+                                int trigTri = FindNearestTriangle3D(tcx, tcy,
+                                                                    CapturedLineMidZ(tl));
                                 if (trigTri >= 0 && AreTrianglesConnected(startTri, trigTri)) {
                                     if (tdist < bestTrigDist) {
                                         bestTrigDist = tdist;
@@ -469,7 +607,8 @@ static void HandleKeys()
                                 // Redirect to the trigger line center.
                                 float bridgeX = (float)(s_capturedLines[bestTrigIdx].x1 + s_capturedLines[bestTrigIdx].x2) / 2.0f;
                                 float bridgeY = (float)(s_capturedLines[bestTrigIdx].y1 + s_capturedLines[bestTrigIdx].y2) / 2.0f;
-                                int bridgeTri = FindNearestTriangle(bridgeX, bridgeY);
+                                int bridgeTri = FindNearestTriangle3D(bridgeX, bridgeY,
+                                                    CapturedLineMidZ(bestTrigIdx));
                                 Log::Field("FieldNavigation: [drive] redirecting to trigger line %d "
                                            "center=(%.0f,%.0f) tri=%d dist=%.0f",
                                            bestTrigIdx, bridgeX, bridgeY, bridgeTri, bestTrigDist);
@@ -482,10 +621,59 @@ static void HandleKeys()
                                 float tdx2 = tlx2 - tlx1;
                                 float tdy2 = tly2 - tly1;
                                 s_driveTrigCrossStart = tdx2 * (_pz - tly1) - tdy2 * (_px - tlx1);
+                                // v0.118.0 (#centra): the crossing line has to be the
+                                // BRIDGE's, not the gateway's. A gateway target seeded
+                                // s_driveCrossLine* from the gateway's own endpoints a
+                                // few dozen lines above; if the drive is actually
+                                // heading for a ladder 1400 units away from that line,
+                                // "have we crossed yet" was asking about the wrong line
+                                // -- and so was the 300-unit push applied to the target.
+                                s_driveCrossLineX1 = s_capturedLines[bestTrigIdx].x1;
+                                s_driveCrossLineY1 = s_capturedLines[bestTrigIdx].y1;
+                                s_driveCrossLineX2 = s_capturedLines[bestTrigIdx].x2;
+                                s_driveCrossLineY2 = s_capturedLines[bestTrigIdx].y2;
+                                s_driveCrossLineActive = true;
+                                // v0.118.0 (#centra): AND THE TICK LOOP HAS TO KNOW.
+                                // v06.01 wrote the bridge into _tx/_tz, which are locals
+                                // here; UpdateAutoDrive re-derives its target from the
+                                // catalog index every tick and so drove at the gateway
+                                // it could not reach. See drive_bridge_target_model.inl.
+                                s_driveBridgeActive  = true;
+                                s_driveBridgeLineIdx = bestTrigIdx;
+                                s_driveBridgeX = bridgeX;
+                                s_driveBridgeY = bridgeY;
+                                // v0.120.0 (#centra): the bridge is usually a ladder,
+                                // and a ladder is a button press. The drive walks to
+                                // it and hands over rather than pushing through it.
+                                DriveSetButtonTarget(bestTrigIdx, nullptr, drTgt.name);
                                 // Path to the trigger line.
                                 // v06.02: Exempt the bridge trigger from A* avoidance.
-                                if (bridgeTri >= 0 && ComputeAStarPath(startTri, bridgeTri, -1, bestTrigIdx)) {
+                                // v0.118.0: a bridge inside the player's OWN triangle
+                                // needs no path -- A* from a triangle to itself is a
+                                // degenerate query, and on crtower2 (player tri 37,
+                                // bridge tri 37) its funnelled output steered 1149 units
+                                // the wrong way. One waypoint, straight at it.
+                                if (BridgeNeedsNoPath(startTri, bridgeTri)) {
+                                    s_waypoints[0][0] = bridgeX;
+                                    s_waypoints[0][1] = bridgeY;
+                                    s_waypointCount = 1;
+                                    s_waypointIdx = 0;
+                                    s_usingFunnel = false;
+                                    Log::Field("FieldNavigation: [drive] bridge is in the player's own "
+                                               "triangle (%d) -- steering straight at it [v0.118.0]",
+                                               startTri);
+                                } else if (bridgeTri >= 0 &&
+                                           ComputeAStarPath(startTri, bridgeTri, -1, bestTrigIdx)) {
                                     FunnelPath(_px, _pz, bridgeX, bridgeY);
+                                } else {
+                                    s_waypoints[0][0] = bridgeX;
+                                    s_waypoints[0][1] = bridgeY;
+                                    s_waypointCount = 1;
+                                    s_waypointIdx = 0;
+                                    s_usingFunnel = false;
+                                    Log::Field("FieldNavigation: [drive] no A* route to the bridge "
+                                               "(tri %d -> %d) -- steering straight at it [v0.118.0]",
+                                               startTri, bridgeTri);
                                 }
                                 _tx = bridgeX;
                                 _tz = bridgeY;
@@ -587,6 +775,11 @@ static void HandleKeys()
                 } else {
                     Log::Field("FieldNavigation: [drive] No walkmesh — straight-line mode");
                 }
+
+                // v0.119.0 (#centra): the recovery re-paths inside UpdateAutoDrive
+                // re-derive the goal triangle too, and must use the same height.
+                s_driveGoalZ      = _goalZ;
+                s_driveGoalZValid = _haveGoalZ;
 
                 // v06.08: Compute and store starting distance for NavLog
                 {

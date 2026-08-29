@@ -177,6 +177,22 @@ enum JSMEntityType {
     JSM_ENT_DIRECTOR             // v0.12.20: Invisible Others entity that dispatches interaction zones via REQ (dormitory bed/desk, classroom desk/sign)
 };
 
+// The engine's comparison, given the live value. Pure -- the memory read that
+// produces `live` is the caller's problem, because only the mod can do it
+// safely and only the harness can fake it.
+static bool JsmGateSatisfied(uint8_t op, int32_t gateValue, int32_t live)
+{
+    switch (op) {
+        case 6:  return live == gateValue;
+        case 7:  return live >  gateValue;
+        case 8:  return live >= gateValue;
+        case 9:  return live <  gateValue;
+        case 10: return live <= gateValue;
+        case 11: return live != gateValue;
+        default: return true;
+    }
+}
+
 // Classification result for a single JSM entity.
 struct JSMEntityInfo {
     int            jsmIndex;      // index in JSM entity table (Door→Line→Bg→Other order)
@@ -198,6 +214,54 @@ struct JSMEntityInfo {
     // If this entity's talk script calls REQSW/REQEW to a JSM_ENT_DRAW_POINT entity,
     // this field holds the JSM index of that draw point. -1 = not a trigger.
     int            drawPointTriggerOf;
+    // v0.62.0: the SETMODEL (0x2B) INLINE PARAMETER -- this entity's index into
+    // the field's chara.one model list, and the only key that survives the
+    // engine's live-entity compaction. The live entity block's modelId (+0x218)
+    // holds the same number, so `live.modelId == jsm.modelParam` joins a running
+    // entity to the script that drives it. -1 = the script never calls SETMODEL.
+    int            modelParam;
+    // v0.75.0 (#112): AN INVISIBLE INTERACTION POINT, not an absent object.
+    // The entity's own INIT method calls HIDE (0x061) and TALKON (0x057). FF8
+    // uses this constantly for terminals, panels, signs and consoles: the thing
+    // the player sees is painted into the background art, and the entity is a
+    // hidden model that exists only to carry the talk target. Hidden AND
+    // talk-enabled in the same breath is not the same as hidden -- it is the
+    // opposite of a not-yet-revealed prop, which hides itself and stays silent.
+    //
+    // The catalog's HIDE filter (both paths) drops the second and must not drop
+    // the first. rgguest2's `comp` -- the Ragnarok terminal that tells the
+    // player how the Propagator pairing works, the one thing in that room worth
+    // finding -- was invisible to the catalog for exactly this reason.
+    // Aaron: "the terminal is not appearing in the catalog."
+    bool           invisibleTalkTarget;
+    // v0.62.2 (#123): the STORY GATE guarding this entity's triggering method.
+    // A REQ-follow exit is only real while its trigger's own script is willing to
+    // run: `ele`, the Lunar Base pod lift, opens with
+    //   PSHM_W var[256]; PSHN_L 2552; OP(==); JMPZ  -- i.e. do nothing unless the
+    // story has reached 2552, which is the value `elone`'s talk script writes to
+    // var[256] when you speak to Ellone in the control room. Offering the exit
+    // before then is offering something that cannot happen.
+    // Operator numbers are the engine's, from the table at 0x00B8DE4C:
+    //   6 ==  7 >  8 >=  9 <  10 <=  11 !=
+    // The variable is read at 0x01CFE9B8 + gateAddr, zero-extended, gateWidth
+    // bytes wide (PSHM_B/W/L = 0x0A/0x0C/0x0E -> 1/2/4).
+    // v0.63.0 (#123): this entity is a MAP_EXIT because the REQ-follow decided
+    // it triggers somebody else's MAPJUMP -- a lift platform, a bus, a lever.
+    // False means the MAPJUMP is in its OWN script, which is what a person who
+    // sets a story transition going looks like. The two need opposite handling
+    // and nothing else in JSMEntityInfo tells them apart.
+    bool           exitFromReqFollow;
+    // v0.120.0 (#centra): the BTNTEST mask this entity's non-init scripts wait
+    // on, or 0 for none. A Centra ladder is `PSHN_L 192; BTNTEST` -- Cross or
+    // Square -- and walking onto it does nothing at all until one is pressed,
+    // which is why auto-drive parked on one and pushed at a point 300 units
+    // past it. See button_mask_model.inl.
+    uint16_t       touchButtonMask;
+    bool           hasGate;
+    int32_t        gateAddr;
+    uint8_t        gateWidth;
+    uint8_t        gateOp;
+    int32_t        gateValue;
     // v0.12.24: True if entity uses runtime 0x1C extended dispatch (PSHM_W-based).
     // Indicates potential runtime-dispatched dialog opcodes not detectable statically.
     bool           hasExtDispatch;
@@ -333,6 +397,14 @@ struct JSMEntityInfo {
     // The junk-gate keeps a marker-positioned Object only if it has one of these zones
     // (or its own talk/dialog, or a curated name); the inert lights have none.
     bool           hasNearbyInteractionZone;
+    // v0.58.0: this entity's index in the engine's runtime script-object table
+    // (0x01D9D020), which is ordered Others, Lines, Backgrounds, Doors -- NOT the
+    // same as jsmIndex, which is this entity's index in the JSM group-word array
+    // (ordered Lines, Doors, Backgrounds, Others). For an "Other" this is exactly
+    // the pFieldStateOthers slot the catalog scan walks, so it is the one and only
+    // reliable join between a live entity block and its script. Both orderings are
+    // read out of field_scripts_init; see field_archive_jsm_order.inl.
+    int            runtimeSlot;
 };
 
 const char* JSMEntityTypeName(JSMEntityType t);
@@ -393,6 +465,12 @@ struct WalkmeshTriangle {
     uint16_t neighbor[3];    // adjacent triangle on each edge (0xFFFF = none)
     // Derived at load time:
     float    centerX, centerY; // center of triangle (X, Y screen-space)
+    // v0.119.0 (#centra): the third axis, which the mesh has always had and the
+    // lookup has always ignored. FF8 field walkmeshes stack triangles
+    // vertically -- crtower1 has five ladder rungs at the same X/Y, 400 units
+    // apart in Z -- so a 2D nearest-triangle answer can be a thousand units in
+    // the air. See walkmesh_height_lookup_model.inl.
+    float    centerZ;          // center of triangle (Z, height)
 };
 
 struct WalkmeshData {

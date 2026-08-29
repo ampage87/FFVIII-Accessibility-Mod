@@ -40,6 +40,63 @@ static char s_captureBasePath[512] = {};
 // in scope here.
 static void PollPopupRecords();
 
+// ============================================================================
+// v0.107.0 (#megaflare) — a RUN of screenshots, not a single shot
+// ============================================================================
+// s_captureRequested above is one flag and one path: the last request wins.
+// That is the right shape for the Scan UI, which is a still frame. It cannot
+// answer "what is on screen across these ten seconds", which is the question
+// Bahamut's Mega Flare asks: the mod's only trigger is the ability name
+// landing in the window at the START of a ~10 s charge animation, and the
+// thing being hunted -- a single digit, shown briefly -- is somewhere inside
+// it. The 2026-08-26 log has NOTHING between the ability name and the damage:
+// no window text, no popup render, no sprite. Whatever draws that digit, no
+// sensor the mod owns can currently see it, so this build goes and looks.
+//
+// The schedule lives in battle_burst_capture_model.inl and is tested there.
+// This is the part that touches GL and the filesystem.
+//
+// DoGLCapture is defined below; this block sits above it because the state it
+// declares has to be visible to the frame hook either way.
+static void DoGLCapture();
+
+static BurstCapture s_burst = { 0, 0, 0, 0 };
+static char s_burstTag[24] = {};
+static bool s_burstDirEnsured = false;
+
+// Ten shots, 54 frames (~0.9 s at 60 fps) apart, covers ~9 s from the trigger.
+static const int BURST_SHOTS    = 10;
+static const int BURST_INTERVAL = 54;
+
+// Called from HookedSwapBuffers. Runs only when the single-shot path is idle
+// so the two cannot fight over s_captureBasePath in the same frame.
+static void BurstOnSwapBuffers()
+{
+    if (!BurstIsRunning(&s_burst)) return;
+    if (s_captureRequested) return;
+    if (!BurstStep(&s_burst)) return;
+
+    if (!s_burstDirEnsured) {
+        CreateDirectoryA(KIND4_SCREENSHOT_DIR, NULL);
+        s_burstDirEnsured = true;
+    }
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    snprintf(s_captureBasePath, sizeof(s_captureBasePath),
+             "%s\\burst_%s_%02d%02d%02d_%02d",
+             KIND4_SCREENSHOT_DIR, s_burstTag,
+             st.wHour, st.wMinute, st.wSecond, BurstShotNumber(&s_burst));
+
+    // Already inside HookedSwapBuffers: the GL context is current and the back
+    // buffer holds the frame about to be presented.
+    DoGLCapture();
+
+    Log::Battle("BattleTTS: [BURST] shot %d/%d tag=%s -> %s",
+                BurstShotNumber(&s_burst) + 1, BURST_SHOTS, s_burstTag,
+                s_captureBasePath);
+}
+
 // Called from hooked SwapBuffers — GL context is current, framebuffer is ready
 static void DoGLCapture()
 {
@@ -61,6 +118,12 @@ static void DoGLCapture()
     // Read framebuffer (GL gives bottom-up, same as BMP)
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glReadPixels(0, 0, w, h, GL_BGR_EXT, GL_UNSIGNED_BYTE, pixels);
+
+    // v0.65.6 (#111): let the overlay measure the bytes that are about to
+    // become the file. Draw() has already run this frame (it is first in the
+    // hook now), so if the box is in this buffer at all it is in it here. No-op
+    // unless the overlay is shown, and once per Show() rather than per F11.
+    FieldOverlay::ProbeCapture(pixels, w, h, stride);
     
     // Write BMP
     char bmpPath[512];
@@ -1234,6 +1297,44 @@ static void PollSpritePool()
 
 static BOOL WINAPI HookedSwapBuffers(HDC hdc)
 {
+    // v0.66.1 (#111): count every presented frame, before anything can return
+    // early. A pause across which this number does not move is a pause during
+    // which the game drew nothing and captured nothing -- which is exactly what
+    // the field freeze turns out to do.
+    FieldOverlay::NoteSwap();
+
+    // v0.65.5 (#111): THE MOD'S OWN ON-SCREEN TEXT, AND IT GOES FIRST.
+    //
+    // It is drawn here rather than anywhere else because this hook is the one
+    // part of the render path the field freeze does not touch. It is drawn
+    // FIRST -- ahead of DoGLCapture below -- and that ordering is the whole
+    // point of this comment, because getting it wrong cost three builds.
+    //
+    // "Last" was the wrong instinct. The game has ALREADY finished rendering
+    // this frame by the time SwapBuffers is called; nothing between here and
+    // the swap draws game content, so the top of this hook is exactly as "last"
+    // as the bottom of it. What the bottom of the hook is NOT is visible to
+    // F11: DoGLCapture() reads the back buffer at the top, so a capture on
+    // frame N sampled the buffer BEFORE that frame's overlay went into it, and
+    // the overlay could never appear in a screenshot no matter how well it
+    // drew.
+    //
+    // That silence was read as failure twice. Aaron's F11 shots showed a large
+    // bordered box with one line of text in it and everyone (me) called it the
+    // overlay rendering badly. It was not the overlay at all -- it is the
+    // GAME's dialog window, revealing its text one character at a time under a
+    // frozen field: 22:45 caught it at "REACHING RIN", 00:05 at "REACHING
+    // RINOA" plus the "N" of the next line, same box to the pixel (x255..968,
+    // y52..656) in both. The mod's own box is 372x240 at (454,280) and was
+    // simply not in either frame.
+    //
+    // So the overlay now lands in the buffer F11 samples, and the screenshot
+    // becomes what it was always assumed to be: an independent check on the
+    // glReadPixels read-back rather than a second opinion about a different
+    // frame. No-op unless something is shown; the battle paths below read
+    // pixels only in battle, where the overlay never is.
+    FieldOverlay::Draw();
+
     if (s_captureRequested) {
         // v0.14.65.3: optional N-frame delay between request and capture.
         // When s_captureFrameDelay > 0, decrement it and skip this swap;
@@ -1247,6 +1348,10 @@ static BOOL WINAPI HookedSwapBuffers(HDC hdc)
             DoGLCapture();
         }
     }
+
+    // v0.107.0 (#megaflare): the burst, after the single-shot path so the two
+    // can never both write s_captureBasePath on one frame.
+    BurstOnSwapBuffers();
 
     // v0.14.0: sprite pool poll FIRST (before any other path can perturb
     // the read). The pool data at 0x1D28C44 is read-only from our side;

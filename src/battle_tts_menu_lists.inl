@@ -17,8 +17,12 @@ static void BuildMagicList(uint8_t partySlot)
     s_magicListBuilt = false;
     if (partySlot >= 3) return;
     
+    uint8_t kind = 0xFF; bool over = false;
+    const uint8_t charIdxOuter = BattleSlotCharIdx(partySlot, &kind, &over);
+    if (over) Log::Battle("BattleTTS: [MAGIC-LIST] dream slot %d: formation was stale, "
+                          "actor kind %d -> char %d", (int)partySlot, (int)kind, (int)charIdxOuter);
     __try {
-        uint8_t charIdx = *(uint8_t*)(SAVEMAP_PARTY_FORMATION + partySlot);
+        uint8_t charIdx = charIdxOuter;
         if (charIdx >= 8) return;
         
         uint8_t* charBase = (uint8_t*)(SAVEMAP_CHAR_DATA_BASE + charIdx * SAVEMAP_CHAR_STRIDE);
@@ -56,7 +60,7 @@ static void BuildGFList(uint8_t partySlot)
     if (partySlot >= 3) return;
     
     __try {
-        uint8_t charIdx = *(uint8_t*)(SAVEMAP_PARTY_FORMATION + partySlot);
+        uint8_t charIdx = BattleSlotCharIdx(partySlot, 0, 0);
         if (charIdx >= 8) return;
         
         uint8_t* charBase = (uint8_t*)(SAVEMAP_CHAR_DATA_BASE + charIdx * SAVEMAP_CHAR_STRIDE);
@@ -147,7 +151,7 @@ static void SnapshotAllMagicInventories()
     s_magicSnapshotValid = false;
     __try {
         for (int slot = 0; slot < 3; slot++) {
-            uint8_t charIdx = *(uint8_t*)(SAVEMAP_PARTY_FORMATION + slot);
+            uint8_t charIdx = BattleSlotCharIdx((uint8_t)slot, 0, 0);
             if (charIdx >= 8) {
                 memset(s_magicSnapshotBefore[slot], 0, sizeof(s_magicSnapshotBefore[slot]));
                 continue;
@@ -175,7 +179,7 @@ static uint8_t DiffMagicInventories(uint8_t claimedSlot)
     uint8_t gainedSlot = 0xFF;
     __try {
         for (int slot = 0; slot < 3; slot++) {
-            uint8_t charIdx = *(uint8_t*)(SAVEMAP_PARTY_FORMATION + slot);
+            uint8_t charIdx = BattleSlotCharIdx((uint8_t)slot, 0, 0);
             if (charIdx >= 8) continue;
             uint8_t* magicBase = (uint8_t*)(SAVEMAP_CHAR_DATA_BASE + charIdx * SAVEMAP_CHAR_STRIDE + 0x10);
             for (int i = 0; i < 32; i++) {

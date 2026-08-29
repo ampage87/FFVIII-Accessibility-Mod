@@ -131,7 +131,36 @@
                             (strstr(s_jsmEntities[jsmIdx].symName, "jump") ||
                              strstr(s_jsmEntities[jsmIdx].symName, "Jump"))) {
                             s_capturedLines[t].lineType = FieldArchive::JSM_ENT_LINE_SCREEN_BOUND;
-                            s_capturedLines[t].isCameraTransition = true;
+                            // v0.60.0: A WORLD-MAP EXIT IS NEVER A CAMERA TRANSITION.
+                            //
+                            // The v0.20.29 rule identifies camera-view transition
+                            // lines by "jump" appearing in the SYM name. Nineteen of
+                            // the lines it matches are WORLDMAPJUMPs -- among them the
+                            // line named literally `Jump` in every one of the seven
+                            // Chocobo Forest woods, plus `WorldJump`, `wmjumpline0`
+                            // and `WMJumpline1`. Those were labelled "Camera
+                            // transition" and then zone-filtered like one, which is
+                            // how a field whose ONLY way out is the world map could
+                            // end up with nothing in the catalog at all. Aaron:
+                            // "in those cases there should still be an exit to the
+                            // world map in the catalog."
+                            //
+                            // The exemption is exact rather than another name test:
+                            // WORLDMAPJUMP (0x10D, handler 0x00521820) sets the
+                            // transition mode at 0x01CE4760 to 7, where every
+                            // field-to-field jump sets 1, and there is no camera view
+                            // of the world map to transition to. The line falls
+                            // through to the ordinary SCREEN_BOUND exit path, which
+                            // already knows how to name destination -2.
+                            if (s_jsmEntities[jsmIdx].param == -2) {
+                                s_capturedLines[t].isCameraTransition = false;
+                                Log::Field("FieldNavigation: [linetype] line%d '%s' has a "
+                                           "\"jump\" name but goes to the WORLD MAP -- kept as a "
+                                           "real exit, not a camera transition [v0.60.0]",
+                                           t, s_jsmEntities[jsmIdx].symName);
+                            } else {
+                                s_capturedLines[t].isCameraTransition = true;
+                            }
                         }
                         // v0.07.83 / v0.17.7.1.2: Capture MAPJUMP destination for screen boundary lines.
                         //
@@ -170,7 +199,18 @@
                         // its destination captured (glfurin1 jsm0 -> 725).
                         if (mappedType == FieldArchive::JSM_ENT_LINE_SCREEN_BOUND) {
                             int rawParam = s_jsmEntities[jsmIdx].param;
-                            if ((unsigned)rawParam & 0x80000000u) {
+                            // v0.60.0: -2 is the WORLDMAPJUMP sentinel, not a PSHM
+                            // marker. Both have bit 31 set, so it used to fall into
+                            // the marker branch below, get read as address 0xFFFE,
+                            // fail the field-id range test and come out the other
+                            // side unchanged -- the right answer by accident, with a
+                            // misleading [PSHM-DEST] line for every world-map exit in
+                            // the game. Say so up front instead.
+                            if (rawParam == -2) {
+                                Log::Field("FieldNavigation: [linetype] line%d (jsm%d '%s') "
+                                           "destination is the WORLD MAP (WORLDMAPJUMP) [v0.60.0]",
+                                           t, jsmIdx, s_jsmEntities[jsmIdx].symName);
+                            } else if ((unsigned)rawParam & 0x80000000u) {
                                 uint16_t pshmAddr = (uint16_t)(rawParam & 0xFFFF);
                                 // v0.17.7.5.3: addr-as-literal. Empirically across
                                 // 8 BAT fires on B-Garden hall fields, SCREEN_BOUND

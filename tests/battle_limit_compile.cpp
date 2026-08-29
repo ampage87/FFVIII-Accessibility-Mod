@@ -119,7 +119,7 @@ static uint8_t Enc(char c)
     if (c >= 'a' && c <= 'z') return (uint8_t)(0x5F + (c - 'a'));
     switch (c) {
         case '-': return 0x32; case '.': return 0x3B; case ',': return 0x3C;
-        case '?': return 0x2F; case '!': return 0x2E; case '\'': return 0x3A;
+        case '?': return 0x2F; case '!': return 0x2E; case '\'': return 0x43;  // v0.117.0
         default:  return 0x20;
     }
 }

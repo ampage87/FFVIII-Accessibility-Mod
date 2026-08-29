@@ -170,6 +170,8 @@ cl /nologo /W3 /EHsc /O2 /MD /LD ^
     "%SRC_DIR%\chase_detector.cpp" ^
     "%SRC_DIR%\chase_ask_overlay.cpp" ^
     "%SRC_DIR%\train_mode_ask_overlay.cpp" ^
+    "%SRC_DIR%\bahamut_light_overlay.cpp" ^
+    "%SRC_DIR%\centra_code_overlay.cpp" ^
     "%SRC_DIR%\chase_auto_pilot.cpp" ^
     "%SRC_DIR%\chase_keyboard.cpp" ^
     "%SRC_DIR%\chase_wndproc.cpp" ^
@@ -178,6 +180,7 @@ cl /nologo /W3 /EHsc /O2 /MD /LD ^
     "%SRC_DIR%\countdown_timer.cpp" ^
     "%SRC_DIR%\dialog_inject.cpp" ^
     "%SRC_DIR%\field_announce.cpp" ^
+    "%SRC_DIR%\field_overlay.cpp" ^
     "%SRC_DIR%\ff8_text_decode.cpp" ^
     "%MINHOOK_DIR%\src\buffer.c" ^
     "%MINHOOK_DIR%\src\hook.c" ^

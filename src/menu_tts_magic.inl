@@ -150,6 +150,21 @@ static const char* MagicCharName(uint8_t charIdx)
     __try {
         modelId = *(uint8_t*)(MM_SAVEMAP + MM_CHAR_ARRAY_OFF + charIdx * MM_CHAR_STRIDE + MM_CHAR_MODEL_OFF);
     } __except(EXCEPTION_EXECUTE_HANDLER) { modelId = charIdx; }
+    // v0.45.0 (#106) diag: Aaron saw "Squall, Irvine, Selphie" where the dream
+    // party should have been, and this resolver is dream-aware -- so either the
+    // model bytes were not 8/9/10 at that moment or the names came from a path
+    // that does not call here. One line per (index, model) pair, so the next
+    // dream log answers which, and it is silent everywhere else.
+    static uint16_t s_seen[11] = {0};
+    if (charIdx < 11) {
+        const uint16_t tag = (uint16_t)((charIdx << 8) | modelId);
+        if (s_seen[charIdx] != tag) {
+            s_seen[charIdx] = tag;
+            Log::Menu("[MagicTTS] name: char=%u modelId=%u -> \"%s\"",
+                      (unsigned)charIdx, (unsigned)modelId,
+                      (modelId >= 8 && modelId <= 10) ? NAMES[modelId] : NAMES[charIdx]);
+        }
+    }
     if (modelId >= 8 && modelId <= 10) return NAMES[modelId];
     return NAMES[charIdx];
 }

@@ -311,13 +311,36 @@ static const char* FIELD_DISPLAY_NAMES[] = {
     "Deep Sea Deposit 4",  // 297: ddruins4
     "Deep Sea Deposit 5",  // 298: ddruins5
     "Deep Sea Deposit 6",  // 299: ddruins6
-    "Deep Sea Research Center - Levels 1",  // 300: ddsteam1
-    "Deep Sea Research Center - Levels 2",  // 301: ddtower1
-    "Deep Sea Research Center - Levels 3",  // 302: ddtower2
-    "Deep Sea Research Center - Levels 4",  // 303: ddtower3
-    "Deep Sea Research Center - Levels 5",  // 304: ddtower4
-    "Deep Sea Research Center - Levels 6",  // 305: ddtower5
-    "Deep Sea Research Center - Levels 7",  // 306: ddtower6
+// v0.112.0 (#dsrc): THE DEEP SEA RESEARCH CENTER, RENUMBERED FROM THE GAME'S
+// OWN TERMINALS. Aaron: "Floor numbers between the catalog and the game seemed
+// off. What the game called floor 3 of the DSRC was not identified as floor 3
+// in the catalog, I think they were off by one."
+//
+// He is right, and the whole block was one out. The source these names came
+// from (ff8-speedruns' mapId.md) numbered "Deep Sea Research Center - Levels N"
+// in ascending field-id order across a group that INCLUDES ddsteam1 at id 300 --
+// so the steam room took "Levels 1" and pushed every tower floor up by one.
+//
+// The terminals in the .msd say what each floor is, in plain English:
+//   ddtower1 msg21  "Reset confirmed.  Door to level 2 unlocked."     -> Level 1
+//   ddtower2 msg 8  "Opening door to level 3."                        -> Level 2
+//   ddtower3 msg26  "Opening door to level 4."                        -> Level 3
+//   ddtower4 msg 0  "Opening door to level 5."                        -> Level 4
+//   ddtower5 msg 0  "Opening door to level 6."                        -> Level 5
+//   ddtower6 msg 0  "Opening door to excavation site: Ocean Deposit."  -> Level 6
+// and ddtower1 msg22 calls the whole thing a "6 level tower", while ddtower6
+// msg 2 tells you to "return to level 1 and reset" -- level 1 being where
+// ddtower1's reset terminal is. ddtowerN is Level N, exactly.
+//
+// ddsteam1 is not a level at all. ddtower3 msg27 names it: "Opening door to the
+// Steam Room."
+    "Deep Sea Research Center - Steam Room",  // 300: ddsteam1
+    "Deep Sea Research Center - Level 1",  // 301: ddtower1
+    "Deep Sea Research Center - Level 2",  // 302: ddtower2
+    "Deep Sea Research Center - Level 3",  // 303: ddtower3
+    "Deep Sea Research Center - Level 4",  // 304: ddtower4
+    "Deep Sea Research Center - Level 5",  // 305: ddtower5
+    "Deep Sea Research Center - Level 6",  // 306: ddtower6
     "Dollet - Comm Tower 1",  // 307: doan1_1
     "Dollet - Comm Tower 2",  // 308: doan1_2
     "Dollet - Comm Tower 3",  // 309: doani1_1
