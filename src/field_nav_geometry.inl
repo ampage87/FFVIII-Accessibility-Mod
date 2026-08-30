@@ -62,6 +62,27 @@ static bool SegmentsCross(float ax, float ay, float bx, float by,
 // Dollet chase -> gated on a chase-first BAT. See DEVNOTES "Track A Step 2".
 static bool EdgeCrossesScreenBound(float ax, float ay, float bx, float by, int skipTriggerIdx)
 {
+    return EdgeCrossesScreenBoundEx(ax, ay, bx, by, skipTriggerIdx, s_driveSkipGatewayIdx);
+}
+
+// v0.132.0 (#shumi): the same test, plus the field's INF gateways.
+//
+// An INF gateway is a doorway the engine watches for itself -- it is not a
+// SETLINE line and has never been in s_capturedLines, so until now A* could plan
+// a route straight through one. That is how a drive to a Moomba in Shumi Village
+// 2 delivered Aaron to Village 3: the only walkable route to triangle 3 crosses
+// the Village 3 gateway, and nothing stopped it. See gateway_avoidance_model.inl.
+static bool EdgeCrossesScreenBoundEx(float ax, float ay, float bx, float by,
+                                     int skipTriggerIdx, int skipGatewayIdx)
+{
+    for (int g = 0; g < s_gatewayCount && g < MAX_GATEWAYS; g++) {
+        if (!GatewayIsPathBarrier(g, skipGatewayIdx)) continue;
+        const int x1 = (int)s_gateways[g].lineX1, y1 = (int)s_gateways[g].lineY1;
+        const int x2 = (int)s_gateways[g].lineX2, y2 = (int)s_gateways[g].lineY2;
+        if (!GatewayLineIsUsable(x1, y1, x2, y2)) continue;
+        if (SegmentsCross(ax, ay, bx, by, (float)x1, (float)y1, (float)x2, (float)y2))
+            return true;
+    }
     for (int t = 0; t < s_capturedLineCount; t++) {
         if (!s_capturedLines[t].active) continue;
         if (s_capturedLines[t].gateClosed) continue;   // v0.62.3: inert, not a wall

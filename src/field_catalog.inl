@@ -2094,6 +2094,30 @@ static void InjectInteractionLines(EntityInfo* newCatalog, int& newCount)
                     // symbols a human has looked at; 95 camera-pan lines disc-wide use
                     // PREQEW and most of them are auto-firing story triggers a player
                     // must never be steered into. See line_camera_pan_surface_model.inl.
+                    // v0.132.2 (#shumi): AN EVENT LINE THAT WAITS ON A BUTTON.
+                    // The wind stone's two trigger lines in Village 1 are typed
+                    // LINE_EVENT because they REQ a method on the party leader
+                    // rather than carrying dialogue of their own, so v0.61.0's
+                    // promotion does not fire and the catalog treated them as
+                    // scenery -- while the gate was open, the lines were placed
+                    // and active, and the naming pass had already called them
+                    // "Search Spot". A line that does nothing until you stand on
+                    // it AND press Cross or Square is something the player does
+                    // on purpose. See line_event_surface_model.inl: 16 lines
+                    // across 13 fields, and the change is purely additive.
+                    if (!isInteractive) {
+                        const unsigned lineBtn =
+                            (t < s_jsmEntityCount) ? s_jsmEntities[t].touchButtonMask : 0u;
+                        if (EventLineSurfaces(
+                                s_capturedLines[t].lineType == FieldArchive::JSM_ENT_LINE_EVENT,
+                                lineBtn)) {
+                            isInteractive = true;
+                            Log::Field("FieldNavigation: [refresh] line%d '%s' surfaced as an "
+                                       "interaction: an event line that waits on button mask "
+                                       "0x%04X -- the player has to press for it [v0.132.2]",
+                                       t, lineCurated ? lineCurated : "(unnamed)", lineBtn);
+                        }
+                    }
                     if (!isInteractive &&
                         CameraPanLineSurfaces(lineIsCamPan, lineCurated)) {
                         isInteractive = true;
@@ -4808,9 +4832,62 @@ static void RefreshCatalog()
             // Runtime capture (v0.18.3.227) is kept as a secondary signal: it
             // catches entities whose talk radius is enabled dynamically at
             // runtime rather than declared in the static script.
-            bool talkable = (talkonoff > 0) || jsmTalk ||
-                            (i < MAX_ENTITIES && (s_entSeenTalkable[i] ||
-                                                  s_entTalkRadius[i] > 0));
+            // v0.132.1 (#shumi): READ THE TALK RADIUS OFF THE BLOCK WE ARE
+            // ALREADY HOLDING, instead of trusting a side table keyed by index.
+            //
+            // s_entTalkRadius[] is filled by the TALKRADIUS hook, which maps the
+            // executing entity's POINTER back to an index by subtracting
+            // pFieldStateOthers and dividing by the stride. In tmkobo2 that
+            // mapping came out **three slots high**, and the log proves it: the
+            // Shumi scripts set talk radii of 130 (Shou), 100 (Otuki) and 100
+            // (Tukurite), who are live entities 4, 5 and 6 -- and the scan
+            // reported those exact three radii on entities 7, 8 and 9. Entity 9
+            // is the Draw Point, which sets no talk radius at all and was
+            // credited with 100.
+            //
+            // The consequence for Aaron was the whole reason he could not get on
+            // with the side quest: `Shou`, the only Shumi actually standing in
+            // the workshop, read rtRad=0, failed every talkability test, and was
+            // discarded by the push-only rule below. The workshop offered him an
+            // exit, a nameless "Interaction 1" and a draw point, and not one
+            // person to talk to -- in a room his own screenshot shows a Shumi
+            // standing in, working on the statue.
+            //
+            // `block` IS entity i. The radius lives at +0x1F8 in that block, so
+            // reading it here cannot be attributed to the wrong entity, whatever
+            // the hook's pointer arithmetic does. The side table stays as a
+            // secondary signal because it also latches a radius that was set and
+            // then cleared before the scan ran.
+            uint16_t liveTalkRad = 0;
+            __try { liveTalkRad = *(uint16_t*)(block + 0x1F8); }
+            __except (EXCEPTION_EXECUTE_HANDLER) { liveTalkRad = 0; }
+
+            // v0.132.3 (#shumi): LATCH WHAT WE READ OURSELVES, AND STOP
+            // BELIEVING THE HOOK'S ATTRIBUTION.
+            //
+            // v0.132.1 established that the TALKRADIUS hook files radii under the
+            // wrong entity -- in tmkobo2 three slots high -- and fixed the
+            // Sculptor by reading +0x1F8 off the block directly. It left the
+            // hook's table in the OR as a "secondary signal", and that is what
+            // has been keeping the Elder's four decorative fish in the catalog:
+            // all four read `talk=0 push=0 jsmTalk=0 rtRad=0` and still came out
+            // talkable=1, because two radii belonging to `Shou` and `Tyuu`
+            // landed on them. Their own scripts contain no TALKRADIUS, no
+            // TALKON, no push radius and no message opcode.
+            //
+            // A signal that is demonstrably attributed to the wrong entity is
+            // not a secondary signal, it is noise. The latch it was there to
+            // provide -- remember a radius that was set and then cleared before
+            // the next scan -- is kept, but fed from the direct read, which
+            // cannot be misattributed because `block` IS entity i. Scans run
+            // about once a second, so a radius that exists at any point in a
+            // field's life is still caught.
+            if (i < MAX_ENTITIES && liveTalkRad > 0) s_entSeenTalkable[i] = true;
+
+            const bool talkable = ScanEntityIsTalkable(
+                talkonoff > 0, jsmTalk, liveTalkRad,
+                (i < MAX_ENTITIES && s_entSeenTalkable[i]),
+                0 /* v0.132.3: the hook's per-index cache is no longer trusted */);
 
             // v0.18.3.228: per-entity scan trace (see field_nav_catalog_diag.inl).
             // v0.18.3.234: once per field load, not on every rebuild.
@@ -5028,9 +5105,29 @@ static void RefreshCatalog()
             EntityType etype = ENT_UNKNOWN;
             if (talkable)                         etype = ENT_NPC;
             else if (pushonoff > 0 && modelId >= 10) etype = ENT_NPC;   // v0.07.97: walking NPC, talk not yet set
-            else if (pushonoff > 0 && modelId >= 0) {
+            else if (ScanDropAsPushOnly(pushonoff > 0, (int)modelId, liveTalkRad)) {
                 // v0.12.12: visible push-only entity — not interactable, skip.
                 // v0.18.3.228: now logs its reason instead of dropping silently.
+                //
+                // v0.132.1 (#shumi): AND ONLY WHEN IT HAS NO TALK RADIUS. This
+                // branch discards a VISIBLE entity, which is the most expensive
+                // mistake the scan can make -- a person standing in the room who
+                // is not in the catalog cannot be found by a blind player at all.
+                // `pushonoff` is the raw byte at +0x249, and the engine's polarity
+                // is inverted: opcode 0x059 (PUSHON) writes 0 and 0x05A (PUSHOFF)
+                // writes 1, as their handlers at 0x0051EBF0 and 0x0051EC10 show.
+                // So `pushonoff > 0` is true of an entity whose push was turned
+                // OFF -- the opposite of the "push-only" this rule means to catch.
+                // Every Shumi in the workshop runs `TALKRADIUS n; PUSHOFF`, which
+                // is as clear a statement of "talk to me, walk through me" as a
+                // script can make, and each one landed in this branch.
+                //
+                // The polarity itself is NOT flipped here. It is wrong, it is
+                // wrong game-wide, and the correct test would change the fate of
+                // entities in every field on the disc -- that needs its own build
+                // and its own evidence. The talk-radius guard is a strict
+                // narrowing: it can only ever KEEP an entity this branch would
+                // have dropped, never drop one it would have kept.
                 if (!s_scanTraced) LogScanDropPushOnly(i, symName, (int)modelId);
                 continue;
             }
@@ -5044,6 +5141,44 @@ static void RefreshCatalog()
             // exits come from the trigger-line/gateway path anyway, not from here.
             else if (throughonoff > 0 && modelId < 0) etype = ENT_EXIT;
             else                                  etype = ENT_NPC;  // visible character, default to NPC
+
+            // v0.132.1 (#shumi): CURATED SCENERY, ON THE RUNTIME PATH TOO.
+            //
+            // Aaron: "I noticed multiple catalog entries titled 'fish' and don't
+            // know what these are. I tried interacting with one and nothing
+            // happened so I assume they are purely decorative." He is right. The
+            // Elder's pond holds four separate models -- Fish, Fish2, FishUp,
+            // FishUp2 -- and between them their scripts contain no TALKRADIUS, no
+            // TALKON, no push radius and no message opcode at all.
+            //
+            // ENTITY_SKIP_NAMES has existed for this since the 900-field survey,
+            // but IsBgControllerName() was only ever consulted for Background
+            // entities and JSM-injected objects. The fish arrive down the runtime
+            // NPC path, which never asked.
+            //
+            // THE GUARDS ARE THE POINT. IsBgControllerName() returns true for an
+            // EMPTY name, and on this path a failed model join leaves symName ""
+            // -- calling it directly here would silently delete every entity the
+            // join could not resolve, which in the Shumi workshop is the entire
+            // cast. So the name must be real AND in the list; the entity must
+            // have no talk radius and no talk flag; and its type must be one of
+            // the three that carry no navigational promise. Disc-wide 49 placed
+            // entities across 37 fields carry a skip-list name, and the talk
+            // guard keeps the ones that turned out to be real -- bcmin2_1's
+            // `Urakata` reads as an NPC, gfcross2's as a Draw Point.
+            if (ScanDropAsScenery(symName[0] != '\0',
+                                  symName[0] != '\0' && IsBgControllerName(symName),
+                                  talkable, liveTalkRad,
+                                  (etype == ENT_NPC || etype == ENT_OBJECT ||
+                                   etype == ENT_UNKNOWN))) {
+                if (!s_scanTraced)
+                    Log::Field("FieldNavigation: [SCAN-DROP] ent%d sym='%s' model=%d "
+                               "scenery: a curated skip-list name with no talk radius and "
+                               "nothing to interact with [v0.132.1]",
+                               i, symName, (int)modelId);
+                continue;
+            }
+
             bool hasModel = (modelId >= 0);
             bool hasInteraction = (talkonoff > 0 || pushonoff > 0 || throughonoff > 0);
             // v0.12.08 Fix D: Entities at (0,0) with triId=0 are inactive placeholders

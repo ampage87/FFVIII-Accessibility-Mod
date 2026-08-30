@@ -109,7 +109,7 @@ bccent15   SCAN FAILED
 ### bcgate_1  entities=28
   g0   slot26  cat1 Eventline1           Event Trigger          pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g1   slot27  cat1 Eventline2           Screen Boundary        pos=?(0,0) tri=0 param=-2 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
-  g2   slot0   cat3 Director             Map Exit               pos=?(0,0) tri=0 param=-2147418114 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
+  g2   slot0   cat3 Director             Map Exit               pos=?(0,0) tri=0 param=-2147418114 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=var[256]:2B==750 btn=0000
   g3   slot1   cat3 Squall               Unknown                pos=(136,4009) tri=189 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g4   slot2   cat3 Squall2              Unknown                pos=(136,4009) tri=189 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g5   slot3   cat3 Zell                 Unknown                pos=(136,4009) tri=189 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
@@ -397,7 +397,7 @@ bccent15   SCAN FAILED
   g19  slot16  cat3 Urakata3             Unknown                pos=(-1050,-1400) tri=351 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g20  slot17  cat3 Kage                 Unknown                pos=(571,-2870) tri=282 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
 ### bcport_2  entities=26
-  g0   slot20  cat1 Eventline1           Screen Boundary        pos=?(0,0) tri=0 param=121 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
+  g0   slot20  cat1 Eventline1           Screen Boundary        pos=?(0,0) tri=0 param=121 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=var[256]:2B==135 btn=0000
   g1   slot21  cat1 Eventline2           Screen Boundary        pos=?(0,0) tri=0 param=-2 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=var[256]:2B==40 btn=0000
   g2   slot22  cat1 Eventline            Event Trigger          pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g3   slot23  cat2 sea                  Background             pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
@@ -775,7 +775,7 @@ bg2f_1a    SCAN FAILED
   g14  slot7   cat3 quistis              Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g15  slot8   cat3 rinoa                Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g16  slot9   cat3 irvine               Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
-  g17  slot10  cat3 dic                  Map Exit               pos=?(0,0) tri=0 param=602 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
+  g17  slot10  cat3 dic                  Map Exit               pos=?(0,0) tri=0 param=602 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=var[256]:2B==1547 btn=0000
   g18  slot11  cat3 shu                  Map Exit               pos=(-2947,-6317) tri=22 param=602 model=0 talk=0 dlg=0 item=1 req=1 interp=0 gate=- btn=0000
   g19  slot12  cat3 gaki                 NPC                    pos=(-4252,-5518) tri=39 param=-1 model=0 talk=1 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
 ### bg2f_31  entities=20
@@ -1367,7 +1367,7 @@ bg2f_1a    SCAN FAILED
   g13  slot4   cat3 rinoa                Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g14  slot5   cat3 irvine               Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g15  slot6   cat3 selphie              Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
-  g16  slot7   cat3 dic                  Map Exit               pos=?(0,0) tri=0 param=-2147418114 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
+  g16  slot7   cat3 dic                  Map Exit               pos=?(0,0) tri=0 param=-2147418114 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=var[256]:2B==748 btn=0000
   g17  slot8   cat3 raijin               Unknown                pos=(-58,-7703) tri=4 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g18  slot9   cat3 fuujin               Unknown                pos=(109,-7703) tri=292 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g19  slot10  cat3 s1                   Unknown                pos=(329,-9060) tri=209 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
@@ -1718,7 +1718,7 @@ bg2f_1a    SCAN FAILED
   g6   slot6   cat3 director0            Map Exit               pos=(512,2315) tri=101 param=188 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=var[256]:2B<868 btn=0000
   g7   slot7   cat3 view                 Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
 ### bgkote_5  entities=13
-  g0   slot8   cat1 eventline0           Screen Boundary        pos=?(0,0) tri=0 param=253 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
+  g0   slot8   cat1 eventline0           Screen Boundary        pos=?(0,0) tri=0 param=253 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=var[1033]:1B==1 btn=0000
   g1   slot9   cat1 jumpline0            Screen Boundary        pos=?(0,0) tri=0 param=-2147418114 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=var[256]:2B>=868 btn=0000
   g2   slot10  cat1 eventline1           Event Trigger          pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=var[256]:2B==864 btn=0000
   g3   slot11  cat2 student              Background             pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
@@ -2488,7 +2488,7 @@ bgroom_2   SCAN FAILED
   g25  slot34  cat2 black17              Background             pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g26  slot0   cat3 Squall               Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g27  slot1   cat3 key_scan             Director               pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0010
-  g28  slot2   cat3 bgmover              Map Exit               pos=?(0,0) tri=0 param=234 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
+  g28  slot2   cat3 bgmover              Map Exit               pos=?(0,0) tri=0 param=234 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=var[1024]:1B==12 btn=0000
   g29  slot3   cat3 mess_direct          Map Exit               pos=?(0,0) tri=0 param=234 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g30  slot4   cat3 mess_co_direct       Interactive Object     pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g31  slot5   cat3 director             Map Exit               pos=?(0,0) tri=0 param=236 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
@@ -2530,7 +2530,7 @@ bgroom_2   SCAN FAILED
   g31  slot39  cat2 contents4            Background             pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g32  slot0   cat3 squall               Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g33  slot1   cat3 keyman               Map Exit               pos=?(0,0) tri=0 param=235 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0040
-  g34  slot2   cat3 bgmover              Map Exit               pos=?(0,0) tri=0 param=235 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
+  g34  slot2   cat3 bgmover              Map Exit               pos=?(0,0) tri=0 param=235 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=var[1024]:1B==10 btn=0000
   g35  slot3   cat3 mess                 Map Exit               pos=?(0,0) tri=0 param=235 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g36  slot4   cat3 new_mark             Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g37  slot5   cat3 director             Map Exit               pos=?(0,0) tri=0 param=235 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
@@ -2662,7 +2662,7 @@ bgroom_2   SCAN FAILED
   g2   slot17  cat1 saveline0            Interactive Line       pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=var[256]:2B>=490 btn=0000
   g3   slot18  cat2 camera               Background             pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g4   slot19  cat2 suit                 Background             pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
-  g5   slot0   cat3 squall               Map Exit               pos=(-87,540) tri=20 param=507 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
+  g5   slot0   cat3 squall               Map Exit               pos=(-87,540) tri=20 param=507 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=var[1028]:1B==6 btn=0000
   g6   slot1   cat3 squalls              Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g7   slot2   cat3 squallsd             Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g8   slot3   cat3 zell                 Unknown                pos=(2,133) tri=2 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
@@ -2972,7 +2972,7 @@ bvtr_107   SCAN FAILED
   g4   slot15  cat2 denkou               Background             pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g5   slot16  cat2 denko                Background             pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g6   slot0   cat3 Squall               Map Exit               pos=(303,-107) tri=87 param=-2 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
-  g7   slot1   cat3 Zell                 Map Exit               pos=(-337,-380) tri=61 param=-2 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
+  g7   slot1   cat3 Zell                 Map Exit               pos=(-337,-380) tri=61 param=-2 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=var[256]:2B<290 btn=0000
   g8   slot2   cat3 Selphie              Save Point             pos=(318,30) tri=56 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g9   slot3   cat3 rinoau               Interactive Object     pos=(-66,-247) tri=76 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g10  slot4   cat3 quistis              Unknown                pos=(152,-719) tri=40 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
@@ -4636,7 +4636,7 @@ doani2_2   SCAN FAILED
   g14  slot5   cat3 irvine               Interactive Object     pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g15  slot6   cat3 edea                 Interactive Object     pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g16  slot7   cat3 meka                 Unknown                pos=(0,-5000) tri=44 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
-  g17  slot8   cat3 dic                  Map Exit               pos=?(0,0) tri=0 param=359 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
+  g17  slot8   cat3 dic                  Map Exit               pos=?(0,0) tri=0 param=359 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=var[256]:2B<2500 btn=0000
   g18  slot9   cat3 meskun               Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g19  slot10  cat3 dp01                 Draw Point             pos=(-971,-3007) tri=208 param=1 model=0 talk=1 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g20  slot11  cat3 seigyo               Director               pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
@@ -5563,7 +5563,7 @@ doani2_2   SCAN FAILED
   g15  slot7   cat3 Kenkyuin             Interactive Object     pos=(-31,577) tri=19 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g16  slot8   cat3 Drow                 Draw Point             pos=(-199,353) tri=16 param=1 model=0 talk=1 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g17  slot9   cat3 Director             Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
-  g18  slot10  cat3 Timer                Map Exit               pos=?(0,0) tri=0 param=487 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
+  g18  slot10  cat3 Timer                Map Exit               pos=?(0,0) tri=0 param=487 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=var[672]:2B==19 btn=0000
   g19  slot11  cat3 Timelimit            Map Exit               pos=?(0,0) tri=0 param=487 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=var[672]:2B==18 btn=0000
   g20  slot12  cat3 Shake                Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g21  slot13  cat3 info                 Director               pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0080
@@ -6273,7 +6273,7 @@ doani2_2   SCAN FAILED
   g12  slot8   cat3 Odyne                Unknown                pos=(330,-361) tri=24 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g13  slot9   cat3 Hei1                 Unknown                pos=(1998,-167) tri=22 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g14  slot10  cat3 Hei2                 Unknown                pos=(-8,901) tri=29 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
-  g15  slot11  cat3 kantoku              Save Point             pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
+  g15  slot11  cat3 kantoku              Save Point             pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=var[528]:2B<1000 btn=0000
   g16  slot12  cat3 Musickantoku         Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
 ### edview1  entities=15
   g0   slot12  cat1 Jumpline1            Screen Boundary        pos=?(0,0) tri=0 param=470 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
@@ -6287,7 +6287,7 @@ doani2_2   SCAN FAILED
   g8   slot5   cat3 Munba                Unknown                pos=(-1229,134) tri=474 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g9   slot6   cat3 Odyne                Unknown                pos=(64,1937) tri=275 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g10  slot7   cat3 Man2                 Draw Point             pos=(472,4613) tri=291 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
-  g11  slot8   cat3 kantoku              Map Exit               pos=?(0,0) tri=0 param=-2147483119 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
+  g11  slot8   cat3 kantoku              Map Exit               pos=?(0,0) tri=0 param=-2147483119 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=var[528]:2B==1120 btn=0000
   g12  slot9   cat3 Musickantoku         Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g13  slot10  cat3 drpoint              Draw Point             pos=(-724,2428) tri=221 param=1 model=0 talk=1 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g14  slot11  cat3 savePoint            Unknown                pos=(-480,2005) tri=194 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
@@ -6644,7 +6644,7 @@ doani2_2   SCAN FAILED
   g12  slot10  cat3 syatu3               Unknown                pos=(-17,645) tri=46 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g13  slot11  cat3 KANTOKU              Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
 ### ehback2  entities=17
-  g0   slot11  cat1 cid_move             Screen Boundary        pos=?(0,0) tri=0 param=257 model=0 talk=0 dlg=1 item=0 req=0 interp=0 gate=- btn=0000
+  g0   slot11  cat1 cid_move             Screen Boundary        pos=?(0,0) tri=0 param=257 model=0 talk=0 dlg=1 item=0 req=0 interp=0 gate=var[256]:2B<1104 btn=0000
   g1   slot12  cat2 sea1                 Background             pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g2   slot13  cat2 sea2                 Background             pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g3   slot14  cat2 light1               Background             pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
@@ -8842,7 +8842,7 @@ fhdeck3a   SCAN FAILED
   g3   slot0   cat3 squall               Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g4   slot1   cat3 zell                 Unknown                pos=(1182,-3913) tri=53 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g5   slot2   cat3 irvine               Unknown                pos=(876,-4115) tri=54 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=FFFF
-  g6   slot3   cat3 rinoa                Map Exit               pos=(1352,-3897) tri=60 param=-2147418114 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=00C0
+  g6   slot3   cat3 rinoa                Map Exit               pos=(1352,-3897) tri=60 param=-2147418114 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=var[340]:1B==2 btn=00C0
   g7   slot4   cat3 selphie              Unknown                pos=(784,-4099) tri=52 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g8   slot5   cat3 quistis              Unknown                pos=(583,-3932) tri=49 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g9   slot6   cat3 zell2                Map Exit               pos=(847,-3524) tri=72 param=-2147418114 model=0 talk=1 dlg=0 item=0 req=0 interp=0 gate=var[340]:1B==1 btn=0000
@@ -11870,7 +11870,7 @@ glyagu2    SCAN FAILED
   g9   slot6   cat3 munba01              Unknown                pos=(1064,913) tri=4 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g10  slot7   cat3 munba02              Unknown                pos=(1289,935) tri=4 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g11  slot8   cat3 munba03              Unknown                pos=(793,422) tri=15 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
-  g12  slot9   cat3 dic                  Map Exit               pos=?(0,0) tri=0 param=800 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
+  g12  slot9   cat3 dic                  Map Exit               pos=?(0,0) tri=0 param=800 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=var[256]:2B==429 btn=0000
 ### gpgmn2  entities=32
   g0   slot18  cat1 el1                  Interactive Line       pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=1 item=0 req=0 interp=0 gate=var[256]:2B<433 btn=0000
   g1   slot19  cat1 el2                  Event Trigger          pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=var[256]:2B<434 btn=0000
@@ -12145,7 +12145,7 @@ logo       SCAN FAILED
   g19  slot8   cat3 cardgamemaster       Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g20  slot9   cat3 seigyo               Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
 ### rgguest1  entities=11
-  g0   slot7   cat1 tobuzo               Screen Boundary        pos=?(0,0) tri=0 param=-2147482814 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
+  g0   slot7   cat1 tobuzo               Screen Boundary        pos=?(0,0) tri=0 param=-2147482814 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=var[256]:2B<3161 btn=0000
   g1   slot10  cat0                      Door                   pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g2   slot8   cat2 door                 Background             pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g3   slot9   cat2 light                Background             pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
@@ -12511,7 +12511,7 @@ rghatch2   SCAN FAILED
   g10  slot5   cat3 irvine               Unknown                pos=(67,-370) tri=18 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g11  slot6   cat3 Edea                 Draw Point             pos=(67,-370) tri=18 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g12  slot7   cat3 SeeD1                Map Exit               pos=(397,160) tri=43 param=850 model=0 talk=1 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
-  g13  slot8   cat3 kantoku              Map Exit               pos=?(0,0) tri=0 param=257 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
+  g13  slot8   cat3 kantoku              Map Exit               pos=?(0,0) tri=0 param=257 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=var[84]:2B==858 btn=0000
   g14  slot9   cat3 ShipSindou           Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g15  slot10  cat3 Musickantoku         Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g16  slot11  cat3 drpoint              Draw Point             pos=(598,-250) tri=56 param=1 model=0 talk=1 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
@@ -12668,7 +12668,7 @@ rghatch2   SCAN FAILED
   g19  slot8   cat3 spman1               Unknown                pos=(-724,-26) tri=105 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g20  slot9   cat3 spman2               Unknown                pos=(204,-180) tri=4 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g21  slot10  cat3 elone                Unknown                pos=(405,308) tri=37 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
-  g22  slot11  cat3 spacecloth           Map Exit               pos=(-114,949) tri=61 param=866 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
+  g22  slot11  cat3 spacecloth           Map Exit               pos=(-114,949) tri=61 param=866 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=var[256]:2B>=2538 btn=0000
   g23  slot12  cat3 director1            Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g24  slot13  cat3 director0            Map Exit               pos=?(0,0) tri=0 param=866 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
 ### ssmedi1  entities=16
@@ -14071,7 +14071,7 @@ testblmv   SCAN FAILED
   g7   slot5   cat3 Irvine               Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g8   slot6   cat3 Director             Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
 ### tmelder1  entities=18
-  g0   slot15  cat1 Search               Screen Boundary        pos=?(0,0) tri=0 param=943 model=0 talk=0 dlg=1 item=0 req=0 interp=0 gate=- btn=0000
+  g0   slot15  cat1 Search               Screen Boundary        pos=?(0,0) tri=0 param=943 model=0 talk=0 dlg=1 item=0 req=0 interp=0 gate=var[608]:1B==64 btn=0000
   g1   slot16  cat2 hansha               Background             pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g2   slot17  cat2 mizu                 Background             pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g3   slot0   cat3 Squall               Unknown                pos=(213,-425) tri=19 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
@@ -14193,7 +14193,7 @@ testblmv   SCAN FAILED
   g13  slot8   cat3 Otuki                Unknown                pos=(-348,1460) tri=64 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g14  slot9   cat3 Tukurite             Unknown                pos=(-90,1068) tri=54 param=-1 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g15  slot10  cat3 Munba                Map Exit               pos=(-188,1161) tri=54 param=940 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
-  g16  slot11  cat3 Munbamini            Map Exit               pos=(-68,1055) tri=54 param=936 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
+  g16  slot11  cat3 Munbamini            Map Exit               pos=(-68,1055) tri=54 param=936 model=0 talk=0 dlg=0 item=0 req=0 interp=0 gate=var[623]:1B==16 btn=0000
   g17  slot12  cat3 DrawPoint            Draw Point             pos=(199,1401) tri=68 param=1 model=0 talk=1 dlg=0 item=0 req=0 interp=0 gate=- btn=0000
   g18  slot13  cat3 cardgamemaster       Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000
   g19  slot14  cat3 room                 Unknown                pos=?(0,0) tri=0 param=-1 model=0 talk=0 dlg=0 item=0 req=1 interp=0 gate=- btn=0000

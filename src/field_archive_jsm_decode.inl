@@ -148,6 +148,37 @@ static JsmGate JsmDecodeGate(const uint32_t* code, int len)
     g.skipTo = 4 + i4.param;
     return g;
 }
+// v0.132.0 (#shumi): the same guard, without the leading label.
+//
+// JsmDecodeGate above requires a LBL (0x005) at word 0 because it is only ever
+// pointed at a method's first word, and a method starts with its label. Guards
+// CHAINED after that one do not repeat it -- tmkobo2's `Munbamini` runs
+//
+//     0  LBL 120 | PSHM_B 607 | PSHN 32 | JMP == | JMPB 15
+//    19          | PSHM_B 607 | PSHN 64 | JMP == | JMPB 15
+//    37          | PSHM_B 623 | PSHN 16 | JMP == | JMPB 79      <- guards the exit
+//
+// so a walker that insists on the label finds the first guard and nothing else.
+// The label was never part of the comparison; this decodes the four words that
+// are. skipTo is measured from the PSHM, so the guarded region is (at, at+skipTo).
+static JsmGate JsmDecodeGateAt(const uint32_t* code, int len)
+{
+    JsmGate g = {};
+    if (!code || len < 4) return g;
+    JsmInsn i0 = JsmDecodeWord(code[0]);   // PSHM_B/W/L  <savemap addr>
+    JsmInsn i1 = JsmDecodeWord(code[1]);   // PSHN_L      <compare value>
+    JsmInsn i2 = JsmDecodeWord(code[2]);   // JMP         <operator 6..11>
+    JsmInsn i3 = JsmDecodeWord(code[3]);   // JMPB        <words to skip>
+    uint8_t w = (i0.opcode == 0x00A) ? 1 : (i0.opcode == 0x00C) ? 2
+              : (i0.opcode == 0x00E) ? 4 : 0;
+    if (w == 0 || i1.opcode != 0x007 || i2.opcode != 0x001 || i3.opcode != 0x003 ||
+        i2.param < 6 || i2.param > 11 || i0.param < 0 || i3.param <= 0) return g;
+    g.ok = true; g.addr = (int32_t)i0.param; g.width = w;
+    g.op = (uint8_t)i2.param; g.value = (int32_t)i1.param;
+    g.skipTo = 3 + i3.param;
+    return g;
+}
+
 // The comparison itself lives in field_archive.h as JsmGateSatisfied, because
 // the CONSUMER is the catalog (field_navigation.cpp) and the producer is the
 // scanner (field_archive.cpp) -- two translation units, one shared header.

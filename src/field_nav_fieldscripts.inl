@@ -805,6 +805,34 @@ static int __cdecl HookedFieldScriptsInit(int unk1, int unk2, int unk3, int unk4
                     // definite walk-into interaction target, so it keeps its
                     // place through the junk-gate.
                     s_jsmEntities[j2].hasNearbyInteractionZone = true;
+                    // v0.132.2 (#shumi): AND GIVE IT A TYPE THE CATALOG ACCEPTS.
+                    //
+                    // A position on its own was not enough for tmsand1's `Search`,
+                    // the Shumi shadow stone. The JSM-object injector takes only
+                    // Save Point, Draw Point, Shop, Card Game, Ladder and
+                    // Interactive Object; `Search` is typed Unknown, because its
+                    // whole body is a polling loop that compares the player's
+                    // coordinates against a box and then waits on BTNTEST 0x00C0.
+                    // So v0.132.0 placed it correctly at (674,-1485) on triangle
+                    // 42 and the catalog still had no reason to carry it.
+                    //
+                    // An entity that waits on a button IS an interactive object --
+                    // pressing Cross or Square on it is the entire interaction.
+                    // The promotion is scoped to this table on purpose: disc-wide
+                    // 22 Unknown entities wait on a button, and among them are
+                    // sdcore1's `battlekun1`/`battlekun4`, which throw the player
+                    // into a random encounter for a held direction. Only rows a
+                    // human has written a derivation for are promoted, which today
+                    // is this one.
+                    if (s_jsmEntities[j2].type == FieldArchive::JSM_ENT_UNKNOWN &&
+                        s_jsmEntities[j2].touchButtonMask != 0) {
+                        s_jsmEntities[j2].type = FieldArchive::JSM_ENT_INTERACTIVE_OBJECT;
+                        Log::Field("FieldNavigation: [DERIVED-POS] ent%d '%s' promoted Unknown -> "
+                                   "Interactive Object: it waits on button mask 0x%04X, so "
+                                   "pressing is the interaction [v0.132.2]",
+                                   s_jsmEntities[j2].jsmIndex, s_jsmEntities[j2].symName,
+                                   (unsigned)s_jsmEntities[j2].touchButtonMask);
+                    }
                     derivedApplied++;
                     Log::Field("FieldNavigation: [DERIVED-POS] ent%d '%s' type=%s "
                                "pos -> (%d,%d) for field %u (derived from the field's own script)",

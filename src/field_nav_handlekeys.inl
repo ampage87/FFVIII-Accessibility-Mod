@@ -699,6 +699,18 @@ static void HandleKeys()
                             }
                             s_driveSkipTrigIdx = driveSkipTrigIdx;  // v06.05: save for recovery
 
+                            // v0.132.0 (#shumi): the same exemption for INF
+                            // gateways, which A* now treats as walls. Without it a
+                            // drive TO a doorway would plan a route that avoids
+                            // the doorway and report no path. drTgt.gatewayIdx is
+                            // already the catalog's own index into s_gateways[].
+                            s_driveSkipGatewayIdx = drTgt.gatewayIdx;
+                            if (s_driveSkipGatewayIdx >= 0)
+                                Log::Field("FieldNavigation: [drive] gateway target: exempting "
+                                           "gateway %d from A* avoidance -- every OTHER gateway "
+                                           "on this field is a wall [v0.132.0]",
+                                           s_driveSkipGatewayIdx);
+
                             // v0.17.9.16.2: bggate_6 front-gate TURNSTILE slot
                             // selection. The gate is a closed walkmesh loop with
                             // two offset one-way lanes -- WEST lane = IN/up to the

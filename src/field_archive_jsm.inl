@@ -34,6 +34,7 @@
 // exactly as before the split.
 
 #include "field_archive_jsm_decode.inl"  // v0.59.0: the VM instruction encoding, read from the exe
+#include "gated_exit_model.inl"          // v0.132.0: is this MAPJUMP behind a story gate?
 #include "field_archive_jsm_order.inl"   // v0.58.0: engine-verified group/slot/SYM ordering
 #include "field_archive_jsm_state.inl"
 #include "field_archive_jsm_constants.inl"

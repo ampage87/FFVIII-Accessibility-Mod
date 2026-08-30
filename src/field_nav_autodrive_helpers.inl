@@ -422,6 +422,7 @@ static void StopAutoDrive(const char* reason)
     s_driveTrigTarget = false;
     s_driveTrigCrossStart = 0.0f;
     s_driveSkipTrigIdx = -1;
+    s_driveSkipGatewayIdx = -1;   // v0.132.0 (#shumi)
     // v0.15.9.2.15: clear chase-drive crossing line state.
     s_driveCrossLineActive = false;
     s_driveCrossLineX1 = 0; s_driveCrossLineY1 = 0;

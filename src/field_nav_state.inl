@@ -166,6 +166,29 @@ static bool        s_driveGoalZValid = false;
 // target is an entity. See drive_goal_tri_model.inl.
 #include "drive_goal_tri_model.inl"
 
+// v0.132.1 (#shumi): who survives the runtime entity scan -- the Sculptor did
+// not and four decorative fish did. See scan_keep_model.inl.
+#include "scan_keep_model.inl"
+
+// v0.132.2 (#shumi): an event line the player has to press a button on is an
+// interaction, not scenery. See line_event_surface_model.inl.
+#include "line_event_surface_model.inl"
+
+
+// v0.132.0 (#shumi): which INF gateways A* must route around, and which one the
+// drive is deliberately walking through. See gateway_avoidance_model.inl.
+#include "gateway_avoidance_model.inl"
+
+// The gateway this drive is heading for, or -1. Set alongside s_driveSkipTrigIdx
+// and cleared the same way; it is what keeps a drive TO a doorway from planning
+// a route that avoids the doorway.
+static int s_driveSkipGatewayIdx = -1;
+
+// v0.132.0 (#shumi): which "jump"-named trigger lines are camera-view
+// transitions and which are the way out of the village. See
+// camera_transition_model.inl.
+#include "camera_transition_model.inl"
+
 // v0.131.7 (#centra): which script-derived map exits are real exits. See
 // jsm_exit_surface_model.inl.
 #include "jsm_exit_surface_model.inl"

@@ -77,6 +77,37 @@ static const NavDerivedPos NAV_DERIVED_POS[] = {
     // the five identical `hanno` turn-to-face calls. Walkmesh triangle 232.
     // Displayed as "Blue Light" via ENTITY_DISPLAY_NAMES.
     { 846, "BossBattle", -250, -1161 },
+
+    // tmsand1 (945), Shumi Village's Desert Village. `Search` is the SHADOW
+    // STONE, one of the five the Sculptor sends you for, and it is the only one
+    // of the five with no position anywhere the mod looks: it is not a line, it
+    // has no SET3, and its .inf trigger slots are empty. `[JSMScan]` reads it as
+    //
+    //     ent9 cat=3 type=Unknown sym='Search' pos=no(0,0,0 tri=0) btn=00C0
+    //
+    // so the catalog has never had anything to offer, and a blind player has no
+    // way at all to find it. The field's dialogue is unambiguous about what is
+    // there -- msg 3 "More stones..." and msg 4 "Looks like the shadow stone."
+    //
+    // **THE SCRIPT STATES THE PLACE AS A BOUNDING BOX.** Search::method1 is a
+    // polling loop: it loads the player's position (op 0x070), then gates on
+    // four comparisons before it will accept the button press at 0x06D:
+    //
+    //     op_008 axis0 ; PSHN  581 ; JMP >    -- X >  581
+    //     op_008 axis0 ; PSHN  767 ; JMP <    -- X <  767
+    //     op_008 axis1 ; PSHN 1412 ; NEG ; < -- Y < -1412
+    //     op_008 axis1 ; PSHN 1557 ; NEG ; > -- Y > -1557
+    //
+    // That rectangle is the game's own definition of "standing on the shadow
+    // stone", and its centre is (674, -1485). Parsing tmsand1.id (69 triangles)
+    // puts that point inside **triangle 42**, whose centroid is (700, -1478),
+    // 27 units away -- so it is not merely walkable, it is the middle of a
+    // triangle rather than an edge case.
+    //
+    // Only ONE spot in all thirteen Shumi fields works this way; the other four
+    // stones are trigger lines with real SETLINE geometry, and they reach the
+    // catalog on their own once the quest opens them.
+    { 945, "Search", 674, -1485 },
 };
 
 static const int NAV_DERIVED_POS_COUNT =

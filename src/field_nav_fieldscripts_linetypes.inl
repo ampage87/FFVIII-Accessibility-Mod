@@ -76,6 +76,14 @@
                 //
                 // The pairing dump below exists to settle exactly that in one run.
 
+                // v0.132.0 (#shumi): the field this line is standing in, so a jump
+                // whose destination is its own field can be told apart from a
+                // journey. No such line exists on the disc today; the check costs
+                // one read and stops a future one being offered as an exit that
+                // leads back to where the player already is.
+                const int camXOwnFieldId = FF8Addresses::pCurrentFieldId
+                                           ? (int)*FF8Addresses::pCurrentFieldId : -1;
+
                 int linesMapped = 0;
                 for (int t = 0; t < s_capturedLineCount; t++) {
                     s_capturedLines[t].lineType = FieldArchive::JSM_ENT_UNKNOWN;
@@ -123,13 +131,16 @@
                         // is dual-purpose (exit-via-interaction) vs. a pure walk-across
                         // exit. hasExtDispatch alone is too noisy (fires on any 0x1C use).
                         s_capturedLines[t].hasDialogReqTarget = s_jsmEntities[jsmIdx].hasDialogReqTarget;
-                        // v0.20.29: camera-view transition lines follow FF8's "*jump*"
-                        // naming (validated across all 45 multi-camera fields). Route
-                        // them as SCREEN_BOUND so they wall the zone BFS and reach the
-                        // exit path, and tag them for a "Camera transition" label.
+                        // Lines whose SYM name contains "jump" are routed as
+                        // SCREEN_BOUND so they wall the zone BFS and reach the exit
+                        // path. WHETHER ONE IS A CAMERA TRANSITION OR A REAL EXIT IS
+                        // DECIDED BELOW, BY ITS DESTINATION -- v0.20.29 decided it by
+                        // the name alone and was wrong on 77 fields, and the two
+                        // paragraphs of v0.60.0 reasoning inside this block are the
+                        // world-map half of the same discovery. Read the v0.132.0
+                        // note at the bottom of the block for what actually happens.
                         if (s_jsmEntities[jsmIdx].jsmCategory == 1 &&
-                            (strstr(s_jsmEntities[jsmIdx].symName, "jump") ||
-                             strstr(s_jsmEntities[jsmIdx].symName, "Jump"))) {
+                            CamXlineNameHasJump(s_jsmEntities[jsmIdx].symName)) {
                             s_capturedLines[t].lineType = FieldArchive::JSM_ENT_LINE_SCREEN_BOUND;
                             // v0.60.0: A WORLD-MAP EXIT IS NEVER A CAMERA TRANSITION.
                             //
@@ -152,15 +163,31 @@
                             // of the world map to transition to. The line falls
                             // through to the ordinary SCREEN_BOUND exit path, which
                             // already knows how to name destination -2.
-                            if (s_jsmEntities[jsmIdx].param == -2) {
-                                s_capturedLines[t].isCameraTransition = false;
+                            // v0.132.0 (#shumi): the destination decides, not the
+                            // name. See camera_transition_model.inl -- across the
+                            // whole disc, all 134 jump-named lines that carry a
+                            // destination are real exits and all 14 that carry none
+                            // are camera transitions. v0.60.0's world-map carve-out
+                            // is the -2 case of the same test, so it is subsumed
+                            // rather than removed.
+                            //
+                            // The line's own destFieldId is not resolved until the
+                            // block below, so the marker forms are read straight off
+                            // the JSM entity here; both say the same thing about
+                            // whether a destination EXISTS, which is all this asks.
+                            s_capturedLines[t].isCameraTransition =
+                                CamXlineIsCameraTransition(true, s_jsmEntities[jsmIdx].param,
+                                                           camXOwnFieldId);
+                            if (!s_capturedLines[t].isCameraTransition)
                                 Log::Field("FieldNavigation: [linetype] line%d '%s' has a "
-                                           "\"jump\" name but goes to the WORLD MAP -- kept as a "
-                                           "real exit, not a camera transition [v0.60.0]",
+                                           "\"jump\" name but carries destination %d -- it is a "
+                                           "real exit, not a camera transition [v0.132.0]",
+                                           t, s_jsmEntities[jsmIdx].symName,
+                                           s_jsmEntities[jsmIdx].param);
+                            else
+                                Log::Field("FieldNavigation: [linetype] line%d '%s' goes nowhere "
+                                           "-- a genuine camera-view transition [v0.132.0]",
                                            t, s_jsmEntities[jsmIdx].symName);
-                            } else {
-                                s_capturedLines[t].isCameraTransition = true;
-                            }
                         }
                         // v0.07.83 / v0.17.7.1.2: Capture MAPJUMP destination for screen boundary lines.
                         //

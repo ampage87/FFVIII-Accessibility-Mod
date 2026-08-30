@@ -164,6 +164,10 @@ static bool IsSeparatedByTriggerLine(float px, float py, float ex, float ey, int
 // extension (Balamb Hotel bcsaka_1: "No path tri 13->196"). Defined in
 // field_navigation.cpp next to SegmentsCross. See DEVNOTES "Track A Step 2".
 static bool EdgeCrossesScreenBound(float ax, float ay, float bx, float by, int skipTriggerIdx = -1);
+// v0.132.0 (#shumi): INF gateways are doorways too, and A* has never treated
+// them as walls. See gateway_avoidance_model.inl.
+static bool EdgeCrossesScreenBoundEx(float ax, float ay, float bx, float by,
+                                     int skipTriggerIdx, int skipGatewayIdx);
 // v06.05: Check if moving from (px,py) in direction (dx,dy) by RECOVERY_CHECK_DIST
 // would cross any non-target active trigger line. Used to prevent recovery
 // wiggle from accidentally pushing the player through screen transitions.

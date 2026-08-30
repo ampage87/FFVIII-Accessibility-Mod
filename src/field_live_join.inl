@@ -33,6 +33,11 @@
 // of model ids two entities share (soldier1/soldier2, quistis/quistis2) --
 // resolved 138 of 138 placed entities, none ambiguous, none unmatched.
 // ============================================================================
+// v0.132.3 (#shumi): the order tiebreak for entities sharing a model id.
+// Included here rather than from field_nav_state.inl so this file carries its
+// own dependency -- tests/catalog_harness.cpp includes it directly.
+#include "live_join_order_model.inl"
+
 static int s_liveToJsm[MAX_ENTITIES];        // live index -> s_jsmEntities index
 static int s_jsmToLive[MAX_JSM_ENTITIES];    // s_jsmEntities index -> live index
 static bool s_liveJsmMapReady = false;
@@ -97,6 +102,47 @@ static void BuildLiveJsmMap(uint8_t* base, int liveCount)
         else if (nFree >= 1 && allTwins)       pick = firstFree;
         if (pick >= 0) { s_liveToJsm[i] = pick; s_jsmToLive[pick] = i; }
     }
+    // Pass 1.5 -- v0.132.3 (#shumi): ORDER, for the ones the model key could not
+    // separate. Among entities sharing a model id the engine keeps the script's
+    // own order through the compaction, so the k-th unresolved live entity on a
+    // model is the k-th unresolved script entity on it -- but only when the two
+    // counts agree, which is the whole guard. See live_join_order_model.inl for
+    // the two independent confirmations this rests on.
+    {
+        bool modelDone[512] = {};
+        for (int i = 0; i < liveCount; i++) {
+            if (s_liveToJsm[i] >= 0) continue;
+            int16_t modelId = *(int16_t*)(base + ENTITY_STRIDE * i + 0x218);
+            if (modelId < 0 || modelId >= 512) continue;
+            if (modelDone[modelId]) continue;
+            modelDone[modelId] = true;
+
+            int liveIdx[MAX_ENTITIES]; int nLive = 0;
+            for (int k = i; k < liveCount; k++) {
+                if (s_liveToJsm[k] >= 0) continue;
+                if (*(int16_t*)(base + ENTITY_STRIDE * k + 0x218) != modelId) continue;
+                if (nLive < MAX_ENTITIES) liveIdx[nLive++] = k;
+            }
+            int jsmIdx[MAX_JSM_ENTITIES]; int nJsm = 0;
+            for (int j = 0; j < s_jsmEntityCount; j++) {
+                if (s_jsmEntities[j].jsmCategory != 3) continue;
+                if (s_jsmEntities[j].modelParam != (int)modelId) continue;
+                if (s_jsmToLive[j] >= 0) continue;
+                if (nJsm < MAX_JSM_ENTITIES) jsmIdx[nJsm++] = j;
+            }
+            if (!LiveJoinOrderApplies(nLive, nJsm)) continue;
+            for (int k = 0; k < nLive; k++) {
+                s_liveToJsm[liveIdx[k]] = jsmIdx[k];
+                s_jsmToLive[jsmIdx[k]] = liveIdx[k];
+                Log::Field("FieldNavigation: [LIVE-JOIN] ent%d model=%d -> sym=%s "
+                           "(order: %d entities share this model and %d script entities "
+                           "declare it) [v0.132.3]",
+                           liveIdx[k], (int)modelId, s_jsmEntities[jsmIdx[k]].symName,
+                           nLive, nJsm);
+            }
+        }
+    }
+
     // Pass 2 -- entities the script never gave a model (save points, exits,
     // script-only objects). No model key, so the only honest evidence is that
     // the live block sits exactly where the script's own SET3 put it.

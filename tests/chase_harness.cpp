@@ -55,6 +55,17 @@ static const double NAV_PI = 3.14159265358979323846;
 static volatile bool s_chaseDriveActive = false;
 static bool IsTriangleBlockedByNPC(float x, float y, int targetEntityIdx);
 
+// v0.132.0 (#shumi): A* now treats INF gateways as walls, so the shared
+// geometry .inl needs the gateway table. The chase harness carries none (its
+// fixtures are walkmesh-only), so an empty one is declared here -- zero
+// gateways means the new loop never runs and the barrier rule under test is
+// unchanged for this harness, which is what keeps its golden stable.
+#include "../src/gateway_avoidance_model.inl"
+static const int MAX_GATEWAYS = 12;
+static FieldArchive::GatewayInfo s_gateways[MAX_GATEWAYS] = {};
+static int s_gatewayCount = 0;
+static int s_driveSkipGatewayIdx = -1;
+
 #include "../src/field_nav_pathfinding.inl"
 // v0.55.0: EdgeCrossesScreenBound is forward-declared above and was defined
 // only in field_navigation.cpp, so this harness had stopped linking and was

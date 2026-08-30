@@ -272,6 +272,10 @@ static bool IsPartyCharacterSym(const char* sym)
     return false;
 }
 #include "jsm_exit_surface_model.inl"
+// v0.132.1 (#shumi): the three runtime-scan keep/drop decisions.
+#include "scan_keep_model.inl"
+// v0.132.2 (#shumi): event lines that wait on a button.
+#include "line_event_surface_model.inl"
 static bool IsPrisonShaftFieldId(uint16_t fid) { return (fid >= 0x0319 && fid <= 0x032E) || fid == 0x03C5; }
 static const uintptr_t SHAFT_VB_BASE = 0x01CFE9B8;
 static const unsigned  SHAFT_VB_FLOOR = 0x01B5;

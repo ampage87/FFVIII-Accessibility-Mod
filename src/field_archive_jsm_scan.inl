@@ -1012,16 +1012,33 @@ bool ScanJSMScripts(const char* fieldName, JSMEntityInfo* outEntities, int maxEn
             // so before the story reaches 2556 the line is inert -- and the
             // catalog was both offering it as "Exit to Desert 1" and letting the
             // screen filter treat it as a wall, which is what hid Ellone.
+            // v0.132.0 (#shumi): walk the method for guards instead of decoding
+            // only the one at its first word. tmkobo2's `Munbamini` chains three
+            // -- var[607]==32, var[607]==64, then var[623]==16 skipping 79 words
+            // -- and the MAPJUMPO to the elevator sits inside the third. Under
+            // the leading-guard-only test it read as an ungated exit, so the
+            // catalog offered "Exit to Shumi Village - Elevator" in a room where
+            // nothing happens when you walk onto it. See gated_exit_model.inl.
             if (methodHasMapjump && !info.hasGate &&
-                scriptStart < scriptDataDwords) {
-                JsmGate g = JsmDecodeGate(&scriptData[scriptStart],
-                                          (int)(scriptDataDwords - scriptStart));
-                if (g.ok && methodMapjumpRel >= 0 && methodMapjumpRel < g.skipTo) {
-                    info.hasGate   = true;
-                    info.gateAddr  = g.addr;
-                    info.gateWidth = g.width;
-                    info.gateOp    = g.op;
-                    info.gateValue = g.value;
+                scriptStart < scriptDataDwords && methodMapjumpRel >= 0) {
+                const int avail = (int)(scriptDataDwords - scriptStart);
+                const int lim   = GatedExitScanLimit(methodMapjumpRel, avail);
+                // Link 0 is the method's leading guard, which carries the LBL.
+                JsmGate g = JsmDecodeGate(&scriptData[scriptStart], avail);
+                int at = 0;
+                for (int hop = 0; hop < GATED_EXIT_MAX_CHAIN && g.ok; hop++) {
+                    if (GatedExitJumpIsInsideGuard(at, g.skipTo, methodMapjumpRel)) {
+                        info.hasGate   = true;
+                        info.gateAddr  = g.addr;
+                        info.gateWidth = g.width;
+                        info.gateOp    = g.op;
+                        info.gateValue = g.value;
+                        break;
+                    }
+                    const int next = at + g.skipTo;   // where this link's else lands
+                    if (next <= at || next >= lim) break;
+                    at = next;
+                    g  = JsmDecodeGateAt(&scriptData[scriptStart + at], avail - at);
                 }
             }
             // v0.07.84: Record per-method MAPJUMP for REQ-following.

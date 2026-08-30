@@ -27,6 +27,25 @@ static const char* ENTITY_SKIP_NAMES[] = {
     "bluelaser",
     "bluelight",
     "bokeie",
+    // v0.132.1 (#shumi): the Elder's pond. Aaron: "I noticed multiple catalog
+    // entries titled 'fish' and don't know what these are. I tried interacting
+    // with one and nothing happened so I assume they are purely decorative."
+    // He is right, and the scripts say so without ambiguity -- `Fish`, `Fish2`,
+    // `FishUp` and `FishUp2` contain NO TALKRADIUS, no TALKON, no push radius
+    // and no message opcode between them. Four separate models swimming in a
+    // pond, and v0.132.0 made it worse by naming all four "Fish" where two of
+    // them had previously been unnamed.
+    //
+    // Skipped by name rather than by a rule, because the obvious rule does not
+    // hold: "placed, visible, and no interaction opcode of its own" describes
+    // 2640 entities across 621 fields, among them Shumi Village's own `Munba2`,
+    // `Munba3`, `Turi_jiji` and both save points -- all of which are driven by a
+    // REQ from a line or a director and are entirely real. These four symbols
+    // appear in no field outside tmelder1 and tmhtr1.
+    "Fish",
+    "Fish2",
+    "FishUp",
+    "FishUp2",
     "buttonlight",
     "c_light",
     "camera",
@@ -269,6 +288,18 @@ static const FieldScopedEntity FIELD_SCOPED_ENTITIES[] = {
     // lands in one. It stays an exit, because stepping onto it is still how the
     // scene proceeds; only the words change.
     { "sspod2", "pod", "Capsule" },
+
+    // v0.132.2 (#shumi): the life stone. tmmura1 has exactly two trigger lines,
+    // `saveline0` and `Up`, and the field's own dialogue says what is there --
+    // msg 4, "There are stones under the roots.  This must be the 'life stone'."
+    // So `Up` is the spot, and it is announced as "Interaction 1" without this.
+    //
+    // Field-scoped rather than added to ENTITY_DISPLAY_NAMES because `Up` is
+    // also a line on fhroof1, where it is a way off a roof and "Search Spot"
+    // would be a lie. The other four Shumi stone spots -- Mitukeru, Mitukeru2,
+    // Hakken and Turi -- carry symbols that appear in no field outside the
+    // village, so they are named globally.
+    { "tmmura1", "Up", "Search Spot" },
 
     // "There is another item in the catalog for 'handle' that is only
     // interacted with by the scene automatically so it can be excluded."
@@ -550,9 +581,54 @@ static const EntityDisplayName ENTITY_DISPLAY_NAMES[] = {
     { "monitor", "Study Panel" },
     { "Monorail", "Monorail" },
     { "monorail", "Monorail" },
+    // v0.132.0 (#shumi): the Shumi Village cast, from the fields' own dialogue.
+    // Every name below is corroborated by a speaker label in the .msd of a field
+    // the symbol is actually placed in -- none is inferred from the symbol alone.
+    //
+    // `Munba` is the one that mattered most: Munba2, Munba3 and Munbamini were
+    // already here and the BASE name was not, so the Moomba standing in seven
+    // Shumi fields came through as "NPC" or "Object" while its own siblings were
+    // named. Aaron spent a minute of his log driving at a thing called "NPC".
+    // It appears in 14 fields -- the seven Shumi ones plus Esthar's laboratory
+    // and moor and Fisherman's Horizon, all places Moombas belong.
+    { "Munba", "Moomba" },
     { "Munba2", "Moomba" },
     { "Munba3", "Moomba" },
     { "Munbamini", "Moomba" },
+    // The Shumi themselves. Seven fields, all of them tm*, and the dialogue
+    // calls the tribe "Shumis" (tmkobo2 msg 2). Naming them by tribe rather than
+    // by guessed role: the .msd speaker labels are Elder, Elder's Attendant,
+    // Sculptor, Artisan and Master Fisherman, and which Shou is which is not
+    // something the field data says.
+    { "Shou",   "Shumi" },
+    { "Shou2",  "Shumi" },
+    { "Shou3",  "Shumi" },
+    { "Shou21", "Shumi" },
+    { "Shou22", "Shumi" },
+    // 作り手, "the maker". Placed only in tmkobo2, whose dialogue is 70 lines of
+    // Sculptor and nobody else who could be him.
+    { "Tukurite", "Sculptor" },
+    // 釣り爺, "fishing elder". Placed in tmkobo1 and tmmura2 -- and "Master
+    // Fisherman" speaks in exactly those two fields, 16 lines and 8. He also
+    // appears in four Fisherman's Horizon fields, where the same name holds.
+    { "Turi_jiji", "Master Fisherman" },
+    // tmhtl1's card player. "Queen" speaks 33 of that field's 76 messages.
+    { "queen_tra", "Queen of Cards" },
+    // THE STONE HUNT. 見つける "to find", 発見 "discovery", 釣り "fishing" -- the
+    // trigger lines the Sculptor's errand opens, one per stone. Every one is
+    // gated on a quest variable and inert until the errand reaches it, so they
+    // are correctly absent from the catalog before then and correctly present
+    // after. What they were NOT was findable: with no display name a trigger
+    // line is announced as "Interaction 1", so the whole five-stone hunt would
+    // have been five things called Interaction. These symbols appear in no
+    // field outside Shumi Village.
+    { "Mitukeru",  "Search Spot" },
+    { "Mitukeru2", "Search Spot" },
+    { "Hakken",    "Search Spot" },
+    { "Turi",      "Fishing Spot" },
+    // tmsand1's shadow stone, whose position comes from NAV_DERIVED_POS because
+    // the script states it as a bounding box rather than a placement.
+    { "Search",    "Search Spot" },
     { "naidarokun", "Student" },
     { "Newspaper", "Newspaper" },
     { "nida", "Nida" },
